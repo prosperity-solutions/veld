@@ -26,11 +26,13 @@ elif command -v gtimeout >/dev/null 2>&1; then
     run_with_timeout() { gtimeout "$@"; }
 else
     # Pure-shell fallback using background process + kill.
+    # Redirect watchdog fds to /dev/null so it doesn't hold open the
+    # pipe used by command substitution $(...).
     run_with_timeout() {
         local secs="$1"; shift
         "$@" &
         local pid=$!
-        ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null ) &
+        ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null ) >/dev/null 2>&1 &
         local watchdog=$!
         wait "$pid" 2>/dev/null
         local rc=$?

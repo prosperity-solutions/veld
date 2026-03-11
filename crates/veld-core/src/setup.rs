@@ -262,11 +262,19 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
         }
     }
 
+    // In CI environments, skip CA trust — it can't work (no keychain access,
+    // no GUI prompts) and tests use curl -k anyway.
+    if std::env::var("CI").is_ok() {
+        return Ok(StepResult::success(
+            "Caddy CA generated (skipping trust in CI environment)",
+        ));
+    }
+
     match std::env::consts::OS {
         "macos" => {
             // Add to the user login keychain with SSL trust policy.
             // Use a timeout and pipe stdin from /dev/null to prevent interactive
-            // password prompts from hanging in CI or headless environments.
+            // password prompts from hanging in headless environments.
             let keychain = dirs::home_dir()
                 .context("could not determine home directory")?
                 .join("Library/Keychains/login.keychain-db");
@@ -278,6 +286,8 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                     .arg(&keychain)
                     .arg(&root_cert)
                     .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status(),
             )
             .await;
@@ -296,7 +306,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                     ));
                 }
                 Err(_) => {
-                    // Timeout — likely an interactive password prompt in CI.
+                    // Timeout — likely an interactive password prompt.
                     tracing::warn!("security add-trusted-cert timed out (interactive prompt?)");
                     return Ok(StepResult::success(
                         "Caddy CA generated (trust command timed out — add manually if needed)",
