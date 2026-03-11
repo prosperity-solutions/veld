@@ -1,0 +1,186 @@
+# Veld
+
+Local development environment orchestrator for monorepos. Spin up fully configured preview environments with real HTTPS URLs from a single command.
+
+```sh
+veld start frontend:local --name my-feature
+# => https://frontend.my-feature.myproject.localhost
+# => https://backend.my-feature.myproject.localhost
+```
+
+No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
+
+## Features
+
+- **No port numbers** — work with stable HTTPS URLs instead of `localhost:3847`
+- **Dependency graph** — resolves node dependencies, parallelizes startup, reverse-order teardown
+- **TLS by default** — local CA via mkcert, Caddy handles TLS termination
+- **Health checks** — two-phase checks (TCP port + HTTP endpoint) before marking services healthy
+- **Multiple variants** — same node, different behaviors (local server, Docker, remote URL)
+- **Named runs** — multiple environments coexist; re-running by name is idempotent
+- **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`)
+- **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
+- **Structured output** — all commands support `--json` for scripting and CI
+
+## Install
+
+Download the latest release for your platform:
+
+```sh
+# macOS (Apple Silicon)
+curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-macos-arm64.tar.gz | sudo tar xz -C /usr/local/bin
+
+# macOS (Intel)
+curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-macos-amd64.tar.gz | sudo tar xz -C /usr/local/bin
+
+# Linux (x86_64)
+curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-linux-amd64.tar.gz | sudo tar xz -C /usr/local/bin
+
+# Linux (ARM64)
+curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-linux-arm64.tar.gz | sudo tar xz -C /usr/local/bin
+```
+
+Then run one-time setup:
+
+```sh
+veld setup
+```
+
+This installs Caddy, mkcert, and the helper/daemon services. Requires sudo once. After setup, no sudo is needed.
+
+### Build from source
+
+```sh
+git clone https://github.com/prosperity-solutions/veld.git
+cd veld
+cargo build --release
+# Binaries: target/release/veld, target/release/veld-helper, target/release/veld-daemon
+```
+
+## Quick start
+
+1. Create a `veld.json` in your project root:
+
+```json
+{
+  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "myproject",
+  "url_template": "{service}.{run}.{project}.localhost",
+  "nodes": {
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
+        }
+      }
+    },
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
+          "depends_on": { "backend": "local" }
+        }
+      }
+    }
+  }
+}
+```
+
+2. Start the environment:
+
+```sh
+veld start frontend:local --name dev
+```
+
+Veld resolves the dependency graph (backend first, then frontend), allocates ports, starts processes, runs health checks, configures Caddy routes, and gives you HTTPS URLs.
+
+3. Check status:
+
+```sh
+veld status --name dev
+veld urls --name dev
+```
+
+4. Stop:
+
+```sh
+veld stop --name dev
+```
+
+## CLI reference
+
+| Command | Description |
+|---------|-------------|
+| `veld start [NODE:VARIANT...] --name <n>` | Start an environment |
+| `veld stop [--name <n>] [--all]` | Stop a running environment |
+| `veld restart [--name <n>]` | Restart an environment |
+| `veld status [--name <n>] [--json]` | Show run status |
+| `veld urls [--name <n>] [--json]` | Show URLs for a run |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>]` | View logs |
+| `veld graph [NODE:VARIANT...]` | Print dependency graph |
+| `veld nodes` | List all nodes and variants |
+| `veld presets` | List presets |
+| `veld runs` | List all runs |
+| `veld gc` | Clean up stale state and logs |
+| `veld setup` | One-time system setup |
+| `veld init` | Create a new veld.json |
+
+## Configuration
+
+### Step types
+
+- **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
+- **`bash`** — runs a command to completion. Can emit outputs via `VELD_OUTPUT key=value` on stdout. Optional `verify` command for idempotency.
+
+### Health checks
+
+```json
+{ "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
+{ "type": "port", "timeout_seconds": 10 }
+{ "type": "bash", "command": "curl -sf http://localhost:${veld.port}/ready" }
+```
+
+### URL template variables
+
+| Variable | Description |
+|----------|-------------|
+| `{service}` | Node name |
+| `{run}` | Run name |
+| `{project}` | Project name from veld.json |
+| `{branch}` | Current git branch (slugified) |
+| `{worktree}` | Worktree directory name (slugified) |
+| `{username}` | OS username |
+| `{hostname}` | Machine hostname |
+
+Fallback operator: `{branch ?? run}` uses the first non-empty value.
+
+### Variable interpolation
+
+Commands and env values support `${veld.port}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
+
+## Architecture
+
+Three binaries work together:
+
+- **`veld`** — CLI. Parses commands, orchestrates environments, displays output.
+- **`veld-helper`** — privileged daemon (root). Manages DNS entries and Caddy routes via a minimal Unix socket API.
+- **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
+
+Caddy handles HTTPS termination and reverse proxying. mkcert provides a locally-trusted CA so browsers accept the certificates without warnings.
+
+## Requirements
+
+- macOS (arm64/x64) or Linux (x64/arm64)
+- Ports 80, 443, and 2019 available
+- sudo access once for `veld setup`
+
+## License
+
+MIT
