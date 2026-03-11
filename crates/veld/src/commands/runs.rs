@@ -3,13 +3,13 @@ use veld_core::state::{ProjectState, RunStatus};
 
 use crate::output;
 
-/// `veld runs [--all] [--name <n>]`
-pub async fn list(all: bool, name: Option<&str>) -> i32 {
-    if !super::require_setup(false).await {
+/// `veld runs [--all] [--name <n>] [--json]`
+pub async fn list(all: bool, name: Option<&str>, json: bool) -> i32 {
+    if !super::require_setup(json).await {
         return 1;
     }
 
-    let Some((config_path, _cfg)) = super::load_config(false) else {
+    let Some((config_path, _cfg)) = super::load_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -17,7 +17,7 @@ pub async fn list(all: bool, name: Option<&str>) -> i32 {
     let project_state = match ProjectState::load(&project_root) {
         Ok(s) => s,
         Err(e) => {
-            output::print_error(&format!("Failed to load state: {e}"), false);
+            output::print_error(&format!("Failed to load state: {e}"), json);
             return 1;
         }
     };
@@ -36,7 +36,22 @@ pub async fn list(all: bool, name: Option<&str>) -> i32 {
 
     runs.sort_by_key(|(n, _)| (*n).clone());
 
-    if runs.is_empty() {
+    if json {
+        let payload: Vec<serde_json::Value> = runs
+            .iter()
+            .map(|(_, r)| {
+                let mut node_keys: Vec<String> = r.nodes.keys().cloned().collect();
+                node_keys.sort();
+                serde_json::json!({
+                    "name": r.name,
+                    "status": format!("{:?}", r.status).to_lowercase(),
+                    "created_at": r.created_at.to_rfc3339(),
+                    "nodes": node_keys,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+    } else if runs.is_empty() {
         output::print_info("No runs found.");
     } else {
         let rows: Vec<Vec<String>> = runs

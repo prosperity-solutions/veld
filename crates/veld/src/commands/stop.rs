@@ -14,16 +14,15 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
 
     let mut orchestrator = Orchestrator::new(config_path, config);
 
-    if all {
-        // Stop all runs by loading state and iterating.
-        let project_state = match veld_core::state::ProjectState::load(&orchestrator.project_root) {
-            Ok(s) => s,
-            Err(e) => {
-                output::print_error(&format!("Failed to load state: {e}"), false);
-                return 1;
-            }
-        };
+    let project_state = match veld_core::state::ProjectState::load(&orchestrator.project_root) {
+        Ok(s) => s,
+        Err(e) => {
+            output::print_error(&format!("Failed to load state: {e}"), false);
+            return 1;
+        }
+    };
 
+    if all {
         let run_names: Vec<String> = project_state.runs.keys().cloned().collect();
         let mut stopped = 0;
 
@@ -39,7 +38,11 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
         output::print_success(&format!("Stopped {stopped} environment(s)."));
         0
     } else {
-        let run_name = name.as_deref().unwrap_or("default");
+        let run_name = match super::resolve_run_name(name, &project_state, false, false) {
+            Some(n) => n,
+            None => return 1,
+        };
+        let run_name = run_name.as_str();
 
         match orchestrator.stop(run_name).await {
             Ok(()) => {
