@@ -27,7 +27,6 @@ pub enum SetupError {
 pub struct SetupStatus {
     pub helper_running: bool,
     pub caddy_present: bool,
-    pub mkcert_present: bool,
 }
 
 impl SetupStatus {
@@ -40,14 +39,11 @@ impl SetupStatus {
         if !self.caddy_present {
             missing.push("caddy".to_owned());
         }
-        if !self.mkcert_present {
-            missing.push("mkcert".to_owned());
-        }
         missing
     }
 
     pub fn is_complete(&self) -> bool {
-        self.helper_running && self.caddy_present && self.mkcert_present
+        self.helper_running && self.caddy_present
     }
 }
 
@@ -55,24 +51,14 @@ impl SetupStatus {
 // Check functions
 // ---------------------------------------------------------------------------
 
-fn caddy_path() -> PathBuf {
-    crate::paths::caddy_bin()
-}
-
-fn mkcert_path() -> PathBuf {
-    crate::paths::mkcert_bin()
-}
-
 /// Probe the system to determine setup status.
 pub async fn check_setup() -> SetupStatus {
     let helper_running = check_helper_running().await;
-    let caddy_present = caddy_path().exists();
-    let mkcert_present = mkcert_path().exists();
+    let caddy_present = crate::paths::caddy_bin().exists();
 
     SetupStatus {
         helper_running,
         caddy_present,
-        mkcert_present,
     }
 }
 
@@ -121,10 +107,6 @@ impl StepResult {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Setup steps
@@ -250,86 +232,110 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
     Ok(StepResult::success(format!("Caddy {version} installed")))
 }
 
-/// Install (or verify) mkcert for local TLS certificates.
-pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
-    let lib_dir = crate::paths::lib_dir();
-    let mkcert = lib_dir.join("mkcert");
-    if mkcert.exists() {
-        return Ok(StepResult::success("mkcert is already installed"));
-    }
-
-    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
-
-    let (os, arch) = platform_pair()?;
-    let version = "1.4.4";
-    let url = format!(
-        "https://github.com/FiloSottile/mkcert/releases/download/v{version}/mkcert-v{version}-{os}-{arch}"
-    );
-
-    download_binary(&url, &mkcert)
-        .await
-        .context("failed to download mkcert")?;
-
-    Ok(StepResult::success("mkcert downloaded and installed"))
-}
-
-/// Generate local TLS certificates via mkcert.
+/// Trust Caddy's internal CA root certificate in the system trust store.
 ///
-/// mkcert only supports single-level wildcards, so `*.*.localhost` is invalid.
-/// We install the mkcert root CA into the system trust store (so browsers trust
-/// it), then use `mkcert -CAROOT` to locate the CA cert/key. Caddy is configured
-/// to use this CA directly via its `tls internal` directive, allowing it to
-/// generate certs on-the-fly for any depth of subdomain.
-pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
-    let mkcert = mkcert_path();
+/// Caddy generates its own internal CA when configured with `tls internal`.
+/// The root cert is stored at `{caddy_data_dir}/pki/authorities/local/root.crt`.
+/// This step adds that cert to the OS trust store so browsers accept HTTPS
+/// connections to `.localhost` domains without warnings.
+pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
+    let root_cert = crate::paths::caddy_data_dir()
+        .join("pki")
+        .join("authorities")
+        .join("local")
+        .join("root.crt");
 
-    // Install the local CA into the system trust store.
-    let status = Command::new(&mkcert)
-        .arg("-install")
-        .status()
-        .await
-        .context("failed to run mkcert -install")?;
-    if !status.success() {
-        anyhow::bail!(
-            "mkcert -install exited with code {}",
-            status.code().unwrap_or(-1)
-        );
+    if !root_cert.exists() {
+        // Caddy generates its CA at startup when the PKI app is configured.
+        // Give it a moment to initialize.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if root_cert.exists() {
+                break;
+            }
+        }
+        if !root_cert.exists() {
+            anyhow::bail!(
+                "Caddy CA not generated at {}. Is Caddy running?",
+                root_cert.display()
+            );
+        }
     }
 
-    // Locate the mkcert CA root so Caddy can use it as its internal CA.
-    let ca_root = Command::new(&mkcert)
-        .arg("-CAROOT")
-        .output()
-        .await
-        .context("failed to run mkcert -CAROOT")?;
-    let ca_root_dir = String::from_utf8_lossy(&ca_root.stdout).trim().to_string();
-    if ca_root_dir.is_empty() {
-        anyhow::bail!("mkcert -CAROOT returned empty path");
+    // In CI environments, skip CA trust — it can't work (no keychain access,
+    // no GUI prompts) and tests use curl -k anyway.
+    if std::env::var("CI").is_ok() {
+        return Ok(StepResult::success(
+            "Caddy CA generated (skipping trust in CI environment)",
+        ));
     }
 
-    // Ensure our certs directory exists and symlink the CA files so Caddy
-    // can find them at a well-known location.
-    let certs = crate::paths::certs_dir();
-    std::fs::create_dir_all(&certs).context("failed to create certs directory")?;
+    match std::env::consts::OS {
+        "macos" => {
+            // Add to the user login keychain with SSL trust policy.
+            // Use a timeout and pipe stdin from /dev/null to prevent interactive
+            // password prompts from hanging in headless environments.
+            let keychain = dirs::home_dir()
+                .context("could not determine home directory")?
+                .join("Library/Keychains/login.keychain-db");
 
-    let ca_cert_src = PathBuf::from(&ca_root_dir).join("rootCA.pem");
-    let ca_key_src = PathBuf::from(&ca_root_dir).join("rootCA-key.pem");
-    let ca_cert_dst = certs.join("rootCA.pem");
-    let ca_key_dst = certs.join("rootCA-key.pem");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                Command::new("security")
+                    .args(["add-trusted-cert", "-p", "ssl", "-k"])
+                    .arg(&keychain)
+                    .arg(&root_cert)
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status(),
+            )
+            .await;
 
-    if !ca_cert_src.exists() || !ca_key_src.exists() {
-        anyhow::bail!(
-            "mkcert CA files not found at {}. Run mkcert -install first.",
-            ca_root_dir
-        );
+            match result {
+                Ok(Ok(status)) if status.success() => {}
+                Ok(Ok(_)) => {
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (could not add to keychain — run with sudo or add manually)",
+                    ));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to run security add-trusted-cert");
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (could not add to keychain — add manually)",
+                    ));
+                }
+                Err(_) => {
+                    // Timeout — likely an interactive password prompt.
+                    tracing::warn!("security add-trusted-cert timed out (interactive prompt?)");
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (trust command timed out — add manually if needed)",
+                    ));
+                }
+            }
+        }
+        "linux" => {
+            let ca_dir = PathBuf::from("/usr/local/share/ca-certificates");
+            let dest = ca_dir.join("veld-caddy-ca.crt");
+            if std::fs::create_dir_all(&ca_dir)
+                .and_then(|_| std::fs::copy(&root_cert, &dest).map(|_| ()))
+                .is_err()
+            {
+                return Ok(StepResult::success(
+                    "Caddy CA generated (could not copy to ca-certificates — run with sudo or add manually)",
+                ));
+            }
+            let _ = Command::new("update-ca-certificates").status().await;
+        }
+        other => {
+            return Ok(StepResult::success(format!(
+                "Caddy CA generated (automatic trust not supported on {other} — add manually)"
+            )));
+        }
     }
-
-    // Copy CA files (symlinks may not work across volumes).
-    std::fs::copy(&ca_cert_src, &ca_cert_dst).context("failed to copy CA cert")?;
-    std::fs::copy(&ca_key_src, &ca_key_dst).context("failed to copy CA key")?;
 
     Ok(StepResult::success(
-        "mkcert CA installed, Caddy will generate per-domain certs",
+        "Caddy CA trusted in system store (browsers will accept HTTPS)",
     ))
 }
 
@@ -366,14 +372,20 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             std::fs::write(&plist_path, plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
-            let status = Command::new("launchctl")
-                .args(["load", "-w"])
-                .arg(&plist_path)
-                .status()
-                .await
-                .context("failed to load daemon LaunchAgent")?;
-            if !status.success() {
-                anyhow::bail!("launchctl load failed for veld-daemon");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                Command::new("launchctl")
+                    .args(["load", "-w"])
+                    .arg(&plist_path)
+                    .stdin(std::process::Stdio::null())
+                    .status(),
+            )
+            .await;
+            match result {
+                Ok(Ok(status)) if status.success() => {}
+                Ok(Ok(_)) => anyhow::bail!("launchctl load failed for veld-daemon"),
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => anyhow::bail!("launchctl load timed out for veld-daemon"),
             }
         }
         "linux" => {
@@ -445,11 +457,15 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
         }
     }
 
-    // Start Caddy via the helper.
-    match client.caddy_start().await {
-        Ok(_) => {}
-        Err(e) => {
+    // Start Caddy via the helper (with timeout — Caddy startup waits for
+    // the admin API internally, so give it a generous window).
+    match tokio::time::timeout(std::time::Duration::from_secs(30), client.caddy_start()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "could not start Caddy via helper (may already be running)");
+        }
+        Err(_) => {
+            tracing::warn!("caddy_start RPC timed out (Caddy may still be starting)");
         }
     }
 
@@ -488,16 +504,25 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     );
     std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
-    let status = Command::new("launchctl")
-        .args(["load", "-w"])
-        .arg(plist_path)
-        .status()
-        .await
-        .context("failed to load helper LaunchDaemon")?;
-    if !status.success() {
-        anyhow::bail!("launchctl load failed for veld-helper");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(plist_path)
+            .stdin(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => anyhow::bail!(
+            "launchctl load failed for veld-helper (exit {})",
+            status.code().unwrap_or(-1)
+        ),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => anyhow::bail!("launchctl load timed out for veld-helper"),
     }
-    Ok(())
 }
 
 async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
@@ -581,6 +606,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         _ => {}
     }
 
+    // Remove Caddy CA from system trust store.
+    remove_caddy_ca_trust().await;
+
     // Remove veld library directory (check both possible locations).
     for lib_dir in &[
         PathBuf::from("/usr/local/lib/veld"),
@@ -589,7 +617,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
             .unwrap_or_default(),
     ] {
         if lib_dir.exists() {
-            let _ = std::fs::remove_dir_all(lib_dir);
+            if let Err(e) = std::fs::remove_dir_all(lib_dir) {
+                tracing::warn!(path = %lib_dir.display(), error = %e, "failed to remove lib dir");
+            }
         }
     }
 
@@ -645,18 +675,64 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Locate a sibling binary (e.g. veld-helper) next to the current executable.
+/// Locate a sibling binary (e.g. veld-helper) next to the current executable,
+/// or in the veld lib directory.
 fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     let current = std::env::current_exe().context("cannot determine current executable path")?;
     let dir = current
         .parent()
         .context("executable has no parent directory")?;
+    // Check next to the current binary (e.g. target/debug/).
     let candidate = dir.join(name);
     if candidate.exists() {
-        Ok(candidate)
-    } else {
-        // Fall back to PATH lookup.
-        Ok(PathBuf::from(name))
+        return Ok(candidate);
+    }
+    // Check in the veld lib directory (install.sh puts helper/daemon there).
+    let lib_candidate = crate::paths::lib_dir().join(name);
+    if lib_candidate.exists() {
+        return Ok(lib_candidate);
+    }
+    // Fall back to PATH lookup.
+    Ok(PathBuf::from(name))
+}
+
+/// Remove the Caddy CA from the system trust store (best-effort).
+async fn remove_caddy_ca_trust() {
+    // Try both possible caddy-data locations.
+    let candidates = [
+        PathBuf::from("/usr/local/lib/veld/caddy-data"),
+        dirs::home_dir()
+            .map(|h| h.join(".local/lib/veld/caddy-data"))
+            .unwrap_or_default(),
+    ];
+
+    for data_dir in &candidates {
+        let root_cert = data_dir
+            .join("pki")
+            .join("authorities")
+            .join("local")
+            .join("root.crt");
+        if !root_cert.exists() {
+            continue;
+        }
+
+        match std::env::consts::OS {
+            "macos" => {
+                let _ = Command::new("security")
+                    .args(["remove-trusted-cert"])
+                    .arg(&root_cert)
+                    .status()
+                    .await;
+            }
+            "linux" => {
+                let dest = Path::new("/usr/local/share/ca-certificates/veld-caddy-ca.crt");
+                if dest.exists() {
+                    let _ = std::fs::remove_file(dest);
+                    let _ = Command::new("update-ca-certificates").status().await;
+                }
+            }
+            _ => {}
+        }
     }
 }
 

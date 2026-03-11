@@ -14,7 +14,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 
 - **No port numbers** — work with stable HTTPS URLs instead of `localhost:3847`
 - **Dependency graph** — resolves node dependencies, parallelizes startup, reverse-order teardown
-- **TLS by default** — local CA via mkcert, Caddy handles TLS termination
+- **TLS by default** — Caddy's internal CA handles TLS termination, auto-trusted during setup
 - **Health checks** — two-phase checks (TCP port + HTTP endpoint) before marking services healthy
 - **Multiple variants** — same node, different behaviors (local server, Docker, remote URL)
 - **Named runs** — multiple environments coexist; re-running by name is idempotent
@@ -40,7 +40,7 @@ Then run one-time setup:
 veld setup
 ```
 
-This installs Caddy, mkcert, and the helper/daemon services. Requires sudo once. After setup, no sudo is needed.
+This installs Caddy, the helper/daemon services, and trusts Caddy's CA in your system keychain for HTTPS.
 
 To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL ... | bash`
 
@@ -169,7 +169,7 @@ Three binaries work together:
 - **`veld-helper`** — privileged daemon (root). Manages DNS entries and Caddy routes via a minimal Unix socket API.
 - **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
 
-Caddy handles HTTPS termination and reverse proxying. mkcert provides a locally-trusted CA so browsers accept the certificates without warnings.
+Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
 ## Requirements
 

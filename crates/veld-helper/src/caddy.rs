@@ -230,6 +230,13 @@ fn build_base_config() -> serde_json::Value {
                     }
                 }
             },
+            "pki": {
+                "certificate_authorities": {
+                    "local": {
+                        "name": "Veld Local CA"
+                    }
+                }
+            },
             "tls": {
                 "automation": {
                     "policies": [{
@@ -245,10 +252,6 @@ fn build_base_config() -> serde_json::Value {
 
 /// Build a single route entry with hostname matching, TLS, and reverse proxy.
 fn build_route_json(route_id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
-    let cert_path = veld_core::paths::certs_dir();
-    let _cert_file = cert_path.join(format!("{hostname}.pem"));
-    let _key_file = cert_path.join(format!("{hostname}-key.pem"));
-
     serde_json::json!({
         "@id": route_id,
         "match": [{
