@@ -654,6 +654,10 @@ fn add_veld_to_gitignore(root: &Path) {
 
 /// `veld init` -- create a starter veld.json in the current directory.
 pub async fn run() -> i32 {
+    if !super::require_setup(false).await {
+        return 1;
+    }
+
     let target = Path::new("veld.json");
 
     if target.exists() {

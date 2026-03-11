@@ -12,9 +12,9 @@ pub fn print_version() {
         find_and_query_version("veld-daemon").unwrap_or_else(|| cli_version.to_string());
 
     println!("{}", output::bold("Veld"));
-    println!("  cli      {cli_version}");
-    println!("  daemon   {daemon_version}");
-    println!("  helper   {helper_version}");
+    println!("  veld           {cli_version}");
+    println!("  veld-daemon    {daemon_version}");
+    println!("  veld-helper    {helper_version}");
 }
 
 /// Find a binary by checking known paths and query its version.

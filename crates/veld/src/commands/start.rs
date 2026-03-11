@@ -63,8 +63,9 @@ pub async fn run(
     let run_name = match name {
         Some(ref n) => n.clone(),
         None => {
-            let cwd = std::env::current_dir().unwrap_or_default();
-            let dir_name = cwd
+            // Use the project root (directory containing veld.json) for the default name.
+            let project_root = veld_core::config::project_root(&config_path);
+            let dir_name = project_root
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("default");
