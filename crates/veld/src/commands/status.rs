@@ -40,7 +40,7 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         match serde_json::to_string_pretty(&run_state) {
             Ok(s) => println!("{s}"),
             Err(e) => {
-                output::print_error(&format!("JSON serialization failed: {e}"), true);
+                output::print_error(&format!("JSON serialization failed: {e}"), json);
                 return 1;
             }
         }

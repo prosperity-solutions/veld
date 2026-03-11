@@ -16,7 +16,7 @@ pub async fn run(urls: bool, json: bool) -> i32 {
         match serde_json::to_string_pretty(&registry) {
             Ok(s) => println!("{s}"),
             Err(e) => {
-                output::print_error(&format!("JSON serialization failed: {e}"), true);
+                output::print_error(&format!("JSON serialization failed: {e}"), json);
                 return 1;
             }
         }

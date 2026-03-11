@@ -113,6 +113,7 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 
                             if let Some(info) = reg_entry.runs.get_mut(run_name) {
                                 info.status = RunStatus::Stopped;
+                                info.urls.clear();
                                 registry_changed = true;
                             }
 
