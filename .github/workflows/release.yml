@@ -22,6 +22,7 @@ jobs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic.outputs.new_release_version }}
       new_release_git_tag: ${{ steps.semantic.outputs.new_release_git_tag }}
+      new_release_notes: ${{ steps.semantic.outputs.new_release_notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -34,7 +35,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # On push to main: run semantic-release
+      # On push to main: run semantic-release (creates tag, no GitHub release)
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic
         if: github.event_name == 'push'
@@ -46,7 +47,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # On PRs: dry-run to validate config and preview release
+      # On PRs: dry-run to preview release
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic-dry
         if: github.event_name == 'pull_request'
@@ -63,14 +64,14 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           if [ "${{ steps.semantic-dry.outputs.new_release_published }}" = "true" ]; then
-            echo "### 🚀 Release Preview" >> $GITHUB_STEP_SUMMARY
+            echo "### Release Preview" >> $GITHUB_STEP_SUMMARY
             echo "Merging this PR will release **v${{ steps.semantic-dry.outputs.new_release_version }}**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "### ℹ️ No Release" >> $GITHUB_STEP_SUMMARY
-            echo "No releasable commits found — merging this PR will not trigger a release." >> $GITHUB_STEP_SUMMARY
+            echo "### No Release" >> $GITHUB_STEP_SUMMARY
+            echo "No releasable commits found." >> $GITHUB_STEP_SUMMARY
           fi
 
-  build-release:
+  build:
     name: Build (${{ matrix.suffix }})
     needs: release
     if: needs.release.outputs.new_release_published == 'true'
@@ -119,8 +120,27 @@ jobs:
           done
           tar -czf veld-${{ needs.release.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
 
-      - name: Upload to GitHub Release
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veld-${{ matrix.suffix }}
+          path: veld-*.tar.gz
+
+  publish:
+    name: Publish Release
+    needs: [release, build]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release.outputs.new_release_git_tag }}
-          files: veld-*.tar.gz
+          name: ${{ needs.release.outputs.new_release_git_tag }}
+          body: ${{ needs.release.outputs.new_release_notes }}
+          files: artifacts/*
