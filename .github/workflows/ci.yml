@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   schema:
@@ -51,7 +52,7 @@ jobs:
             os: macos-latest
             suffix: macos-arm64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             suffix: macos-amd64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest

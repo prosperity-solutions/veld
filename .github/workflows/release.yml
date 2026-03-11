@@ -10,6 +10,9 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   release-please:
     name: Release Please
@@ -71,7 +74,7 @@ jobs:
             os: macos-latest
             suffix: macos-arm64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
             suffix: macos-amd64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
