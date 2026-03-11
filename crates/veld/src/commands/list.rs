@@ -58,11 +58,7 @@ pub async fn run(urls: bool, json: bool) -> i32 {
                     RunStatus::Stopped => output::dim("stopped"),
                     _ => output::yellow(&format!("{:?}", run_info.status).to_lowercase()),
                 };
-                println!(
-                    "    {} {}",
-                    output::bold(run_name),
-                    status_str,
-                );
+                println!("    {} {}", output::bold(run_name), status_str,);
 
                 if urls && run_info.status == RunStatus::Running {
                     let mut url_keys: Vec<&String> = run_info.urls.keys().collect();
