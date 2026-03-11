@@ -340,14 +340,25 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
 }
 
 /// Install (or verify) the Veld daemon.
+///
+/// The daemon is a user-level LaunchAgent, so on macOS it must be loaded
+/// by the real user — not root. When running under `sudo`, we use
+/// `SUDO_USER` / `SUDO_UID` to target the correct user and home directory,
+/// and `launchctl asuser <uid>` to load the agent in their session.
 pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     let veld_daemon_bin = which_self("veld-daemon")?;
 
     match std::env::consts::OS {
         "macos" => {
-            let plist_path = dirs::home_dir()
-                .context("could not determine home directory")?
-                .join("Library/LaunchAgents/dev.veld.daemon.plist");
+            // Resolve the real (non-root) user's home and UID. When running
+            // under sudo, HOME and `id -u` reflect root — use SUDO_USER instead.
+            let (real_user, real_uid, real_home) = resolve_real_user_macos()?;
+
+            let plist_dir = real_home.join("Library/LaunchAgents");
+            std::fs::create_dir_all(&plist_dir)
+                .context("failed to create LaunchAgents directory")?;
+            let plist_path = plist_dir.join("dev.veld.daemon.plist");
+
             let plist = format!(
                 r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -370,13 +381,8 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 veld_daemon_bin.display()
             );
             let label = "dev.veld.daemon";
-            let uid = std::process::Command::new("id")
-                .arg("-u")
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "501".to_string());
-            let domain_target = format!("gui/{uid}/{label}");
-            let domain = format!("gui/{uid}");
+            let domain_target = format!("gui/{real_uid}/{label}");
+            let domain = format!("gui/{real_uid}");
 
             // Stop the running service first (required for upgrades).
             let _ = Command::new("launchctl")
@@ -387,15 +393,31 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .status()
                 .await;
 
-            std::fs::write(&plist_path, plist)
+            std::fs::write(&plist_path, &plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
-            // Try the modern bootstrap API first, fall back to legacy load
-            // for environments without a GUI session (CI, SSH).
+            // Fix ownership so the user (not root) owns the plist.
+            let _ = Command::new("chown")
+                .args([
+                    format!("{real_user}:staff"),
+                    plist_path.to_string_lossy().to_string(),
+                ])
+                .status()
+                .await;
+
+            // Load the agent as the real user via `launchctl asuser <uid>`.
+            // This works even when the current process is root.
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
                 Command::new("launchctl")
-                    .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
+                    .args([
+                        "asuser",
+                        &real_uid,
+                        "launchctl",
+                        "bootstrap",
+                        &domain,
+                        &plist_path.to_string_lossy(),
+                    ])
                     .stdin(std::process::Stdio::null())
                     .status(),
             )
@@ -411,11 +433,17 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                         .await;
                 }
                 _ => {
-                    // bootstrap failed (e.g. error 125: no GUI domain in CI/SSH).
-                    // Fall back to legacy load which works in non-GUI contexts.
+                    // bootstrap failed (e.g. no GUI domain in CI/SSH).
+                    // Fall back to `launchctl asuser <uid> launchctl load`.
                     let _ = Command::new("launchctl")
-                        .args(["load", "-w"])
-                        .arg(&plist_path)
+                        .args([
+                            "asuser",
+                            &real_uid,
+                            "launchctl",
+                            "load",
+                            "-w",
+                            &plist_path.to_string_lossy(),
+                        ])
                         .stdin(std::process::Stdio::null())
                         .status()
                         .await;
@@ -626,13 +654,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
                 .await;
             let _ = std::fs::remove_file(helper_plist);
 
-            // Stop and remove daemon (user agent).
-            if let Some(home) = dirs::home_dir() {
-                let uid = std::process::Command::new("id")
-                    .arg("-u")
-                    .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_else(|_| "501".to_string());
+            // Stop and remove daemon (user agent). Use resolve_real_user_macos
+            // so uninstall works correctly when running under sudo.
+            if let Ok((_user, uid, home)) = resolve_real_user_macos() {
                 let _ = Command::new("launchctl")
                     .args(["bootout", &format!("gui/{uid}/dev.veld.daemon")])
                     .status()
@@ -797,6 +821,69 @@ async fn remove_caddy_ca_trust() {
             _ => {}
         }
     }
+}
+
+/// Resolve the real (non-root) user when running under `sudo` on macOS.
+///
+/// Returns `(username, uid_string, home_dir)`. When not running as root,
+/// simply returns the current user's info.
+fn resolve_real_user_macos() -> Result<(String, String, PathBuf), anyhow::Error> {
+    // If SUDO_USER is set, we're running under sudo — use the real user.
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        // Get UID via `id -u <username>`
+        let uid_output = std::process::Command::new("id")
+            .args(["-u", &sudo_user])
+            .output()
+            .context("failed to run `id -u` for SUDO_USER")?;
+        let uid = String::from_utf8_lossy(&uid_output.stdout)
+            .trim()
+            .to_string();
+        if uid.is_empty() || !uid_output.status.success() {
+            anyhow::bail!("failed to resolve UID for SUDO_USER={sudo_user}");
+        }
+
+        // Get home directory via `dscl`
+        let home_output = std::process::Command::new("dscl")
+            .args([
+                ".",
+                "-read",
+                &format!("/Users/{sudo_user}"),
+                "NFSHomeDirectory",
+            ])
+            .output()
+            .context("failed to run `dscl` for SUDO_USER home directory")?;
+        let home_line = String::from_utf8_lossy(&home_output.stdout);
+        let home = home_line
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("NFSHomeDirectory:")
+                    .map(|s| s.trim().to_string())
+            })
+            .unwrap_or_else(|| format!("/Users/{sudo_user}"));
+
+        return Ok((sudo_user, uid, PathBuf::from(home)));
+    }
+
+    // Not running under sudo — use current user info.
+    let uid_output = std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .context("failed to run `id -u`")?;
+    let uid = String::from_utf8_lossy(&uid_output.stdout)
+        .trim()
+        .to_string();
+
+    let user_output = std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .context("failed to run `id -un`")?;
+    let user = String::from_utf8_lossy(&user_output.stdout)
+        .trim()
+        .to_string();
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+
+    Ok((user, uid, home))
 }
 
 /// Run a command and bail on failure.
