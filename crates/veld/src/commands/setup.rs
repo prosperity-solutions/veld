@@ -5,7 +5,7 @@ pub async fn run() -> i32 {
     println!("{}", output::bold("Veld Setup"));
     println!();
 
-    const TOTAL: usize = 6;
+    const TOTAL: usize = 5;
 
     // Step 1: Check port availability.
     print_step(1, TOTAL, "Checking port availability...");
@@ -27,28 +27,8 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 3: Install mkcert.
-    print_step(3, TOTAL, "Installing mkcert...");
-    match veld_core::setup::install_mkcert().await {
-        Ok(info) => print_step_ok(&info.message),
-        Err(e) => {
-            print_step_fail(&format!("{e:#}"));
-            return 1;
-        }
-    }
-
-    // Step 4: Generate TLS certificates.
-    print_step(4, TOTAL, "Generating TLS certificates...");
-    match veld_core::setup::generate_certs().await {
-        Ok(info) => print_step_ok(&info.message),
-        Err(e) => {
-            print_step_fail(&format!("{e:#}"));
-            return 1;
-        }
-    }
-
-    // Step 5: Install Veld daemon.
-    print_step(5, TOTAL, "Installing Veld daemon...");
+    // Step 3: Install Veld daemon.
+    print_step(3, TOTAL, "Installing Veld daemon...");
     match veld_core::setup::install_daemon().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
@@ -57,9 +37,19 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 6: Install Veld helper.
-    print_step(6, TOTAL, "Installing Veld helper...");
+    // Step 4: Install Veld helper (starts Caddy).
+    print_step(4, TOTAL, "Installing Veld helper...");
     match veld_core::setup::install_helper().await {
+        Ok(info) => print_step_ok(&info.message),
+        Err(e) => {
+            print_step_fail(&format!("{e:#}"));
+            return 1;
+        }
+    }
+
+    // Step 5: Trust Caddy's CA in the system store.
+    print_step(5, TOTAL, "Trusting Caddy CA...");
+    match veld_core::setup::trust_caddy_ca().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));

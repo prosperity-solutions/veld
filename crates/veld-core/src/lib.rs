@@ -4,6 +4,7 @@ pub mod health;
 pub mod helper;
 pub mod logging;
 pub mod orchestrator;
+pub mod paths;
 pub mod port;
 pub mod process;
 pub mod setup;
