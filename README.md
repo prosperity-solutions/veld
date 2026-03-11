@@ -27,18 +27,12 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 Download the latest release for your platform:
 
 ```sh
-# macOS (Apple Silicon)
-curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-macos-arm64.tar.gz | sudo tar xz -C /usr/local/bin
-
-# macOS (Intel)
-curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-macos-amd64.tar.gz | sudo tar xz -C /usr/local/bin
-
-# Linux (x86_64)
-curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-linux-amd64.tar.gz | sudo tar xz -C /usr/local/bin
-
-# Linux (ARM64)
-curl -L https://github.com/prosperity-solutions/veld/releases/latest/download/veld-linux-arm64.tar.gz | sudo tar xz -C /usr/local/bin
+curl -fsSL https://raw.githubusercontent.com/prosperity-solutions/veld/main/install.sh | bash
 ```
+
+This detects your OS and architecture, downloads the latest release, and installs:
+- `veld` to `/usr/local/bin/`
+- `veld-helper` and `veld-daemon` to `/usr/local/lib/veld/`
 
 Then run one-time setup:
 
@@ -47,6 +41,8 @@ veld setup
 ```
 
 This installs Caddy, mkcert, and the helper/daemon services. Requires sudo once. After setup, no sudo is needed.
+
+To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL ... | bash`
 
 ### Build from source
 
