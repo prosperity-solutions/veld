@@ -135,7 +135,18 @@ fn is_port_in_use(port: u16) -> bool {
 }
 
 /// Check that the required ports (80, 443, 2019) are free.
+///
+/// If Caddy is already running (admin API responds on 2019), all three ports
+/// are considered owned by Veld and the check passes — this makes `veld setup`
+/// idempotent.
 pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
+    // If our own Caddy is already running, ports are ours — skip the check.
+    if is_caddy_running().await {
+        return Ok(StepResult::success(
+            "Ports in use by Veld's own Caddy (already set up)",
+        ));
+    }
+
     let ports = [80u16, 443, 2019];
     let mut in_use = Vec::new();
 
@@ -154,6 +165,19 @@ pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
             list.join(", ")
         )
     }
+}
+
+/// Check if our Caddy instance is responding on the admin API.
+async fn is_caddy_running() -> bool {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(2))
+        .build()
+        .unwrap_or_default();
+    client
+        .get("http://localhost:2019/config/")
+        .send()
+        .await
+        .is_ok()
 }
 
 /// Install (or verify) the Caddy web server.

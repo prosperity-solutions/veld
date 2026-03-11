@@ -39,25 +39,42 @@ impl CaddyManager {
         }
     }
 
-    /// Start the Caddy process if it is not already running.
+    /// Start the Caddy process if it is not already running, and ensure the
+    /// base config is loaded.
     pub async fn start(&self) -> Result<()> {
         let mut state = self.inner.lock().await;
 
         if let Some(pid) = state.child_pid {
             if is_process_alive(pid) {
-                info!(pid, "caddy is already running");
+                info!(pid, "caddy is already running, ensuring base config");
+                drop(state);
+                self.reload()
+                    .await
+                    .context("failed to reload caddy config")?;
                 return Ok(());
             }
             // Stale PID.
             state.child_pid = None;
         }
 
-        let caddy_bin = &state.caddy_bin;
+        // Check if Caddy is already running externally (e.g. from a previous
+        // helper instance). If the admin API responds, just reload the config.
+        drop(state);
+        if self.is_running().await {
+            info!("caddy admin API already reachable, loading base config");
+            self.reload()
+                .await
+                .context("failed to reload caddy config")?;
+            return Ok(());
+        }
+
+        let mut state = self.inner.lock().await;
+        let caddy_bin = state.caddy_bin.clone();
         if !caddy_bin.exists() {
             anyhow::bail!("caddy not found at {}", caddy_bin.display());
         }
 
-        let child = tokio::process::Command::new(caddy_bin)
+        let child = tokio::process::Command::new(&caddy_bin)
             .arg("run")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
