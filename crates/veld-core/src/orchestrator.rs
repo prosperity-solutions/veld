@@ -76,6 +76,10 @@ pub struct Orchestrator {
     pub helper_client: HelperClient,
     /// Active child processes keyed by `"node:variant"`.
     children: HashMap<String, Child>,
+    /// Debug mode — writes orchestration trace to `veld-debug.log`.
+    debug: bool,
+    /// Debug log writer (created on demand when debug is true).
+    debug_writer: Option<LogWriter>,
 }
 
 impl Orchestrator {
@@ -89,6 +93,20 @@ impl Orchestrator {
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
             children: HashMap::new(),
+            debug: false,
+            debug_writer: None,
+        }
+    }
+
+    /// Enable debug mode for orchestration trace logging.
+    pub fn set_debug(&mut self, debug: bool) {
+        self.debug = debug;
+    }
+
+    /// Write a line to the debug log (no-op when debug is off).
+    async fn debug_log(&self, message: &str) {
+        if let Some(ref writer) = self.debug_writer {
+            let _ = writer.write_line(&format!("[VELD] {message}")).await;
         }
     }
 
@@ -112,12 +130,36 @@ impl Orchestrator {
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
 
+        // Set up debug log writer if debug mode is enabled.
+        if self.debug {
+            let debug_path = logging::debug_log_file(&self.project_root, run_name);
+            match LogWriter::new(debug_path).await {
+                Ok(writer) => {
+                    let _ = writer
+                        .write_line("[VELD] Debug logging enabled — orchestration trace")
+                        .await;
+                    self.debug_writer = Some(writer);
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to create debug log writer");
+                }
+            }
+        }
+
         // Ensure Caddy is running before we add routes.
         if let Err(e) = self.helper_client.caddy_start().await {
             tracing::warn!(error = %e, "failed to start Caddy via helper (routes may fail)");
         }
+        self.debug_log("Caddy start requested").await;
 
         let mut run = RunState::new(run_name, &self.config.name);
+        self.debug_log(&format!(
+            "Run '{}' created (id: {}), graph has {} stages",
+            run_name,
+            run.run_id,
+            plan.len()
+        ))
+        .await;
 
         // Gather context info for URL templates.
         let branch = detect_git_branch(&self.project_root);
@@ -148,6 +190,7 @@ impl Orchestrator {
                 .await?;
 
             for (key, node_state) in results {
+                run.execution_order.push(key.clone());
                 run.nodes.insert(key, node_state);
             }
         }
@@ -218,6 +261,7 @@ impl Orchestrator {
         all_outputs: &HashMap<String, HashMap<String, String>>,
     ) -> Result<NodeState, OrchestratorError> {
         let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
+        let sensitive_outputs = variant_cfg.sensitive_outputs.clone();
         let mut node_state = NodeState::new(&sel.node, &sel.variant);
         node_state.status = NodeStatus::Starting;
 
@@ -257,6 +301,12 @@ impl Orchestrator {
             }
         }
 
+        // Mark sensitive output keys so they are encrypted at rest and masked
+        // in display. The list comes from the variant config.
+        if let Some(sensitive) = sensitive_outputs {
+            node_state.sensitive_keys = sensitive;
+        }
+
         Ok(node_state)
     }
 
@@ -278,6 +328,11 @@ impl Orchestrator {
         let port = self.port_allocator.allocate()?;
         node_state.port = Some(port);
         ctx.set_builtin("port", port.to_string());
+        self.debug_log(&format!(
+            "{}:{} — allocated port {}",
+            sel.node, sel.variant, port
+        ))
+        .await;
 
         // Build URL.
         let url_values = url::build_url_template_values(
@@ -294,6 +349,11 @@ impl Orchestrator {
         node_state.url = Some(https_url.clone());
 
         // Configure DNS + Caddy via helper (best-effort).
+        self.debug_log(&format!(
+            "{}:{} — adding DNS host {} → 127.0.0.1",
+            sel.node, sel.variant, node_url
+        ))
+        .await;
         if let Err(e) = self.helper_client.add_host(&node_url, "127.0.0.1").await {
             tracing::warn!(error = %e, "failed to add DNS host via helper");
         }
@@ -309,6 +369,11 @@ impl Orchestrator {
         // Resolve command.
         let command = variant_cfg.command.as_deref().unwrap_or_default();
         let resolved_cmd = crate::variables::interpolate(command, ctx)?;
+        self.debug_log(&format!(
+            "{}:{} — resolved command: {}",
+            sel.node, sel.variant, resolved_cmd
+        ))
+        .await;
 
         // Build env.
         let mut env = build_env(variant_cfg.env.as_ref(), ctx)?;
@@ -325,16 +390,43 @@ impl Orchestrator {
 
         // Start the process.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
-        let _log_writer = LogWriter::new(log_path).await?;
+        let log_writer = LogWriter::new(log_path).await?;
 
-        let child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
+        let mut child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
         let pid = child.id().unwrap_or(0);
         node_state.pid = Some(pid);
+
+        // Pipe child stdout/stderr to the log file in background tasks.
+        if let Some(stdout) = child.stdout.take() {
+            let writer = log_writer.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = writer.write_line(&line).await;
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let writer = log_writer.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = writer.write_line(&format!("[stderr] {line}")).await;
+                }
+            });
+        }
 
         self.children
             .insert(RunState::node_key(&sel.node, &sel.variant), child);
 
         // Health check.
+        self.debug_log(&format!(
+            "{}:{} — process started (pid {}), beginning health checks",
+            sel.node, sel.variant, pid
+        ))
+        .await;
         if let Some(ref hc) = variant_cfg.health_check {
             node_state.status = NodeStatus::HealthChecking;
             node_state.health_phases.push(HealthCheckPhase {
@@ -358,10 +450,20 @@ impl Orchestrator {
                         phase.passed_at = Some(now);
                     }
                     node_state.status = NodeStatus::Healthy;
+                    self.debug_log(&format!(
+                        "{}:{} — health check passed, node is healthy",
+                        sel.node, sel.variant
+                    ))
+                    .await;
                 }
                 Err(e) => {
                     node_state.status = NodeStatus::Failed;
                     let msg = e.to_string();
+                    self.debug_log(&format!(
+                        "{}:{} — health check FAILED: {}",
+                        sel.node, sel.variant, msg
+                    ))
+                    .await;
                     if let Some(phase) = node_state.health_phases.last_mut() {
                         phase.last_error = Some(msg.clone());
                     }
@@ -455,8 +557,13 @@ impl Orchestrator {
 
         run.status = RunStatus::Stopping;
 
-        // Collect nodes to stop (reverse insertion order).
-        let node_keys: Vec<String> = run.nodes.keys().cloned().collect();
+        // Stop in reverse execution order (dependencies last). Fall back to
+        // HashMap keys for runs created before execution_order was tracked.
+        let node_keys: Vec<String> = if run.execution_order.is_empty() {
+            run.nodes.keys().cloned().collect()
+        } else {
+            run.execution_order.clone()
+        };
 
         for key in node_keys.iter().rev() {
             if let Some(node_state) = run.nodes.get_mut(key) {

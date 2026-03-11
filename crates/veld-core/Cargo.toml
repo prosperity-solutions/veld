@@ -18,3 +18,5 @@ slug = { workspace = true }
 dirs = { workspace = true }
 nix = { workspace = true }
 reqwest = { workspace = true }
+sha2 = { workspace = true }
+base64 = { workspace = true }

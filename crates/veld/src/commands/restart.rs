@@ -5,7 +5,7 @@ use veld_core::state::ProjectState;
 use crate::output;
 
 /// `veld restart [--name <n>] [--debug]`
-pub async fn run(name: Option<String>, _debug: bool) -> i32 {
+pub async fn run(name: Option<String>, debug: bool) -> i32 {
     if !super::require_setup(false).await {
         return 1;
     }
@@ -55,6 +55,7 @@ pub async fn run(name: Option<String>, _debug: bool) -> i32 {
 
     // Start again with a fresh orchestrator.
     let mut orchestrator = Orchestrator::new(config_path, config);
+    orchestrator.set_debug(debug);
 
     match orchestrator.start(&selections, run_name).await {
         Ok(new_run) => {
