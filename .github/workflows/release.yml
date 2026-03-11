@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    name: Release Please
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+    steps:
+      # On push to main: run release-please to create/update release PR
+      - uses: googleapis/release-please-action@v4
+        id: release
+        if: github.event_name == 'push'
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # On PRs: dry-run to validate config
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+      - uses: actions/setup-node@v4
+        if: github.event_name == 'pull_request'
+        with:
+          node-version: "22"
+      - name: Dry-run — validate release-please config
+        if: github.event_name == 'pull_request'
+        run: |
+          npx release-please manifest-pr \
+            --repo-url=${{ github.repository }} \
+            --dry-run \
+            --config-file=release-please-config.json \
+            --manifest-file=.release-please-manifest.json \
+            --token=${{ secrets.GITHUB_TOKEN }}
+
+  build-release:
+    name: Build (${{ matrix.suffix }})
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: macos-arm64
+          - target: x86_64-apple-darwin
+            os: macos-13
+            suffix: macos-amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          for bin in veld veld-helper veld-daemon; do
+            cp target/${{ matrix.target }}/release/$bin dist/
+          done
+          tar -czf veld-${{ needs.release-please.outputs.version }}-${{ matrix.suffix }}.tar.gz -C dist .
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release-please.outputs.tag_name }}
+          files: veld-*.tar.gz
