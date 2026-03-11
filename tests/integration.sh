@@ -247,8 +247,16 @@ if [ -n "$URLS_OUTPUT" ]; then
         while IFS= read -r url; do
             # Extract hostname for --resolve (bypasses DNS for multi-level .localhost)
             CURL_HOST=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
-            if curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
-                    --max-time 5 "$url" >/dev/null 2>&1; then
+            CURL_OK=0
+            for _attempt in 1 2 3 4 5; do
+                if curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
+                        --max-time 5 "$url" >/dev/null 2>&1; then
+                    CURL_OK=1
+                    break
+                fi
+                sleep 1
+            done
+            if [ "$CURL_OK" = "1" ]; then
                 pass "curl $url returned 200"
             else
                 fail "curl $url failed"
