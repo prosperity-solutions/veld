@@ -579,6 +579,18 @@ impl Orchestrator {
 
         project_state.save(&self.project_root)?;
 
+        // Update global registry so `veld list` reflects the stopped state.
+        if let Ok(mut registry) = GlobalRegistry::load() {
+            let key = self.project_root.to_string_lossy().into_owned();
+            if let Some(entry) = registry.projects.get_mut(&key) {
+                if let Some(run_info) = entry.runs.get_mut(run_name) {
+                    run_info.status = RunStatus::Stopped;
+                    run_info.urls.clear();
+                }
+                let _ = registry.save();
+            }
+        }
+
         Ok(())
     }
 

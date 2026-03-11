@@ -1,5 +1,5 @@
 use veld_core::config;
-use veld_core::state::{ProjectState, RunStatus};
+use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
 
 use crate::output;
 
@@ -110,6 +110,19 @@ pub async fn purge(name: &str) -> i32 {
     if let Err(e) = project_state.save(&project_root) {
         output::print_error(&format!("Failed to save state: {e}"), false);
         return 1;
+    }
+
+    // Also remove from the global registry so `veld list` stays in sync.
+    if let Ok(mut registry) = GlobalRegistry::load() {
+        let key = project_root.to_string_lossy().into_owned();
+        if let Some(entry) = registry.projects.get_mut(&key) {
+            entry.runs.remove(name);
+            // If no runs left, remove the entire project entry.
+            if entry.runs.is_empty() {
+                registry.projects.remove(&key);
+            }
+            let _ = registry.save();
+        }
     }
 
     output::print_success(&format!("Purged run '{name}'."));
