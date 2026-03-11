@@ -1636,6 +1636,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "dirs",
  "serde_json",
  "tokio",
  "tracing",

@@ -2,23 +2,46 @@ use crate::output;
 use std::path::Path;
 use std::process::Command;
 
-const HELPER_PATH: &str = "/usr/local/lib/veld/veld-helper";
-const DAEMON_PATH: &str = "/usr/local/lib/veld/veld-daemon";
-
 /// Print version information for all Veld binaries.
 pub fn print_version() {
     let cli_version = env!("CARGO_PKG_VERSION");
 
-    // The daemon and helper binaries share the workspace version. When those
-    // crates expose a `VERSION` constant we can read it directly; for now we
-    // use the same workspace version.
-    let daemon_version = cli_version;
-    let helper_version = cli_version;
+    let helper_version =
+        find_and_query_version("veld-helper").unwrap_or_else(|| cli_version.to_string());
+    let daemon_version =
+        find_and_query_version("veld-daemon").unwrap_or_else(|| cli_version.to_string());
 
     println!("{}", output::bold("Veld"));
     println!("  cli      {cli_version}");
     println!("  daemon   {daemon_version}");
     println!("  helper   {helper_version}");
+}
+
+/// Find a binary by checking known paths and query its version.
+fn find_and_query_version(binary_name: &str) -> Option<String> {
+    let candidates = binary_candidates(binary_name);
+    for path in &candidates {
+        if let Some(v) = query_binary_version(path) {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Build list of candidate paths for a binary.
+fn binary_candidates(binary_name: &str) -> Vec<String> {
+    let mut paths = vec![format!("/usr/local/lib/veld/{binary_name}")];
+    if let Some(home) = dirs::home_dir() {
+        paths.push(
+            home.join(".local")
+                .join("lib")
+                .join("veld")
+                .join(binary_name)
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    paths
 }
 
 /// Query a binary's version by running `<path> --version` and extracting the
@@ -36,14 +59,14 @@ fn query_binary_version(path: &str) -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    // The binary may print something like "veld-helper 0.1.0" or just "0.1.0".
-    // Take the last whitespace-delimited token that looks like a version.
+    // The binary prints "veld-helper 1.0.0" — take the last token.
     let version = stdout.split_whitespace().last()?.to_string();
 
-    if version.is_empty() {
-        None
-    } else {
+    // Sanity check: version should contain a dot (e.g. "1.0.0").
+    if version.contains('.') {
         Some(version)
+    } else {
+        None
     }
 }
 
@@ -54,13 +77,13 @@ pub fn check_version_mismatch() -> Result<(), String> {
     let cli_version = env!("CARGO_PKG_VERSION");
     let mut mismatches: Vec<String> = Vec::new();
 
-    if let Some(v) = query_binary_version(HELPER_PATH) {
+    if let Some(v) = find_and_query_version("veld-helper") {
         if v != cli_version {
             mismatches.push(format!("veld-helper is v{v} (expected v{cli_version})"));
         }
     }
 
-    if let Some(v) = query_binary_version(DAEMON_PATH) {
+    if let Some(v) = find_and_query_version("veld-daemon") {
         if v != cli_version {
             mismatches.push(format!("veld-daemon is v{v} (expected v{cli_version})"));
         }

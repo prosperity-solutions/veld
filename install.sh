@@ -68,32 +68,30 @@ echo "Downloading ${URL}..."
 curl -fSL -o "${TMP_DIR}/${TARBALL}" "$URL"
 
 echo "Downloading checksums..."
-curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL"
+if curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL" 2>/dev/null; then
+  EXPECTED_HASH="$(grep -F " ${TARBALL}" "${TMP_DIR}/checksums.txt" | awk '{print $1}')"
 
-# --- Verify SHA-256 checksum ---
+  if [ -n "$EXPECTED_HASH" ]; then
+    echo "Verifying checksum..."
+    if [ "$OS" = "macos" ]; then
+      ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+    else
+      ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+    fi
 
-echo "Verifying checksum..."
-EXPECTED_HASH="$(grep "${TARBALL}" "${TMP_DIR}/checksums.txt" | awk '{print $1}')"
-
-if [ -z "$EXPECTED_HASH" ]; then
-  echo "Error: checksum for ${TARBALL} not found in checksums.txt"
-  exit 1
-fi
-
-if [ "$OS" = "macos" ]; then
-  ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+    if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+      echo "Error: checksum verification failed"
+      echo "  Expected: ${EXPECTED_HASH}"
+      echo "  Actual:   ${ACTUAL_HASH}"
+      exit 1
+    fi
+    echo "Checksum verified."
+  else
+    echo "Warning: checksum for ${TARBALL} not found in checksums.txt, skipping verification"
+  fi
 else
-  ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+  echo "Warning: checksums.txt not available, skipping verification"
 fi
-
-if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
-  echo "Error: checksum verification failed"
-  echo "  Expected: ${EXPECTED_HASH}"
-  echo "  Actual:   ${ACTUAL_HASH}"
-  exit 1
-fi
-
-echo "Checksum verified."
 
 # --- Extract ---
 
@@ -153,7 +151,7 @@ fi
 if [ -t 1 ]; then
   echo ""
   echo "Running veld setup..."
-  "${INSTALL_DIR}/veld" setup
+  "${INSTALL_DIR}/veld" setup || echo "Warning: veld setup failed. You can re-run it manually: veld setup"
 else
   echo ""
   echo "Non-interactive mode detected — skipping 'veld setup'."

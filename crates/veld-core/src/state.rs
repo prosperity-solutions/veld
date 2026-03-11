@@ -161,6 +161,9 @@ pub struct RunState {
     pub project: String,
     pub status: RunStatus,
     pub nodes: HashMap<String, NodeState>,
+    /// Node keys in the order they were started (for reverse-order stop).
+    #[serde(default)]
+    pub execution_order: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub stopped_at: Option<DateTime<Utc>>,
 }
@@ -173,6 +176,7 @@ impl RunState {
             project: project.to_owned(),
             status: RunStatus::Starting,
             nodes: HashMap::new(),
+            execution_order: Vec::new(),
             created_at: Utc::now(),
             stopped_at: None,
         }

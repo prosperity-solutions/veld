@@ -190,6 +190,7 @@ impl Orchestrator {
                 .await?;
 
             for (key, node_state) in results {
+                run.execution_order.push(key.clone());
                 run.nodes.insert(key, node_state);
             }
         }
@@ -389,11 +390,33 @@ impl Orchestrator {
 
         // Start the process.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
-        let _log_writer = LogWriter::new(log_path).await?;
+        let log_writer = LogWriter::new(log_path).await?;
 
-        let child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
+        let mut child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
         let pid = child.id().unwrap_or(0);
         node_state.pid = Some(pid);
+
+        // Pipe child stdout/stderr to the log file in background tasks.
+        if let Some(stdout) = child.stdout.take() {
+            let writer = log_writer.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = writer.write_line(&line).await;
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let writer = log_writer.clone();
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let _ = writer.write_line(&format!("[stderr] {line}")).await;
+                }
+            });
+        }
 
         self.children
             .insert(RunState::node_key(&sel.node, &sel.variant), child);
@@ -534,8 +557,13 @@ impl Orchestrator {
 
         run.status = RunStatus::Stopping;
 
-        // Collect nodes to stop (reverse insertion order).
-        let node_keys: Vec<String> = run.nodes.keys().cloned().collect();
+        // Stop in reverse execution order (dependencies last). Fall back to
+        // HashMap keys for runs created before execution_order was tracked.
+        let node_keys: Vec<String> = if run.execution_order.is_empty() {
+            run.nodes.keys().cloned().collect()
+        } else {
+            run.execution_order.clone()
+        };
 
         for key in node_keys.iter().rev() {
             if let Some(node_state) = run.nodes.get_mut(key) {

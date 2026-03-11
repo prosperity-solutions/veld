@@ -59,6 +59,7 @@ pub fn debug_log_file(project_root: &Path, run_name: &str) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 /// A writer that timestamps each line and appends to a log file.
+#[derive(Clone)]
 pub struct LogWriter {
     path: PathBuf,
 }
