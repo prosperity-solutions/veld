@@ -55,14 +55,19 @@ impl SetupStatus {
 // Check functions
 // ---------------------------------------------------------------------------
 
-const CADDY_PATH: &str = "/usr/local/lib/veld/caddy";
-const MKCERT_PATH: &str = "/usr/local/lib/veld/mkcert";
+fn caddy_path() -> PathBuf {
+    crate::paths::caddy_bin()
+}
+
+fn mkcert_path() -> PathBuf {
+    crate::paths::mkcert_bin()
+}
 
 /// Probe the system to determine setup status.
 pub async fn check_setup() -> SetupStatus {
     let helper_running = check_helper_running().await;
-    let caddy_present = PathBuf::from(CADDY_PATH).exists();
-    let mkcert_present = PathBuf::from(MKCERT_PATH).exists();
+    let caddy_present = caddy_path().exists();
+    let mkcert_present = mkcert_path().exists();
 
     SetupStatus {
         helper_running,
@@ -120,9 +125,6 @@ impl StepResult {
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-
-const VELD_LIB_DIR: &str = "/usr/local/lib/veld";
-const CERTS_DIR: &str = "/usr/local/lib/veld/certs";
 
 // ---------------------------------------------------------------------------
 // Setup steps
@@ -182,12 +184,13 @@ async fn is_caddy_running() -> bool {
 
 /// Install (or verify) the Caddy web server.
 pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
-    let caddy = PathBuf::from(CADDY_PATH);
+    let lib_dir = crate::paths::lib_dir();
+    let caddy = lib_dir.join("caddy");
     if caddy.exists() {
         return Ok(StepResult::success("Caddy is already installed"));
     }
 
-    std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
+    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
 
     let (_, arch) = platform_pair()?;
     // Caddy uses "mac" for macOS (not "darwin")
@@ -249,12 +252,13 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
 
 /// Install (or verify) mkcert for local TLS certificates.
 pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
-    let mkcert = PathBuf::from(MKCERT_PATH);
+    let lib_dir = crate::paths::lib_dir();
+    let mkcert = lib_dir.join("mkcert");
     if mkcert.exists() {
         return Ok(StepResult::success("mkcert is already installed"));
     }
 
-    std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
+    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
 
     let (os, arch) = platform_pair()?;
     let version = "1.4.4";
@@ -277,10 +281,10 @@ pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
 /// to use this CA directly via its `tls internal` directive, allowing it to
 /// generate certs on-the-fly for any depth of subdomain.
 pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
-    let mkcert = MKCERT_PATH;
+    let mkcert = mkcert_path();
 
     // Install the local CA into the system trust store.
-    let status = Command::new(mkcert)
+    let status = Command::new(&mkcert)
         .arg("-install")
         .status()
         .await
@@ -293,7 +297,7 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
     }
 
     // Locate the mkcert CA root so Caddy can use it as its internal CA.
-    let ca_root = Command::new(mkcert)
+    let ca_root = Command::new(&mkcert)
         .arg("-CAROOT")
         .output()
         .await
@@ -305,12 +309,13 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
 
     // Ensure our certs directory exists and symlink the CA files so Caddy
     // can find them at a well-known location.
-    std::fs::create_dir_all(CERTS_DIR).context("failed to create certs directory")?;
+    let certs = crate::paths::certs_dir();
+    std::fs::create_dir_all(&certs).context("failed to create certs directory")?;
 
     let ca_cert_src = PathBuf::from(&ca_root_dir).join("rootCA.pem");
     let ca_key_src = PathBuf::from(&ca_root_dir).join("rootCA-key.pem");
-    let ca_cert_dst = PathBuf::from(CERTS_DIR).join("rootCA.pem");
-    let ca_key_dst = PathBuf::from(CERTS_DIR).join("rootCA-key.pem");
+    let ca_cert_dst = certs.join("rootCA.pem");
+    let ca_key_dst = certs.join("rootCA-key.pem");
 
     if !ca_cert_src.exists() || !ca_key_src.exists() {
         anyhow::bail!(
@@ -576,10 +581,16 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         _ => {}
     }
 
-    // Remove veld library directory.
-    let lib_dir = Path::new(VELD_LIB_DIR);
-    if lib_dir.exists() {
-        std::fs::remove_dir_all(lib_dir).context("failed to remove /usr/local/lib/veld")?;
+    // Remove veld library directory (check both possible locations).
+    for lib_dir in &[
+        PathBuf::from("/usr/local/lib/veld"),
+        dirs::home_dir()
+            .map(|h| h.join(".local").join("lib").join("veld"))
+            .unwrap_or_default(),
+    ] {
+        if lib_dir.exists() {
+            let _ = std::fs::remove_dir_all(lib_dir);
+        }
     }
 
     // Remove daemon socket.

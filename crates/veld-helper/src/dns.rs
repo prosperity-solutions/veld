@@ -10,9 +10,6 @@ use tracing::{debug, info};
 const HOSTS_BEGIN_MARKER: &str = "# BEGIN veld-managed";
 const HOSTS_END_MARKER: &str = "# END veld-managed";
 
-/// Default path for the dnsmasq include file managed by Veld.
-const DNSMASQ_CONF_PATH: &str = "/usr/local/lib/veld/dnsmasq.d/veld.conf";
-
 /// In-memory state of DNS entries managed by this helper.
 #[derive(Debug)]
 pub struct DnsManager {
@@ -32,7 +29,7 @@ impl DnsManager {
         Self {
             inner: Arc::new(Mutex::new(DnsState {
                 entries: HashMap::new(),
-                dnsmasq_conf: PathBuf::from(DNSMASQ_CONF_PATH),
+                dnsmasq_conf: veld_core::paths::dnsmasq_conf_dir().join("veld.conf"),
             })),
         }
     }
