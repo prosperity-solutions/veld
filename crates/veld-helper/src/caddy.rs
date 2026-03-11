@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -17,7 +16,6 @@ pub struct CaddyManager {
 
 #[derive(Debug)]
 struct CaddyState {
-    caddy_bin: PathBuf,
     /// PID of the managed Caddy process, if running.
     child_pid: Option<u32>,
 }
@@ -25,10 +23,7 @@ struct CaddyState {
 impl CaddyManager {
     pub fn new() -> Self {
         Self {
-            inner: Arc::new(Mutex::new(CaddyState {
-                caddy_bin: veld_core::paths::caddy_bin(),
-                child_pid: None,
-            })),
+            inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
             client: reqwest::Client::new(),
         }
     }
@@ -63,7 +58,7 @@ impl CaddyManager {
         }
 
         let mut state = self.inner.lock().await;
-        let caddy_bin = state.caddy_bin.clone();
+        let caddy_bin = veld_core::paths::caddy_bin();
         if !caddy_bin.exists() {
             anyhow::bail!("caddy not found at {}", caddy_bin.display());
         }

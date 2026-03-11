@@ -8,20 +8,20 @@ pub fn lib_dir() -> PathBuf {
     if system_dir.exists() {
         return system_dir;
     }
-    // Use system dir if parent is writable (fresh install with permissions).
-    if let Some(parent) = system_dir.parent() {
-        if parent.exists()
-            && std::fs::metadata(parent)
-                .map(|m| !m.permissions().readonly())
-                .unwrap_or(false)
-        {
-            return system_dir;
+    // Also check the user-local dir — if it exists, prefer it.
+    let user_dir = dirs::home_dir().map(|h| h.join(".local").join("lib").join("veld"));
+    if let Some(ref ud) = user_dir {
+        if ud.exists() {
+            return ud.clone();
         }
     }
+    // Neither exists yet (fresh install). Try to create the system dir to test
+    // writability, then clean up.
+    if std::fs::create_dir_all(&system_dir).is_ok() {
+        return system_dir;
+    }
     // Fall back to user-local dir.
-    dirs::home_dir()
-        .map(|h| h.join(".local").join("lib").join("veld"))
-        .unwrap_or(system_dir)
+    user_dir.unwrap_or(system_dir)
 }
 
 pub fn caddy_bin() -> PathBuf {

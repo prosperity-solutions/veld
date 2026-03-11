@@ -177,19 +177,8 @@ cd "$PROJECT_DIR"
 info "project directory: $PROJECT_DIR"
 info "run name: $RUN_NAME"
 
-START_OUTPUT=$("$VELD_BIN" start "frontend:local" --name "$RUN_NAME" 2>&1) || true
-START_RC=$?
-info "veld start output: $START_OUTPUT"
-if [ "$START_RC" -eq 0 ]; then
-    pass "veld start frontend:local --name $RUN_NAME"
-else
-    fail "veld start frontend:local --name $RUN_NAME (exit code $START_RC)"
-fi
-
-# Debug: check if Caddy / helper are running
-info "processes after start: $(ps aux | grep -E 'caddy|veld-helper|veld-daemon' | grep -v grep || echo 'none found')"
-info "port 443 after start: $(lsof -i :443 -P 2>&1 | head -5 || echo 'nothing')"
-info "port 2019 after start: $(lsof -i :2019 -P 2>&1 | head -5 || echo 'nothing')"
+assert_ok "veld start frontend:local --name $RUN_NAME" \
+    "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
 
 # Give processes a moment to spin up.
 sleep 2
@@ -259,19 +248,17 @@ if [ -n "$URLS_OUTPUT" ]; then
             # Extract hostname for --resolve (bypasses DNS for multi-level .localhost)
             CURL_HOST=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
             CURL_OK=0
-            CURL_ERR=""
             for _attempt in 1 2 3 4 5; do
-                CURL_ERR=$(curl -vsk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
-                        --max-time 5 "$url" 2>&1) && { CURL_OK=1; break; }
+                if curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
+                        --max-time 5 "$url" >/dev/null 2>&1; then
+                    CURL_OK=1
+                    break
+                fi
                 sleep 1
             done
             if [ "$CURL_OK" = "1" ]; then
                 pass "curl $url returned 200"
             else
-                info "curl debug output: $CURL_ERR"
-                # Check if Caddy is listening at all
-                info "port 443 check: $(lsof -i :443 2>&1 | head -5 || echo 'lsof failed')"
-                info "port 80 check: $(lsof -i :80 2>&1 | head -5 || echo 'lsof failed')"
                 fail "curl $url failed"
             fi
         done <<< "$EXTRACTED_URLS"
