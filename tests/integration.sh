@@ -19,6 +19,27 @@ set -uo pipefail
 # Configuration
 # ---------------------------------------------------------------------------
 
+# Portable timeout wrapper (macOS lacks GNU timeout).
+if command -v timeout >/dev/null 2>&1; then
+    run_with_timeout() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+    run_with_timeout() { gtimeout "$@"; }
+else
+    # Pure-shell fallback using background process + kill.
+    run_with_timeout() {
+        local secs="$1"; shift
+        "$@" &
+        local pid=$!
+        ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null ) &
+        local watchdog=$!
+        wait "$pid" 2>/dev/null
+        local rc=$?
+        kill "$watchdog" 2>/dev/null
+        wait "$watchdog" 2>/dev/null
+        return $rc
+    }
+fi
+
 VELD_BIN="${VELD_BIN:-veld}"
 PROJECT_DIR="${PROJECT_DIR:-$(cd "$(dirname "$0")/../testproject" && pwd)}"
 RUN_NAME="inttest-$$"
@@ -161,10 +182,10 @@ info "running 'veld setup' (may require sudo -- will skip if not available)"
 if sudo -n true 2>/dev/null; then
     # Use timeout to prevent CI hangs (setup involves network downloads,
     # service registration, and CA trust which can block interactively).
-    assert_ok "veld setup completes" timeout 120 "$VELD_BIN" setup
+    assert_ok "veld setup completes" run_with_timeout 120 "$VELD_BIN" setup
 
     # PRD assertion 2: setup idempotency — running setup a second time should also succeed.
-    assert_ok "veld setup idempotent (second run)" timeout 120 "$VELD_BIN" setup
+    assert_ok "veld setup idempotent (second run)" run_with_timeout 120 "$VELD_BIN" setup
 else
     skip "veld setup (sudo not available without password)"
 fi
@@ -180,7 +201,7 @@ info "project directory: $PROJECT_DIR"
 info "run name: $RUN_NAME"
 
 assert_ok "veld start frontend:local --name $RUN_NAME" \
-    timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+    run_with_timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
 
 # Give processes a moment to spin up.
 sleep 2
@@ -348,7 +369,7 @@ header "Idempotency (Re-Start)"
 cd "$PROJECT_DIR"
 
 assert_ok "veld start (re-start) exits 0" \
-    timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+    run_with_timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
 
 sleep 2
 
