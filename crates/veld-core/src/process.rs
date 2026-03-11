@@ -42,19 +42,35 @@ pub struct BashOutput {
 
 /// Spawn a long-running server process. Returns the `Child` handle.
 ///
+/// stdout and stderr are redirected to the provided log file so that
+/// the process survives after the CLI exits (no broken-pipe SIGPIPE).
 /// The caller is responsible for monitoring and killing.
 pub async fn start_server(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
+    log_file: &Path,
 ) -> Result<Child, ProcessError> {
+    // Ensure log directory exists.
+    if let Some(parent) = log_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .map_err(ProcessError::SpawnFailed)?;
+    let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
+
     let child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(working_dir)
         .envs(env)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(stderr_file))
         .kill_on_drop(false) // We manage lifecycle explicitly.
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;

@@ -388,35 +388,14 @@ impl Orchestrator {
             }
         }
 
-        // Start the process.
+        // Start the process. stdout/stderr are redirected to the log file at
+        // the OS level so the process survives after the CLI exits.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
-        let log_writer = LogWriter::new(log_path).await?;
 
-        let mut child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
+        let child =
+            process::start_server(&resolved_cmd, &self.project_root, &env, &log_path).await?;
         let pid = child.id().unwrap_or(0);
         node_state.pid = Some(pid);
-
-        // Pipe child stdout/stderr to the log file in background tasks.
-        if let Some(stdout) = child.stdout.take() {
-            let writer = log_writer.clone();
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = writer.write_line(&line).await;
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let writer = log_writer.clone();
-            tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let _ = writer.write_line(&format!("[stderr] {line}")).await;
-                }
-            });
-        }
 
         self.children
             .insert(RunState::node_key(&sel.node, &sel.variant), child);
