@@ -369,33 +369,57 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
 "#,
                 veld_daemon_bin.display()
             );
-            // Unload first if already loaded (required for upgrades).
-            if plist_path.exists() {
-                let _ = Command::new("launchctl")
-                    .args(["unload", "-w"])
-                    .arg(&plist_path)
-                    .stdin(std::process::Stdio::null())
-                    .status()
-                    .await;
-            }
+            let label = "dev.veld.daemon";
+            let uid = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_else(|_| "501".to_string());
+            let domain_target = format!("gui/{uid}/{label}");
+            let domain = format!("gui/{uid}");
+
+            // Stop the running service first (required for upgrades).
+            let _ = Command::new("launchctl")
+                .args(["bootout", &domain_target])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
 
             std::fs::write(&plist_path, plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
+            // Try the modern bootstrap API first, fall back to legacy load
+            // for environments without a GUI session (CI, SSH).
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
                 Command::new("launchctl")
-                    .args(["load", "-w"])
-                    .arg(&plist_path)
+                    .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
                     .stdin(std::process::Stdio::null())
                     .status(),
             )
             .await;
             match result {
                 Ok(Ok(status)) if status.success() => {}
-                Ok(Ok(_)) => anyhow::bail!("launchctl load failed for veld-daemon"),
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => anyhow::bail!("launchctl load timed out for veld-daemon"),
+                Ok(Ok(status)) if status.code() == Some(37) => {
+                    // Already loaded — kickstart to restart with new binary.
+                    let _ = Command::new("launchctl")
+                        .args(["kickstart", "-k", &domain_target])
+                        .stdin(std::process::Stdio::null())
+                        .status()
+                        .await;
+                }
+                _ => {
+                    // bootstrap failed (e.g. error 125: no GUI domain in CI/SSH).
+                    // Fall back to legacy load which works in non-GUI contexts.
+                    let _ = Command::new("launchctl")
+                        .args(["load", "-w"])
+                        .arg(&plist_path)
+                        .stdin(std::process::Stdio::null())
+                        .status()
+                        .await;
+                }
             }
         }
         "linux" => {
@@ -493,6 +517,7 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
 
 async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     let plist_path = Path::new("/Library/LaunchDaemons/dev.veld.helper.plist");
+    let label = "dev.veld.helper";
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -500,7 +525,7 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>dev.veld.helper</string>
+    <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
         <string>{}</string>
@@ -515,24 +540,24 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
         bin.display()
     );
 
-    // Unload first if already loaded (required for upgrades — `load` on an
-    // already-loaded plist is a no-op, so the old binary keeps running).
-    if plist_path.exists() {
-        let _ = Command::new("launchctl")
-            .args(["unload", "-w"])
-            .arg(plist_path)
-            .stdin(std::process::Stdio::null())
-            .status()
-            .await;
-    }
+    // Stop the running service first (required for upgrades). Use the modern
+    // `bootout` API — the legacy `unload` is deprecated and unreliable for
+    // system-domain LaunchDaemons.
+    let _ = Command::new("launchctl")
+        .args(["bootout", &format!("system/{label}")])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
     std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
+    // Register and start via the modern `bootstrap` API.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(15),
         Command::new("launchctl")
-            .args(["load", "-w"])
-            .arg(plist_path)
+            .args(["bootstrap", "system", &plist_path.to_string_lossy()])
             .stdin(std::process::Stdio::null())
             .status(),
     )
@@ -540,12 +565,24 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
 
     match result {
         Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => anyhow::bail!(
-            "launchctl load failed for veld-helper (exit {})",
-            status.code().unwrap_or(-1)
-        ),
+        Ok(Ok(status)) => {
+            // bootstrap returns 37 if already loaded — try kickstart instead.
+            if status.code() == Some(37) {
+                let _ = Command::new("launchctl")
+                    .args(["kickstart", "-k", &format!("system/{label}")])
+                    .stdin(std::process::Stdio::null())
+                    .status()
+                    .await;
+                Ok(())
+            } else {
+                anyhow::bail!(
+                    "launchctl bootstrap failed for veld-helper (exit {})",
+                    status.code().unwrap_or(-1)
+                )
+            }
+        }
         Ok(Err(e)) => Err(e.into()),
-        Err(_) => anyhow::bail!("launchctl load timed out for veld-helper"),
+        Err(_) => anyhow::bail!("launchctl bootstrap timed out for veld-helper"),
     }
 }
 
@@ -581,27 +618,27 @@ pub async fn perform_update(_version: &str) -> Result<(), anyhow::Error> {
 pub async fn uninstall() -> Result<(), anyhow::Error> {
     match std::env::consts::OS {
         "macos" => {
-            // Unload helper (system daemon).
+            // Stop and remove helper (system daemon).
             let helper_plist = "/Library/LaunchDaemons/dev.veld.helper.plist";
-            if Path::new(helper_plist).exists() {
+            let _ = Command::new("launchctl")
+                .args(["bootout", "system/dev.veld.helper"])
+                .status()
+                .await;
+            let _ = std::fs::remove_file(helper_plist);
+
+            // Stop and remove daemon (user agent).
+            if let Some(home) = dirs::home_dir() {
+                let uid = std::process::Command::new("id")
+                    .arg("-u")
+                    .output()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_else(|_| "501".to_string());
                 let _ = Command::new("launchctl")
-                    .args(["unload", "-w", helper_plist])
+                    .args(["bootout", &format!("gui/{uid}/dev.veld.daemon")])
                     .status()
                     .await;
-                let _ = std::fs::remove_file(helper_plist);
-            }
-
-            // Unload daemon (user agent).
-            if let Some(home) = dirs::home_dir() {
                 let daemon_plist = home.join("Library/LaunchAgents/dev.veld.daemon.plist");
-                if daemon_plist.exists() {
-                    let _ = Command::new("launchctl")
-                        .args(["unload", "-w"])
-                        .arg(&daemon_plist)
-                        .status()
-                        .await;
-                    let _ = std::fs::remove_file(&daemon_plist);
-                }
+                let _ = std::fs::remove_file(&daemon_plist);
             }
         }
         "linux" => {
