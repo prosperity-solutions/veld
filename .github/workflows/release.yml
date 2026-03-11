@@ -37,7 +37,8 @@ jobs:
 
   build:
     name: Build (${{ matrix.suffix }})
-    permissions: {}
+    permissions:
+      contents: read
     needs: release
     if: needs.release.outputs.new_release_published == 'true'
     strategy:
