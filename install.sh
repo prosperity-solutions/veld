@@ -96,6 +96,16 @@ fi
 # --- Extract ---
 
 echo "Extracting..."
+# Verify tarball only contains expected files before extracting.
+EXPECTED_BINS="veld veld-helper veld-daemon"
+TAR_CONTENTS="$(tar -tzf "${TMP_DIR}/${TARBALL}")"
+for entry in $TAR_CONTENTS; do
+  entry="${entry#./}"
+  case "$entry" in
+    veld|veld-helper|veld-daemon|"") ;;
+    *) echo "Error: unexpected file in tarball: ${entry}"; exit 1 ;;
+  esac
+done
 tar xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 
 # --- Determine install directories ---
