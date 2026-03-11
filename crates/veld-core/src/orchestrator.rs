@@ -188,10 +188,7 @@ impl Orchestrator {
                 node_out.insert("url".to_owned(), u.clone());
             }
             // Store under both qualified and unqualified keys.
-            all_outputs.insert(
-                format!("{}:{}", sel.node, sel.variant),
-                node_out.clone(),
-            );
+            all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
             all_outputs
                 .entry(sel.node.clone())
                 .or_default()
@@ -223,10 +220,7 @@ impl Orchestrator {
         let mut ctx = VariableContext::new();
         ctx.set_builtin("run", run.name.clone());
         ctx.set_builtin("run_id", run.run_id.to_string());
-        ctx.set_builtin(
-            "root",
-            self.project_root.to_string_lossy().into_owned(),
-        );
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
         ctx.set_builtin("project", self.config.name.clone());
         ctx.set_builtin("worktree", url::slugify(worktree));
         ctx.set_builtin("branch", url::slugify(branch));
@@ -235,17 +229,23 @@ impl Orchestrator {
         // Populate node output references from already-executed nodes.
         for (node_key, outputs) in all_outputs {
             for (field, value) in outputs {
-                ctx.set_node_output(
-                    &format!("nodes.{node_key}.{field}"),
-                    value.clone(),
-                );
+                ctx.set_node_output(&format!("nodes.{node_key}.{field}"), value.clone());
             }
         }
 
         match variant_cfg.step_type {
             StepType::StartServer => {
-                self.execute_start_server(sel, run, branch, worktree, username, hostname, &mut ctx, &mut node_state)
-                    .await?;
+                self.execute_start_server(
+                    sel,
+                    run,
+                    branch,
+                    worktree,
+                    username,
+                    hostname,
+                    &mut ctx,
+                    &mut node_state,
+                )
+                .await?;
             }
             StepType::Bash => {
                 self.execute_bash(sel, &mut ctx, &mut node_state).await?;
@@ -284,8 +284,7 @@ impl Orchestrator {
             username,
             hostname,
         );
-        let node_url =
-            url::evaluate_url_template(&self.config.url_template, &url_values)?;
+        let node_url = url::evaluate_url_template(&self.config.url_template, &url_values)?;
         let https_url = format!("https://{node_url}");
         node_state.url = Some(https_url.clone());
 
@@ -323,12 +322,10 @@ impl Orchestrator {
         }
 
         // Start the process.
-        let log_path =
-            logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
+        let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
         let _log_writer = LogWriter::new(log_path).await?;
 
-        let child =
-            process::start_server(&resolved_cmd, &self.project_root, &env).await?;
+        let child = process::start_server(&resolved_cmd, &self.project_root, &env).await?;
         let pid = child.id().unwrap_or(0);
         node_state.pid = Some(pid);
 
@@ -351,14 +348,7 @@ impl Orchestrator {
                 passed_at: None,
             });
 
-            match health::run_health_check(
-                port,
-                Some(&https_url),
-                &self.project_root,
-                hc,
-            )
-            .await
-            {
+            match health::run_health_check(port, Some(&https_url), &self.project_root, hc).await {
                 Ok(()) => {
                     let now = chrono::Utc::now();
                     for phase in &mut node_state.health_phases {
@@ -409,8 +399,7 @@ impl Orchestrator {
         // Verify step (idempotency).
         if let Some(ref verify_cmd) = variant_cfg.verify {
             let verify_resolved = crate::variables::interpolate(verify_cmd, ctx)?;
-            let verify_result =
-                process::run_bash(&verify_resolved, &self.project_root, &env).await;
+            let verify_result = process::run_bash(&verify_resolved, &self.project_root, &env).await;
             if let Ok(ref out) = verify_result {
                 if out.exit_code == 0 {
                     tracing::info!(
@@ -428,8 +417,7 @@ impl Orchestrator {
         }
 
         // Run bash step.
-        let result =
-            process::run_bash(&resolved_cmd, &self.project_root, &env).await?;
+        let result = process::run_bash(&resolved_cmd, &self.project_root, &env).await?;
 
         node_state
             .outputs
@@ -461,9 +449,7 @@ impl Orchestrator {
         let mut project_state = ProjectState::load(&self.project_root)?;
         let run = project_state
             .get_run_mut(run_name)
-            .ok_or_else(|| {
-                crate::state::StateError::RunNotFound(run_name.to_owned())
-            })?;
+            .ok_or_else(|| crate::state::StateError::RunNotFound(run_name.to_owned()))?;
 
         run.status = RunStatus::Stopping;
 
@@ -483,8 +469,7 @@ impl Orchestrator {
 
                 // Remove DNS + Caddy route.
                 if let Some(ref url_str) = node_state.url {
-                    let hostname =
-                        url_str.strip_prefix("https://").unwrap_or(url_str);
+                    let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
                     let _ = self.helper_client.remove_host(hostname).await;
                     let route_id = format!(
                         "veld-{}-{}-{}",
@@ -523,10 +508,7 @@ impl Orchestrator {
             let mut urls = HashMap::new();
             for ns in run.nodes.values() {
                 if let Some(ref u) = ns.url {
-                    urls.insert(
-                        RunState::node_key(&ns.node_name, &ns.variant),
-                        u.clone(),
-                    );
+                    urls.insert(RunState::node_key(&ns.node_name, &ns.variant), u.clone());
                 }
             }
 

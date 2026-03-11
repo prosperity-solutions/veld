@@ -89,10 +89,7 @@ pub async fn run_bash(
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .expect("stdout should be piped");
+    let stdout = child.stdout.take().expect("stdout should be piped");
 
     let mut reader = BufReader::new(stdout).lines();
     let mut outputs = HashMap::new();
@@ -105,10 +102,7 @@ pub async fn run_bash(
         }
     }
 
-    let status = child
-        .wait()
-        .await
-        .map_err(ProcessError::SpawnFailed)?;
+    let status = child.wait().await.map_err(ProcessError::SpawnFailed)?;
 
     let exit_code = status.code().unwrap_or(-1);
 
@@ -135,7 +129,7 @@ pub fn is_alive(pid: u32) -> bool {
 
 /// Kill a process: send SIGTERM, wait briefly, then SIGKILL if still alive.
 pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
     let nix_pid = Pid::from_raw(pid as i32);

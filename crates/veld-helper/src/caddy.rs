@@ -54,10 +54,7 @@ impl CaddyManager {
 
         let caddy_bin = &state.caddy_bin;
         if !caddy_bin.exists() {
-            anyhow::bail!(
-                "caddy not found at {}",
-                caddy_bin.display()
-            );
+            anyhow::bail!("caddy not found at {}", caddy_bin.display());
         }
 
         let child = tokio::process::Command::new(caddy_bin)
@@ -138,17 +135,10 @@ impl CaddyManager {
     }
 
     /// Add a reverse-proxy route via the Caddy admin API.
-    pub async fn add_route(
-        &self,
-        route_id: &str,
-        hostname: &str,
-        upstream: &str,
-    ) -> Result<()> {
+    pub async fn add_route(&self, route_id: &str, hostname: &str, upstream: &str) -> Result<()> {
         let route = build_route_json(route_id, hostname, upstream);
 
-        let url = format!(
-            "{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",
-        );
+        let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
 
         let resp = self
             .client
@@ -225,11 +215,7 @@ fn build_base_config() -> serde_json::Value {
 }
 
 /// Build a single route entry with hostname matching, TLS, and reverse proxy.
-fn build_route_json(
-    route_id: &str,
-    hostname: &str,
-    upstream: &str,
-) -> serde_json::Value {
+fn build_route_json(route_id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
     let cert_path = Path::new(CERTS_DIR);
     let _cert_file = cert_path.join(format!("{hostname}.pem"));
     let _key_file = cert_path.join(format!("{hostname}-key.pem"));

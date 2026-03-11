@@ -49,19 +49,10 @@ pub enum HelperError {
 /// `command` + `args` object that veld-helper's server expects.
 #[derive(Debug, Clone)]
 pub enum HelperCommand {
-    AddHost {
-        hostname: String,
-        ip: String,
-    },
-    RemoveHost {
-        hostname: String,
-    },
-    AddRoute {
-        route: serde_json::Value,
-    },
-    RemoveRoute {
-        route_id: String,
-    },
+    AddHost { hostname: String, ip: String },
+    RemoveHost { hostname: String },
+    AddRoute { route: serde_json::Value },
+    RemoveRoute { route_id: String },
     ReloadDns,
     CaddyStart,
     CaddyStop,
@@ -77,18 +68,22 @@ impl Serialize for HelperCommand {
                 "add_host",
                 serde_json::json!({ "hostname": hostname, "ip": ip }),
             ),
-            HelperCommand::RemoveHost { hostname } => (
-                "remove_host",
-                serde_json::json!({ "hostname": hostname }),
-            ),
+            HelperCommand::RemoveHost { hostname } => {
+                ("remove_host", serde_json::json!({ "hostname": hostname }))
+            }
             HelperCommand::AddRoute { route } => ("add_route", route.clone()),
-            HelperCommand::RemoveRoute { route_id } => (
-                "remove_route",
-                serde_json::json!({ "route_id": route_id }),
-            ),
-            HelperCommand::ReloadDns => ("reload_dns", serde_json::Value::Object(Default::default())),
-            HelperCommand::CaddyStart => ("caddy_start", serde_json::Value::Object(Default::default())),
-            HelperCommand::CaddyStop => ("caddy_stop", serde_json::Value::Object(Default::default())),
+            HelperCommand::RemoveRoute { route_id } => {
+                ("remove_route", serde_json::json!({ "route_id": route_id }))
+            }
+            HelperCommand::ReloadDns => {
+                ("reload_dns", serde_json::Value::Object(Default::default()))
+            }
+            HelperCommand::CaddyStart => {
+                ("caddy_start", serde_json::Value::Object(Default::default()))
+            }
+            HelperCommand::CaddyStop => {
+                ("caddy_stop", serde_json::Value::Object(Default::default()))
+            }
             HelperCommand::Status => ("status", serde_json::Value::Object(Default::default())),
         };
 
@@ -131,12 +126,12 @@ impl HelperClient {
 
     /// Send a command and receive the response.
     async fn send(&self, command: &HelperCommand) -> Result<HelperResponse, HelperError> {
-        let mut stream = UnixStream::connect(&self.socket_path)
-            .await
-            .map_err(|e| HelperError::ConnectionFailed {
+        let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
+            HelperError::ConnectionFailed {
                 path: self.socket_path.clone(),
                 source: e,
-            })?;
+            }
+        })?;
 
         // Write the JSON command followed by a newline delimiter.
         let payload = serde_json::to_vec(command).expect("command serialization cannot fail");
@@ -162,9 +157,7 @@ impl HelperClient {
 
         if !response.ok {
             return Err(HelperError::CommandError(
-                response
-                    .error
-                    .unwrap_or_else(|| "unknown error".to_owned()),
+                response.error.unwrap_or_else(|| "unknown error".to_owned()),
             ));
         }
 
@@ -188,10 +181,7 @@ impl HelperClient {
         .await
     }
 
-    pub async fn add_route(
-        &self,
-        route: serde_json::Value,
-    ) -> Result<HelperResponse, HelperError> {
+    pub async fn add_route(&self, route: serde_json::Value) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::AddRoute { route }).await
     }
 

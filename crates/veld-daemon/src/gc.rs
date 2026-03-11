@@ -55,7 +55,10 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         let mut project_state = match ProjectState::load(&project_root) {
             Ok(ps) => ps,
             Err(e) => {
-                debug!("could not load project state for {}: {e}", project_root.display());
+                debug!(
+                    "could not load project state for {}: {e}",
+                    project_root.display()
+                );
                 continue;
             }
         };
@@ -86,7 +89,10 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 
                         if !any_alive && !dead_pids.is_empty() {
                             // All processes dead -- mark as stopped (orphan cleanup).
-                            info!("killing orphan run '{}' with dead PIDs: {:?}", run_name, dead_pids);
+                            info!(
+                                "killing orphan run '{}' with dead PIDs: {:?}",
+                                run_name, dead_pids
+                            );
 
                             if let Some(run) = project_state.get_run_mut(run_name) {
                                 run.status = RunStatus::Stopped;
@@ -120,7 +126,11 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                         if let Some(stopped_at) = run_state.stopped_at {
                             let age = chrono::Utc::now().signed_duration_since(stopped_at);
                             if age.num_hours() > MAX_ENTRY_AGE_HOURS {
-                                debug!("removing stale run '{}' from project {}", run_name, project_root.display());
+                                debug!(
+                                    "removing stale run '{}' from project {}",
+                                    run_name,
+                                    project_root.display()
+                                );
                                 project_state.runs.remove(run_name);
                                 project_changed = true;
                                 // Will remove from registry below.
@@ -134,7 +144,9 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         }
 
         // Remove stale runs from registry entry.
-        reg_entry.runs.retain(|name, _| project_state.runs.contains_key(name));
+        reg_entry
+            .runs
+            .retain(|name, _| project_state.runs.contains_key(name));
         if reg_entry.runs.len() != run_names.len() {
             registry_changed = true;
         }

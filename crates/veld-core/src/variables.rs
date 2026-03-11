@@ -64,9 +64,9 @@ pub fn interpolate(template: &str, ctx: &VariableContext) -> Result<String, Vari
         result.push_str(&rest[..start]);
         let after_open = &rest[start + 2..];
 
-        let end = after_open
-            .find('}')
-            .ok_or_else(|| VariableError::Unresolved(format!("unclosed ${{ at position {start}")))?;
+        let end = after_open.find('}').ok_or_else(|| {
+            VariableError::Unresolved(format!("unclosed ${{ at position {start}"))
+        })?;
 
         let ref_str = &after_open[..end];
         let value = resolve_reference(ref_str, ctx)?;
@@ -103,10 +103,7 @@ fn resolve_reference(reference: &str, ctx: &VariableContext) -> Result<String, V
 /// Evaluate the `??` fallback operator within a single template segment.
 ///
 /// Given `"branch ?? run"`, returns the first non-empty value.
-pub fn evaluate_fallback(
-    expr: &str,
-    values: &HashMap<String, String>,
-) -> Option<String> {
+pub fn evaluate_fallback(expr: &str, values: &HashMap<String, String>) -> Option<String> {
     for part in expr.split("??") {
         let key = part.trim();
         if let Some(val) = values.get(key) {
@@ -139,14 +136,15 @@ pub fn interpolate_url_template(
         let expr = &after_open[..end];
         let value = if expr.contains("??") {
             evaluate_fallback(expr, values).ok_or_else(|| {
-                VariableError::Unresolved(format!("no non-empty value for fallback expression \"{expr}\""))
+                VariableError::Unresolved(format!(
+                    "no non-empty value for fallback expression \"{expr}\""
+                ))
             })?
         } else {
             let key = expr.trim();
-            values
-                .get(key)
-                .cloned()
-                .ok_or_else(|| VariableError::Unresolved(format!("unknown URL template variable \"{key}\"")))?
+            values.get(key).cloned().ok_or_else(|| {
+                VariableError::Unresolved(format!("unknown URL template variable \"{key}\""))
+            })?
         };
 
         result.push_str(&value);

@@ -29,10 +29,7 @@ pub async fn run(json: bool) -> i32 {
                 let mut names: Vec<&String> = p.keys().collect();
                 names.sort();
                 for name in names {
-                    rows.push(vec![
-                        name.clone(),
-                        p[name].join(", "),
-                    ]);
+                    rows.push(vec![name.clone(), p[name].join(", ")]);
                 }
                 output::print_table(&["PRESET", "SELECTIONS"], &rows);
             }

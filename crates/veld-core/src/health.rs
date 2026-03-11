@@ -185,9 +185,7 @@ pub async fn run_health_check(
     // Phase 1: always check the port is bound.
     tracing::info!(port, "health check phase 1: waiting for port");
     wait_for_port(port, hc).await.map_err(|e| {
-        HealthError::PortCheckFailed(format!(
-            "process did not bind to port {port}: {e}"
-        ))
+        HealthError::PortCheckFailed(format!("process did not bind to port {port}: {e}"))
     })?;
     tracing::info!(port, "health check phase 1: port is open");
 
@@ -211,7 +209,10 @@ pub async fn run_health_check(
             // Phase 1 already covers this; phase 2 is a no-op for type "port".
         }
         other => {
-            tracing::warn!(check_type = other, "unknown health check type, skipping phase 2");
+            tracing::warn!(
+                check_type = other,
+                "unknown health check type, skipping phase 2"
+            );
         }
     }
 

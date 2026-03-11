@@ -136,9 +136,9 @@ impl<'de> Deserialize<'de> for Outputs {
                 let items: Vec<String> = arr
                     .into_iter()
                     .map(|v| {
-                        v.as_str()
-                            .map(|s| s.to_owned())
-                            .ok_or_else(|| serde::de::Error::custom("outputs array must contain strings"))
+                        v.as_str().map(|s| s.to_owned()).ok_or_else(|| {
+                            serde::de::Error::custom("outputs array must contain strings")
+                        })
                     })
                     .collect::<Result<_, _>>()?;
                 Ok(Outputs::Declared(items))
@@ -147,12 +147,9 @@ impl<'de> Deserialize<'de> for Outputs {
                 let items: HashMap<String, String> = map
                     .into_iter()
                     .map(|(k, v)| {
-                        let s = v
-                            .as_str()
-                            .map(|s| s.to_owned())
-                            .ok_or_else(|| {
-                                serde::de::Error::custom("outputs map values must be strings")
-                            })?;
+                        let s = v.as_str().map(|s| s.to_owned()).ok_or_else(|| {
+                            serde::de::Error::custom("outputs map values must be strings")
+                        })?;
                         Ok((k, s))
                     })
                     .collect::<Result<_, _>>()?;

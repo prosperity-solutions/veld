@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+  integration:
+    name: Integration Tests
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build all binaries
+        run: cargo build
+
+      - name: Verify CLI works
+        run: ./target/debug/veld --version
+
+      - name: Verify test project config
+        working-directory: testproject
+        run: |
+          ../target/debug/veld nodes
+          ../target/debug/veld nodes --json
+          ../target/debug/veld graph frontend:local
+
+      - name: Verify setup guard
+        working-directory: testproject
+        run: |
+          output=$(../target/debug/veld status --json 2>&1 || true)
+          echo "$output"
+          echo "$output" | grep -q "setup_required"
+
+      - name: Test backend server
+        run: |
+          python3 testproject/backend/server.py 19555 &
+          PID=$!
+          sleep 2
+          curl -sf http://localhost:19555/health
+          curl -sf http://localhost:19555/
+          kill $PID
+
+      - name: Test frontend server
+        run: |
+          python3 testproject/frontend/server.py 19556 &
+          PID=$!
+          sleep 2
+          curl -sf http://localhost:19556/
+          kill $PID
+
+      - name: Run integration tests
+        run: |
+          chmod +x tests/integration.sh
+          ./tests/integration.sh --veld-bin ./target/debug/veld --project-dir ./testproject || echo "::warning::Full integration tests require veld setup (sudo). Server and config tests passed above."

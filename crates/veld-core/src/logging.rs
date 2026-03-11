@@ -36,10 +36,7 @@ pub enum LogError {
 
 /// Return the log directory for a run: `.veld/logs/{run_name}/`.
 pub fn log_dir(project_root: &Path, run_name: &str) -> PathBuf {
-    project_root
-        .join(".veld")
-        .join("logs")
-        .join(run_name)
+    project_root.join(".veld").join("logs").join(run_name)
 }
 
 /// Return the log file path for a node+variant.
@@ -48,12 +45,7 @@ pub fn log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) 
 }
 
 /// Return the setup (bash step) log file path.
-pub fn setup_log_file(
-    project_root: &Path,
-    run_name: &str,
-    node: &str,
-    variant: &str,
-) -> PathBuf {
+pub fn setup_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
     log_dir(project_root, run_name).join(format!("{node}-{variant}-setup.log"))
 }
 
@@ -117,13 +109,12 @@ impl LogWriter {
 
 /// Read the last `n` lines from a log file.
 pub async fn tail_lines(path: &Path, n: usize) -> Result<Vec<String>, LogError> {
-    let content =
-        fs::read_to_string(path)
-            .await
-            .map_err(|e| LogError::ReadFailed {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+    let content = fs::read_to_string(path)
+        .await
+        .map_err(|e| LogError::ReadFailed {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
 
     let lines: Vec<String> = content.lines().map(|l| l.to_owned()).collect();
     let start = lines.len().saturating_sub(n);
@@ -131,18 +122,14 @@ pub async fn tail_lines(path: &Path, n: usize) -> Result<Vec<String>, LogError> 
 }
 
 /// Read lines since a given duration ago (based on the ISO 8601 timestamps in the log).
-pub async fn lines_since(
-    path: &Path,
-    since: chrono::Duration,
-) -> Result<Vec<String>, LogError> {
+pub async fn lines_since(path: &Path, since: chrono::Duration) -> Result<Vec<String>, LogError> {
     let cutoff = Utc::now() - since;
-    let content =
-        fs::read_to_string(path)
-            .await
-            .map_err(|e| LogError::ReadFailed {
-                path: path.to_path_buf(),
-                source: e,
-            })?;
+    let content = fs::read_to_string(path)
+        .await
+        .map_err(|e| LogError::ReadFailed {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
 
     let mut result = Vec::new();
     for line in content.lines() {
@@ -173,15 +160,13 @@ fn extract_timestamp(line: &str) -> Option<&str> {
 }
 
 /// Format a log line as JSON for `--json` output.
-pub fn line_to_json(
-    line: &str,
-    run: &str,
-    node: &str,
-    variant: &str,
-) -> serde_json::Value {
+pub fn line_to_json(line: &str, run: &str, node: &str, variant: &str) -> serde_json::Value {
     let (timestamp, content) = if let Some(ts) = extract_timestamp(line) {
         let after_bracket = line.find(']').map(|i| i + 2).unwrap_or(0);
-        (ts.to_owned(), line.get(after_bracket..).unwrap_or("").to_owned())
+        (
+            ts.to_owned(),
+            line.get(after_bracket..).unwrap_or("").to_owned(),
+        )
     } else {
         (String::new(), line.to_owned())
     };

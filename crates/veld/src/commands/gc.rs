@@ -29,7 +29,9 @@ pub async fn run() -> i32 {
     }
 
     if removed > 0 {
-        output::print_success(&format!("Removed {removed} stale project(s) from registry."));
+        output::print_success(&format!(
+            "Removed {removed} stale project(s) from registry."
+        ));
     } else {
         output::print_success("Nothing to clean up.");
     }

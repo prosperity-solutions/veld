@@ -32,10 +32,7 @@ pub async fn require_setup(json: bool) -> bool {
                 let payload = veld_core::setup::setup_required_json(missing);
                 println!("{}", serde_json::to_string_pretty(&payload).unwrap());
             } else {
-                output::print_error(
-                    "Veld is not set up yet. Run `veld setup` first.",
-                    false,
-                );
+                output::print_error("Veld is not set up yet. Run `veld setup` first.", false);
             }
             false
         }
@@ -44,9 +41,7 @@ pub async fn require_setup(json: bool) -> bool {
 
 /// Load the project configuration from the current working directory.
 /// On failure prints an error and returns `None`.
-pub fn load_config(
-    json: bool,
-) -> Option<(std::path::PathBuf, veld_core::config::VeldConfig)> {
+pub fn load_config(json: bool) -> Option<(std::path::PathBuf, veld_core::config::VeldConfig)> {
     match veld_core::config::load_config_from_cwd() {
         Ok(pair) => Some(pair),
         Err(e) => {

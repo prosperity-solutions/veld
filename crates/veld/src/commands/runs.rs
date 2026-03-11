@@ -22,8 +22,7 @@ pub async fn list(all: bool, name: Option<&str>) -> i32 {
         }
     };
 
-    let mut runs: Vec<(&String, &veld_core::state::RunState)> =
-        project_state.runs.iter().collect();
+    let mut runs: Vec<(&String, &veld_core::state::RunState)> = project_state.runs.iter().collect();
 
     // Filter by name if given.
     if let Some(filter_name) = name {

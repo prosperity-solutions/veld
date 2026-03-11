@@ -93,8 +93,7 @@ async fn main() -> Result<()> {
     }
 
     // Bind the Unix socket listener.
-    let listener = UnixListener::bind(&args.socket_path)
-        .context("failed to bind Unix socket")?;
+    let listener = UnixListener::bind(&args.socket_path).context("failed to bind Unix socket")?;
 
     info!("listening on {}", args.socket_path.display());
 

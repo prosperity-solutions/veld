@@ -34,9 +34,7 @@ fn parse_args() -> Result<PathBuf> {
             }
             "--socket-path" => {
                 i += 1;
-                let path = args
-                    .get(i)
-                    .context("--socket-path requires a value")?;
+                let path = args.get(i).context("--socket-path requires a value")?;
                 socket_path = PathBuf::from(path);
             }
             other => anyhow::bail!("unknown argument: {other}"),
@@ -60,8 +58,9 @@ async fn main() -> Result<()> {
 
     // Remove stale socket if it exists.
     if socket_path.exists() {
-        std::fs::remove_file(&socket_path)
-            .with_context(|| format!("failed to remove stale socket at {}", socket_path.display()))?;
+        std::fs::remove_file(&socket_path).with_context(|| {
+            format!("failed to remove stale socket at {}", socket_path.display())
+        })?;
     }
 
     // Ensure the parent directory exists.
@@ -72,7 +71,10 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind socket at {}", socket_path.display()))?;
 
-    info!("veld-helper {VERSION} listening on {}", socket_path.display());
+    info!(
+        "veld-helper {VERSION} listening on {}",
+        socket_path.display()
+    );
 
     let state = Arc::new(handler::State::new());
 
@@ -108,9 +110,7 @@ async fn handle_connection(
 
         let response = state.handle_request(&line).await;
         let mut response_json = serde_json::to_string(&response)
-            .unwrap_or_else(|e| {
-                format!(r#"{{"ok":false,"error":"serialization error: {e}"}}"#)
-            });
+            .unwrap_or_else(|e| format!(r#"{{"ok":false,"error":"serialization error: {e}"}}"#));
         response_json.push('\n');
         writer.write_all(response_json.as_bytes()).await?;
     }

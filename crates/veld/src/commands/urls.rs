@@ -57,11 +57,7 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         output::print_info("No URLs exposed.");
     } else {
         for (node, variant, url) in &url_entries {
-            println!(
-                "{} {}",
-                output::cyan(&format!("{node}:{variant}")),
-                url,
-            );
+            println!("{} {}", output::cyan(&format!("{node}:{variant}")), url,);
         }
     }
 

@@ -42,7 +42,9 @@ pub enum GraphError {
     #[error("dependency cycle detected: {0}")]
     CycleDetected(String),
 
-    #[error("ambiguous variable reference \"{reference}\" — node \"{node}\" has multiple active variants ({variants:?}); use the qualified form ${{nodes.{node}:{hint}.{field}}}")]
+    #[error(
+        "ambiguous variable reference \"{reference}\" — node \"{node}\" has multiple active variants ({variants:?}); use the qualified form ${{nodes.{node}:{hint}.{field}}}"
+    )]
     AmbiguousReference {
         reference: String,
         node: String,
@@ -120,9 +122,10 @@ pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
-    let presets = config.presets.as_ref().ok_or_else(|| {
-        GraphError::UnknownPreset(preset_name.to_owned())
-    })?;
+    let presets = config
+        .presets
+        .as_ref()
+        .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;
     let items = presets
         .get(preset_name)
         .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;

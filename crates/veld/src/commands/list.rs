@@ -55,11 +55,7 @@ pub async fn run(urls: bool, json: bool) -> i32 {
                     let mut url_keys: Vec<&String> = run_info.urls.keys().collect();
                     url_keys.sort();
                     for node_key in url_keys {
-                        println!(
-                            "    {} {}",
-                            output::cyan(node_key),
-                            run_info.urls[node_key],
-                        );
+                        println!("    {} {}", output::cyan(node_key), run_info.urls[node_key],);
                     }
                 }
             }

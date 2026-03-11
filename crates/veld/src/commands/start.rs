@@ -40,8 +40,10 @@ pub async fn run(
             None => return 1,
         }
     } else {
-        let raw: Result<Vec<NodeSelection>, _> =
-            selections.iter().map(|s| graph::parse_selection(s)).collect();
+        let raw: Result<Vec<NodeSelection>, _> = selections
+            .iter()
+            .map(|s| graph::parse_selection(s))
+            .collect();
         match raw {
             Ok(parsed) => match graph::resolve_selections(&parsed, &config) {
                 Ok(resolved) => resolved,

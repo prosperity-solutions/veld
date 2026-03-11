@@ -87,7 +87,11 @@ fn format_node_status(status: &NodeStatus) -> String {
         NodeStatus::Healthy => format!("{} {}", output::checkmark(), output::green("healthy")),
         NodeStatus::Starting => format!("{} {}", output::yellow("~"), output::yellow("starting")),
         NodeStatus::HealthChecking => {
-            format!("{} {}", output::yellow("~"), output::yellow("health-checking"))
+            format!(
+                "{} {}",
+                output::yellow("~"),
+                output::yellow("health-checking")
+            )
         }
         NodeStatus::Pending => format!("{} {}", output::dim("-"), output::dim("pending")),
         NodeStatus::Stopped => format!("{} {}", output::dim("-"), output::dim("stopped")),

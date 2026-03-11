@@ -46,7 +46,10 @@ async fn scan_and_update(broadcaster: &Broadcaster) -> anyhow::Result<usize> {
             let project_state = match ProjectState::load(project_root) {
                 Ok(ps) => ps,
                 Err(e) => {
-                    debug!("could not load project state for {}: {e}", project_root.display());
+                    debug!(
+                        "could not load project state for {}: {e}",
+                        project_root.display()
+                    );
                     continue;
                 }
             };
@@ -95,7 +98,10 @@ async fn scan_and_update(broadcaster: &Broadcaster) -> anyhow::Result<usize> {
 
                 // Update the global registry.
                 let mut registry = GlobalRegistry::load().unwrap_or_default();
-                if let Some(entry) = registry.projects.get_mut(&project_root.to_string_lossy().into_owned()) {
+                if let Some(entry) = registry
+                    .projects
+                    .get_mut(&project_root.to_string_lossy().into_owned())
+                {
                     if let Some(info) = entry.runs.get_mut(run_name) {
                         info.status = RunStatus::Stopped;
                     }
@@ -124,7 +130,5 @@ async fn scan_and_update(broadcaster: &Broadcaster) -> anyhow::Result<usize> {
 /// Check whether a given PID is alive by sending signal 0.
 fn is_process_alive(pid: u32) -> bool {
     // On Unix, sending signal 0 checks for process existence.
-    unsafe {
-        libc::kill(pid as libc::pid_t, 0) == 0
-    }
+    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }

@@ -109,7 +109,9 @@ pub struct StepResult {
 
 impl StepResult {
     pub fn success(msg: impl Into<String>) -> Self {
-        Self { message: msg.into() }
+        Self {
+            message: msg.into(),
+        }
     }
 }
 
@@ -139,7 +141,10 @@ pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
         Ok(StepResult::success("Ports 80, 443, and 2019 are available"))
     } else {
         let list: Vec<String> = in_use.iter().map(|p| p.to_string()).collect();
-        anyhow::bail!("The following ports are already in use: {}", list.join(", "))
+        anyhow::bail!(
+            "The following ports are already in use: {}",
+            list.join(", ")
+        )
     }
 }
 
@@ -150,15 +155,15 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
         return Ok(StepResult::success("Caddy is already installed"));
     }
 
-    std::fs::create_dir_all(VELD_LIB_DIR)
-        .context("failed to create /usr/local/lib/veld")?;
+    std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
 
     let (os, arch) = platform_pair()?;
-    let url = format!(
-        "https://github.com/caddyserver/caddy/releases/latest/download/caddy_{os}_{arch}"
-    );
+    let url =
+        format!("https://github.com/caddyserver/caddy/releases/latest/download/caddy_{os}_{arch}");
 
-    download_binary(&url, &caddy).await.context("failed to download Caddy")?;
+    download_binary(&url, &caddy)
+        .await
+        .context("failed to download Caddy")?;
 
     Ok(StepResult::success("Caddy downloaded and installed"))
 }
@@ -170,15 +175,16 @@ pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
         return Ok(StepResult::success("mkcert is already installed"));
     }
 
-    std::fs::create_dir_all(VELD_LIB_DIR)
-        .context("failed to create /usr/local/lib/veld")?;
+    std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
 
     let (os, arch) = platform_pair()?;
     let url = format!(
         "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-{os}-{arch}"
     );
 
-    download_binary(&url, &mkcert).await.context("failed to download mkcert")?;
+    download_binary(&url, &mkcert)
+        .await
+        .context("failed to download mkcert")?;
 
     Ok(StepResult::success("mkcert downloaded and installed"))
 }
@@ -194,12 +200,14 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
         .await
         .context("failed to run mkcert -install")?;
     if !status.success() {
-        anyhow::bail!("mkcert -install exited with code {}", status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "mkcert -install exited with code {}",
+            status.code().unwrap_or(-1)
+        );
     }
 
     // Ensure certs directory exists.
-    std::fs::create_dir_all(CERTS_DIR)
-        .context("failed to create certs directory")?;
+    std::fs::create_dir_all(CERTS_DIR).context("failed to create certs directory")?;
 
     // Generate wildcard certs.
     let cert_file = format!("{CERTS_DIR}/cert.pem");
@@ -207,8 +215,10 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
 
     let status = Command::new(mkcert)
         .args([
-            "-cert-file", &cert_file,
-            "-key-file", &key_file,
+            "-cert-file",
+            &cert_file,
+            "-key-file",
+            &key_file,
             "*.localhost",
             "*.*.localhost",
             "*.*.*.localhost",
@@ -217,7 +227,10 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
         .await
         .context("failed to run mkcert for cert generation")?;
     if !status.success() {
-        anyhow::bail!("mkcert cert generation exited with code {}", status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "mkcert cert generation exited with code {}",
+            status.code().unwrap_or(-1)
+        );
     }
 
     Ok(StepResult::success("TLS certificates generated"))
@@ -270,16 +283,14 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             let unit_dir = dirs::home_dir()
                 .context("could not determine home directory")?
                 .join(".config/systemd/user");
-            std::fs::create_dir_all(&unit_dir)
-                .context("failed to create systemd user unit dir")?;
+            std::fs::create_dir_all(&unit_dir).context("failed to create systemd user unit dir")?;
 
             let unit_path = unit_dir.join("veld-daemon.service");
             let unit = format!(
                 "[Unit]\nDescription=Veld Daemon\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
                 veld_daemon_bin.display()
             );
-            std::fs::write(&unit_path, unit)
-                .context("failed to write daemon systemd unit")?;
+            std::fs::write(&unit_path, unit).context("failed to write daemon systemd unit")?;
 
             run_cmd("systemctl", &["--user", "daemon-reload"]).await?;
             run_cmd("systemctl", &["--user", "enable", "--now", "veld-daemon"]).await?;
@@ -287,7 +298,9 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
         other => anyhow::bail!("unsupported OS: {other}"),
     }
 
-    Ok(StepResult::success("veld-daemon service installed and started"))
+    Ok(StepResult::success(
+        "veld-daemon service installed and started",
+    ))
 }
 
 /// Install (or verify) the Veld helper.
@@ -337,8 +350,7 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
                 "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
                 veld_helper_bin.display()
             );
-            std::fs::write(unit_path, unit)
-                .context("failed to write helper systemd unit")?;
+            std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
 
             run_cmd("systemctl", &["daemon-reload"]).await?;
             run_cmd("systemctl", &["enable", "--now", "veld-helper"]).await?;
@@ -346,7 +358,9 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
         other => anyhow::bail!("unsupported OS: {other}"),
     }
 
-    Ok(StepResult::success("veld-helper service installed and started"))
+    Ok(StepResult::success(
+        "veld-helper service installed and started",
+    ))
 }
 
 /// Check for available updates. Returns `Some(version)` if an update exists.
@@ -411,9 +425,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
                 .status()
                 .await;
             if let Some(home) = dirs::home_dir() {
-                let _ = std::fs::remove_file(
-                    home.join(".config/systemd/user/veld-daemon.service"),
-                );
+                let _ = std::fs::remove_file(home.join(".config/systemd/user/veld-daemon.service"));
             }
         }
         _ => {}
@@ -422,8 +434,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // Remove veld library directory.
     let lib_dir = Path::new(VELD_LIB_DIR);
     if lib_dir.exists() {
-        std::fs::remove_dir_all(lib_dir)
-            .context("failed to remove /usr/local/lib/veld")?;
+        std::fs::remove_dir_all(lib_dir).context("failed to remove /usr/local/lib/veld")?;
     }
 
     // Remove daemon socket.
@@ -462,7 +473,10 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
         .error_for_status()
         .context("download returned non-success status")?;
 
-    let bytes = response.bytes().await.context("failed to read response body")?;
+    let bytes = response
+        .bytes()
+        .await
+        .context("failed to read response body")?;
     std::fs::write(dest, &bytes).context("failed to write binary")?;
 
     #[cfg(unix)]
@@ -478,7 +492,9 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable.
 fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     let current = std::env::current_exe().context("cannot determine current executable path")?;
-    let dir = current.parent().context("executable has no parent directory")?;
+    let dir = current
+        .parent()
+        .context("executable has no parent directory")?;
     let candidate = dir.join(name);
     if candidate.exists() {
         Ok(candidate)
@@ -496,7 +512,11 @@ async fn run_cmd(program: &str, args: &[&str]) -> Result<(), anyhow::Error> {
         .await
         .with_context(|| format!("failed to run {program}"))?;
     if !status.success() {
-        anyhow::bail!("{program} {} exited with code {}", args.join(" "), status.code().unwrap_or(-1));
+        anyhow::bail!(
+            "{program} {} exited with code {}",
+            args.join(" "),
+            status.code().unwrap_or(-1)
+        );
     }
     Ok(())
 }

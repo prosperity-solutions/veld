@@ -33,7 +33,11 @@ pub async fn run(json: bool) -> i32 {
             variants.sort();
             rows.push(vec![
                 name.clone(),
-                variants.iter().map(|v| v.as_str()).collect::<Vec<_>>().join(", "),
+                variants
+                    .iter()
+                    .map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 node_cfg.default_variant.clone().unwrap_or_default(),
             ]);
         }
