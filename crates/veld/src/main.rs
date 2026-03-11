@@ -1,7 +1,7 @@
 mod commands;
 mod output;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 /// Veld -- local development environment orchestrator.
 #[derive(Parser)]
@@ -74,6 +74,10 @@ enum Command {
         /// Filter by run name.
         #[arg(long)]
         name: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show status of a running environment.
@@ -115,6 +119,10 @@ enum Command {
         /// Only show logs since this duration (e.g. "5m", "1h").
         #[arg(long)]
         since: Option<String>,
+
+        /// Stream logs continuously (like `tail -f`).
+        #[arg(long, short = 'f')]
+        follow: bool,
 
         /// Output as JSON.
         #[arg(long)]
@@ -167,6 +175,9 @@ enum Command {
 
     /// Uninstall Veld and clean up.
     Uninstall,
+
+    /// Print version information for all Veld binaries.
+    Version,
 }
 
 #[derive(Subcommand)]
@@ -197,9 +208,10 @@ async fn main() {
 
     init_tracing(cli.debug);
 
-    // Handle bare `veld` with no subcommand -- print version.
+    // Handle bare `veld` with no subcommand -- print help.
     if cli.command.is_none() {
-        commands::version::print_version();
+        let _ = Cli::command().print_help();
+        println!();
         return;
     }
 
@@ -235,9 +247,14 @@ async fn main() {
 
         Command::Restart { name, debug } => commands::restart::run(name, debug).await,
 
-        Command::Runs { action, all, name } => match action {
+        Command::Runs {
+            action,
+            all,
+            name,
+            json,
+        } => match action {
             Some(RunsAction::Purge { name }) => commands::runs::purge(&name).await,
-            None => commands::runs::list(all, name.as_deref()).await,
+            None => commands::runs::list(all, name.as_deref(), json).await,
         },
 
         Command::Status { name, json } => commands::status::run(name, json).await,
@@ -249,8 +266,9 @@ async fn main() {
             node,
             lines,
             since,
+            follow,
             json,
-        } => commands::logs::run(name, node, lines, since, json).await,
+        } => commands::logs::run(name, node, lines, since, follow, json).await,
 
         Command::Graph { selections } => commands::graph::run(selections).await,
 
@@ -269,6 +287,11 @@ async fn main() {
         Command::Update => commands::update::run().await,
 
         Command::Uninstall => commands::uninstall::run().await,
+
+        Command::Version => {
+            commands::version::print_version();
+            0
+        }
     };
 
     std::process::exit(exit_code);

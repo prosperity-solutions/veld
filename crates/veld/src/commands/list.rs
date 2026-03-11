@@ -47,15 +47,32 @@ pub async fn run(urls: bool, json: bool) -> i32 {
                 output::dim(&entry.project_root.display().to_string()),
             );
 
-            if urls {
-                for run_info in entry.runs.values() {
-                    if run_info.status != RunStatus::Running {
-                        continue;
-                    }
+            // Show individual runs with their names and status.
+            let mut run_names: Vec<&String> = entry.runs.keys().collect();
+            run_names.sort();
+
+            for run_name in run_names {
+                let run_info = &entry.runs[run_name];
+                let status_str = match run_info.status {
+                    RunStatus::Running => output::green("running"),
+                    RunStatus::Stopped => output::dim("stopped"),
+                    _ => output::yellow(&format!("{:?}", run_info.status).to_lowercase()),
+                };
+                println!(
+                    "    {} {}",
+                    output::bold(run_name),
+                    status_str,
+                );
+
+                if urls && run_info.status == RunStatus::Running {
                     let mut url_keys: Vec<&String> = run_info.urls.keys().collect();
                     url_keys.sort();
                     for node_key in url_keys {
-                        println!("    {} {}", output::cyan(node_key), run_info.urls[node_key],);
+                        println!(
+                            "      {} {}",
+                            output::cyan(node_key),
+                            run_info.urls[node_key],
+                        );
                     }
                 }
             }

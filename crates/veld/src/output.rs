@@ -8,8 +8,20 @@ pub fn is_tty() -> bool {
     io::stdout().is_terminal()
 }
 
+/// Whether colored output is enabled. Respects the `NO_COLOR` standard
+/// (https://no-color.org/) and `FORCE_COLOR` override.
+pub fn colors_enabled() -> bool {
+    if std::env::var_os("NO_COLOR").is_some() {
+        return false;
+    }
+    if std::env::var_os("FORCE_COLOR").is_some() {
+        return true;
+    }
+    is_tty()
+}
+
 fn ansi(code: &str, text: &str) -> String {
-    if is_tty() {
+    if colors_enabled() {
         format!("\x1b[{code}m{text}\x1b[0m")
     } else {
         text.to_string()

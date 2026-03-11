@@ -22,7 +22,11 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         }
     };
 
-    let run_name = name.as_deref().unwrap_or("default");
+    let run_name = match super::resolve_run_name(name, &project_state, true, json) {
+        Some(n) => n,
+        None => return 1,
+    };
+    let run_name = run_name.as_str();
 
     let run_state = match project_state.get_run(run_name) {
         Some(r) => r,

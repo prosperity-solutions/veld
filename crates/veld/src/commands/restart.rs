@@ -14,11 +14,23 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         return 1;
     };
 
-    let run_name = name.as_deref().unwrap_or("default");
+    let mut orchestrator = Orchestrator::new(config_path.clone(), config.clone());
+
+    let project_state = match ProjectState::load(&orchestrator.project_root) {
+        Ok(s) => s,
+        Err(e) => {
+            output::print_error(&format!("Failed to load state: {e}"), false);
+            return 1;
+        }
+    };
+
+    let run_name = match super::resolve_run_name(name, &project_state, false, false) {
+        Some(n) => n,
+        None => return 1,
+    };
+    let run_name = run_name.as_str();
 
     output::print_info(&format!("Restarting environment '{run_name}'..."));
-
-    let mut orchestrator = Orchestrator::new(config_path.clone(), config.clone());
 
     // First stop the existing run.
     if let Err(e) = orchestrator.stop(run_name).await {
