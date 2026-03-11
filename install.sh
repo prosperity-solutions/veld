@@ -203,16 +203,38 @@ else
   fi
 fi
 
-# --- macOS: remove quarantine attribute ---
+# --- macOS: clear extended attributes and re-sign binaries ---
+#
+# Downloaded binaries carry com.apple.quarantine and com.apple.provenance
+# attributes. On macOS Sequoia (15+), provenance alone can cause Gatekeeper
+# to SIGKILL unsigned/adhoc-signed binaries. Clearing all xattrs and
+# re-signing locally makes macOS treat them as trusted.
 
 if [ "$OS" = "macos" ]; then
-  echo "Removing macOS quarantine attribute..."
-  $NEED_SUDO xattr -dr com.apple.quarantine "${INSTALL_DIR}/veld" 2>/dev/null || true
+  echo "Clearing macOS extended attributes and re-signing binaries..."
+  $NEED_SUDO xattr -cr "${INSTALL_DIR}/veld" 2>/dev/null || true
+  $NEED_SUDO codesign --force --sign - "${INSTALL_DIR}/veld" 2>/dev/null || true
   for bin in veld-helper veld-daemon; do
     if [ -f "${LIB_DIR}/${bin}" ]; then
-      $NEED_SUDO xattr -dr com.apple.quarantine "${LIB_DIR}/${bin}" 2>/dev/null || true
+      $NEED_SUDO xattr -cr "${LIB_DIR}/${bin}" 2>/dev/null || true
+      $NEED_SUDO codesign --force --sign - "${LIB_DIR}/${bin}" 2>/dev/null || true
     fi
   done
+fi
+
+# --- Clean up stale binaries from alternate install location ---
+#
+# Previous installs may have placed binaries in ~/.local/lib/veld/ (fallback
+# when /usr/local was not writable). If we just installed to a different
+# location, remove the stale copies so `veld version` doesn't pick them up.
+
+if [ "$LIB_DIR" != "$HOME/.local/lib/veld" ] && [ -d "$HOME/.local/lib/veld" ]; then
+  echo "Removing stale binaries from $HOME/.local/lib/veld/..."
+  for bin in veld-helper veld-daemon; do
+    rm -f "$HOME/.local/lib/veld/$bin" 2>/dev/null || true
+  done
+  # Remove the directory if empty.
+  rmdir "$HOME/.local/lib/veld" 2>/dev/null || true
 fi
 
 # --- Auto-run veld setup in interactive mode ---

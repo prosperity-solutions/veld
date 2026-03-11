@@ -6,26 +6,59 @@ use std::process::Command;
 pub fn print_version() {
     let cli_version = env!("CARGO_PKG_VERSION");
 
-    let helper_version =
-        find_and_query_version("veld-helper").unwrap_or_else(|| cli_version.to_string());
-    let daemon_version =
-        find_and_query_version("veld-daemon").unwrap_or_else(|| cli_version.to_string());
+    let helper_version = find_and_query_version("veld-helper");
+    let daemon_version = find_and_query_version("veld-daemon");
 
     println!("{}", output::bold("Veld"));
     println!("  veld           {cli_version}");
-    println!("  veld-daemon    {daemon_version}");
-    println!("  veld-helper    {helper_version}");
+    println!(
+        "  veld-daemon    {}",
+        format_version(&daemon_version, cli_version)
+    );
+    println!(
+        "  veld-helper    {}",
+        format_version(&helper_version, cli_version)
+    );
+}
+
+/// Format a version result for display.
+fn format_version(result: &VersionResult, cli_version: &str) -> String {
+    match result {
+        VersionResult::Ok(v) => v.clone(),
+        VersionResult::NotFound => format!("{cli_version} (assumed — binary not found)"),
+        VersionResult::ExecFailed(path) => {
+            format!("{cli_version} (assumed — could not execute {path})")
+        }
+    }
+}
+
+enum VersionResult {
+    /// Successfully queried the version.
+    Ok(String),
+    /// Binary not found at any candidate path.
+    NotFound,
+    /// Binary exists but `--version` failed (e.g. macOS killed it).
+    ExecFailed(String),
 }
 
 /// Find a binary by checking known paths and query its version.
-fn find_and_query_version(binary_name: &str) -> Option<String> {
+///
+/// If a binary exists at a candidate path but `--version` fails (e.g. macOS
+/// Gatekeeper kills it), stop searching — don't fall through to potentially
+/// stale copies at other locations.
+fn find_and_query_version(binary_name: &str) -> VersionResult {
     let candidates = binary_candidates(binary_name);
     for path in &candidates {
-        if let Some(v) = query_binary_version(path) {
-            return Some(v);
+        if !Path::new(path).exists() {
+            continue;
+        }
+        // Binary exists at this path. Try to query its version.
+        match query_binary_version(path) {
+            Some(v) => return VersionResult::Ok(v),
+            None => return VersionResult::ExecFailed(path.clone()),
         }
     }
-    None
+    VersionResult::NotFound
 }
 
 /// Build list of candidate paths for a binary.
@@ -77,13 +110,13 @@ pub fn check_version_mismatch() -> Result<(), String> {
     let cli_version = env!("CARGO_PKG_VERSION");
     let mut mismatches: Vec<String> = Vec::new();
 
-    if let Some(v) = find_and_query_version("veld-helper") {
+    if let VersionResult::Ok(v) = find_and_query_version("veld-helper") {
         if v != cli_version {
             mismatches.push(format!("veld-helper is v{v} (expected v{cli_version})"));
         }
     }
 
-    if let Some(v) = find_and_query_version("veld-daemon") {
+    if let VersionResult::Ok(v) = find_and_query_version("veld-daemon") {
         if v != cli_version {
             mismatches.push(format!("veld-daemon is v{v} (expected v{cli_version})"));
         }
