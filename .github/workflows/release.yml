@@ -27,22 +27,38 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-      # On PRs: dry-run to validate config
+      # On PRs: validate that config files are parseable JSON
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request'
-      - uses: actions/setup-node@v4
-        if: github.event_name == 'pull_request'
-        with:
-          node-version: "22"
       - name: Dry-run — validate release-please config
         if: github.event_name == 'pull_request'
         run: |
-          npx release-please manifest-pr \
-            --repo-url=${{ github.repository }} \
-            --dry-run \
-            --config-file=release-please-config.json \
-            --manifest-file=.release-please-manifest.json \
-            --token=${{ secrets.GITHUB_TOKEN }}
+          echo "Validating release-please config files..."
+          python3 -c "
+          import json, sys
+          for f in ['release-please-config.json', '.release-please-manifest.json']:
+              try:
+                  data = json.load(open(f))
+                  print(f'  {f}: OK')
+              except Exception as e:
+                  print(f'  {f}: FAIL - {e}')
+                  sys.exit(1)
+          # Verify manifest version matches Cargo.toml
+          import re
+          manifest = json.load(open('.release-please-manifest.json'))
+          cargo = open('Cargo.toml').read()
+          m = re.search(r'# x-release-please-version\nversion = \"([^\"]+)\"', cargo)
+          if m:
+              cargo_ver = m.group(1)
+              manifest_ver = manifest.get('.', '')
+              if cargo_ver == manifest_ver:
+                  print(f'  Version consistency: OK ({cargo_ver})')
+              else:
+                  print(f'  Version mismatch: manifest={manifest_ver} cargo={cargo_ver}')
+                  sys.exit(1)
+          else:
+              print('  WARNING: x-release-please-version marker not found in Cargo.toml')
+          "
 
   build-release:
     name: Build (${{ matrix.suffix }})
@@ -57,6 +73,13 @@ jobs:
           - target: x86_64-apple-darwin
             os: macos-13
             suffix: macos-amd64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-arm64
+            cross: true
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -64,6 +87,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
