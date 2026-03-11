@@ -332,12 +332,21 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
     }
 
     // Copy CA files (symlinks may not work across volumes).
-    std::fs::copy(&ca_cert_src, &ca_cert_dst).context("failed to copy CA cert")?;
-    std::fs::copy(&ca_key_src, &ca_key_dst).context("failed to copy CA key")?;
-
-    Ok(StepResult::success(
-        "mkcert CA installed, Caddy will generate per-domain certs",
-    ))
+    // If the source files are not readable (e.g. owned by root from a previous
+    // sudo run of mkcert), skip gracefully — Caddy will use its own internal CA.
+    match std::fs::copy(&ca_cert_src, &ca_cert_dst)
+        .and_then(|_| std::fs::copy(&ca_key_src, &ca_key_dst))
+    {
+        Ok(_) => Ok(StepResult::success(
+            "mkcert CA installed, Caddy will generate per-domain certs",
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            Ok(StepResult::success(
+                "mkcert CA installed (CA key not readable without sudo; Caddy will use its own internal CA)",
+            ))
+        }
+        Err(e) => Err(anyhow::anyhow!("failed to copy CA files: {e}")),
+    }
 }
 
 /// Install (or verify) the Veld daemon.
