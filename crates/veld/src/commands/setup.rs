@@ -2,6 +2,34 @@ use crate::output;
 
 /// `veld setup` -- run the first-time setup sequence.
 pub async fn run() -> i32 {
+    // Setup requires root for writing LaunchDaemons, binding /var/run socket,
+    // etc. If we're not root, re-exec with sudo so the user gets a password
+    // prompt automatically.
+    if !is_root_user() {
+        eprintln!(
+            "{} Setup requires administrator privileges.",
+            output::bold("Note:")
+        );
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
+            Err(e) => {
+                eprintln!("Cannot determine executable path: {e}");
+                return 1;
+            }
+        };
+        let status = std::process::Command::new("sudo")
+            .arg(&exe)
+            .arg("setup")
+            .status();
+        return match status {
+            Ok(s) => s.code().unwrap_or(1),
+            Err(e) => {
+                eprintln!("Failed to run sudo: {e}");
+                1
+            }
+        };
+    }
+
     println!("{}", output::bold("Veld Setup"));
     println!();
 
@@ -74,4 +102,17 @@ fn print_step_ok(detail: &str) {
 
 fn print_step_fail(detail: &str) {
     eprintln!(" {} {}", output::cross(), output::red(detail));
+}
+
+/// Check if the current process is running as root.
+pub fn is_root_user() -> bool {
+    std::env::var("EUID")
+        .or_else(|_| {
+            std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .map(|id| id == "0")
+        .unwrap_or(false)
 }

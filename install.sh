@@ -157,6 +157,7 @@ if [ "$OS" = "macos" ]; then
 fi
 
 # --- Auto-run veld setup in interactive mode ---
+# veld setup self-escalates to sudo when needed, so no need to wrap in sudo here.
 
 if [ -t 1 ]; then
   echo ""
