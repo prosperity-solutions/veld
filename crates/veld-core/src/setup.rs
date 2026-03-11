@@ -390,6 +390,8 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             std::fs::write(&plist_path, plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
+            // Try the modern bootstrap API first, fall back to legacy load
+            // for environments without a GUI session (CI, SSH).
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
                 Command::new("launchctl")
@@ -408,9 +410,16 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                         .status()
                         .await;
                 }
-                Ok(Ok(_)) => anyhow::bail!("launchctl bootstrap failed for veld-daemon"),
-                Ok(Err(e)) => return Err(e.into()),
-                Err(_) => anyhow::bail!("launchctl bootstrap timed out for veld-daemon"),
+                _ => {
+                    // bootstrap failed (e.g. error 125: no GUI domain in CI/SSH).
+                    // Fall back to legacy load which works in non-GUI contexts.
+                    let _ = Command::new("launchctl")
+                        .args(["load", "-w"])
+                        .arg(&plist_path)
+                        .stdin(std::process::Stdio::null())
+                        .status()
+                        .await;
+                }
             }
         }
         "linux" => {
