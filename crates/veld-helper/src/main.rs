@@ -71,6 +71,20 @@ async fn main() -> Result<()> {
     let listener = UnixListener::bind(&socket_path)
         .with_context(|| format!("failed to bind socket at {}", socket_path.display()))?;
 
+    // Allow non-root users to connect to the socket. The helper runs as root
+    // but the CLI and daemon run as the regular user.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))
+            .with_context(|| {
+                format!(
+                    "failed to set socket permissions on {}",
+                    socket_path.display()
+                )
+            })?;
+    }
+
     info!(
         "veld-helper {VERSION} listening on {}",
         socket_path.display()
