@@ -12,7 +12,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::check_ports().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }
@@ -22,7 +22,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::install_caddy().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }
@@ -32,7 +32,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::install_mkcert().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }
@@ -42,7 +42,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::generate_certs().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }
@@ -52,7 +52,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::install_daemon().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }
@@ -62,7 +62,7 @@ pub async fn run() -> i32 {
     match veld_core::setup::install_helper().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
-            print_step_fail(&format!("{e}"));
+            print_step_fail(&format!("{e:#}"));
             return 1;
         }
     }

@@ -79,17 +79,18 @@ trap cleanup EXIT
 # Test helpers
 # ---------------------------------------------------------------------------
 
-# Run a command and check that it exits 0.
+# Run a command and check that it exits 0. Shows output on failure.
 assert_ok() {
     local label="$1"
     shift
-    local rc=0
-    "$@" >/dev/null 2>&1 || rc=$?
+    local output rc=0
+    output=$("$@" 2>&1) || rc=$?
     if [ "$rc" -eq 0 ]; then
         pass "$label"
         return 0
     else
         fail "$label (exit code $rc)"
+        info "output: $output"
         return 1
     fi
 }
