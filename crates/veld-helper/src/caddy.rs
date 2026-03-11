@@ -221,9 +221,19 @@ impl CaddyManager {
 // Caddy JSON config builders
 // ---------------------------------------------------------------------------
 
+/// Directory for Caddy's data (PKI certs, OCSP, etc.).
+const CADDY_DATA_DIR: &str = "/usr/local/lib/veld/caddy-data";
+
 /// Build a minimal base Caddy config with a server block for Veld.
 fn build_base_config() -> serde_json::Value {
+    // Ensure the data directory exists so Caddy can write PKI data.
+    let _ = std::fs::create_dir_all(CADDY_DATA_DIR);
+
     serde_json::json!({
+        "storage": {
+            "module": "file_system",
+            "root": CADDY_DATA_DIR
+        },
         "apps": {
             "http": {
                 "servers": {
