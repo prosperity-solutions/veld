@@ -159,10 +159,12 @@ header "Setup"
 info "running 'veld setup' (may require sudo -- will skip if not available)"
 
 if sudo -n true 2>/dev/null; then
-    assert_ok "veld setup completes" "$VELD_BIN" setup
+    # Use timeout to prevent CI hangs (setup involves network downloads,
+    # service registration, and CA trust which can block interactively).
+    assert_ok "veld setup completes" timeout 120 "$VELD_BIN" setup
 
     # PRD assertion 2: setup idempotency — running setup a second time should also succeed.
-    assert_ok "veld setup idempotent (second run)" "$VELD_BIN" setup
+    assert_ok "veld setup idempotent (second run)" timeout 120 "$VELD_BIN" setup
 else
     skip "veld setup (sudo not available without password)"
 fi
@@ -178,7 +180,7 @@ info "project directory: $PROJECT_DIR"
 info "run name: $RUN_NAME"
 
 assert_ok "veld start frontend:local --name $RUN_NAME" \
-    "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+    timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
 
 # Give processes a moment to spin up.
 sleep 2
@@ -346,7 +348,7 @@ header "Idempotency (Re-Start)"
 cd "$PROJECT_DIR"
 
 assert_ok "veld start (re-start) exits 0" \
-    "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+    timeout 120 "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
 
 sleep 2
 

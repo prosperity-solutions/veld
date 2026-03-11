@@ -362,14 +362,20 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             std::fs::write(&plist_path, plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
-            let status = Command::new("launchctl")
-                .args(["load", "-w"])
-                .arg(&plist_path)
-                .status()
-                .await
-                .context("failed to load daemon LaunchAgent")?;
-            if !status.success() {
-                anyhow::bail!("launchctl load failed for veld-daemon");
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                Command::new("launchctl")
+                    .args(["load", "-w"])
+                    .arg(&plist_path)
+                    .stdin(std::process::Stdio::null())
+                    .status(),
+            )
+            .await;
+            match result {
+                Ok(Ok(status)) if status.success() => {}
+                Ok(Ok(_)) => anyhow::bail!("launchctl load failed for veld-daemon"),
+                Ok(Err(e)) => return Err(e.into()),
+                Err(_) => anyhow::bail!("launchctl load timed out for veld-daemon"),
             }
         }
         "linux" => {
@@ -441,11 +447,15 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
         }
     }
 
-    // Start Caddy via the helper.
-    match client.caddy_start().await {
-        Ok(_) => {}
-        Err(e) => {
+    // Start Caddy via the helper (with timeout — Caddy startup waits for
+    // the admin API internally, so give it a generous window).
+    match tokio::time::timeout(std::time::Duration::from_secs(30), client.caddy_start()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
             tracing::warn!(error = %e, "could not start Caddy via helper (may already be running)");
+        }
+        Err(_) => {
+            tracing::warn!("caddy_start RPC timed out (Caddy may still be starting)");
         }
     }
 
@@ -484,16 +494,25 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     );
     std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
-    let status = Command::new("launchctl")
-        .args(["load", "-w"])
-        .arg(plist_path)
-        .status()
-        .await
-        .context("failed to load helper LaunchDaemon")?;
-    if !status.success() {
-        anyhow::bail!("launchctl load failed for veld-helper");
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        Command::new("launchctl")
+            .args(["load", "-w"])
+            .arg(plist_path)
+            .stdin(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+
+    match result {
+        Ok(Ok(status)) if status.success() => Ok(()),
+        Ok(Ok(status)) => anyhow::bail!(
+            "launchctl load failed for veld-helper (exit {})",
+            status.code().unwrap_or(-1)
+        ),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => anyhow::bail!("launchctl load timed out for veld-helper"),
     }
-    Ok(())
 }
 
 async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
