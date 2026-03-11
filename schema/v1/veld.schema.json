@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veld.dev/schema/v1/veld.schema.json",
+  "title": "Veld Project Configuration",
+  "description": "Configuration file for a Veld local development environment. Place this as veld.json in your project root.",
+  "type": "object",
+  "required": ["schemaVersion", "name", "nodes"],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor autocompletion."
+    },
+    "schemaVersion": {
+      "const": "1",
+      "description": "Schema version. Must be \"1\" for this version of Veld."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable project name. Used in URLs and registry entries.",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+    },
+    "url_template": {
+      "type": "string",
+      "description": "URL template for services. Supports placeholders: {service}, {run}, {project}, {port}.",
+      "default": "{service}.{run}.{project}.localhost",
+      "examples": [
+        "{service}.{run}.{project}.localhost",
+        "{service}.localhost:{port}"
+      ]
+    },
+    "presets": {
+      "type": "object",
+      "description": "Named shortcuts for node:variant selections. Each preset maps to an array of \"node:variant\" strings.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "A node:variant selector, e.g. \"backend:local\" or \"frontend:docker\".",
+          "pattern": "^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$"
+        },
+        "minItems": 1
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
+      "additionalProperties": {
+        "$ref": "#/$defs/NodeConfig"
+      },
+      "minProperties": 1
+    }
+  },
+  "$defs": {
+    "NodeConfig": {
+      "type": "object",
+      "description": "Configuration for a single node in the dependency graph.",
+      "required": ["variants"],
+      "additionalProperties": false,
+      "properties": {
+        "default_variant": {
+          "type": "string",
+          "description": "The variant to use when none is specified. If omitted and the node has exactly one variant, that variant is used automatically."
+        },
+        "variants": {
+          "type": "object",
+          "description": "Available variants for this node. Each key is a variant name.",
+          "additionalProperties": {
+            "$ref": "#/$defs/VariantConfig"
+          },
+          "minProperties": 1
+        }
+      }
+    },
+    "VariantConfig": {
+      "type": "object",
+      "description": "Configuration for a single variant of a node.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["bash", "start_server"],
+          "description": "Step type. \"bash\" runs a command/script to completion. \"start_server\" starts a long-running process and waits for it to become healthy."
+        },
+        "command": {
+          "type": "string",
+          "description": "Inline shell command to execute. Supports Veld variable substitution (e.g. ${veld.port}, ${node.output})."
+        },
+        "script": {
+          "type": "string",
+          "description": "Path to a script file, relative to veld.json. Mutually exclusive with command."
+        },
+        "health_check": {
+          "$ref": "#/$defs/HealthCheck",
+          "description": "Health check configuration. Required for start_server variants."
+        },
+        "depends_on": {
+          "type": "object",
+          "description": "Dependencies: maps node names to the variant that must be running before this variant starts.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "description": "Extra environment variables injected into the process.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "outputs": {
+          "description": "Output declarations. For bash steps: an array of output names captured from VELD_OUTPUT. For start_server steps: an object mapping output names to template strings.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Declared output names for bash steps."
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Synthetic output templates for start_server steps."
+            }
+          ]
+        },
+        "sensitive_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Output keys whose values are sensitive. These are masked in logs and encrypted at rest."
+        },
+        "verify": {
+          "type": "string",
+          "description": "Idempotency verification command. Only applies to \"bash\" type variants. If this command exits 0, the step is considered already complete and is skipped."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "type": { "const": "start_server" } },
+            "required": ["type"]
+          },
+          "then": {
+            "required": ["command"]
+          }
+        },
+        {
+          "if": {
+            "properties": { "type": { "const": "bash" } },
+            "required": ["type"]
+          },
+          "then": {
+            "anyOf": [
+              { "required": ["command"] },
+              { "required": ["script"] }
+            ]
+          }
+        }
+      ]
+    },
+    "HealthCheck": {
+      "type": "object",
+      "description": "Health check configuration for a start_server variant.",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["http", "port", "bash"],
+          "description": "Health check strategy. \"http\" polls an HTTP endpoint. \"port\" checks if the port is accepting connections. \"bash\" runs a command and checks the exit code."
+        },
+        "path": {
+          "type": "string",
+          "description": "HTTP path to poll (type \"http\" only).",
+          "examples": ["/health", "/ready", "/"]
+        },
+        "expect_status": {
+          "type": "integer",
+          "description": "Expected HTTP status code (type \"http\" only). Defaults to 200.",
+          "minimum": 100,
+          "maximum": 599,
+          "default": 200
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to run (type \"bash\" only). Exit code 0 means healthy."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Maximum seconds to wait for the service to become healthy.",
+          "default": 60,
+          "minimum": 1
+        },
+        "interval_ms": {
+          "type": "integer",
+          "description": "Milliseconds between health check attempts.",
+          "default": 1000,
+          "minimum": 100
+        }
+      }
+    }
+  }
+}

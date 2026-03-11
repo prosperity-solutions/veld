@@ -1,0 +1,219 @@
+use std::path::Path;
+use std::time::Duration;
+
+use thiserror::Error;
+use tokio::net::TcpStream;
+use tokio::time::{sleep, timeout};
+
+use crate::config::HealthCheck;
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Error)]
+pub enum HealthError {
+    #[error("health check timed out after {timeout_seconds}s")]
+    Timeout { timeout_seconds: u64 },
+
+    #[error("port check failed: {0}")]
+    PortCheckFailed(String),
+
+    #[error("HTTPS check failed: {0}")]
+    HttpsCheckFailed(String),
+
+    #[error("bash health check failed with exit code {0}")]
+    BashCheckFailed(i32),
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: TCP port check
+// ---------------------------------------------------------------------------
+
+/// Repeatedly try to connect to `port` on localhost until success or timeout.
+pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthError> {
+    let deadline = Duration::from_secs(hc.timeout_seconds);
+    let interval = Duration::from_millis(hc.interval_ms);
+
+    let result = timeout(deadline, async {
+        loop {
+            match TcpStream::connect(("127.0.0.1", port)).await {
+                Ok(_) => return Ok(()),
+                Err(_) => sleep(interval).await,
+            }
+        }
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(HealthError::Timeout {
+            timeout_seconds: hc.timeout_seconds,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: HTTPS URL check
+// ---------------------------------------------------------------------------
+
+/// Repeatedly GET the HTTPS URL until success or timeout.
+pub async fn wait_for_https(url: &str, hc: &HealthCheck) -> Result<(), HealthError> {
+    let deadline = Duration::from_secs(hc.timeout_seconds);
+    let interval = Duration::from_millis(hc.interval_ms);
+
+    let full_url = if let Some(path) = &hc.path {
+        let trimmed = url.trim_end_matches('/');
+        let path = if path.starts_with('/') {
+            path.clone()
+        } else {
+            format!("/{path}")
+        };
+        format!("{trimmed}{path}")
+    } else {
+        url.to_owned()
+    };
+
+    let expected_status = hc.expect_status.unwrap_or(200);
+
+    // Build a client that accepts self-signed certs (mkcert local CA).
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|e| HealthError::HttpsCheckFailed(e.to_string()))?;
+
+    let result = timeout(deadline, async {
+        loop {
+            match client.get(&full_url).send().await {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    if status == expected_status {
+                        return Ok(());
+                    }
+                    tracing::debug!(
+                        url = full_url,
+                        status,
+                        expected_status,
+                        "HTTPS health check: unexpected status"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(url = full_url, error = %e, "HTTPS health check: request failed");
+                }
+            }
+            sleep(interval).await;
+        }
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(HealthError::Timeout {
+            timeout_seconds: hc.timeout_seconds,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bash health check
+// ---------------------------------------------------------------------------
+
+/// Run a bash command as a health check. Exit 0 = healthy.
+pub async fn wait_for_bash_check(
+    command: &str,
+    working_dir: &Path,
+    hc: &HealthCheck,
+) -> Result<(), HealthError> {
+    let deadline = Duration::from_secs(hc.timeout_seconds);
+    let interval = Duration::from_millis(hc.interval_ms);
+
+    let cmd = command.to_owned();
+    let dir = working_dir.to_path_buf();
+
+    let result = timeout(deadline, async {
+        loop {
+            let status = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .current_dir(&dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await;
+
+            match status {
+                Ok(s) if s.success() => return Ok(()),
+                Ok(s) => {
+                    tracing::debug!(
+                        command = cmd,
+                        exit_code = s.code().unwrap_or(-1),
+                        "bash health check: not yet healthy"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(command = cmd, error = %e, "bash health check: command error");
+                }
+            }
+            sleep(interval).await;
+        }
+    })
+    .await;
+
+    match result {
+        Ok(inner) => inner,
+        Err(_) => Err(HealthError::Timeout {
+            timeout_seconds: hc.timeout_seconds,
+        }),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Two-phase health check runner
+// ---------------------------------------------------------------------------
+
+/// Run the complete two-phase health check for a `start_server` node.
+///
+/// Phase 1: TCP port check.
+/// Phase 2: HTTPS URL check (if health check type is "http") or bash check.
+pub async fn run_health_check(
+    port: u16,
+    url: Option<&str>,
+    working_dir: &Path,
+    hc: &HealthCheck,
+) -> Result<(), HealthError> {
+    // Phase 1: always check the port is bound.
+    tracing::info!(port, "health check phase 1: waiting for port");
+    wait_for_port(port, hc).await.map_err(|e| {
+        HealthError::PortCheckFailed(format!(
+            "process did not bind to port {port}: {e}"
+        ))
+    })?;
+    tracing::info!(port, "health check phase 1: port is open");
+
+    // Phase 2: depends on check type.
+    match hc.check_type.as_str() {
+        "http" => {
+            if let Some(url) = url {
+                tracing::info!(url, "health check phase 2: waiting for HTTPS");
+                wait_for_https(url, hc).await?;
+                tracing::info!(url, "health check phase 2: HTTPS check passed");
+            }
+        }
+        "bash" => {
+            if let Some(cmd) = &hc.command {
+                tracing::info!(command = cmd, "health check phase 2: running bash check");
+                wait_for_bash_check(cmd, working_dir, hc).await?;
+                tracing::info!("health check phase 2: bash check passed");
+            }
+        }
+        "port" => {
+            // Phase 1 already covers this; phase 2 is a no-op for type "port".
+        }
+        other => {
+            tracing::warn!(check_type = other, "unknown health check type, skipping phase 2");
+        }
+    }
+
+    Ok(())
+}
