@@ -110,16 +110,49 @@ tar xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 
 # --- Determine install directories ---
 
-INSTALL_DIR="${VELD_INSTALL_DIR:-/usr/local/bin}"
-LIB_DIR="/usr/local/lib/veld"
+# If veld is already installed, update in the same location.
+EXISTING_VELD="$(command -v veld 2>/dev/null || true)"
+if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
+  INSTALL_DIR="$(dirname "$EXISTING_VELD")"
+  echo "Existing veld found at ${EXISTING_VELD}, updating in place."
+else
+  INSTALL_DIR="${VELD_INSTALL_DIR:-/usr/local/bin}"
+fi
+
+# Determine lib directory based on install dir.
+if [[ "$INSTALL_DIR" == /usr/local/* ]] || [[ "$INSTALL_DIR" == /usr/* ]]; then
+  LIB_DIR="/usr/local/lib/veld"
+else
+  LIB_DIR="$HOME/.local/lib/veld"
+fi
+
+# Also check if lib dir already exists elsewhere (from a previous install).
+if [ -d "/usr/local/lib/veld" ]; then
+  LIB_DIR="/usr/local/lib/veld"
+elif [ -d "$HOME/.local/lib/veld" ]; then
+  LIB_DIR="$HOME/.local/lib/veld"
+fi
+
 NEED_SUDO=""
 USED_FALLBACK=""
 
-if [ ! -w "$INSTALL_DIR" ] 2>/dev/null; then
+# Prompt for sudo if we need it (don't silently fall back to a different dir).
+if [ ! -w "$INSTALL_DIR" ] 2>/dev/null || [ ! -w "$LIB_DIR" ] 2>/dev/null; then
   if sudo -n true 2>/dev/null; then
     NEED_SUDO="sudo"
+  elif [ -t 0 ]; then
+    # Interactive terminal — ask for sudo.
+    echo "Installation requires administrator privileges."
+    if sudo true; then
+      NEED_SUDO="sudo"
+    else
+      echo "Warning: sudo failed. Falling back to ~/.local paths."
+      INSTALL_DIR="$HOME/.local/bin"
+      LIB_DIR="$HOME/.local/lib/veld"
+      USED_FALLBACK="1"
+    fi
   else
-    # Fallback to ~/.local/bin and ~/.local/lib/veld
+    # Non-interactive, no passwordless sudo — fall back.
     INSTALL_DIR="$HOME/.local/bin"
     LIB_DIR="$HOME/.local/lib/veld"
     USED_FALLBACK="1"
