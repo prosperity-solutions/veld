@@ -293,12 +293,9 @@ impl Orchestrator {
             tracing::warn!(error = %e, "failed to add DNS host via helper");
         }
         let route = serde_json::json!({
-            "@id": format!("veld-{}-{}-{}", run.name, sel.node, sel.variant),
-            "match": [{"host": [&node_url]}],
-            "handle": [{
-                "handler": "reverse_proxy",
-                "upstreams": [{"dial": format!("localhost:{port}")}]
-            }]
+            "route_id": format!("veld-{}-{}-{}", run.name, sel.node, sel.variant),
+            "hostname": &node_url,
+            "upstream": format!("localhost:{port}"),
         });
         if let Err(e) = self.helper_client.add_route(route).await {
             tracing::warn!(error = %e, "failed to add Caddy route via helper");

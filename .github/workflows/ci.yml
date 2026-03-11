@@ -78,22 +78,6 @@ jobs:
           kill $PID_B $PID_F
           wait $PID_B $PID_F 2>/dev/null || true
 
-      - name: Diagnose setup environment
-        run: |
-          echo "--- Port check ---"
-          for port in 80 443 2019; do
-            if nc -z 127.0.0.1 $port 2>/dev/null; then
-              echo "Port $port: IN USE"
-              sudo lsof -i :$port | head -5 || true
-            else
-              echo "Port $port: free"
-            fi
-          done
-          echo "--- Paths ---"
-          ls -la /usr/local/lib/veld/ 2>/dev/null || echo "/usr/local/lib/veld/ does not exist"
-          echo "--- Try setup directly ---"
-          sudo ./target/debug/veld setup 2>&1 || echo "Setup exited with code $?"
-
       - name: Run full integration tests
         run: |
           chmod +x tests/integration.sh
