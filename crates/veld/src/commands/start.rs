@@ -1,6 +1,7 @@
 use veld_core::config::VeldConfig;
 use veld_core::graph::{self, NodeSelection};
 use veld_core::orchestrator::Orchestrator;
+use veld_core::url::slugify;
 
 use crate::output::{self, is_tty};
 
@@ -59,10 +60,22 @@ pub async fn run(
         }
     };
 
-    let run_name = name.as_deref().unwrap_or("default");
+    let run_name = match name {
+        Some(ref n) => n.clone(),
+        None => {
+            let cwd = std::env::current_dir().unwrap_or_default();
+            let dir_name = cwd
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default");
+            slugify(dir_name)
+        }
+    };
+    let run_name = run_name.as_str();
 
     // Build the orchestrator.
     let mut orchestrator = Orchestrator::new(config_path, config);
+    orchestrator.set_debug(_debug);
 
     println!(
         "{} Starting environment '{}'...",
@@ -156,21 +169,16 @@ fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
                 None
             }
         }
+    } else if is_tty() {
+        interactive_node_variant_picker(config)
     } else {
         let node_names: Vec<String> = config.nodes.keys().cloned().collect();
-        if is_tty() {
-            output::print_error(
-                "No selections provided. Specify nodes as `node:variant` or define presets.",
-                false,
-            );
-        } else {
-            let payload = serde_json::json!({
-                "error": "No selections provided",
-                "nodes": node_names,
-                "presets": preset_names,
-            });
-            println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-        }
+        let payload = serde_json::json!({
+            "error": "No selections provided",
+            "nodes": node_names,
+            "presets": preset_names,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
         None
     }
 }
@@ -195,4 +203,131 @@ fn interactive_preset_selector(presets: &[String]) -> Option<String> {
         return None;
     }
     Some(presets[idx - 1].clone())
+}
+
+/// Interactive node+variant picker for TTY mode when no presets are defined.
+fn interactive_node_variant_picker(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
+    use std::io::{self, BufRead, Write};
+
+    let mut node_names: Vec<&String> = config.nodes.keys().collect();
+    node_names.sort();
+
+    if node_names.is_empty() {
+        output::print_error("No nodes defined in config.", false);
+        return None;
+    }
+
+    // Display available nodes.
+    println!("{}", output::bold("Available nodes:"));
+    println!();
+    for (i, name) in node_names.iter().enumerate() {
+        let node_cfg = &config.nodes[*name];
+        let mut variant_names: Vec<&String> = node_cfg.variants.keys().collect();
+        variant_names.sort();
+        let variants_str = variant_names
+            .iter()
+            .map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        println!(
+            "  {} {} {}",
+            output::dim(&format!("[{}]", i + 1)),
+            name,
+            output::dim(&format!("({})", variants_str)),
+        );
+    }
+    println!();
+    print!(
+        "Select nodes to start (1-{}, comma-separated): ",
+        node_names.len()
+    );
+    io::stdout().flush().ok()?;
+
+    let stdin = io::stdin();
+    let line = stdin.lock().lines().next()?.ok()?;
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        output::print_info("Cancelled.");
+        return None;
+    }
+
+    // Parse selected indices.
+    let indices: Vec<usize> = trimmed
+        .split(',')
+        .filter_map(|s| s.trim().parse::<usize>().ok())
+        .collect();
+
+    if indices.is_empty() {
+        output::print_info("Cancelled.");
+        return None;
+    }
+
+    let mut selections = Vec::new();
+
+    for idx in &indices {
+        if *idx == 0 || *idx > node_names.len() {
+            output::print_error(
+                &format!(
+                    "Invalid selection: {}. Must be 1-{}.",
+                    idx,
+                    node_names.len()
+                ),
+                false,
+            );
+            return None;
+        }
+        let node_name = node_names[*idx - 1];
+        let node_cfg = &config.nodes[node_name];
+        let mut variant_names: Vec<&String> = node_cfg.variants.keys().collect();
+        variant_names.sort();
+
+        let variant = if variant_names.len() == 1 {
+            // Auto-select the only variant.
+            variant_names[0].clone()
+        } else {
+            // Ask user which variant.
+            println!();
+            println!(
+                "{} {}",
+                output::bold("Variants for"),
+                output::bold(node_name),
+            );
+            for (vi, v) in variant_names.iter().enumerate() {
+                println!("  {} {}", output::dim(&format!("[{}]", vi + 1)), v);
+            }
+            print!(
+                "Select variant for {} (1-{}): ",
+                node_name,
+                variant_names.len()
+            );
+            io::stdout().flush().ok()?;
+
+            let vline = io::stdin().lock().lines().next()?.ok()?;
+            let vidx: usize = vline.trim().parse().ok()?;
+            if vidx == 0 || vidx > variant_names.len() {
+                output::print_error(
+                    &format!(
+                        "Invalid variant selection: {}. Must be 1-{}.",
+                        vidx,
+                        variant_names.len()
+                    ),
+                    false,
+                );
+                return None;
+            }
+            variant_names[vidx - 1].clone()
+        };
+
+        selections.push(NodeSelection {
+            node: node_name.clone(),
+            variant,
+        });
+    }
+
+    if selections.is_empty() {
+        output::print_info("Cancelled.");
+        return None;
+    }
+
+    Some(selections)
 }

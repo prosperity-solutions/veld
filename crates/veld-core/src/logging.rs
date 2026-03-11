@@ -49,6 +49,11 @@ pub fn setup_log_file(project_root: &Path, run_name: &str, node: &str, variant: 
     log_dir(project_root, run_name).join(format!("{node}-{variant}-setup.log"))
 }
 
+/// Return the debug log file path for a run.
+pub fn debug_log_file(project_root: &Path, run_name: &str) -> PathBuf {
+    log_dir(project_root, run_name).join("veld-debug.log")
+}
+
 // ---------------------------------------------------------------------------
 // Log writer
 // ---------------------------------------------------------------------------

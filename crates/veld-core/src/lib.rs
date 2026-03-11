@@ -6,6 +6,7 @@ pub mod logging;
 pub mod orchestrator;
 pub mod port;
 pub mod process;
+pub mod sensitive;
 pub mod setup;
 pub mod state;
 pub mod url;

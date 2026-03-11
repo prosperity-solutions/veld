@@ -203,7 +203,27 @@ async fn main() {
         return;
     }
 
-    let exit_code = match cli.command.unwrap() {
+    let command = cli.command.unwrap();
+
+    // Check for version mismatches on commands that talk to the daemon/helper.
+    let needs_version_check = matches!(
+        command,
+        Command::Start { .. }
+            | Command::Stop { .. }
+            | Command::Restart { .. }
+            | Command::Status { .. }
+            | Command::Urls { .. }
+            | Command::Logs { .. }
+    );
+
+    if needs_version_check {
+        if let Err(msg) = commands::version::check_version_mismatch() {
+            output::print_error(&msg, false);
+            std::process::exit(1);
+        }
+    }
+
+    let exit_code = match command {
         Command::Start {
             selections,
             preset,

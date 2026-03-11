@@ -11,8 +11,6 @@
 set -euo pipefail
 
 REPO="prosperity-solutions/veld"
-INSTALL_DIR="${VELD_INSTALL_DIR:-/usr/local/bin}"
-LIB_DIR="/usr/local/lib/veld"
 
 # --- Detect platform ---
 
@@ -60,6 +58,7 @@ echo "Installing veld ${VERSION}..."
 
 TARBALL="veld-${VERSION}-${SUFFIX}.tar.gz"
 URL="https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}"
+CHECKSUMS_URL="https://github.com/${REPO}/releases/download/${TAG}/checksums.txt"
 TMP_DIR="$(mktemp -d)"
 
 cleanup() { rm -rf "$TMP_DIR"; }
@@ -68,16 +67,58 @@ trap cleanup EXIT
 echo "Downloading ${URL}..."
 curl -fSL -o "${TMP_DIR}/${TARBALL}" "$URL"
 
+echo "Downloading checksums..."
+curl -fSL -o "${TMP_DIR}/checksums.txt" "$CHECKSUMS_URL"
+
+# --- Verify SHA-256 checksum ---
+
+echo "Verifying checksum..."
+EXPECTED_HASH="$(grep "${TARBALL}" "${TMP_DIR}/checksums.txt" | awk '{print $1}')"
+
+if [ -z "$EXPECTED_HASH" ]; then
+  echo "Error: checksum for ${TARBALL} not found in checksums.txt"
+  exit 1
+fi
+
+if [ "$OS" = "macos" ]; then
+  ACTUAL_HASH="$(shasum -a 256 "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+else
+  ACTUAL_HASH="$(sha256sum "${TMP_DIR}/${TARBALL}" | awk '{print $1}')"
+fi
+
+if [ "$EXPECTED_HASH" != "$ACTUAL_HASH" ]; then
+  echo "Error: checksum verification failed"
+  echo "  Expected: ${EXPECTED_HASH}"
+  echo "  Actual:   ${ACTUAL_HASH}"
+  exit 1
+fi
+
+echo "Checksum verified."
+
+# --- Extract ---
+
 echo "Extracting..."
 tar xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 
-# --- Install ---
+# --- Determine install directories ---
 
-# Check if we need sudo
+INSTALL_DIR="${VELD_INSTALL_DIR:-/usr/local/bin}"
+LIB_DIR="/usr/local/lib/veld"
 NEED_SUDO=""
+USED_FALLBACK=""
+
 if [ ! -w "$INSTALL_DIR" ] 2>/dev/null; then
-  NEED_SUDO="sudo"
+  if sudo -n true 2>/dev/null; then
+    NEED_SUDO="sudo"
+  else
+    # Fallback to ~/.local/bin and ~/.local/lib/veld
+    INSTALL_DIR="$HOME/.local/bin"
+    LIB_DIR="$HOME/.local/lib/veld"
+    USED_FALLBACK="1"
+  fi
 fi
+
+# --- Install ---
 
 echo "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
@@ -107,11 +148,41 @@ if [ "$OS" = "macos" ]; then
   done
 fi
 
+# --- Auto-run veld setup in interactive mode ---
+
+if [ -t 1 ]; then
+  echo ""
+  echo "Running veld setup..."
+  "${INSTALL_DIR}/veld" setup
+else
+  echo ""
+  echo "Non-interactive mode detected — skipping 'veld setup'."
+  echo "Run it manually after install:"
+  echo "  veld setup"
+fi
+
+# --- Print success and next steps ---
+
 echo ""
 echo "veld ${VERSION} installed successfully!"
 echo ""
 echo "  veld binary:   ${INSTALL_DIR}/veld"
 echo "  veld-helper:   ${LIB_DIR}/veld-helper"
 echo "  veld-daemon:   ${LIB_DIR}/veld-daemon"
+
+if [ -n "$USED_FALLBACK" ]; then
+  echo ""
+  echo "Note: Installed to ${INSTALL_DIR} because /usr/local/bin is not writable."
+  echo "Make sure it is on your PATH:"
+  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+fi
+
 echo ""
-echo "Run 'veld setup' to complete one-time system configuration."
+if [ -t 1 ]; then
+  echo "Next steps:"
+  echo "  Run 'veld init' in a project to get started."
+else
+  echo "Next steps:"
+  echo "  1. Run 'veld setup' to complete one-time system configuration."
+  echo "  2. Run 'veld init' in a project to get started."
+fi

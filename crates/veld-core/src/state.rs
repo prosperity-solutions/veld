@@ -91,6 +91,9 @@ pub struct NodeState {
     pub url: Option<String>,
     pub outputs: HashMap<String, String>,
     pub health_phases: Vec<HealthCheckPhase>,
+    /// Output keys whose values are sensitive (encrypted at rest, masked in display).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sensitive_keys: Vec<String>,
 }
 
 impl NodeState {
@@ -104,7 +107,46 @@ impl NodeState {
             url: None,
             outputs: HashMap::new(),
             health_phases: Vec::new(),
+            sensitive_keys: Vec::new(),
         }
+    }
+
+    /// Encrypt sensitive output values in-place for storage at rest.
+    pub fn encrypt_sensitive_outputs(&mut self) {
+        for key in &self.sensitive_keys {
+            if let Some(value) = self.outputs.get(key) {
+                if !crate::sensitive::is_encrypted(value) {
+                    let encrypted = crate::sensitive::encrypt_value(value);
+                    self.outputs.insert(key.clone(), encrypted);
+                }
+            }
+        }
+    }
+
+    /// Decrypt sensitive output values in-place after loading from storage.
+    pub fn decrypt_sensitive_outputs(&mut self) {
+        for key in &self.sensitive_keys {
+            if let Some(value) = self.outputs.get(key) {
+                if crate::sensitive::is_encrypted(value) {
+                    let decrypted = crate::sensitive::decrypt_value(value);
+                    self.outputs.insert(key.clone(), decrypted);
+                }
+            }
+        }
+    }
+
+    /// Return a copy of outputs with sensitive values masked for display.
+    pub fn display_outputs(&self) -> HashMap<String, String> {
+        self.outputs
+            .iter()
+            .map(|(k, v)| {
+                if self.sensitive_keys.contains(k) {
+                    (k.clone(), crate::sensitive::mask_value(v))
+                } else {
+                    (k.clone(), v.clone())
+                }
+            })
+            .collect()
     }
 }
 
@@ -153,6 +195,7 @@ pub struct ProjectState {
 
 impl ProjectState {
     /// Load from the `.veld/state.json` file under `project_root`.
+    /// Sensitive output values are decrypted after loading.
     pub fn load(project_root: &Path) -> Result<Self, StateError> {
         let path = state_file_path(project_root);
         if !path.exists() {
@@ -162,10 +205,21 @@ impl ProjectState {
             path: path.clone(),
             source: e,
         })?;
-        serde_json::from_str(&data).map_err(|e| StateError::ParseError { path, source: e })
+        let mut state: Self =
+            serde_json::from_str(&data).map_err(|e| StateError::ParseError { path, source: e })?;
+
+        // Decrypt sensitive outputs after loading.
+        for run in state.runs.values_mut() {
+            for node in run.nodes.values_mut() {
+                node.decrypt_sensitive_outputs();
+            }
+        }
+
+        Ok(state)
     }
 
     /// Persist to `.veld/state.json`.
+    /// Sensitive output values are encrypted before writing.
     pub fn save(&self, project_root: &Path) -> Result<(), StateError> {
         let path = state_file_path(project_root);
         if let Some(parent) = path.parent() {
@@ -174,7 +228,17 @@ impl ProjectState {
                 source: e,
             })?;
         }
-        let data = serde_json::to_string_pretty(self).expect("state serialization cannot fail");
+
+        // Clone and encrypt sensitive values before serializing.
+        let mut state_for_disk = self.clone();
+        for run in state_for_disk.runs.values_mut() {
+            for node in run.nodes.values_mut() {
+                node.encrypt_sensitive_outputs();
+            }
+        }
+
+        let data =
+            serde_json::to_string_pretty(&state_for_disk).expect("state serialization cannot fail");
         std::fs::write(&path, data).map_err(|e| StateError::WriteError { path, source: e })
     }
 
