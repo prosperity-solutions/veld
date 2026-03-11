@@ -165,10 +165,16 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
 
     std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
 
-    let (os, arch) = platform_pair()?;
-    let version = "2.9.1";
+    let (_, arch) = platform_pair()?;
+    // Caddy uses "mac" for macOS (not "darwin")
+    let caddy_os = match std::env::consts::OS {
+        "macos" => "mac",
+        "linux" => "linux",
+        other => anyhow::bail!("unsupported OS: {other}"),
+    };
+    let version = "2.11.2";
     let url = format!(
-        "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{os}_{arch}.tar.gz"
+        "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{caddy_os}_{arch}.tar.gz"
     );
 
     // Download to temp file
