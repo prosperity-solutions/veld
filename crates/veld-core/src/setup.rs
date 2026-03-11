@@ -297,9 +297,9 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
             let _ = Command::new("update-ca-certificates").status().await;
         }
         other => {
-            return Ok(StepResult::success(
-                format!("Caddy CA generated (automatic trust not supported on {other} — add manually)"),
-            ));
+            return Ok(StepResult::success(format!(
+                "Caddy CA generated (automatic trust not supported on {other} — add manually)"
+            )));
         }
     }
 
