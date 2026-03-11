@@ -265,22 +265,43 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
     match std::env::consts::OS {
         "macos" => {
             // Add to the user login keychain with SSL trust policy.
+            // Use a timeout and pipe stdin from /dev/null to prevent interactive
+            // password prompts from hanging in CI or headless environments.
             let keychain = dirs::home_dir()
                 .context("could not determine home directory")?
                 .join("Library/Keychains/login.keychain-db");
 
-            let status = Command::new("security")
-                .args(["add-trusted-cert", "-p", "ssl", "-k"])
-                .arg(&keychain)
-                .arg(&root_cert)
-                .status()
-                .await
-                .context("failed to run security add-trusted-cert")?;
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                Command::new("security")
+                    .args(["add-trusted-cert", "-p", "ssl", "-k"])
+                    .arg(&keychain)
+                    .arg(&root_cert)
+                    .stdin(std::process::Stdio::null())
+                    .status(),
+            )
+            .await;
 
-            if !status.success() {
-                return Ok(StepResult::success(
-                    "Caddy CA generated (could not add to keychain — run with sudo or add manually)",
-                ));
+            match result {
+                Ok(Ok(status)) if status.success() => {}
+                Ok(Ok(_)) => {
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (could not add to keychain — run with sudo or add manually)",
+                    ));
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(error = %e, "failed to run security add-trusted-cert");
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (could not add to keychain — add manually)",
+                    ));
+                }
+                Err(_) => {
+                    // Timeout — likely an interactive password prompt in CI.
+                    tracing::warn!("security add-trusted-cert timed out (interactive prompt?)");
+                    return Ok(StepResult::success(
+                        "Caddy CA generated (trust command timed out — add manually if needed)",
+                    ));
+                }
             }
         }
         "linux" => {
