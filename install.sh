@@ -173,6 +173,34 @@ for bin in veld-helper veld-daemon; do
   fi
 done
 
+# --- Restart running services (picks up new binaries) ---
+
+if [ "$OS" = "macos" ]; then
+  HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
+  if [ -f "$HELPER_PLIST" ]; then
+    echo "Restarting veld-helper service..."
+    $NEED_SUDO launchctl unload -w "$HELPER_PLIST" 2>/dev/null || true
+    $NEED_SUDO launchctl load -w "$HELPER_PLIST" 2>/dev/null || true
+  fi
+
+  DAEMON_PLIST="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
+  if [ -f "$DAEMON_PLIST" ]; then
+    echo "Restarting veld-daemon service..."
+    launchctl unload -w "$DAEMON_PLIST" 2>/dev/null || true
+    launchctl load -w "$DAEMON_PLIST" 2>/dev/null || true
+  fi
+else
+  # Linux: restart systemd services if they exist.
+  if systemctl is-active --quiet veld-helper 2>/dev/null; then
+    echo "Restarting veld-helper service..."
+    $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+  fi
+  if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
+    echo "Restarting veld-daemon service..."
+    systemctl --user restart veld-daemon 2>/dev/null || true
+  fi
+fi
+
 # --- macOS: remove quarantine attribute ---
 
 if [ "$OS" = "macos" ]; then

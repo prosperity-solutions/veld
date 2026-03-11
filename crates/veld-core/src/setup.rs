@@ -369,6 +369,16 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
 "#,
                 veld_daemon_bin.display()
             );
+            // Unload first if already loaded (required for upgrades).
+            if plist_path.exists() {
+                let _ = Command::new("launchctl")
+                    .args(["unload", "-w"])
+                    .arg(&plist_path)
+                    .stdin(std::process::Stdio::null())
+                    .status()
+                    .await;
+            }
+
             std::fs::write(&plist_path, plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
@@ -402,6 +412,8 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             std::fs::write(&unit_path, unit).context("failed to write daemon systemd unit")?;
 
             run_cmd("systemctl", &["--user", "daemon-reload"]).await?;
+            // restart to pick up new binary on upgrades.
+            let _ = run_cmd("systemctl", &["--user", "restart", "veld-daemon"]).await;
             run_cmd("systemctl", &["--user", "enable", "--now", "veld-daemon"]).await?;
         }
         other => anyhow::bail!("unsupported OS: {other}"),
@@ -502,6 +514,18 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
 "#,
         bin.display()
     );
+
+    // Unload first if already loaded (required for upgrades — `load` on an
+    // already-loaded plist is a no-op, so the old binary keeps running).
+    if plist_path.exists() {
+        let _ = Command::new("launchctl")
+            .args(["unload", "-w"])
+            .arg(plist_path)
+            .stdin(std::process::Stdio::null())
+            .status()
+            .await;
+    }
+
     std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
     let result = tokio::time::timeout(
@@ -534,6 +558,8 @@ async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
     std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
 
     run_cmd("systemctl", &["daemon-reload"]).await?;
+    // restart (not just enable) to pick up new binary on upgrades.
+    let _ = run_cmd("systemctl", &["restart", "veld-helper"]).await;
     run_cmd("systemctl", &["enable", "--now", "veld-helper"]).await?;
     Ok(())
 }
