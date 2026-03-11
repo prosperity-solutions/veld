@@ -176,18 +176,20 @@ done
 # --- Restart running services (picks up new binaries) ---
 
 if [ "$OS" = "macos" ]; then
+  # Use the modern launchctl bootout/bootstrap API (load/unload is deprecated
+  # and unreliable for system-domain LaunchDaemons).
   HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
   if [ -f "$HELPER_PLIST" ]; then
     echo "Restarting veld-helper service..."
-    $NEED_SUDO launchctl unload -w "$HELPER_PLIST" 2>/dev/null || true
-    $NEED_SUDO launchctl load -w "$HELPER_PLIST" 2>/dev/null || true
+    $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
+    $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
   fi
 
   DAEMON_PLIST="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
   if [ -f "$DAEMON_PLIST" ]; then
     echo "Restarting veld-daemon service..."
-    launchctl unload -w "$DAEMON_PLIST" 2>/dev/null || true
-    launchctl load -w "$DAEMON_PLIST" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" 2>/dev/null || true
   fi
 else
   # Linux: restart systemd services if they exist.
