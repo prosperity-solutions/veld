@@ -246,30 +246,31 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
         .join("root.crt");
 
     if !root_cert.exists() {
-        // Caddy hasn't generated its CA yet. This can happen if Caddy was just
-        // started — give it a moment and retry.
-        for _ in 0..10 {
+        // Caddy generates its CA at startup when the PKI app is configured.
+        // Give it a moment to initialize.
+        for _ in 0..20 {
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             if root_cert.exists() {
                 break;
             }
         }
         if !root_cert.exists() {
-            return Ok(StepResult::success(
-                "Caddy CA not yet generated (will be trusted on next setup run)",
-            ));
+            anyhow::bail!(
+                "Caddy CA not generated at {}. Is Caddy running?",
+                root_cert.display()
+            );
         }
     }
 
     match std::env::consts::OS {
         "macos" => {
-            // Add to the user login keychain so no sudo is required.
+            // Add to the user login keychain with SSL trust policy.
             let keychain = dirs::home_dir()
                 .context("could not determine home directory")?
                 .join("Library/Keychains/login.keychain-db");
 
             let status = Command::new("security")
-                .args(["add-trusted-cert", "-k"])
+                .args(["add-trusted-cert", "-p", "ssl", "-k"])
                 .arg(&keychain)
                 .arg(&root_cert)
                 .status()
@@ -295,7 +296,11 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
             }
             let _ = Command::new("update-ca-certificates").status().await;
         }
-        _ => {}
+        other => {
+            return Ok(StepResult::success(
+                format!("Caddy CA generated (automatic trust not supported on {other} — add manually)"),
+            ));
+        }
     }
 
     Ok(StepResult::success(
@@ -551,6 +556,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         _ => {}
     }
 
+    // Remove Caddy CA from system trust store.
+    remove_caddy_ca_trust().await;
+
     // Remove veld library directory (check both possible locations).
     for lib_dir in &[
         PathBuf::from("/usr/local/lib/veld"),
@@ -559,7 +567,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
             .unwrap_or_default(),
     ] {
         if lib_dir.exists() {
-            let _ = std::fs::remove_dir_all(lib_dir);
+            if let Err(e) = std::fs::remove_dir_all(lib_dir) {
+                tracing::warn!(path = %lib_dir.display(), error = %e, "failed to remove lib dir");
+            }
         }
     }
 
@@ -634,6 +644,46 @@ fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     }
     // Fall back to PATH lookup.
     Ok(PathBuf::from(name))
+}
+
+/// Remove the Caddy CA from the system trust store (best-effort).
+async fn remove_caddy_ca_trust() {
+    // Try both possible caddy-data locations.
+    let candidates = [
+        PathBuf::from("/usr/local/lib/veld/caddy-data"),
+        dirs::home_dir()
+            .map(|h| h.join(".local/lib/veld/caddy-data"))
+            .unwrap_or_default(),
+    ];
+
+    for data_dir in &candidates {
+        let root_cert = data_dir
+            .join("pki")
+            .join("authorities")
+            .join("local")
+            .join("root.crt");
+        if !root_cert.exists() {
+            continue;
+        }
+
+        match std::env::consts::OS {
+            "macos" => {
+                let _ = Command::new("security")
+                    .args(["remove-trusted-cert"])
+                    .arg(&root_cert)
+                    .status()
+                    .await;
+            }
+            "linux" => {
+                let dest = Path::new("/usr/local/share/ca-certificates/veld-caddy-ca.crt");
+                if dest.exists() {
+                    let _ = std::fs::remove_file(dest);
+                    let _ = Command::new("update-ca-certificates").status().await;
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Run a command and bail on failure.

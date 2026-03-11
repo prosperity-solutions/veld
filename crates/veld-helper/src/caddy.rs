@@ -230,6 +230,13 @@ fn build_base_config() -> serde_json::Value {
                     }
                 }
             },
+            "pki": {
+                "certificate_authorities": {
+                    "local": {
+                        "name": "Veld Local CA"
+                    }
+                }
+            },
             "tls": {
                 "automation": {
                     "policies": [{
