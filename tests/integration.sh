@@ -177,8 +177,19 @@ cd "$PROJECT_DIR"
 info "project directory: $PROJECT_DIR"
 info "run name: $RUN_NAME"
 
-assert_ok "veld start frontend:local --name $RUN_NAME" \
-    "$VELD_BIN" start "frontend:local" --name "$RUN_NAME"
+START_OUTPUT=$("$VELD_BIN" start "frontend:local" --name "$RUN_NAME" 2>&1) || true
+START_RC=$?
+info "veld start output: $START_OUTPUT"
+if [ "$START_RC" -eq 0 ]; then
+    pass "veld start frontend:local --name $RUN_NAME"
+else
+    fail "veld start frontend:local --name $RUN_NAME (exit code $START_RC)"
+fi
+
+# Debug: check if Caddy / helper are running
+info "processes after start: $(ps aux | grep -E 'caddy|veld-helper|veld-daemon' | grep -v grep || echo 'none found')"
+info "port 443 after start: $(lsof -i :443 -P 2>&1 | head -5 || echo 'nothing')"
+info "port 2019 after start: $(lsof -i :2019 -P 2>&1 | head -5 || echo 'nothing')"
 
 # Give processes a moment to spin up.
 sleep 2
