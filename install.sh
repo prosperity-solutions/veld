@@ -136,14 +136,15 @@ fi
 NEED_SUDO=""
 USED_FALLBACK=""
 
-# Prompt for sudo if we need it (don't silently fall back to a different dir).
+# Prompt for sudo if we need it. Note: `sudo` reads passwords from /dev/tty,
+# not stdin, so it works even when piped (curl | bash).
 if [ ! -w "$INSTALL_DIR" ] 2>/dev/null || [ ! -w "$LIB_DIR" ] 2>/dev/null; then
   if sudo -n true 2>/dev/null; then
     NEED_SUDO="sudo"
-  elif [ -t 0 ]; then
-    # Interactive terminal — ask for sudo.
-    echo "Installation requires administrator privileges."
-    if sudo true; then
+  else
+    echo "Installation to ${INSTALL_DIR} requires administrator privileges."
+    # sudo reads the password from /dev/tty, so this works in curl | bash.
+    if sudo true </dev/tty; then
       NEED_SUDO="sudo"
     else
       echo "Warning: sudo failed. Falling back to ~/.local paths."
@@ -151,11 +152,6 @@ if [ ! -w "$INSTALL_DIR" ] 2>/dev/null || [ ! -w "$LIB_DIR" ] 2>/dev/null; then
       LIB_DIR="$HOME/.local/lib/veld"
       USED_FALLBACK="1"
     fi
-  else
-    # Non-interactive, no passwordless sudo — fall back.
-    INSTALL_DIR="$HOME/.local/bin"
-    LIB_DIR="$HOME/.local/lib/veld"
-    USED_FALLBACK="1"
   fi
 fi
 
