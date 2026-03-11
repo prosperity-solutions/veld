@@ -112,6 +112,11 @@ impl Orchestrator {
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
 
+        // Ensure Caddy is running before we add routes.
+        if let Err(e) = self.helper_client.caddy_start().await {
+            tracing::warn!(error = %e, "failed to start Caddy via helper (routes may fail)");
+        }
+
         let mut run = RunState::new(run_name, &self.config.name);
 
         // Gather context info for URL templates.

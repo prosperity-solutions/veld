@@ -371,15 +371,73 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     ))
 }
 
-/// Install (or verify) the Veld helper.
+/// Install (or verify) the Veld helper, then verify it is reachable and
+/// start Caddy through it.
 pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
     let veld_helper_bin = which_self("veld-helper")?;
+    let socket = crate::helper::default_socket_path();
 
-    match std::env::consts::OS {
-        "macos" => {
-            let plist_path = Path::new("/Library/LaunchDaemons/dev.veld.helper.plist");
-            let plist = format!(
-                r#"<?xml version="1.0" encoding="UTF-8"?>
+    // Try to register as a system service. If launchctl/systemctl fails
+    // (e.g. in CI), fall back to starting the helper directly.
+    let service_ok = match std::env::consts::OS {
+        "macos" => install_helper_macos(&veld_helper_bin).await.is_ok(),
+        "linux" => install_helper_linux(&veld_helper_bin).await.is_ok(),
+        other => anyhow::bail!("unsupported OS: {other}"),
+    };
+
+    // Give the service a moment to start.
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Check if the helper is reachable.
+    let client = HelperClient::new(&socket);
+    let helper_up = client.status().await.is_ok();
+
+    if !helper_up {
+        // Service registration may have failed or the daemon hasn't started
+        // yet. Start the helper directly as a background process.
+        tracing::info!("helper not reachable via service manager, starting directly");
+        let _child = tokio::process::Command::new(&veld_helper_bin)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("failed to spawn veld-helper directly")?;
+
+        // Wait for the socket to appear.
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if client.status().await.is_ok() {
+                break;
+            }
+        }
+
+        if client.status().await.is_err() {
+            anyhow::bail!("veld-helper failed to start — socket not reachable");
+        }
+    }
+
+    // Start Caddy via the helper.
+    match client.caddy_start().await {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start Caddy via helper (may already be running)");
+        }
+    }
+
+    let via = if service_ok {
+        "service registered and running"
+    } else {
+        "started directly (service registration skipped)"
+    };
+    Ok(StepResult::success(format!(
+        "veld-helper {via}, Caddy started"
+    )))
+}
+
+async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
+    let plist_path = Path::new("/Library/LaunchDaemons/dev.veld.helper.plist");
+    let plist = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -397,38 +455,33 @@ pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
 </dict>
 </plist>
 "#,
-                veld_helper_bin.display()
-            );
-            std::fs::write(plist_path, plist)
-                .context("failed to write helper LaunchDaemon plist")?;
+        bin.display()
+    );
+    std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
-            let status = Command::new("launchctl")
-                .args(["load", "-w"])
-                .arg(plist_path)
-                .status()
-                .await
-                .context("failed to load helper LaunchDaemon")?;
-            if !status.success() {
-                anyhow::bail!("launchctl load failed for veld-helper");
-            }
-        }
-        "linux" => {
-            let unit_path = Path::new("/etc/systemd/system/veld-helper.service");
-            let unit = format!(
-                "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
-                veld_helper_bin.display()
-            );
-            std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
-
-            run_cmd("systemctl", &["daemon-reload"]).await?;
-            run_cmd("systemctl", &["enable", "--now", "veld-helper"]).await?;
-        }
-        other => anyhow::bail!("unsupported OS: {other}"),
+    let status = Command::new("launchctl")
+        .args(["load", "-w"])
+        .arg(plist_path)
+        .status()
+        .await
+        .context("failed to load helper LaunchDaemon")?;
+    if !status.success() {
+        anyhow::bail!("launchctl load failed for veld-helper");
     }
+    Ok(())
+}
 
-    Ok(StepResult::success(
-        "veld-helper service installed and started",
-    ))
+async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
+    let unit_path = Path::new("/etc/systemd/system/veld-helper.service");
+    let unit = format!(
+        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
+        bin.display()
+    );
+    std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
+
+    run_cmd("systemctl", &["daemon-reload"]).await?;
+    run_cmd("systemctl", &["enable", "--now", "veld-helper"]).await?;
+    Ok(())
 }
 
 /// Check for available updates. Returns `Some(version)` if an update exists.

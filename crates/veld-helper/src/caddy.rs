@@ -59,10 +59,6 @@ impl CaddyManager {
 
         let child = tokio::process::Command::new(caddy_bin)
             .arg("run")
-            .arg("--config")
-            .arg("")
-            .arg("--adapter")
-            .arg("")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -70,8 +66,27 @@ impl CaddyManager {
 
         let pid = child.id().context("failed to get caddy PID")?;
         state.child_pid = Some(pid);
+        drop(state); // release lock before HTTP call
 
-        info!(pid, "caddy started");
+        // Wait for the admin API to become available, then load the base config
+        // (TLS internal issuer + HTTP/HTTPS listeners).
+        info!(pid, "caddy process started, loading base config...");
+        for _ in 0..30 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            if self
+                .client
+                .get(format!("{CADDY_ADMIN_API}/config/"))
+                .send()
+                .await
+                .is_ok()
+            {
+                break;
+            }
+        }
+        self.reload()
+            .await
+            .context("failed to load caddy base config")?;
+        info!(pid, "caddy started with base config");
         Ok(())
     }
 
