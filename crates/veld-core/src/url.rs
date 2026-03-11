@@ -1,0 +1,81 @@
+use std::collections::HashMap;
+
+use crate::variables::{self, VariableError};
+
+// ---------------------------------------------------------------------------
+// Slugification
+// ---------------------------------------------------------------------------
+
+/// Slugify a string for use in URLs:
+/// lowercase, non-alphanumeric -> `-`, collapse consecutive `-`,
+/// strip leading/trailing `-`, max 48 characters.
+pub fn slugify(input: &str) -> String {
+    let mut slug = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+        } else {
+            slug.push('-');
+        }
+    }
+
+    // Collapse consecutive dashes.
+    let mut collapsed = String::with_capacity(slug.len());
+    let mut prev_dash = false;
+    for ch in slug.chars() {
+        if ch == '-' {
+            if !prev_dash {
+                collapsed.push('-');
+            }
+            prev_dash = true;
+        } else {
+            collapsed.push(ch);
+            prev_dash = false;
+        }
+    }
+
+    // Strip leading/trailing dashes.
+    let trimmed = collapsed.trim_matches('-');
+
+    // Max 48 characters.
+    if trimmed.len() > 48 {
+        trimmed[..48].trim_end_matches('-').to_owned()
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL template evaluation
+// ---------------------------------------------------------------------------
+
+/// Build the complete URL for a node given the URL template and context values.
+///
+/// Template syntax uses `{var}` (not `${var}`) and supports `{a ?? b}` fallback.
+pub fn evaluate_url_template(
+    template: &str,
+    values: &HashMap<String, String>,
+) -> Result<String, VariableError> {
+    variables::interpolate_url_template(template, values)
+}
+
+/// Build the template variables map for a given node in a run.
+pub fn build_url_template_values(
+    service: &str,
+    run_name: &str,
+    project: &str,
+    branch: &str,
+    worktree: &str,
+    username: &str,
+    hostname: &str,
+) -> HashMap<String, String> {
+    let mut values = HashMap::new();
+    values.insert("service".to_owned(), slugify(service));
+    values.insert("run".to_owned(), slugify(run_name));
+    values.insert("project".to_owned(), slugify(project));
+    values.insert("branch".to_owned(), slugify(branch));
+    values.insert("worktree".to_owned(), slugify(worktree));
+    values.insert("username".to_owned(), slugify(username));
+    values.insert("hostname".to_owned(), slugify(hostname));
+    values
+}

@@ -2,7 +2,7 @@
 /target/
 **/target/
 **/*.rs.bk
-Cargo.lock
+# Cargo.lock is tracked for reproducible binary builds
 
 # Veld runtime directories
 .veld/

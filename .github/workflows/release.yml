@@ -1,0 +1,126 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    outputs:
+      new_release_published: ${{ steps.semantic.outputs.new_release_published }}
+      new_release_version: ${{ steps.semantic.outputs.new_release_version }}
+      new_release_git_tag: ${{ steps.semantic.outputs.new_release_git_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # On push to main: run semantic-release
+      - uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        if: github.event_name == 'push'
+        with:
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/exec
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # On PRs: dry-run to validate config and preview release
+      - uses: cycjimmy/semantic-release-action@v4
+        id: semantic-dry
+        if: github.event_name == 'pull_request'
+        with:
+          dry_run: true
+          extra_plugins: |
+            @semantic-release/changelog
+            @semantic-release/exec
+            @semantic-release/git
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Dry-run summary
+        if: github.event_name == 'pull_request'
+        run: |
+          if [ "${{ steps.semantic-dry.outputs.new_release_published }}" = "true" ]; then
+            echo "### 🚀 Release Preview" >> $GITHUB_STEP_SUMMARY
+            echo "Merging this PR will release **v${{ steps.semantic-dry.outputs.new_release_version }}**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ℹ️ No Release" >> $GITHUB_STEP_SUMMARY
+            echo "No releasable commits found — merging this PR will not trigger a release." >> $GITHUB_STEP_SUMMARY
+          fi
+
+  build-release:
+    name: Build (${{ matrix.suffix }})
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: macos-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: macos-amd64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-arm64
+            cross: true
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.new_release_git_tag }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binaries
+        run: |
+          mkdir -p dist
+          for bin in veld veld-helper veld-daemon; do
+            cp target/${{ matrix.target }}/release/$bin dist/
+          done
+          tar -czf veld-${{ needs.release.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.release.outputs.new_release_git_tag }}
+          files: veld-*.tar.gz

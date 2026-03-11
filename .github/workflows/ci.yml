@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  schema:
+    name: Validate JSON Schema
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate schema and configs
+        run: |
+          chmod +x tests/validate-schema.sh
+          ./tests/validate-schema.sh --install
+
+  check:
+    name: Check & Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace -- -D warnings
+      - name: cargo test
+        run: cargo test --workspace
+
+  integration:
+    name: Integration Tests (macOS)
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build all binaries
+        run: cargo build
+
+      - name: Verify CLI basics
+        run: |
+          ./target/debug/veld --version
+          ./target/debug/veld --help
+
+      - name: Test config parsing (testproject)
+        working-directory: testproject
+        run: |
+          ../target/debug/veld nodes
+          ../target/debug/veld nodes --json
+          ../target/debug/veld graph frontend:local
+
+      - name: Verify setup guard (PRD assertion 13)
+        working-directory: testproject
+        run: |
+          set -e
+          # status should fail with exit 1 before setup
+          if ../target/debug/veld status --json 2>&1; then
+            echo "ERROR: status should have failed before setup"
+            exit 1
+          fi
+          # verify the JSON error contains setup_required
+          output=$(../target/debug/veld status --json 2>&1 || true)
+          echo "$output" | grep -q '"setup_required"'
+
+      - name: Test Python servers directly
+        run: |
+          set -e
+          python3 testproject/backend/server.py 19555 &
+          PID_B=$!
+          python3 testproject/frontend/server.py 19556 &
+          PID_F=$!
+          sleep 2
+          curl -sf http://localhost:19555/health
+          curl -sf http://localhost:19555/
+          curl -sf http://localhost:19556/
+          kill $PID_B $PID_F
+          wait $PID_B $PID_F 2>/dev/null || true
+
+      - name: Run full integration tests
+        run: |
+          chmod +x tests/integration.sh
+          sudo ./tests/integration.sh \
+            --veld-bin "$(pwd)/target/debug/veld" \
+            --project-dir "$(pwd)/testproject"

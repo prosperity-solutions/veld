@@ -1,0 +1,29 @@
+{
+  "$schema": "../../schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "testproject",
+  "url_template": "{service}.{run}.testproject.localhost",
+  "nodes": {
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "python3 backend/server.py ${veld.port}",
+          "health_check": { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
+        }
+      }
+    },
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "python3 frontend/server.py ${veld.port}",
+          "health_check": { "type": "http", "path": "/", "expect_status": 200, "timeout_seconds": 30 },
+          "depends_on": { "backend": "local" }
+        }
+      }
+    }
+  }
+}
