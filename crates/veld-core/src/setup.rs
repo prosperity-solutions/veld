@@ -324,6 +324,13 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
         );
     }
 
+    // Skip copy if destination files already exist and are readable.
+    if ca_cert_dst.exists() && ca_key_dst.exists() {
+        return Ok(StepResult::success(
+            "mkcert CA already configured for Caddy",
+        ));
+    }
+
     // Copy CA files (symlinks may not work across volumes).
     std::fs::copy(&ca_cert_src, &ca_cert_dst).context("failed to copy CA cert")?;
     std::fs::copy(&ca_key_src, &ca_key_dst).context("failed to copy CA key")?;
@@ -645,19 +652,25 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Locate a sibling binary (e.g. veld-helper) next to the current executable.
+/// Locate a sibling binary (e.g. veld-helper) next to the current executable,
+/// or in the veld lib directory.
 fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     let current = std::env::current_exe().context("cannot determine current executable path")?;
     let dir = current
         .parent()
         .context("executable has no parent directory")?;
+    // Check next to the current binary (e.g. target/debug/).
     let candidate = dir.join(name);
     if candidate.exists() {
-        Ok(candidate)
-    } else {
-        // Fall back to PATH lookup.
-        Ok(PathBuf::from(name))
+        return Ok(candidate);
     }
+    // Check in the veld lib directory (install.sh puts helper/daemon there).
+    let lib_candidate = crate::paths::lib_dir().join(name);
+    if lib_candidate.exists() {
+        return Ok(lib_candidate);
+    }
+    // Fall back to PATH lookup.
+    Ok(PathBuf::from(name))
 }
 
 /// Run a command and bail on failure.
