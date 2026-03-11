@@ -43,7 +43,7 @@ if [ -n "${VELD_VERSION:-}" ]; then
   TAG="v${VERSION}"
 else
   echo "Fetching latest release..."
-  TAG="$(curl -fsSL -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name":"[^"]*"' | cut -d'"' -f4)"
+  TAG="$(curl -fsSL -H "Accept: application/json" "https://api.github.com/repos/${REPO}/releases/latest" | grep -o '"tag_name": *"[^"]*"' | cut -d'"' -f4)"
   VERSION="${TAG#v}"
 fi
 
