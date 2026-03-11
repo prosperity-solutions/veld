@@ -1,0 +1,25 @@
+# Rust / Cargo
+/target/
+**/target/
+**/*.rs.bk
+Cargo.lock
+
+# Veld runtime directories
+.veld/
+**/.veld/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Environment / secrets
+.env
+.env.local
+*.pem
+*.key
