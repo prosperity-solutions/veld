@@ -35,11 +35,7 @@ impl CaddyManager {
 
         if let Some(pid) = state.child_pid {
             if is_process_alive(pid) {
-                info!(pid, "caddy is already running, ensuring base config");
-                drop(state);
-                self.reload()
-                    .await
-                    .context("failed to reload caddy config")?;
+                info!(pid, "caddy is already running");
                 return Ok(());
             }
             // Stale PID.
@@ -47,13 +43,11 @@ impl CaddyManager {
         }
 
         // Check if Caddy is already running externally (e.g. from a previous
-        // helper instance). If the admin API responds, just reload the config.
+        // helper instance). If the admin API responds, nothing to do — routes
+        // are added individually via add_route(), not via base config reload.
         drop(state);
         if self.is_running().await {
-            info!("caddy admin API already reachable, loading base config");
-            self.reload()
-                .await
-                .context("failed to reload caddy config")?;
+            info!("caddy admin API already reachable, skipping startup");
             return Ok(());
         }
 
