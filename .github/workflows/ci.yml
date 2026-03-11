@@ -28,7 +28,7 @@ jobs:
         run: cargo test --workspace
 
   integration:
-    name: Integration Tests
+    name: Integration Tests (macOS)
     runs-on: macos-latest
     needs: check
     steps:
@@ -39,41 +39,48 @@ jobs:
       - name: Build all binaries
         run: cargo build
 
-      - name: Verify CLI works
-        run: ./target/debug/veld --version
+      - name: Verify CLI basics
+        run: |
+          ./target/debug/veld --version
+          ./target/debug/veld --help
 
-      - name: Verify test project config
+      - name: Test config parsing (testproject)
         working-directory: testproject
         run: |
           ../target/debug/veld nodes
           ../target/debug/veld nodes --json
           ../target/debug/veld graph frontend:local
 
-      - name: Verify setup guard
+      - name: Verify setup guard (PRD assertion 13)
         working-directory: testproject
         run: |
+          set -e
+          # status should fail with exit 1 before setup
+          if ../target/debug/veld status --json 2>&1; then
+            echo "ERROR: status should have failed before setup"
+            exit 1
+          fi
+          # verify the JSON error contains setup_required
           output=$(../target/debug/veld status --json 2>&1 || true)
-          echo "$output"
-          echo "$output" | grep -q "setup_required"
+          echo "$output" | grep -q '"setup_required"'
 
-      - name: Test backend server
+      - name: Test Python servers directly
         run: |
+          set -e
           python3 testproject/backend/server.py 19555 &
-          PID=$!
+          PID_B=$!
+          python3 testproject/frontend/server.py 19556 &
+          PID_F=$!
           sleep 2
           curl -sf http://localhost:19555/health
           curl -sf http://localhost:19555/
-          kill $PID
-
-      - name: Test frontend server
-        run: |
-          python3 testproject/frontend/server.py 19556 &
-          PID=$!
-          sleep 2
           curl -sf http://localhost:19556/
-          kill $PID
+          kill $PID_B $PID_F
+          wait $PID_B $PID_F 2>/dev/null || true
 
-      - name: Run integration tests
+      - name: Run full integration tests
         run: |
           chmod +x tests/integration.sh
-          ./tests/integration.sh --veld-bin ./target/debug/veld --project-dir ./testproject || echo "::warning::Full integration tests require veld setup (sudo). Server and config tests passed above."
+          sudo ./tests/integration.sh \
+            --veld-bin "$(pwd)/target/debug/veld" \
+            --project-dir "$(pwd)/testproject"

@@ -1,4 +1,6 @@
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -126,13 +128,19 @@ const CERTS_DIR: &str = "/usr/local/lib/veld/certs";
 // Setup steps
 // ---------------------------------------------------------------------------
 
+/// Check whether a port has something listening on it.
+fn is_port_in_use(port: u16) -> bool {
+    let addr: SocketAddr = ([127, 0, 0, 1], port).into();
+    TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
+}
+
 /// Check that the required ports (80, 443, 2019) are free.
 pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
     let ports = [80u16, 443, 2019];
     let mut in_use = Vec::new();
 
     for port in ports {
-        if std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        if is_port_in_use(port) {
             in_use.push(port);
         }
     }
@@ -158,14 +166,55 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
     std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
 
     let (os, arch) = platform_pair()?;
-    let url =
-        format!("https://github.com/caddyserver/caddy/releases/latest/download/caddy_{os}_{arch}");
+    let version = "2.9.1";
+    let url = format!(
+        "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{os}_{arch}.tar.gz"
+    );
 
-    download_binary(&url, &caddy)
+    // Download to temp file
+    let tmp_dir = std::env::temp_dir().join("veld-setup");
+    std::fs::create_dir_all(&tmp_dir)?;
+    let tarball = tmp_dir.join("caddy.tar.gz");
+
+    download_binary(&url, &tarball)
         .await
-        .context("failed to download Caddy")?;
+        .context("failed to download Caddy tarball")?;
 
-    Ok(StepResult::success("Caddy downloaded and installed"))
+    // Extract caddy binary from tarball
+    let status = tokio::process::Command::new("tar")
+        .args(["xzf"])
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&tmp_dir)
+        .arg("caddy")
+        .status()
+        .await
+        .context("failed to extract Caddy tarball")?;
+
+    if !status.success() {
+        anyhow::bail!("tar extraction failed");
+    }
+
+    let extracted = tmp_dir.join("caddy");
+    std::fs::rename(&extracted, &caddy)
+        .or_else(|_| {
+            // rename fails across filesystems, fall back to copy
+            std::fs::copy(&extracted, &caddy)?;
+            std::fs::remove_file(&extracted)?;
+            Ok::<(), std::io::Error>(())
+        })
+        .context("failed to install Caddy binary")?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755))?;
+    }
+
+    // Clean up
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+
+    Ok(StepResult::success(format!("Caddy {version} installed")))
 }
 
 /// Install (or verify) mkcert for local TLS certificates.
@@ -178,8 +227,9 @@ pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
     std::fs::create_dir_all(VELD_LIB_DIR).context("failed to create /usr/local/lib/veld")?;
 
     let (os, arch) = platform_pair()?;
+    let version = "1.4.4";
     let url = format!(
-        "https://github.com/FiloSottile/mkcert/releases/latest/download/mkcert-v1.4.4-{os}-{arch}"
+        "https://github.com/FiloSottile/mkcert/releases/download/v{version}/mkcert-v{version}-{os}-{arch}"
     );
 
     download_binary(&url, &mkcert)

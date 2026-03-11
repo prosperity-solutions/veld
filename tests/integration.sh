@@ -11,7 +11,9 @@
 #   0  All tests passed
 #   1  One or more tests failed
 
-set -euo pipefail
+set -uo pipefail
+# NOTE: This script should be run with sudo for full testing (veld setup
+# requires privileged access). Without sudo, setup-dependent tests are skipped.
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -57,11 +59,17 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Resolve paths to absolute so that cd later does not break them.
+VELD_BIN="$(cd "$(dirname "$VELD_BIN")" && pwd)/$(basename "$VELD_BIN")"
+PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
+ORIG_DIR="$(pwd)"
+
 # ---------------------------------------------------------------------------
 # Cleanup on exit
 # ---------------------------------------------------------------------------
 
 cleanup() {
+    cd "$ORIG_DIR"
     info "cleaning up: stopping run '${RUN_NAME}' if still active"
     "$VELD_BIN" stop --name "$RUN_NAME" 2>/dev/null || true
 }
@@ -75,11 +83,13 @@ trap cleanup EXIT
 assert_ok() {
     local label="$1"
     shift
-    if "$@" >/dev/null 2>&1; then
+    local rc=0
+    "$@" >/dev/null 2>&1 || rc=$?
+    if [ "$rc" -eq 0 ]; then
         pass "$label"
         return 0
     else
-        fail "$label (exit code $?)"
+        fail "$label (exit code $rc)"
         return 1
     fi
 }
@@ -88,13 +98,15 @@ assert_ok() {
 capture_ok() {
     local label="$1"
     shift
-    local output
-    if output=$("$@" 2>/dev/null); then
+    local output rc=0
+    output=$("$@" 2>&1) || rc=$?
+    if [ "$rc" -eq 0 ]; then
         pass "$label"
         echo "$output"
         return 0
     else
-        fail "$label (exit code $?)"
+        fail "$label (exit code $rc)"
+        echo "$output" >&2
         return 1
     fi
 }
@@ -194,6 +206,7 @@ fi
 header "URL Check"
 
 URLS_OUTPUT=""
+EXTRACTED_URLS=""
 if URLS_OUTPUT=$(capture_ok "veld urls --json" "$VELD_BIN" urls --name "$RUN_NAME" --json); then
     if echo "$URLS_OUTPUT" | grep -q "localhost"; then
         pass "urls output contains localhost entries"
