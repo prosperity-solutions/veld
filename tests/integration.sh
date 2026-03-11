@@ -245,7 +245,10 @@ if [ -n "$URLS_OUTPUT" ]; then
     EXTRACTED_URLS=$(echo "$URLS_OUTPUT" | grep -oE 'https?://[^"]+' || true)
     if [ -n "$EXTRACTED_URLS" ]; then
         while IFS= read -r url; do
-            if curl -sf --max-time 5 "$url" >/dev/null 2>&1; then
+            # Extract hostname for --resolve (bypasses DNS for multi-level .localhost)
+            CURL_HOST=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
+            if curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" --resolve "${CURL_HOST}:80:127.0.0.1" \
+                    --max-time 5 "$url" >/dev/null 2>&1; then
                 pass "curl $url returned 200"
             else
                 fail "curl $url failed"
@@ -286,7 +289,9 @@ header "Post-Stop URL Verification"
 
 if [ -n "$EXTRACTED_URLS" ]; then
     while IFS= read -r url; do
-        HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "$url" 2>/dev/null || echo "000")
+        CURL_HOST=$(echo "$url" | sed -E 's|https?://([^/:]+).*|\1|')
+        HTTP_CODE=$(curl -sk --resolve "${CURL_HOST}:443:127.0.0.1" \
+            -o /dev/null -w "%{http_code}" --max-time 3 "$url" 2>/dev/null) || HTTP_CODE="000"
         if [ "$HTTP_CODE" = "000" ] || [ "$HTTP_CODE" -ge 400 ] 2>/dev/null; then
             pass "post-stop: $url is unreachable or non-200 (HTTP $HTTP_CODE)"
         else
