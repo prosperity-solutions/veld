@@ -54,11 +54,11 @@ pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthErro
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2: HTTPS URL check
+// Phase 2: HTTP endpoint check
 // ---------------------------------------------------------------------------
 
-/// Repeatedly GET the HTTPS URL until success or timeout.
-pub async fn wait_for_https(url: &str, hc: &HealthCheck) -> Result<(), HealthError> {
+/// Repeatedly GET an HTTP URL until success or timeout.
+pub async fn wait_for_http(url: &str, hc: &HealthCheck) -> Result<(), HealthError> {
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
 
@@ -76,9 +76,7 @@ pub async fn wait_for_https(url: &str, hc: &HealthCheck) -> Result<(), HealthErr
 
     let expected_status = hc.expect_status.unwrap_or(200);
 
-    // Build a client that accepts self-signed certs (mkcert local CA).
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true)
         .timeout(Duration::from_secs(5))
         .build()
         .map_err(|e| HealthError::HttpsCheckFailed(e.to_string()))?;
@@ -95,11 +93,11 @@ pub async fn wait_for_https(url: &str, hc: &HealthCheck) -> Result<(), HealthErr
                         url = full_url,
                         status,
                         expected_status,
-                        "HTTPS health check: unexpected status"
+                        "HTTP health check: unexpected status"
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(url = full_url, error = %e, "HTTPS health check: request failed");
+                    tracing::debug!(url = full_url, error = %e, "HTTP health check: request failed");
                 }
             }
             sleep(interval).await;
@@ -175,10 +173,10 @@ pub async fn wait_for_bash_check(
 /// Run the complete two-phase health check for a `start_server` node.
 ///
 /// Phase 1: TCP port check.
-/// Phase 2: HTTPS URL check (if health check type is "http") or bash check.
+/// Phase 2: HTTP endpoint check directly on the port (not through Caddy).
 pub async fn run_health_check(
     port: u16,
-    url: Option<&str>,
+    _url: Option<&str>,
     working_dir: &Path,
     hc: &HealthCheck,
 ) -> Result<(), HealthError> {
@@ -192,11 +190,13 @@ pub async fn run_health_check(
     // Phase 2: depends on check type.
     match hc.check_type.as_str() {
         "http" => {
-            if let Some(url) = url {
-                tracing::info!(url, "health check phase 2: waiting for HTTPS");
-                wait_for_https(url, hc).await?;
-                tracing::info!(url, "health check phase 2: HTTPS check passed");
-            }
+            // Check the service directly on its port rather than going through
+            // Caddy's HTTPS reverse proxy — this avoids DNS resolution issues
+            // for multi-level .localhost subdomains.
+            let direct_url = format!("http://127.0.0.1:{port}");
+            tracing::info!(url = direct_url, "health check phase 2: waiting for HTTP");
+            wait_for_http(&direct_url, hc).await?;
+            tracing::info!(url = direct_url, "health check phase 2: HTTP check passed");
         }
         "bash" => {
             if let Some(cmd) = &hc.command {
