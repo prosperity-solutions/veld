@@ -246,10 +246,16 @@ pub async fn install_mkcert() -> Result<StepResult, anyhow::Error> {
 }
 
 /// Generate local TLS certificates via mkcert.
+///
+/// mkcert only supports single-level wildcards, so `*.*.localhost` is invalid.
+/// We install the mkcert root CA into the system trust store (so browsers trust
+/// it), then use `mkcert -CAROOT` to locate the CA cert/key. Caddy is configured
+/// to use this CA directly via its `tls internal` directive, allowing it to
+/// generate certs on-the-fly for any depth of subdomain.
 pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
     let mkcert = MKCERT_PATH;
 
-    // Install the local CA.
+    // Install the local CA into the system trust store.
     let status = Command::new(mkcert)
         .arg("-install")
         .status()
@@ -262,34 +268,40 @@ pub async fn generate_certs() -> Result<StepResult, anyhow::Error> {
         );
     }
 
-    // Ensure certs directory exists.
+    // Locate the mkcert CA root so Caddy can use it as its internal CA.
+    let ca_root = Command::new(mkcert)
+        .arg("-CAROOT")
+        .output()
+        .await
+        .context("failed to run mkcert -CAROOT")?;
+    let ca_root_dir = String::from_utf8_lossy(&ca_root.stdout).trim().to_string();
+    if ca_root_dir.is_empty() {
+        anyhow::bail!("mkcert -CAROOT returned empty path");
+    }
+
+    // Ensure our certs directory exists and symlink the CA files so Caddy
+    // can find them at a well-known location.
     std::fs::create_dir_all(CERTS_DIR).context("failed to create certs directory")?;
 
-    // Generate wildcard certs.
-    let cert_file = format!("{CERTS_DIR}/cert.pem");
-    let key_file = format!("{CERTS_DIR}/key.pem");
+    let ca_cert_src = PathBuf::from(&ca_root_dir).join("rootCA.pem");
+    let ca_key_src = PathBuf::from(&ca_root_dir).join("rootCA-key.pem");
+    let ca_cert_dst = PathBuf::from(CERTS_DIR).join("rootCA.pem");
+    let ca_key_dst = PathBuf::from(CERTS_DIR).join("rootCA-key.pem");
 
-    let status = Command::new(mkcert)
-        .args([
-            "-cert-file",
-            &cert_file,
-            "-key-file",
-            &key_file,
-            "*.localhost",
-            "*.*.localhost",
-            "*.*.*.localhost",
-        ])
-        .status()
-        .await
-        .context("failed to run mkcert for cert generation")?;
-    if !status.success() {
+    if !ca_cert_src.exists() || !ca_key_src.exists() {
         anyhow::bail!(
-            "mkcert cert generation exited with code {}",
-            status.code().unwrap_or(-1)
+            "mkcert CA files not found at {}. Run mkcert -install first.",
+            ca_root_dir
         );
     }
 
-    Ok(StepResult::success("TLS certificates generated"))
+    // Copy CA files (symlinks may not work across volumes).
+    std::fs::copy(&ca_cert_src, &ca_cert_dst).context("failed to copy CA cert")?;
+    std::fs::copy(&ca_key_src, &ca_key_dst).context("failed to copy CA key")?;
+
+    Ok(StepResult::success(
+        "mkcert CA installed, Caddy will generate per-domain certs",
+    ))
 }
 
 /// Install (or verify) the Veld daemon.
