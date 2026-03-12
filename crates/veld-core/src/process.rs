@@ -3,7 +3,7 @@ use std::path::Path;
 use std::process::Stdio;
 
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing;
 
@@ -42,9 +42,9 @@ pub struct BashOutput {
 
 /// Spawn a long-running server process. Returns the `Child` handle.
 ///
-/// stdout and stderr are redirected to the provided log file so that
-/// the process survives after the CLI exits (no broken-pipe SIGPIPE).
-/// The caller is responsible for monitoring and killing.
+/// stdout and stderr are piped through a background task that prepends
+/// ISO 8601 timestamps to each line before appending to the log file.
+/// The process survives after the CLI exits (kill_on_drop is false).
 pub async fn start_server(
     command: &str,
     working_dir: &Path,
@@ -56,21 +56,14 @@ pub async fn start_server(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .map_err(ProcessError::SpawnFailed)?;
-    let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
-
-    let child = Command::new("sh")
+    let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(working_dir)
         .envs(env)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(stderr_file))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .kill_on_drop(false) // We manage lifecycle explicitly.
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
@@ -81,7 +74,48 @@ pub async fn start_server(
         "started server process"
     );
 
+    // Spawn background tasks to timestamp and write stdout/stderr to the log file.
+    let log_path = log_file.to_path_buf();
+
+    if let Some(stdout) = child.stdout.take() {
+        let path = log_path.clone();
+        tokio::spawn(async move {
+            timestamp_pipe(stdout, &path).await;
+        });
+    }
+
+    if let Some(stderr) = child.stderr.take() {
+        let path = log_path.clone();
+        tokio::spawn(async move {
+            timestamp_pipe(stderr, &path).await;
+        });
+    }
+
     Ok(child)
+}
+
+/// Read lines from an async reader, prepend timestamps, and append to the log file.
+async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &Path) {
+    let mut lines = BufReader::new(reader).lines();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                let timestamp = chrono::Utc::now().to_rfc3339();
+                let formatted = format!("[{timestamp}] {line}\n");
+                // Open in append mode for each write to avoid holding the file lock.
+                if let Ok(mut file) = tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(log_path)
+                    .await
+                {
+                    let _ = file.write_all(formatted.as_bytes()).await;
+                }
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

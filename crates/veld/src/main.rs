@@ -35,6 +35,10 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
 
+        /// Run in the background (default when not a TTY).
+        #[arg(long, short = 'd')]
+        detach: bool,
+
         /// Enable debug logging for the started environment.
         #[arg(long)]
         debug: bool,
@@ -223,8 +227,9 @@ async fn main() {
             selections,
             preset,
             name,
+            detach,
             debug,
-        } => commands::start::run(selections, preset, name, debug).await,
+        } => commands::start::run(selections, preset, name, detach, debug).await,
 
         Command::Stop { name, all } => commands::stop::run(name, all).await,
 

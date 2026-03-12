@@ -1,15 +1,22 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
+
 use veld_core::config::VeldConfig;
 use veld_core::graph::{self, NodeSelection};
+use veld_core::logging;
 use veld_core::orchestrator::Orchestrator;
 use veld_core::url::slugify;
 
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+
 use crate::output::{self, is_tty};
 
-/// `veld start [node:variant...] [--preset <n>] [--name <n>] [--debug]`
+/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-d] [--debug]`
 pub async fn run(
     selections: Vec<String>,
     preset: Option<String>,
     name: Option<String>,
+    detach: bool,
     _debug: bool,
 ) -> i32 {
     if !super::require_setup(false).await {
@@ -72,20 +79,20 @@ pub async fn run(
             slugify(dir_name)
         }
     };
-    let run_name = run_name.as_str();
+    let run_name_str = run_name.as_str();
 
     // Build the orchestrator.
-    let mut orchestrator = Orchestrator::new(config_path, config);
+    let mut orchestrator = Orchestrator::new(config_path.clone(), config);
     orchestrator.set_debug(_debug);
 
     println!(
         "{} Starting environment '{}'...",
         output::bold("veld"),
-        run_name,
+        run_name_str,
     );
     println!();
 
-    match orchestrator.start(&parsed_selections, run_name).await {
+    match orchestrator.start(&parsed_selections, run_name_str).await {
         Ok(run_state) => {
             // Print node results.
             let mut node_keys: Vec<&String> = run_state.nodes.keys().collect();
@@ -131,13 +138,117 @@ pub async fn run(
                 }
             }
 
+            // Foreground mode: tail logs and stop on Ctrl+C.
+            // Default to foreground when TTY, unless --detach is set.
+            let foreground = !detach && is_tty();
+            if foreground {
+                println!();
+                output::print_info("Streaming logs (Ctrl+C to stop)...");
+                println!();
+
+                let project_root = veld_core::config::project_root(&config_path);
+                let targets: Vec<(String, String)> = run_state
+                    .nodes
+                    .values()
+                    .map(|ns| (ns.node_name.clone(), ns.variant.clone()))
+                    .collect();
+
+                // Stream logs until Ctrl+C.
+                follow_logs_until_interrupt(&targets, &project_root, run_name_str).await;
+
+                // Ctrl+C received — stop the environment.
+                println!();
+                output::print_info("Stopping environment...");
+                let _ = orchestrator.stop(run_name_str).await;
+                output::print_success(&format!("Environment '{}' stopped.", run_name_str));
+            }
+
             0
         }
         Err(e) => {
             output::print_error(&format!("Startup failed: {e}"), false);
             // Best-effort teardown.
-            let _stop_result = orchestrator.stop(run_name).await;
+            let _stop_result = orchestrator.stop(run_name_str).await;
             1
+        }
+    }
+}
+
+/// Tail all log files, printing timestamped lines with node labels, until Ctrl+C.
+async fn follow_logs_until_interrupt(
+    targets: &[(String, String)],
+    project_root: &std::path::Path,
+    run_name: &str,
+) {
+    let mut positions: HashMap<PathBuf, u64> = HashMap::new();
+
+    // Initialize positions to current file sizes (skip historical output).
+    for (node_name, variant) in targets {
+        let log_path = logging::log_file(project_root, run_name, node_name, variant);
+        if let Ok(metadata) = tokio::fs::metadata(&log_path).await {
+            positions.insert(log_path, metadata.len());
+        }
+    }
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+
+    loop {
+        tokio::select! {
+            _ = interval.tick() => {
+                for (node_name, variant) in targets {
+                    let log_path = logging::log_file(project_root, run_name, node_name, variant);
+                    let pos = positions.get(&log_path).copied().unwrap_or(0);
+
+                    let metadata = match tokio::fs::metadata(&log_path).await {
+                        Ok(m) => m,
+                        Err(_) => continue,
+                    };
+
+                    let file_len = metadata.len();
+
+                    // Handle file truncation/rotation.
+                    if file_len < pos {
+                        positions.insert(log_path.clone(), 0);
+                        continue;
+                    }
+                    if file_len == pos {
+                        continue;
+                    }
+
+                    let mut file = match tokio::fs::File::open(&log_path).await {
+                        Ok(f) => f,
+                        Err(_) => continue,
+                    };
+                    file.seek(std::io::SeekFrom::Start(pos)).await.ok();
+
+                    let mut reader = BufReader::new(file);
+                    let mut new_pos = pos;
+                    let mut line = String::new();
+
+                    loop {
+                        line.clear();
+                        match reader.read_line(&mut line).await {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                new_pos += n as u64;
+                                let trimmed = line.trim_end();
+                                if !trimmed.is_empty() {
+                                    let label = output::cyan(
+                                        &format!("{node_name}:{variant}"),
+                                    );
+                                    println!("{label} {trimmed}");
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    positions.insert(log_path, new_pos);
+                }
+            }
+            _ = tokio::signal::ctrl_c() => {
+                return;
+            }
         }
     }
 }
