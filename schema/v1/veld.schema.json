@@ -66,6 +66,11 @@
           "type": "string",
           "description": "URL template override for all variants of this node. Overrides the project-level url_template."
         },
+        "hidden": {
+          "type": "boolean",
+          "description": "When true, this node is hidden from `veld nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
+          "default": false
+        },
         "variants": {
           "type": "object",
           "description": "Available variants for this node. Each key is a variant name.",
@@ -146,6 +151,10 @@
         "url_template": {
           "type": "string",
           "description": "URL template override for this specific variant. Overrides both node-level and project-level url_template."
+        },
+        "on_stop": {
+          "type": "string",
+          "description": "Teardown command to run when the environment is stopped. Executed in reverse dependency order. Supports Veld variable substitution."
         }
       },
       "allOf": [
