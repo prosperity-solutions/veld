@@ -89,6 +89,9 @@ pub struct Orchestrator {
     debug: bool,
     /// Debug log writer (created on demand when debug is true).
     debug_writer: Option<LogWriter>,
+    /// Foreground mode — pipes stdout/stderr through timestamping tasks.
+    /// When false (detached), redirects directly to file so processes survive CLI exit.
+    foreground: bool,
 }
 
 impl Orchestrator {
@@ -104,7 +107,13 @@ impl Orchestrator {
             children: HashMap::new(),
             debug: false,
             debug_writer: None,
+            foreground: false,
         }
+    }
+
+    /// Enable foreground mode (timestamped pipe for server output).
+    pub fn set_foreground(&mut self, foreground: bool) {
+        self.foreground = foreground;
     }
 
     /// Enable debug mode for orchestration trace logging.
@@ -408,8 +417,14 @@ impl Orchestrator {
         // the OS level so the process survives after the CLI exits.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
 
-        let child =
-            process::start_server(&resolved_cmd, &self.project_root, &env, &log_path).await?;
+        let child = process::start_server(
+            &resolved_cmd,
+            &self.project_root,
+            &env,
+            &log_path,
+            self.foreground,
+        )
+        .await?;
         let pid = child.id().unwrap_or(0);
         node_state.pid = Some(pid);
 

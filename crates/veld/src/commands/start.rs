@@ -82,8 +82,10 @@ pub async fn run(
     let run_name_str = run_name.as_str();
 
     // Build the orchestrator.
+    let foreground = !detach && is_tty();
     let mut orchestrator = Orchestrator::new(config_path.clone(), config);
     orchestrator.set_debug(_debug);
+    orchestrator.set_foreground(foreground);
 
     println!(
         "{} Starting environment '{}'...",
@@ -139,8 +141,6 @@ pub async fn run(
             }
 
             // Foreground mode: tail logs and stop on Ctrl+C.
-            // Default to foreground when TTY, unless --detach is set.
-            let foreground = !detach && is_tty();
             if foreground {
                 println!();
                 output::print_info("Streaming logs (Ctrl+C to stop)...");
