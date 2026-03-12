@@ -28,7 +28,11 @@ pub async fn run(json: bool) -> i32 {
             .collect();
         println!("{}", serde_json::to_string_pretty(&nodes).unwrap());
     } else if visible_nodes.is_empty() {
-        output::print_info("No nodes defined.");
+        if config.nodes.is_empty() {
+            output::print_info("No nodes defined.");
+        } else {
+            output::print_info("All nodes are hidden.");
+        }
     } else {
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut sorted: Vec<(&String, &veld_core::config::NodeConfig)> = visible_nodes;
