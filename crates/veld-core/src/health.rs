@@ -13,8 +13,8 @@ use crate::config::HealthCheck;
 
 #[derive(Debug, Error)]
 pub enum HealthError {
-    #[error("health check timed out after {timeout_seconds}s")]
-    Timeout { timeout_seconds: u64 },
+    #[error("health check timed out after {timeout_seconds}s{hint}")]
+    Timeout { timeout_seconds: u64, hint: String },
 
     #[error("port check failed: {0}")]
     PortCheckFailed(String),
@@ -31,25 +31,45 @@ pub enum HealthError {
 // ---------------------------------------------------------------------------
 
 /// Repeatedly try to connect to `port` on localhost until success or timeout.
+///
+/// Tries both IPv4 (127.0.0.1) and IPv6 (::1) on each attempt since modern
+/// runtimes (Node.js 18+, Next.js, etc.) may bind to either address family.
 pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthError> {
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
 
+    let ipv4: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+    let ipv6: std::net::SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+
     let result = timeout(deadline, async {
         loop {
-            match TcpStream::connect(("127.0.0.1", port)).await {
-                Ok(_) => return Ok(()),
-                Err(_) => sleep(interval).await,
+            // Accept either IPv4 or IPv6 — whichever the process bound to.
+            if TcpStream::connect(ipv4).await.is_ok() || TcpStream::connect(ipv6).await.is_ok() {
+                return Ok(());
             }
+            sleep(interval).await;
         }
     })
     .await;
 
     match result {
         Ok(inner) => inner,
-        Err(_) => Err(HealthError::Timeout {
-            timeout_seconds: hc.timeout_seconds,
-        }),
+        Err(_) => {
+            // Before returning timeout, check if the port is in use by
+            // something other than the expected process (stale process hint).
+            let hint = if !crate::port::is_port_available(port) {
+                format!(
+                    " (note: port {port} is currently in use — \
+                     a stale process may be occupying it)"
+                )
+            } else {
+                String::new()
+            };
+            Err(HealthError::Timeout {
+                timeout_seconds: hc.timeout_seconds,
+                hint,
+            })
+        }
     }
 }
 
@@ -109,6 +129,7 @@ pub async fn wait_for_http(url: &str, hc: &HealthCheck) -> Result<(), HealthErro
         Ok(inner) => inner,
         Err(_) => Err(HealthError::Timeout {
             timeout_seconds: hc.timeout_seconds,
+            hint: String::new(),
         }),
     }
 }
@@ -162,6 +183,7 @@ pub async fn wait_for_bash_check(
         Ok(inner) => inner,
         Err(_) => Err(HealthError::Timeout {
             timeout_seconds: hc.timeout_seconds,
+            hint: String::new(),
         }),
     }
 }
