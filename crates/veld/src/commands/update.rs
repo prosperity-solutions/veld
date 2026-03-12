@@ -14,9 +14,8 @@ pub async fn run() -> i32 {
             match veld_core::setup::perform_update(&new_version).await {
                 Ok(()) => {
                     output::print_success(&format!("Updated to {new_version}."));
-                    output::print_info("Running setup to restart services...");
-                    // Re-run setup to restart daemons with the new binaries.
-                    let _ = commands_setup_run().await;
+                    output::print_info("Restarting services with new binaries...");
+                    restart_services().await;
                     0
                 }
                 Err(e) => {
@@ -36,14 +35,45 @@ pub async fn run() -> i32 {
     }
 }
 
-/// Run `veld setup` to restart helper/daemon with updated binaries.
-async fn commands_setup_run() -> i32 {
-    match veld_core::setup::require_setup().await {
-        Ok(_) => 0,
-        Err(_) => {
-            // Setup not complete — tell user to run it manually.
-            output::print_info("Run `veld setup` to complete configuration.");
-            0
+/// Restart daemon and helper so they run the newly installed binaries.
+/// This re-runs setup non-interactively via `veld setup` with sudo.
+async fn restart_services() {
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            output::print_error(
+                &format!("Cannot determine executable path: {e}. Run `veld setup` manually."),
+                false,
+            );
+            return;
+        }
+    };
+
+    // The updated binary is already installed — invoke it to run setup,
+    // which will restart daemon + helper with the new versions.
+    let status = std::process::Command::new("sudo")
+        .arg(&exe)
+        .arg("setup")
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            output::print_success("Services restarted.");
+        }
+        Ok(s) => {
+            output::print_error(
+                &format!(
+                    "Setup exited with code {}. Run `veld setup` manually.",
+                    s.code().unwrap_or(-1)
+                ),
+                false,
+            );
+        }
+        Err(e) => {
+            output::print_error(
+                &format!("Failed to run setup: {e}. Run `veld setup` manually."),
+                false,
+            );
         }
     }
 }
