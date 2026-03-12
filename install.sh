@@ -240,14 +240,14 @@ fi
 # --- Auto-run veld setup in interactive mode ---
 # veld setup self-escalates to sudo when needed, so no need to wrap in sudo here.
 
-if [ -t 1 ]; then
+if [ -z "${VELD_NON_INTERACTIVE:-}" ] && [ -t 1 ]; then
   echo ""
   echo "Running veld setup..."
   "${INSTALL_DIR}/veld" setup || echo "Warning: veld setup failed. You can re-run it manually: veld setup"
 else
   echo ""
-  echo "Non-interactive mode detected — skipping 'veld setup'."
-  echo "Run it manually after install:"
+  echo "Skipping 'veld setup' (non-interactive mode)."
+  echo "Run it manually if needed:"
   echo "  veld setup"
 fi
 

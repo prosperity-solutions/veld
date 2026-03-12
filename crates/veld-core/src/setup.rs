@@ -629,16 +629,102 @@ async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
-/// Check for available updates. Returns `Some(version)` if an update exists.
+const GITHUB_REPO: &str = "prosperity-solutions/veld";
+
+/// Check for available updates. Returns `Some(version)` if a newer version
+/// exists on GitHub releases, or `None` if we're already up to date.
 pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
-    // Stub: no update mechanism in v0.1.
-    Ok(None)
+    let current = env!("CARGO_PKG_VERSION");
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("veld/{current}"))
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let url = format!("https://api.github.com/repos/{GITHUB_REPO}/releases/latest");
+    let resp = client
+        .get(&url)
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .context("failed to fetch latest release from GitHub")?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "GitHub API returned status {} when checking for updates",
+            resp.status()
+        );
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse GitHub release response")?;
+
+    let tag = body["tag_name"]
+        .as_str()
+        .context("GitHub release missing tag_name")?;
+
+    let latest = tag.strip_prefix('v').unwrap_or(tag);
+
+    if is_newer(latest, current) {
+        Ok(Some(latest.to_owned()))
+    } else {
+        Ok(None)
+    }
 }
 
-/// Download and install the given version.
-pub async fn perform_update(_version: &str) -> Result<(), anyhow::Error> {
-    // Stub: no update mechanism in v0.1.
-    tracing::info!("No update available");
+/// Compare two semver-like version strings. Returns true if `latest` is
+/// newer than `current`.
+fn is_newer(latest: &str, current: &str) -> bool {
+    let parse = |v: &str| -> (u64, u64, u64) {
+        let mut parts = v.split('.');
+        let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let minor = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        let patch = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+        (major, minor, patch)
+    };
+    parse(latest) > parse(current)
+}
+
+/// Download and run the install script to update to the given version.
+pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
+    let install_url = format!("https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh");
+
+    let client = reqwest::Client::builder()
+        .user_agent(format!("veld/{}", env!("CARGO_PKG_VERSION")))
+        .timeout(Duration::from_secs(30))
+        .build()
+        .context("failed to build HTTP client")?;
+
+    let script = client
+        .get(&install_url)
+        .send()
+        .await
+        .context("failed to download install script")?
+        .text()
+        .await
+        .context("failed to read install script")?;
+
+    // Run the install script with the target version pinned, in
+    // non-interactive mode (skip the `veld setup` prompt at the end).
+    let status = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .env("VELD_VERSION", version)
+        .env("VELD_NON_INTERACTIVE", "1")
+        .status()
+        .await
+        .context("failed to execute install script")?;
+
+    if !status.success() {
+        anyhow::bail!(
+            "install script exited with code {}",
+            status.code().unwrap_or(-1)
+        );
+    }
+
     Ok(())
 }
 
