@@ -591,8 +591,10 @@ impl Orchestrator {
                     let _ = self.helper_client.remove_route(&route_id).await;
                 }
 
-                // Run on_stop hook if defined.
-                self.run_on_stop_hook(node_state).await;
+                // Run on_stop hook if defined (skip nodes that never ran).
+                if node_state.status != NodeStatus::Pending {
+                    self.run_on_stop_hook(run_name, node_state).await;
+                }
 
                 node_state.status = NodeStatus::Stopped;
                 node_state.pid = None;
@@ -613,7 +615,7 @@ impl Orchestrator {
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
-    async fn run_on_stop_hook(&self, node_state: &NodeState) {
+    async fn run_on_stop_hook(&self, run_name: &str, node_state: &NodeState) {
         let variant_cfg = match self
             .config
             .nodes
@@ -635,11 +637,26 @@ impl Orchestrator {
             "running on_stop hook"
         );
 
-        // Build a variable context with the node's outputs so the hook
-        // can reference values produced during start (e.g. container names).
+        // Build variable context matching what was available at start time.
         let mut ctx = VariableContext::new();
+        ctx.set_builtin("run", run_name.to_owned());
         ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
         ctx.set_builtin("project", self.config.name.clone());
+        ctx.set_builtin(
+            "worktree",
+            url::slugify(
+                self.project_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("default"),
+            ),
+        );
+        ctx.set_builtin(
+            "branch",
+            url::slugify(&detect_git_branch(&self.project_root)),
+        );
+        ctx.set_builtin("username", whoami_username());
+
         for (k, v) in &node_state.outputs {
             ctx.set_builtin(k, v.clone());
             ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
@@ -661,7 +678,17 @@ impl Orchestrator {
         };
 
         // Build env from the variant config.
-        let env = build_env(variant_cfg.env.as_ref(), &ctx).unwrap_or_default();
+        let env = match build_env(variant_cfg.env.as_ref(), &ctx) {
+            Ok(env) => env,
+            Err(e) => {
+                tracing::warn!(
+                    node = node_state.node_name,
+                    error = %e,
+                    "failed to resolve on_stop env variables, using empty env"
+                );
+                HashMap::new()
+            }
+        };
 
         match process::run_bash(&resolved_cmd, &self.project_root, &env).await {
             Ok(result) => {
