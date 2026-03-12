@@ -62,15 +62,8 @@ enum Command {
         debug: bool,
     },
 
-    /// Manage environment runs.
+    /// List environment runs.
     Runs {
-        #[command(subcommand)]
-        action: Option<RunsAction>,
-
-        /// Show all runs (including stopped).
-        #[arg(long)]
-        all: bool,
-
         /// Filter by run name.
         #[arg(long)]
         name: Option<String>,
@@ -180,16 +173,6 @@ enum Command {
     Version,
 }
 
-#[derive(Subcommand)]
-enum RunsAction {
-    /// Purge a stopped run's state and logs.
-    Purge {
-        /// Name of the run to purge.
-        #[arg(long)]
-        name: String,
-    },
-}
-
 fn init_tracing(debug: bool) {
     use tracing_subscriber::EnvFilter;
 
@@ -247,15 +230,7 @@ async fn main() {
 
         Command::Restart { name, debug } => commands::restart::run(name, debug).await,
 
-        Command::Runs {
-            action,
-            all,
-            name,
-            json,
-        } => match action {
-            Some(RunsAction::Purge { name }) => commands::runs::purge(&name).await,
-            None => commands::runs::list(all, name.as_deref(), json).await,
-        },
+        Command::Runs { name, json } => commands::runs::list(name.as_deref(), json).await,
 
         Command::Status { name, json } => commands::status::run(name, json).await,
 

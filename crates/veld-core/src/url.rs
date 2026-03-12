@@ -46,6 +46,26 @@ pub fn slugify(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// URL template resolution (cascade: variant > node > project > built-in)
+// ---------------------------------------------------------------------------
+
+/// Resolve the effective URL template for a given node+variant, using the
+/// most specific override: variant > node > project.
+pub fn resolve_url_template<'a>(
+    project_template: &'a str,
+    node_template: Option<&'a str>,
+    variant_template: Option<&'a str>,
+) -> &'a str {
+    if let Some(t) = variant_template {
+        return t;
+    }
+    if let Some(t) = node_template {
+        return t;
+    }
+    project_template
+}
+
+// ---------------------------------------------------------------------------
 // URL template evaluation
 // ---------------------------------------------------------------------------
 
@@ -60,8 +80,10 @@ pub fn evaluate_url_template(
 }
 
 /// Build the template variables map for a given node in a run.
+#[allow(clippy::too_many_arguments)]
 pub fn build_url_template_values(
     service: &str,
+    variant: &str,
     run_name: &str,
     project: &str,
     branch: &str,
@@ -71,6 +93,7 @@ pub fn build_url_template_values(
 ) -> HashMap<String, String> {
     let mut values = HashMap::new();
     values.insert("service".to_owned(), slugify(service));
+    values.insert("variant".to_owned(), slugify(variant));
     values.insert("run".to_owned(), slugify(run_name));
     values.insert("project".to_owned(), slugify(project));
     values.insert("branch".to_owned(), slugify(branch));

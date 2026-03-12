@@ -1,4 +1,4 @@
-use veld_core::orchestrator::Orchestrator;
+use veld_core::orchestrator::{Orchestrator, StopResult};
 
 use crate::output;
 
@@ -24,11 +24,15 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
 
     if all {
         let run_names: Vec<String> = project_state.runs.keys().cloned().collect();
+        if run_names.is_empty() {
+            output::print_info("No runs to stop.");
+            return 0;
+        }
         let mut stopped = 0;
 
         for rn in &run_names {
             match orchestrator.stop(rn).await {
-                Ok(()) => stopped += 1,
+                Ok(_) => stopped += 1,
                 Err(e) => {
                     output::print_error(&format!("Failed to stop '{rn}': {e}"), false);
                 }
@@ -45,8 +49,12 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
         let run_name = run_name.as_str();
 
         match orchestrator.stop(run_name).await {
-            Ok(()) => {
+            Ok(StopResult::Stopped) => {
                 output::print_success(&format!("Environment '{run_name}' stopped."));
+                0
+            }
+            Ok(StopResult::AlreadyStopped) => {
+                output::print_info(&format!("Environment '{run_name}' is already stopped."));
                 0
             }
             Err(e) => {
