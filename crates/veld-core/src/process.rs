@@ -37,24 +37,60 @@ pub struct BashOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Server handle — abstracts over foreground (tokio Child) vs detached (PID only)
+// ---------------------------------------------------------------------------
+
+/// Handle to a spawned server process.
+///
+/// In foreground mode this wraps a `tokio::process::Child` so the orchestrator
+/// can manage the async I/O pipes.  In detached mode the process is fully
+/// decoupled from the tokio runtime — we only keep the PID.
+pub enum ServerHandle {
+    /// Foreground: tokio-managed child with piped stdout/stderr.
+    Foreground(Child),
+    /// Detached: process runs independently; only the PID is tracked.
+    Detached { pid: u32 },
+}
+
+impl ServerHandle {
+    /// Return the OS process ID.
+    pub fn pid(&self) -> u32 {
+        match self {
+            ServerHandle::Foreground(child) => child.id().unwrap_or(0),
+            ServerHandle::Detached { pid } => *pid,
+        }
+    }
+
+    /// Take the inner tokio `Child` if this is a foreground handle.
+    pub fn into_child(self) -> Option<Child> {
+        match self {
+            ServerHandle::Foreground(child) => Some(child),
+            ServerHandle::Detached { .. } => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Start a long-running server process
 // ---------------------------------------------------------------------------
 
-/// Spawn a long-running server process. Returns the `Child` handle.
+/// Spawn a long-running server process.
 ///
 /// When `foreground` is true, stdout/stderr are piped through background
 /// tasks that prepend ISO 8601 timestamps to each line. The process will
 /// die when the CLI exits (pipes close).
 ///
-/// When `foreground` is false (detached mode), stdout/stderr are redirected
-/// directly to the log file so the process survives after the CLI exits.
+/// When `foreground` is false (detached mode), the process is spawned via
+/// `std::process::Command` in its own process group so it is fully
+/// independent of the CLI process and the tokio runtime. stdout/stderr are
+/// redirected directly to the log file.
 pub async fn start_server(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_file: &Path,
     foreground: bool,
-) -> Result<Child, ProcessError> {
+) -> Result<ServerHandle, ProcessError> {
     // Ensure log directory exists.
     if let Some(parent) = log_file.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -63,7 +99,7 @@ pub async fn start_server(
     if foreground {
         start_server_foreground(command, working_dir, env, log_file).await
     } else {
-        start_server_detached(command, working_dir, env, log_file).await
+        start_server_detached(command, working_dir, env, log_file)
     }
 }
 
@@ -73,7 +109,7 @@ async fn start_server_foreground(
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_file: &Path,
-) -> Result<Child, ProcessError> {
+) -> Result<ServerHandle, ProcessError> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -108,17 +144,25 @@ async fn start_server_foreground(
         });
     }
 
-    Ok(child)
+    Ok(ServerHandle::Foreground(child))
 }
 
-/// Detached mode: redirect stdout/stderr directly to the log file.
-/// The process survives after the CLI exits.
-async fn start_server_detached(
+/// Detached mode: spawn via std::process::Command in its own process group.
+///
+/// Using `std::process::Command` (not tokio) avoids registering the child
+/// with tokio's SIGCHLD reaper, and `process_group(0)` ensures the process
+/// is in its own process group so it won't receive signals intended for the
+/// CLI (e.g. SIGHUP on terminal close, SIGINT from Ctrl-C).
+///
+/// The process survives after the CLI exits and is reparented to init/launchd.
+fn start_server_detached(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_file: &Path,
-) -> Result<Child, ProcessError> {
+) -> Result<ServerHandle, ProcessError> {
+    use std::os::unix::process::CommandExt;
+
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -126,7 +170,7 @@ async fn start_server_detached(
         .map_err(ProcessError::SpawnFailed)?;
     let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
 
-    let child = Command::new("sh")
+    let child = std::process::Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(working_dir)
@@ -134,17 +178,24 @@ async fn start_server_detached(
         .stdin(Stdio::null())
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(stderr_file))
-        .kill_on_drop(false)
+        .process_group(0) // own process group — immune to parent signals
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
 
+    let pid = child.id();
+
     tracing::info!(
-        pid = child.id().unwrap_or(0),
+        pid = pid,
         command = command,
-        "started server process (detached)"
+        "started server process (detached, pgid=own)"
     );
 
-    Ok(child)
+    // Intentionally drop the std Child handle. The process is fully
+    // independent — it will be reparented to init/launchd and reaped
+    // by the OS. We only track the PID for later stop/status checks.
+    drop(child);
+
+    Ok(ServerHandle::Detached { pid })
 }
 
 /// Read lines from an async reader, prepend timestamps, and append to the log file.

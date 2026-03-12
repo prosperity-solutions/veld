@@ -5,7 +5,6 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use thiserror::Error;
-use tokio::process::Child;
 use tracing;
 
 use crate::config::{self, Outputs, StepType, VeldConfig};
@@ -84,7 +83,7 @@ pub struct Orchestrator {
     pub port_allocator: PortAllocator,
     pub helper_client: HelperClient,
     /// Active child processes keyed by `"node:variant"`.
-    children: HashMap<String, Child>,
+    children: HashMap<String, process::ServerHandle>,
     /// Debug mode — writes orchestration trace to `veld-debug.log`.
     debug: bool,
     /// Debug log writer (created on demand when debug is true).
@@ -422,7 +421,7 @@ impl Orchestrator {
         // the OS level so the process survives after the CLI exits.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
 
-        let child = process::start_server(
+        let handle = process::start_server(
             &resolved_cmd,
             &self.project_root,
             &env,
@@ -430,11 +429,11 @@ impl Orchestrator {
             self.foreground,
         )
         .await?;
-        let pid = child.id().unwrap_or(0);
+        let pid = handle.pid();
         node_state.pid = Some(pid);
 
         self.children
-            .insert(RunState::node_key(&sel.node, &sel.variant), child);
+            .insert(RunState::node_key(&sel.node, &sel.variant), handle);
 
         // Health check.
         self.debug_log(&format!(
