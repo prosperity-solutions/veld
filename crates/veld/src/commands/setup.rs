@@ -33,10 +33,11 @@ pub async fn run() -> i32 {
     println!("{}", output::bold("Veld Setup"));
     println!();
 
-    const TOTAL: usize = 5;
+    let has_hammerspoon = std::path::Path::new("/Applications/Hammerspoon.app").exists();
+    let total: usize = if has_hammerspoon { 6 } else { 5 };
 
     // Step 1: Check port availability.
-    print_step(1, TOTAL, "Checking port availability...");
+    print_step(1, total, "Checking port availability...");
     match veld_core::setup::check_ports().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
@@ -46,7 +47,7 @@ pub async fn run() -> i32 {
     }
 
     // Step 2: Install Caddy.
-    print_step(2, TOTAL, "Installing Caddy...");
+    print_step(2, total, "Installing Caddy...");
     match veld_core::setup::install_caddy().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
@@ -56,7 +57,7 @@ pub async fn run() -> i32 {
     }
 
     // Step 3: Install Veld daemon.
-    print_step(3, TOTAL, "Installing Veld daemon...");
+    print_step(3, total, "Installing Veld daemon...");
     match veld_core::setup::install_daemon().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
@@ -66,7 +67,7 @@ pub async fn run() -> i32 {
     }
 
     // Step 4: Install Veld helper (starts Caddy).
-    print_step(4, TOTAL, "Installing Veld helper...");
+    print_step(4, total, "Installing Veld helper...");
     match veld_core::setup::install_helper().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
@@ -76,12 +77,24 @@ pub async fn run() -> i32 {
     }
 
     // Step 5: Trust Caddy's CA in the system store.
-    print_step(5, TOTAL, "Trusting Caddy CA...");
+    print_step(5, total, "Trusting Caddy CA...");
     match veld_core::setup::trust_caddy_ca().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
             return 1;
+        }
+    }
+
+    // Step 6: Install Hammerspoon Spoon (optional, non-fatal).
+    if has_hammerspoon {
+        print_step(6, total, "Installing Hammerspoon Spoon...");
+        match veld_core::setup::install_hammerspoon().await {
+            Ok(info) => print_step_ok(&info.message),
+            Err(e) => {
+                // Never fail setup for a menu bar widget.
+                print_step_ok(&format!("skipped ({e})"));
+            }
         }
     }
 
