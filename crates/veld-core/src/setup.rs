@@ -108,6 +108,21 @@ impl StepResult {
     }
 }
 
+/// Result from the Hammerspoon install step — carries extra info so the CLI
+/// can interactively offer to patch `init.lua`.
+#[derive(Debug)]
+pub struct HammerspoonResult {
+    pub message: String,
+    /// If `true`, `require("hs.ipc")` is missing from init.lua.
+    pub needs_ipc: bool,
+    /// If `true`, `hs.loadSpoon("Veld")` is missing from init.lua.
+    pub needs_load_spoon: bool,
+    /// Path to the user's init.lua (may not exist yet).
+    pub init_lua_path: PathBuf,
+    /// Real user name (for chown after editing).
+    pub user: String,
+}
+
 // ---------------------------------------------------------------------------
 // Setup steps
 // ---------------------------------------------------------------------------
@@ -985,17 +1000,21 @@ const HAMMERSPOON_SPOON_LUA: &str =
 
 /// Install the Veld Spoon into ~/.hammerspoon/Spoons/ and load it via `hs` CLI.
 ///
-/// This is the standard Hammerspoon plugin mechanism. The Spoon is self-contained
-/// and does not modify the user's init.lua. It is loaded via `hs -c` IPC if the
-/// CLI tool is available, otherwise the user is told to add one line.
-pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
+/// Returns a `HammerspoonResult` with details about what the CLI should prompt
+/// the user about (IPC module, loadSpoon line).
+pub async fn install_hammerspoon() -> Result<HammerspoonResult, anyhow::Error> {
     let (user, uid, home) = resolve_real_user_macos()?;
     let hs_dir = home.join(".hammerspoon");
+    let user_init_lua = hs_dir.join("init.lua");
 
     if !hs_dir.exists() {
-        return Ok(StepResult::success(
-            "Hammerspoon detected but not configured (~/.hammerspoon missing)",
-        ));
+        return Ok(HammerspoonResult {
+            message: "Hammerspoon detected but not configured (~/.hammerspoon missing)".into(),
+            needs_ipc: false,
+            needs_load_spoon: false,
+            init_lua_path: user_init_lua,
+            user,
+        });
     }
 
     // Write the Spoon to the standard Spoons directory.
@@ -1008,18 +1027,63 @@ pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
     // Fix ownership (setup runs as root via sudo).
     fix_owner_recursive(&spoon_dir, &user);
 
+    // Check what's in the user's init.lua.
+    let init_contents = std::fs::read_to_string(&user_init_lua).unwrap_or_default();
+    let needs_ipc = !init_contents.contains("hs.ipc");
+    let needs_load_spoon = !init_contents.contains("loadSpoon(\"Veld\")")
+        && !init_contents.contains("loadSpoon('Veld')");
+
     // Try to load the Spoon via `hs` CLI (IPC).
     let loaded = load_spoon_via_hs(&uid).await;
 
-    if loaded {
-        Ok(StepResult::success(
-            "Veld.spoon installed and loaded (add `hs.loadSpoon(\"Veld\"):start()` to init.lua for persistence)",
-        ))
+    let message = if loaded {
+        "Veld.spoon installed and loaded".into()
+    } else if needs_ipc {
+        "Veld.spoon installed (Hammerspoon IPC not enabled)".into()
     } else {
-        Ok(StepResult::success(
-            "Veld.spoon installed (add `hs.loadSpoon(\"Veld\"):start()` to init.lua to activate)",
-        ))
+        "Veld.spoon installed".into()
+    };
+
+    Ok(HammerspoonResult {
+        message,
+        needs_ipc,
+        needs_load_spoon,
+        init_lua_path: user_init_lua,
+        user,
+    })
+}
+
+/// Patch the user's Hammerspoon init.lua to add IPC and/or Veld Spoon loading.
+///
+/// Called by the CLI after the user confirms. Prepends the lines at the top of
+/// the file to ensure they run early.
+pub fn patch_hammerspoon_init_lua(result: &HammerspoonResult) -> Result<(), anyhow::Error> {
+    let path = &result.init_lua_path;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+
+    let mut prepend = String::new();
+    if result.needs_ipc {
+        prepend.push_str("require(\"hs.ipc\")\n");
     }
+    if result.needs_load_spoon {
+        prepend.push_str("hs.loadSpoon(\"Veld\"):start()\n");
+    }
+
+    if prepend.is_empty() {
+        return Ok(());
+    }
+
+    // Add a blank line between our additions and existing content.
+    let new_contents = if existing.is_empty() {
+        prepend
+    } else {
+        format!("{prepend}\n{existing}")
+    };
+
+    std::fs::write(path, &new_contents).context("failed to write Hammerspoon init.lua")?;
+    fix_owner_recursive(path.as_ref(), &result.user);
+
+    Ok(())
 }
 
 /// Remove the Veld Spoon (best-effort, called during uninstall).
