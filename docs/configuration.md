@@ -786,6 +786,37 @@ veld start --preset fullstack --name my-feature
 3. `backend:local` starts next -- Veld allocates a port, injects `${nodes.database.DATABASE_URL}` into the env, and waits for `/health` to return 200.
 4. `frontend:local` and `admin:local` start in parallel -- both depend only on `backend:local`, which is now healthy.
 5. Each service gets a stable HTTPS URL like `https://frontend.my-feature.my-project.localhost`.
+6. In a terminal (TTY), logs from all services stream in real-time. Press Ctrl+C to stop all services.
+
+### Foreground vs Detached Mode
+
+By default, `veld start` runs in **foreground mode** when invoked from a terminal: after starting all services, it streams logs from all nodes (like `docker compose up`) and stops the environment on Ctrl+C.
+
+Use `--detach` / `-d` to start in the background (like `docker compose up -d`):
+
+```sh
+# Foreground (default in TTY) — streams logs, Ctrl+C stops everything
+veld start --preset fullstack --name my-feature
+
+# Detached — starts and exits immediately
+veld start --preset fullstack --name my-feature -d
+
+# View logs later
+veld logs -f
+```
+
+When not running in a terminal (e.g. piped or in a script), `veld start` always detaches automatically.
+
+### Log Timestamps
+
+All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped with ISO 8601 timestamps:
+
+```
+[2026-03-12T08:30:01.123456+00:00] Server listening on port 3000
+[2026-03-12T08:30:01.456789+00:00] Connected to database
+```
+
+Timestamps are written at the time each line is emitted, enabling chronological merging across nodes in `veld logs`.
 
 ---
 
