@@ -145,6 +145,11 @@ impl Orchestrator {
         selections: &[NodeSelection],
         run_name: &str,
     ) -> Result<RunState, OrchestratorError> {
+        // Clean up any stale run with the same name (kills processes, removes
+        // DNS/Caddy routes, clears state). This handles the case where a
+        // previous run was not properly cleaned up or the user reuses a name.
+        self.cleanup_stale_run(run_name).await;
+
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
 
@@ -627,6 +632,45 @@ impl Orchestrator {
         self.remove_from_registry(run_name);
 
         Ok(StopResult::Stopped)
+    }
+
+    /// Clean up a stale run with the given name if it exists in state.
+    /// Kills any live processes, removes DNS/Caddy routes, and clears state.
+    /// Errors are logged but never propagated — this is best-effort cleanup.
+    async fn cleanup_stale_run(&mut self, run_name: &str) {
+        let project_state = match ProjectState::load(&self.project_root) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let run = match project_state.get_run(run_name) {
+            Some(r) => r,
+            None => return,
+        };
+
+        tracing::info!(run_name, "cleaning up stale run before starting");
+
+        // Kill any processes that are still alive.
+        for ns in run.nodes.values() {
+            if let Some(pid) = ns.pid {
+                if process::is_alive(pid) {
+                    let _ = process::kill_process(pid).await;
+                }
+            }
+            // Remove DNS + Caddy route.
+            if let Some(ref url_str) = ns.url {
+                let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+                let _ = self.helper_client.remove_host(hostname).await;
+                let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+                let _ = self.helper_client.remove_route(&route_id).await;
+            }
+        }
+
+        // Remove from state and registry.
+        let mut project_state = project_state;
+        project_state.runs.remove(run_name);
+        let _ = project_state.save(&self.project_root);
+        self.remove_from_registry(run_name);
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
