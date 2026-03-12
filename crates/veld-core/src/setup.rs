@@ -802,6 +802,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         let _ = std::fs::remove_file(&socket);
     }
 
+    // Remove Hammerspoon Spoon (best-effort).
+    uninstall_hammerspoon().await;
+
     Ok(())
 }
 
@@ -970,6 +973,114 @@ fn resolve_real_user_macos() -> Result<(String, String, PathBuf), anyhow::Error>
     let home = dirs::home_dir().context("could not determine home directory")?;
 
     Ok((user, uid, home))
+}
+
+// ---------------------------------------------------------------------------
+// Hammerspoon Spoon integration (macOS only, optional)
+// ---------------------------------------------------------------------------
+
+/// The embedded Spoon init.lua for the Hammerspoon menu bar integration.
+const HAMMERSPOON_SPOON_LUA: &str =
+    include_str!("../../../integrations/hammerspoon/Veld.spoon/init.lua");
+
+/// Install the Veld Spoon into ~/.hammerspoon/Spoons/ and load it via `hs` CLI.
+///
+/// This is the standard Hammerspoon plugin mechanism. The Spoon is self-contained
+/// and does not modify the user's init.lua. It is loaded via `hs -c` IPC if the
+/// CLI tool is available, otherwise the user is told to add one line.
+pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
+    let (user, uid, home) = resolve_real_user_macos()?;
+    let hs_dir = home.join(".hammerspoon");
+
+    if !hs_dir.exists() {
+        return Ok(StepResult::success(
+            "Hammerspoon detected but not configured (~/.hammerspoon missing)",
+        ));
+    }
+
+    // Write the Spoon to the standard Spoons directory.
+    let spoon_dir = hs_dir.join("Spoons").join("Veld.spoon");
+    std::fs::create_dir_all(&spoon_dir).context("failed to create Veld.spoon directory")?;
+    let init_lua = spoon_dir.join("init.lua");
+    std::fs::write(&init_lua, HAMMERSPOON_SPOON_LUA)
+        .context("failed to write Veld.spoon/init.lua")?;
+
+    // Fix ownership (setup runs as root via sudo).
+    fix_owner_recursive(&spoon_dir, &user);
+
+    // Try to load the Spoon via `hs` CLI (IPC).
+    let loaded = load_spoon_via_hs(&uid).await;
+
+    if loaded {
+        Ok(StepResult::success(
+            "Veld.spoon installed and loaded (add `hs.loadSpoon(\"Veld\"):start()` to init.lua for persistence)",
+        ))
+    } else {
+        Ok(StepResult::success(
+            "Veld.spoon installed (add `hs.loadSpoon(\"Veld\"):start()` to init.lua to activate)",
+        ))
+    }
+}
+
+/// Remove the Veld Spoon (best-effort, called during uninstall).
+async fn uninstall_hammerspoon() {
+    let (_, uid, home) = match resolve_real_user_macos() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+
+    // Stop the running Spoon so the menu bar icon disappears immediately.
+    let stop_lua = r#"if spoon.Veld then spoon.Veld:stop() end"#;
+    let _ = Command::new("launchctl")
+        .args(["asuser", &uid, "/usr/local/bin/hs", "-c", stop_lua])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    let spoon_dir = home.join(".hammerspoon/Spoons/Veld.spoon");
+    if spoon_dir.exists() {
+        let _ = std::fs::remove_dir_all(&spoon_dir);
+    }
+}
+
+/// Load the Veld Spoon in the running Hammerspoon instance via `hs -c`.
+async fn load_spoon_via_hs(uid: &str) -> bool {
+    let lua_code = r#"hs.loadSpoon("Veld"); spoon.Veld:start()"#;
+
+    // Try direct `hs` CLI first.
+    let direct = Command::new("hs")
+        .args(["-c", lua_code])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if direct.is_ok_and(|s| s.success()) {
+        return true;
+    }
+
+    // Try via launchctl asuser (we're running as root under sudo).
+    let via_launchctl = Command::new("launchctl")
+        .args(["asuser", uid, "/usr/local/bin/hs", "-c", lua_code])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    via_launchctl.is_ok_and(|s| s.success())
+}
+
+/// Recursively fix ownership of a path to the real user.
+fn fix_owner_recursive(path: &Path, user: &str) {
+    let _ = std::process::Command::new("chown")
+        .arg("-R")
+        .arg(format!("{user}:staff"))
+        .arg(path)
+        .output();
 }
 
 /// Run a command and bail on failure.
