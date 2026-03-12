@@ -145,7 +145,7 @@ pub async fn run() -> i32 {
             }
             Err(e) => {
                 // Never fail setup for a menu bar widget.
-                print_step_ok(&format!("skipped ({e})"));
+                print_step_ok(&format!("skipped ({e})"))
             }
         }
     }
