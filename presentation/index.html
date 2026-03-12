@@ -1,0 +1,1013 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Veld — Local Development Environment Orchestrator</title>
+<style>
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+:root {
+  --bg: #0a0a0a;
+  --bg-subtle: #111111;
+  --bg-card: #0f0f0f;
+  --text: #f0f0f0;
+  --text-dim: #888888;
+  --text-muted: #555555;
+  --accent: #ffffff;
+  --border: #222222;
+  --green: #4ade80;
+  --red: #f87171;
+  --blue: #60a5fa;
+  --purple: #a78bfa;
+  --amber: #fbbf24;
+}
+
+html {
+  scroll-behavior: smooth;
+  scroll-snap-type: y mandatory;
+  overflow-y: scroll;
+  overflow-x: hidden;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ---- Canvas background ---- */
+#bg-canvas {
+  position: fixed;
+  top: 0; left: 0;
+  width: 100%; height: 100%;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* ---- Progress bar ---- */
+#progress {
+  position: fixed;
+  top: 0; left: 0;
+  height: 2px;
+  background: var(--text);
+  z-index: 1000;
+  transition: width 0.15s ease-out;
+  width: 0%;
+}
+
+/* ---- Slide base ---- */
+.slide {
+  min-height: 100vh;
+  scroll-snap-align: start;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 60px 40px;
+  position: relative;
+  z-index: 1;
+}
+
+/* ---- Reveal animations ---- */
+.reveal {
+  opacity: 0;
+  transform: translateY(30px);
+  transition: opacity 0.7s cubic-bezier(0.16, 1, 0.3, 1), transform 0.7s cubic-bezier(0.16, 1, 0.3, 1);
+}
+.reveal.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.reveal.delay-1 { transition-delay: 0.1s; }
+.reveal.delay-2 { transition-delay: 0.2s; }
+.reveal.delay-3 { transition-delay: 0.3s; }
+.reveal.delay-4 { transition-delay: 0.4s; }
+.reveal.delay-5 { transition-delay: 0.5s; }
+.reveal.delay-6 { transition-delay: 0.6s; }
+.reveal.delay-7 { transition-delay: 0.7s; }
+.reveal.delay-8 { transition-delay: 0.8s; }
+
+/* ---- Typography ---- */
+h1 {
+  font-size: clamp(4rem, 12vw, 10rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 0.9;
+  text-align: center;
+}
+
+h2 {
+  font-size: clamp(2.2rem, 5vw, 4.2rem);
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  line-height: 1.05;
+  text-align: center;
+  margin-bottom: 48px;
+}
+
+h3 {
+  font-size: clamp(1.2rem, 2.5vw, 1.8rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  margin-bottom: 20px;
+}
+
+.mono {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* ---- Slide: Title ---- */
+.slide-title {
+  background: radial-gradient(ellipse at 50% 50%, #1a1a1a 0%, var(--bg) 70%);
+}
+
+.title-logo {
+  font-size: clamp(7rem, 20vw, 16rem);
+  font-weight: 900;
+  letter-spacing: -0.06em;
+  background: linear-gradient(180deg, #ffffff 0%, #888888 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  line-height: 1;
+}
+
+.tagline {
+  font-size: clamp(1.2rem, 2.5vw, 1.8rem);
+  color: var(--text-dim);
+  font-weight: 400;
+  letter-spacing: -0.01em;
+  margin-top: 24px;
+  text-align: center;
+}
+
+/* ---- Terminal mock ---- */
+.terminal {
+  background: #0c0c0c;
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  overflow: hidden;
+  max-width: 820px;
+  width: 100%;
+  box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+}
+
+.terminal-bar {
+  background: #161616;
+  padding: 10px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid #1a1a1a;
+}
+
+.terminal-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #333;
+}
+
+.terminal-dot.red { background: #ff5f57; }
+.terminal-dot.yellow { background: #febc2e; }
+.terminal-dot.green { background: #28c840; }
+
+.terminal-title {
+  flex: 1;
+  text-align: center;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+.terminal-body {
+  padding: 20px 24px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: clamp(0.78rem, 1.2vw, 0.95rem);
+  line-height: 1.8;
+  color: var(--text-dim);
+  overflow-x: auto;
+}
+
+.terminal-body .prompt { color: var(--text-muted); }
+.terminal-body .cmd { color: var(--text); font-weight: 500; }
+.terminal-body .green { color: var(--green); }
+.terminal-body .red { color: var(--red); }
+.terminal-body .blue { color: var(--blue); }
+.terminal-body .dim { color: #444; }
+.terminal-body .amber { color: var(--amber); }
+.terminal-body .muted { color: var(--text-muted); }
+
+/* ---- Browser mock ---- */
+.browser {
+  background: #0c0c0c;
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 25px 50px rgba(0,0,0,0.5);
+}
+
+.browser-bar {
+  background: #1a1a1a;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.browser-dots {
+  display: flex;
+  gap: 6px;
+}
+
+.browser-url {
+  flex: 1;
+  background: #111;
+  border-radius: 6px;
+  padding: 7px 14px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.lock { color: var(--green); font-size: 0.8rem; }
+
+.browser-body {
+  padding: 40px;
+  text-align: center;
+  font-size: 0.9rem;
+  color: var(--text-muted);
+  min-height: 80px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- Comparison side-by-side ---- */
+.vs-grid {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 24px;
+  align-items: center;
+  max-width: 900px;
+  width: 100%;
+}
+
+.vs-divider {
+  font-size: 1.4rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.vs-label {
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-muted);
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.vs-label.good { color: var(--green); }
+.vs-label.bad { color: var(--red); }
+
+/* ---- Code block ---- */
+.code-block {
+  background: #0c0c0c;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px 28px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: clamp(0.78rem, 1.2vw, 0.92rem);
+  line-height: 1.9;
+  overflow-x: auto;
+  max-width: 780px;
+  width: 100%;
+  text-align: left;
+  color: var(--text-dim);
+}
+
+.code-block .key { color: var(--blue); }
+.code-block .str { color: var(--green); }
+.code-block .comment { color: #444; }
+.code-block .punct { color: var(--text-muted); }
+.code-block .var { color: var(--amber); }
+
+/* ---- Comparison table ---- */
+.comp-table {
+  width: 100%;
+  max-width: 1050px;
+  border-collapse: collapse;
+}
+
+.comp-table th,
+.comp-table td {
+  padding: 12px 14px;
+  text-align: center;
+  border-bottom: 1px solid #1a1a1a;
+  font-size: clamp(0.72rem, 1.1vw, 0.88rem);
+}
+
+.comp-table th {
+  color: var(--text-muted);
+  font-weight: 500;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding-bottom: 16px;
+}
+
+.comp-table th:first-child,
+.comp-table td:first-child {
+  text-align: left;
+  font-weight: 600;
+  padding-left: 0;
+}
+
+.comp-table td:first-child { color: var(--text-dim); }
+
+.comp-table tr:last-child td { border-bottom: none; }
+
+.comp-table .veld-row {
+  background: rgba(255,255,255,0.03);
+}
+.comp-table .veld-row td:first-child {
+  color: #fff;
+  font-weight: 700;
+}
+
+.comp-table .yes { color: var(--green); font-weight: 600; }
+.comp-table .no { color: #333; }
+.comp-table .partial { color: var(--text-muted); }
+
+/* ---- DX cards ---- */
+.dx-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 16px;
+  max-width: 900px;
+  width: 100%;
+}
+
+.dx-card {
+  background: var(--bg-card);
+  border: 1px solid #1a1a1a;
+  border-radius: 12px;
+  padding: 20px;
+  text-align: left;
+}
+
+.dx-card h4 {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin-bottom: 14px;
+  color: var(--text);
+  letter-spacing: -0.01em;
+}
+
+.dx-card .code-inline {
+  display: block;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.8rem;
+  color: var(--text-dim);
+  line-height: 1.85;
+}
+
+/* ---- Vision phrases ---- */
+.vision-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-width: 800px;
+  width: 100%;
+}
+
+.vision-line {
+  font-size: clamp(1.4rem, 3.5vw, 2.6rem);
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  line-height: 1.5;
+  text-align: center;
+  color: var(--text);
+  padding: 8px 0;
+}
+
+.vision-line.dim {
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+/* ---- Company ---- */
+.company-name {
+  font-size: clamp(1.6rem, 4vw, 3rem);
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-align: center;
+  color: var(--text);
+  margin-bottom: 24px;
+}
+
+.company-tagline {
+  font-size: clamp(1rem, 2vw, 1.4rem);
+  color: var(--text-dim);
+  text-align: center;
+  max-width: 600px;
+  line-height: 1.6;
+}
+
+/* ---- Finale ---- */
+.slide-finale {
+  background: radial-gradient(ellipse at 50% 50%, #141414 0%, var(--bg) 70%);
+}
+
+.finale-line {
+  font-size: clamp(2.5rem, 6vw, 5rem);
+  font-weight: 900;
+  letter-spacing: -0.04em;
+  line-height: 1.1;
+  text-align: center;
+  background: linear-gradient(180deg, #ffffff 0%, #666666 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.finale-cmd {
+  display: inline-block;
+  margin-top: 48px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: clamp(0.85rem, 1.3vw, 1rem);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 14px 28px;
+  background: var(--bg-subtle);
+}
+
+/* ---- Keyboard hint ---- */
+#keyboard-hint {
+  position: fixed;
+  bottom: 20px;
+  right: 24px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  opacity: 0.3;
+  transition: opacity 0.3s;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+
+#keyboard-hint:hover { opacity: 0.7; }
+
+.key {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-size: 0.65rem;
+  background: var(--bg-subtle);
+}
+
+/* ---- Slide counter ---- */
+#slide-counter {
+  position: fixed;
+  bottom: 20px;
+  left: 24px;
+  z-index: 100;
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  opacity: 0.3;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+}
+
+/* ---- Responsive ---- */
+@media (max-width: 700px) {
+  .slide { padding: 40px 20px; }
+  .vs-grid { grid-template-columns: 1fr; gap: 16px; }
+  .vs-divider { display: none; }
+  .dx-grid { grid-template-columns: 1fr; }
+  .comp-table { font-size: 0.7rem; }
+  .comp-table th, .comp-table td { padding: 8px 6px; }
+  .terminal-body { font-size: 0.72rem; padding: 14px 16px; }
+}
+</style>
+</head>
+<body>
+
+<canvas id="bg-canvas"></canvas>
+<div id="progress"></div>
+<div id="slide-counter">1 / 10</div>
+
+<div id="keyboard-hint">
+  <span class="key">&#8593;</span>
+  <span class="key">&#8595;</span>
+  <span>navigate</span>
+</div>
+
+<!-- ========== SLIDE 1: TITLE ========== -->
+<section class="slide slide-title" data-slide="1">
+  <div class="reveal">
+    <div class="title-logo">veld</div>
+  </div>
+  <p class="tagline reveal delay-2">One command. Every service. Real HTTPS.</p>
+</section>
+
+<!-- ========== SLIDE 2: THE PAIN ========== -->
+<section class="slide" data-slide="2">
+  <h2 class="reveal">Local dev is broken.</h2>
+  <div class="terminal reveal delay-2">
+    <div class="terminal-bar">
+      <span class="terminal-dot red"></span>
+      <span class="terminal-dot yellow"></span>
+      <span class="terminal-dot green"></span>
+      <span class="terminal-title">your-morning.sh</span>
+    </div>
+    <div class="terminal-body">
+      <span class="prompt">$</span> <span class="cmd">docker-compose up</span><br>
+      <span class="red">ERROR: for postgres  Cannot start service postgres:</span><br>
+      <span class="red">Ports are not available: listen tcp 0.0.0.0:5432: bind: address already in use</span><br>
+      <br>
+      <span class="prompt">$</span> <span class="cmd">lsof -i :3000</span><br>
+      <span class="muted">node    12847  you   23u  IPv4  TCP *:3000 (LISTEN)</span><br>
+      <span class="prompt">$</span> <span class="cmd">kill -9 12847</span><br>
+      <br>
+      <span class="prompt">$</span> <span class="cmd">npm run dev:backend &</span><br>
+      <span class="prompt">$</span> <span class="cmd">npm run dev:frontend &</span><br>
+      <span class="prompt">$</span> <span class="cmd">npm run dev:admin &</span><br>
+      <br>
+      <span class="dim">// wait, was the backend on 3001 or 8080?</span><br>
+      <span class="dim">// is the DB even running?</span><br>
+      <span class="dim">// why is HTTPS not working again?</span><br>
+      <br>
+      <span class="red">ERR_SSL_PROTOCOL_ERROR</span><br>
+      <span class="muted">localhost:3001 &mdash; connection refused</span><br>
+      <span class="amber">Mixed Content: 'https://...' was loaded over HTTPS, but requested 'http://localhost:3001/api'</span>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 3: ONE COMMAND ========== -->
+<section class="slide" data-slide="3">
+  <h2 class="reveal">One command.</h2>
+  <div class="terminal reveal delay-2">
+    <div class="terminal-bar">
+      <span class="terminal-dot red"></span>
+      <span class="terminal-dot yellow"></span>
+      <span class="terminal-dot green"></span>
+      <span class="terminal-title">zsh &mdash; veld</span>
+    </div>
+    <div class="terminal-body">
+      <span class="prompt">$</span> <span class="cmd">veld start --preset fullstack --name my-feature</span><br>
+      <br>
+      <span class="dim">[1/4]</span> database:docker &nbsp;&nbsp;<span class="green">&#10003; healthy</span><br>
+      <span class="dim">[2/4]</span> backend:local &nbsp;&nbsp;&nbsp;<span class="green">&#10003; healthy</span><br>
+      <span class="dim">[3/4]</span> frontend:local &nbsp;&nbsp;<span class="green">&#10003; healthy</span><br>
+      <span class="dim">[4/4]</span> admin:local &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="green">&#10003; healthy</span><br>
+      <br>
+      <span class="green">&#9679;</span> Environment ready<br>
+      <br>
+      &nbsp;&nbsp;<span class="green">https://frontend.my-feature.my-project.localhost</span><br>
+      &nbsp;&nbsp;<span class="green">https://admin.my-feature.my-project.localhost</span><br>
+      &nbsp;&nbsp;<span class="green">https://backend.my-feature.my-project.localhost</span><br>
+      <br>
+      <span class="muted">Streaming logs... (Ctrl+C to stop)</span>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 4: REAL HTTPS ========== -->
+<section class="slide" data-slide="4">
+  <h2 class="reveal">Real HTTPS. Zero config.</h2>
+
+  <div class="vs-grid reveal delay-2">
+    <div>
+      <div class="vs-label bad">Before</div>
+      <div class="browser">
+        <div class="browser-bar">
+          <div class="browser-dots">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+          </div>
+          <div class="browser-url">
+            <span style="color:var(--red); font-size:0.8rem;">&#9888;</span>
+            <span style="color:var(--text-muted);">http://localhost:3001</span>
+          </div>
+        </div>
+        <div class="browser-body" style="color:var(--red); font-size:0.8rem;">
+          Mixed Content blocked &middot; CORS errors &middot; No TLS
+        </div>
+      </div>
+    </div>
+
+    <div class="vs-divider">vs</div>
+
+    <div>
+      <div class="vs-label good">Veld</div>
+      <div class="browser">
+        <div class="browser-bar">
+          <div class="browser-dots">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+          </div>
+          <div class="browser-url">
+            <span class="lock">&#128274;</span>
+            <span style="color:var(--green);">https://api.my-feature.my-project.localhost</span>
+          </div>
+        </div>
+        <div class="browser-body" style="color:var(--green); font-size:0.8rem;">
+          Auto DNS &middot; Auto TLS &middot; Auto ports &middot; Just works
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="reveal delay-4" style="margin-top: 48px; display: flex; gap: 32px; flex-wrap: wrap; justify-content: center;">
+    <div style="text-align:center;">
+      <div style="font-size:2rem; margin-bottom:4px; color:var(--text);">DNS</div>
+      <div style="font-size:0.8rem; color:var(--text-muted);">RFC 6761 .localhost<br>No hosts file edits</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:2rem; margin-bottom:4px; color:var(--text);">TLS</div>
+      <div style="font-size:0.8rem; color:var(--text-muted);">mkcert auto-certs<br>Trusted by browsers</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:2rem; margin-bottom:4px; color:var(--text);">Ports</div>
+      <div style="font-size:0.8rem; color:var(--text-muted);">Auto-allocated<br>You never see them</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 5: YOUR STACK, ONE FILE ========== -->
+<section class="slide" data-slide="5">
+  <h2 class="reveal">Your stack. One file.</h2>
+
+  <div class="code-block reveal delay-2">
+    <span class="punct">{</span><br>
+    &nbsp;&nbsp;<span class="key">"name"</span><span class="punct">:</span> <span class="str">"my-project"</span><span class="punct">,</span><br>
+    &nbsp;&nbsp;<span class="key">"url_template"</span><span class="punct">:</span> <span class="str">"{service}.{branch ?? run}.my-project.localhost"</span><span class="punct">,</span><br>
+    <br>
+    &nbsp;&nbsp;<span class="key">"presets"</span><span class="punct">:</span> <span class="punct">{</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"fullstack"</span><span class="punct">:</span> <span class="punct">[</span><span class="str">"frontend:local"</span><span class="punct">,</span> <span class="str">"admin:local"</span><span class="punct">]</span><br>
+    &nbsp;&nbsp;<span class="punct">},</span><br>
+    <br>
+    &nbsp;&nbsp;<span class="key">"nodes"</span><span class="punct">:</span> <span class="punct">{</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"database"</span><span class="punct">:</span> <span class="punct">{</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"command"</span><span class="punct">:</span> <span class="str">"docker run ... -p <span class="var">${veld.port}</span>:5432 postgres:16"</span><span class="punct">,</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"health_check"</span><span class="punct">:</span> <span class="punct">{</span> <span class="key">"type"</span><span class="punct">:</span> <span class="str">"port"</span> <span class="punct">}</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="punct">},</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"backend"</span><span class="punct">:</span> <span class="punct">{</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"depends_on"</span><span class="punct">:</span> <span class="punct">{</span> <span class="key">"database"</span><span class="punct">:</span> <span class="str">"docker"</span> <span class="punct">},</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"health_check"</span><span class="punct">:</span> <span class="punct">{</span> <span class="key">"type"</span><span class="punct">:</span> <span class="str">"http"</span><span class="punct">,</span> <span class="key">"path"</span><span class="punct">:</span> <span class="str">"/health"</span> <span class="punct">}</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="punct">},</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"frontend"</span><span class="punct">:</span> <span class="punct">{</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span class="key">"depends_on"</span><span class="punct">:</span> <span class="punct">{</span> <span class="key">"backend"</span><span class="punct">:</span> <span class="str">"local"</span> <span class="punct">}</span><br>
+    &nbsp;&nbsp;&nbsp;&nbsp;<span class="punct">}</span><br>
+    &nbsp;&nbsp;<span class="punct">}</span><br>
+    <span class="punct">}</span>
+  </div>
+
+  <div class="reveal delay-4" style="margin-top: 32px; display: flex; gap: 40px; flex-wrap: wrap; justify-content: center;">
+    <span style="font-size:0.85rem; color:var(--text-muted);">Dependency graph</span>
+    <span style="font-size:0.85rem; color:var(--text-muted);">Health checks</span>
+    <span style="font-size:0.85rem; color:var(--text-muted);">URL templates</span>
+    <span style="font-size:0.85rem; color:var(--text-muted);">Presets</span>
+    <span style="font-size:0.85rem; color:var(--text-muted);">Variable wiring</span>
+  </div>
+</section>
+
+<!-- ========== SLIDE 6: VS THE REST ========== -->
+<section class="slide" data-slide="6">
+  <h2 class="reveal">vs the rest.</h2>
+
+  <table class="comp-table reveal delay-2">
+    <thead>
+      <tr>
+        <th></th>
+        <th>Native Speed</th>
+        <th>Real HTTPS</th>
+        <th>Auto DNS</th>
+        <th>Dep Graph</th>
+        <th>Health Checks</th>
+        <th>No Containers</th>
+        <th>Works Offline</th>
+        <th>Single Binary</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr class="veld-row">
+        <td>Veld</td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">Two-phase</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+      </tr>
+      <tr>
+        <td>Docker Compose</td>
+        <td><span class="no">VM layer</span></td>
+        <td><span class="no">Manual</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="partial">Basic</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="no">&mdash;</span></td>
+      </tr>
+      <tr>
+        <td>Tilt</td>
+        <td><span class="no">K8s</span></td>
+        <td><span class="no">Manual</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="partial">Partial</span></td>
+        <td><span class="no">&mdash;</span></td>
+      </tr>
+      <tr>
+        <td>Portless</td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="partial">Opt-in</span></td>
+        <td><span class="partial">.localhost</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="no">Node.js</span></td>
+      </tr>
+      <tr>
+        <td>Manual Scripts</td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="no">DIY</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="no">&mdash;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="yes">&#10003;</span></td>
+        <td><span class="no">&mdash;</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div class="reveal delay-4" style="margin-top: 36px; display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; max-width: 900px; width: 100%;">
+    <div style="background:var(--bg-card); border:1px solid #1a1a1a; border-radius:10px; padding:16px 20px;">
+      <div style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;">Portless</div>
+      <div style="font-size:0.88rem; color:var(--text-dim);">URL proxy only. No process lifecycle. No dependency graphs. No health checks. Node.js runtime.</div>
+    </div>
+    <div style="background:var(--bg-card); border:1px solid #1a1a1a; border-radius:10px; padding:16px 20px;">
+      <div style="font-size:0.75rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;">Docker Compose</div>
+      <div style="font-size:0.88rem; color:var(--text-dim);">Everything in containers. Slow rebuilds. No native HTTPS. Port mapping hell. YAML complexity.</div>
+    </div>
+    <div style="background:var(--bg-card); border:1px solid #1a1a1a; border-radius:10px; padding:16px 20px;">
+      <div style="font-size:0.75rem; color:var(--green); text-transform:uppercase; letter-spacing:0.08em; margin-bottom:6px;">Veld</div>
+      <div style="font-size:0.88rem; color:var(--text);">Full orchestrator. Native speed. Real HTTPS. Dependency graphs. Two-phase health checks. Single Rust binary.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 7: DEVELOPER EXPERIENCE ========== -->
+<section class="slide" data-slide="7">
+  <h2 class="reveal">Developer experience.</h2>
+
+  <div class="dx-grid">
+    <div class="dx-card reveal delay-1">
+      <h4>$ veld status</h4>
+      <span class="code-inline"><span style="color:var(--text-muted)">NODE&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;STATUS&nbsp;&nbsp;&nbsp;&nbsp;HEALTH&nbsp;&nbsp;&nbsp;&nbsp;URL</span><br>database&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">running</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">healthy</span>&nbsp;&nbsp;&nbsp;&mdash;<br>backend&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">running</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">healthy</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">https://backend.m...</span><br>frontend&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">running</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">healthy</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">https://frontend.m...</span><br>admin&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">running</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">healthy</span>&nbsp;&nbsp;&nbsp;<span style="color:var(--green)">https://admin.m...</span></span>
+    </div>
+    <div class="dx-card reveal delay-2">
+      <h4>$ veld logs -f</h4>
+      <span class="code-inline"><span style="color:var(--text-muted)">[08:30:01]</span> <span style="color:var(--blue)">[backend]</span>&nbsp;&nbsp;Server listening<br><span style="color:var(--text-muted)">[08:30:02]</span> <span style="color:var(--purple)">[frontend]</span> Compiled in 1.2s<br><span style="color:var(--text-muted)">[08:30:03]</span> <span style="color:var(--amber)">[admin]</span>&nbsp;&nbsp;&nbsp;&nbsp;Ready<br><span style="color:var(--text-muted)">[08:30:04]</span> <span style="color:var(--blue)">[backend]</span>&nbsp;&nbsp;GET /api/users <span style="color:var(--green)">200</span></span>
+    </div>
+    <div class="dx-card reveal delay-3">
+      <h4>Interactive presets</h4>
+      <span class="code-inline"><span style="color:var(--text-muted)">$</span> veld start<br><br><span style="color:var(--text-muted)">Select a preset:</span><br><span style="color:var(--green)">&#9656;</span> fullstack<br>&nbsp;&nbsp;ui-only<br>&nbsp;&nbsp;backend-dev</span>
+    </div>
+    <div class="dx-card reveal delay-4">
+      <h4>30-second install</h4>
+      <span class="code-inline"><span style="color:var(--text-muted)">$</span> curl -fsSL https://get.veld.dev | bash<br><br><span style="color:var(--green)">&#10003;</span> veld installed<br><span style="color:var(--green)">&#10003;</span> caddy installed<br><span style="color:var(--green)">&#10003;</span> mkcert CA trusted<br><span style="color:var(--green)">&#10003;</span> veld-helper running<br><br><span style="color:var(--text-muted)">Ready. Run `veld init` to start.</span></span>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 8: AGENTIC FUTURE ========== -->
+<section class="slide" data-slide="8">
+  <h2 class="reveal">The agentic future.</h2>
+
+  <div class="vision-stack">
+    <div class="vision-line reveal delay-1">AI agents spin up environments.</div>
+    <div class="vision-line reveal delay-2">One veld.json. Any machine.</div>
+    <div class="vision-line reveal delay-3">Any agent.</div>
+    <div class="vision-line dim reveal delay-4" style="margin-top: 24px;">JSON in. HTTPS URLs out.</div>
+    <div class="vision-line dim reveal delay-5">Structured, deterministic, machine-readable.</div>
+    <div class="vision-line dim reveal delay-6">The runtime layer for autonomous development.</div>
+  </div>
+
+  <div class="terminal reveal delay-7" style="margin-top: 48px; max-width: 620px;">
+    <div class="terminal-bar">
+      <span class="terminal-dot red"></span>
+      <span class="terminal-dot yellow"></span>
+      <span class="terminal-dot green"></span>
+      <span class="terminal-title">claude-agent</span>
+    </div>
+    <div class="terminal-body">
+      <span class="dim"># Agent reads veld.json, runs one command</span><br>
+      <span class="prompt">$</span> <span class="cmd">veld start --preset fullstack -d</span><br>
+      <span class="prompt">$</span> <span class="cmd">veld urls --json</span><br>
+      <span class="muted">{"frontend": "https://frontend.test.my-project.localhost"}</span><br>
+      <br>
+      <span class="dim"># Agent tests, iterates, ships</span>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 9: PROSPERITY ========== -->
+<section class="slide" data-slide="9">
+  <div class="reveal">
+    <div style="font-size:0.8rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:0.15em; margin-bottom:32px;">Built by</div>
+    <div class="company-name">Prosperity Solutions</div>
+  </div>
+  <div class="company-tagline reveal delay-2">
+    We don't depend on platforms.<br>We build them.
+  </div>
+  <div class="reveal delay-4" style="margin-top: 48px; display: flex; gap: 48px; flex-wrap: wrap; justify-content: center;">
+    <div style="text-align:center;">
+      <div style="font-size:1.4rem; font-weight:700; color:var(--text);">Open Source</div>
+      <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">MIT Licensed</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:1.4rem; font-weight:700; color:var(--text);">Rust</div>
+      <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">Zero runtime deps</div>
+    </div>
+    <div style="text-align:center;">
+      <div style="font-size:1.4rem; font-weight:700; color:var(--text);">Local-first</div>
+      <div style="font-size:0.8rem; color:var(--text-muted); margin-top:4px;">No vendor lock-in</div>
+    </div>
+  </div>
+</section>
+
+<!-- ========== SLIDE 10: CLOSER ========== -->
+<section class="slide slide-finale" data-slide="10">
+  <div class="reveal">
+    <div class="finale-line">Stop managing ports.<br>Start building.</div>
+  </div>
+  <div class="reveal delay-3">
+    <code class="finale-cmd">curl -fsSL https://get.veld.dev | bash</code>
+  </div>
+</section>
+
+<script>
+// ---- Grid background animation ----
+(function() {
+  var canvas = document.getElementById('bg-canvas');
+  var ctx = canvas.getContext('2d');
+  var w, h, dots = [];
+  var DOT_SPACING = 60;
+  var DOT_RADIUS = 0.6;
+  var MOUSE_RADIUS = 200;
+  var mouseX = -1000, mouseY = -1000;
+
+  function resize() {
+    w = canvas.width = window.innerWidth;
+    h = canvas.height = window.innerHeight;
+    initDots();
+  }
+
+  function initDots() {
+    dots = [];
+    for (var x = DOT_SPACING; x < w; x += DOT_SPACING) {
+      for (var y = DOT_SPACING; y < h; y += DOT_SPACING) {
+        dots.push({ x: x, y: y });
+      }
+    }
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, w, h);
+    var scrollY = window.scrollY;
+    for (var i = 0; i < dots.length; i++) {
+      var d = dots[i];
+      var screenY = d.y;
+      var dx = d.x - mouseX;
+      var dy = screenY - (mouseY + scrollY % DOT_SPACING);
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var alpha = 0.06;
+      if (dist < MOUSE_RADIUS) {
+        alpha = 0.06 + 0.15 * (1 - dist / MOUSE_RADIUS);
+      }
+      ctx.beginPath();
+      ctx.arc(d.x, screenY, DOT_RADIUS, 0, Math.PI * 2);
+      ctx.fillStyle = 'rgba(255,255,255,' + alpha + ')';
+      ctx.fill();
+    }
+    requestAnimationFrame(draw);
+  }
+
+  window.addEventListener('resize', resize);
+  window.addEventListener('mousemove', function(e) {
+    mouseX = e.clientX;
+    mouseY = e.clientY;
+  });
+
+  resize();
+  draw();
+})();
+
+// ---- Intersection Observer for reveal animations ----
+(function() {
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        entry.target.classList.add('visible');
+      }
+    });
+  }, { threshold: 0.15 });
+
+  document.querySelectorAll('.reveal').forEach(function(el) {
+    observer.observe(el);
+  });
+})();
+
+// ---- Progress bar & slide counter ----
+(function() {
+  var progress = document.getElementById('progress');
+  var counter = document.getElementById('slide-counter');
+  var slides = document.querySelectorAll('.slide');
+  var total = slides.length;
+
+  function update() {
+    var scrollTop = window.scrollY;
+    var docHeight = document.documentElement.scrollHeight - window.innerHeight;
+    var pct = docHeight > 0 ? (scrollTop / docHeight) * 100 : 0;
+    progress.style.width = pct + '%';
+
+    var current = 1;
+    for (var i = slides.length - 1; i >= 0; i--) {
+      if (slides[i].getBoundingClientRect().top <= window.innerHeight * 0.5) {
+        current = i + 1;
+        break;
+      }
+    }
+    counter.textContent = current + ' / ' + total;
+  }
+
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+})();
+
+// ---- Keyboard navigation ----
+(function() {
+  var slides = document.querySelectorAll('.slide');
+  var currentIdx = 0;
+
+  function getCurrent() {
+    for (var i = slides.length - 1; i >= 0; i--) {
+      if (slides[i].getBoundingClientRect().top <= window.innerHeight * 0.5) {
+        return i;
+      }
+    }
+    return 0;
+  }
+
+  function goTo(idx) {
+    if (idx < 0) idx = 0;
+    if (idx >= slides.length) idx = slides.length - 1;
+    slides[idx].scrollIntoView({ behavior: 'smooth' });
+    currentIdx = idx;
+  }
+
+  document.addEventListener('keydown', function(e) {
+    currentIdx = getCurrent();
+    if (e.key === 'ArrowDown' || e.key === 'ArrowRight' || e.key === ' ' || e.key === 'PageDown') {
+      e.preventDefault();
+      goTo(currentIdx + 1);
+    } else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft' || e.key === 'PageUp') {
+      e.preventDefault();
+      goTo(currentIdx - 1);
+    } else if (e.key === 'Home') {
+      e.preventDefault();
+      goTo(0);
+    } else if (e.key === 'End') {
+      e.preventDefault();
+      goTo(slides.length - 1);
+    }
+  });
+})();
+</script>
+
+</body>
+</html>

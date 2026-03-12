@@ -108,6 +108,21 @@ impl StepResult {
     }
 }
 
+/// Result from the Hammerspoon install step — carries extra info so the CLI
+/// can interactively offer to patch `init.lua`.
+#[derive(Debug)]
+pub struct HammerspoonResult {
+    pub message: String,
+    /// If `true`, `require("hs.ipc")` is missing from init.lua.
+    pub needs_ipc: bool,
+    /// If `true`, `hs.loadSpoon("Veld")` is missing from init.lua.
+    pub needs_load_spoon: bool,
+    /// Path to the user's init.lua (may not exist yet).
+    pub init_lua_path: PathBuf,
+    /// Real user name (for chown after editing).
+    pub user: String,
+}
+
 // ---------------------------------------------------------------------------
 // Setup steps
 // ---------------------------------------------------------------------------
@@ -802,40 +817,10 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         let _ = std::fs::remove_file(&socket);
     }
 
-    // Remove Hammerspoon integration (best-effort).
+    // Remove Hammerspoon Spoon (best-effort).
     uninstall_hammerspoon().await;
 
     Ok(())
-}
-
-/// Remove the Hammerspoon integration (best-effort, never fails).
-async fn uninstall_hammerspoon() {
-    let home = match resolve_real_user_macos() {
-        Ok((_, _, h)) => h,
-        Err(_) => return,
-    };
-
-    let lua_path = home.join(".hammerspoon/menu/veld.lua");
-    if lua_path.exists() {
-        let _ = std::fs::remove_file(&lua_path);
-    }
-
-    // Remove require("menu.veld") from workspace-manager.lua or init.lua.
-    for config_file in &[
-        home.join(".hammerspoon/workspace-manager.lua"),
-        home.join(".hammerspoon/init.lua"),
-    ] {
-        if let Ok(content) = std::fs::read_to_string(config_file) {
-            if content.contains("menu.veld") {
-                let cleaned: String = content
-                    .lines()
-                    .filter(|line| !line.contains("menu.veld"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let _ = std::fs::write(config_file, cleaned + "\n");
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1006,152 +991,160 @@ fn resolve_real_user_macos() -> Result<(String, String, PathBuf), anyhow::Error>
 }
 
 // ---------------------------------------------------------------------------
-// Hammerspoon integration (macOS only, optional)
+// Hammerspoon Spoon integration (macOS only, optional)
 // ---------------------------------------------------------------------------
 
-/// The embedded Lua module for the Hammerspoon menu bar integration.
-const HAMMERSPOON_LUA: &str = include_str!("../../../integrations/hammerspoon/veld.lua");
+/// The embedded Spoon init.lua for the Hammerspoon menu bar integration.
+const HAMMERSPOON_SPOON_LUA: &str =
+    include_str!("../../../integrations/hammerspoon/Veld.spoon/init.lua");
 
-/// Marker we look for / insert in workspace-manager.lua or init.lua.
-const HS_REQUIRE: &str = "require(\"menu.veld\")";
-
-/// Install the Hammerspoon menu bar integration if Hammerspoon is present.
+/// Install the Veld Spoon into ~/.hammerspoon/Spoons/ and load it via `hs` CLI.
 ///
-/// This is best-effort and never fails setup. It:
-/// 1. Writes `~/.hammerspoon/menu/veld.lua`
-/// 2. Registers the module in workspace-manager.lua (if it exists) or init.lua
-/// 3. Reloads Hammerspoon
-pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
-    let (_user, _uid, home) = resolve_real_user_macos()?;
+/// Returns a `HammerspoonResult` with details about what the CLI should prompt
+/// the user about (IPC module, loadSpoon line).
+pub async fn install_hammerspoon() -> Result<HammerspoonResult, anyhow::Error> {
+    let (user, uid, home) = resolve_real_user_macos()?;
     let hs_dir = home.join(".hammerspoon");
+    let user_init_lua = hs_dir.join("init.lua");
 
     if !hs_dir.exists() {
-        return Ok(StepResult::success(
-            "Hammerspoon detected but not configured (~/.hammerspoon missing)",
-        ));
+        return Ok(HammerspoonResult {
+            message: "Hammerspoon detected but not configured (~/.hammerspoon missing)".into(),
+            needs_ipc: false,
+            needs_load_spoon: false,
+            init_lua_path: user_init_lua,
+            user,
+        });
     }
 
-    // Step 1: Write the Lua module.
-    let menu_dir = hs_dir.join("menu");
-    std::fs::create_dir_all(&menu_dir).context("failed to create ~/.hammerspoon/menu")?;
-    let lua_path = menu_dir.join("veld.lua");
-    std::fs::write(&lua_path, HAMMERSPOON_LUA).context("failed to write veld.lua")?;
+    // Write the Spoon to the standard Spoons directory.
+    let spoon_dir = hs_dir.join("Spoons").join("Veld.spoon");
+    std::fs::create_dir_all(&spoon_dir).context("failed to create Veld.spoon directory")?;
+    let init_lua = spoon_dir.join("init.lua");
+    std::fs::write(&init_lua, HAMMERSPOON_SPOON_LUA)
+        .context("failed to write Veld.spoon/init.lua")?;
 
     // Fix ownership (setup runs as root via sudo).
-    fix_owner(&lua_path, &_user);
-    fix_owner(&menu_dir, &_user);
+    fix_owner_recursive(&spoon_dir, &user);
 
-    // Step 2: Register the module.
-    let ws_manager = hs_dir.join("workspace-manager.lua");
-    let init_lua = hs_dir.join("init.lua");
+    // Check what's in the user's init.lua.
+    let init_contents = std::fs::read_to_string(&user_init_lua).unwrap_or_default();
+    let needs_ipc = !init_contents.contains("hs.ipc");
+    let needs_load_spoon = !init_contents.contains("loadSpoon(\"Veld\")")
+        && !init_contents.contains("loadSpoon('Veld')");
 
-    let registered = if ws_manager.exists() {
-        register_in_workspace_manager(&ws_manager)?
-    } else if init_lua.exists() {
-        register_in_init_lua(&init_lua)?
+    // Try to load the Spoon via `hs` CLI (IPC).
+    let loaded = load_spoon_via_hs(&uid).await;
+
+    let message = if loaded {
+        "Veld.spoon installed and loaded".into()
+    } else if needs_ipc {
+        "Veld.spoon installed (Hammerspoon IPC not enabled)".into()
     } else {
-        false
+        "Veld.spoon installed".into()
     };
 
-    // Step 3: Reload Hammerspoon.
-    reload_hammerspoon(&_uid).await;
+    Ok(HammerspoonResult {
+        message,
+        needs_ipc,
+        needs_load_spoon,
+        init_lua_path: user_init_lua,
+        user,
+    })
+}
 
-    let detail = if registered {
-        "installed and registered"
+/// Patch the user's Hammerspoon init.lua to add IPC and/or Veld Spoon loading.
+///
+/// Called by the CLI after the user confirms. Prepends the lines at the top of
+/// the file to ensure they run early.
+pub fn patch_hammerspoon_init_lua(result: &HammerspoonResult) -> Result<(), anyhow::Error> {
+    let path = &result.init_lua_path;
+    let existing = std::fs::read_to_string(path).unwrap_or_default();
+
+    let mut prepend = String::new();
+    if result.needs_ipc {
+        prepend.push_str("require(\"hs.ipc\")\n");
+    }
+    if result.needs_load_spoon {
+        prepend.push_str("hs.loadSpoon(\"Veld\"):start()\n");
+    }
+
+    if prepend.is_empty() {
+        return Ok(());
+    }
+
+    // Add a blank line between our additions and existing content.
+    let new_contents = if existing.is_empty() {
+        prepend
     } else {
-        "updated (already registered)"
+        format!("{prepend}\n{existing}")
     };
 
-    Ok(StepResult::success(format!(
-        "Hammerspoon menu bar integration {detail}"
-    )))
+    std::fs::write(path, &new_contents).context("failed to write Hammerspoon init.lua")?;
+    fix_owner_recursive(path.as_ref(), &result.user);
+
+    Ok(())
 }
 
-/// Register `require("menu.veld")` in workspace-manager.lua's sections table.
-fn register_in_workspace_manager(path: &Path) -> Result<bool, anyhow::Error> {
-    let content = std::fs::read_to_string(path).context("failed to read workspace-manager.lua")?;
+/// Remove the Veld Spoon (best-effort, called during uninstall).
+async fn uninstall_hammerspoon() {
+    let (_, uid, home) = match resolve_real_user_macos() {
+        Ok(t) => t,
+        Err(_) => return,
+    };
 
-    if content.contains(HS_REQUIRE) {
-        return Ok(false); // Already registered.
-    }
-
-    // Find the sections table closing brace and insert before it.
-    // Pattern: look for the last `}` that closes the `local sections = {` table.
-    if let Some(pos) = content.find("local sections = {") {
-        // Find the matching closing `}`
-        if let Some(close) = content[pos..].find('}') {
-            let insert_at = pos + close;
-            let new_content = format!(
-                "{}    {},\n{}",
-                &content[..insert_at],
-                HS_REQUIRE,
-                &content[insert_at..]
-            );
-            std::fs::write(path, new_content).context("failed to update workspace-manager.lua")?;
-            return Ok(true);
-        }
-    }
-
-    Ok(false)
-}
-
-/// Register a standalone menubar in init.lua as a fallback.
-fn register_in_init_lua(path: &Path) -> Result<bool, anyhow::Error> {
-    let content = std::fs::read_to_string(path).context("failed to read init.lua")?;
-
-    if content.contains("menu.veld") {
-        return Ok(false); // Already registered.
-    }
-
-    let snippet = format!(
-        "\n-- Veld environment menu bar (installed by veld setup)\n\
-         veldMenu = {}:start()\n",
-        HS_REQUIRE
-    );
-    let new_content = format!("{content}{snippet}");
-    std::fs::write(path, new_content).context("failed to update init.lua")?;
-    Ok(true)
-}
-
-/// Fix file ownership to the real user (since setup runs as root).
-fn fix_owner(path: &Path, user: &str) {
-    let _ = std::process::Command::new("chown")
-        .args([
-            &format!("{user}:staff"),
-            &path.to_string_lossy().to_string(),
-        ])
-        .output();
-}
-
-/// Reload Hammerspoon configuration via the `hs` CLI or AppleScript.
-async fn reload_hammerspoon(uid: &str) {
-    // Try the `hs` CLI tool first (if user has installed it).
-    let result = Command::new("launchctl")
-        .args(["asuser", uid, "hs", "-c", "hs.reload()"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    if result.is_ok_and(|s| s.success()) {
-        return;
-    }
-
-    // Fall back to AppleScript.
+    // Stop the running Spoon so the menu bar icon disappears immediately.
+    let stop_lua = r#"if spoon.Veld then spoon.Veld:stop() end"#;
     let _ = Command::new("launchctl")
-        .args([
-            "asuser",
-            uid,
-            "osascript",
-            "-e",
-            "tell application \"Hammerspoon\" to execute lua code \"hs.reload()\"",
-        ])
+        .args(["asuser", &uid, "/usr/local/bin/hs", "-c", stop_lua])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
         .await;
+
+    let spoon_dir = home.join(".hammerspoon/Spoons/Veld.spoon");
+    if spoon_dir.exists() {
+        let _ = std::fs::remove_dir_all(&spoon_dir);
+    }
+}
+
+/// Load the Veld Spoon in the running Hammerspoon instance via `hs -c`.
+async fn load_spoon_via_hs(uid: &str) -> bool {
+    let lua_code = r#"hs.loadSpoon("Veld"); spoon.Veld:start()"#;
+
+    // Try direct `hs` CLI first.
+    let direct = Command::new("hs")
+        .args(["-c", lua_code])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    if direct.is_ok_and(|s| s.success()) {
+        return true;
+    }
+
+    // Try via launchctl asuser (we're running as root under sudo).
+    let via_launchctl = Command::new("launchctl")
+        .args(["asuser", uid, "/usr/local/bin/hs", "-c", lua_code])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
+
+    via_launchctl.is_ok_and(|s| s.success())
+}
+
+/// Recursively fix ownership of a path to the real user.
+fn fix_owner_recursive(path: &Path, user: &str) {
+    let _ = std::process::Command::new("chown")
+        .arg("-R")
+        .arg(format!("{user}:staff"))
+        .arg(path)
+        .output();
 }
 
 /// Run a command and bail on failure.

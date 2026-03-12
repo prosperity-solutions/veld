@@ -86,14 +86,66 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 6: Install Hammerspoon integration (optional, non-fatal).
+    // Step 6: Install Hammerspoon Spoon (optional, non-fatal).
     if has_hammerspoon {
-        print_step(6, total, "Installing Hammerspoon integration...");
+        print_step(6, total, "Installing Hammerspoon Spoon...");
         match veld_core::setup::install_hammerspoon().await {
-            Ok(info) => print_step_ok(&info.message),
+            Ok(hs_result) => {
+                print_step_ok(&hs_result.message);
+
+                // Offer to patch init.lua if IPC or loadSpoon lines are missing.
+                if hs_result.needs_ipc || hs_result.needs_load_spoon {
+                    println!();
+                    let mut lines_to_add = Vec::new();
+                    if hs_result.needs_ipc {
+                        lines_to_add.push("require(\"hs.ipc\")");
+                    }
+                    if hs_result.needs_load_spoon {
+                        lines_to_add.push("hs.loadSpoon(\"Veld\"):start()");
+                    }
+
+                    eprintln!(
+                        "  {} The following lines are needed in {}:",
+                        output::bold("Hammerspoon:"),
+                        hs_result.init_lua_path.display()
+                    );
+                    for line in &lines_to_add {
+                        eprintln!("    {}", output::green(line));
+                    }
+                    eprintln!();
+                    eprint!("  Add them automatically? [Y/n] ");
+
+                    let mut answer = String::new();
+                    let _ = std::io::stdin().read_line(&mut answer);
+                    let answer = answer.trim().to_lowercase();
+
+                    if answer.is_empty() || answer == "y" || answer == "yes" {
+                        match veld_core::setup::patch_hammerspoon_init_lua(&hs_result) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "  {} {}",
+                                    output::checkmark(),
+                                    output::green(
+                                        "init.lua updated — reload Hammerspoon to activate"
+                                    )
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "  {} {}",
+                                    output::cross(),
+                                    output::red(&format!("failed to update init.lua: {e}"))
+                                );
+                            }
+                        }
+                    } else {
+                        eprintln!("  Skipped. Add the lines manually when ready.");
+                    }
+                }
+            }
             Err(e) => {
                 // Never fail setup for a menu bar widget.
-                print_step_ok(&format!("skipped ({})", e));
+                print_step_ok(&format!("skipped ({e})"))
             }
         }
     }
