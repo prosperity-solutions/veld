@@ -591,6 +591,9 @@ impl Orchestrator {
                     let _ = self.helper_client.remove_route(&route_id).await;
                 }
 
+                // Run on_stop hook if defined.
+                self.run_on_stop_hook(node_state).await;
+
                 node_state.status = NodeStatus::Stopped;
                 node_state.pid = None;
             }
@@ -607,6 +610,77 @@ impl Orchestrator {
         self.remove_from_registry(run_name);
 
         Ok(StopResult::Stopped)
+    }
+
+    /// Run the `on_stop` hook for a node if one is defined in the config.
+    async fn run_on_stop_hook(&self, node_state: &NodeState) {
+        let variant_cfg = match self
+            .config
+            .nodes
+            .get(&node_state.node_name)
+            .and_then(|n| n.variants.get(&node_state.variant))
+        {
+            Some(cfg) => cfg,
+            None => return,
+        };
+
+        let on_stop_cmd = match variant_cfg.on_stop.as_deref() {
+            Some(cmd) => cmd,
+            None => return,
+        };
+
+        tracing::info!(
+            node = node_state.node_name,
+            variant = node_state.variant,
+            "running on_stop hook"
+        );
+
+        // Build a variable context with the node's outputs so the hook
+        // can reference values produced during start (e.g. container names).
+        let mut ctx = VariableContext::new();
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        ctx.set_builtin("project", self.config.name.clone());
+        for (k, v) in &node_state.outputs {
+            ctx.set_builtin(k, v.clone());
+            ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
+        }
+        if let Some(port) = node_state.port {
+            ctx.set_builtin("port", port.to_string());
+        }
+
+        let resolved_cmd = match crate::variables::interpolate(on_stop_cmd, &ctx) {
+            Ok(cmd) => cmd,
+            Err(e) => {
+                tracing::warn!(
+                    node = node_state.node_name,
+                    error = %e,
+                    "failed to resolve on_stop command variables"
+                );
+                return;
+            }
+        };
+
+        // Build env from the variant config.
+        let env = build_env(variant_cfg.env.as_ref(), &ctx).unwrap_or_default();
+
+        match process::run_bash(&resolved_cmd, &self.project_root, &env).await {
+            Ok(result) => {
+                if result.exit_code != 0 {
+                    tracing::warn!(
+                        node = node_state.node_name,
+                        exit_code = result.exit_code,
+                        "on_stop hook exited with non-zero code"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    node = node_state.node_name,
+                    error = %e,
+                    "on_stop hook failed to execute"
+                );
+            }
+        }
     }
 
     /// Remove a run from the global registry.

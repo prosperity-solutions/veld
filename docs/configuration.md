@@ -103,6 +103,22 @@ Specifies which variant to use when none is explicitly selected. Optional -- if 
 
 If a node has multiple variants and no `default_variant` is set, the user must explicitly specify which variant to use.
 
+### `hidden`
+
+When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes still participate fully in the dependency graph — they are started, stopped, and have their `on_stop` hooks executed like any other node. This is useful for internal setup tasks (certificate generation, database seeding, etc.) that end users don't need to see.
+
+```json
+"generate-certs": {
+  "hidden": true,
+  "variants": {
+    "default": {
+      "type": "bash",
+      "command": "./scripts/generate-certs.sh"
+    }
+  }
+}
+```
+
 ### `url_template` (node-level)
 
 Overrides the project-level `url_template` for all variants of this node. See [URL Template Cascade](#url-template-cascade) for resolution order.
@@ -137,6 +153,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
+| `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
 | `verify`            | string           | No       | `bash` only    | Idempotency verification command                      |
 
 ### `type`
@@ -361,6 +378,39 @@ The verify command receives the previous run's output variables as environment v
   "script": "./scripts/clone-db.sh",
   "verify": "./scripts/verify-db.sh",
   "outputs": ["DATABASE_URL"]
+}
+```
+
+### `on_stop`
+
+A teardown command that runs when `veld stop` is called. Executed in reverse dependency order, after the process is killed (for `start_server` nodes) but before state is cleaned up.
+
+This is especially useful for `bash` nodes that provision external resources during start — databases, Docker containers, temporary credentials — that need explicit cleanup.
+
+```json
+{
+  "type": "bash",
+  "command": "docker run -d --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16",
+  "on_stop": "docker rm -f veld-db-${veld.run}",
+  "outputs": ["DATABASE_URL"]
+}
+```
+
+The `on_stop` command receives the same variable context that was available during start:
+- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, etc.)
+- All outputs produced by this node (e.g. `${veld.exit_code}`, custom outputs)
+- Environment variables from the variant's `env` block
+
+If the `on_stop` command fails (non-zero exit code or execution error), Veld logs a warning but continues tearing down the remaining nodes. A failing teardown hook never blocks the stop operation.
+
+`on_stop` works with both `bash` and `start_server` variants:
+
+```json
+{
+  "type": "start_server",
+  "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7",
+  "on_stop": "docker stop veld-redis-${veld.run}",
+  "health_check": { "type": "port" }
 }
 ```
 
@@ -590,12 +640,14 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
           "type": "bash",
           "script": "./scripts/clone-db.sh",
           "verify": "./scripts/verify-db.sh",
+          "on_stop": "./scripts/drop-db.sh",
           "outputs": ["DATABASE_URL"],
           "sensitive_outputs": ["DATABASE_URL"]
         },
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-db-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "command": "docker run -d --name veld-db-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "on_stop": "docker rm -f veld-db-${veld.run}",
           "health_check": {
             "type": "port",
             "timeout_seconds": 30
@@ -603,6 +655,17 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
           "outputs": {
             "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
           }
+        }
+      }
+    },
+
+    "generate-certs": {
+      "hidden": true,
+      "variants": {
+        "default": {
+          "type": "bash",
+          "command": "./scripts/generate-dev-certs.sh",
+          "verify": "test -f ./certs/dev.pem"
         }
       }
     },

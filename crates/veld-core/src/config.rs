@@ -74,6 +74,11 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_template: Option<String>,
 
+    /// When true, this node is hidden from `veld nodes` output.
+    /// Hidden nodes still participate in the dependency graph normally.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+
     pub variants: HashMap<String, VariantConfig>,
 }
 
@@ -121,6 +126,11 @@ pub struct VariantConfig {
     /// Optional URL template override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url_template: Option<String>,
+
+    /// Teardown command to run when the environment is stopped.
+    /// Executed in reverse dependency order during `veld stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stop: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
