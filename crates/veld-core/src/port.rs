@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::net::TcpListener;
+use std::net::{SocketAddr, TcpListener};
 use std::sync::Mutex;
 
 use thiserror::Error;
@@ -78,7 +78,16 @@ impl Default for PortAllocator {
     }
 }
 
-/// Check whether a TCP port is available by attempting to bind.
+/// Check whether a TCP port is available by attempting to bind on both
+/// IPv4 (127.0.0.1) and IPv6 (::1).
+///
+/// Modern runtimes (Node.js 18+, Next.js, etc.) often default to IPv6.
+/// A stale process on `[::1]:port` would pass an IPv4-only check, so we
+/// must verify both address families.
 pub fn is_port_available(port: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", port)).is_ok()
+    let ipv4: SocketAddr = ([127, 0, 0, 1], port).into();
+    let ipv6: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+
+    // Both must succeed — if either is in use, the port is occupied.
+    TcpListener::bind(ipv4).is_ok() && TcpListener::bind(ipv6).is_ok()
 }
