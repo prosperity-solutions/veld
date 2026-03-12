@@ -43,7 +43,13 @@ pub fn resolve_run_name(
         .collect();
 
     match active_runs.len() {
-        1 => return Some(active_runs[0].clone()),
+        1 => {
+            let resolved = active_runs[0].clone();
+            if !json {
+                output::print_info(&format!("Using run '{}' (only active run).", resolved));
+            }
+            return Some(resolved);
+        }
         n if n > 1 => {
             let mut names: Vec<&str> = active_runs.iter().map(|s| s.as_str()).collect();
             names.sort();
@@ -61,7 +67,11 @@ pub fn resolve_run_name(
 
     // No active runs. For read-only commands, fall back to any run.
     if include_stopped && project_state.runs.len() == 1 {
-        return Some(project_state.runs.keys().next().unwrap().clone());
+        let resolved = project_state.runs.keys().next().unwrap().clone();
+        if !json {
+            output::print_info(&format!("Using run '{}' (only run).", resolved));
+        }
+        return Some(resolved);
     }
 
     if include_stopped && project_state.runs.len() > 1 {

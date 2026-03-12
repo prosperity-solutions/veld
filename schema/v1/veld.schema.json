@@ -22,7 +22,7 @@
     },
     "url_template": {
       "type": "string",
-      "description": "URL template for services. Supports placeholders: {service}, {run}, {project}, {port}.",
+      "description": "URL template for services. Supports placeholders: {service}, {variant}, {run}, {project}, {branch}, {worktree}, {username}, {hostname}. Supports fallback operator: {branch ?? run}.",
       "default": "{service}.{run}.{project}.localhost",
       "examples": [
         "{service}.{run}.{project}.localhost",
@@ -61,6 +61,10 @@
         "default_variant": {
           "type": "string",
           "description": "The variant to use when none is specified. If omitted and the node has exactly one variant, that variant is used automatically."
+        },
+        "url_template": {
+          "type": "string",
+          "description": "URL template override for all variants of this node. Overrides the project-level url_template."
         },
         "variants": {
           "type": "object",
@@ -138,6 +142,10 @@
         "verify": {
           "type": "string",
           "description": "Idempotency verification command. Only applies to \"bash\" type variants. If this command exits 0, the step is considered already complete and is skipped."
+        },
+        "url_template": {
+          "type": "string",
+          "description": "URL template override for this specific variant. Overrides both node-level and project-level url_template."
         }
       },
       "allOf": [

@@ -68,6 +68,15 @@ pub enum OrchestratorError {
 // ---------------------------------------------------------------------------
 
 /// The main orchestration engine.
+/// Result of a stop operation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopResult {
+    /// The run was actively stopped (processes killed, routes removed).
+    Stopped,
+    /// The run was already stopped; state was cleaned up.
+    AlreadyStopped,
+}
+
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
@@ -334,9 +343,16 @@ impl Orchestrator {
         ))
         .await;
 
-        // Build URL.
+        // Build URL using the most specific template (variant > node > project).
+        let node_cfg = &self.config.nodes[&sel.node];
+        let effective_template = url::resolve_url_template(
+            &self.config.url_template,
+            node_cfg.url_template.as_deref(),
+            variant_cfg.url_template.as_deref(),
+        );
         let url_values = url::build_url_template_values(
             &sel.node,
+            &sel.variant,
             &run.name,
             &self.config.name,
             branch,
@@ -344,7 +360,7 @@ impl Orchestrator {
             username,
             hostname,
         );
-        let node_url = url::evaluate_url_template(&self.config.url_template, &url_values)?;
+        let node_url = url::evaluate_url_template(effective_template, &url_values)?;
         let https_url = format!("https://{node_url}");
         node_state.url = Some(https_url.clone());
 
@@ -527,12 +543,21 @@ impl Orchestrator {
     // Stop
     // -----------------------------------------------------------------------
 
-    /// Stop a run in reverse dependency order.
-    pub async fn stop(&mut self, run_name: &str) -> Result<(), OrchestratorError> {
+    /// Stop a run in reverse dependency order. Returns whether the run was
+    /// actually stopped or was already stopped.
+    pub async fn stop(&mut self, run_name: &str) -> Result<StopResult, OrchestratorError> {
         let mut project_state = ProjectState::load(&self.project_root)?;
         let run = project_state
             .get_run_mut(run_name)
             .ok_or_else(|| crate::state::StateError::RunNotFound(run_name.to_owned()))?;
+
+        if run.status == RunStatus::Stopped {
+            // Already stopped — clean up state and return.
+            project_state.runs.remove(run_name);
+            project_state.save(&self.project_root)?;
+            self.remove_from_registry(run_name);
+            return Ok(StopResult::AlreadyStopped);
+        }
 
         run.status = RunStatus::Stopping;
 
@@ -574,24 +599,28 @@ impl Orchestrator {
             self.children.remove(key);
         }
 
-        run.status = RunStatus::Stopped;
-        run.stopped_at = Some(chrono::Utc::now());
-
+        // Remove the run from project state entirely (no lingering stopped state).
+        project_state.runs.remove(run_name);
         project_state.save(&self.project_root)?;
 
-        // Update global registry so `veld list` reflects the stopped state.
+        // Remove from global registry.
+        self.remove_from_registry(run_name);
+
+        Ok(StopResult::Stopped)
+    }
+
+    /// Remove a run from the global registry.
+    fn remove_from_registry(&self, run_name: &str) {
         if let Ok(mut registry) = GlobalRegistry::load() {
             let key = self.project_root.to_string_lossy().into_owned();
             if let Some(entry) = registry.projects.get_mut(&key) {
-                if let Some(run_info) = entry.runs.get_mut(run_name) {
-                    run_info.status = RunStatus::Stopped;
-                    run_info.urls.clear();
+                entry.runs.remove(run_name);
+                if entry.runs.is_empty() {
+                    registry.projects.remove(&key);
                 }
                 let _ = registry.save();
             }
         }
-
-        Ok(())
     }
 
     // -----------------------------------------------------------------------

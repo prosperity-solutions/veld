@@ -30,40 +30,29 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     };
     let run_name = run_name.as_str();
 
+    // Save the selections BEFORE stopping (stop removes the run from state).
+    let selections: Vec<graph::NodeSelection> = match project_state.get_run(run_name) {
+        Some(run_state) => run_state
+            .nodes
+            .values()
+            .map(|ns| graph::NodeSelection {
+                node: ns.node_name.clone(),
+                variant: ns.variant.clone(),
+            })
+            .collect(),
+        None => {
+            output::print_error(&format!("Run '{run_name}' not found."), false);
+            return 1;
+        }
+    };
+
     output::print_info(&format!("Restarting environment '{run_name}'..."));
 
-    // First stop the existing run.
+    // Stop the existing run (this removes it from state).
     if let Err(e) = orchestrator.stop(run_name).await {
         output::print_error(&format!("Failed to stop '{run_name}': {e}"), false);
         return 1;
     }
-
-    // Re-read state to get the selections that were used.
-    let project_state = match ProjectState::load(&orchestrator.project_root) {
-        Ok(s) => s,
-        Err(e) => {
-            output::print_error(&format!("Failed to load state: {e}"), false);
-            return 1;
-        }
-    };
-
-    let run_state = match project_state.get_run(run_name) {
-        Some(r) => r,
-        None => {
-            output::print_error(&format!("Run '{run_name}' not found after stop."), false);
-            return 1;
-        }
-    };
-
-    // Reconstruct selections from the node states.
-    let selections: Vec<veld_core::graph::NodeSelection> = run_state
-        .nodes
-        .values()
-        .map(|ns| graph::NodeSelection {
-            node: ns.node_name.clone(),
-            variant: ns.variant.clone(),
-        })
-        .collect();
 
     // Start again with a fresh orchestrator.
     let mut orchestrator = Orchestrator::new(config_path, config);

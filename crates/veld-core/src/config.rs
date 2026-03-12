@@ -70,6 +70,10 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_variant: Option<String>,
 
+    /// Optional URL template override for all variants of this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_template: Option<String>,
+
     pub variants: HashMap<String, VariantConfig>,
 }
 
@@ -113,6 +117,10 @@ pub struct VariantConfig {
     /// Idempotency verify command (bash steps only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
+
+    /// Optional URL template override for this specific variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_template: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

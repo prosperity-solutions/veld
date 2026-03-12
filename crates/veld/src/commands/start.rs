@@ -136,7 +136,7 @@ pub async fn run(
         Err(e) => {
             output::print_error(&format!("Startup failed: {e}"), false);
             // Best-effort teardown.
-            let _ = orchestrator.stop(run_name).await;
+            let _stop_result = orchestrator.stop(run_name).await;
             1
         }
     }

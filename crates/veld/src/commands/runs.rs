@@ -1,10 +1,10 @@
 use veld_core::config;
-use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
+use veld_core::state::ProjectState;
 
 use crate::output;
 
-/// `veld runs [--all] [--name <n>] [--json]`
-pub async fn list(all: bool, name: Option<&str>, json: bool) -> i32 {
+/// `veld runs [--name <n>] [--json]`
+pub async fn list(name: Option<&str>, json: bool) -> i32 {
     if !super::require_setup(json).await {
         return 1;
     }
@@ -27,11 +27,6 @@ pub async fn list(all: bool, name: Option<&str>, json: bool) -> i32 {
     // Filter by name if given.
     if let Some(filter_name) = name {
         runs.retain(|(n, _)| *n == filter_name);
-    }
-
-    // Unless --all, only show active (non-stopped) runs.
-    if !all {
-        runs.retain(|(_, r)| r.status != RunStatus::Stopped);
     }
 
     runs.sort_by_key(|(n, _)| (*n).clone());
@@ -69,62 +64,5 @@ pub async fn list(all: bool, name: Option<&str>, json: bool) -> i32 {
         output::print_table(&["NAME", "STATE", "STARTED", "NODES"], &rows);
     }
 
-    0
-}
-
-/// `veld runs purge --name <n>`
-pub async fn purge(name: &str) -> i32 {
-    if !super::require_setup(false).await {
-        return 1;
-    }
-
-    let Some((config_path, _cfg)) = super::load_config(false) else {
-        return 1;
-    };
-    let project_root = config::project_root(&config_path);
-
-    let mut project_state = match ProjectState::load(&project_root) {
-        Ok(s) => s,
-        Err(e) => {
-            output::print_error(&format!("Failed to load state: {e}"), false);
-            return 1;
-        }
-    };
-
-    if project_state.runs.remove(name).is_none() {
-        output::print_error(&format!("Run '{name}' not found."), false);
-        return 1;
-    }
-
-    // Remove log directory.
-    let log_dir = veld_core::logging::log_dir(&project_root, name);
-    if log_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&log_dir) {
-            output::print_error(
-                &format!("Failed to remove logs at {}: {e}", log_dir.display()),
-                false,
-            );
-        }
-    }
-
-    if let Err(e) = project_state.save(&project_root) {
-        output::print_error(&format!("Failed to save state: {e}"), false);
-        return 1;
-    }
-
-    // Also remove from the global registry so `veld list` stays in sync.
-    if let Ok(mut registry) = GlobalRegistry::load() {
-        let key = project_root.to_string_lossy().into_owned();
-        if let Some(entry) = registry.projects.get_mut(&key) {
-            entry.runs.remove(name);
-            // If no runs left, remove the entire project entry.
-            if entry.runs.is_empty() {
-                registry.projects.remove(&key);
-            }
-            let _ = registry.save();
-        }
-    }
-
-    output::print_success(&format!("Purged run '{name}'."));
     0
 }
