@@ -42,20 +42,38 @@ pub struct BashOutput {
 
 /// Spawn a long-running server process. Returns the `Child` handle.
 ///
-/// stdout and stderr are piped through a background task that prepends
-/// ISO 8601 timestamps to each line before appending to the log file.
-/// The process survives after the CLI exits (kill_on_drop is false).
+/// When `foreground` is true, stdout/stderr are piped through background
+/// tasks that prepend ISO 8601 timestamps to each line. The process will
+/// die when the CLI exits (pipes close).
+///
+/// When `foreground` is false (detached mode), stdout/stderr are redirected
+/// directly to the log file so the process survives after the CLI exits.
 pub async fn start_server(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_file: &Path,
+    foreground: bool,
 ) -> Result<Child, ProcessError> {
     // Ensure log directory exists.
     if let Some(parent) = log_file.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
+    if foreground {
+        start_server_foreground(command, working_dir, env, log_file).await
+    } else {
+        start_server_detached(command, working_dir, env, log_file).await
+    }
+}
+
+/// Foreground mode: pipe stdout/stderr through timestamping tasks.
+async fn start_server_foreground(
+    command: &str,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    log_file: &Path,
+) -> Result<Child, ProcessError> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -64,17 +82,16 @@ pub async fn start_server(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .kill_on_drop(false) // We manage lifecycle explicitly.
+        .kill_on_drop(false)
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
 
     tracing::info!(
         pid = child.id().unwrap_or(0),
         command = command,
-        "started server process"
+        "started server process (foreground)"
     );
 
-    // Spawn background tasks to timestamp and write stdout/stderr to the log file.
     let log_path = log_file.to_path_buf();
 
     if let Some(stdout) = child.stdout.take() {
@@ -94,6 +111,42 @@ pub async fn start_server(
     Ok(child)
 }
 
+/// Detached mode: redirect stdout/stderr directly to the log file.
+/// The process survives after the CLI exits.
+async fn start_server_detached(
+    command: &str,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    log_file: &Path,
+) -> Result<Child, ProcessError> {
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_file)
+        .map_err(ProcessError::SpawnFailed)?;
+    let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
+
+    let child = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(working_dir)
+        .envs(env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(file))
+        .stderr(Stdio::from(stderr_file))
+        .kill_on_drop(false)
+        .spawn()
+        .map_err(ProcessError::SpawnFailed)?;
+
+    tracing::info!(
+        pid = child.id().unwrap_or(0),
+        command = command,
+        "started server process (detached)"
+    );
+
+    Ok(child)
+}
+
 /// Read lines from an async reader, prepend timestamps, and append to the log file.
 async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &Path) {
     let mut lines = BufReader::new(reader).lines();
@@ -102,7 +155,6 @@ async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &P
             Ok(Some(line)) => {
                 let timestamp = chrono::Utc::now().to_rfc3339();
                 let formatted = format!("[{timestamp}] {line}\n");
-                // Open in append mode for each write to avoid holding the file lock.
                 if let Ok(mut file) = tokio::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
