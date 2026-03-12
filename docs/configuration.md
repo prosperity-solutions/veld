@@ -1,0 +1,776 @@
+# Veld Configuration Reference
+
+## Overview
+
+Veld is configured through a single `veld.json` file placed in the root of your project. This file is committed to version control and defines your entire local development environment: the services to run, how they depend on each other, health checks, environment wiring, and URL routing.
+
+Veld discovers `veld.json` by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld init`.
+
+All relative paths in the configuration resolve relative to the directory containing `veld.json` -- never the current working directory.
+
+### Minimal Example
+
+```json
+{
+  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "my-app",
+  "nodes": {
+    "backend": {
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health" }
+        }
+      }
+    }
+  }
+}
+```
+
+### Top-Level Structure
+
+| Field            | Type   | Required | Description                                      |
+|------------------|--------|----------|--------------------------------------------------|
+| `$schema`        | string | No       | JSON Schema URL for editor autocompletion         |
+| `schemaVersion`  | string | Yes      | Must be `"1"` for the current version             |
+| `name`           | string | Yes      | Human-readable project name                       |
+| `url_template`   | string | No       | URL template for services (see [URL Templates])   |
+| `presets`        | object | No       | Named shortcuts for node:variant selections       |
+| `nodes`          | object | Yes      | The dependency graph nodes                        |
+
+[URL Templates]: #url-templates
+
+---
+
+## Project Settings
+
+### `name`
+
+A human-readable project name used in URLs and registry entries. Must match the pattern `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` -- start with an alphanumeric character, followed by alphanumerics, dots, underscores, or hyphens.
+
+```json
+"name": "my-project"
+```
+
+The name is available as the `{project}` variable in URL templates and as `${veld.project}` in commands and environment variables.
+
+### `schemaVersion`
+
+Must be `"1"`. Veld validates this on every command and exits with a clear error if it encounters an unknown version.
+
+```json
+"schemaVersion": "1"
+```
+
+### `url_template`
+
+Defines how Veld generates HTTPS URLs for your services. See the full [URL Templates](#url-templates) section for details.
+
+```json
+"url_template": "{service}.{branch ?? run}.my-project.localhost"
+```
+
+**Default:** `{service}.{run}.{project}.localhost`
+
+---
+
+## Nodes
+
+A node represents a unit in your dependency graph -- typically a service, a database, or a setup task. Each node has a name (the object key) and contains one or more variants.
+
+```json
+"nodes": {
+  "backend": {
+    "default_variant": "local",
+    "variants": {
+      "local": { ... },
+      "docker": { ... },
+      "staging": { ... }
+    }
+  }
+}
+```
+
+### `default_variant`
+
+Specifies which variant to use when none is explicitly selected. Optional -- if omitted and the node has exactly one variant, that variant is used automatically.
+
+```json
+"default_variant": "local"
+```
+
+If a node has multiple variants and no `default_variant` is set, the user must explicitly specify which variant to use.
+
+### `url_template` (node-level)
+
+Overrides the project-level `url_template` for all variants of this node. See [URL Template Cascade](#url-template-cascade) for resolution order.
+
+```json
+"backend": {
+  "url_template": "{service}-api.{branch ?? run}.{project}.localhost",
+  "variants": { ... }
+}
+```
+
+### `variants`
+
+An object mapping variant names to their configuration. Each node must have at least one variant.
+
+---
+
+## Variants
+
+A variant defines how a node behaves in a given context. The same node might be a running server in one variant and a bash script exporting a remote URL in another.
+
+### Complete Variant Fields
+
+| Field               | Type             | Required | Applies To     | Description                                           |
+|---------------------|------------------|----------|----------------|-------------------------------------------------------|
+| `type`              | string           | Yes      | All            | `"bash"` or `"start_server"`                          |
+| `command`           | string           | Varies   | All            | Inline shell command to execute                       |
+| `script`            | string           | Varies   | `bash` only    | Path to script file, relative to `veld.json`          |
+| `health_check`      | object           | Required for `start_server` | `start_server` | How to verify the service is healthy |
+| `depends_on`        | object           | No       | All            | Dependencies on other nodes                           |
+| `env`               | object           | No       | All            | Extra environment variables                           |
+| `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
+| `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
+| `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
+| `verify`            | string           | No       | `bash` only    | Idempotency verification command                      |
+
+### `type`
+
+#### `bash`
+
+Runs a shell command or script to completion. Used for setup tasks such as database cloning, seeding, data migration, or exporting remote service URLs.
+
+- The working directory defaults to `${veld.root}` (the directory containing `veld.json`)
+- Must specify either `command` or `script` (mutually exclusive)
+- Can declare outputs via `VELD_OUTPUT key=value` written to stdout
+- Built-in output: `exit_code`
+- Supports the `verify` field for idempotency
+
+```json
+{
+  "type": "bash",
+  "command": "echo 'VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb'",
+  "outputs": ["DATABASE_URL"]
+}
+```
+
+#### `start_server`
+
+Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+
+- The working directory defaults to `${veld.root}`
+- Must specify `command` (required)
+- The process **must** bind to `${veld.port}` -- if it does not, the health check fails with a clear error
+- Built-in outputs: `url` (the full HTTPS URL) and `port` (the allocated port number)
+- Supports the `health_check` field (required)
+- Users never see or deal with port numbers -- only clean HTTPS URLs
+
+```json
+{
+  "type": "start_server",
+  "command": "pnpm --filter backend dev --port ${veld.port}",
+  "health_check": { "type": "http", "path": "/health" }
+}
+```
+
+### `command`
+
+An inline shell command to execute. Supports full Veld variable substitution.
+
+```json
+"command": "docker run --rm --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16"
+```
+
+For `start_server` variants, `command` is required. For `bash` variants, you must provide either `command` or `script`.
+
+### `script`
+
+A path to a script file, relative to the directory containing `veld.json`. Mutually exclusive with `command`. Only valid for `bash` type variants.
+
+```json
+"script": "./scripts/clone-db.sh"
+```
+
+### `health_check`
+
+Defines how Veld verifies that a `start_server` process is healthy. Veld runs a two-phase health check:
+
+1. **Phase 1 -- Port Check:** Verifies the process bound to `${veld.port}` via TCP connection.
+2. **Phase 2 -- HTTPS URL Check:** Verifies the full stack end-to-end (DNS, Caddy routing, TLS, upstream response).
+
+If Phase 1 fails, the error is a process issue. If Phase 1 passes but Phase 2 fails, it is an infrastructure issue. This distinction produces precise error messages.
+
+#### Health Check Fields
+
+| Field              | Type    | Required | Description                                          |
+|--------------------|---------|----------|------------------------------------------------------|
+| `type`             | string  | Yes      | Strategy: `"http"`, `"port"`, or `"bash"`            |
+| `path`             | string  | No       | HTTP path to poll (`http` type only)                 |
+| `expect_status`    | integer | No       | Expected HTTP status code (`http` type only, default: 200) |
+| `command`          | string  | No       | Shell command to run (`bash` type only)              |
+| `timeout_seconds`  | integer | No       | Max seconds to wait (default: 60)                    |
+| `interval_ms`      | integer | No       | Milliseconds between checks (default: 1000, min: 100)|
+
+#### Strategy: `http`
+
+Polls an HTTP endpoint at the given path. The check passes when the endpoint returns the expected status code.
+
+```json
+"health_check": {
+  "type": "http",
+  "path": "/health",
+  "expect_status": 200,
+  "timeout_seconds": 30
+}
+```
+
+If `expect_status` is omitted, it defaults to `200`. If `path` is omitted, Veld checks the root `/`.
+
+#### Strategy: `port`
+
+Checks whether the allocated port is accepting TCP connections. The simplest strategy -- useful for databases, caches, and services without an HTTP health endpoint.
+
+```json
+"health_check": {
+  "type": "port",
+  "timeout_seconds": 15
+}
+```
+
+#### Strategy: `bash`
+
+Runs a shell command and checks the exit code. Exit code `0` means healthy.
+
+```json
+"health_check": {
+  "type": "bash",
+  "command": "./scripts/check-db-ready.sh",
+  "timeout_seconds": 45,
+  "interval_ms": 2000
+}
+```
+
+### `depends_on`
+
+Declares dependencies as explicit `node:variant` pairs. Dependencies are resolved before this variant starts. The value is an object mapping node names to variant names.
+
+```json
+"depends_on": {
+  "database": "docker",
+  "backend": "local"
+}
+```
+
+Default variants are never silently assumed -- every dependency must name its variant explicitly. If two selected nodes transitively require the same dependency node with different variants, Veld starts both as independent processes, each with its own port, URL, and state.
+
+Dependencies are started in topological order, with independent branches parallelized. On teardown, the reverse order is used.
+
+### `env`
+
+Extra environment variables injected into the process. Values support Veld variable substitution, including references to outputs from upstream nodes.
+
+```json
+"env": {
+  "DATABASE_URL": "${nodes.database.DATABASE_URL}",
+  "PORT": "${veld.port}",
+  "NODE_ENV": "development",
+  "NEXT_PUBLIC_API_URL": "${nodes.backend.url}"
+}
+```
+
+**Precedence:** The `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
+
+### `outputs`
+
+Output declarations differ based on the variant type.
+
+#### For `bash` variants: Array of strings
+
+Declares the output names that the script will emit via `VELD_OUTPUT` lines written to stdout. Your script prints `VELD_OUTPUT key=value` to stdout, and Veld captures the values.
+
+```json
+{
+  "type": "bash",
+  "script": "./scripts/clone-db.sh",
+  "outputs": ["DATABASE_URL", "DB_NAME"]
+}
+```
+
+Inside the script:
+```bash
+#!/bin/bash
+echo "VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb"
+echo "VELD_OUTPUT DB_NAME=mydb"
+```
+
+Every `bash` variant also automatically provides the built-in output `exit_code`.
+
+#### For `start_server` variants: Object (key-value map)
+
+Defines synthetic outputs whose values are string templates interpolated after the port is allocated. This is especially useful for Docker infrastructure nodes where stdout cannot be used for `VELD_OUTPUT`.
+
+```json
+{
+  "type": "start_server",
+  "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+  "health_check": { "type": "port" },
+  "outputs": {
+    "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app",
+    "REDIS_URL": "redis://localhost:${veld.port}"
+  }
+}
+```
+
+Every `start_server` variant also automatically provides the built-in outputs `url` (the full HTTPS URL) and `port` (the allocated port number).
+
+### `sensitive_outputs`
+
+An array of output key names whose values are sensitive. These outputs are:
+
+- Masked as `[REDACTED]` in all terminal output, debug logs, and run logs
+- Stored encrypted at rest using a machine-local key
+- Never visible in `veld graph` output
+
+```json
+{
+  "type": "bash",
+  "script": "./scripts/clone-db.sh",
+  "outputs": ["DATABASE_URL"],
+  "sensitive_outputs": ["DATABASE_URL"]
+}
+```
+
+### `verify`
+
+An idempotency verification command. Only applies to `bash` type variants. Before running the main command/script, Veld executes the verify command:
+
+- **Exit code 0:** The step is considered already complete and is skipped.
+- **Non-zero exit code:** The step runs normally.
+- If `verify` itself errors unexpectedly, the step re-runs (safe default).
+
+The verify command receives the previous run's output variables as environment variables, so it can check whether the previous result is still valid.
+
+```json
+{
+  "type": "bash",
+  "script": "./scripts/clone-db.sh",
+  "verify": "./scripts/verify-db.sh",
+  "outputs": ["DATABASE_URL"]
+}
+```
+
+---
+
+## Presets
+
+Presets are named shortcuts for node:variant selections. They provide convenience for common configurations without introducing a new core concept.
+
+```json
+"presets": {
+  "fullstack": ["frontend:local", "admin:local"],
+  "ui-only": ["frontend:staging", "admin:staging"],
+  "backend-dev": ["backend:local"]
+}
+```
+
+Each preset maps to an array of `"node:variant"` strings. Use presets with:
+
+```sh
+veld start --preset fullstack --name my-feature
+```
+
+In interactive mode (TTY with presets defined), `veld start` with no arguments presents a preset selector. Presets are purely additive -- they select end nodes that Veld then resolves through the dependency graph, starting all required upstream nodes automatically.
+
+---
+
+## Variable Substitution
+
+Veld provides two separate variable systems for different contexts:
+
+1. **`${...}` syntax** -- used in `command`, `script` arguments, and `env` values within variant configurations.
+2. **`{...}` syntax** -- used exclusively in the `url_template` field.
+
+### Built-in Variables (`${veld.*}`)
+
+Available to all node variants without any declaration:
+
+| Variable            | Value                                                |
+|---------------------|------------------------------------------------------|
+| `${veld.port}`      | Allocated port for this node in this run             |
+| `${veld.run}`       | Run name                                             |
+| `${veld.run_id}`    | Stable run UUID                                      |
+| `${veld.root}`      | Absolute path to the directory containing `veld.json`|
+| `${veld.project}`   | Project name from `veld.json`                        |
+| `${veld.worktree}`  | Slugified worktree directory name                    |
+| `${veld.branch}`    | Current git branch, slugified (empty string if not in git) |
+| `${veld.username}`  | OS username                                          |
+
+### Node Output References (`${nodes.*}`)
+
+Downstream nodes can reference outputs from their upstream dependencies.
+
+#### Short Form
+
+When only one variant of a node is active in the current dependency graph:
+
+```
+${nodes.database.DATABASE_URL}     # custom output from bash or outputs declaration
+${nodes.backend.url}               # start_server built-in: full HTTPS URL
+${nodes.backend.port}              # start_server built-in: allocated port (rarely needed)
+${nodes.clone-db.exit_code}        # bash built-in: exit code
+```
+
+#### Qualified Form
+
+When two variants of the same node are running simultaneously (because different end nodes depend on different variants), you must use the qualified form:
+
+```
+${nodes.backend:local.url}         # qualified with variant name
+${nodes.backend:staging.BACKEND_URL}
+```
+
+Veld validates all variable references for ambiguity at graph resolution time and fails fast with a precise error before starting anything. If a short-form reference is ambiguous (multiple variants of the same node are active), Veld reports exactly which qualified form to use.
+
+### Examples in Context
+
+```json
+{
+  "type": "start_server",
+  "command": "pnpm --filter frontend dev",
+  "depends_on": { "backend": "local", "database": "docker" },
+  "env": {
+    "PORT": "${veld.port}",
+    "NEXT_PUBLIC_API_URL": "${nodes.backend.url}",
+    "DATABASE_URL": "${nodes.database.DATABASE_URL}"
+  }
+}
+```
+
+---
+
+## URL Templates
+
+URL templates define how Veld generates HTTPS URLs for `start_server` nodes. Templates can be defined at the project, node, or variant level.
+
+### Syntax
+
+URL templates use `{variable}` syntax (single braces, not `${}`). This is different from the `${variable}` syntax used in commands and env values.
+
+```json
+"url_template": "{service}.{branch ?? run}.my-project.localhost"
+```
+
+### Template Variables
+
+All values are slugified automatically (lowercased, non-alphanumeric characters replaced with `-`, consecutive dashes collapsed, leading/trailing dashes stripped, max 48 characters).
+
+| Variable     | Value                                                          |
+|--------------|----------------------------------------------------------------|
+| `{service}`  | Node name                                                      |
+| `{variant}`  | Variant name                                                   |
+| `{run}`      | Run name (always non-empty)                                    |
+| `{project}`  | Project name from `veld.json`                                  |
+| `{branch}`   | Current git branch name, slugified (empty string if not in git)|
+| `{worktree}` | Slugified worktree directory name                              |
+| `{username}` | OS username                                                    |
+| `{hostname}` | Machine hostname                                               |
+
+`{branch}` and `{worktree}` are evaluated at run creation time and frozen into the run state. URLs never change if you switch branches mid-run.
+
+### The `??` Fallback Operator
+
+The `??` operator provides fallback values. Veld evaluates left to right and uses the first non-empty value.
+
+```json
+"url_template": "{service}.{branch ?? run}.my-project.localhost"
+```
+
+In this example:
+- If the current git branch is `feature/login`, the URL becomes `backend.feature-login.my-project.localhost`
+- If not in a git repo (branch is empty), it falls back to the run name: `backend.my-feature.my-project.localhost`
+
+Since `{run}` is always guaranteed to be non-empty, it is the recommended final fallback:
+
+```json
+"{service}.{branch ?? worktree ?? run}.{project}.localhost"
+```
+
+### Default Template
+
+If `url_template` is not declared, Veld uses:
+
+```
+{service}.{run}.{project}.localhost
+```
+
+`.localhost` subdomains resolve to `127.0.0.1` automatically on modern macOS and Linux (RFC 6761), so no DNS configuration is needed for the default case.
+
+### Custom Domains
+
+For custom apex domains, Veld manages exact DNS entries via `veld-helper`:
+
+```json
+"url_template": "{service}.{branch ?? run}.my-project.life.li"
+```
+
+Veld writes exact host entries only -- never wildcard rules. Real domains and unrelated subdomains continue resolving normally via public DNS.
+
+### URL Template Cascade
+
+URL templates can be overridden at three levels. Veld uses the most specific one:
+
+1. **Variant-level** `url_template` -- highest priority
+2. **Node-level** `url_template` -- applies to all variants of the node
+3. **Project-level** `url_template` -- the default for all nodes
+
+This lets you use a common template for most services while giving specific nodes or variants a different URL pattern:
+
+```json
+{
+  "url_template": "{service}.{branch ?? run}.{project}.localhost",
+  "nodes": {
+    "frontend": {
+      "variants": {
+        "local": { "..." : "uses project-level template" }
+      }
+    },
+    "backend": {
+      "url_template": "{service}-api.{branch ?? run}.{project}.localhost",
+      "variants": {
+        "local": { "..." : "uses node-level template" },
+        "docker": {
+          "url_template": "{service}.localhost:{port}",
+          "..." : "uses variant-level template"
+        }
+      }
+    }
+  }
+}
+```
+
+### URL Examples
+
+Given a project named `my-project`, a run named `my-feature`, a node named `frontend`, and a branch named `feature/auth`:
+
+| Template                                            | Resulting URL                                     |
+|-----------------------------------------------------|---------------------------------------------------|
+| `{service}.{run}.{project}.localhost`               | `frontend.my-feature.my-project.localhost`        |
+| `{service}.{branch ?? run}.{project}.localhost`     | `frontend.feature-auth.my-project.localhost`      |
+| `{service}.localhost:{port}`                        | `frontend.localhost:8432`                         |
+| `{service}.{username}.{project}.localhost`           | `frontend.jane.my-project.localhost`              |
+
+---
+
+## Complete Example
+
+Below is a realistic `veld.json` for a monorepo with a database, backend API, frontend app, and admin panel. It demonstrates all major features.
+
+```json
+{
+  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "my-project",
+  "url_template": "{service}.{branch ?? run}.my-project.localhost",
+
+  "presets": {
+    "fullstack": ["frontend:local", "admin:local"],
+    "ui-only": ["frontend:staging", "admin:staging"]
+  },
+
+  "nodes": {
+    "database": {
+      "default_variant": "docker",
+      "variants": {
+        "local": {
+          "type": "bash",
+          "script": "./scripts/clone-db.sh",
+          "verify": "./scripts/verify-db.sh",
+          "outputs": ["DATABASE_URL"],
+          "sensitive_outputs": ["DATABASE_URL"]
+        },
+        "docker": {
+          "type": "start_server",
+          "command": "docker run --rm --name veld-db-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "health_check": {
+            "type": "port",
+            "timeout_seconds": 30
+          },
+          "outputs": {
+            "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
+          }
+        }
+      }
+    },
+
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "pnpm --filter backend dev --port ${veld.port}",
+          "health_check": {
+            "type": "http",
+            "path": "/health",
+            "expect_status": 200,
+            "timeout_seconds": 30,
+            "interval_ms": 1000
+          },
+          "depends_on": {
+            "database": "docker"
+          },
+          "env": {
+            "DATABASE_URL": "${nodes.database.DATABASE_URL}",
+            "NODE_ENV": "development"
+          }
+        },
+        "staging": {
+          "type": "bash",
+          "command": "echo 'VELD_OUTPUT BACKEND_URL=https://api.staging.my-project.com'",
+          "outputs": ["BACKEND_URL"]
+        }
+      }
+    },
+
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "pnpm --filter frontend dev",
+          "health_check": {
+            "type": "http",
+            "path": "/"
+          },
+          "depends_on": {
+            "backend": "local"
+          },
+          "env": {
+            "PORT": "${veld.port}",
+            "NEXT_PUBLIC_API_URL": "${nodes.backend:local.url}"
+          }
+        },
+        "staging": {
+          "type": "start_server",
+          "command": "pnpm --filter frontend dev",
+          "health_check": {
+            "type": "http",
+            "path": "/"
+          },
+          "depends_on": {
+            "backend": "staging"
+          },
+          "env": {
+            "PORT": "${veld.port}",
+            "NEXT_PUBLIC_API_URL": "${nodes.backend:staging.BACKEND_URL}"
+          }
+        }
+      }
+    },
+
+    "admin": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "pnpm --filter admin dev",
+          "health_check": {
+            "type": "http",
+            "path": "/",
+            "timeout_seconds": 45
+          },
+          "depends_on": {
+            "backend": "local"
+          },
+          "env": {
+            "PORT": "${veld.port}",
+            "NEXT_PUBLIC_API_URL": "${nodes.backend:local.url}"
+          }
+        },
+        "staging": {
+          "type": "start_server",
+          "command": "pnpm --filter admin dev",
+          "health_check": {
+            "type": "http",
+            "path": "/"
+          },
+          "depends_on": {
+            "backend": "staging"
+          },
+          "env": {
+            "PORT": "${veld.port}",
+            "NEXT_PUBLIC_API_URL": "${nodes.backend:staging.BACKEND_URL}"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### What Happens When You Run This
+
+```sh
+veld start --preset fullstack --name my-feature
+```
+
+1. Veld resolves the dependency graph: `frontend:local` and `admin:local` both depend on `backend:local`, which depends on `database:docker`.
+2. `database:docker` starts first -- Veld allocates a port, runs the Docker command with `${veld.port}` injected, and waits for the port health check to pass. The `DATABASE_URL` synthetic output is interpolated.
+3. `backend:local` starts next -- Veld allocates a port, injects `${nodes.database.DATABASE_URL}` into the env, and waits for `/health` to return 200.
+4. `frontend:local` and `admin:local` start in parallel -- both depend only on `backend:local`, which is now healthy.
+5. Each service gets a stable HTTPS URL like `https://frontend.my-feature.my-project.localhost`.
+
+---
+
+## JSON Schema
+
+Veld provides a JSON Schema for editor autocompletion and validation. Add the `$schema` field to your `veld.json`:
+
+```json
+{
+  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  ...
+}
+```
+
+### Local Schema Reference
+
+If you have the Veld repository checked out, you can reference the schema locally:
+
+```json
+{
+  "$schema": "./node_modules/veld/schema/v1/veld.schema.json",
+  ...
+}
+```
+
+Or relative to your project structure:
+
+```json
+{
+  "$schema": "../../schema/v1/veld.schema.json",
+  ...
+}
+```
+
+### Editor Support
+
+Most modern editors support JSON Schema natively or through extensions:
+
+- **VS Code:** Automatically picks up the `$schema` field. Provides autocompletion, hover documentation, and inline validation.
+- **JetBrains IDEs (WebStorm, IntelliJ):** Automatically recognizes the `$schema` field.
+- **Neovim (with LSP):** JSON language server respects the `$schema` field.
+
+The schema validates:
+- All required fields are present
+- Field types are correct
+- `type` values are one of `"bash"` or `"start_server"`
+- Health check types are one of `"http"`, `"port"`, or `"bash"`
+- `start_server` variants require `command`
+- `bash` variants require either `command` or `script`
+- Preset entries match the `node:variant` pattern
+- Numeric constraints (timeouts, intervals, status codes)
