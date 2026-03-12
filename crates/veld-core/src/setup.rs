@@ -989,7 +989,7 @@ const HAMMERSPOON_SPOON_LUA: &str =
 /// and does not modify the user's init.lua. It is loaded via `hs -c` IPC if the
 /// CLI tool is available, otherwise the user is told to add one line.
 pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
-    let (_user, uid, home) = resolve_real_user_macos()?;
+    let (user, uid, home) = resolve_real_user_macos()?;
     let hs_dir = home.join(".hammerspoon");
 
     if !hs_dir.exists() {
@@ -1006,7 +1006,7 @@ pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
         .context("failed to write Veld.spoon/init.lua")?;
 
     // Fix ownership (setup runs as root via sudo).
-    fix_owner_recursive(&hs_dir.join("Spoons"), &_user);
+    fix_owner_recursive(&spoon_dir, &user);
 
     // Try to load the Spoon via `hs` CLI (IPC).
     let loaded = load_spoon_via_hs(&uid).await;
@@ -1024,10 +1024,20 @@ pub async fn install_hammerspoon() -> Result<StepResult, anyhow::Error> {
 
 /// Remove the Veld Spoon (best-effort, called during uninstall).
 async fn uninstall_hammerspoon() {
-    let home = match resolve_real_user_macos() {
-        Ok((_, _, h)) => h,
+    let (_, uid, home) = match resolve_real_user_macos() {
+        Ok(t) => t,
         Err(_) => return,
     };
+
+    // Stop the running Spoon so the menu bar icon disappears immediately.
+    let stop_lua = r#"if spoon.Veld then spoon.Veld:stop() end"#;
+    let _ = Command::new("launchctl")
+        .args(["asuser", &uid, "/usr/local/bin/hs", "-c", stop_lua])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await;
 
     let spoon_dir = home.join(".hammerspoon/Spoons/Veld.spoon");
     if spoon_dir.exists() {
@@ -1054,7 +1064,7 @@ async fn load_spoon_via_hs(uid: &str) -> bool {
 
     // Try via launchctl asuser (we're running as root under sudo).
     let via_launchctl = Command::new("launchctl")
-        .args(["asuser", uid, "hs", "-c", lua_code])
+        .args(["asuser", uid, "/usr/local/bin/hs", "-c", lua_code])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

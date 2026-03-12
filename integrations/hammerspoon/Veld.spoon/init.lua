@@ -190,12 +190,6 @@ local function buildMenu(veldBin)
         end
     end
 
-    table.insert(items, { title = "-" })
-    table.insert(items, {
-        title = "Refresh",
-        fn = function() end, -- menu rebuilds on every open
-    })
-
     return items
 end
 
