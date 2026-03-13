@@ -100,12 +100,11 @@ pub async fn run(
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
 
-            // Print outputs for nodes that have non-trivial outputs.
-            let mut node_keys: Vec<&String> = run_state.nodes.keys().collect();
-            node_keys.sort();
+            // Print outputs for nodes in execution (topological) order.
+            let node_keys = &run_state.execution_order;
             let skip_keys = ["port", "url", "exit_code"];
-            for key in &node_keys {
-                let ns = &run_state.nodes[*key];
+            for key in node_keys {
+                let ns = &run_state.nodes[key];
                 let mut output_keys: Vec<&String> = ns
                     .outputs
                     .keys()
@@ -131,12 +130,17 @@ pub async fn run(
                 }
             }
 
-            // Print URLs on success.
+            // Print URLs on success (in execution order).
             println!();
             let urls: Vec<(&str, &str)> = run_state
-                .nodes
-                .values()
-                .filter_map(|ns| ns.url.as_ref().map(|u| (ns.node_name.as_str(), u.as_str())))
+                .execution_order
+                .iter()
+                .filter_map(|key| {
+                    run_state
+                        .nodes
+                        .get(key)
+                        .and_then(|ns| ns.url.as_ref().map(|u| (ns.node_name.as_str(), u.as_str())))
+                })
                 .collect();
 
             if urls.is_empty() {
