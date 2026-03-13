@@ -77,7 +77,7 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
             let run_info = &reg_entry.runs[run_name];
 
             match run_info.status {
-                RunStatus::Running => {
+                RunStatus::Running | RunStatus::Starting => {
                     // Check if processes are actually alive.
                     if let Some(run_state) = project_state.get_run(run_name) {
                         let mut any_alive = false;
