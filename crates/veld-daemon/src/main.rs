@@ -1,4 +1,5 @@
 mod broadcaster;
+mod feedback_server;
 mod gc;
 mod monitor;
 
@@ -110,6 +111,10 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler().await;
     });
 
+    let feedback_handle = tokio::spawn(async move {
+        feedback_server::run_feedback_server().await;
+    });
+
     let accept_broadcaster = broadcaster.clone();
     let accept_handle = tokio::spawn(async move {
         accept_connections(listener, accept_broadcaster).await;
@@ -123,6 +128,7 @@ async fn main() -> Result<()> {
     monitor_handle.abort();
     gc_handle.abort();
     accept_handle.abort();
+    feedback_handle.abort();
 
     // Clean up the socket file.
     let _ = tokio::fs::remove_file(&args.socket_path).await;

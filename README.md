@@ -126,6 +126,7 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
+| `veld feedback [--name <n>] [--wait] [--history]` | Read or wait for in-browser feedback |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup` | One-time system setup |
 | `veld init` | Create a new veld.json |
