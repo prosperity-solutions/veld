@@ -541,8 +541,33 @@ impl Orchestrator {
         node_state
             .outputs
             .insert("exit_code".to_owned(), result.exit_code.to_string());
-        for (k, v) in result.outputs {
-            node_state.outputs.insert(k, v);
+
+        // Filter outputs against declared keys.
+        let declared_keys = variant_cfg
+            .outputs
+            .as_ref()
+            .map(|o| o.declared_keys())
+            .unwrap_or_default();
+
+        for (k, v) in &result.outputs {
+            if declared_keys.contains(k.as_str()) {
+                node_state.outputs.insert(k.clone(), v.clone());
+            } else if variant_cfg.strict_outputs {
+                return Err(OrchestratorError::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    reason: format!(
+                        "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
+                    ),
+                });
+            } else {
+                tracing::warn!(
+                    node = sel.node,
+                    variant = sel.variant,
+                    key = k,
+                    "ignoring undeclared output"
+                );
+            }
         }
 
         if result.exit_code == 0 {

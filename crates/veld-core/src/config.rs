@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -119,6 +119,11 @@ pub struct VariantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_outputs: Option<Vec<String>>,
 
+    /// When true (default), fail if a command produces outputs not declared in `outputs`.
+    /// Set to `false` to allow undeclared outputs to pass through.
+    #[serde(default = "default_strict_outputs")]
+    pub strict_outputs: bool,
+
     /// Idempotency verify command (command steps only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
@@ -144,6 +149,16 @@ pub enum Outputs {
     Declared(Vec<String>),
     /// Synthetic output templates for `start_server` steps.
     Synthetic(HashMap<String, String>),
+}
+
+impl Outputs {
+    /// Return the set of declared output key names.
+    pub fn declared_keys(&self) -> HashSet<&str> {
+        match self {
+            Outputs::Declared(keys) => keys.iter().map(|s| s.as_str()).collect(),
+            Outputs::Synthetic(map) => map.keys().map(|s| s.as_str()).collect(),
+        }
+    }
 }
 
 impl<'de> Deserialize<'de> for Outputs {
@@ -221,6 +236,10 @@ pub struct HealthCheck {
     /// Milliseconds between checks (default 1000).
     #[serde(default = "default_interval")]
     pub interval_ms: u64,
+}
+
+fn default_strict_outputs() -> bool {
+    true
 }
 
 fn default_timeout() -> u64 {

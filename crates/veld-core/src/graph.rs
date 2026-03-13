@@ -55,6 +55,15 @@ pub enum GraphError {
 
     #[error("unknown preset \"{0}\"")]
     UnknownPreset(String),
+
+    #[error(
+        "node \"{node}:{variant}\" has sensitive_outputs {undeclared:?} not declared in outputs"
+    )]
+    UndeclaredSensitiveOutputs {
+        node: String,
+        variant: String,
+        undeclared: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +173,10 @@ pub fn build_execution_plan(
     // 3. Validate variable references for ambiguity.
     validate_variable_references(&all_nodes, config)?;
 
-    // 4. Kahn's algorithm for topological sort into stages.
+    // 4. Validate sensitive_outputs are subsets of declared outputs.
+    validate_sensitive_outputs(&all_nodes, config)?;
+
+    // 5. Kahn's algorithm for topological sort into stages.
     topological_stages(&all_nodes, &deps)
 }
 
@@ -316,6 +328,36 @@ fn validate_variable_references(
         }
     }
 
+    Ok(())
+}
+
+/// Validate that sensitive_outputs are subsets of declared outputs.
+fn validate_sensitive_outputs(
+    all_nodes: &[NodeSelection],
+    config: &VeldConfig,
+) -> Result<(), GraphError> {
+    for sel in all_nodes {
+        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
+        if let Some(ref sensitive) = variant_cfg.sensitive_outputs {
+            let declared = variant_cfg
+                .outputs
+                .as_ref()
+                .map(|o| o.declared_keys())
+                .unwrap_or_default();
+            let undeclared: Vec<String> = sensitive
+                .iter()
+                .filter(|k| !declared.contains(k.as_str()))
+                .cloned()
+                .collect();
+            if !undeclared.is_empty() {
+                return Err(GraphError::UndeclaredSensitiveOutputs {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    undeclared,
+                });
+            }
+        }
+    }
     Ok(())
 }
 
