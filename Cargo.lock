@@ -1696,6 +1696,7 @@ dependencies = [
  "chrono",
  "clap",
  "dirs",
+ "libc",
  "serde_json",
  "tokio",
  "tracing",
