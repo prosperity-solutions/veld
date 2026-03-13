@@ -46,6 +46,18 @@ pub fn slugify(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Run name generation
+// ---------------------------------------------------------------------------
+
+/// Generate a random, human-friendly run name (e.g. "swift-falcon").
+///
+/// Uses two-word petnames (adjective-noun) with hyphen separators,
+/// similar to Docker container names.
+pub fn generate_run_name() -> String {
+    petname::petname(2, "-").unwrap_or_else(|| "default".to_owned())
+}
+
+// ---------------------------------------------------------------------------
 // URL template resolution (cascade: variant > node > project > built-in)
 // ---------------------------------------------------------------------------
 

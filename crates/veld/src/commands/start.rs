@@ -5,18 +5,18 @@ use veld_core::config::VeldConfig;
 use veld_core::graph::{self, NodeSelection};
 use veld_core::logging;
 use veld_core::orchestrator::Orchestrator;
-use veld_core::url::slugify;
+use veld_core::url::generate_run_name;
 
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 use crate::output::{self, is_tty};
 
-/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-d] [--debug]`
+/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--debug]`
 pub async fn run(
     selections: Vec<String>,
     preset: Option<String>,
     name: Option<String>,
-    detach: bool,
+    attach: bool,
     _debug: bool,
 ) -> i32 {
     if !super::require_setup(false).await {
@@ -69,28 +69,20 @@ pub async fn run(
 
     let run_name = match name {
         Some(ref n) => n.clone(),
-        None => {
-            // Use the project root (directory containing veld.json) for the default name.
-            let project_root = veld_core::config::project_root(&config_path);
-            let dir_name = project_root
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("default");
-            slugify(dir_name)
-        }
+        None => generate_run_name(),
     };
     let run_name_str = run_name.as_str();
 
     // Build the orchestrator.
-    let foreground = !detach && is_tty();
+    let foreground = attach && is_tty();
     let mut orchestrator = Orchestrator::new(config_path.clone(), config);
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
 
     println!(
-        "{} Starting environment '{}'...",
+        "{} Starting environment {}...",
         output::bold("veld"),
-        run_name_str,
+        output::bold(&format!("'{run_name_str}'")),
     );
     println!();
 
