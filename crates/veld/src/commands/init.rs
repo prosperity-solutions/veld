@@ -9,7 +9,7 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 const INIT_TEMPLATE: &str = r#"{
-  "$schema": "https://veld.dev/schema/v1.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "my-project",
   "url_template": "{service}.{run}.{project}.localhost",
@@ -522,7 +522,7 @@ fn generate_veld_json(
 ) -> String {
     let mut json = String::new();
     json.push_str("{\n");
-    json.push_str("  \"$schema\": \"https://veld.dev/schema/v1.json\",\n");
+    json.push_str("  \"$schema\": \"https://veld.oss.life.li/schema/v1/veld.schema.json\",\n");
     json.push_str("  \"schemaVersion\": \"1\",\n");
     json.push_str(&format!("  \"name\": \"{}\",\n", escape_json(project_name)));
     json.push_str(&format!(
@@ -869,7 +869,7 @@ pub async fn run() -> i32 {
         // No services detected/selected: write basic template with project name
         format!(
             r#"{{
-  "$schema": "https://veld.dev/schema/v1.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "{}",
   "url_template": "{}",

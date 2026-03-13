@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://veld.dev/schema/v1/veld.schema.json",
+  "$id": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "title": "Veld Project Configuration",
   "description": "Configuration file for a Veld local development environment. Place this as veld.json in your project root.",
   "type": "object",

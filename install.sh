@@ -2,7 +2,7 @@
 # Veld installer — detects OS/arch and installs the latest release.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/prosperity-solutions/veld/main/install.sh | bash
+#   curl -fsSL https://veld.oss.life.li/get | bash
 #
 # Options (via env vars):
 #   VELD_VERSION=1.0.0    Install a specific version (default: latest)

@@ -705,7 +705,7 @@ fn is_newer(latest: &str, current: &str) -> bool {
 
 /// Download and run the install script to update to the given version.
 pub async fn perform_update(version: &str) -> Result<(), anyhow::Error> {
-    let install_url = format!("https://raw.githubusercontent.com/{GITHUB_REPO}/main/install.sh");
+    let install_url = "https://veld.oss.life.li/get".to_string();
 
     let client = reqwest::Client::builder()
         .user_agent(format!("veld/{}", env!("CARGO_PKG_VERSION")))
