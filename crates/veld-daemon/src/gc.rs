@@ -1,5 +1,6 @@
 use tracing::{debug, info, warn};
-use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
+use veld_core::helper::HelperClient;
+use veld_core::state::{GlobalRegistry, ProjectState, RunState, RunStatus};
 
 /// Interval between garbage-collection runs (seconds).
 const GC_INTERVAL_SECS: u64 = 600; // 10 minutes
@@ -22,8 +23,11 @@ pub async fn run_gc_scheduler() {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale entries removed, {} orphans killed, {} log files pruned",
-                    summary.stale_removed, summary.orphans_killed, summary.logs_pruned
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} routes cleaned",
+                    summary.stale_removed,
+                    summary.orphans_killed,
+                    summary.logs_pruned,
+                    summary.routes_cleaned
                 );
             }
             Err(e) => {
@@ -39,11 +43,13 @@ pub struct GcSummary {
     pub stale_removed: usize,
     pub orphans_killed: usize,
     pub logs_pruned: usize,
+    pub routes_cleaned: usize,
 }
 
 /// Perform a single garbage-collection pass.
 pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
+    let helper = HelperClient::default_client();
 
     let mut registry = GlobalRegistry::load()?;
     let mut registry_changed = false;
@@ -108,6 +114,11 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                                         }
                                     }
                                 }
+
+                                // Clean up Caddy routes and DNS entries.
+                                summary.routes_cleaned +=
+                                    cleanup_routes_and_dns(run, run_name, &helper).await;
+
                                 project_changed = true;
                             }
 
@@ -132,6 +143,10 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                                     run_name,
                                     project_root.display()
                                 );
+                                // Best-effort route/DNS cleanup before removing state.
+                                summary.routes_cleaned +=
+                                    cleanup_routes_and_dns(run_state, run_name, &helper).await;
+
                                 project_state.runs.remove(run_name);
                                 project_changed = true;
                                 // Will remove from registry below.
@@ -196,6 +211,29 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Remove Caddy routes and DNS entries for all nodes in a run.
+/// Returns the number of routes/hosts cleaned up.
+async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperClient) -> usize {
+    let mut cleaned = 0;
+    for ns in run.nodes.values() {
+        // Remove Caddy route (ID follows the convention from orchestrator).
+        let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+        if helper.remove_route(&route_id).await.is_ok() {
+            debug!("removed Caddy route: {route_id}");
+            cleaned += 1;
+        }
+
+        // Remove DNS host entry.
+        if let Some(ref url_str) = ns.url {
+            let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+            if helper.remove_host(hostname).await.is_ok() {
+                debug!("removed DNS entry: {hostname}");
+            }
+        }
+    }
+    cleaned
+}
 
 fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
