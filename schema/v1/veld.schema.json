@@ -89,8 +89,8 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["bash", "start_server"],
-          "description": "Step type. \"bash\" runs a command/script to completion. \"start_server\" starts a long-running process and waits for it to become healthy."
+          "enum": ["command", "start_server"],
+          "description": "Step type. \"command\" runs a command/script to completion. \"start_server\" starts a long-running process and waits for it to become healthy."
         },
         "command": {
           "type": "string",
@@ -119,14 +119,14 @@
           }
         },
         "outputs": {
-          "description": "Output declarations. For bash steps: an array of output names captured from VELD_OUTPUT. For start_server steps: an object mapping output names to template strings.",
+          "description": "Output declarations. For command steps: an array of output names captured from VELD_OUTPUT. For start_server steps: an object mapping output names to template strings.",
           "oneOf": [
             {
               "type": "array",
               "items": {
                 "type": "string"
               },
-              "description": "Declared output names for bash steps."
+              "description": "Declared output names for command steps."
             },
             {
               "type": "object",
@@ -146,7 +146,7 @@
         },
         "verify": {
           "type": "string",
-          "description": "Idempotency verification command. Only applies to \"bash\" type variants. If this command exits 0, the step is considered already complete and is skipped."
+          "description": "Idempotency verification command. Only applies to \"command\" type variants. If this command exits 0, the step is considered already complete and is skipped."
         },
         "url_template": {
           "type": "string",
@@ -169,7 +169,7 @@
         },
         {
           "if": {
-            "properties": { "type": { "const": "bash" } },
+            "properties": { "type": { "const": "command" } },
             "required": ["type"]
           },
           "then": {
@@ -189,8 +189,8 @@
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["http", "port", "bash"],
-          "description": "Health check strategy. \"http\" polls an HTTP endpoint. \"port\" checks if the port is accepting connections. \"bash\" runs a command and checks the exit code."
+          "enum": ["http", "port", "command"],
+          "description": "Health check strategy. \"http\" polls an HTTP endpoint. \"port\" checks if the port is accepting connections. \"command\" runs a command and checks the exit code."
         },
         "path": {
           "type": "string",
@@ -206,7 +206,7 @@
         },
         "command": {
           "type": "string",
-          "description": "Shell command to run (type \"bash\" only). Exit code 0 means healthy."
+          "description": "Shell command to run (type \"command\" only). Exit code 0 means healthy."
         },
         "timeout_seconds": {
           "type": "integer",

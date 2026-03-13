@@ -318,8 +318,8 @@ impl Orchestrator {
                 )
                 .await?;
             }
-            StepType::Bash => {
-                self.execute_bash(sel, &mut ctx, &mut node_state).await?;
+            StepType::Command => {
+                self.execute_command(sel, &mut ctx, &mut node_state).await?;
             }
         }
 
@@ -495,8 +495,8 @@ impl Orchestrator {
         Ok(())
     }
 
-    /// Execute a `bash` node.
-    async fn execute_bash(
+    /// Execute a `command` node.
+    async fn execute_command(
         &mut self,
         sel: &NodeSelection,
         ctx: &mut VariableContext,
@@ -506,7 +506,7 @@ impl Orchestrator {
 
         // Resolve command or script.
         let raw_cmd = if let Some(ref script) = variant_cfg.script {
-            format!("bash {}", self.project_root.join(script).display())
+            format!("sh {}", self.project_root.join(script).display())
         } else {
             variant_cfg.command.clone().unwrap_or_default()
         };
@@ -517,13 +517,14 @@ impl Orchestrator {
         // Verify step (idempotency).
         if let Some(ref verify_cmd) = variant_cfg.verify {
             let verify_resolved = crate::variables::interpolate(verify_cmd, ctx)?;
-            let verify_result = process::run_bash(&verify_resolved, &self.project_root, &env).await;
+            let verify_result =
+                process::run_command(&verify_resolved, &self.project_root, &env).await;
             if let Ok(ref out) = verify_result {
                 if out.exit_code == 0 {
                     tracing::info!(
                         node = sel.node,
                         variant = sel.variant,
-                        "verify passed — skipping bash step"
+                        "verify passed — skipping command step"
                     );
                     node_state.status = NodeStatus::Skipped;
                     node_state
@@ -534,8 +535,8 @@ impl Orchestrator {
             }
         }
 
-        // Run bash step.
-        let result = process::run_bash(&resolved_cmd, &self.project_root, &env).await?;
+        // Run command step.
+        let result = process::run_command(&resolved_cmd, &self.project_root, &env).await?;
 
         node_state
             .outputs
@@ -551,7 +552,7 @@ impl Orchestrator {
             return Err(OrchestratorError::NodeFailed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
-                reason: format!("bash step exited with code {}", result.exit_code),
+                reason: format!("command step exited with code {}", result.exit_code),
             });
         }
 
@@ -748,7 +749,7 @@ impl Orchestrator {
             }
         };
 
-        match process::run_bash(&resolved_cmd, &self.project_root, &env).await {
+        match process::run_command(&resolved_cmd, &self.project_root, &env).await {
             Ok(result) => {
                 if result.exit_code != 0 {
                     tracing::warn!(

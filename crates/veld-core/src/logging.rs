@@ -44,7 +44,7 @@ pub fn log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) 
     log_dir(project_root, run_name).join(format!("{node}-{variant}.log"))
 }
 
-/// Return the setup (bash step) log file path.
+/// Return the setup (command step) log file path.
 pub fn setup_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
     log_dir(project_root, run_name).join(format!("{node}-{variant}-setup.log"))
 }
