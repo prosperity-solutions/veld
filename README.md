@@ -1,5 +1,7 @@
 # Veld
 
+> This fucking thing is 100% vibe coded with [Claude Code](https://claude.com/claude-code).
+
 Local development environment orchestrator for monorepos. Spin up fully configured preview environments with real HTTPS URLs from a single command.
 
 ```sh
@@ -177,6 +179,10 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 - Ports 80, 443, and 2019 available
 - sudo access once for `veld setup`
 
+## Contributing
+
+We only accept agentic contributions — see [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+
 ## License
 
-MIT
+[MIT](LICENSE)
