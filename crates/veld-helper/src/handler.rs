@@ -84,11 +84,30 @@ impl State {
             Some(v) => v,
             None => return Response::err("missing 'upstream' in args"),
         };
-        let feedback_upstream = args.get("feedback_upstream").and_then(Value::as_str);
+
+        // Build feedback config if the orchestrator included feedback fields.
+        let feedback = match (
+            args.get("feedback_upstream").and_then(Value::as_str),
+            args.get("run_name").and_then(Value::as_str),
+            args.get("project_root").and_then(Value::as_str),
+        ) {
+            (Some(fb_upstream), Some(run_name), Some(project_root)) => {
+                Some(crate::caddy::FeedbackConfig {
+                    upstream: fb_upstream,
+                    run_name,
+                    project_root,
+                })
+            }
+            (None, None, None) => None,
+            _ => {
+                warn!("partial feedback config in add_route args — disabling feedback overlay");
+                None
+            }
+        };
 
         match self
             .caddy
-            .add_route(route_id, hostname, upstream, feedback_upstream)
+            .add_route(route_id, hostname, upstream, feedback)
             .await
         {
             Ok(()) => Response::ok(),

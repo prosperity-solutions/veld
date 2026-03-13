@@ -1,109 +1,13 @@
 //! Feedback overlay assets served by the feedback HTTP server.
-
-/// HTML page that registers the feedback Service Worker.
-pub const INSTALLER_HTML: &str = r###"
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Veld Feedback</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body {
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      display: flex; align-items: center; justify-content: center;
-      min-height: 100vh; background: #0f172a; color: #e2e8f0;
-    }
-    .msg { text-align: center; }
-    .msg h1 { font-size: 1.25rem; font-weight: 500; margin-bottom: 0.5rem; }
-    .msg p { font-size: 0.875rem; color: #94a3b8; }
-    .error { color: #f87171; display: none; margin-top: 1rem; font-size: 0.875rem; }
-  </style>
-</head>
-<body>
-  <div class="msg">
-    <h1>Enabling Veld Feedback&hellip;</h1>
-    <p>Registering the feedback service worker.</p>
-    <p class="error" id="err"></p>
-  </div>
-  <script>
-    (function () {
-      if (!("serviceWorker" in navigator)) {
-        document.getElementById("err").textContent = "Service Workers are not supported in this browser.";
-        document.getElementById("err").style.display = "block";
-        return;
-      }
-      navigator.serviceWorker.register("/__veld__/sw.js", { scope: "/" })
-        .then(function () { window.location.href = "/"; })
-        .catch(function (e) {
-          var el = document.getElementById("err");
-          el.textContent = "Failed to register service worker: " + e.message;
-          el.style.display = "block";
-        });
-    })();
-  </script>
-</body>
-</html>
-"###;
-
-/// Service Worker that injects the feedback script into HTML responses.
-pub const SERVICE_WORKER_JS: &str = r###"
-// Veld Feedback Service Worker
-// Intercepts navigation requests and injects the feedback overlay script.
-
-self.addEventListener("install", function () {
-  self.skipWaiting();
-});
-
-self.addEventListener("activate", function (event) {
-  event.waitUntil(self.clients.claim());
-});
-
-self.addEventListener("fetch", function (event) {
-  if (event.request.mode !== "navigate") {
-    return;
-  }
-
-  event.respondWith(
-    fetch(event.request).then(function (response) {
-      var ct = response.headers.get("content-type") || "";
-      if (!ct.includes("text/html")) {
-        return response;
-      }
-
-      return response.text().then(function (html) {
-        var script = '<script src="/__veld__/feedback/script.js"><\/script>';
-        if (html.indexOf("/__veld__/feedback/script.js") !== -1) {
-          // Script already present, do not inject again.
-          return new Response(html, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers
-          });
-        }
-        var idx = html.lastIndexOf("</body>");
-        if (idx !== -1) {
-          html = html.slice(0, idx) + script + "\n" + html.slice(idx);
-        } else {
-          html = html + script;
-        }
-        return new Response(html, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers
-        });
-      });
-    })
-  );
-});
-"###;
+//!
+//! The overlay `<script>` tag is injected into HTML responses by Caddy's
+//! `replace-response` plugin — no Service Worker or manual activation needed.
 
 /// Self-contained feedback overlay UI script.
 pub const OVERLAY_JS: &str = r###"
 // ---------------------------------------------------------------------------
 // Veld Feedback Overlay
-// Self-contained feedback UI injected into the host page via the Service Worker.
+// Self-contained feedback UI injected into the host page via Caddy's replace-response handler.
 // All DOM elements and styles are created dynamically. No external dependencies.
 // ---------------------------------------------------------------------------
 

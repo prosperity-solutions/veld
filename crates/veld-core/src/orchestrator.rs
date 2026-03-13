@@ -464,9 +464,11 @@ impl Orchestrator {
             "hostname": &node_url,
             "upstream": format!("localhost:{port}"),
         });
-        // Include feedback proxy upstream so Caddy routes /__veld__/* to the
-        // daemon's feedback HTTP server.
+        // Include feedback config so Caddy routes /__veld__/* to the daemon
+        // and injects the overlay script into HTML responses.
         route["feedback_upstream"] = serde_json::json!("localhost:19899");
+        route["run_name"] = serde_json::json!(&run.name);
+        route["project_root"] = serde_json::json!(self.project_root.to_string_lossy());
         if let Err(e) = self.helper_client.add_route(route).await {
             tracing::warn!(error = %e, "failed to add Caddy route via helper");
         }
