@@ -27,11 +27,11 @@ pub enum ProcessError {
 }
 
 // ---------------------------------------------------------------------------
-// Parsed output from a bash step
+// Parsed output from a command step
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default)]
-pub struct BashOutput {
+pub struct CommandOutput {
     pub exit_code: i32,
     pub outputs: HashMap<String, String>,
 }
@@ -222,16 +222,16 @@ async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &P
 }
 
 // ---------------------------------------------------------------------------
-// Run a bash script to completion, capturing VELD_OUTPUT lines
+// Run a command to completion, capturing VELD_OUTPUT lines
 // ---------------------------------------------------------------------------
 
-/// Run a bash command/script to completion. Parses `VELD_OUTPUT key=value`
+/// Run a command/script to completion. Parses `VELD_OUTPUT key=value`
 /// lines from stdout. Returns the collected outputs and exit code.
-pub async fn run_bash(
+pub async fn run_command(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
-) -> Result<BashOutput, ProcessError> {
+) -> Result<CommandOutput, ProcessError> {
     let mut child = Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -260,10 +260,10 @@ pub async fn run_bash(
     let exit_code = status.code().unwrap_or(-1);
 
     if !status.success() {
-        tracing::warn!(exit_code, command, "bash step exited with non-zero code");
+        tracing::warn!(exit_code, command, "command step exited with non-zero code");
     }
 
-    Ok(BashOutput { exit_code, outputs })
+    Ok(CommandOutput { exit_code, outputs })
 }
 
 // ---------------------------------------------------------------------------

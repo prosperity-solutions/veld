@@ -545,14 +545,14 @@ fn generate_veld_json(
 
     let mut node_entries: Vec<String> = Vec::new();
 
-    // Database / bash step nodes first
+    // Database / command step nodes first
     for (name, script) in db_steps {
         let mut node = String::new();
         node.push_str(&format!("    \"{}\": {{\n", escape_json(name)));
         node.push_str("      \"default_variant\": \"local\",\n");
         node.push_str("      \"variants\": {\n");
         node.push_str("        \"local\": {\n");
-        node.push_str("          \"type\": \"bash\",\n");
+        node.push_str("          \"type\": \"command\",\n");
         node.push_str(&format!(
             "          \"script\": \"{}\"\n",
             escape_json(script)

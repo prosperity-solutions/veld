@@ -133,14 +133,14 @@ veld stop --name dev
 ### Step types
 
 - **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
-- **`bash`** — runs a command to completion. Can emit outputs via `VELD_OUTPUT key=value` on stdout. Optional `verify` command for idempotency.
+- **`command`** — runs a command to completion. Can emit outputs via `VELD_OUTPUT key=value` on stdout. Optional `verify` command for idempotency.
 
 ### Health checks
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
-{ "type": "bash", "command": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "command", "command": "curl -sf http://localhost:${veld.port}/ready" }
 ```
 
 ### URL template variables

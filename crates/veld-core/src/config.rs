@@ -84,7 +84,7 @@ pub struct NodeConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantConfig {
-    /// Step type: `bash` or `start_server`.
+    /// Step type: `command` or `start_server`.
     #[serde(rename = "type")]
     pub step_type: StepType,
 
@@ -110,7 +110,7 @@ pub struct VariantConfig {
 
     /// Outputs declaration.
     ///
-    /// - For `bash`: a list of declared output names (`Vec<String>`).
+    /// - For `command`: a list of declared output names (`Vec<String>`).
     /// - For `start_server`: a map of synthetic outputs (`HashMap<String, String>`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outputs: Option<Outputs>,
@@ -119,7 +119,7 @@ pub struct VariantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sensitive_outputs: Option<Vec<String>>,
 
-    /// Idempotency verify command (bash steps only).
+    /// Idempotency verify command (command steps only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify: Option<String>,
 
@@ -140,7 +140,7 @@ pub struct VariantConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Outputs {
-    /// Declared output names for `bash` steps (captured from VELD_OUTPUT).
+    /// Declared output names for `command` steps (captured from VELD_OUTPUT).
     Declared(Vec<String>),
     /// Synthetic output templates for `start_server` steps.
     Synthetic(HashMap<String, String>),
@@ -186,8 +186,8 @@ impl<'de> Deserialize<'de> for Outputs {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepType {
-    #[serde(rename = "bash")]
-    Bash,
+    #[serde(rename = "command", alias = "bash")]
+    Command,
     #[serde(rename = "start_server")]
     StartServer,
 }
@@ -198,7 +198,7 @@ pub enum StepType {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HealthCheck {
-    /// One of "http", "port", "bash".
+    /// One of "http", "port", "command".
     #[serde(rename = "type")]
     pub check_type: String,
 
@@ -210,7 +210,7 @@ pub struct HealthCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_status: Option<u16>,
 
-    /// Command for type "bash".
+    /// Command for type "command".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 

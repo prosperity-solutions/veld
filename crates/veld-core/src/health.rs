@@ -22,8 +22,8 @@ pub enum HealthError {
     #[error("HTTPS check failed: {0}")]
     HttpsCheckFailed(String),
 
-    #[error("bash health check failed with exit code {0}")]
-    BashCheckFailed(i32),
+    #[error("command health check failed with exit code {0}")]
+    CommandCheckFailed(i32),
 }
 
 // ---------------------------------------------------------------------------
@@ -135,11 +135,11 @@ pub async fn wait_for_http(url: &str, hc: &HealthCheck) -> Result<(), HealthErro
 }
 
 // ---------------------------------------------------------------------------
-// Bash health check
+// Command health check
 // ---------------------------------------------------------------------------
 
-/// Run a bash command as a health check. Exit 0 = healthy.
-pub async fn wait_for_bash_check(
+/// Run a command as a health check. Exit 0 = healthy.
+pub async fn wait_for_command_check(
     command: &str,
     working_dir: &Path,
     hc: &HealthCheck,
@@ -167,11 +167,11 @@ pub async fn wait_for_bash_check(
                     tracing::debug!(
                         command = cmd,
                         exit_code = s.code().unwrap_or(-1),
-                        "bash health check: not yet healthy"
+                        "command health check: not yet healthy"
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(command = cmd, error = %e, "bash health check: command error");
+                    tracing::debug!(command = cmd, error = %e, "command health check: command error");
                 }
             }
             sleep(interval).await;
@@ -220,11 +220,11 @@ pub async fn run_health_check(
             wait_for_http(&direct_url, hc).await?;
             tracing::info!(url = direct_url, "health check phase 2: HTTP check passed");
         }
-        "bash" => {
+        "command" | "bash" => {
             if let Some(cmd) = &hc.command {
-                tracing::info!(command = cmd, "health check phase 2: running bash check");
-                wait_for_bash_check(cmd, working_dir, hc).await?;
-                tracing::info!("health check phase 2: bash check passed");
+                tracing::info!(command = cmd, "health check phase 2: running command check");
+                wait_for_command_check(cmd, working_dir, hc).await?;
+                tracing::info!("health check phase 2: command check passed");
             }
         }
         "port" => {

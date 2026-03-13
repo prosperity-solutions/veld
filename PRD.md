@@ -262,7 +262,7 @@ Both phases must pass for a node to be considered healthy. The health check conf
 ```json
 { "type": "http", "path": "/health", "expect_status": 200 }
 { "type": "port" }
-{ "type": "bash", "command": "./scripts/check.sh" }
+{ "type": "command", "command": "./scripts/check.sh" }
 ```
 
 Configurable `timeout_seconds` (default: 60) and `interval_ms` (default: 1000).
@@ -339,7 +339,7 @@ The config describes a directed graph of nodes. Each node has one or more varian
 There are no static profiles. A **preset** is a named shortcut for a node+variant selection — convenience only, not a core concept.
 
 ### Variants
-A variant defines *how* a node behaves in a given context. The step type (`bash` or `start_server`) is declared at the **variant level** — the same node might be a running server in one variant and a bash script exporting a remote URL in another.
+A variant defines *how* a node behaves in a given context. The step type (`command` or `start_server`) is declared at the **variant level** — the same node might be a running server in one variant and a script exporting a remote URL in another.
 
 ### Dependency Declaration
 Each variant declares its dependencies as explicit `node:variant` pairs. Default variants are never silently assumed — every dependency names its variant. The graph is always fully deterministic.
@@ -350,7 +350,7 @@ If two selected end nodes transitively require the same dependency node with *di
 
 ## Step Types
 
-### `bash`
+### `command`
 Runs a shell script or inline command to completion. Used for setup tasks — database cloning, seeding, exporting remote service URLs, etc.
 
 - Working directory defaults to `${veld.root}`
@@ -418,11 +418,11 @@ Available to all node variants without declaration:
 Node output references available to downstream nodes:
 
 ```
-${nodes.database.DATABASE_URL}        # custom bash or outputs declaration
+${nodes.database.DATABASE_URL}        # custom command or outputs declaration
 ${nodes.backend.url}                  # start_server built-in (unambiguous)
 ${nodes.backend:local.url}            # qualified form (two variants running)
 ${nodes.backend:local.port}           # internal port (rarely needed)
-${nodes.clone-db.exit_code}           # bash built-in
+${nodes.clone-db.exit_code}           # command built-in
 ```
 
 Short form `${nodes.backend.url}` is valid when only one variant of `backend` is active in the current graph. Qualified form is required when two variants of the same node are running simultaneously. Veld validates this at graph resolution time and fails fast with a precise, actionable error.
@@ -434,8 +434,8 @@ Short form `${nodes.backend.url}` is valid when only one variant of `backend` is
 ## Idempotency
 
 - `start_server` — if process is running and both health check phases pass, skip
-- `bash` without `verify` — if previously completed successfully with the same input variable values, skip
-- `bash` with `verify` — run the verify command; exit 0 = skip, non-zero = re-run
+- `command` without `verify` — if previously completed successfully with the same input variable values, skip
+- `command` with `verify` — run the verify command; exit 0 = skip, non-zero = re-run
 
 `veld start --name my-feature` always converges to a healthy state. Safe to call repeatedly.
 
@@ -459,7 +459,7 @@ Each run's process output is piped directly to files in the project's `.veld/` d
   logs/
     {run-name}/
       {node}-{variant}.log          # start_server stdout+stderr, merged
-      {node}-{variant}-setup.log    # bash step stdout+stderr
+      {node}-{variant}-setup.log    # command step stdout+stderr
       veld-debug.log                # orchestration trace, only with --debug
 ```
 
@@ -538,7 +538,7 @@ veld init
 1. Detects project structure (pnpm/npm/yarn workspaces, Cargo workspace)
 2. Lists discovered services and asks which to include
 3. For each service: dev command, port hint, dependencies
-4. Detects database patterns (Prisma, Drizzle) and suggests bash steps
+4. Detects database patterns (Prisma, Drizzle) and suggests command steps
 5. Proposes URL template based on project name
 6. Writes `veld.json` and adds `.veld/` to `.gitignore`
 
@@ -703,7 +703,7 @@ No cross-compilation until v1 is stable. No Tauri. No GTK. No npm in CI.
       "default_variant": "local",
       "variants": {
         "local": {
-          "type": "bash",
+          "type": "command",
           "script": "./scripts/clone-db.sh",
           "verify": "./scripts/verify-db.sh",
           "outputs": ["DATABASE_URL"],
@@ -732,7 +732,7 @@ No cross-compilation until v1 is stable. No Tauri. No GTK. No npm in CI.
           }
         },
         "staging": {
-          "type": "bash",
+          "type": "command",
           "script": "./scripts/export-staging-backend-url.sh",
           "outputs": ["BACKEND_URL"]
         }

@@ -112,7 +112,7 @@ When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes 
   "hidden": true,
   "variants": {
     "default": {
-      "type": "bash",
+      "type": "command",
       "command": "./scripts/generate-certs.sh"
     }
   }
@@ -144,9 +144,9 @@ A variant defines how a node behaves in a given context. The same node might be 
 
 | Field               | Type             | Required | Applies To     | Description                                           |
 |---------------------|------------------|----------|----------------|-------------------------------------------------------|
-| `type`              | string           | Yes      | All            | `"bash"` or `"start_server"`                          |
+| `type`              | string           | Yes      | All            | `"command"` or `"start_server"`                          |
 | `command`           | string           | Varies   | All            | Inline shell command to execute                       |
-| `script`            | string           | Varies   | `bash` only    | Path to script file, relative to `veld.json`          |
+| `script`            | string           | Varies   | `command` only    | Path to script file, relative to `veld.json`          |
 | `health_check`      | object           | Required for `start_server` | `start_server` | How to verify the service is healthy |
 | `depends_on`        | object           | No       | All            | Dependencies on other nodes                           |
 | `env`               | object           | No       | All            | Extra environment variables                           |
@@ -154,11 +154,11 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
 | `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
-| `verify`            | string           | No       | `bash` only    | Idempotency verification command                      |
+| `verify`            | string           | No       | `command` only    | Idempotency verification command                      |
 
 ### `type`
 
-#### `bash`
+#### `command`
 
 Runs a shell command or script to completion. Used for setup tasks such as database cloning, seeding, data migration, or exporting remote service URLs.
 
@@ -170,7 +170,7 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 
 ```json
 {
-  "type": "bash",
+  "type": "command",
   "command": "echo 'VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb'",
   "outputs": ["DATABASE_URL"]
 }
@@ -203,11 +203,11 @@ An inline shell command to execute. Supports full Veld variable substitution.
 "command": "docker run --rm --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16"
 ```
 
-For `start_server` variants, `command` is required. For `bash` variants, you must provide either `command` or `script`.
+For `start_server` variants, `command` is required. For `command` variants, you must provide either `command` or `script`.
 
 ### `script`
 
-A path to a script file, relative to the directory containing `veld.json`. Mutually exclusive with `command`. Only valid for `bash` type variants.
+A path to a script file, relative to the directory containing `veld.json`. Mutually exclusive with `command`. Only valid for `command` type variants.
 
 ```json
 "script": "./scripts/clone-db.sh"
@@ -226,10 +226,10 @@ If Phase 1 fails, the error is a process issue. If Phase 1 passes but Phase 2 fa
 
 | Field              | Type    | Required | Description                                          |
 |--------------------|---------|----------|------------------------------------------------------|
-| `type`             | string  | Yes      | Strategy: `"http"`, `"port"`, or `"bash"`            |
+| `type`             | string  | Yes      | Strategy: `"http"`, `"port"`, or `"command"`            |
 | `path`             | string  | No       | HTTP path to poll (`http` type only)                 |
 | `expect_status`    | integer | No       | Expected HTTP status code (`http` type only, default: 200) |
-| `command`          | string  | No       | Shell command to run (`bash` type only)              |
+| `command`          | string  | No       | Shell command to run (`command` type only)              |
 | `timeout_seconds`  | integer | No       | Max seconds to wait (default: 60)                    |
 | `interval_ms`      | integer | No       | Milliseconds between checks (default: 1000, min: 100)|
 
@@ -259,13 +259,13 @@ Checks whether the allocated port is accepting TCP connections. The simplest str
 }
 ```
 
-#### Strategy: `bash`
+#### Strategy: `command`
 
 Runs a shell command and checks the exit code. Exit code `0` means healthy.
 
 ```json
 "health_check": {
-  "type": "bash",
+  "type": "command",
   "command": "./scripts/check-db-ready.sh",
   "timeout_seconds": 45,
   "interval_ms": 2000
@@ -306,13 +306,13 @@ Extra environment variables injected into the process. Values support Veld varia
 
 Output declarations differ based on the variant type.
 
-#### For `bash` variants: Array of strings
+#### For `command` variants: Array of strings
 
 Declares the output names that the script will emit via `VELD_OUTPUT` lines written to stdout. Your script prints `VELD_OUTPUT key=value` to stdout, and Veld captures the values.
 
 ```json
 {
-  "type": "bash",
+  "type": "command",
   "script": "./scripts/clone-db.sh",
   "outputs": ["DATABASE_URL", "DB_NAME"]
 }
@@ -325,7 +325,7 @@ echo "VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb"
 echo "VELD_OUTPUT DB_NAME=mydb"
 ```
 
-Every `bash` variant also automatically provides the built-in output `exit_code`.
+Every `command` variant also automatically provides the built-in output `exit_code`.
 
 #### For `start_server` variants: Object (key-value map)
 
@@ -355,7 +355,7 @@ An array of output key names whose values are sensitive. These outputs are:
 
 ```json
 {
-  "type": "bash",
+  "type": "command",
   "script": "./scripts/clone-db.sh",
   "outputs": ["DATABASE_URL"],
   "sensitive_outputs": ["DATABASE_URL"]
@@ -364,7 +364,7 @@ An array of output key names whose values are sensitive. These outputs are:
 
 ### `verify`
 
-An idempotency verification command. Only applies to `bash` type variants. Before running the main command/script, Veld executes the verify command:
+An idempotency verification command. Only applies to `command` type variants. Before running the main command/script, Veld executes the verify command:
 
 - **Exit code 0:** The step is considered already complete and is skipped.
 - **Non-zero exit code:** The step runs normally.
@@ -374,7 +374,7 @@ The verify command receives the previous run's output variables as environment v
 
 ```json
 {
-  "type": "bash",
+  "type": "command",
   "script": "./scripts/clone-db.sh",
   "verify": "./scripts/verify-db.sh",
   "outputs": ["DATABASE_URL"]
@@ -385,11 +385,11 @@ The verify command receives the previous run's output variables as environment v
 
 A teardown command that runs when `veld stop` is called. Executed in reverse dependency order, after the process is killed (for `start_server` nodes) but before state is cleaned up.
 
-This is especially useful for `bash` nodes that provision external resources during start — databases, Docker containers, temporary credentials — that need explicit cleanup.
+This is especially useful for `command` nodes that provision external resources during start — databases, Docker containers, temporary credentials — that need explicit cleanup.
 
 ```json
 {
-  "type": "bash",
+  "type": "command",
   "command": "docker run -d --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16",
   "on_stop": "docker rm -f veld-db-${veld.run}",
   "outputs": ["DATABASE_URL"]
@@ -403,7 +403,7 @@ The `on_stop` command receives the same variable context that was available duri
 
 If the `on_stop` command fails (non-zero exit code or execution error), Veld logs a warning but continues tearing down the remaining nodes. A failing teardown hook never blocks the stop operation.
 
-`on_stop` works with both `bash` and `start_server` variants:
+`on_stop` works with both `command` and `start_server` variants:
 
 ```json
 {
@@ -637,7 +637,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "default_variant": "docker",
       "variants": {
         "local": {
-          "type": "bash",
+          "type": "command",
           "script": "./scripts/clone-db.sh",
           "verify": "./scripts/verify-db.sh",
           "on_stop": "./scripts/drop-db.sh",
@@ -663,7 +663,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "hidden": true,
       "variants": {
         "default": {
-          "type": "bash",
+          "type": "command",
           "command": "./scripts/generate-dev-certs.sh",
           "verify": "test -f ./certs/dev.pem"
         }
@@ -692,7 +692,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
           }
         },
         "staging": {
-          "type": "bash",
+          "type": "command",
           "command": "echo 'VELD_OUTPUT BACKEND_URL=https://api.staging.my-project.com'",
           "outputs": ["BACKEND_URL"]
         }
@@ -862,9 +862,9 @@ Most modern editors support JSON Schema natively or through extensions:
 The schema validates:
 - All required fields are present
 - Field types are correct
-- `type` values are one of `"bash"` or `"start_server"`
-- Health check types are one of `"http"`, `"port"`, or `"bash"`
+- `type` values are one of `"command"` or `"start_server"`
+- Health check types are one of `"http"`, `"port"`, or `"command"`
 - `start_server` variants require `command`
-- `bash` variants require either `command` or `script`
+- `command` variants require either `command` or `script`
 - Preset entries match the `node:variant` pattern
 - Numeric constraints (timeouts, intervals, status codes)
