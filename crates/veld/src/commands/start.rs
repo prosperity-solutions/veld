@@ -94,7 +94,23 @@ pub async fn run(
     );
     eprintln!();
 
-    match orchestrator.start(&parsed_selections, run_name_str).await {
+    // Run start with Ctrl+C interception so we can clean up on interrupt.
+    let start_result = tokio::select! {
+        result = orchestrator.start(&parsed_selections, run_name_str) => result,
+        _ = tokio::signal::ctrl_c() => {
+            orchestrator.close_progress_sender();
+            let _ = progress_handle.await;
+            eprintln!();
+            output::print_info("Interrupted — stopping partially started environment...");
+            match orchestrator.stop(run_name_str).await {
+                Ok(_) => output::print_success(&format!("Environment '{}' cleaned up.", run_name_str)),
+                Err(e) => output::print_error(&format!("Cleanup failed: {e}"), false),
+            }
+            return 130; // Standard exit code for SIGINT
+        }
+    };
+
+    match start_result {
         Ok(run_state) => {
             // Drop the progress sender so the renderer can finish.
             orchestrator.close_progress_sender();

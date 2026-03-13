@@ -248,11 +248,15 @@ impl Orchestrator {
                 run.execution_order.push(key.clone());
                 run.nodes.insert(key, node_state);
             }
+
+            // Save partial state after each stage so that Ctrl+C or crashes
+            // leave enough information for `veld stop` to find and kill PIDs.
+            self.save_state(&run)?;
         }
 
         run.status = RunStatus::Running;
 
-        // Persist state.
+        // Final state save with Running status.
         self.save_state(&run)?;
 
         Ok(run)
@@ -503,6 +507,16 @@ impl Orchestrator {
 
         self.children
             .insert(RunState::node_key(&sel.node, &sel.variant), handle);
+
+        // Checkpoint: persist the PID immediately so Ctrl+C during health
+        // checks still allows `veld stop` to find and kill this process.
+        {
+            let key = RunState::node_key(&sel.node, &sel.variant);
+            let mut checkpoint_run = run.clone();
+            checkpoint_run.execution_order.push(key.clone());
+            checkpoint_run.nodes.insert(key, node_state.clone());
+            let _ = self.save_state(&checkpoint_run);
+        }
 
         // Health check — inlined to emit progress events between phases.
         self.debug_log(&format!(
