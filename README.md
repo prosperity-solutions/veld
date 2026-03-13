@@ -27,7 +27,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 Download the latest release for your platform:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/prosperity-solutions/veld/main/install.sh | bash
+curl -fsSL https://veld.oss.life.li/get | bash
 ```
 
 This detects your OS and architecture, downloads the latest release, and installs:
@@ -42,7 +42,7 @@ veld setup
 
 This installs Caddy, the helper/daemon services, and trusts Caddy's CA in your system keychain for HTTPS.
 
-To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL ... | bash`
+To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
 
 ### Build from source
 
@@ -59,7 +59,7 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",

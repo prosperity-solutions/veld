@@ -1,0 +1,2046 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>veld — One command. Every service. Real HTTPS.</title>
+  <meta name="description" content="veld is an open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+  <meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, monorepo, developer tools, open source, Rust">
+  <meta name="author" content="Prosperity Solutions">
+  <meta name="robots" content="index, follow">
+
+  <!-- Open Graph -->
+  <meta property="og:title" content="veld — One command. Every service. Real HTTPS.">
+  <meta property="og:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://veld.oss.life.li">
+  <meta property="og:image" content="https://veld.oss.life.li/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:site_name" content="veld">
+  <meta property="og:locale" content="en_US">
+
+  <!-- Twitter -->
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="veld — One command. Every service. Real HTTPS.">
+  <meta name="twitter:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+  <meta name="twitter:image" content="https://veld.oss.life.li/og.png">
+
+  <meta name="theme-color" content="#0a0a0a">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>V</text></svg>">
+
+  <!-- Canonical -->
+  <link rel="canonical" href="https://veld.oss.life.li">
+
+  <!-- Structured Data -->
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    "name": "veld",
+    "description": "Open-source local development environment orchestrator for monorepos. No port numbers, real HTTPS, dependency graphs.",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Linux",
+    "license": "https://opensource.org/licenses/MIT",
+    "url": "https://veld.oss.life.li",
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "author": { "@type": "Organization", "name": "Prosperity Solutions" }
+  }
+  </script>
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0a0a0a;
+      --bg-card: #111113;
+      --bg-terminal: #0d0d0f;
+      --border: #1e1e24;
+      --text: #e4e4e7;
+      --text-dim: #71717a;
+      --text-muted: #52525b;
+      --green: #22c55e;
+      --green-dim: #16a34a;
+      --cyan: #06b6d4;
+      --amber: #f59e0b;
+      --red: #ef4444;
+      --purple: #a855f7;
+      --blue: #3b82f6;
+      --max-w: 720px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* Center container layout */
+    .container {
+      max-width: var(--max-w);
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    /* Sections */
+    section {
+      padding: 80px 0;
+    }
+
+    @media (max-width: 640px) {
+      section { padding: 56px 0; }
+    }
+
+    /* Typography */
+    h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
+
+    h2 {
+      font-size: 1.75rem;
+      margin-bottom: 16px;
+    }
+
+    h3 {
+      font-size: 1.125rem;
+      margin-bottom: 8px;
+    }
+
+    p { color: var(--text-dim); }
+
+    .label {
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--green);
+      margin-bottom: 12px;
+    }
+
+    /* ===================== HERO ===================== */
+    .hero {
+      min-height: 100svh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      text-align: center;
+      padding-top: 60px;
+      padding-bottom: 60px;
+    }
+
+    .hero-title {
+      font-size: clamp(4rem, 14vw, 8rem);
+      font-weight: 800;
+      letter-spacing: -0.04em;
+      background: linear-gradient(180deg, #fff 30%, #71717a 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .hero-tagline {
+      font-size: clamp(1.1rem, 3vw, 1.5rem);
+      color: var(--text-dim);
+      margin-top: 16px;
+      font-weight: 400;
+    }
+
+    .hero-badges {
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+      margin-top: 32px;
+    }
+
+    .badge {
+      font-size: 0.8rem;
+      padding: 6px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+      background: var(--bg-card);
+      font-weight: 500;
+    }
+
+    .hero-cta {
+      margin-top: 40px;
+      display: flex;
+      gap: 12px;
+      justify-content: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 24px;
+      border-radius: 8px;
+      font-size: 0.9rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.15s;
+      cursor: pointer;
+      border: none;
+      font-family: inherit;
+    }
+
+    .btn-primary {
+      background: var(--green);
+      color: #000;
+    }
+
+    .btn-primary:hover { background: #16a34a; }
+
+    .btn-secondary {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover { border-color: var(--text-muted); }
+
+    .scroll-hint {
+      margin-top: 48px;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+      animation: bounce 2s infinite;
+    }
+
+    @keyframes bounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(6px); }
+    }
+
+    /* ===================== TERMINAL ===================== */
+    .terminal {
+      background: var(--bg-terminal);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      overflow: hidden;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace;
+      font-size: 0.8rem;
+      line-height: 1.7;
+    }
+
+    .terminal-header {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 14px;
+      background: #161618;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .terminal-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    .terminal-dot.red { background: #ff5f57; }
+    .terminal-dot.yellow { background: #febc2e; }
+    .terminal-dot.green { background: #28c840; }
+
+    .terminal-title {
+      flex: 1;
+      text-align: center;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+
+    .terminal-body {
+      padding: 16px;
+      overflow-x: auto;
+      white-space: pre;
+      min-height: 60px;
+    }
+
+    .t-green { color: var(--green); }
+    .t-red { color: var(--red); }
+    .t-cyan { color: var(--cyan); }
+    .t-amber { color: var(--amber); }
+    .t-purple { color: var(--purple); }
+    .t-blue { color: var(--blue); }
+    .t-dim { color: var(--text-muted); }
+    .t-bold { font-weight: 700; }
+    .t-white { color: #fff; }
+
+    /* ===================== PROBLEM ===================== */
+    .problem-line {
+      opacity: 0;
+      animation: fadeInUp 0.4s forwards;
+    }
+
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* ===================== INTERACTIVE DEMO ===================== */
+    .demo-section {
+      padding: 80px 0;
+    }
+
+    @media (max-width: 640px) {
+      .demo-section { padding: 56px 0; }
+    }
+
+    .demo-layout {
+      display: flex;
+      flex-direction: column;
+      gap: 0;
+      margin-top: 24px;
+    }
+
+    .demo-terminals {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      order: 2;
+    }
+
+    .timeline-controls { order: 1; }
+
+    @media (min-width: 900px) {
+      .demo-terminals {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .demo-terminals { order: 1; }
+      .timeline-controls { order: 2; }
+
+      .container.wide {
+        max-width: 960px;
+      }
+    }
+
+    .demo-terminal {
+      transition: border-color 0.4s;
+    }
+
+    .demo-terminal .terminal-body {
+      height: 240px;
+      overflow-y: hidden;
+      position: relative;
+    }
+
+    @media (min-width: 900px) {
+      .demo-terminal .terminal-body {
+        height: 320px;
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: var(--border) transparent;
+        overscroll-behavior: contain;
+        -webkit-overflow-scrolling: touch;
+      }
+    }
+
+    .demo-terminal .terminal-body::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    .demo-terminal .terminal-body::-webkit-scrollbar-track {
+      background: transparent;
+    }
+
+    .demo-terminal .terminal-body::-webkit-scrollbar-thumb {
+      background: var(--border);
+      border-radius: 2px;
+    }
+
+    .demo-terminal .terminal-body::-webkit-scrollbar-thumb:hover {
+      background: var(--text-muted);
+    }
+
+    .demo-terminal.done-good {
+      border-color: rgba(34, 197, 94, 0.35);
+    }
+
+    .demo-terminal.done-bad {
+      border-color: rgba(239, 68, 68, 0.25);
+    }
+
+    .demo-done-badge {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      font-size: 0.65rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 3px 10px;
+      border-radius: 999px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+    }
+
+    .demo-done-badge.visible { opacity: 1; }
+
+    .demo-done-badge.good {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+    }
+
+    .demo-done-badge.bad {
+      background: rgba(239, 68, 68, 0.12);
+      color: var(--red);
+    }
+
+    /* Timeline slider */
+    .timeline-controls {
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    @media (min-width: 900px) {
+      .timeline-controls {
+        margin-bottom: 0;
+        margin-top: 24px;
+      }
+    }
+
+    .timeline-btn {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text);
+      width: 36px;
+      height: 36px;
+      border-radius: 8px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: border-color 0.15s;
+      flex-shrink: 0;
+    }
+
+    .timeline-btn:hover { border-color: var(--text-muted); }
+
+    .timeline-slider {
+      flex: 1;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      outline: none;
+    }
+
+    .timeline-slider::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--green);
+      cursor: pointer;
+      transition: transform 0.1s;
+    }
+
+    .timeline-slider::-webkit-slider-thumb:hover {
+      transform: scale(1.2);
+    }
+
+    .timeline-slider::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: var(--green);
+      cursor: pointer;
+      border: none;
+    }
+
+    .timeline-time {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: 'SF Mono', Menlo, monospace;
+      min-width: 36px;
+      text-align: right;
+      flex-shrink: 0;
+    }
+
+    /* ===================== FEATURES GRID ===================== */
+    .features-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    @media (min-width: 640px) {
+      .features-grid { grid-template-columns: 1fr 1fr; }
+    }
+
+    .feature-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 24px;
+      transition: border-color 0.2s;
+    }
+
+    .feature-card:hover { border-color: var(--text-muted); }
+
+    .feature-card h3 { font-size: 1rem; }
+    .feature-card p { font-size: 0.875rem; margin-top: 6px; }
+
+    /* ===================== CONFIG ===================== */
+    .config-block {
+      margin-top: 24px;
+    }
+
+    .config-block .terminal-body {
+      font-size: 0.75rem;
+      line-height: 1.8;
+    }
+
+    .config-callouts {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 16px;
+    }
+
+    .callout {
+      font-size: 0.75rem;
+      padding: 4px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      color: var(--text-dim);
+    }
+
+    /* ===================== DX SECTION ===================== */
+    .dx-cards {
+      display: flex;
+      flex-direction: column;
+      gap: 24px;
+      margin-top: 24px;
+    }
+
+    .dx-card .terminal {
+      margin-top: 12px;
+    }
+
+    .dx-card .terminal-body {
+      font-size: 0.75rem;
+    }
+
+    /* ===================== AGENTIC ===================== */
+    .agentic-lines {
+      margin-top: 24px;
+      font-size: 1.125rem;
+      line-height: 2.2;
+    }
+
+    .agentic-lines .dim {
+      color: var(--text-muted);
+    }
+
+    /* ===================== CTA ===================== */
+    .cta-section {
+      text-align: center;
+      padding: 100px 0;
+    }
+
+    .cta-section h2 {
+      font-size: clamp(1.5rem, 5vw, 2.25rem);
+    }
+
+    .install-cmd {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 14px 20px;
+      margin-top: 24px;
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.85rem;
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color 0.15s;
+      max-width: 100%;
+      overflow-x: auto;
+    }
+
+    .install-cmd:hover { border-color: var(--text-muted); }
+
+    .install-cmd .copy-icon {
+      color: var(--text-muted);
+      flex-shrink: 0;
+      transition: color 0.15s;
+    }
+
+    .install-cmd:hover .copy-icon { color: var(--text); }
+
+    .copy-toast {
+      font-size: 0.75rem;
+      color: var(--green);
+      margin-top: 8px;
+      opacity: 0;
+      transition: opacity 0.2s;
+    }
+
+    .copy-toast.show { opacity: 1; }
+
+    /* ===================== FOOTER ===================== */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 0;
+      text-align: center;
+      color: var(--text-muted);
+      font-size: 0.8rem;
+    }
+
+    footer a {
+      color: var(--text-dim);
+      text-decoration: none;
+    }
+
+    footer a:hover { color: var(--text); }
+
+    /* ===================== FOCUS VISIBLE ===================== */
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    /* ===================== REDUCED MOTION ===================== */
+    @media (prefers-reduced-motion: reduce) {
+      html { scroll-behavior: auto; }
+      .reveal { transition: none; opacity: 1; transform: none; }
+      .env-lane { transition: none; }
+      .scroll-hint { animation: none; }
+      .cursor { animation: none; opacity: 1; }
+    }
+
+    /* ===================== ANIMATIONS ===================== */
+    .reveal {
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 0.5s, transform 0.5s;
+    }
+
+    .reveal.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    /* Cursor blink for terminal */
+    .cursor {
+      display: inline-block;
+      width: 8px;
+      height: 16px;
+      background: var(--text);
+      animation: blink 1s step-end infinite;
+      vertical-align: text-bottom;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+
+    /* HTTPS section */
+    .https-comparison {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    @media (min-width: 640px) {
+      .https-comparison { grid-template-columns: 1fr 1fr; }
+    }
+
+    .https-card {
+      border-radius: 10px;
+      padding: 24px;
+      border: 1px solid var(--border);
+    }
+
+    .https-card.before {
+      background: rgba(239, 68, 68, 0.05);
+      border-color: rgba(239, 68, 68, 0.2);
+    }
+
+    .https-card.after {
+      background: rgba(34, 197, 94, 0.05);
+      border-color: rgba(34, 197, 94, 0.2);
+    }
+
+    .https-card h3 { margin-bottom: 16px; }
+
+    .https-url {
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.8rem;
+      padding: 8px 12px;
+      border-radius: 6px;
+      background: var(--bg);
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+    }
+
+    .https-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .https-tag {
+      font-size: 0.7rem;
+      padding: 3px 10px;
+      border-radius: 999px;
+      font-weight: 500;
+    }
+
+    .https-tag.bad {
+      background: rgba(239, 68, 68, 0.15);
+      color: var(--red);
+    }
+
+    .https-tag.good {
+      background: rgba(34, 197, 94, 0.15);
+      color: var(--green);
+    }
+
+    .tls-features {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    @media (min-width: 640px) {
+      .tls-features { grid-template-columns: repeat(3, 1fr); }
+    }
+
+    .tls-feature {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+    }
+
+    .tls-feature h4 {
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 6px;
+      color: var(--text);
+    }
+
+    .tls-feature p {
+      font-size: 0.8rem;
+    }
+
+    .custom-domain-urls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+
+    .custom-domain-url {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 8px 14px;
+      font-size: 0.8rem;
+    }
+
+    .custom-domain-url code {
+      font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
+      color: var(--text-dim);
+    }
+
+    /* ===================== PARALLEL ENVIRONMENTS ===================== */
+    .env-lanes {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-top: 28px;
+    }
+
+    .env-lane {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 20px;
+      opacity: 0;
+      transform: translateX(-20px);
+      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.4s;
+    }
+
+    .env-lane.active {
+      opacity: 1;
+      transform: translateX(0);
+      border-color: rgba(34, 197, 94, 0.3);
+    }
+
+    .env-lane-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .env-lane-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(34, 197, 94, 0.12);
+      color: var(--green);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .env-lane-icon.purple {
+      background: rgba(168, 85, 247, 0.12);
+      color: var(--purple);
+    }
+
+    .env-lane-icon.amber {
+      background: rgba(245, 158, 11, 0.12);
+      color: var(--amber);
+    }
+
+    .env-lane-title {
+      font-weight: 700;
+      font-size: 0.9rem;
+      color: var(--text);
+    }
+
+    .env-lane-dir {
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+
+    .env-lane-cmd {
+      margin-left: auto;
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      background: var(--bg);
+      padding: 4px 10px;
+      border-radius: 4px;
+      white-space: nowrap;
+    }
+
+    @media (max-width: 640px) {
+      .env-lane-cmd {
+        margin-left: 0;
+        margin-top: 8px;
+        width: 100%;
+        overflow-x: auto;
+      }
+    }
+
+    .env-lane-nodes {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      margin-top: 12px;
+    }
+
+    .env-node {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+
+    .env-node-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--text-muted);
+      transition: background 0.3s;
+    }
+
+    .env-lane.active .env-node-dot.green {
+      background: var(--green);
+      box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
+    }
+
+    .env-lane-urls {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      margin-top: 12px;
+    }
+
+    .env-lane-urls code {
+      font-family: 'SF Mono', Menlo, monospace;
+      font-size: 0.7rem;
+      color: var(--text-muted);
+    }
+
+    .env-lane.active .env-lane-urls code {
+      color: var(--text-dim);
+    }
+
+    .env-lane-urls code strong {
+      color: var(--cyan);
+      font-weight: 600;
+    }
+
+    /* Summary counter bar */
+    .env-summary {
+      display: flex;
+      gap: 32px;
+      justify-content: center;
+      margin-top: 28px;
+      padding: 20px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    .env-summary-stat {
+      text-align: center;
+    }
+
+    .env-summary-number {
+      display: block;
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text);
+      line-height: 1;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .env-summary-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-top: 4px;
+      display: block;
+    }
+  </style>
+</head>
+<body>
+
+  <main>
+
+  <!-- ==================== HERO ==================== -->
+  <section class="hero">
+    <div class="container">
+      <h1 class="hero-title">veld</h1>
+      <p style="font-size:0.85rem;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase;font-weight:500;margin-bottom:4px">Local development orchestrator</p>
+      <p class="hero-tagline">One command. Every service. Real HTTPS.</p>
+      <div class="hero-badges">
+        <span class="badge">Open Source</span>
+        <span class="badge">MIT Licensed</span>
+        <span class="badge">Written in Rust</span>
+        <span class="badge">macOS &amp; Linux</span>
+      </div>
+      <div class="hero-cta">
+        <a href="https://github.com/prosperity-solutions/veld" class="btn btn-primary" rel="noopener" target="_blank">GitHub</a>
+        <a href="#demo" class="btn btn-secondary">See it in action</a>
+        <button class="btn btn-secondary" id="copy-llms" aria-label="Copy llms.txt URL" style="font-size:0.8rem;padding:12px 16px">llms.txt</button>
+      </div>
+      <div class="scroll-hint" aria-hidden="true">&#8595;</div>
+    </div>
+  </section>
+
+  <!-- ==================== PROBLEM ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">The problem</span>
+      <h2>Local dev is broken</h2>
+      <p>Port conflicts, manual wiring, no HTTPS&mdash;sound familiar?</p>
+      <div class="terminal" style="margin-top: 24px">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">your-monorepo</span>
+        </div>
+        <div class="terminal-body"><span class="t-dim">$</span> npm run dev:backend
+<span class="t-red">Error: listen EADDRINUSE: address already in use :::3000</span>
+
+<span class="t-dim">$</span> lsof -i :3000
+<span class="t-dim">node    4821 dev   23u  IPv6  0x1a2b3c  TCP *:3000 (LISTEN)</span>
+
+<span class="t-dim">$</span> kill -9 4821 && npm run dev:backend &
+<span class="t-dim">$</span> npm run dev:frontend &
+<span class="t-dim">$</span> npm run dev:admin &
+
+<span class="t-amber">Wait, which port is which again?</span>
+<span class="t-dim">backend  → localhost:3000</span>
+<span class="t-dim">frontend → localhost:3001  ...or was it 3002?</span>
+<span class="t-dim">admin    → localhost:????</span>
+
+<span class="t-red">Mixed Content: blocked loading http:// from https://</span>
+<span class="t-red">ERR_SSL_PROTOCOL_ERROR</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== SOLUTION ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">The solution</span>
+      <h2>One command</h2>
+      <p>Declare your stack in <code style="color:var(--text);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">veld.json</code>, run <code style="color:var(--green);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">veld start</code>.</p>
+      <div class="terminal" style="margin-top: 24px">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">veld</span>
+        </div>
+        <div class="terminal-body"><span class="t-dim">$</span> veld start --preset fullstack --name my-feature
+
+<span class="t-white t-bold">veld</span> Starting environment 'my-feature'...
+
+<span class="t-bold">[1/4]</span> database:docker
+  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[2.1s]</span>
+
+<span class="t-bold">[2/4]</span> backend:local
+  <span class="t-green">&#10003;</span> Phase 1 (port check) passed
+  <span class="t-green">&#10003;</span> Phase 2 (HTTPS check) passed
+  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[1.2s]</span>
+
+<span class="t-bold">[3/4]</span> frontend:local
+  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[0.8s]</span>
+
+<span class="t-bold">[4/4]</span> admin:local
+  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[0.6s]</span>
+
+<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
+<span class="t-cyan">database</span>   <span class="t-dim">https://database.my-feature.myproject.localhost</span>
+<span class="t-cyan">backend</span>    <span class="t-dim">https://backend.my-feature.myproject.localhost</span>
+<span class="t-cyan">frontend</span>   <span class="t-dim">https://frontend.my-feature.myproject.localhost</span>
+<span class="t-cyan">admin</span>      <span class="t-dim">https://admin.my-feature.myproject.localhost</span>
+<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
+
+<span class="t-green">&#10003;</span> Environment 'my-feature' started. 4 URL(s) active.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== INTERACTIVE DEMO ==================== -->
+  <section class="demo-section" id="demo">
+    <div class="container wide reveal">
+      <span class="label">Same task, different world</span>
+      <h2>Start backend + frontend with HTTPS</h2>
+      <p>Same goal. Watch the difference.</p>
+
+      <div class="demo-layout">
+        <div class="demo-terminals">
+          <div class="terminal demo-terminal" id="demo-left-wrap">
+            <div class="terminal-header">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+              <span class="terminal-title">without veld</span>
+            </div>
+            <div class="terminal-body" id="demo-left"></div>
+          </div>
+          <div class="terminal demo-terminal" id="demo-right-wrap">
+            <div class="terminal-header">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+              <span class="terminal-title">with veld</span>
+            </div>
+            <div class="terminal-body" id="demo-right"></div>
+          </div>
+        </div>
+
+        <div class="timeline-controls">
+          <button class="timeline-btn" id="demo-play" aria-label="Play/Pause">
+            <svg id="play-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><polygon points="3,1 12,7 3,13"/></svg>
+            <svg id="pause-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" style="display:none"><rect x="2" y="1" width="3.5" height="12"/><rect x="8.5" y="1" width="3.5" height="12"/></svg>
+          </button>
+          <input type="range" class="timeline-slider" id="demo-slider" min="0" max="100" value="0" aria-label="Demo timeline">
+          <span class="timeline-time" id="demo-time">0s</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== HTTPS ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Core feature</span>
+      <h2>Real HTTPS. Zero config.</h2>
+      <p>No self-signed cert warnings. No mixed content errors. Trusted by browsers out of the box.</p>
+
+      <div class="https-comparison">
+        <div class="https-card before">
+          <h3><span class="t-red">Before</span></h3>
+          <div class="https-url">
+            <span class="t-red">&#9888;</span>
+            <span>http://localhost:3000</span>
+          </div>
+          <div class="https-tags">
+            <span class="https-tag bad">Mixed Content</span>
+            <span class="https-tag bad">CORS errors</span>
+            <span class="https-tag bad">No TLS</span>
+            <span class="https-tag bad">Port conflicts</span>
+          </div>
+        </div>
+        <div class="https-card after">
+          <h3><span class="t-green">With veld</span></h3>
+          <div class="https-url">
+            <span class="t-green">&#128274;</span>
+            <span>https://frontend.dev.myproject.localhost</span>
+          </div>
+          <div class="https-tags">
+            <span class="https-tag good">Auto TLS</span>
+            <span class="https-tag good">Auto DNS</span>
+            <span class="https-tag good">Auto ports</span>
+            <span class="https-tag good">Browser-trusted</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tls-features">
+        <div class="tls-feature">
+          <h4>DNS</h4>
+          <p>RFC 6761 <code>.localhost</code>. No hosts file edits needed.</p>
+        </div>
+        <div class="tls-feature">
+          <h4>TLS</h4>
+          <p>mkcert auto-certs, trusted by your browser automatically.</p>
+        </div>
+        <div class="tls-feature">
+          <h4>Ports</h4>
+          <p>Auto-allocated. You never see or manage them.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ==================== CUSTOM DOMAINS ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Production parity</span>
+      <h2>Any domain. Real policies.</h2>
+      <p>Use your own apex domain locally. Test <code style="color:var(--text);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">frame-ancestors</code>, strict CSP, cookie scoping, and OAuth redirects against URLs that match production&mdash;not <code style="color:var(--text-dim);font-size:0.85em">localhost:3000</code>.</p>
+
+      <div class="https-comparison" style="margin-top: 24px">
+        <div class="https-card before">
+          <h3><span class="t-red">localhost</span></h3>
+          <div class="https-url">
+            <span class="t-red">&#9888;</span>
+            <span>http://localhost:3000</span>
+          </div>
+          <div class="https-tags">
+            <span class="https-tag bad">CSP bypassed</span>
+            <span class="https-tag bad">Cookies leak</span>
+            <span class="https-tag bad">frame-ancestors fails</span>
+          </div>
+        </div>
+        <div class="https-card after">
+          <h3><span class="t-green">Your domain</span></h3>
+          <div class="https-url">
+            <span class="t-green">&#128274;</span>
+            <span>https://app.feat-42.myapp.dev</span>
+          </div>
+          <div class="https-tags">
+            <span class="https-tag good">CSP enforced</span>
+            <span class="https-tag good">Cookies scoped</span>
+            <span class="https-tag good">Matches production</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="terminal" style="margin-top: 24px">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">veld.json</span>
+        </div>
+        <div class="terminal-body" style="font-size:0.75rem;line-height:1.8"><span class="t-dim">// .localhost works out of the box (RFC 6761, zero DNS config)</span>
+<span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.{project}.localhost"</span>
+
+<span class="t-dim">// or use your own apex — veld handles DNS + TLS automatically</span>
+<span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.<span class="t-white" style="font-weight:700">myapp.dev</span>"</span></div>
+      </div>
+
+      <div class="custom-domain-urls" style="margin-top: 16px">
+        <div class="custom-domain-url">
+          <span class="t-green" style="font-size:0.9em">&#128274;</span>
+          <code>https://frontend.feat-42.myapp.dev</code>
+        </div>
+        <div class="custom-domain-url">
+          <span class="t-green" style="font-size:0.9em">&#128274;</span>
+          <code>https://backend.feat-42.myapp.dev</code>
+        </div>
+        <div class="custom-domain-url">
+          <span class="t-green" style="font-size:0.9em">&#128274;</span>
+          <code>https://admin.feat-42.myapp.dev</code>
+        </div>
+      </div>
+
+      <div class="config-callouts" style="margin-top: 16px">
+        <span class="callout">CSP frame-ancestors</span>
+        <span class="callout">Cookie domain scoping</span>
+        <span class="callout">CORS origin matching</span>
+        <span class="callout">OAuth redirect URIs</span>
+        <span class="callout">iframe embedding</span>
+        <span class="callout">Prod-like URLs</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== PARALLEL ENVIRONMENTS ==================== -->
+  <section class="parallel-section">
+    <div class="container reveal">
+      <span class="label">Parallel worlds</span>
+      <h2>Every worktree. Every variant. Zero collisions.</h2>
+      <p>Run the main branch, two feature worktrees, and a staging variant&mdash;all at the same time on the same machine. Every environment gets its own URLs.</p>
+
+      <div class="env-lanes" id="env-lanes">
+        <!-- Lane 1: main branch -->
+        <div class="env-lane" data-delay="0">
+          <div class="env-lane-header">
+            <div class="env-lane-icon">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v12M2 8h12"/></svg>
+            </div>
+            <div>
+              <div class="env-lane-title">main branch</div>
+              <div class="env-lane-dir">~/myproject</div>
+            </div>
+            <div class="env-lane-cmd">veld start --preset fullstack</div>
+          </div>
+          <div class="env-lane-nodes">
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">database:docker</span>
+            </div>
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">backend:local</span>
+            </div>
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">frontend:local</span>
+            </div>
+          </div>
+          <div class="env-lane-urls">
+            <code>https://frontend.<strong>cuddly-panda</strong>.myproject.localhost</code>
+            <code>https://backend.<strong>cuddly-panda</strong>.myproject.localhost</code>
+          </div>
+        </div>
+
+        <!-- Lane 2: feature-auth worktree -->
+        <div class="env-lane" data-delay="1">
+          <div class="env-lane-header">
+            <div class="env-lane-icon purple">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3L10 8 6 13"/></svg>
+            </div>
+            <div>
+              <div class="env-lane-title">feature/auth-v2</div>
+              <div class="env-lane-dir">~/worktrees/auth-v2</div>
+            </div>
+            <div class="env-lane-cmd">veld start backend:local frontend:local</div>
+          </div>
+          <div class="env-lane-nodes">
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">backend:local</span>
+            </div>
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">frontend:local</span>
+            </div>
+          </div>
+          <div class="env-lane-urls">
+            <code>https://frontend.<strong>fuzzy-tiger</strong>.myproject.localhost</code>
+            <code>https://backend.<strong>fuzzy-tiger</strong>.myproject.localhost</code>
+          </div>
+        </div>
+
+        <!-- Lane 3: feature-payments worktree with different variants -->
+        <div class="env-lane" data-delay="2">
+          <div class="env-lane-header">
+            <div class="env-lane-icon amber">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3L10 8 6 13"/></svg>
+            </div>
+            <div>
+              <div class="env-lane-title">feature/payments</div>
+              <div class="env-lane-dir">~/worktrees/payments</div>
+            </div>
+            <div class="env-lane-cmd">veld start backend:<strong>docker</strong> frontend:local</div>
+          </div>
+          <div class="env-lane-nodes">
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">backend:<span class="t-amber">docker</span></span>
+            </div>
+            <div class="env-node">
+              <span class="env-node-dot green"></span>
+              <span class="env-node-name">frontend:local</span>
+            </div>
+          </div>
+          <div class="env-lane-urls">
+            <code>https://frontend.<strong>happy-fox</strong>.myproject.localhost</code>
+            <code>https://backend.<strong>happy-fox</strong>.myproject.localhost</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="env-summary" id="env-summary">
+        <div class="env-summary-stat">
+          <span class="env-summary-number" id="env-count">0</span>
+          <span class="env-summary-label">environments</span>
+        </div>
+        <div class="env-summary-stat">
+          <span class="env-summary-number" id="url-count">0</span>
+          <span class="env-summary-label">unique URLs</span>
+        </div>
+        <div class="env-summary-stat">
+          <span class="env-summary-number t-green">0</span>
+          <span class="env-summary-label">port conflicts</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== CONFIG ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Configuration</span>
+      <h2>Your stack. One file.</h2>
+      <p>Declarative, version-controlled, with JSON Schema support for your editor.</p>
+      <div class="config-block terminal">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">veld.json</span>
+        </div>
+        <div class="terminal-body">{
+  <span class="t-cyan">"name"</span>: <span class="t-green">"myproject"</span>,
+  <span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.myproject.localhost"</span>,
+  <span class="t-cyan">"nodes"</span>: {
+    <span class="t-cyan">"database"</span>: {
+      <span class="t-cyan">"variants"</span>: {
+        <span class="t-cyan">"docker"</span>: {
+          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
+          <span class="t-cyan">"command"</span>: <span class="t-green">"docker run --rm -p ${veld.port}:5432 postgres:16"</span>,
+          <span class="t-cyan">"outputs"</span>: { <span class="t-dim">// <span class="t-amber">&#8592;</span> downstream nodes reference these</span>
+            <span class="t-cyan">"DATABASE_URL"</span>: <span class="t-green">"postgres://dev:dev@localhost:${veld.port}/app"</span>
+          },
+          <span class="t-cyan">"health_check"</span>: {
+            <span class="t-cyan">"type"</span>: <span class="t-green">"port"</span>,
+            <span class="t-cyan">"timeout_seconds"</span>: <span class="t-purple">15</span>
+          }
+        }
+      }
+    },
+    <span class="t-cyan">"backend"</span>: {
+      <span class="t-cyan">"variants"</span>: {
+        <span class="t-cyan">"local"</span>: {
+          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
+          <span class="t-cyan">"command"</span>: <span class="t-green">"cargo run -- --port ${veld.port}"</span>,
+          <span class="t-cyan">"env"</span>: {
+            <span class="t-cyan">"DATABASE_URL"</span>: <span class="t-green">"<span class="t-amber">${nodes.database.DATABASE_URL}</span>"</span> <span class="t-dim">// <span class="t-amber">&#8592;</span> wired</span>
+          },
+          <span class="t-cyan">"health_check"</span>: {
+            <span class="t-cyan">"type"</span>: <span class="t-green">"http"</span>,
+            <span class="t-cyan">"path"</span>: <span class="t-green">"/health"</span>
+          },
+          <span class="t-cyan">"depends_on"</span>: {
+            <span class="t-cyan">"database"</span>: <span class="t-green">"docker"</span>
+          }
+        }
+      }
+    },
+    <span class="t-cyan">"frontend"</span>: {
+      <span class="t-cyan">"variants"</span>: {
+        <span class="t-cyan">"local"</span>: {
+          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
+          <span class="t-cyan">"command"</span>: <span class="t-green">"npm run dev -- --port ${veld.port}"</span>,
+          <span class="t-cyan">"env"</span>: {
+            <span class="t-cyan">"API_URL"</span>: <span class="t-green">"<span class="t-amber">${nodes.backend.url}</span>"</span> <span class="t-dim">// <span class="t-amber">&#8592;</span> HTTPS URL</span>
+          },
+          <span class="t-cyan">"depends_on"</span>: {
+            <span class="t-cyan">"backend"</span>: <span class="t-green">"local"</span>
+          }
+        }
+      }
+    }
+  },
+  <span class="t-cyan">"presets"</span>: {
+    <span class="t-cyan">"fullstack"</span>: [
+      <span class="t-green">"database:docker"</span>,
+      <span class="t-green">"backend:local"</span>,
+      <span class="t-green">"frontend:local"</span>
+    ],
+    <span class="t-cyan">"frontend-only"</span>: [
+      <span class="t-green">"frontend:local"</span>
+    ]
+  }
+}</div>
+      </div>
+      <div class="config-callouts">
+        <span class="callout">Dependency graph</span>
+        <span class="callout">Health checks</span>
+        <span class="callout">Output wiring</span>
+        <span class="callout">URL templates</span>
+        <span class="callout">Presets</span>
+        <span class="callout">Variable interpolation</span>
+        <span class="callout">Teardown hooks</span>
+        <span class="callout">JSON Schema</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== FEATURES ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Features</span>
+      <h2>Built for real workflows</h2>
+      <div class="features-grid">
+        <div class="feature-card">
+          <h3>Dependency graph</h3>
+          <p>Nodes start in the right order. Parallel when possible. Reverse teardown on stop.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Two-phase health checks</h3>
+          <p>TCP port check + HTTPS endpoint check. Precise error messages when something fails.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Named runs</h3>
+          <p>Multiple environments coexist. Re-running by name is idempotent. Auto-generated fun names.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Variable interpolation</h3>
+          <p><code style="font-size:0.8em;color:var(--cyan)">${veld.port}</code>, <code style="font-size:0.8em;color:var(--cyan)">${nodes.backend.url}</code>, git branch, username&mdash;wired automatically.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Structured output</h3>
+          <p>Every command supports <code style="font-size:0.8em;color:var(--cyan)">--json</code>. Built for scripting, CI, and AI agents.</p>
+        </div>
+        <div class="feature-card">
+          <h3>Single binary</h3>
+          <p>Written in Rust. No runtime, no Node, no containers required for the tool itself.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== DX ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Developer experience</span>
+      <h2>Commands you'll actually use</h2>
+      <div class="dx-cards">
+        <div class="dx-card">
+          <h3>Check what's running</h3>
+          <div class="terminal">
+            <div class="terminal-header">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+            </div>
+            <div class="terminal-body"><span class="t-dim">$</span> veld status
+
+<span class="t-white t-bold">Environment:</span> my-feature
+<span class="t-white t-bold">State:</span> <span class="t-green">running</span>
+
+<span class="t-bold">NODE             STATUS              URL</span>
+<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
+<span class="t-cyan">backend:local</span>    <span class="t-green">&#10003; healthy</span>   https://backend.my-feature.myproject.localhost
+<span class="t-cyan">frontend:local</span>   <span class="t-green">&#10003; healthy</span>   https://frontend.my-feature.myproject.localhost</div>
+          </div>
+        </div>
+
+        <div class="dx-card">
+          <h3>Stream logs</h3>
+          <div class="terminal">
+            <div class="terminal-header">
+              <span class="terminal-dot red"></span>
+              <span class="terminal-dot yellow"></span>
+              <span class="terminal-dot green"></span>
+            </div>
+            <div class="terminal-body"><span class="t-dim">$</span> veld logs -f
+
+<span class="t-cyan">backend:local</span>  Server listening on allocated port
+<span class="t-cyan">backend:local</span>  Database connection established
+<span class="t-cyan">frontend:local</span> Dev server compiled in 340ms
+<span class="t-cyan">frontend:local</span> Connected to backend at https://backend....</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== AGENTIC ==================== -->
+  <section>
+    <div class="container reveal">
+      <span class="label">Agent-ready</span>
+      <h2>Built for AI agents</h2>
+      <div class="agentic-lines">
+        <div>AI agents spin up environments.</div>
+        <div>One <code style="color:var(--cyan)">veld.json</code>. Any machine. Any agent.</div>
+        <div class="dim">JSON in. HTTPS URLs out.</div>
+        <div class="dim">Structured, deterministic, machine-readable.</div>
+        <div class="dim">Every command supports <code style="color:var(--cyan)">--json</code>.</div>
+      </div>
+      <div class="terminal" style="margin-top: 24px">
+        <div class="terminal-header">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+          <span class="terminal-title">ai-agent</span>
+        </div>
+        <div class="terminal-body"><span class="t-purple">agent</span> <span class="t-dim">Reading veld.json...</span>
+<span class="t-purple">agent</span> <span class="t-dim">$</span> veld start --preset fullstack -d --json
+<span class="t-purple">agent</span> <span class="t-dim">$</span> veld urls --json
+<span class="t-dim">{</span>
+  <span class="t-cyan">"backend"</span>: <span class="t-green">"https://backend.agent-run.myproject.localhost"</span>,
+  <span class="t-cyan">"frontend"</span>: <span class="t-green">"https://frontend.agent-run.myproject.localhost"</span>
+<span class="t-dim">}</span>
+<span class="t-purple">agent</span> Running test suite against live URLs...
+<span class="t-purple">agent</span> <span class="t-green">&#10003;</span> All tests passed. Pushing changes.</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== CTA ==================== -->
+  <section class="cta-section">
+    <div class="container reveal">
+      <h2>Stop managing ports.<br>Start building.</h2>
+      <div class="install-cmd" id="install-cmd" role="button" tabindex="0" aria-label="Copy install command">
+        <span>curl -fsSL https://veld.oss.life.li/get | bash</span>
+        <svg class="copy-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+      </div>
+      <div class="copy-toast" id="copy-toast">Copied to clipboard</div>
+      <div style="margin-top: 24px;">
+        <a href="https://github.com/prosperity-solutions/veld" class="btn btn-secondary" rel="noopener" target="_blank">View on GitHub</a>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ==================== FOOTER ==================== -->
+  <footer>
+    <div class="container">
+      <p>MIT Licensed &middot; Built by <a href="https://github.com/prosperity-solutions">Prosperity Solutions GmbH</a></p>
+    </div>
+  </footer>
+
+  <script>
+    // ========== Reveal on scroll ==========
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
+    }, { threshold: 0.15 });
+    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+    // ========== Copy install command ==========
+    const installCmd = document.getElementById('install-cmd');
+    const copyToast = document.getElementById('copy-toast');
+    installCmd.addEventListener('click', () => {
+      navigator.clipboard.writeText('curl -fsSL https://veld.oss.life.li/get | bash').then(() => {
+        copyToast.classList.add('show');
+        setTimeout(() => copyToast.classList.remove('show'), 1500);
+      });
+    });
+    installCmd.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); installCmd.click(); }
+    });
+
+    // ========== Copy llms.txt URL ==========
+    const copyLlmsBtn = document.getElementById('copy-llms');
+    copyLlmsBtn.addEventListener('click', () => {
+      navigator.clipboard.writeText('https://veld.oss.life.li/llms-full.txt').then(() => {
+        const orig = copyLlmsBtn.textContent;
+        copyLlmsBtn.textContent = 'Copied!';
+        setTimeout(() => { copyLlmsBtn.textContent = orig; }, 1500);
+      });
+    });
+
+    // ========== Interactive Demo — Typing Engine ==========
+    //
+    // Each terminal has a script: an array of actions.
+    //   { type: 'type', cmd: 'string', speed: N }  — type characters one per N ticks
+    //   { type: 'run' }                             — "press enter" (remove cursor)
+    //   { type: 'output', lines: ['...'], speed: N }— show output lines one per N ticks
+    //   { type: 'wait', ticks: N }                  — pause
+    //   { type: 'clear', keep: N }                  — clear all but last N lines of history
+    //
+    // The engine pre-compiles these into a flat array of snapshots (one per tick),
+    // so the slider can scrub to any point instantly.
+
+    const _$ = id => document.getElementById(id);
+    const demoLeft = _$('demo-left');
+    const demoRight = _$('demo-right');
+    const demoLeftWrap = _$('demo-left-wrap');
+    const demoRightWrap = _$('demo-right-wrap');
+    const slider = _$('demo-slider');
+    const playBtn = _$('demo-play');
+    const playIcon = _$('play-icon');
+    const pauseIcon = _$('pause-icon');
+    const timeDisplay = _$('demo-time');
+
+    const LOOP_PAUSE = 3000;
+    const TICK_MS = 60;
+
+    // Track which terminals the user has manually scrolled
+    const userScrolled = new WeakSet();
+
+    function autoScrollIfAtBottom(el) {
+      if (!userScrolled.has(el)) {
+        el.scrollTop = el.scrollHeight;
+      }
+    }
+
+    // Detect manual scroll (user scrolls up = opt out of auto-scroll)
+    function trackUserScroll(el) {
+      el.addEventListener('scroll', () => {
+        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
+        if (atBottom) {
+          userScrolled.delete(el);
+        } else {
+          userScrolled.add(el);
+        }
+      }, { passive: true });
+    }
+
+    // Will be initialized after DOM refs are set up (they already are above)
+    trackUserScroll(demoLeft);
+    trackUserScroll(demoRight);
+    let playing = false;
+    let animFrame = null;
+    let lastTick = 0;
+    let loopTimeout = null;
+    let userPaused = false;
+
+    // ── Color helpers ──
+    const s = (cls, txt) => `<span class="${cls}">${txt}</span>`;
+    const dim = t => s('t-dim', t);
+    const wht = t => s('t-white', t);
+    const grn = t => s('t-green', t);
+    const red = t => s('t-red', t);
+    const amb = t => s('t-amber', t);
+    const cyn = t => s('t-cyan', t);
+    const bld = t => s('t-bold', t);
+    const CURSOR = '<span class="cursor"></span>';
+    const LINE = dim('&#9472;'.repeat(44));
+    const PROMPT = dim('$') + ' ';
+
+    // ── Compile a script into an array of {history, prompt, cursor} snapshots ──
+    function compileScript(script, cwd) {
+      const snaps = [];
+      let history = []; // finished lines (HTML strings)
+      let promptLine = '';
+      let typed = '';
+
+      function snap(showCursor) {
+        const h = history.join('\n');
+        const p = promptLine ? (PROMPT + (typed ? wht(typed) : '')) : '';
+        const c = showCursor ? CURSOR : '';
+        const cwdLine = dim(cwd);
+        const parts = [cwdLine];
+        if (h) parts.push(h);
+        if (p || showCursor) parts.push(p + c);
+        snaps.push(parts.join('\n'));
+      }
+
+      // Initial state: just prompt with cursor
+      promptLine = '$';
+      snap(true);
+
+      for (const action of script) {
+        if (action.type === 'type') {
+          const speed = action.speed || 1;
+          const chars = action.cmd.split('');
+          typed = '';
+          let count = 0;
+          for (const ch of chars) {
+            typed += ch;
+            count++;
+            if (count % speed === 0 || count === chars.length) snap(true);
+          }
+        } else if (action.type === 'run') {
+          // "Press enter" — move typed command to history, show no cursor briefly
+          history.push(PROMPT + typed);
+          typed = '';
+          promptLine = '';
+          snap(false);
+        } else if (action.type === 'output') {
+          const speed = action.speed || 1;
+          let count = 0;
+          for (const line of action.lines) {
+            history.push(line);
+            count++;
+            if (count % speed === 0 || count === action.lines.length) snap(false);
+          }
+        } else if (action.type === 'prompt') {
+          // Show a new prompt
+          promptLine = '$';
+          typed = '';
+          snap(true);
+        } else if (action.type === 'wait') {
+          const n = action.ticks || 1;
+          const lastSnap = snaps[snaps.length - 1];
+          for (let i = 0; i < n; i++) snaps.push(lastSnap);
+        } else if (action.type === 'clear') {
+          const keep = action.keep || 0;
+          history = keep > 0 ? history.slice(-keep) : [];
+          snap(promptLine ? true : false);
+        }
+      }
+
+      return snaps;
+    }
+
+    // ─── LEFT SCRIPT: Without veld ───
+    const leftScript = [
+      // cd into project
+      { type: 'type', cmd: 'cd myproject/' },
+      { type: 'run' },
+      { type: 'wait', ticks: 6 },
+      // npm run backend — user thinks, then types
+      { type: 'prompt' },
+      { type: 'wait', ticks: 5 },
+      { type: 'type', cmd: 'npm run dev:backend' },
+      { type: 'run' },
+      { type: 'wait', ticks: 12 },          // npm takes a moment...
+      { type: 'output', lines: [red('Error: EADDRINUSE :::3000'), ''] },
+      { type: 'wait', ticks: 15 },          // stare at error, process it
+      // lsof — developer googles, then types
+      { type: 'prompt' },
+      { type: 'wait', ticks: 8 },           // thinking...
+      { type: 'type', cmd: 'lsof -i :3000' },
+      { type: 'run' },
+      { type: 'wait', ticks: 6 },
+      { type: 'output', lines: [dim('node  4821 dev  23u  IPv6  TCP *:3000'), ''] },
+      { type: 'wait', ticks: 8 },           // read the output, find the PID
+      // kill — okay, nuke it
+      { type: 'prompt' },
+      { type: 'wait', ticks: 4 },
+      { type: 'type', cmd: 'kill -9 4821' },
+      { type: 'run' },
+      { type: 'wait', ticks: 6 },
+      // restart backend in background
+      { type: 'prompt' },
+      { type: 'wait', ticks: 6 },           // remember the & this time
+      { type: 'type', cmd: 'npm run dev:backend &' },
+      { type: 'run' },
+      { type: 'wait', ticks: 10 },          // npm starting up...
+      { type: 'output', lines: [dim('[1] 5102  Listening on :3000'), ''] },
+      { type: 'wait', ticks: 6 },
+      // start frontend
+      { type: 'prompt' },
+      { type: 'wait', ticks: 4 },
+      { type: 'type', cmd: 'npm run dev:frontend &' },
+      { type: 'run' },
+      { type: 'wait', ticks: 10 },          // npm starting up...
+      { type: 'output', lines: [dim('[2] 5204  Listening on :3001'), ''] },
+      { type: 'wait', ticks: 10 },
+      // confusion — developer pauses, realizes they don't know
+      { type: 'output', lines: [
+        '',
+        amb('wait... which port is which?'),
+        dim('backend  = localhost:3000'),
+        dim('frontend = localhost:3001 ...right?'),
+        '',
+      ]},
+      { type: 'wait', ticks: 18 },          // staring at ports, unsure
+      // try HTTPS — new idea
+      { type: 'prompt' },
+      { type: 'wait', ticks: 8 },           // googling "mkcert localhost"
+      { type: 'type', cmd: 'mkcert localhost' },
+      { type: 'run' },
+      { type: 'wait', ticks: 8 },
+      { type: 'output', lines: [dim('Created ./localhost.pem'), ''] },
+      { type: 'wait', ticks: 6 },
+      { type: 'prompt' },
+      { type: 'wait', ticks: 10 },          // figuring out the env var
+      { type: 'type', cmd: 'HTTPS=true npm run dev:frontend' },
+      { type: 'run' },
+      { type: 'wait', ticks: 12 },          // waiting for it to start...
+      { type: 'output', lines: [
+        red('ERR_SSL_PROTOCOL_ERROR'),
+        red('Mixed Content: blocked http:// from https://'),
+        '',
+      ]},
+      { type: 'wait', ticks: 20 },          // long stare at the error
+      // despair
+      { type: 'output', lines: [''] },
+      { type: 'output', lines: [
+        dim('$ ... configure nginx reverse proxy?'),
+      ]},
+      { type: 'wait', ticks: 10 },
+      { type: 'output', lines: [
+        dim('$ ... edit /etc/hosts?'),
+      ]},
+      { type: 'wait', ticks: 10 },
+      { type: 'output', lines: [
+        dim('$ ... set up Caddy manually?'),
+        '',
+      ]},
+      { type: 'wait', ticks: 12 },
+      { type: 'output', lines: [
+        red('20 minutes later, still no HTTPS'),
+        '',
+        dim('Result: 2 processes, 0 HTTPS,'),
+        dim('unknown ports, no health checks'),
+      ]},
+      { type: 'wait', ticks: 30 },
+    ];
+
+    // ─── RIGHT SCRIPT: With veld ───
+    const rightScript = [
+      { type: 'type', cmd: 'veld start' },
+      { type: 'run' },
+      { type: 'wait', ticks: 2 },
+      { type: 'output', lines: [
+        '',
+        s('t-white t-bold', 'veld') + ' Starting environment...',
+        '',
+        dim('plan: 2 node(s) in 2 stage(s)'),
+      ]},
+      { type: 'wait', ticks: 3 },
+      { type: 'output', lines: [
+        '',
+        bld('[1/2]') + ' backend:local',
+        '  ' + amb('~') + ' ' + dim('starting... port 52341'),
+      ]},
+      { type: 'wait', ticks: 3 },
+      { type: 'output', lines: [
+        '  ' + grn('&#10003;') + ' Phase 1 passed',
+        '  ' + amb('~') + ' ' + dim('phase 2: HTTPS...'),
+      ]},
+      { type: 'wait', ticks: 3 },
+      { type: 'output', lines: [
+        '  ' + grn('&#10003;') + ' Phase 2 passed',
+        '  ' + grn('&#10003; healthy') + ' ' + dim('[1.2s]'),
+      ]},
+      { type: 'wait', ticks: 2 },
+      { type: 'output', lines: [
+        '',
+        bld('[2/2]') + ' frontend:local',
+        '  ' + amb('~') + ' ' + dim('depends on: backend:local'),
+        '  ' + amb('~') + ' ' + dim('starting... port 52342'),
+      ]},
+      { type: 'wait', ticks: 3 },
+      { type: 'output', lines: [
+        '  ' + grn('&#10003;') + ' Phase 1 passed',
+        '  ' + grn('&#10003;') + ' Phase 2 passed',
+        '  ' + grn('&#10003; healthy') + ' ' + dim('[0.8s]'),
+      ]},
+      { type: 'wait', ticks: 2 },
+      // Summary — URLs appear
+      { type: 'output', lines: [
+        '',
+        LINE,
+        cyn('backend') + '   ' + dim('https://backend.dev.myproject.localhost'),
+        cyn('frontend') + '  ' + dim('https://frontend.dev.myproject.localhost'),
+        LINE,
+        '',
+        grn('&#10003;') + ' Environment started. 2 URL(s) active.',
+      ]},
+      { type: 'prompt' },
+      // Idle — just a blinking cursor while left is still struggling
+      { type: 'wait', ticks: 300 },
+    ];
+
+    // Compile both
+    const leftSnaps = compileScript(leftScript, '~/myproject');
+    const rightSnaps = compileScript(rightScript, '~/myproject');
+
+    // Pad to same length
+    const TOTAL_STEPS = Math.max(leftSnaps.length, rightSnaps.length);
+    while (leftSnaps.length < TOTAL_STEPS) leftSnaps.push(leftSnaps[leftSnaps.length - 1]);
+    while (rightSnaps.length < TOTAL_STEPS) rightSnaps.push(rightSnaps[rightSnaps.length - 1]);
+
+    slider.max = TOTAL_STEPS;
+
+    // Find when right terminal shows the final summary (scan for "Environment started")
+    let RIGHT_DONE_STEP = TOTAL_STEPS;
+    for (let i = 0; i < rightSnaps.length; i++) {
+      if (rightSnaps[i].includes('Environment started')) { RIGHT_DONE_STEP = i; break; }
+    }
+    // Find when left terminal shows the failure
+    let LEFT_DONE_STEP = TOTAL_STEPS;
+    for (let i = 0; i < leftSnaps.length; i++) {
+      if (leftSnaps[i].includes('still no HTTPS')) { LEFT_DONE_STEP = i; break; }
+    }
+
+    function renderDemo(step) {
+      step = Math.min(step, TOTAL_STEPS - 1);
+      demoLeft.innerHTML = leftSnaps[step];
+      demoRight.innerHTML = rightSnaps[step];
+      // Auto-scroll to bottom unless user has scrolled up manually
+      autoScrollIfAtBottom(demoLeft);
+      autoScrollIfAtBottom(demoRight);
+      slider.value = step;
+      timeDisplay.textContent = (step * TICK_MS / 1000).toFixed(1) + 's';
+
+      // Badge & border for right terminal
+      if (step >= RIGHT_DONE_STEP) {
+        demoRightWrap.classList.add('done-good');
+        showBadge(demoRightWrap, 'good', 'done in ~2s');
+      } else {
+        demoRightWrap.classList.remove('done-good');
+        hideBadge(demoRightWrap);
+      }
+
+      // Badge & border for left terminal
+      if (step >= LEFT_DONE_STEP) {
+        demoLeftWrap.classList.add('done-bad');
+        showBadge(demoLeftWrap, 'bad', 'still broken');
+      } else {
+        demoLeftWrap.classList.remove('done-bad');
+        hideBadge(demoLeftWrap);
+      }
+    }
+
+    function showBadge(wrap, type, text) {
+      let badge = wrap.querySelector('.demo-done-badge');
+      if (!badge) {
+        badge = document.createElement('div');
+        badge.className = 'demo-done-badge ' + type;
+        wrap.style.position = 'relative';
+        wrap.appendChild(badge);
+      }
+      badge.textContent = text;
+      badge.className = 'demo-done-badge ' + type + ' visible';
+    }
+
+    function hideBadge(wrap) {
+      const badge = wrap.querySelector('.demo-done-badge');
+      if (badge) badge.classList.remove('visible');
+    }
+
+    function setPlayState(isPlaying) {
+      playing = isPlaying;
+      playIcon.style.display = isPlaying ? 'none' : 'block';
+      pauseIcon.style.display = isPlaying ? 'block' : 'none';
+    }
+
+    function togglePlay() {
+      if (playing) {
+        userPaused = true;
+        setPlayState(false);
+        cancelAnimationFrame(animFrame);
+        clearTimeout(loopTimeout);
+      } else {
+        userPaused = false;
+        if (parseInt(slider.value, 10) >= TOTAL_STEPS - 1) {
+          slider.value = 0;
+          renderDemo(0);
+        }
+        setPlayState(true);
+        lastTick = performance.now();
+        tick();
+      }
+    }
+
+    function tick() {
+      if (!playing) return;
+      const now = performance.now();
+      if (now - lastTick >= TICK_MS) {
+        let v = parseInt(slider.value, 10) + 1;
+        if (v >= TOTAL_STEPS) {
+          renderDemo(TOTAL_STEPS - 1);
+          loopTimeout = setTimeout(() => {
+            if (!playing) return;
+            // Reset scroll tracking on loop restart
+            userScrolled.delete(demoLeft);
+            userScrolled.delete(demoRight);
+            slider.value = 0;
+            renderDemo(0);
+            lastTick = performance.now();
+            animFrame = requestAnimationFrame(tick);
+          }, LOOP_PAUSE);
+          return;
+        }
+        renderDemo(v);
+        lastTick = now;
+      }
+      animFrame = requestAnimationFrame(tick);
+    }
+
+    playBtn.addEventListener('click', togglePlay);
+
+    slider.addEventListener('input', () => {
+      // Pause playback when user scrubs
+      if (playing) {
+        setPlayState(false);
+        cancelAnimationFrame(animFrame);
+      }
+      clearTimeout(loopTimeout);
+      renderDemo(parseInt(slider.value, 10));
+    });
+
+    // Auto-start on scroll into view (respect user pause and reduced motion)
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const demoObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting && !playing && !userPaused && !prefersReducedMotion) {
+          setTimeout(() => { if (!playing && !userPaused) togglePlay(); }, 400);
+        }
+      });
+    }, { threshold: 0.3 });
+    demoObserver.observe(document.querySelector('.demo-section'));
+
+    renderDemo(0);
+
+    // ========== Parallel Environments Animation ==========
+    const envLanes = document.querySelectorAll('.env-lane');
+    const envCountEl = document.getElementById('env-count');
+    const urlCountEl = document.getElementById('url-count');
+    let envAnimated = false;
+
+    function animateCount(el, target, duration) {
+      const start = performance.now();
+      const from = 0;
+      function step(now) {
+        const t = Math.min((now - start) / duration, 1);
+        el.textContent = Math.round(from + (target - from) * t);
+        if (t < 1) requestAnimationFrame(step);
+      }
+      requestAnimationFrame(step);
+    }
+
+    const envObserver = new IntersectionObserver((entries) => {
+      entries.forEach(e => {
+        if (e.isIntersecting && !envAnimated) {
+          envAnimated = true;
+          envLanes.forEach((lane, i) => {
+            setTimeout(() => {
+              lane.classList.add('active');
+              // Update counters as each lane appears
+              animateCount(envCountEl, i + 1, 300);
+              animateCount(urlCountEl, (i + 1) * 2, 300);
+            }, i * 600);
+          });
+        }
+      });
+    }, { threshold: 0.2 });
+    envObserver.observe(document.querySelector('.parallel-section'));
+  </script>
+</body>
+</html>
