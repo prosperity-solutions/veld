@@ -12,6 +12,38 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
+  commits:
+    name: Conventional Commits
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate PR commits follow conventional format
+        run: |
+          set -e
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          PATTERN='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.+\))?!?: .+'
+          FAILED=0
+          while IFS= read -r sha; do
+            MSG=$(git log --format='%s' -1 "$sha")
+            if ! echo "$MSG" | grep -qE "$PATTERN"; then
+              echo "❌ $sha: $MSG"
+              FAILED=1
+            else
+              echo "✅ $sha: $MSG"
+            fi
+          done < <(git rev-list "$BASE".."$HEAD")
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "Some commits do not follow conventional commit format."
+            echo "Expected: type(scope)?: description"
+            echo "Types: feat, fix, docs, style, refactor, perf, test, build, ci, chore, revert"
+            exit 1
+          fi
+
   schema:
     name: Validate JSON Schema
     runs-on: ubuntu-latest

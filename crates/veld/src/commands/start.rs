@@ -112,6 +112,29 @@ pub async fn run(
                     output::step(i + 1, total, &padded),
                     output::dim(&detail),
                 );
+
+                // Show non-trivial outputs (skip port/url which are already shown).
+                let skip_keys = ["port", "url", "exit_code"];
+                let mut output_keys: Vec<&String> = ns
+                    .outputs
+                    .keys()
+                    .filter(|k| !skip_keys.contains(&k.as_str()))
+                    .collect();
+                output_keys.sort();
+                for okey in output_keys {
+                    let val = if ns.sensitive_keys.contains(okey) {
+                        "***".to_owned()
+                    } else {
+                        ns.outputs[okey].clone()
+                    };
+                    eprintln!(
+                        "{}  {} {}={}",
+                        output::pad_right("", 36),
+                        output::dim("↳"),
+                        output::dim(okey),
+                        output::dim(&val),
+                    );
+                }
             }
 
             // Print URLs on success.
