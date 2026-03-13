@@ -248,11 +248,15 @@ impl Orchestrator {
                 run.execution_order.push(key.clone());
                 run.nodes.insert(key, node_state);
             }
+
+            // Save partial state after each stage so that Ctrl+C or crashes
+            // leave enough information for `veld stop` to find and kill PIDs.
+            self.save_state(&run)?;
         }
 
         run.status = RunStatus::Running;
 
-        // Persist state.
+        // Final state save with Running status.
         self.save_state(&run)?;
 
         Ok(run)
