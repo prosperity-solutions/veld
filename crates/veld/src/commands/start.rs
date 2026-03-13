@@ -96,7 +96,8 @@ pub async fn run(
 
     match orchestrator.start(&parsed_selections, run_name_str).await {
         Ok(run_state) => {
-            // Wait for progress renderer to finish draining.
+            // Drop the progress sender so the renderer can finish.
+            orchestrator.close_progress_sender();
             let _ = progress_handle.await;
 
             // Print outputs for nodes that have non-trivial outputs.
@@ -174,6 +175,7 @@ pub async fn run(
             0
         }
         Err(e) => {
+            orchestrator.close_progress_sender();
             let _ = progress_handle.await;
             output::print_error(&format!("Startup failed: {e}"), false);
             // Best-effort teardown.

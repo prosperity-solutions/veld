@@ -131,6 +131,11 @@ impl Orchestrator {
         self.progress_tx = Some(tx);
     }
 
+    /// Drop the progress sender, signaling the receiver to close.
+    pub fn close_progress_sender(&mut self) {
+        self.progress_tx.take();
+    }
+
     /// Emit a progress event (no-op if no sender is set).
     fn emit(&self, event: ProgressEvent) {
         if let Some(ref tx) = self.progress_tx {
