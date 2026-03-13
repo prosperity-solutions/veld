@@ -168,6 +168,25 @@ enum Command {
         json: bool,
     },
 
+    /// Read or wait for feedback submitted via the in-browser overlay.
+    Feedback {
+        /// Name of the run.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Block until new feedback is submitted.
+        #[arg(long)]
+        wait: bool,
+
+        /// Show all submitted feedback batches.
+        #[arg(long)]
+        history: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Garbage-collect stale state and logs.
     Gc,
 
@@ -280,6 +299,13 @@ async fn main() {
         Command::Init => commands::init::run().await,
 
         Command::List { urls, json } => commands::list::run(urls, json).await,
+
+        Command::Feedback {
+            name,
+            wait,
+            history,
+            json,
+        } => commands::feedback::run(name, wait, history, json).await,
 
         Command::Gc => commands::gc::run().await,
 

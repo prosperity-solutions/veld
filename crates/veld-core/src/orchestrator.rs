@@ -459,11 +459,14 @@ impl Orchestrator {
         if let Err(e) = self.helper_client.add_host(&node_url, "127.0.0.1").await {
             tracing::warn!(error = %e, "failed to add DNS host via helper");
         }
-        let route = serde_json::json!({
+        let mut route = serde_json::json!({
             "route_id": format!("veld-{}-{}-{}", run.name, sel.node, sel.variant),
             "hostname": &node_url,
             "upstream": format!("localhost:{port}"),
         });
+        // Include feedback proxy upstream so Caddy routes /__veld__/* to the
+        // daemon's feedback HTTP server.
+        route["feedback_upstream"] = serde_json::json!("localhost:19899");
         if let Err(e) = self.helper_client.add_route(route).await {
             tracing::warn!(error = %e, "failed to add Caddy route via helper");
         }

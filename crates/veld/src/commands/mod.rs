@@ -1,3 +1,4 @@
+pub mod feedback;
 pub mod gc;
 pub mod graph;
 pub mod init;

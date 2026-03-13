@@ -1,4 +1,5 @@
 pub mod config;
+pub mod feedback;
 pub mod graph;
 pub mod health;
 pub mod helper;

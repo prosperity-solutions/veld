@@ -21,3 +21,5 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 libc = "0.2"
+axum = "0.8"
+uuid = { workspace = true }

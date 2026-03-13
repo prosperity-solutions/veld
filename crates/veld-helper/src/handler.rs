@@ -84,8 +84,13 @@ impl State {
             Some(v) => v,
             None => return Response::err("missing 'upstream' in args"),
         };
+        let feedback_upstream = args.get("feedback_upstream").and_then(Value::as_str);
 
-        match self.caddy.add_route(route_id, hostname, upstream).await {
+        match self
+            .caddy
+            .add_route(route_id, hostname, upstream, feedback_upstream)
+            .await
+        {
             Ok(()) => Response::ok(),
             Err(e) => Response::err(format!("{e:#}")),
         }

@@ -150,8 +150,14 @@ impl CaddyManager {
     }
 
     /// Add a reverse-proxy route via the Caddy admin API.
-    pub async fn add_route(&self, route_id: &str, hostname: &str, upstream: &str) -> Result<()> {
-        let route = build_route_json(route_id, hostname, upstream);
+    pub async fn add_route(
+        &self,
+        route_id: &str,
+        hostname: &str,
+        upstream: &str,
+        feedback_upstream: Option<&str>,
+    ) -> Result<()> {
+        let route = build_route_json(route_id, hostname, upstream, feedback_upstream);
 
         let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
 
@@ -245,7 +251,43 @@ fn build_base_config() -> serde_json::Value {
 }
 
 /// Build a single route entry with hostname matching, TLS, and reverse proxy.
-fn build_route_json(route_id: &str, hostname: &str, upstream: &str) -> serde_json::Value {
+/// When `feedback_upstream` is provided, a `/__veld__/*` subroute is added
+/// that proxies feedback API/asset requests to the daemon's HTTP server.
+fn build_route_json(
+    route_id: &str,
+    hostname: &str,
+    upstream: &str,
+    feedback_upstream: Option<&str>,
+) -> serde_json::Value {
+    let mut subroutes = Vec::new();
+
+    // If feedback is enabled, add /__veld__/* handler before the main proxy.
+    if let Some(fb_upstream) = feedback_upstream {
+        subroutes.push(serde_json::json!({
+            "match": [{ "path": ["/__veld__/*"] }],
+            "handle": [
+                {
+                    "handler": "rewrite",
+                    "strip_path_prefix": "/__veld__"
+                },
+                {
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": fb_upstream }]
+                }
+            ]
+        }));
+    }
+
+    // Main app reverse proxy (catch-all).
+    subroutes.push(serde_json::json!({
+        "handle": [{
+            "handler": "reverse_proxy",
+            "upstreams": [{
+                "dial": upstream
+            }]
+        }]
+    }));
+
     serde_json::json!({
         "@id": route_id,
         "match": [{
@@ -254,14 +296,7 @@ fn build_route_json(route_id: &str, hostname: &str, upstream: &str) -> serde_jso
         "handle": [
             {
                 "handler": "subroute",
-                "routes": [{
-                    "handle": [{
-                        "handler": "reverse_proxy",
-                        "upstreams": [{
-                            "dial": upstream
-                        }]
-                    }]
-                }]
+                "routes": subroutes
             }
         ],
         "terminal": true
@@ -285,9 +320,26 @@ mod tests {
 
     #[test]
     fn test_build_route_json() {
-        let route = build_route_json("test-route", "app.test.localhost", "localhost:3000");
+        let route = build_route_json("test-route", "app.test.localhost", "localhost:3000", None);
         assert_eq!(route["@id"], "test-route");
         assert_eq!(route["match"][0]["host"][0], "app.test.localhost");
+        // Without feedback, only one subroute (the main proxy).
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        assert_eq!(subroutes.len(), 1);
+    }
+
+    #[test]
+    fn test_build_route_json_with_feedback() {
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            Some("localhost:19899"),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        assert_eq!(subroutes.len(), 2);
+        // First subroute matches /__veld__/*
+        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
     }
 
     #[test]
