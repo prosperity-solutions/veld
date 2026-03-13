@@ -1,6 +1,6 @@
 # Veld
 
-> This fucking thing is 100% vibe coded with [Claude Code](https://claude.com/claude-code).
+> This thing is 100% vibe coded with [Claude Code](https://claude.com/claude-code).
 
 Local development environment orchestrator for monorepos. Spin up fully configured preview environments with real HTTPS URLs from a single command.
 
