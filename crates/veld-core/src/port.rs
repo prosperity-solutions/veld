@@ -137,8 +137,7 @@ mod tests {
         allocator.release(first_port);
 
         // Now occupy that port and allocate again — should skip it.
-        let listener =
-            TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], first_port))).unwrap();
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], first_port))).unwrap();
         let second_port = allocator.allocate().unwrap();
         assert_ne!(second_port, first_port);
         drop(listener);
