@@ -144,6 +144,11 @@
           },
           "description": "Output keys whose values are sensitive. These are masked in logs and encrypted at rest."
         },
+        "strict_outputs": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), fail if the command produces VELD_OUTPUT keys not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
+        },
         "verify": {
           "type": "string",
           "description": "Idempotency verification command. Only applies to \"command\" type variants. If this command exits 0, the step is considered already complete and is skipped."
