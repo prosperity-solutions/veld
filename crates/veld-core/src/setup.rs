@@ -189,17 +189,11 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
 
     std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
 
-    let (_, arch) = platform_pair()?;
-    // Caddy uses "mac" for macOS (not "darwin")
-    let caddy_os = match std::env::consts::OS {
-        "macos" => "mac",
-        "linux" => "linux",
-        other => anyhow::bail!("unsupported OS: {other}"),
-    };
+    let (os, arch) = platform_pair()?;
     // Use Caddy's build API to get a custom binary with the replace-response
     // plugin, which lets us inject the feedback overlay script into HTML responses.
     let url = format!(
-        "https://caddyserver.com/api/download?os={caddy_os}&arch={arch}&p=github.com/caddyserver/replace-response"
+        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/caddyserver/replace-response"
     );
 
     download_binary(&url, &caddy)
