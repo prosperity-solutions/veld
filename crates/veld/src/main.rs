@@ -83,6 +83,10 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
 
+        /// Show node outputs (environment variables, ports, etc.).
+        #[arg(long)]
+        outputs: bool,
+
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -237,7 +241,11 @@ async fn main() {
 
         Command::Runs { name, json } => commands::runs::list(name.as_deref(), json).await,
 
-        Command::Status { name, json } => commands::status::run(name, json).await,
+        Command::Status {
+            name,
+            outputs,
+            json,
+        } => commands::status::run(name, outputs, json).await,
 
         Command::Urls { name, json } => commands::urls::run(name, json).await,
 

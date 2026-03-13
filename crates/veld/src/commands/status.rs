@@ -4,8 +4,8 @@ use veld_core::state::{NodeStatus, ProjectState, RunStatus};
 
 use crate::output;
 
-/// `veld status [--name <n>] [--json]`
-pub async fn run(name: Option<String>, json: bool) -> i32 {
+/// `veld status [--name <n>] [--outputs] [--json]`
+pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
     if !super::require_setup(json).await {
         return 1;
     }
@@ -90,8 +90,8 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         let mut rows: Vec<Vec<String>> = Vec::new();
         let mut node_keys: Vec<&String> = run_state.nodes.keys().collect();
         node_keys.sort();
-        for key in node_keys {
-            let ns = &run_state.nodes[key];
+        for key in &node_keys {
+            let ns = &run_state.nodes[*key];
             let effective = effective_statuses.get(key.as_str()).unwrap_or(&ns.status);
             let status_str = if *effective != ns.status {
                 // The process died — show "dead" instead of the stored status.
@@ -108,6 +108,38 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         }
 
         output::print_table(&["NODE", "VARIANT", "STATUS", "URL"], &rows);
+
+        // Show outputs per node when --outputs is passed.
+        if show_outputs {
+            println!();
+            println!("{}", output::bold("Outputs:"));
+            let mut any = false;
+            for key in &node_keys {
+                let ns = &run_state.nodes[*key];
+                if ns.outputs.is_empty() {
+                    continue;
+                }
+                any = true;
+                println!();
+                println!(
+                    "  {}",
+                    output::cyan(&format!("{}:{}", ns.node_name, ns.variant))
+                );
+                let mut okeys: Vec<&String> = ns.outputs.keys().collect();
+                okeys.sort();
+                for okey in okeys {
+                    let val = if ns.sensitive_keys.contains(okey) {
+                        "***".to_owned()
+                    } else {
+                        ns.outputs[okey].clone()
+                    };
+                    println!("    {} = {}", output::dim(okey), val);
+                }
+            }
+            if !any {
+                println!("  {}", output::dim("No outputs recorded."));
+            }
+        }
     }
 
     0
