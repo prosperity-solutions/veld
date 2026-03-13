@@ -196,6 +196,10 @@ pub async fn wait_for_command_check(
 ///
 /// Phase 1: TCP port check.
 /// Phase 2: HTTP endpoint check directly on the port (not through Caddy).
+///
+/// Note: The orchestrator inlines the two-phase logic for progress events,
+/// but this function remains available for external callers and tests.
+#[allow(dead_code)]
 pub async fn run_health_check(
     port: u16,
     _url: Option<&str>,

@@ -5,9 +5,11 @@ use veld_core::config::VeldConfig;
 use veld_core::graph::{self, NodeSelection};
 use veld_core::logging;
 use veld_core::orchestrator::Orchestrator;
+use veld_core::progress::ProgressEvent;
 use veld_core::url::generate_run_name;
 
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::sync::mpsc;
 
 use crate::output::{self, is_tty};
 
@@ -79,61 +81,53 @@ pub async fn run(
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
 
-    println!(
+    // Set up live progress channel.
+    let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
+    orchestrator.set_progress_sender(progress_tx);
+    let tty = is_tty();
+    let progress_handle = tokio::spawn(render_progress(progress_rx, tty));
+
+    eprintln!(
         "{} Starting environment {}...",
         output::bold("veld"),
         output::bold(&format!("'{run_name_str}'")),
     );
-    println!();
+    eprintln!();
 
     match orchestrator.start(&parsed_selections, run_name_str).await {
         Ok(run_state) => {
-            // Print node results.
+            // Drop the progress sender so the renderer can finish.
+            orchestrator.close_progress_sender();
+            let _ = progress_handle.await;
+
+            // Print outputs for nodes that have non-trivial outputs.
             let mut node_keys: Vec<&String> = run_state.nodes.keys().collect();
             node_keys.sort();
-            let total = node_keys.len();
-
-            for (i, key) in node_keys.iter().enumerate() {
+            let skip_keys = ["port", "url", "exit_code"];
+            for key in &node_keys {
                 let ns = &run_state.nodes[*key];
-                let label = format!("{}:{}", ns.node_name, ns.variant);
-                let padded = output::pad_right(&label, 30);
-                let status_icon = match ns.status {
-                    veld_core::state::NodeStatus::Healthy
-                    | veld_core::state::NodeStatus::Skipped => output::checkmark(),
-                    veld_core::state::NodeStatus::Failed => output::cross(),
-                    _ => output::dim("~"),
-                };
-                let detail = match &ns.url {
-                    Some(url) => url.clone(),
-                    None => format!("{:?}", ns.status).to_lowercase(),
-                };
-                eprintln!(
-                    "{} {status_icon} {}",
-                    output::step(i + 1, total, &padded),
-                    output::dim(&detail),
-                );
-
-                // Show non-trivial outputs (skip port/url which are already shown).
-                let skip_keys = ["port", "url", "exit_code"];
                 let mut output_keys: Vec<&String> = ns
                     .outputs
                     .keys()
                     .filter(|k| !skip_keys.contains(&k.as_str()))
                     .collect();
                 output_keys.sort();
-                for okey in output_keys {
-                    let val = if ns.sensitive_keys.contains(okey) {
-                        "***".to_owned()
-                    } else {
-                        ns.outputs[okey].clone()
-                    };
-                    eprintln!(
-                        "{}  {} {}={}",
-                        output::pad_right("", 36),
-                        output::dim("↳"),
-                        output::dim(okey),
-                        output::dim(&val),
-                    );
+                if !output_keys.is_empty() {
+                    let label = format!("{}:{}", ns.node_name, ns.variant);
+                    for okey in output_keys {
+                        let val = if ns.sensitive_keys.contains(okey) {
+                            "***".to_owned()
+                        } else {
+                            ns.outputs[okey].clone()
+                        };
+                        eprintln!(
+                            "  {} {} {}={}",
+                            output::dim(&label),
+                            output::dim("↳"),
+                            output::dim(okey),
+                            output::dim(&val),
+                        );
+                    }
                 }
             }
 
@@ -181,10 +175,130 @@ pub async fn run(
             0
         }
         Err(e) => {
+            orchestrator.close_progress_sender();
+            let _ = progress_handle.await;
             output::print_error(&format!("Startup failed: {e}"), false);
             // Best-effort teardown.
             let _stop_result = orchestrator.stop(run_name_str).await;
             1
+        }
+    }
+}
+
+/// Render live progress events from the orchestrator.
+///
+/// TTY mode: Uses `\r` carriage returns for in-place updates, finalizing with `\n`.
+/// Non-TTY/JSON mode: Emits NDJSON for agent consumption.
+async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bool) {
+    while let Some(event) = rx.recv().await {
+        if tty {
+            render_progress_tty(&event);
+        } else {
+            // NDJSON for non-TTY / agent mode.
+            if let Ok(json) = serde_json::to_string(&event) {
+                println!("{json}");
+            }
+        }
+    }
+}
+
+/// Render a single progress event for TTY output.
+fn render_progress_tty(event: &ProgressEvent) {
+    match event {
+        ProgressEvent::PlanResolved {
+            total_nodes,
+            stages,
+        } => {
+            eprintln!(
+                "  {} {total_nodes} node(s) in {stages} stage(s)",
+                output::dim("plan:"),
+            );
+            eprintln!();
+        }
+        ProgressEvent::NodeStarting {
+            node,
+            variant,
+            index,
+            total,
+        } => {
+            let label = format!("{node}:{variant}");
+            eprint!(
+                "\x1b[2K\r{}",
+                output::step(*index, *total, &output::pad_right(&label, 30)),
+            );
+            eprint!(" {}", output::dim("starting..."));
+        }
+        ProgressEvent::PortAllocated {
+            node: _,
+            variant: _,
+            port,
+        } => {
+            eprint!(" {}", output::dim(&format!("port {port}")));
+        }
+        ProgressEvent::HealthCheckPhase {
+            node: _,
+            variant: _,
+            phase,
+            description,
+        } => {
+            eprint!(
+                " {}",
+                output::dim(&format!("[phase {phase}: {description}]"))
+            );
+        }
+        ProgressEvent::HealthCheckPassed {
+            node: _,
+            variant: _,
+            phase: _,
+        } => {
+            // Phase pass is shown implicitly by the next event.
+        }
+        ProgressEvent::NodeHealthy {
+            node,
+            variant,
+            url,
+            elapsed_ms,
+        } => {
+            let label = format!("{node}:{variant}");
+            let detail = match url {
+                Some(u) => u.clone(),
+                None => "healthy".to_owned(),
+            };
+            let elapsed = format!("{elapsed_ms}ms");
+            eprintln!(
+                "\x1b[2K\r  {} {} {}",
+                output::checkmark(),
+                output::pad_right(&label, 30),
+                output::dim(&format!("{detail} ({elapsed})")),
+            );
+        }
+        ProgressEvent::NodeSkipped { node, variant } => {
+            let label = format!("{node}:{variant}");
+            eprintln!(
+                "\x1b[2K\r  {} {} {}",
+                output::dim("~"),
+                output::pad_right(&label, 30),
+                output::dim("skipped (verify passed)"),
+            );
+        }
+        ProgressEvent::NodeFailed {
+            node,
+            variant,
+            error,
+        } => {
+            let label = format!("{node}:{variant}");
+            eprintln!(
+                "\x1b[2K\r  {} {} {}",
+                output::cross(),
+                output::pad_right(&label, 30),
+                output::red(error),
+            );
+        }
+        ProgressEvent::CommandRunning {
+            node: _,
+            variant: _,
+        } => {
+            eprint!(" {}", output::dim("running..."));
         }
     }
 }

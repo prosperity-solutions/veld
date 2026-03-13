@@ -14,12 +14,15 @@ use crate::helper::HelperClient;
 use crate::logging::{self, LogWriter};
 use crate::port::PortAllocator;
 use crate::process;
+use crate::progress::ProgressEvent;
 use crate::state::{
     GlobalRegistry, HealthCheckPhase, NodeState, NodeStatus, ProjectState, RegistryEntry,
     RegistryRunInfo, RunState, RunStatus,
 };
 use crate::url;
 use crate::variables::VariableContext;
+
+use tokio::sync::mpsc;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -91,6 +94,8 @@ pub struct Orchestrator {
     /// Foreground mode — pipes stdout/stderr through timestamping tasks.
     /// When false (detached), redirects directly to file so processes survive CLI exit.
     foreground: bool,
+    /// Optional channel for live progress events.
+    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
 }
 
 impl Orchestrator {
@@ -107,6 +112,7 @@ impl Orchestrator {
             debug: false,
             debug_writer: None,
             foreground: false,
+            progress_tx: None,
         }
     }
 
@@ -118,6 +124,23 @@ impl Orchestrator {
     /// Enable debug mode for orchestration trace logging.
     pub fn set_debug(&mut self, debug: bool) {
         self.debug = debug;
+    }
+
+    /// Set the progress event sender for live progress reporting.
+    pub fn set_progress_sender(&mut self, tx: mpsc::UnboundedSender<ProgressEvent>) {
+        self.progress_tx = Some(tx);
+    }
+
+    /// Drop the progress sender, signaling the receiver to close.
+    pub fn close_progress_sender(&mut self) {
+        self.progress_tx.take();
+    }
+
+    /// Emit a progress event (no-op if no sender is set).
+    fn emit(&self, event: ProgressEvent) {
+        if let Some(ref tx) = self.progress_tx {
+            let _ = tx.send(event);
+        }
     }
 
     /// Write a line to the debug log (no-op when debug is off).
@@ -197,7 +220,15 @@ impl Orchestrator {
         // Outputs collected as we execute stages (for variable resolution).
         let mut all_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
 
+        // Count total nodes for progress reporting.
+        let total_nodes: usize = plan.iter().map(|s| s.len()).sum();
+        self.emit(ProgressEvent::PlanResolved {
+            total_nodes,
+            stages: plan.len(),
+        });
+
         // Execute stages in order.
+        let mut node_index: usize = 0;
         for stage in &plan {
             let results = self
                 .execute_stage(
@@ -208,6 +239,8 @@ impl Orchestrator {
                     &username,
                     &hostname,
                     &mut all_outputs,
+                    total_nodes,
+                    &mut node_index,
                 )
                 .await?;
 
@@ -235,13 +268,24 @@ impl Orchestrator {
         username: &str,
         hostname: &str,
         all_outputs: &mut HashMap<String, HashMap<String, String>>,
+        total_nodes: usize,
+        node_index: &mut usize,
     ) -> Result<Vec<(String, NodeState)>, OrchestratorError> {
         let mut results = Vec::new();
 
         // Nodes within a stage are independent. We run them sequentially here;
         // the CLI layer can wrap in tokio::spawn for true parallelism.
         for sel in stage {
+            *node_index += 1;
+            self.emit(ProgressEvent::NodeStarting {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                index: *node_index,
+                total: total_nodes,
+            });
+
             let key = RunState::node_key(&sel.node, &sel.variant);
+            let start_time = std::time::Instant::now();
             let node_state = self
                 .execute_node(sel, run, branch, worktree, username, hostname, all_outputs)
                 .await?;
@@ -263,6 +307,26 @@ impl Orchestrator {
                 .entry(sel.node.clone())
                 .or_default()
                 .extend(node_out);
+
+            // Emit completion event.
+            let elapsed_ms = start_time.elapsed().as_millis() as u64;
+            match node_state.status {
+                NodeStatus::Healthy => {
+                    self.emit(ProgressEvent::NodeHealthy {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        url: node_state.url.clone(),
+                        elapsed_ms,
+                    });
+                }
+                NodeStatus::Skipped => {
+                    self.emit(ProgressEvent::NodeSkipped {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                    });
+                }
+                _ => {}
+            }
 
             results.push((key, node_state));
         }
@@ -350,6 +414,11 @@ impl Orchestrator {
         let port = self.port_allocator.allocate()?;
         node_state.port = Some(port);
         ctx.set_builtin("port", port.to_string());
+        self.emit(ProgressEvent::PortAllocated {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+            port,
+        });
         self.debug_log(&format!(
             "{}:{} — allocated port {}",
             sel.node, sel.variant, port
@@ -435,7 +504,7 @@ impl Orchestrator {
         self.children
             .insert(RunState::node_key(&sel.node, &sel.variant), handle);
 
-        // Health check.
+        // Health check — inlined to emit progress events between phases.
         self.debug_log(&format!(
             "{}:{} — process started (pid {}), beginning health checks",
             sel.node, sel.variant, pid
@@ -456,14 +525,90 @@ impl Orchestrator {
                 passed_at: None,
             });
 
-            match health::run_health_check(port, Some(&https_url), &self.project_root, hc).await {
+            // Phase 1: TCP port check.
+            self.emit(ProgressEvent::HealthCheckPhase {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 1,
+                description: format!("waiting for port {port}"),
+            });
+
+            if let Err(e) = health::wait_for_port(port, hc).await {
+                let msg = format!("process did not bind to port {port}: {e}");
+                node_state.status = NodeStatus::Failed;
+                node_state.health_phases[0].last_error = Some(msg.clone());
+                self.debug_log(&format!(
+                    "{}:{} — health check phase 1 FAILED: {}",
+                    sel.node, sel.variant, msg
+                ))
+                .await;
+                self.emit(ProgressEvent::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    error: msg.clone(),
+                });
+                return Err(OrchestratorError::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    reason: msg,
+                });
+            }
+
+            let now = chrono::Utc::now();
+            node_state.health_phases[0].passed = true;
+            node_state.health_phases[0].passed_at = Some(now);
+            self.emit(ProgressEvent::HealthCheckPassed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 1,
+            });
+            self.debug_log(&format!(
+                "{}:{} — phase 1 passed (port open)",
+                sel.node, sel.variant
+            ))
+            .await;
+
+            // Phase 2: depends on check type.
+            let phase2_desc = match hc.check_type.as_str() {
+                "http" => format!("HTTP check on port {port}"),
+                "command" | "bash" => "command health check".to_owned(),
+                "port" => "port-only (no phase 2)".to_owned(),
+                other => format!("unknown check type: {other}"),
+            };
+            self.emit(ProgressEvent::HealthCheckPhase {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 2,
+                description: phase2_desc,
+            });
+
+            let phase2_result = match hc.check_type.as_str() {
+                "http" => {
+                    let direct_url = format!("http://127.0.0.1:{port}");
+                    health::wait_for_http(&direct_url, hc).await
+                }
+                "command" | "bash" => {
+                    if let Some(cmd) = &hc.command {
+                        health::wait_for_command_check(cmd, &self.project_root, hc).await
+                    } else {
+                        Ok(())
+                    }
+                }
+                "port" => Ok(()), // Phase 1 already covers this.
+                _ => Ok(()),
+            };
+
+            match phase2_result {
                 Ok(()) => {
                     let now = chrono::Utc::now();
-                    for phase in &mut node_state.health_phases {
-                        phase.passed = true;
-                        phase.passed_at = Some(now);
-                    }
+                    node_state.health_phases[1].passed = true;
+                    node_state.health_phases[1].passed_at = Some(now);
                     node_state.status = NodeStatus::Healthy;
+                    self.emit(ProgressEvent::HealthCheckPassed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        phase: 2,
+                    });
                     self.debug_log(&format!(
                         "{}:{} — health check passed, node is healthy",
                         sel.node, sel.variant
@@ -473,14 +618,17 @@ impl Orchestrator {
                 Err(e) => {
                     node_state.status = NodeStatus::Failed;
                     let msg = e.to_string();
+                    node_state.health_phases[1].last_error = Some(msg.clone());
                     self.debug_log(&format!(
-                        "{}:{} — health check FAILED: {}",
+                        "{}:{} — health check phase 2 FAILED: {}",
                         sel.node, sel.variant, msg
                     ))
                     .await;
-                    if let Some(phase) = node_state.health_phases.last_mut() {
-                        phase.last_error = Some(msg.clone());
-                    }
+                    self.emit(ProgressEvent::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        error: msg.clone(),
+                    });
                     return Err(OrchestratorError::NodeFailed {
                         node: sel.node.clone(),
                         variant: sel.variant.clone(),
@@ -536,6 +684,10 @@ impl Orchestrator {
         }
 
         // Run command step.
+        self.emit(ProgressEvent::CommandRunning {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+        });
         let result = process::run_command(&resolved_cmd, &self.project_root, &env).await?;
 
         node_state
@@ -553,12 +705,18 @@ impl Orchestrator {
             if declared_keys.contains(k.as_str()) {
                 node_state.outputs.insert(k.clone(), v.clone());
             } else if variant_cfg.strict_outputs {
+                let reason = format!(
+                    "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
+                );
+                self.emit(ProgressEvent::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    error: reason.clone(),
+                });
                 return Err(OrchestratorError::NodeFailed {
                     node: sel.node.clone(),
                     variant: sel.variant.clone(),
-                    reason: format!(
-                        "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
-                    ),
+                    reason,
                 });
             } else {
                 tracing::warn!(
@@ -574,10 +732,16 @@ impl Orchestrator {
             node_state.status = NodeStatus::Healthy;
         } else {
             node_state.status = NodeStatus::Failed;
+            let reason = format!("command step exited with code {}", result.exit_code);
+            self.emit(ProgressEvent::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                error: reason.clone(),
+            });
             return Err(OrchestratorError::NodeFailed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
-                reason: format!("command step exited with code {}", result.exit_code),
+                reason,
             });
         }
 
