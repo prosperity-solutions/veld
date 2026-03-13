@@ -87,12 +87,12 @@ pub async fn run(
     let tty = is_tty();
     let progress_handle = tokio::spawn(render_progress(progress_rx, tty));
 
-    println!(
+    eprintln!(
         "{} Starting environment {}...",
         output::bold("veld"),
         output::bold(&format!("'{run_name_str}'")),
     );
-    println!();
+    eprintln!();
 
     match orchestrator.start(&parsed_selections, run_name_str).await {
         Ok(run_state) => {
@@ -221,7 +221,7 @@ fn render_progress_tty(event: &ProgressEvent) {
         } => {
             let label = format!("{node}:{variant}");
             eprint!(
-                "\r{}",
+                "\x1b[2K\r{}",
                 output::step(*index, *total, &output::pad_right(&label, 30)),
             );
             eprint!(" {}", output::dim("starting..."));
@@ -264,8 +264,7 @@ fn render_progress_tty(event: &ProgressEvent) {
             };
             let elapsed = format!("{elapsed_ms}ms");
             eprintln!(
-                "\r{} {} {} {}",
-                output::pad_right("", 0), // clear any partial \r content
+                "\x1b[2K\r  {} {} {}",
                 output::checkmark(),
                 output::pad_right(&label, 30),
                 output::dim(&format!("{detail} ({elapsed})")),
@@ -274,7 +273,7 @@ fn render_progress_tty(event: &ProgressEvent) {
         ProgressEvent::NodeSkipped { node, variant } => {
             let label = format!("{node}:{variant}");
             eprintln!(
-                "\r  {} {} {}",
+                "\x1b[2K\r  {} {} {}",
                 output::dim("~"),
                 output::pad_right(&label, 30),
                 output::dim("skipped (verify passed)"),
@@ -287,7 +286,7 @@ fn render_progress_tty(event: &ProgressEvent) {
         } => {
             let label = format!("{node}:{variant}");
             eprintln!(
-                "\r  {} {} {}",
+                "\x1b[2K\r  {} {} {}",
                 output::cross(),
                 output::pad_right(&label, 30),
                 output::red(error),

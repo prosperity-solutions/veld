@@ -532,7 +532,11 @@ impl Orchestrator {
                 let msg = format!("process did not bind to port {port}: {e}");
                 node_state.status = NodeStatus::Failed;
                 node_state.health_phases[0].last_error = Some(msg.clone());
-                self.debug_log(&format!("{}:{} — health check phase 1 FAILED: {}", sel.node, sel.variant, msg)).await;
+                self.debug_log(&format!(
+                    "{}:{} — health check phase 1 FAILED: {}",
+                    sel.node, sel.variant, msg
+                ))
+                .await;
                 self.emit(ProgressEvent::NodeFailed {
                     node: sel.node.clone(),
                     variant: sel.variant.clone(),
@@ -553,7 +557,11 @@ impl Orchestrator {
                 variant: sel.variant.clone(),
                 phase: 1,
             });
-            self.debug_log(&format!("{}:{} — phase 1 passed (port open)", sel.node, sel.variant)).await;
+            self.debug_log(&format!(
+                "{}:{} — phase 1 passed (port open)",
+                sel.node, sel.variant
+            ))
+            .await;
 
             // Phase 2: depends on check type.
             let phase2_desc = match hc.check_type.as_str() {
@@ -596,13 +604,21 @@ impl Orchestrator {
                         variant: sel.variant.clone(),
                         phase: 2,
                     });
-                    self.debug_log(&format!("{}:{} — health check passed, node is healthy", sel.node, sel.variant)).await;
+                    self.debug_log(&format!(
+                        "{}:{} — health check passed, node is healthy",
+                        sel.node, sel.variant
+                    ))
+                    .await;
                 }
                 Err(e) => {
                     node_state.status = NodeStatus::Failed;
                     let msg = e.to_string();
                     node_state.health_phases[1].last_error = Some(msg.clone());
-                    self.debug_log(&format!("{}:{} — health check phase 2 FAILED: {}", sel.node, sel.variant, msg)).await;
+                    self.debug_log(&format!(
+                        "{}:{} — health check phase 2 FAILED: {}",
+                        sel.node, sel.variant, msg
+                    ))
+                    .await;
                     self.emit(ProgressEvent::NodeFailed {
                         node: sel.node.clone(),
                         variant: sel.variant.clone(),
@@ -684,12 +700,18 @@ impl Orchestrator {
             if declared_keys.contains(k.as_str()) {
                 node_state.outputs.insert(k.clone(), v.clone());
             } else if variant_cfg.strict_outputs {
+                let reason = format!(
+                    "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
+                );
+                self.emit(ProgressEvent::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    error: reason.clone(),
+                });
                 return Err(OrchestratorError::NodeFailed {
                     node: sel.node.clone(),
                     variant: sel.variant.clone(),
-                    reason: format!(
-                        "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
-                    ),
+                    reason,
                 });
             } else {
                 tracing::warn!(

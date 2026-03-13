@@ -8,10 +8,7 @@ use serde::Serialize;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProgressEvent {
     /// Execution plan resolved.
-    PlanResolved {
-        total_nodes: usize,
-        stages: usize,
-    },
+    PlanResolved { total_nodes: usize, stages: usize },
 
     /// A node is about to begin execution.
     NodeStarting {
@@ -52,10 +49,7 @@ pub enum ProgressEvent {
     },
 
     /// Node was skipped (verify command passed).
-    NodeSkipped {
-        node: String,
-        variant: String,
-    },
+    NodeSkipped { node: String, variant: String },
 
     /// Node failed.
     NodeFailed {
@@ -65,10 +59,7 @@ pub enum ProgressEvent {
     },
 
     /// Command step running.
-    CommandRunning {
-        node: String,
-        variant: String,
-    },
+    CommandRunning { node: String, variant: String },
 }
 
 #[cfg(test)]
