@@ -155,9 +155,9 @@ impl CaddyManager {
         route_id: &str,
         hostname: &str,
         upstream: &str,
-        feedback_upstream: Option<&str>,
+        feedback: Option<FeedbackConfig<'_>>,
     ) -> Result<()> {
-        let route = build_route_json(route_id, hostname, upstream, feedback_upstream);
+        let route = build_route_json(route_id, hostname, upstream, feedback);
 
         let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
 
@@ -207,6 +207,17 @@ impl CaddyManager {
 }
 
 // ---------------------------------------------------------------------------
+// Feedback config
+// ---------------------------------------------------------------------------
+
+/// Configuration for feedback overlay injection on a route.
+pub struct FeedbackConfig<'a> {
+    pub upstream: &'a str,
+    pub run_name: &'a str,
+    pub project_root: &'a str,
+}
+
+// ---------------------------------------------------------------------------
 // Caddy JSON config builders
 // ---------------------------------------------------------------------------
 
@@ -251,18 +262,23 @@ fn build_base_config() -> serde_json::Value {
 }
 
 /// Build a single route entry with hostname matching, TLS, and reverse proxy.
-/// When `feedback_upstream` is provided, a `/__veld__/*` subroute is added
-/// that proxies feedback API/asset requests to the daemon's HTTP server.
+///
+/// When feedback is configured:
+/// 1. `/__veld__/*` routes to the daemon's feedback HTTP server (API + assets)
+///    with `X-Veld-Run` and `X-Veld-Project` headers injected by Caddy.
+/// 2. The main app proxy uses Caddy's `replace` handler to inject the feedback
+///    overlay `<script>` tag into HTML responses automatically — no Service
+///    Worker, no manual activation, it just works.
 fn build_route_json(
     route_id: &str,
     hostname: &str,
     upstream: &str,
-    feedback_upstream: Option<&str>,
+    feedback: Option<FeedbackConfig<'_>>,
 ) -> serde_json::Value {
     let mut subroutes = Vec::new();
 
-    // If feedback is enabled, add /__veld__/* handler before the main proxy.
-    if let Some(fb_upstream) = feedback_upstream {
+    if let Some(fb) = feedback {
+        // /__veld__/* → strip prefix, proxy to daemon with context headers.
         subroutes.push(serde_json::json!({
             "match": [{ "path": ["/__veld__/*"] }],
             "handle": [
@@ -272,21 +288,46 @@ fn build_route_json(
                 },
                 {
                     "handler": "reverse_proxy",
-                    "upstreams": [{ "dial": fb_upstream }]
+                    "headers": {
+                        "request": {
+                            "set": {
+                                "X-Veld-Run": [fb.run_name],
+                                "X-Veld-Project": [fb.project_root]
+                            }
+                        }
+                    },
+                    "upstreams": [{ "dial": fb.upstream }]
                 }
             ]
         }));
-    }
 
-    // Main app reverse proxy (catch-all).
-    subroutes.push(serde_json::json!({
-        "handle": [{
-            "handler": "reverse_proxy",
-            "upstreams": [{
-                "dial": upstream
+        // Main app proxy with HTML injection via the replace-response plugin.
+        subroutes.push(serde_json::json!({
+            "handle": [
+                {
+                    "handler": "replace_response",
+                    "replacements": [{
+                        "search": "</body>",
+                        "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
+                    }]
+                },
+                {
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": upstream }]
+                }
+            ]
+        }));
+    } else {
+        // No feedback — plain reverse proxy.
+        subroutes.push(serde_json::json!({
+            "handle": [{
+                "handler": "reverse_proxy",
+                "upstreams": [{
+                    "dial": upstream
+                }]
             }]
-        }]
-    }));
+        }));
+    }
 
     serde_json::json!({
         "@id": route_id,
@@ -334,12 +375,26 @@ mod tests {
             "test-route",
             "app.test.localhost",
             "localhost:3000",
-            Some("localhost:19899"),
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "my-run",
+                project_root: "/tmp/project",
+            }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 2);
         // First subroute matches /__veld__/*
         assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
+        // Verify headers are set on the feedback proxy.
+        let fb_proxy = &subroutes[0]["handle"][1];
+        assert_eq!(
+            fb_proxy["headers"]["request"]["set"]["X-Veld-Run"][0],
+            "my-run"
+        );
+        assert_eq!(
+            fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
+            "/tmp/project"
+        );
     }
 
     #[test]

@@ -196,44 +196,15 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
         "linux" => "linux",
         other => anyhow::bail!("unsupported OS: {other}"),
     };
-    let version = "2.11.2";
+    // Use Caddy's build API to get a custom binary with the replace-response
+    // plugin, which lets us inject the feedback overlay script into HTML responses.
     let url = format!(
-        "https://github.com/caddyserver/caddy/releases/download/v{version}/caddy_{version}_{caddy_os}_{arch}.tar.gz"
+        "https://caddyserver.com/api/download?os={caddy_os}&arch={arch}&p=github.com/caddyserver/replace-response"
     );
 
-    // Download to temp file
-    let tmp_dir = std::env::temp_dir().join("veld-setup");
-    std::fs::create_dir_all(&tmp_dir)?;
-    let tarball = tmp_dir.join("caddy.tar.gz");
-
-    download_binary(&url, &tarball)
+    download_binary(&url, &caddy)
         .await
-        .context("failed to download Caddy tarball")?;
-
-    // Extract caddy binary from tarball
-    let status = tokio::process::Command::new("tar")
-        .args(["xzf"])
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&tmp_dir)
-        .arg("caddy")
-        .status()
-        .await
-        .context("failed to extract Caddy tarball")?;
-
-    if !status.success() {
-        anyhow::bail!("tar extraction failed");
-    }
-
-    let extracted = tmp_dir.join("caddy");
-    std::fs::rename(&extracted, &caddy)
-        .or_else(|_| {
-            // rename fails across filesystems, fall back to copy
-            std::fs::copy(&extracted, &caddy)?;
-            std::fs::remove_file(&extracted)?;
-            Ok::<(), std::io::Error>(())
-        })
-        .context("failed to install Caddy binary")?;
+        .context("failed to download Caddy binary from build API")?;
 
     #[cfg(unix)]
     {
@@ -241,10 +212,9 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
         std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755))?;
     }
 
-    // Clean up
-    let _ = std::fs::remove_dir_all(&tmp_dir);
-
-    Ok(StepResult::success(format!("Caddy {version} installed")))
+    Ok(StepResult::success(
+        "Caddy installed (with replace-response plugin)",
+    ))
 }
 
 /// Trust Caddy's internal CA root certificate in the system trust store.

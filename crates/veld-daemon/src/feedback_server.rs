@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
@@ -38,11 +38,7 @@ pub async fn run_feedback_server() {
     });
 
     let app = Router::new()
-        // Service Worker installer page.
-        .route("/", get(installer_page))
-        // Service Worker script.
-        .route("/sw.js", get(service_worker))
-        // Overlay script.
+        // Overlay script (injected by Caddy's replace-response handler).
         .route("/feedback/script.js", get(overlay_script))
         // Feedback CRUD API.
         .route("/feedback/api/comments", get(list_comments))
@@ -129,18 +125,6 @@ fn resolve_store(
 // ---------------------------------------------------------------------------
 // Asset handlers
 // ---------------------------------------------------------------------------
-
-async fn installer_page() -> Html<&'static str> {
-    Html(feedback_assets::INSTALLER_HTML)
-}
-
-async fn service_worker() -> Response {
-    (
-        [(header::CONTENT_TYPE, "application/javascript")],
-        feedback_assets::SERVICE_WORKER_JS,
-    )
-        .into_response()
-}
 
 async fn overlay_script() -> Response {
     (
