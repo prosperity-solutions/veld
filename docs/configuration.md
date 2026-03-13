@@ -12,7 +12,7 @@ All relative paths in the configuration resolve relative to the directory contai
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "my-app",
   "nodes": {
@@ -622,7 +622,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
@@ -826,7 +826,7 @@ Veld provides a JSON Schema for editor autocompletion and validation. Add the `$
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   ...
 }
 ```
