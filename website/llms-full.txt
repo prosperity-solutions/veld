@@ -1,0 +1,376 @@
+# veld
+
+> Open-source local development environment orchestrator for monorepos. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring.
+
+veld is a Rust-based CLI tool that replaces the ritual of opening multiple terminals, remembering ports, and manually wiring services together. You declare your stack in a single `veld.json`, and veld resolves the dependency graph, allocates ports, starts processes, runs health checks, configures Caddy for HTTPS, and gives you clean URLs like `https://frontend.my-feature.myproject.localhost`.
+
+- Source: https://github.com/prosperity-solutions/veld
+- Website: https://veld.oss.life.li
+- License: MIT
+- Platforms: macOS (arm64/x64), Linux (x64/arm64)
+
+---
+
+## Install
+
+```sh
+curl -fsSL https://veld.oss.life.li/get | bash
+```
+
+This detects your OS and architecture, downloads the latest release, and installs:
+- `veld` to `/usr/local/bin/`
+- `veld-helper` and `veld-daemon` to `/usr/local/lib/veld/`
+
+Then run one-time setup:
+
+```sh
+veld setup
+```
+
+This installs Caddy, the helper/daemon services, and trusts Caddy's CA in your system keychain for HTTPS.
+
+To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
+
+### Build from source
+
+```sh
+git clone https://github.com/prosperity-solutions/veld.git
+cd veld
+cargo build --release
+# Binaries: target/release/veld, target/release/veld-helper, target/release/veld-daemon
+```
+
+---
+
+## Quick Start
+
+1. Create a `veld.json` in your project root:
+
+```json
+{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "myproject",
+  "url_template": "{service}.{run}.{project}.localhost",
+  "nodes": {
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
+        }
+      }
+    },
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
+          "depends_on": { "backend": "local" }
+        }
+      }
+    }
+  }
+}
+```
+
+2. Start the environment:
+
+```sh
+veld start frontend:local --name dev
+```
+
+Veld resolves the dependency graph (backend first, then frontend), allocates ports, starts processes, runs health checks, configures Caddy routes, and gives you HTTPS URLs.
+
+3. Check status:
+
+```sh
+veld status --name dev
+veld urls --name dev
+```
+
+4. Stop:
+
+```sh
+veld stop --name dev
+```
+
+---
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached) |
+| `veld stop [--name <n>] [--all]` | Stop a running environment |
+| `veld restart [--name <n>]` | Restart an environment |
+| `veld status [--name <n>] [--json]` | Show run status |
+| `veld urls [--name <n>] [--json]` | Show URLs for a run |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f]` | View logs (`-f` to follow) |
+| `veld graph [NODE:VARIANT...]` | Print dependency graph |
+| `veld nodes` | List all nodes and variants |
+| `veld presets` | List presets |
+| `veld runs` | List all runs |
+| `veld gc` | Clean up stale state and logs |
+| `veld setup` | One-time system setup |
+| `veld init` | Create a new veld.json |
+
+All commands support `--json` for structured output, making veld scriptable and CI/agent-friendly.
+
+---
+
+## Architecture
+
+Three binaries work together:
+
+- **`veld`** — CLI. Parses commands, orchestrates environments, displays output.
+- **`veld-helper`** — privileged daemon (root). Manages DNS entries and Caddy routes via a minimal Unix socket API.
+- **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
+
+Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
+
+---
+
+## Configuration Reference
+
+### Top-Level Structure
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `$schema` | string | No | JSON Schema URL for editor autocompletion |
+| `schemaVersion` | string | Yes | Must be `"1"` |
+| `name` | string | Yes | Project name (used in URLs) |
+| `url_template` | string | No | URL template for services |
+| `presets` | object | No | Named shortcuts for node:variant selections |
+| `nodes` | object | Yes | The dependency graph nodes |
+
+### Step Types
+
+#### `start_server`
+
+Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
+
+- Must specify `command` (required)
+- The process must bind to `${veld.port}`
+- Built-in outputs: `url` (full HTTPS URL) and `port` (allocated port number)
+- Supports synthetic `outputs` as an object (key → template string, interpolated after port allocation)
+- Requires `health_check`
+
+```json
+{
+  "type": "start_server",
+  "command": "npm run dev -- --port ${veld.port}",
+  "health_check": { "type": "http", "path": "/health" }
+}
+```
+
+#### `command`
+
+Runs a shell command or script to completion. Used for setup tasks.
+
+- Must specify either `command` or `script` (mutually exclusive)
+- Can emit outputs via `VELD_OUTPUT key=value` on stdout
+- Declares outputs as an array of strings
+- Built-in output: `exit_code`
+- Supports `verify` for idempotency
+- Does NOT get a port allocated — `${veld.port}` is not available
+
+```json
+{
+  "type": "command",
+  "script": "./scripts/clone-db.sh",
+  "outputs": ["DATABASE_URL"]
+}
+```
+
+### Health Checks
+
+Two-phase: (1) TCP port check, (2) HTTPS endpoint check. Three strategies:
+
+```json
+{ "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
+{ "type": "port", "timeout_seconds": 10 }
+{ "type": "command", "command": "curl -sf http://localhost:${veld.port}/ready" }
+```
+
+### Dependencies
+
+Dependencies are explicit `node:variant` pairs. Resolved before start. Started in topological order, parallelized where possible. Reverse-order teardown.
+
+```json
+"depends_on": {
+  "database": "docker",
+  "backend": "local"
+}
+```
+
+### Environment Variables
+
+Values support variable interpolation including upstream node outputs:
+
+```json
+"env": {
+  "DATABASE_URL": "${nodes.database.DATABASE_URL}",
+  "PORT": "${veld.port}",
+  "NEXT_PUBLIC_API_URL": "${nodes.backend.url}"
+}
+```
+
+### Outputs
+
+For `start_server` variants — object (synthetic templates):
+```json
+"outputs": {
+  "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
+}
+```
+
+For `command` variants — array (captured from VELD_OUTPUT):
+```json
+"outputs": ["DATABASE_URL", "DB_NAME"]
+```
+
+### Variable Substitution
+
+#### Built-in Variables (`${veld.*}`)
+
+| Variable | Value |
+|----------|-------|
+| `${veld.port}` | Allocated port (start_server only) |
+| `${veld.run}` | Run name |
+| `${veld.run_id}` | Stable run UUID |
+| `${veld.root}` | Path to directory containing veld.json |
+| `${veld.project}` | Project name |
+| `${veld.worktree}` | Slugified worktree directory name |
+| `${veld.branch}` | Current git branch (slugified) |
+| `${veld.username}` | OS username |
+
+#### Node Output References (`${nodes.*}`)
+
+```
+${nodes.database.DATABASE_URL}   # custom output
+${nodes.backend.url}             # start_server built-in: HTTPS URL
+${nodes.backend.port}            # start_server built-in: port
+${nodes.backend:local.url}       # qualified form (when multiple variants active)
+```
+
+### URL Templates
+
+URL templates use `{variable}` syntax (single braces). Available variables:
+
+| Variable | Description |
+|----------|-------------|
+| `{service}` | Node name |
+| `{variant}` | Variant name |
+| `{run}` | Run name (always non-empty) |
+| `{project}` | Project name |
+| `{branch}` | Git branch (slugified) |
+| `{worktree}` | Worktree directory name (slugified) |
+| `{username}` | OS username |
+| `{hostname}` | Machine hostname |
+
+Fallback operator: `{branch ?? run}` uses first non-empty value.
+
+Default: `{service}.{run}.{project}.localhost`
+
+`.localhost` resolves to 127.0.0.1 automatically (RFC 6761). Custom domains are supported — veld manages exact DNS entries via veld-helper.
+
+### URL Template Cascade
+
+1. Variant-level (highest priority)
+2. Node-level
+3. Project-level (default)
+
+### Presets
+
+Named shortcuts for node:variant selections:
+
+```json
+"presets": {
+  "fullstack": ["database:docker", "backend:local", "frontend:local"],
+  "frontend-only": ["frontend:local"]
+}
+```
+
+Usage: `veld start --preset fullstack --name my-feature`
+
+### Additional Variant Fields
+
+| Field | Type | Applies To | Description |
+|-------|------|------------|-------------|
+| `on_stop` | string | All | Teardown command on `veld stop` |
+| `verify` | string | `command` only | Idempotency check (exit 0 = skip) |
+| `sensitive_outputs` | array | All | Output keys to mask and encrypt |
+| `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
+
+---
+
+## Complete Example
+
+```json
+{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "myproject",
+  "url_template": "{service}.{run}.myproject.localhost",
+  "presets": {
+    "fullstack": ["database:docker", "backend:local", "frontend:local"],
+    "frontend-only": ["frontend:local"]
+  },
+  "nodes": {
+    "database": {
+      "default_variant": "docker",
+      "variants": {
+        "docker": {
+          "type": "start_server",
+          "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+          "health_check": { "type": "port", "timeout_seconds": 15 },
+          "outputs": {
+            "DATABASE_URL": "postgres://dev:dev@localhost:${veld.port}/app"
+          }
+        }
+      }
+    },
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "cargo run -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health" },
+          "depends_on": { "database": "docker" },
+          "env": {
+            "DATABASE_URL": "${nodes.database.DATABASE_URL}"
+          }
+        }
+      }
+    },
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/" },
+          "depends_on": { "backend": "local" },
+          "env": {
+            "API_URL": "${nodes.backend.url}"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+---
+
+## Requirements
+
+- macOS (arm64/x64) or Linux (x64/arm64)
+- Ports 80, 443, and 2019 available
+- sudo access once for `veld setup`

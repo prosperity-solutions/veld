@@ -44,6 +44,14 @@ jobs:
             exit 1
           fi
 
+  website:
+    name: Website Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build website container
+        run: docker build -t veld-website website/
+
   schema:
     name: Validate JSON Schema
     runs-on: ubuntu-latest
