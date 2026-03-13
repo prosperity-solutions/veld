@@ -44,6 +44,7 @@ website/
 
 - Static files served by nginx:alpine
 - `/get` → 302 redirect to GitHub install script
+- `/schema/` → rewrite redirect to GitHub raw schema files
 - `/llms.txt` and `/llms-full.txt` served as `text/markdown`
 - `/health` → 200 OK (for container health checks)
 - All other paths → SPA fallback to `index.html`

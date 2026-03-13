@@ -1378,6 +1378,10 @@
         <span class="t-cyan">"local"</span>: {
           <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
           <span class="t-cyan">"command"</span>: <span class="t-green">"npm run dev -- --port ${veld.port}"</span>,
+          <span class="t-cyan">"health_check"</span>: {
+            <span class="t-cyan">"type"</span>: <span class="t-green">"http"</span>,
+            <span class="t-cyan">"path"</span>: <span class="t-green">"/"</span>
+          },
           <span class="t-cyan">"env"</span>: {
             <span class="t-cyan">"API_URL"</span>: <span class="t-green">"<span class="t-amber">${nodes.backend.url}</span>"</span> <span class="t-dim">// <span class="t-amber">&#8592;</span> HTTPS URL</span>
           },

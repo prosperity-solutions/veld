@@ -105,12 +105,12 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n>` | Start an environment |
+| `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached) |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
-| `veld logs [--name <n>] [--node <n>] [--lines <n>]` | View logs |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f]` | View logs (`-f` to follow) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
@@ -291,8 +291,8 @@ Named shortcuts for node:variant selections:
 
 ```json
 "presets": {
-  "fullstack": ["frontend:local", "admin:local"],
-  "ui-only": ["frontend:staging"]
+  "fullstack": ["database:docker", "backend:local", "frontend:local"],
+  "frontend-only": ["frontend:local"]
 }
 ```
 
@@ -318,8 +318,8 @@ Usage: `veld start --preset fullstack --name my-feature`
   "name": "myproject",
   "url_template": "{service}.{run}.myproject.localhost",
   "presets": {
-    "fullstack": ["frontend:local", "admin:local"],
-    "ui-only": ["frontend:staging"]
+    "fullstack": ["database:docker", "backend:local", "frontend:local"],
+    "frontend-only": ["frontend:local"]
   },
   "nodes": {
     "database": {
@@ -330,7 +330,7 @@ Usage: `veld start --preset fullstack --name my-feature`
           "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
           "health_check": { "type": "port", "timeout_seconds": 15 },
           "outputs": {
-            "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
+            "DATABASE_URL": "postgres://dev:dev@localhost:${veld.port}/app"
           }
         }
       }
