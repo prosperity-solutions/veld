@@ -102,8 +102,10 @@ pub async fn run(
             let _ = progress_handle.await;
             eprintln!();
             output::print_info("Interrupted — stopping partially started environment...");
-            let _ = orchestrator.stop(run_name_str).await;
-            output::print_success(&format!("Environment '{}' cleaned up.", run_name_str));
+            match orchestrator.stop(run_name_str).await {
+                Ok(_) => output::print_success(&format!("Environment '{}' cleaned up.", run_name_str)),
+                Err(e) => output::print_error(&format!("Cleanup failed: {e}"), false),
+            }
             return 130; // Standard exit code for SIGINT
         }
     };
