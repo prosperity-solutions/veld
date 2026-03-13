@@ -78,16 +78,68 @@ impl Default for PortAllocator {
     }
 }
 
-/// Check whether a TCP port is available by attempting to bind on both
-/// IPv4 (127.0.0.1) and IPv6 (::1).
+/// Check whether a TCP port is available by attempting to bind on all
+/// relevant address families: IPv4 loopback, IPv6 loopback, and IPv4
+/// wildcard (`0.0.0.0`).
 ///
 /// Modern runtimes (Node.js 18+, Next.js, etc.) often default to IPv6.
-/// A stale process on `[::1]:port` would pass an IPv4-only check, so we
-/// must verify both address families.
+/// Docker containers bind on `0.0.0.0`. A stale process on any of these
+/// addresses would cause the new process to fail, so we check all three.
 pub fn is_port_available(port: u16) -> bool {
     let ipv4: SocketAddr = ([127, 0, 0, 1], port).into();
     let ipv6: SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
+    let wildcard: SocketAddr = ([0, 0, 0, 0], port).into();
 
-    // Both must succeed — if either is in use, the port is occupied.
-    TcpListener::bind(ipv4).is_ok() && TcpListener::bind(ipv6).is_ok()
+    // All must succeed — if any is in use, the port is occupied.
+    TcpListener::bind(ipv4).is_ok()
+        && TcpListener::bind(ipv6).is_ok()
+        && TcpListener::bind(wildcard).is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn test_available_port_is_detected() {
+        // Port 0 lets the OS pick a free port; use it to find one that's free.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        // After dropping, the port should be available.
+        assert!(is_port_available(port));
+    }
+
+    #[test]
+    fn test_occupied_port_is_detected() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Port is still held — should NOT be available.
+        assert!(!is_port_available(port));
+        drop(listener);
+    }
+
+    #[test]
+    fn test_wildcard_occupied_port_is_detected() {
+        let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Wildcard binding occupies the port on all interfaces.
+        assert!(!is_port_available(port));
+        drop(listener);
+    }
+
+    #[test]
+    fn test_allocator_skips_occupied_ports() {
+        // Find the first port the allocator would pick, then occupy it.
+        let allocator = PortAllocator::new();
+        let first_port = allocator.allocate().unwrap();
+        allocator.release(first_port);
+
+        // Now occupy that port and allocate again — should skip it.
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], first_port))).unwrap();
+        let second_port = allocator.allocate().unwrap();
+        assert_ne!(second_port, first_port);
+        drop(listener);
+    }
 }

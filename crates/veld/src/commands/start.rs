@@ -100,54 +100,9 @@ pub async fn run(
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
 
-            // Print outputs for nodes that have non-trivial outputs.
-            let mut node_keys: Vec<&String> = run_state.nodes.keys().collect();
-            node_keys.sort();
-            let skip_keys = ["port", "url", "exit_code"];
-            for key in &node_keys {
-                let ns = &run_state.nodes[*key];
-                let mut output_keys: Vec<&String> = ns
-                    .outputs
-                    .keys()
-                    .filter(|k| !skip_keys.contains(&k.as_str()))
-                    .collect();
-                output_keys.sort();
-                if !output_keys.is_empty() {
-                    let label = format!("{}:{}", ns.node_name, ns.variant);
-                    for okey in output_keys {
-                        let val = if ns.sensitive_keys.contains(okey) {
-                            "***".to_owned()
-                        } else {
-                            ns.outputs[okey].clone()
-                        };
-                        eprintln!(
-                            "  {} {} {}={}",
-                            output::dim(&label),
-                            output::dim("↳"),
-                            output::dim(okey),
-                            output::dim(&val),
-                        );
-                    }
-                }
-            }
-
-            // Print URLs on success.
+            // Final receipt: summary table.
             println!();
-            let urls: Vec<(&str, &str)> = run_state
-                .nodes
-                .values()
-                .filter_map(|ns| ns.url.as_ref().map(|u| (ns.node_name.as_str(), u.as_str())))
-                .collect();
-
-            if urls.is_empty() {
-                output::print_success("Environment started (no URLs exposed).");
-            } else {
-                output::print_success("Environment started. URLs:");
-                println!();
-                for (node, url) in &urls {
-                    println!("  {} {}", output::cyan(node), url);
-                }
-            }
+            print_start_receipt(&run_state);
 
             // Foreground mode: tail logs and stop on Ctrl+C.
             if foreground {
@@ -182,6 +137,79 @@ pub async fn run(
             let _stop_result = orchestrator.stop(run_name_str).await;
             1
         }
+    }
+}
+
+/// Print the final receipt after a successful start.
+fn print_start_receipt(run_state: &veld_core::state::RunState) {
+    use veld_core::state::NodeStatus;
+
+    let skip_output_keys = ["port", "url", "exit_code"];
+
+    // Build summary table rows in execution order.
+    let mut summary_rows: Vec<Vec<String>> = Vec::new();
+    for key in &run_state.execution_order {
+        let Some(ns) = run_state.nodes.get(key) else {
+            continue;
+        };
+        let label = format!("{}:{}", ns.node_name, ns.variant);
+        let status = match ns.status {
+            NodeStatus::Healthy => output::green("healthy"),
+            NodeStatus::Skipped => output::dim("skipped"),
+            NodeStatus::Failed => output::red("failed"),
+            _ => output::dim(&format!("{:?}", ns.status).to_lowercase()),
+        };
+        let url = ns.url.as_deref().unwrap_or("-").to_owned();
+        summary_rows.push(vec![label, status, url]);
+    }
+
+    output::print_table(&["Node", "Status", "URL"], &summary_rows);
+
+    // Collect outputs (non-trivial only).
+    let mut output_rows: Vec<Vec<String>> = Vec::new();
+    for key in &run_state.execution_order {
+        let Some(ns) = run_state.nodes.get(key) else {
+            continue;
+        };
+        let label = format!("{}:{}", ns.node_name, ns.variant);
+        let mut okeys: Vec<&String> = ns
+            .outputs
+            .keys()
+            .filter(|k| !skip_output_keys.contains(&k.as_str()))
+            .collect();
+        okeys.sort();
+        for okey in okeys {
+            let val = if ns.sensitive_keys.contains(okey) {
+                "***".to_owned()
+            } else {
+                ns.outputs[okey].clone()
+            };
+            output_rows.push(vec![label.clone(), okey.clone(), val]);
+        }
+    }
+
+    if !output_rows.is_empty() {
+        println!();
+        output::print_table(&["Node", "Output", "Value"], &output_rows);
+    }
+
+    // Summary line.
+    let url_count = run_state
+        .nodes
+        .values()
+        .filter(|ns| ns.url.is_some())
+        .count();
+    println!();
+    if url_count > 0 {
+        output::print_success(&format!(
+            "Environment '{}' started. {url_count} URL(s) active.",
+            run_state.name,
+        ));
+    } else {
+        output::print_success(&format!(
+            "Environment '{}' started (no URLs exposed).",
+            run_state.name,
+        ));
     }
 }
 
