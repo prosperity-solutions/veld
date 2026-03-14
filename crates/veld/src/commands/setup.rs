@@ -1,7 +1,7 @@
 use crate::output;
 
 /// `veld setup` -- run the first-time setup sequence.
-pub async fn run() -> i32 {
+pub async fn run(force: bool) -> i32 {
     // Setup requires root for writing LaunchDaemons, binding /var/run socket,
     // etc. If we're not root, re-exec with sudo so the user gets a password
     // prompt automatically.
@@ -17,10 +17,12 @@ pub async fn run() -> i32 {
                 return 1;
             }
         };
-        let status = std::process::Command::new("sudo")
-            .arg(&exe)
-            .arg("setup")
-            .status();
+        let mut cmd = std::process::Command::new("sudo");
+        cmd.arg(&exe).arg("setup");
+        if force {
+            cmd.arg("--force");
+        }
+        let status = cmd.status();
         return match status {
             Ok(s) => s.code().unwrap_or(1),
             Err(e) => {
@@ -48,7 +50,7 @@ pub async fn run() -> i32 {
 
     // Step 2: Install Caddy.
     print_step(2, total, "Installing Caddy...");
-    match veld_core::setup::install_caddy().await {
+    match veld_core::setup::install_caddy(force).await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
