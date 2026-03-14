@@ -828,6 +828,34 @@ pub const OVERLAY_JS: &str = r###"
 
   // ---------- init --------------------------------------------------------
 
+  // ---------- SPA navigation detection -------------------------------------
+
+  var __veld_lastPathname = window.location.pathname;
+
+  function onNavigate() {
+    var newPath = window.location.pathname;
+    if (newPath !== __veld_lastPathname) {
+      __veld_lastPathname = newPath;
+      // Clear current page's comments and pins, then load for new page.
+      __veld_comments = [];
+      renderAllPins();
+      updateBadge();
+      loadExisting();
+    }
+  }
+
+  // Monkey-patch pushState/replaceState to detect SPA navigations.
+  var origPushState = history.pushState;
+  var origReplaceState = history.replaceState;
+  history.pushState = function () {
+    origPushState.apply(this, arguments);
+    onNavigate();
+  };
+  history.replaceState = function () {
+    origReplaceState.apply(this, arguments);
+    onNavigate();
+  };
+
   function init() {
     injectStyles();
     buildDOM();
@@ -839,6 +867,7 @@ pub const OVERLAY_JS: &str = r###"
     document.addEventListener("keydown", onKeyDown, true);
     window.addEventListener("scroll", scheduleReposition, true);
     window.addEventListener("resize", scheduleReposition);
+    window.addEventListener("popstate", onNavigate);
 
     loadExisting();
   }

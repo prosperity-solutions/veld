@@ -5,10 +5,11 @@ use crate::output;
 
 /// `veld feedback` — read, wait for, or list feedback batches.
 pub async fn run(name: Option<String>, wait: bool, history: bool, json: bool) -> i32 {
-    let (project_root, _config) = match super::load_config(json) {
+    let (config_path, _config) = match super::load_config(json) {
         Some(pair) => pair,
         None => return 1,
     };
+    let project_root = veld_core::config::project_root(&config_path);
 
     let project_state = match ProjectState::load(&project_root) {
         Ok(ps) => ps,
