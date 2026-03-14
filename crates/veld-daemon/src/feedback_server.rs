@@ -74,6 +74,7 @@ pub async fn run_feedback_server() {
 struct RunQuery {
     run: Option<String>,
     project: Option<String>,
+    page_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -143,9 +144,19 @@ async fn list_comments(
     Query(q): Query<RunQuery>,
 ) -> Result<Json<Vec<FeedbackComment>>, StatusCode> {
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-    let comments = store
+    let mut comments = store
         .get_comments()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Filter by page URL (pathname only) when requested by the overlay.
+    if let Some(ref page_url) = q.page_url {
+        let pathname = page_url.split('?').next().unwrap_or(page_url);
+        comments.retain(|c| {
+            let comment_path = c.page_url.split('?').next().unwrap_or(&c.page_url);
+            comment_path == pathname
+        });
+    }
+
     Ok(Json(comments))
 }
 

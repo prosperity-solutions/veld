@@ -533,7 +533,7 @@ pub const OVERLAY_JS: &str = r###"
 
   function saveComment(selector, selectedText, comment, position, targetEl, popoverEl) {
     var payload = {
-      page_url: window.location.pathname + window.location.search,
+      page_url: window.location.pathname,
       element_selector: selector,
       selected_text: selectedText || "",
       comment: comment,
@@ -785,7 +785,7 @@ pub const OVERLAY_JS: &str = r###"
   // ---------- submit all --------------------------------------------------
 
   function submitAll() {
-    api("POST", "/submit", { page_url: window.location.pathname + window.location.search })
+    api("POST", "/submit", { page_url: window.location.pathname })
       .then(function () {
         __veld_comments = [];
         renderAllPins();
@@ -812,7 +812,7 @@ pub const OVERLAY_JS: &str = r###"
   // ---------- fetch existing comments on load -----------------------------
 
   function loadExisting() {
-    var pageUrl = window.location.pathname + window.location.search;
+    var pageUrl = window.location.pathname;
     api("GET", "/comments?page_url=" + encodeURIComponent(pageUrl))
       .then(function (data) {
         if (Array.isArray(data) && data.length) {

@@ -23,6 +23,15 @@ pub async fn run(name: Option<String>, wait: bool, history: bool, json: bool) ->
         None => return 1,
     };
 
+    // Validate the run actually exists in project state.
+    if !project_state.runs.contains_key(&run_name) {
+        output::print_error(
+            &format!("Run '{}' does not exist. Use `veld runs` to see available runs.", run_name),
+            json,
+        );
+        return 1;
+    }
+
     let store = FeedbackStore::new(&project_root, &run_name);
 
     if wait {
