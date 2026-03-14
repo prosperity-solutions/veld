@@ -10,13 +10,16 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FeedbackComment {
+    #[serde(default)]
     pub id: String,
     pub page_url: String,
     pub element_selector: Option<String>,
     pub selected_text: Option<String>,
     pub comment: String,
     pub position: Option<ElementPosition>,
+    #[serde(default = "Utc::now")]
     pub created_at: DateTime<Utc>,
+    #[serde(default = "Utc::now")]
     pub updated_at: DateTime<Utc>,
 }
 
