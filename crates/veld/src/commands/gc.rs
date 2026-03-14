@@ -20,6 +20,7 @@ pub async fn run() -> i32 {
     let mut registry_changed = false;
     let mut orphans_cleaned = 0usize;
     let mut routes_cleaned = 0usize;
+    let mut feedback_cleaned = 0usize;
 
     // Remove entries whose project root no longer exists.
     let before = registry.projects.len();
@@ -97,6 +98,41 @@ pub async fn run() -> i32 {
         if project_changed {
             let _ = project_state.save(&project_root);
         }
+
+        // Clean up stale feedback directories for runs that no longer exist
+        // in project state and whose data is older than 7 days.
+        let feedback_dir = project_root.join(".veld").join("feedback");
+        if feedback_dir.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(&feedback_dir) {
+                for entry in entries.flatten() {
+                    let run_dir = entry.path();
+                    if !run_dir.is_dir() {
+                        continue;
+                    }
+                    let dir_name = entry.file_name().to_string_lossy().to_string();
+                    // Skip if this run is still active.
+                    if project_state.runs.contains_key(&dir_name) {
+                        continue;
+                    }
+                    // Skip if the run is in the registry (active elsewhere).
+                    if reg_entry.runs.contains_key(&dir_name) {
+                        continue;
+                    }
+                    // Only remove if last modified > 7 days ago.
+                    let stale = entry
+                        .metadata()
+                        .and_then(|m| m.modified())
+                        .map(|t| {
+                            t.elapsed().unwrap_or_default()
+                                > std::time::Duration::from_secs(7 * 24 * 3600)
+                        })
+                        .unwrap_or(false);
+                    if stale && std::fs::remove_dir_all(&run_dir).is_ok() {
+                        feedback_cleaned += 1;
+                    }
+                }
+            }
+        }
     }
 
     if registry_changed {
@@ -113,6 +149,9 @@ pub async fn run() -> i32 {
     }
     if routes_cleaned > 0 {
         parts.push(format!("{routes_cleaned} route(s) removed"));
+    }
+    if feedback_cleaned > 0 {
+        parts.push(format!("{feedback_cleaned} stale feedback dir(s) removed"));
     }
 
     if parts.is_empty() {
