@@ -292,26 +292,33 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
 
     match std::env::consts::OS {
         "macos" => {
-            // Add to the user login keychain with SSL trust policy.
-            // Use a timeout and pipe stdin from /dev/null to prevent interactive
-            // password prompts from hanging in headless environments.
-            // Use resolve_real_user_macos() so that under sudo we target
-            // the real user's keychain, not root's.
+            // Add to the real user's login keychain as a trusted root CA.
+            // - `-d` adds to admin cert store (persists across sessions)
+            // - `-r trustRoot` marks it as a trusted root (not just "present")
+            // - We copy the cert to a temp file first because the caddy-data
+            //   directory is owned by root with mode 600, and `security` may
+            //   not be able to read it directly.
             let (_, _, real_home) = resolve_real_user_macos()?;
             let keychain = real_home.join("Library/Keychains/login.keychain-db");
+
+            let tmp_cert = std::env::temp_dir().join("veld-ca.crt");
+            std::fs::copy(&root_cert, &tmp_cert)
+                .context("failed to copy CA cert to temp file")?;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 Command::new("security")
-                    .args(["add-trusted-cert", "-p", "ssl", "-k"])
+                    .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k"])
                     .arg(&keychain)
-                    .arg(&root_cert)
+                    .arg(&tmp_cert)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status(),
             )
             .await;
+
+            let _ = std::fs::remove_file(&tmp_cert);
 
             match result {
                 Ok(Ok(status)) if status.success() => {}
