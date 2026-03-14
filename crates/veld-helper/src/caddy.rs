@@ -308,6 +308,7 @@ fn build_route_json(
             "handle": [
                 {
                     "handler": "replace_response",
+                    "content_type": "text/html",
                     "replacements": [{
                         "search": "</body>",
                         "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
