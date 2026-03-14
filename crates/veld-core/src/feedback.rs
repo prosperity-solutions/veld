@@ -62,6 +62,11 @@ impl FeedbackStore {
         }
     }
 
+    /// Check whether any feedback data (drafts or batches) exists for this run.
+    pub fn has_data(&self) -> bool {
+        self.drafts_path.exists() || self.batches_dir.exists()
+    }
+
     fn ensure_dirs(&self) -> anyhow::Result<()> {
         if let Some(parent) = self.drafts_path.parent() {
             std::fs::create_dir_all(parent)?;

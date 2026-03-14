@@ -19,21 +19,30 @@ pub async fn run(name: Option<String>, wait: bool, history: bool, json: bool) ->
         }
     };
 
-    let run_name = match super::resolve_run_name(name, &project_state, true, json) {
+    // If --name was given explicitly, use it directly (feedback data may
+    // outlive the run). Otherwise resolve from active runs.
+    let run_name = match name {
         Some(n) => n,
-        None => return 1,
+        None => match super::resolve_run_name(None, &project_state, true, json) {
+            Some(n) => n,
+            None => return 1,
+        },
     };
 
-    // Validate the run actually exists in project state.
-    if !project_state.runs.contains_key(&run_name) {
+    let store = FeedbackStore::new(&project_root, &run_name);
+
+    // Validate that feedback data exists for this run (covers both active
+    // and stopped runs). Only error if no data at all.
+    if !store.has_data() {
         output::print_error(
-            &format!("Run '{}' does not exist. Use `veld runs` to see available runs.", run_name),
+            &format!(
+                "No feedback data for run '{}'. Use `veld runs` to see available runs.",
+                run_name
+            ),
             json,
         );
         return 1;
     }
-
-    let store = FeedbackStore::new(&project_root, &run_name);
 
     if wait {
         return run_wait(&store, &run_name, json).await;

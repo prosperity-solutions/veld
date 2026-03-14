@@ -1,5 +1,6 @@
 dev-setup:
     cargo build
+    sudo cp ./target/debug/veld /usr/local/bin/veld
     sudo ./target/debug/veld setup --force
 
 test:
