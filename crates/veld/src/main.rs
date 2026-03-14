@@ -191,7 +191,11 @@ enum Command {
     Gc,
 
     /// Run the first-time setup sequence.
-    Setup,
+    Setup {
+        /// Force re-download of components (e.g. Caddy) even if already present.
+        #[arg(long)]
+        force: bool,
+    },
 
     /// Update Veld to the latest version.
     Update,
@@ -309,7 +313,7 @@ async fn main() {
 
         Command::Gc => commands::gc::run().await,
 
-        Command::Setup => commands::setup::run().await,
+        Command::Setup { force } => commands::setup::run(force).await,
 
         Command::Update => commands::update::run().await,
 

@@ -179,24 +179,42 @@ async fn is_caddy_running() -> bool {
         .is_ok()
 }
 
-/// Install (or verify) the Caddy web server.
-pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
+/// Install, upgrade, or verify the Caddy web server.
+///
+/// When `force` is true the binary is always re-downloaded. Otherwise the
+/// function checks a URL marker file (`.caddy-url`) next to the binary: if
+/// the recorded URL matches the desired download URL the existing binary is
+/// kept; if it differs (e.g. new plugins were added) the old binary is
+/// replaced automatically.
+pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
     let lib_dir = crate::paths::lib_dir();
     let caddy = lib_dir.join("caddy");
-    if caddy.exists() {
-        return Ok(StepResult::success("Caddy is already installed"));
-    }
-
-    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
+    let marker = crate::paths::caddy_url_marker();
 
     let (os, arch) = platform_pair()?;
     // Use Caddy's build API to get a custom binary with the replace-response
     // plugin, which lets us inject the feedback overlay script into HTML responses.
-    let url = format!(
+    let desired_url = format!(
         "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/caddyserver/replace-response"
     );
 
-    download_binary(&url, &caddy)
+    if caddy.exists() && !force {
+        // Check if the existing binary was built from the same URL.
+        let existing_url = std::fs::read_to_string(&marker).unwrap_or_default();
+        if existing_url.trim() == desired_url {
+            return Ok(StepResult::success(
+                "Caddy is already installed (up to date)",
+            ));
+        }
+        // URL mismatch — need to upgrade.
+        tracing::info!("Caddy URL marker mismatch, upgrading binary");
+        stop_caddy_best_effort().await;
+        let _ = std::fs::remove_file(&caddy);
+    }
+
+    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
+
+    download_binary(&desired_url, &caddy)
         .await
         .context("failed to download Caddy binary from build API")?;
 
@@ -206,9 +224,32 @@ pub async fn install_caddy() -> Result<StepResult, anyhow::Error> {
         std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755))?;
     }
 
+    // Write marker so subsequent runs can detect when the URL changes.
+    let _ = std::fs::write(&marker, &desired_url);
+
     Ok(StepResult::success(
         "Caddy installed (with replace-response plugin)",
     ))
+}
+
+/// Best-effort stop of a running Caddy instance before replacing the binary.
+///
+/// Tries the helper RPC first (if veld-helper is running), then falls back to
+/// hitting the Caddy admin API directly.
+async fn stop_caddy_best_effort() {
+    let client = HelperClient::new(&helper::default_socket_path());
+    if client.caddy_stop().await.is_ok() {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        return;
+    }
+
+    // Fallback: POST directly to Caddy admin API.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+    let _ = http.post("http://localhost:2019/stop").send().await;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
 /// Trust Caddy's internal CA root certificate in the system trust store.
@@ -251,25 +292,33 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
 
     match std::env::consts::OS {
         "macos" => {
-            // Add to the user login keychain with SSL trust policy.
-            // Use a timeout and pipe stdin from /dev/null to prevent interactive
-            // password prompts from hanging in headless environments.
-            let keychain = dirs::home_dir()
-                .context("could not determine home directory")?
-                .join("Library/Keychains/login.keychain-db");
+            // Add to the real user's login keychain as a trusted root CA.
+            // - `-d` adds to admin cert store (persists across sessions)
+            // - `-r trustRoot` marks it as a trusted root (not just "present")
+            // - We copy the cert to a temp file first because the caddy-data
+            //   directory is owned by root with mode 600, and `security` may
+            //   not be able to read it directly.
+            let (_, _, real_home) = resolve_real_user_macos()?;
+            let keychain = real_home.join("Library/Keychains/login.keychain-db");
+
+            let tmp_cert = std::env::temp_dir().join("veld-ca.crt");
+            std::fs::copy(&root_cert, &tmp_cert)
+                .context("failed to copy CA cert to temp file")?;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 Command::new("security")
-                    .args(["add-trusted-cert", "-p", "ssl", "-k"])
+                    .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k"])
                     .arg(&keychain)
-                    .arg(&root_cert)
+                    .arg(&tmp_cert)
                     .stdin(std::process::Stdio::null())
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status(),
             )
             .await;
+
+            let _ = std::fs::remove_file(&tmp_cert);
 
             match result {
                 Ok(Ok(status)) if status.success() => {}

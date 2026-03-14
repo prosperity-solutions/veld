@@ -302,10 +302,17 @@ fn build_route_json(
         }));
 
         // Main app proxy with HTML injection via the replace-response plugin.
+        // We set Accept-Encoding: identity so the upstream sends uncompressed
+        // responses — replace_response cannot match inside gzip'd bytes.
         subroutes.push(serde_json::json!({
             "handle": [
                 {
                     "handler": "replace_response",
+                    "match": {
+                        "headers": {
+                            "Content-Type": ["text/html*"]
+                        }
+                    },
                     "replacements": [{
                         "search": "</body>",
                         "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
@@ -313,6 +320,13 @@ fn build_route_json(
                 },
                 {
                     "handler": "reverse_proxy",
+                    "headers": {
+                        "request": {
+                            "set": {
+                                "Accept-Encoding": ["identity"]
+                            }
+                        }
+                    },
                     "upstreams": [{ "dial": upstream }]
                 }
             ]
@@ -394,6 +408,12 @@ mod tests {
         assert_eq!(
             fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
             "/tmp/project"
+        );
+        // Main app proxy strips compression so replace_response can work.
+        let main_proxy = &subroutes[1]["handle"][1];
+        assert_eq!(
+            main_proxy["headers"]["request"]["set"]["Accept-Encoding"][0],
+            "identity"
         );
     }
 
