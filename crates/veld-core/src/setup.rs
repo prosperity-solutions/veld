@@ -295,9 +295,10 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
             // Add to the user login keychain with SSL trust policy.
             // Use a timeout and pipe stdin from /dev/null to prevent interactive
             // password prompts from hanging in headless environments.
-            let keychain = dirs::home_dir()
-                .context("could not determine home directory")?
-                .join("Library/Keychains/login.keychain-db");
+            // Use resolve_real_user_macos() so that under sudo we target
+            // the real user's keychain, not root's.
+            let (_, _, real_home) = resolve_real_user_macos()?;
+            let keychain = real_home.join("Library/Keychains/login.keychain-db");
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
