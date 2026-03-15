@@ -31,17 +31,23 @@ pub async fn run(name: Option<String>, wait: bool, history: bool, json: bool) ->
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
-    // Validate that feedback data exists for this run (covers both active
-    // and stopped runs). Only error if no data at all.
-    if !store.has_data() {
-        output::print_error(
-            &format!(
-                "No feedback data for run '{}'. Use `veld runs` to see available runs.",
-                run_name
-            ),
-            json,
-        );
-        return 1;
+    // Validate that feedback data exists — but skip for --wait mode since
+    // we're waiting for feedback that doesn't exist yet.
+    if !wait && !store.has_data() {
+        // Check if the run is active (waiting for feedback) or truly unknown.
+        if project_state.runs.contains_key(&run_name) {
+            output::print_info("No feedback submitted yet for this run.");
+        } else {
+            output::print_error(
+                &format!(
+                    "No feedback data for run '{}'. Use `veld runs` to see available runs.",
+                    run_name
+                ),
+                json,
+            );
+            return 1;
+        }
+        return 0;
     }
 
     if wait {
