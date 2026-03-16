@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>veld — Agents</title>
+<meta name="description" content="veld is an open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+<meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, monorepo, developer tools, open source, Rust">
+<meta name="author" content="Prosperity Solutions">
+<meta name="robots" content="index, follow">
+<meta property="og:title" content="veld — Agents">
+<meta property="og:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://veld.oss.life.li/agents">
+<meta property="og:image" content="https://veld.oss.life.li/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:site_name" content="veld">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="veld — Agents">
+<meta name="twitter:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+<meta name="twitter:image" content="https://veld.oss.life.li/og.png">
+<meta name="theme-color" content="#0A0A0B">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.1 36L11.9 12H16.3L23.6 31.8H23.7L31 12H35.4L26.2 36H21.1Z' fill='white'/><path d='M32.5 36C33.88 36 35 34.88 35 33.5C35 32.12 33.88 31 32.5 31C31.12 31 30 32.12 30 33.5C30 34.88 31.12 36 32.5 36Z' fill='%23C4F56A'/></svg>">
+<link rel="canonical" href="https://veld.oss.life.li/agents">
+<link rel="alternate" type="text/markdown" href="llms.txt" title="LLM Index">
+<link rel="alternate" type="text/markdown" href="llms-full.txt" title="Full LLM Documentation">
+<script type="application/ld+json">{"@context":"https://schema.org","@type":"SoftwareApplication","name":"veld","description":"Open-source local development environment orchestrator for monorepos. No port numbers, real HTTPS, dependency graphs.","applicationCategory":"DeveloperApplication","operatingSystem":"macOS, Linux","license":"https://opensource.org/licenses/MIT","url":"https://veld.oss.life.li","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"author":{"@type":"Organization","name":"Prosperity Solutions"}}</script>
+<style>
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:url(fonts/jetbrains-mono-regular.woff2) format('woff2')}
+@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:700;font-display:swap;src:url(fonts/jetbrains-mono-bold.woff2) format('woff2')}
+
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:'JetBrains Mono',ui-monospace,Menlo,monospace;background:#0A0A0B;color:#E8E4DF;line-height:1.7;-webkit-font-smoothing:antialiased;font-size:14px}
+nav{position:fixed;top:0;left:0;right:0;height:48px;background:rgba(10,10,11,0.8);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid rgba(74,74,80,0.3);display:flex;align-items:center;justify-content:space-between;padding:0 24px;z-index:1000}
+.wm{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:1.125rem;font-weight:700;color:#E8E4DF;text-decoration:none}
+.wm::after{content:".";color:#C4F56A;font-weight:800}
+.nl{display:flex;gap:14px;font-size:0.85rem;font-weight:500;align-items:center;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.nl a{color:#8a8a92;text-decoration:none;font-size:0.85rem;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;transition:color 0.2s}
+.nl a:hover{color:#E8E4DF}
+.nl a.on{color:#C4F56A}
+.nl .sep{color:#8a8a92;opacity:0.5;user-select:none;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+.nav-github{color:#8a8a92;text-decoration:none;display:flex;align-items:center;margin-left:8px;transition:color 0.2s}
+.nav-github:hover{color:#E8E4DF}
+main{max-width:680px;margin:0 auto;padding:80px 24px 64px}
+section{margin-bottom:48px}
+hr{border:none;border-top:1px dotted #4A4A50;margin:48px 0}
+h1{font-size:36px;font-weight:700;letter-spacing:-1px;color:#C4F56A;margin-bottom:12px}
+h2{font-size:18px;font-weight:600;color:#E8E4DF;margin-bottom:16px;letter-spacing:-.3px}
+h3{font-size:15px;font-weight:600;color:#C4F56A;margin-bottom:8px}
+p{margin-bottom:12px}
+.sub{color:#9A9A9F;font-size:14px;line-height:1.7}
+a{color:#5B8DEF}
+a:hover{color:#7DA8FF}
+dl{display:grid;grid-template-columns:auto 1fr;gap:4px 20px;margin-bottom:16px}
+dt{color:#4A4A50;font-size:13px}
+dd{font-size:13px}
+dd a{font-size:13px}
+pre{background:#141416;border:1px solid #1e1e24;border-radius:6px;padding:16px;overflow-x:auto;margin-bottom:16px;font-size:13px;line-height:1.6}
+code{font-family:inherit;font-size:13px}
+:not(pre)>code{background:#141416;padding:2px 6px;border-radius:3px;border:1px solid #1e1e24;font-size:12px}
+.p::before{content:"$ ";color:#4A4A50}
+.c{color:#4A4A50}
+table{width:100%;border-collapse:collapse;margin-bottom:16px;font-size:13px}
+th{text-align:left;color:#4A4A50;font-weight:400;padding:8px 12px;border-bottom:1px solid #1e1e24;font-size:12px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:8px 12px;border-bottom:1px solid #1e1e24;vertical-align:top}
+td code{color:#C4F56A;font-size:12px}
+.cmp td:first-child{color:#4A4A50;text-decoration:line-through}
+.cmp td:last-child{color:#C4F56A}
+ol{padding-left:20px;margin-bottom:16px;font-size:15px}
+ol li{margin-bottom:16px}
+ol li>code{font-size:13px}
+ol li pre{text-align:left;margin-top:8px}
+.asc{color:#4A4A50;font-size:12px;line-height:1.4}
+.asc .h{color:#C4F56A}
+.asc .b{color:#5B8DEF}
+footer{max-width:680px;margin:0 auto;padding:0 24px 64px;color:#4A4A50;font-size:13px}
+footer a{color:#5B8DEF;text-decoration:none}
+footer a:hover{text-decoration:underline}
+footer p{color:#4A4A50}
+.legal-footer{text-align:center;font-size:11px;color:#4A4A50;padding:24px;border-top:1px solid #1e1e24}
+.legal-footer a{color:#4A4A50;text-decoration:none}
+.legal-footer a:hover{color:#E8E4DF;text-decoration:underline}
+.cpt dt{grid-column:1/-1;color:#C4F56A;font-weight:600;font-size:14px;margin-top:12px}
+.cpt dt:first-child{margin-top:0}
+.cpt dd{grid-column:1/-1;color:#9A9A9F;margin-bottom:4px}
+.cdl{display:block}
+.cdl dt{color:#C4F56A;font-weight:600;font-size:14px;margin-top:20px;margin-bottom:4px}
+.cdl dt:first-child{margin-top:0}
+.cdl dd{color:#9A9A9F;margin-bottom:8px}
+</style>
+</head>
+<body>
+
+<nav>
+<a href="index.html" class="wm">veld</a>
+<div class="nl">
+<a href="index.html">experience</a>
+<span class="sep">&middot;</span>
+<a href="humans.html">humans</a>
+<span class="sep">&middot;</span>
+<a href="agents.html" class="on">agents</a>
+<span class="sep">&middot;</span>
+<a href="https://github.com/prosperity-solutions/veld" class="nav-github" title="GitHub" aria-label="GitHub" target="_blank" rel="noopener">
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+</a>
+</div>
+</nav>
+
+<main>
+
+<section>
+<h1>veld</h1>
+<p class="sub">Open-source local development environment orchestrator. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring. Works with monorepos, multi-repo setups, or any project directory.</p>
+</section>
+
+<section style="background:#141416;border:1px solid #1e1e24;border-radius:6px;padding:20px;margin-bottom:48px">
+<h3 style="margin-bottom:8px">Built for the agentic era</h3>
+<p class="sub" style="margin-bottom:0">AI agents can start environments, inspect health, read logs, and receive human feedback — all through structured CLI output. Every command supports <code>--json</code>. The built-in feedback overlay lets humans annotate running UIs while agents receive structured results. veld is designed for human-agent collaboration from the ground up.</p>
+</section>
+
+<hr>
+
+<section>
+<dl>
+<dt>License</dt><dd>MIT</dd>
+<dt>Language</dt><dd>Rust</dd>
+<dt>Platforms</dt><dd>macOS (arm64/x64), Linux (x64/arm64)</dd>
+<dt>Source</dt><dd><a href="https://github.com/prosperity-solutions/veld">github.com/prosperity-solutions/veld</a></dd>
+<dt>Website</dt><dd><a href="https://veld.oss.life.li">veld.oss.life.li</a></dd>
+</dl>
+</section>
+
+<hr>
+
+<section>
+<h2>Install</h2>
+<pre><code><span class="p">curl -fsSL https://veld.oss.life.li/get | bash</span></code></pre>
+</section>
+
+<hr>
+
+<section>
+<h2>What it replaces</h2>
+<table class="cmp">
+<thead><tr><th>Without veld</th><th>With veld</th></tr></thead>
+<tbody>
+<tr><td>localhost:3000, :3001, :8080</td><td>https://frontend.dev.myproject.localhost</td></tr>
+<tr><td>Manual mkcert + reverse proxy</td><td>Automatic TLS, auto-trusted</td></tr>
+<tr><td>"Start the API before the frontend"</td><td>Dependency graph, health checks</td></tr>
+<tr><td>Describe UI issues in chat to the agent</td><td>Built-in feedback overlay: humans annotate, agents receive structured feedback</td></tr>
+</tbody>
+</table>
+</section>
+
+<hr>
+
+<section>
+<h2>Core concepts</h2>
+<dl class="cpt">
+<dt>Dependency Graphs</dt>
+<dd>Declare which services depend on which. Veld resolves the graph, starts in topological order, parallelizes where possible, and tears down in reverse.</dd>
+<dt>HTTPS Everywhere</dt>
+<dd>Every <code>start_server</code> gets a real HTTPS URL via Caddy. The CA is trusted in your system keychain during <code>veld setup</code> — browsers accept certificates without warnings.</dd>
+<dt>Health Checks</dt>
+<dd>Two-phase: TCP port check, then HTTP/port/command verification. Downstream services wait until dependencies are healthy.</dd>
+<dd><pre><code>{ "type": "http", "path": "/health", "timeout_seconds": 30 }</code></pre></dd>
+<dt>Named Runs</dt>
+<dd>Each environment gets a name (<code>--name dev</code>). Run multiple environments side-by-side from different branches. Names appear in URLs: <code>https://frontend.dev.myproject.localhost</code>.</dd>
+<dt>Feedback Overlay</dt>
+<dd>Built-in UI injected into running services. Click to annotate, screenshot, and share — no separate tools needed. The overlay also captures React and Vue component stack traces alongside CSS selectors, giving agents precise context about which component to modify.</dd>
+<dt>Structured Output</dt>
+<dd>Every command supports <code>--json</code> for machine-readable output. Designed for CI pipelines and AI agent consumption.</dd>
+</dl>
+</section>
+
+<hr>
+
+<section>
+<h2>Quick start</h2>
+<ol>
+<li>Create a <code>veld.json</code> in your project root:
+<pre><code>{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "myproject",
+  "url_template": "{service}.{run}.{project}.localhost",
+  "nodes": {
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
+        }
+      }
+    }
+  }
+}</code></pre></li>
+<li>Start the environment:
+<pre><code><span class="p">veld start backend:local --name dev</span></code></pre></li>
+<li>Check status and URLs:
+<pre><code><span class="p">veld status --name dev</span>
+<span class="p">veld urls --name dev</span></code></pre></li>
+<li>Stop:
+<pre><code><span class="p">veld stop --name dev</span></code></pre></li>
+</ol>
+</section>
+
+<hr>
+
+<section>
+<h2>CLI reference</h2>
+<table>
+<thead><tr><th>Command</th><th>Description</th></tr></thead>
+<tbody>
+<tr><td><code>veld start [NODE:VARIANT...] --name &lt;n&gt; [-d]</code></td><td>Start an environment (<code>-d</code> for detached)</td></tr>
+<tr><td><code>veld stop [--name &lt;n&gt;] [--all]</code></td><td>Stop a running environment</td></tr>
+<tr><td><code>veld status [--name &lt;n&gt;] [--json]</code></td><td>Show run status</td></tr>
+<tr><td><code>veld urls [--name &lt;n&gt;] [--json]</code></td><td>Show URLs for a run</td></tr>
+<tr><td><code>veld logs [--name &lt;n&gt;] [--node &lt;n&gt;] [-f] [--lines &lt;n&gt;]</code></td><td>View logs (<code>-f</code> to follow)</td></tr>
+<tr><td><code>veld feedback [--name &lt;n&gt;] [--wait]</code></td><td>Open feedback UI for a run</td></tr>
+</tbody>
+</table>
+<p class="sub">All commands support <code>--json</code> for structured output.</p>
+<p class="sub">Additional commands: <code>restart</code>, <code>init</code>, <code>setup</code>, <code>gc</code>, <code>graph</code>, <code>nodes</code>, <code>presets</code>, <code>runs</code> — see the <a href="https://github.com/prosperity-solutions/veld#readme">README</a> for the full reference.</p>
+</section>
+
+<hr>
+
+<section>
+<h2>Configuration reference</h2>
+<p>veld is configured with a <code>veld.json</code> file at your project root. It defines nodes (services or setup tasks), their variants, health checks, dependencies between them, URL templates for HTTPS routing, and presets for common combinations.</p>
+<p>The full configuration schema is available as a JSON Schema — point your editor at it for autocompletion and validation:</p>
+<pre><code>"$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json"</code></pre>
+<p class="sub"><a href="https://veld.oss.life.li/schema/v1/veld.schema.json">View the full JSON Schema</a></p>
+</section>
+
+<hr>
+
+<section>
+<h2>Architecture</h2>
+<p class="sub" style="margin-bottom:16px">Three binaries work together:</p>
+<dl class="cdl">
+<dt>veld <span style="color:#9A9A9F;font-weight:400">(CLI)</span></dt>
+<dd>Parses commands, orchestrates environments, displays output. Communicates with the daemon via Unix socket.</dd>
+<dt>veld-helper <span style="color:#9A9A9F;font-weight:400">(privileged daemon, runs as root)</span></dt>
+<dd>Manages DNS entries and Caddy reverse-proxy routes via a minimal Unix socket API.</dd>
+<dt>veld-daemon <span style="color:#9A9A9F;font-weight:400">(user-space daemon)</span></dt>
+<dd>Monitors service health, runs garbage collection, broadcasts state updates, serves the feedback overlay.</dd>
+<dt>Caddy <span style="color:#9A9A9F;font-weight:400">(reverse proxy)</span></dt>
+<dd>Handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup.</dd>
+</dl>
+<p class="sub" style="margin-top:16px"><strong style="color:#E8E4DF">Communication flow:</strong></p>
+<p class="sub" style="padding-left:16px;line-height:2">
+veld CLI &rarr; veld-daemon <span style="color:#4A4A50">(health, state, feedback)</span><br>
+veld CLI &rarr; veld-helper <span style="color:#4A4A50">(DNS, Caddy routes)</span><br>
+veld-helper &rarr; Caddy <span style="color:#4A4A50">(route configuration)</span><br>
+Caddy &rarr; your services <span style="color:#4A4A50">(reverse proxy with TLS)</span>
+</p>
+</section>
+
+<hr>
+
+<section>
+<h2>Complete example</h2>
+<p class="sub" style="margin-bottom:16px">A typical full-stack setup. For the complete list of fields, types, and options, see the <a href="https://veld.oss.life.li/schema/v1/veld.schema.json">JSON Schema</a>.</p>
+<pre><code>{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "myproject",
+  "url_template": "{service}.{run}.myproject.localhost",
+  "presets": {
+    "fullstack": ["database:docker", "backend:local", "frontend:local"],
+    "frontend-only": ["frontend:local"]
+  },
+  "nodes": {
+    "database": {
+      "default_variant": "docker",
+      "variants": {
+        "docker": {
+          "type": "start_server",
+          "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+          "health_check": { "type": "port", "timeout_seconds": 15 },
+          "outputs": {
+            "DATABASE_URL": "postgres://dev:dev@localhost:${veld.port}/app"
+          }
+        }
+      }
+    },
+    "backend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "cargo run -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health" },
+          "depends_on": { "database": "docker" },
+          "env": {
+            "DATABASE_URL": "${nodes.database.DATABASE_URL}"
+          }
+        }
+      }
+    },
+    "frontend": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev -- --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/" },
+          "depends_on": { "backend": "local" },
+          "env": {
+            "API_URL": "${nodes.backend.url}"
+          }
+        }
+      }
+    }
+  }
+}</code></pre>
+</section>
+
+<hr>
+
+</main>
+
+<footer>
+<pre id="install-cmd" role="button" tabindex="0" aria-label="Click to copy install command" style="margin-bottom:4px;display:flex;align-items:center;gap:12px;cursor:pointer;width:100%" title="Click to copy"><code style="flex:1"><span class="p" style="color:#E8E4DF">curl -fsSL https://veld.oss.life.li/get | bash</span></code><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#71717a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg></pre>
+<p style="margin-bottom:16px;font-size:11px;color:#4A4A50">click to copy</p>
+<p style="margin-bottom:16px">
+<a href="humans.html">Want a guided walkthrough?</a> &middot;
+<a href="index.html">Want the cinematic experience?</a>
+</p>
+<p>
+<a href="llms.txt">llms.txt</a> &middot;
+<a href="llms-full.txt">llms-full.txt</a> &middot;
+<a href="https://github.com/prosperity-solutions/veld">source</a>
+</p>
+</footer>
+
+<div class="legal-footer">
+<a href="https://github.com/prosperity-solutions/veld">GitHub</a> &middot;
+<a href="https://github.com/prosperity-solutions/veld/blob/main/LICENSE" style="color:inherit">MIT License</a> &middot;
+<a href="https://github.com/prosperity-solutions">Prosperity Solutions</a> &middot;
+<a href="https://prosperitysolutions.li/legal">Legal Notice</a>
+</div>
+
+<script>
+document.getElementById('install-cmd').addEventListener('click', function () {
+  var el = this;
+  navigator.clipboard.writeText('curl -fsSL https://veld.oss.life.li/get | bash').then(function () {
+    el.style.borderColor = '#C4F56A';
+    var hint = el.nextElementSibling;
+    var orig = hint.textContent;
+    hint.textContent = 'Copied!';
+    hint.style.color = '#C4F56A';
+    setTimeout(function () {
+      el.style.borderColor = '';
+      hint.textContent = orig;
+      hint.style.color = '';
+    }, 1500);
+  }).catch(function(){});
+});
+document.getElementById('install-cmd').addEventListener('keydown', function (e) {
+  if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); this.click(); }
+});
+</script>
+
+</body>
+</html>

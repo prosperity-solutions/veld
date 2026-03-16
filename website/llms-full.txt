@@ -1,11 +1,14 @@
 # veld
 
-> Open-source local development environment orchestrator for monorepos. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring.
+> Open-source local development environment orchestrator. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring. Works with monorepos, multi-repo setups, or any project directory.
 
 veld is a Rust-based CLI tool that replaces the ritual of opening multiple terminals, remembering ports, and manually wiring services together. You declare your stack in a single `veld.json`, and veld resolves the dependency graph, allocates ports, starts processes, runs health checks, configures Caddy for HTTPS, and gives you clean URLs like `https://frontend.my-feature.myproject.localhost`.
 
 - Source: https://github.com/prosperity-solutions/veld
 - Website: https://veld.oss.life.li
+  - https://veld.oss.life.li/ (homepage, cinematic experience)
+  - https://veld.oss.life.li/agents (structured, agent-optimized)
+  - https://veld.oss.life.li/humans (developer documentation)
 - License: MIT
 - Platforms: macOS (arm64/x64), Linux (x64/arm64)
 
@@ -115,6 +118,8 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
+| `veld feedback [--name <n>]` | Open feedback UI for a run |
+| `veld feedback --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup` | One-time system setup |
 | `veld init` | Create a new veld.json |
@@ -132,6 +137,38 @@ Three binaries work together:
 - **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
+
+---
+
+## Feedback System
+
+veld includes a built-in feedback overlay for human-AI collaboration. When an AI agent is iterating on UI work, humans can give structured feedback through an in-browser overlay injected into veld-served pages.
+
+### How it works
+
+1. When a `start_server` service is running, veld can inject a feedback overlay into the served pages
+2. Humans open the feedback overlay in their browser and leave comments
+3. AI agents receive the feedback via `veld feedback --wait`, which blocks until new feedback arrives
+4. The agent reads the structured feedback and iterates
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `veld feedback [--name <n>]` | Open feedback UI for a run |
+| `veld feedback --wait [--name <n>]` | Block until feedback is submitted (designed for agent tool-use loops) |
+
+### Feedback API
+
+The feedback server runs per-run and exposes:
+
+- `POST /feedback` — Submit feedback `{ "comment": "text", "selector": "css-selector" }`
+- `GET /feedback` — Get all feedback for current run
+- `WS /feedback/ws` — Real-time feedback stream
+
+The feedback overlay automatically captures React and Vue component stack traces when available, providing agents with component-level context (not just CSS selectors) for precise modifications.
+
+This makes veld uniquely suited for agentic workflows where AI agents build UI and humans provide iterative feedback without context-switching.
 
 ---
 
@@ -189,7 +226,7 @@ Runs a shell command or script to completion. Used for setup tasks.
 
 ### Health Checks
 
-Two-phase: (1) TCP port check, (2) HTTPS endpoint check. Three strategies:
+Two-phase: (1) TCP port check, (2) HTTP endpoint check. Three strategies:
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }

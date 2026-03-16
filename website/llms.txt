@@ -1,19 +1,22 @@
 # veld
 
-> Open-source local development environment orchestrator for monorepos. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring.
+> Open-source local development environment orchestrator. One command starts every service with real HTTPS URLs — no port numbers, no manual wiring. Works with monorepos, multi-repo setups, or any project directory.
 
 veld is a Rust-based CLI tool that replaces the ritual of opening multiple terminals, remembering ports, and manually wiring services together. You declare your stack in a single `veld.json`, and veld resolves the dependency graph, allocates ports, starts processes, runs health checks, configures Caddy for HTTPS, and gives you clean URLs like `https://frontend.my-feature.myproject.localhost`.
 
 - Source: https://github.com/prosperity-solutions/veld
-- Website: https://veld.oss.life.li
+- Website (homepage): https://veld.oss.life.li/
+- Website (agent-friendly, structured): https://veld.oss.life.li/agents
+- Website (human docs): https://veld.oss.life.li/humans
 - License: MIT
 - Platforms: macOS (arm64/x64), Linux (x64/arm64)
 
 ## Docs
 
+- [Full Documentation](/llms-full.txt): Complete reference in a single request
 - [README](https://raw.githubusercontent.com/prosperity-solutions/veld/main/README.md): Installation, quick start, CLI reference, architecture overview
-- [Configuration Reference](https://raw.githubusercontent.com/prosperity-solutions/veld/main/docs/configuration.md): Full veld.json specification — nodes, variants, health checks, outputs, URL templates, variable interpolation, presets
-- [JSON Schema](https://veld.oss.life.li/schema/v1/veld.schema.json): Machine-readable schema for veld.json validation and editor autocompletion
+- [Configuration Reference](https://raw.githubusercontent.com/prosperity-solutions/veld/main/docs/configuration.md): Full veld.json specification
+- [JSON Schema](https://veld.oss.life.li/schema/v1/veld.schema.json): Machine-readable schema for veld.json
 
 ## Optional
 

@@ -3,15 +3,15 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>veld — One command. Every service. Real HTTPS.</title>
-  <meta name="description" content="veld is an open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
-  <meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, monorepo, developer tools, open source, Rust">
+  <title>veld — The Experience</title>
+  <meta name="description" content="A cinematic journey from chaos to clarity. See how veld transforms local development from scattered terminal windows into one elegant command.">
+  <meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, developer experience, open source">
   <meta name="author" content="Prosperity Solutions">
   <meta name="robots" content="index, follow">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="veld — One command. Every service. Real HTTPS.">
-  <meta property="og:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+  <meta property="og:title" content="veld — The Experience">
+  <meta property="og:description" content="A cinematic journey from chaos to clarity. See how veld transforms local development.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://veld.oss.life.li">
   <meta property="og:image" content="https://veld.oss.life.li/og.png">
@@ -22,57 +22,79 @@
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="veld — One command. Every service. Real HTTPS.">
-  <meta name="twitter:description" content="Open-source local development environment orchestrator. No port numbers. No manual wiring. Just clean, stable, human-readable HTTPS URLs.">
+  <meta name="twitter:title" content="veld — The Experience">
+  <meta name="twitter:description" content="A cinematic journey from chaos to clarity. See how veld transforms local development.">
   <meta name="twitter:image" content="https://veld.oss.life.li/og.png">
 
-  <meta name="theme-color" content="#0a0a0a">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>V</text></svg>">
+  <meta name="theme-color" content="#0A0A0B">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.1 36L11.9 12H16.3L23.6 31.8H23.7L31 12H35.4L26.2 36H21.1Z' fill='white'/><path d='M32.5 36C33.88 36 35 34.88 35 33.5C35 32.12 33.88 31 32.5 31C31.12 31 30 32.12 30 33.5C30 34.88 31.12 36 32.5 36Z' fill='%23C4F56A'/></svg>">
 
   <!-- Canonical -->
   <link rel="canonical" href="https://veld.oss.life.li">
+
+  <!-- LLMs -->
+  <link rel="alternate" type="text/markdown" href="llms.txt" title="LLM Index">
+  <link rel="alternate" type="text/markdown" href="llms-full.txt" title="Full LLM Documentation">
 
   <!-- Structured Data -->
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
-    "@type": "SoftwareApplication",
-    "name": "veld",
-    "description": "Open-source local development environment orchestrator for monorepos. No port numbers, real HTTPS, dependency graphs.",
-    "applicationCategory": "DeveloperApplication",
-    "operatingSystem": "macOS, Linux",
-    "license": "https://opensource.org/licenses/MIT",
+    "@type": "WebPage",
+    "name": "veld — The Experience",
+    "description": "A cinematic scroll-driven narrative showing how veld transforms chaotic local development into elegant simplicity.",
     "url": "https://veld.oss.life.li",
-    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+    "isPartOf": {
+      "@type": "WebSite",
+      "name": "veld",
+      "url": "https://veld.oss.life.li"
+    },
     "author": { "@type": "Organization", "name": "Prosperity Solutions" }
   }
   </script>
 
   <style>
+    @font-face {
+      font-family: 'JetBrains Mono';
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+      src: url(fonts/jetbrains-mono-regular.woff2) format('woff2');
+    }
+    @font-face {
+      font-family: 'JetBrains Mono';
+      font-style: normal;
+      font-weight: 700;
+      font-display: swap;
+      src: url(fonts/jetbrains-mono-bold.woff2) format('woff2');
+    }
+    @font-face {
+      font-family: 'Playfair Display';
+      font-style: normal;
+      font-weight: 400 700;
+      font-display: swap;
+      src: url(fonts/playfair-display.woff2) format('woff2');
+    }
+
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg: #0a0a0a;
-      --bg-card: #111113;
-      --bg-terminal: #0d0d0f;
-      --border: #1e1e24;
-      --text: #e4e4e7;
-      --text-dim: #71717a;
-      --text-muted: #52525b;
-      --green: #22c55e;
-      --green-dim: #16a34a;
-      --cyan: #06b6d4;
-      --amber: #f59e0b;
+      --bg: #0A0A0B;
+      --text: #E8E4DF;
+      --accent: #C4F56A;
+      --blue: #5B8DEF;
+      --muted: #4A4A50;
       --red: #ef4444;
-      --purple: #a855f7;
-      --blue: #3b82f6;
-      --max-w: 720px;
+      --code-bg: #141416;
+      --font-narrative: 'Playfair Display', Georgia, 'Times New Roman', serif;
+      --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
+      --font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
     }
 
     html { scroll-behavior: smooth; }
 
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-family: var(--font-heading);
       background: var(--bg);
       color: var(--text);
       line-height: 1.6;
@@ -80,1971 +102,1872 @@
       overflow-x: hidden;
     }
 
-    /* Center container layout */
-    .container {
-      max-width: var(--max-w);
-      margin: 0 auto;
-      padding: 0 20px;
+    /* ===================== NAV ===================== */
+    .nav {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 48px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 24px;
+      background: rgba(10, 10, 11, 0.8);
+      backdrop-filter: blur(12px);
+      -webkit-backdrop-filter: blur(12px);
+      z-index: 1000;
+      border-bottom: 1px solid rgba(74, 74, 80, 0.3);
     }
 
-    /* Sections */
-    section {
-      padding: 80px 0;
-    }
-
-    @media (max-width: 640px) {
-      section { padding: 56px 0; }
-    }
-
-    /* Typography */
-    h1, h2, h3 { font-weight: 700; letter-spacing: -0.02em; line-height: 1.2; }
-
-    h2 {
-      font-size: 1.75rem;
-      margin-bottom: 16px;
-    }
-
-    h3 {
+    .nav-wordmark {
+      font-family: var(--font-heading);
       font-size: 1.125rem;
-      margin-bottom: 8px;
+      font-weight: 700;
+      color: var(--text);
+      text-decoration: none;
     }
 
-    p { color: var(--text-dim); }
-
-    .label {
-      display: inline-block;
-      font-size: 0.75rem;
-      font-weight: 600;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--green);
-      margin-bottom: 12px;
+    .nav-dot {
+      color: var(--accent);
+      font-weight: 800;
     }
 
-    /* ===================== HERO ===================== */
-    .hero {
-      min-height: 100svh;
+    .nav-links {
+      display: flex;
+      gap: 14px;
+      font-size: 0.85rem;
+      font-weight: 500;
+      align-items: center;
+    }
+
+    .nav-links a {
+      color: #8a8a92;
+      text-decoration: none;
+      transition: color 0.2s;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    }
+
+    .nav-links a:hover { color: var(--text); }
+
+    .nav-links a.active { color: var(--accent); }
+
+    .nav-links .sep { color: #8a8a92; opacity: 0.5; }
+
+    .nav-github {
+      color: #8a8a92;
+      text-decoration: none;
+      display: flex;
+      align-items: center;
+      margin-left: 8px;
+    }
+    .nav-github:hover { color: var(--text); }
+
+    /* ===================== ACTS ===================== */
+    .act {
+      min-height: 100vh;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      overflow: hidden;
+    }
+
+    /* ===================== ACT 1: CHAOS ===================== */
+    .act-chaos {
+      background: var(--bg);
+      transition: background 0.8s ease;
+    }
+
+    .act-chaos.in-view {
+      background: var(--bg);
+    }
+
+    /* No gradient overlays — clean section transitions */
+
+    /* Gradient fade at bottom of chaos only (chaos has a different bg color) */
+
+    .chaos-container {
+      position: relative;
+      width: 100%;
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 80px 24px 48px;
       display: flex;
       flex-direction: column;
-      justify-content: center;
-      text-align: center;
-      padding-top: 60px;
-      padding-bottom: 60px;
-    }
-
-    .hero-title {
-      font-size: clamp(4rem, 14vw, 8rem);
-      font-weight: 800;
-      letter-spacing: -0.04em;
-      background: linear-gradient(180deg, #fff 30%, #71717a 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-    }
-
-    .hero-tagline {
-      font-size: clamp(1.1rem, 3vw, 1.5rem);
-      color: var(--text-dim);
-      margin-top: 16px;
-      font-weight: 400;
-    }
-
-    .hero-badges {
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
-      margin-top: 32px;
-    }
-
-    .badge {
-      font-size: 0.8rem;
-      padding: 6px 14px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      color: var(--text-dim);
-      background: var(--bg-card);
-      font-weight: 500;
-    }
-
-    .hero-cta {
-      margin-top: 40px;
-      display: flex;
-      gap: 12px;
-      justify-content: center;
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      display: inline-flex;
       align-items: center;
-      gap: 8px;
-      padding: 12px 24px;
+      gap: 32px;
+    }
+
+    .chaos-windows-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      width: 100%;
+    }
+
+    .chaos-window {
+      background: var(--code-bg);
+      border: 1px solid #2a2a2e;
       border-radius: 8px;
-      font-size: 0.9rem;
-      font-weight: 600;
-      text-decoration: none;
-      transition: all 0.15s;
-      cursor: pointer;
-      border: none;
-      font-family: inherit;
-    }
-
-    .btn-primary {
-      background: var(--green);
-      color: #000;
-    }
-
-    .btn-primary:hover { background: #16a34a; }
-
-    .btn-secondary {
-      background: transparent;
-      color: var(--text);
-      border: 1px solid var(--border);
-    }
-
-    .btn-secondary:hover { border-color: var(--text-muted); }
-
-    .scroll-hint {
-      margin-top: 48px;
-      color: var(--text-muted);
+      font-family: var(--font-mono);
       font-size: 0.8rem;
-      animation: bounce 2s infinite;
+      line-height: 1.5;
+      padding: 0;
+      opacity: 0;
+      transform: translateY(30px);
+      transition: opacity 0.8s ease, transform 0.8s ease;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
     }
 
-    @keyframes bounce {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(6px); }
+    .act-chaos.in-view .chaos-window {
+      opacity: 1;
+      transform: translateY(0);
     }
 
-    /* ===================== TERMINAL ===================== */
-    .terminal {
-      background: var(--bg-terminal);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      overflow: hidden;
-      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Menlo, Monaco, 'Courier New', monospace;
-      font-size: 0.8rem;
-      line-height: 1.7;
-    }
-
-    .terminal-header {
+    .chaos-window .titlebar {
       display: flex;
       align-items: center;
       gap: 6px;
-      padding: 10px 14px;
-      background: #161618;
-      border-bottom: 1px solid var(--border);
+      padding: 8px 12px;
+      border-bottom: 1px solid #2a2a2e;
+      background: #1a1a1e;
+      border-radius: 8px 8px 0 0;
     }
 
-    .terminal-dot {
+    .titlebar-dot {
       width: 10px;
       height: 10px;
       border-radius: 50%;
     }
 
-    .terminal-dot.red { background: #ff5f57; }
-    .terminal-dot.yellow { background: #febc2e; }
-    .terminal-dot.green { background: #28c840; }
+    .titlebar-dot.r { background: #ff5f57; }
+    .titlebar-dot.y { background: #febc2e; }
+    .titlebar-dot.g { background: #28c840; }
 
-    .terminal-title {
-      flex: 1;
-      text-align: center;
+    .titlebar-label {
+      margin-left: 8px;
       font-size: 0.7rem;
-      color: var(--text-muted);
+      color: var(--muted);
     }
 
-    .terminal-body {
-      padding: 16px;
-      overflow-x: auto;
-      white-space: pre;
-      min-height: 60px;
+    .chaos-window .body {
+      padding: 12px 14px;
     }
 
-    .t-green { color: var(--green); }
-    .t-red { color: var(--red); }
-    .t-cyan { color: var(--cyan); }
-    .t-amber { color: var(--amber); }
-    .t-purple { color: var(--purple); }
-    .t-blue { color: var(--blue); }
-    .t-dim { color: var(--text-muted); }
-    .t-bold { font-weight: 700; }
-    .t-white { color: #fff; }
+    .chaos-window .prompt { color: var(--accent); }
+    .chaos-window .cmd { color: var(--text); }
+    .chaos-window .error { color: var(--red); }
+    .chaos-window .dim { color: var(--muted); }
+    .chaos-window .slack-name { color: var(--blue); font-weight: 600; }
+    .chaos-window .slack-msg { color: var(--text); }
 
-    /* ===================== PROBLEM ===================== */
-    .problem-line {
+    /* Window initial rotation offsets */
+    .cw-1 { transform: rotate(-1.5deg) translateY(30px); }
+    .cw-2 { transform: rotate(1deg) translateY(30px); }
+    .cw-3 { transform: rotate(0.5deg) translateY(30px); }
+    .cw-4 { transform: rotate(-0.8deg) translateY(30px); }
+    .cw-5 { transform: rotate(1.2deg) translateY(30px); }
+    .cw-6 { transform: rotate(-0.5deg) translateY(30px); }
+
+    .act-chaos.in-view .cw-1 { transform: rotate(-1.5deg) translateY(0); transition-delay: 0s; animation: wiggle-1 4s ease-in-out 1s infinite; }
+    .act-chaos.in-view .cw-2 { transform: rotate(1deg) translateY(0); transition-delay: 0.4s; animation: wiggle-2 4.5s ease-in-out 1.4s infinite; }
+    .act-chaos.in-view .cw-3 { transform: rotate(0.5deg) translateY(0); transition-delay: 0.8s; animation: wiggle-3 5s ease-in-out 1.8s infinite; }
+    .act-chaos.in-view .cw-4 { transform: rotate(-0.8deg) translateY(0); transition-delay: 1.2s; animation: wiggle-4 4.2s ease-in-out 2.2s infinite; }
+    .act-chaos.in-view .cw-5 { transform: rotate(1.2deg) translateY(0); transition-delay: 1.6s; animation: wiggle-5 4.8s ease-in-out 2.6s infinite; }
+    .act-chaos.in-view .cw-6 { transform: rotate(-0.5deg) translateY(0); transition-delay: 2.0s; animation: wiggle-6 5.2s ease-in-out 3.0s infinite; }
+
+    @keyframes wiggle-1 {
+      0%, 100% { transform: rotate(-1.5deg) translate(0, 0); }
+      25% { transform: rotate(-1.2deg) translate(2px, -3px); }
+      50% { transform: rotate(-1.8deg) translate(-1px, 2px); }
+      75% { transform: rotate(-1.3deg) translate(1px, -1px); }
+    }
+    @keyframes wiggle-2 {
+      0%, 100% { transform: rotate(1deg) translate(0, 0); }
+      25% { transform: rotate(1.3deg) translate(-2px, 2px); }
+      50% { transform: rotate(0.7deg) translate(1px, -2px); }
+      75% { transform: rotate(1.1deg) translate(-1px, 1px); }
+    }
+    @keyframes wiggle-3 {
+      0%, 100% { transform: rotate(0.5deg) translate(0, 0); }
+      25% { transform: rotate(0.8deg) translate(1px, -2px); }
+      50% { transform: rotate(0.2deg) translate(-2px, 1px); }
+      75% { transform: rotate(0.6deg) translate(1px, 2px); }
+    }
+    @keyframes wiggle-4 {
+      0%, 100% { transform: rotate(-0.8deg) translate(0, 0); }
+      25% { transform: rotate(-0.5deg) translate(-1px, 2px); }
+      50% { transform: rotate(-1.1deg) translate(2px, -1px); }
+      75% { transform: rotate(-0.7deg) translate(-1px, -2px); }
+    }
+    @keyframes wiggle-5 {
+      0%, 100% { transform: rotate(1.2deg) translate(0, 0); }
+      25% { transform: rotate(0.9deg) translate(2px, 1px); }
+      50% { transform: rotate(1.5deg) translate(-1px, -2px); }
+      75% { transform: rotate(1.1deg) translate(1px, 2px); }
+    }
+    @keyframes wiggle-6 {
+      0%, 100% { transform: rotate(-0.5deg) translate(0, 0); }
+      25% { transform: rotate(-0.2deg) translate(-2px, -1px); }
+      50% { transform: rotate(-0.8deg) translate(1px, 2px); }
+      75% { transform: rotate(-0.4deg) translate(-1px, -1px); }
+    }
+
+    .chaos-headline {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.5rem, 4vw, 2.5rem);
+      color: #E8E4DF;
+      text-align: center;
       opacity: 0;
-      animation: fadeInUp 0.4s forwards;
+      transition: opacity 1s ease 0.2s;
     }
 
-    @keyframes fadeInUp {
-      from { opacity: 0; transform: translateY(8px); }
-      to { opacity: 1; transform: translateY(0); }
+    .act-chaos.in-view .chaos-headline {
+      opacity: 1;
     }
 
-    /* ===================== INTERACTIVE DEMO ===================== */
-    .demo-section {
-      padding: 80px 0;
-    }
-
-    @media (max-width: 640px) {
-      .demo-section { padding: 56px 0; }
-    }
-
-    .demo-layout {
+    .chaos-bottom {
       display: flex;
       flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      margin-top: 8px;
+    }
+
+    .cognitive-load {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--muted);
+      opacity: 0;
+      transition: opacity 0.6s ease 2.4s;
+      text-align: center;
+    }
+
+    .act-chaos.in-view .cognitive-load { opacity: 1; }
+
+    .scroll-arrow {
+      opacity: 0;
+      transition: opacity 0.6s ease 3s;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 600;
+    }
+
+    .act-chaos.in-view .scroll-arrow { opacity: 1; }
+
+    .scroll-arrow-icon {
+      font-size: 2rem;
+      animation: bounce-arrow 2s ease-in-out infinite;
+    }
+
+    @keyframes bounce-arrow {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(6px); }
+    }
+
+    .load-bar { color: var(--red); }
+    .load-label { color: var(--red); }
+
+    /* ===================== ACT 2: THE CLEARING ===================== */
+    .act-clearing {
+      min-height: auto;
+      padding: 120px 24px;
+      flex-direction: column;
       gap: 0;
+    }
+
+    .clearing-terminal {
+      width: 100%;
+      max-width: 680px;
+      padding: 0 24px;
+      font-family: var(--font-mono);
+      font-size: clamp(0.85rem, 1.8vw, 1.05rem);
+      line-height: 1.8;
+      min-height: 420px;
+    }
+
+    .type-line {
+      overflow: hidden;
+      white-space: nowrap;
+      border-right: 2px solid var(--accent);
+      width: 0;
+      opacity: 0;
+    }
+
+    .act-clearing.in-view .type-line {
+      opacity: 1;
+      animation: typewriter 1.2s steps(44) 0.3s forwards, blink-caret 0.6s step-end infinite;
+    }
+
+    @keyframes typewriter {
+      from { width: 0; }
+      to { width: 44ch; }
+    }
+
+    @keyframes blink-caret {
+      50% { border-color: transparent; }
+    }
+
+    .type-line .prompt-char { color: var(--accent); }
+    .type-line .cmd-text { color: var(--text); }
+    .type-line .flag { color: var(--blue); }
+
+    .service-lines {
       margin-top: 24px;
     }
 
-    .demo-terminals {
+    .service-line {
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 0.4s ease, transform 0.4s ease;
+      display: flex;
+      gap: 12px;
+      align-items: baseline;
+      white-space: nowrap;
+      padding: 2px 0;
+    }
+
+    .act-clearing.in-view .service-line {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .act-clearing.in-view .sl-1-starting { transition-delay: 1.8s; }
+    .act-clearing.in-view .sl-1-healthy  { transition-delay: 2.6s; }
+    .act-clearing.in-view .sl-2-starting { transition-delay: 3.2s; }
+    .act-clearing.in-view .sl-2-healthy  { transition-delay: 4.0s; }
+    .act-clearing.in-view .sl-3-starting { transition-delay: 4.6s; }
+    .act-clearing.in-view .sl-3-ready    { transition-delay: 5.4s; }
+    .act-clearing.in-view .sl-final      { transition-delay: 6.2s; }
+
+    /* Hide starting line when healthy appears */
+    .act-clearing.in-view .sl-1-starting { animation: fade-replace 0s 2.6s forwards; }
+    .act-clearing.in-view .sl-2-starting { animation: fade-replace 0s 4.0s forwards; }
+    .act-clearing.in-view .sl-3-starting { animation: fade-replace 0s 5.4s forwards; }
+
+    @keyframes fade-replace {
+      to { height: 0; overflow: hidden; opacity: 0; padding: 0; margin: 0; }
+    }
+
+    .svc-icon { display: inline-block; width: 16px; text-align: center; }
+    .svc-icon.starting { color: var(--muted); animation: pulse-dot 1s ease-in-out infinite; }
+    .svc-icon.healthy { color: var(--accent); }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 0.4; }
+      50% { opacity: 1; }
+    }
+
+    .svc-name { color: var(--text); min-width: 100px; }
+    .svc-status { color: var(--muted); min-width: 90px; }
+    .svc-status.ok { color: var(--accent); }
+    .svc-url { color: var(--blue); }
+
+    .final-line {
+      margin-top: 20px;
+      color: var(--accent);
+      font-weight: 600;
+    }
+
+    .cognitive-load-zero {
+      margin-top: 40px;
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--accent);
+      opacity: 0;
+      transition: opacity 0.6s ease;
+    }
+
+    .act-clearing.in-view .cognitive-load-zero {
+      opacity: 1;
+      transition-delay: 6.8s;
+    }
+
+    /* ===================== ACT 3: FEEDBACK LOOP ===================== */
+    .act-feedback {
+      flex-direction: column;
+      padding: 48px 24px;
+      gap: 0;
+    }
+
+    .feedback-stage {
+      width: 100%;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .feedback-narrative {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
+      line-height: 1.4;
+      text-align: center;
+      color: var(--text);
+      margin-bottom: 48px;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 0.8s ease, transform 0.8s ease;
+      position: relative;
+      z-index: 3;
+    }
+
+    .act-feedback.in-view .feedback-narrative { opacity: 1; transform: translateY(0); }
+
+    .feedback-split {
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 16px;
-      order: 2;
+      grid-template-columns: 1fr 1fr;
+      gap: 32px;
+      align-items: start;
+      margin-bottom: 40px;
     }
 
-    .timeline-controls { order: 1; }
-
-    @media (min-width: 900px) {
-      .demo-terminals {
-        grid-template-columns: 1fr 1fr;
-      }
-
-      .demo-terminals { order: 1; }
-      .timeline-controls { order: 2; }
-
-      .container.wide {
-        max-width: 960px;
+    @media (max-width: 768px) {
+      .feedback-split {
+        grid-template-columns: 1fr;
       }
     }
 
-    .demo-terminal {
-      transition: border-color 0.4s;
+    /* Browser mockup */
+    .browser-mockup {
+      background: #1a1a1e;
+      border: 1px solid #2a2a2e;
+      border-radius: 10px;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateX(30px);
+      transition: opacity 0.7s ease 0.3s, transform 0.7s ease 0.3s;
     }
 
-    .demo-terminal .terminal-body {
-      height: 240px;
-      overflow-y: hidden;
+    .act-feedback.in-view .browser-mockup { opacity: 1; transform: translateX(0); }
+
+    .browser-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 10px 14px;
+      background: #111113;
+      border-bottom: 1px solid #2a2a2e;
+    }
+
+    .browser-url {
+      flex: 1;
+      margin-left: 10px;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--muted);
+      background: #0A0A0B;
+      padding: 4px 10px;
+      border-radius: 4px;
+    }
+
+    .browser-url .lock { color: var(--accent); margin-right: 4px; }
+
+    .browser-content {
+      padding: 24px 20px;
+      min-height: 240px;
       position: relative;
     }
 
-    @media (min-width: 900px) {
-      .demo-terminal .terminal-body {
-        height: 320px;
-        overflow-y: auto;
-        scrollbar-width: thin;
-        scrollbar-color: var(--border) transparent;
-        overscroll-behavior: contain;
-        -webkit-overflow-scrolling: touch;
-      }
-    }
-
-    .demo-terminal .terminal-body::-webkit-scrollbar {
-      width: 4px;
-    }
-
-    .demo-terminal .terminal-body::-webkit-scrollbar-track {
-      background: transparent;
-    }
-
-    .demo-terminal .terminal-body::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 2px;
-    }
-
-    .demo-terminal .terminal-body::-webkit-scrollbar-thumb:hover {
-      background: var(--text-muted);
-    }
-
-    .demo-terminal.done-good {
-      border-color: rgba(34, 197, 94, 0.35);
-    }
-
-    .demo-terminal.done-bad {
-      border-color: rgba(239, 68, 68, 0.25);
-    }
-
-    .demo-done-badge {
-      position: absolute;
-      top: 12px;
-      right: 12px;
-      font-size: 0.65rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      padding: 3px 10px;
-      border-radius: 999px;
-      opacity: 0;
-      transition: opacity 0.3s;
-      font-family: -apple-system, BlinkMacSystemFont, sans-serif;
-    }
-
-    .demo-done-badge.visible { opacity: 1; }
-
-    .demo-done-badge.good {
-      background: rgba(34, 197, 94, 0.15);
-      color: var(--green);
-    }
-
-    .demo-done-badge.bad {
-      background: rgba(239, 68, 68, 0.12);
-      color: var(--red);
-    }
-
-    /* Timeline slider */
-    .timeline-controls {
-      margin-bottom: 16px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    @media (min-width: 900px) {
-      .timeline-controls {
-        margin-bottom: 0;
-        margin-top: 24px;
-      }
-    }
-
-    .timeline-btn {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+    .browser-header {
+      font-family: var(--font-heading);
+      font-size: 1.1rem;
+      font-weight: 700;
       color: var(--text);
-      width: 36px;
-      height: 36px;
-      border-radius: 8px;
-      cursor: pointer;
+      margin-bottom: 8px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #2a2a2e;
+      transition: padding-bottom 0.6s ease, margin-bottom 0.6s ease;
+    }
+
+    .act-feedback.phase-fix .browser-header {
+      padding-bottom: 20px;
+      margin-bottom: 16px;
+    }
+
+    .browser-body-text {
+      font-size: 0.85rem;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+
+    .feedback-btn-mock {
+      position: absolute;
+      bottom: 16px;
+      right: 16px;
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: #0a0a0a;
+      border: 1px solid #1e1e24;
       display: flex;
       align-items: center;
       justify-content: center;
-      transition: border-color 0.15s;
-      flex-shrink: 0;
+      box-shadow: 0 8px 30px rgba(0,0,0,.5);
     }
 
-    .timeline-btn:hover { border-color: var(--text-muted); }
-
-    .timeline-slider {
-      flex: 1;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 4px;
-      background: var(--border);
-      border-radius: 2px;
-      outline: none;
+    .act-feedback.in-view .feedback-btn-mock {
+      animation: pulse-ring 2s ease-in-out 1.2s 3;
     }
 
-    .timeline-slider::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: var(--green);
-      cursor: pointer;
-      transition: transform 0.1s;
+    @keyframes pulse-ring {
+      0% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 0 rgba(196, 245, 106, 0.4); }
+      70% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 12px rgba(196, 245, 106, 0); }
+      100% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 0 rgba(196, 245, 106, 0); }
     }
 
-    .timeline-slider::-webkit-slider-thumb:hover {
-      transform: scale(1.2);
-    }
-
-    .timeline-slider::-moz-range-thumb {
-      width: 16px;
-      height: 16px;
-      border-radius: 50%;
-      background: var(--green);
-      cursor: pointer;
-      border: none;
-    }
-
-    .timeline-time {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      font-family: 'SF Mono', Menlo, monospace;
-      min-width: 36px;
-      text-align: right;
-      flex-shrink: 0;
-    }
-
-    /* ===================== FEATURES GRID ===================== */
-    .features-grid {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 16px;
-      margin-top: 24px;
-    }
-
-    @media (min-width: 640px) {
-      .features-grid { grid-template-columns: 1fr 1fr; }
-    }
-
-    .feature-card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+    /* Feedback overlay popover */
+    .feedback-overlay {
+      position: absolute;
+      bottom: 60px;
+      right: 16px;
+      width: 260px;
+      background: #1a1a1e;
+      border: 1px solid rgba(196, 245, 106, 0.3);
       border-radius: 10px;
-      padding: 24px;
-      transition: border-color 0.2s;
+      padding: 0;
+      opacity: 0;
+      transform: translateY(8px) scale(0.95);
+      pointer-events: none;
+      transition: opacity 0.4s ease, transform 0.4s ease;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      overflow: hidden;
     }
 
-    .feature-card:hover { border-color: var(--text-muted); }
-
-    .feature-card h3 { font-size: 1rem; }
-    .feature-card p { font-size: 0.875rem; margin-top: 6px; }
-
-    /* ===================== CONFIG ===================== */
-    .config-block {
-      margin-top: 24px;
+    .act-feedback.phase-overlay .feedback-overlay {
+      opacity: 1;
+      transform: translateY(0) scale(1);
     }
 
-    .config-block .terminal-body {
+    .feedback-overlay-header {
+      padding: 10px 14px;
+      font-family: var(--font-heading);
       font-size: 0.75rem;
-      line-height: 1.8;
-    }
-
-    .config-callouts {
+      font-weight: 600;
+      color: var(--text);
+      border-bottom: 1px solid #2a2a2e;
       display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 16px;
+      align-items: center;
+      gap: 6px;
     }
 
-    .callout {
+    .feedback-overlay-header .icon { color: var(--accent); }
+
+    .feedback-overlay-body {
+      padding: 12px 14px;
+    }
+
+    .feedback-textarea-mock {
+      width: 100%;
+      min-height: 48px;
+      background: #1e1e24;
+      border: 1px solid #2a2a2e;
+      border-radius: 6px;
+      padding: 8px 10px;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      color: var(--text);
+      line-height: 1.5;
+      overflow: hidden;
+      transition: border-color 0.2s ease;
+    }
+
+    .act-feedback.phase-typing .feedback-textarea-mock {
+      border-color: #C4F56A;
+    }
+
+    .feedback-typing-text {
+      opacity: 0;
+    }
+
+    .act-feedback.phase-typing .feedback-typing-text {
+      opacity: 1;
+      animation: type-feedback 1.5s steps(22) forwards;
+      overflow: hidden;
+      white-space: nowrap;
+      width: 0;
+      display: inline-block;
+    }
+
+    @keyframes type-feedback {
+      from { width: 0; }
+      to { width: 100%; }
+    }
+
+    .feedback-overlay-footer {
+      padding: 8px 14px 12px;
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .feedback-submit-btn {
+      background: #C4F56A;
+      color: #0A0A0B;
+      border: none;
+      border-radius: 6px;
+      padding: 6px 16px;
+      font-family: var(--font-heading);
+      font-size: 0.7rem;
+      font-weight: 700;
+      opacity: 0.4;
+      transition: opacity 0.3s ease;
+    }
+
+    .act-feedback.phase-typing .feedback-submit-btn {
+      opacity: 1;
+    }
+
+    .feedback-submit-flash {
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .act-feedback.phase-submit .feedback-submit-flash {
+      opacity: 1;
+    }
+
+    .act-feedback.phase-submit .feedback-overlay {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+      animation: overlay-dismiss 0.5s ease 0.6s forwards;
+    }
+
+    @keyframes overlay-dismiss {
+      to { opacity: 0; transform: translateY(8px) scale(0.95); }
+    }
+
+    .feedback-comment {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(196, 245, 106, 0.1);
+      border: 1px solid rgba(196, 245, 106, 0.3);
+      border-radius: 8px;
+      padding: 12px 16px;
+      font-family: var(--font-mono);
       font-size: 0.75rem;
-      padding: 4px 12px;
-      border-radius: 999px;
-      border: 1px solid var(--border);
-      color: var(--text-dim);
+      color: var(--accent);
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
     }
 
-    /* ===================== DX SECTION ===================== */
-    .dx-cards {
+    .act-feedback.phase-submit .feedback-comment {
+      animation: comment-pin 0.4s ease 0.2s forwards;
+    }
+
+    @keyframes comment-pin {
+      from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
+      to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+
+    .act-feedback.phase-fix .feedback-comment {
+      opacity: 1;
+      transform: translate(-50%, -50%) scale(1);
+      animation: comment-fade 0.5s ease 1s forwards;
+    }
+
+    @keyframes comment-fade {
+      to { opacity: 0; }
+    }
+
+    /* Browser content update after fix */
+    .browser-update-indicator {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 2px;
+      background: var(--accent);
+      transform: scaleX(0);
+      transform-origin: left;
+    }
+
+    .act-feedback.phase-fix .browser-update-indicator {
+      animation: progress-bar 0.8s ease 1.2s forwards;
+    }
+
+    @keyframes progress-bar {
+      to { transform: scaleX(1); }
+    }
+
+    .browser-header-fixed {
+      opacity: 0;
+      transition: opacity 0.3s ease;
+    }
+
+    .act-feedback.phase-fix .browser-header-fixed {
+      opacity: 1;
+      transition-delay: 2s;
+    }
+
+    .act-feedback.phase-fix .browser-header-original {
+      transition: padding-top 0.5s ease 2s;
+      padding-top: 12px;
+    }
+
+    /* Terminal on left side for Act 3 */
+    .feedback-terminal {
+      background: var(--code-bg);
+      border: 1px solid #2a2a2e;
+      border-radius: 10px;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateX(-30px);
+      transition: opacity 0.7s ease 0.5s, transform 0.7s ease 0.5s;
+    }
+
+    .act-feedback.in-view .feedback-terminal { opacity: 1; transform: translateX(0); }
+
+    .feedback-terminal .titlebar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 8px 12px;
+      border-bottom: 1px solid #2a2a2e;
+      background: #1a1a1e;
+    }
+
+    .feedback-terminal .body {
+      padding: 14px 16px;
+      font-family: var(--font-mono);
+      font-size: 0.78rem;
+      line-height: 1.7;
+    }
+
+    .feedback-terminal .body .dim { color: var(--muted); }
+    .feedback-terminal .body .accent { color: var(--accent); }
+    .feedback-terminal .body .blue { color: var(--blue); }
+
+    .terminal-waiting {
+      opacity: 0;
+      transition: opacity 0.5s ease;
+    }
+
+    .act-feedback.in-view .terminal-waiting { opacity: 1; transition-delay: 0.8s; }
+
+    .terminal-waiting-dots::after {
+      content: '';
+      animation: waiting-dots 1.5s step-end infinite;
+    }
+
+    @keyframes waiting-dots {
+      0% { content: ''; }
+      25% { content: '.'; }
+      50% { content: '..'; }
+      75% { content: '...'; }
+    }
+
+    .json-float {
+      opacity: 0;
+      transform: translateX(20px);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+    }
+
+    .act-feedback.phase-submit .json-float {
+      opacity: 1;
+      transform: translateX(0);
+      transition-delay: 1.2s;
+    }
+
+    .agent-response {
+      opacity: 0;
+      transform: translateY(4px);
+      transition: opacity 0.4s ease, transform 0.4s ease;
+    }
+
+    .agent-response.resp-1 { }
+    .agent-response.resp-2 { }
+    .agent-response.resp-3 { }
+
+    .act-feedback.phase-fix .agent-response.resp-1 {
+      opacity: 1; transform: translateY(0); transition-delay: 0.3s;
+    }
+    .act-feedback.phase-fix .agent-response.resp-2 {
+      opacity: 1; transform: translateY(0); transition-delay: 0.8s;
+    }
+    .act-feedback.phase-fix .agent-response.resp-3 {
+      opacity: 1; transform: translateY(0); transition-delay: 1.3s;
+    }
+
+    .feedback-narrative-2 {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.2rem, 2.5vw, 1.6rem);
+      text-align: center;
+      color: var(--text);
+      margin-top: 40px;
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.8s ease, transform 0.8s ease;
+    }
+
+    .act-feedback.phase-fix .feedback-narrative-2 { opacity: 1; transform: translateY(0); transition-delay: 0.5s; }
+
+    .feedback-narrative-result {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.1rem, 2vw, 1.4rem);
+      font-style: italic;
+      text-align: center;
+      color: var(--accent);
+      margin-top: 16px;
+      opacity: 0;
+      transition: opacity 0.8s ease;
+    }
+
+    .act-feedback.phase-fix .feedback-narrative-result { opacity: 1; transition-delay: 2.5s; }
+
+    .feedback-caption {
+      margin-top: 48px;
+      font-family: var(--font-narrative);
+      font-size: clamp(0.9rem, 1.8vw, 1.05rem);
+      text-align: center;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 600px;
+      margin-left: auto;
+      margin-right: auto;
+      opacity: 0;
+      transition: opacity 0.8s ease;
+    }
+
+    .act-feedback.phase-fix .feedback-caption { opacity: 1; transition-delay: 3.2s; }
+
+    /* ===================== ACT 3.5: CROSSED-OUT PROBLEMS ===================== */
+    .act-problems {
+      flex-direction: column;
+      padding: 48px 24px;
+      gap: 0;
+    }
+
+    .problems-stage {
+      width: 100%;
+      max-width: 1000px;
+      margin: 0 auto;
+    }
+
+    .problems-narrative {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
+      line-height: 1.4;
+      text-align: center;
+      color: var(--text);
+      margin-bottom: 48px;
+      opacity: 0;
+      transform: translateY(20px);
+      transition: opacity 0.8s ease, transform 0.8s ease;
+    }
+
+    .act-problems.in-view .problems-narrative { opacity: 1; transform: translateY(0); }
+
+    .problems-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 20px;
+      position: relative;
+    }
+
+    @media (max-width: 900px) {
+      .problems-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+
+    @media (max-width: 560px) {
+      .problems-grid { grid-template-columns: 1fr; }
+    }
+
+    .problem-card {
+      background: #141416;
+      border: 1px solid #1e1e24;
+      border-radius: 10px;
+      padding: 24px 20px;
+      position: relative;
+      overflow: hidden;
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.5s ease, transform 0.5s ease;
+    }
+
+    .problem-card.visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .problem-title {
+      font-family: var(--font-heading);
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--accent);
+      margin-bottom: 8px;
+    }
+
+    .problem-desc {
+      font-size: 0.82rem;
+      color: var(--muted);
+      line-height: 1.5;
+      font-style: italic;
+    }
+
+    /* Diagonal strikethrough line */
+    .problem-card::after {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 141.4%; /* sqrt(2) * 100% to cover diagonal */
+      height: 2px;
+      background: var(--accent);
+      transform-origin: 0 0;
+      transform: rotate(25deg) scaleX(0);
+      transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+      box-shadow: 0 0 8px rgba(196, 245, 106, 0.4);
+    }
+
+    .problem-card.struck::after {
+      transform: rotate(25deg) scaleX(1);
+    }
+
+    /* Badge below the grid (normal flow) */
+    .problems-overlay-badge {
+      font-family: var(--font-heading);
+      font-size: clamp(0.9rem, 2.5vw, 1.4rem);
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      color: var(--accent);
+      background: transparent;
+      border: 2px solid var(--accent);
+      padding: 12px 28px;
+      border-radius: 12px;
+      opacity: 0;
+      white-space: nowrap;
+      transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
+      margin: 40px auto 0;
+      text-align: center;
+      display: block;
+      width: fit-content;
+      transform: scale(0.85);
+    }
+
+    .problems-overlay-badge.visible {
+      opacity: 1;
+      transform: scale(1);
+    }
+
+    /* ===================== ACT 3.75: UNLEASHED ===================== */
+    .act-unleashed {
+      flex-direction: column;
+      padding: 0 24px;
+      gap: 0;
+      min-height: auto;
+      align-items: stretch;
+    }
+
+    .unleashed-statement {
+      min-height: 40vh;
       display: flex;
       flex-direction: column;
-      gap: 24px;
-      margin-top: 24px;
-    }
-
-    .dx-card .terminal {
-      margin-top: 12px;
-    }
-
-    .dx-card .terminal-body {
-      font-size: 0.75rem;
-    }
-
-    /* ===================== AGENTIC ===================== */
-    .agentic-lines {
-      margin-top: 24px;
-      font-size: 1.125rem;
-      line-height: 2.2;
-    }
-
-    .agentic-lines .dim {
-      color: var(--text-muted);
-    }
-
-    /* ===================== CTA ===================== */
-    .cta-section {
+      align-items: center;
+      justify-content: center;
       text-align: center;
-      padding: 100px 0;
+      padding: 80px 0;
+      opacity: 0;
+      transform: translateY(60px);
+      transition: opacity 0.9s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                  transform 0.9s cubic-bezier(0.25, 0.46, 0.45, 0.94);
     }
 
-    .cta-section h2 {
-      font-size: clamp(1.5rem, 5vw, 2.25rem);
+    .unleashed-statement.visible {
+      opacity: 1;
+      transform: translateY(0);
     }
 
-    .install-cmd {
-      display: inline-flex;
+    /* Alternate alignment for visual rhythm */
+    .unleashed-statement:nth-child(even) {
+      align-items: flex-start;
+      text-align: left;
+      padding-left: 8%;
+    }
+
+    .unleashed-statement:nth-child(3n) {
+      align-items: flex-end;
+      text-align: right;
+      padding-right: 8%;
+    }
+
+    .unleashed-headline {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.8rem, 4.5vw, 3.2rem);
+      line-height: 1.2;
+      color: var(--text);
+      font-weight: 400;
+      max-width: 800px;
+      letter-spacing: -0.01em;
+    }
+
+    .unleashed-headline .accent {
+      color: var(--accent);
+    }
+
+    .unleashed-subtext {
+      font-family: var(--font-heading);
+      font-size: clamp(0.85rem, 1.4vw, 1rem);
+      color: var(--muted);
+      max-width: 560px;
+      margin-top: 20px;
+      line-height: 1.6;
+      font-weight: 400;
+    }
+
+    .unleashed-disclaimer {
+      border-top: 1px solid rgba(196,245,106,0.1);
+      padding-top: 60px;
+      margin-top: 20px;
+    }
+
+    .unleashed-disclaimer .unleashed-headline {
+      font-size: clamp(1.2rem, 3vw, 2rem);
+      opacity: 0.85;
+    }
+
+    .unleashed-disclaimer .unleashed-subtext {
+      max-width: 640px;
+      opacity: 0.7;
+    }
+
+    /* Reduced motion: show everything immediately */
+    @media (prefers-reduced-motion: reduce) {
+      .unleashed-statement {
+        opacity: 1;
+        transform: none;
+        transition: none;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .unleashed-statement,
+      .unleashed-statement:nth-child(even),
+      .unleashed-statement:nth-child(3n) {
+        align-items: center;
+        text-align: center;
+        padding-left: 0;
+        padding-right: 0;
+        min-height: 35vh;
+        padding: 60px 0;
+      }
+    }
+
+    /* ===================== ACT 4: HORIZON ===================== */
+    .act-horizon {
+      flex-direction: column;
+      text-align: center;
+      padding: 48px 24px;
+      position: relative;
+    }
+
+    .contour-bg {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      opacity: 0;
+      transition: opacity 1.5s ease 0.3s;
+      pointer-events: none;
+    }
+
+    .act-horizon.in-view .contour-bg { opacity: 1; }
+
+    .contour-bg svg {
+      width: 100%;
+      height: 100%;
+    }
+
+    .horizon-content {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 40px;
+    }
+
+    .horizon-quote {
+      font-family: var(--font-narrative);
+      font-size: clamp(1.8rem, 4.5vw, 3rem);
+      line-height: 1.3;
+      color: var(--text);
+      max-width: 700px;
+      opacity: 0;
+      transform: translateY(24px);
+      transition: opacity 1s ease 0.5s, transform 1s ease 0.5s;
+    }
+
+    .act-horizon.in-view .horizon-quote { opacity: 1; transform: translateY(0); }
+
+    .horizon-line {
+      display: inline-block;
+      opacity: 0;
+      transform: translateY(10px);
+      transition: opacity 0.8s ease, transform 0.8s ease;
+    }
+
+    .act-horizon.in-view .horizon-line:nth-child(1) {
+      opacity: 1; transform: translateY(0);
+      transition-delay: 0.5s;
+    }
+
+    .act-horizon.in-view .horizon-line:nth-child(3) {
+      opacity: 1; transform: translateY(0);
+      transition-delay: 0.9s;
+    }
+
+    .act-horizon.in-view .horizon-line:nth-child(5) {
+      opacity: 1; transform: translateY(0);
+      transition-delay: 1.3s;
+    }
+
+    .horizon-install {
+      opacity: 0;
+      transform: translateY(16px);
+      transition: opacity 0.8s ease 1.8s, transform 0.8s ease 1.8s;
+    }
+
+    .act-horizon.in-view .horizon-install { opacity: 1; transform: translateY(0); }
+
+    .install-box {
+      display: flex;
       align-items: center;
       gap: 12px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
+      background: var(--code-bg);
+      border: 1px solid #2a2a2e;
       border-radius: 8px;
       padding: 14px 20px;
-      margin-top: 24px;
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.85rem;
+      font-family: var(--font-mono);
+      font-size: clamp(0.8rem, 1.5vw, 0.95rem);
       color: var(--text);
       cursor: pointer;
-      transition: border-color 0.15s;
-      max-width: 100%;
-      overflow-x: auto;
+      position: relative;
+      transition: border-color 0.3s, box-shadow 0.3s;
     }
 
-    .install-cmd:hover { border-color: var(--text-muted); }
+    .install-box:hover {
+      border-color: var(--accent);
+      box-shadow: 0 0 20px rgba(196, 245, 106, 0.1);
+    }
 
-    .install-cmd .copy-icon {
-      color: var(--text-muted);
+    .install-box .copy-icon {
+      color: var(--accent);
+      font-size: 1rem;
       flex-shrink: 0;
-      transition: color 0.15s;
     }
-
-    .install-cmd:hover .copy-icon { color: var(--text); }
 
     .copy-toast {
+      position: absolute;
+      top: -32px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--accent);
+      color: #0A0A0B;
+      padding: 4px 12px;
+      border-radius: 4px;
       font-size: 0.75rem;
-      color: var(--green);
-      margin-top: 8px;
+      font-weight: 600;
       opacity: 0;
+      pointer-events: none;
       transition: opacity 0.2s;
     }
 
     .copy-toast.show { opacity: 1; }
 
-    /* ===================== FOOTER ===================== */
-    footer {
-      border-top: 1px solid var(--border);
-      padding: 32px 0;
-      text-align: center;
-      color: var(--text-muted);
-      font-size: 0.8rem;
+    .horizon-links {
+      display: flex;
+      gap: 32px;
+      opacity: 0;
+      transition: opacity 0.8s ease 1.8s;
     }
 
-    footer a {
-      color: var(--text-dim);
+    .act-horizon.in-view .horizon-links { opacity: 1; }
+
+    .horizon-links a {
+      font-family: var(--font-heading);
+      font-size: 1rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+
+    .horizon-links a.primary {
+      color: var(--accent);
+    }
+
+    .horizon-links a.primary:hover { color: #d4ff8a; }
+
+    .horizon-links a.secondary {
+      color: var(--muted);
+    }
+
+    .horizon-links a.secondary:hover { color: var(--text); }
+
+    .horizon-logo {
+      margin-top: 20px;
+      opacity: 0;
+      transition: opacity 0.8s ease 1.8s;
+    }
+
+    .act-horizon.in-view .horizon-logo { opacity: 1; }
+
+    .horizon-logo-img {
+      height: clamp(1.5rem, 3.5vw, 2.2rem);
+      display: block;
+      margin: 0 auto;
+    }
+
+    /* ===================== LEGAL FOOTER ===================== */
+    .legal-footer {
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      padding: 24px;
+      border-top: 1px solid rgba(74, 74, 80, 0.3);
+    }
+    .legal-footer a {
+      color: var(--muted);
       text-decoration: none;
     }
-
-    footer a:hover { color: var(--text); }
-
-    /* ===================== FOCUS VISIBLE ===================== */
-    :focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 2px;
+    .legal-footer a:hover {
+      color: var(--text);
+      text-decoration: underline;
     }
 
     /* ===================== REDUCED MOTION ===================== */
     @media (prefers-reduced-motion: reduce) {
-      html { scroll-behavior: auto; }
-      .reveal { transition: none; opacity: 1; transform: none; }
-      .env-lane { transition: none; }
-      .scroll-hint { animation: none; }
-      .cursor { animation: none; opacity: 1; }
-    }
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-delay: 0ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        transition-delay: 0ms !important;
+      }
 
-    /* ===================== ANIMATIONS ===================== */
-    .reveal {
-      opacity: 0;
-      transform: translateY(20px);
-      transition: opacity 0.5s, transform 0.5s;
-    }
+      .chaos-window,
+      .type-line,
+      .service-line,
+      .browser-mockup,
+      .feedback-terminal,
+      .feedback-narrative,
+      .feedback-narrative-2,
+      .feedback-narrative-result,
+      .feedback-caption,
+      .feedback-comment,
+      .feedback-overlay,
+      .json-float,
+      .agent-response,
+      .terminal-waiting,
+      .chaos-headline,
+      .cognitive-load,
+      .cognitive-load-zero,
+      .scroll-arrow,
+      .problems-narrative,
+      .problem-card,
+      .horizon-quote,
+      .horizon-line,
+      .horizon-install,
+      .horizon-links,
+      .horizon-logo,
+      .contour-bg {
+        opacity: 1 !important;
+        transform: none !important;
+      }
 
-    .reveal.visible {
-      opacity: 1;
-      transform: translateY(0);
-    }
+      .type-line {
+        width: 100% !important;
+        border-right: none !important;
+      }
 
-    /* Cursor blink for terminal */
-    .cursor {
-      display: inline-block;
-      width: 8px;
-      height: 16px;
-      background: var(--text);
-      animation: blink 1s step-end infinite;
-      vertical-align: text-bottom;
-    }
+      .problem-card::after {
+        transform: rotate(25deg) scaleX(1) !important;
+      }
 
-    @keyframes blink {
-      0%, 100% { opacity: 1; }
-      50% { opacity: 0; }
-    }
-
-    /* HTTPS section */
-    .https-comparison {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 16px;
-      margin-top: 24px;
-    }
-
-    @media (min-width: 640px) {
-      .https-comparison { grid-template-columns: 1fr 1fr; }
-    }
-
-    .https-card {
-      border-radius: 10px;
-      padding: 24px;
-      border: 1px solid var(--border);
-    }
-
-    .https-card.before {
-      background: rgba(239, 68, 68, 0.05);
-      border-color: rgba(239, 68, 68, 0.2);
-    }
-
-    .https-card.after {
-      background: rgba(34, 197, 94, 0.05);
-      border-color: rgba(34, 197, 94, 0.2);
-    }
-
-    .https-card h3 { margin-bottom: 16px; }
-
-    .https-url {
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.8rem;
-      padding: 8px 12px;
-      border-radius: 6px;
-      background: var(--bg);
-      margin-bottom: 16px;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      overflow-x: auto;
-    }
-
-    .https-tags {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .https-tag {
-      font-size: 0.7rem;
-      padding: 3px 10px;
-      border-radius: 999px;
-      font-weight: 500;
-    }
-
-    .https-tag.bad {
-      background: rgba(239, 68, 68, 0.15);
-      color: var(--red);
-    }
-
-    .https-tag.good {
-      background: rgba(34, 197, 94, 0.15);
-      color: var(--green);
-    }
-
-    .tls-features {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 12px;
-      margin-top: 24px;
-    }
-
-    @media (min-width: 640px) {
-      .tls-features { grid-template-columns: repeat(3, 1fr); }
-    }
-
-    .tls-feature {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 16px;
-    }
-
-    .tls-feature h4 {
-      font-size: 0.85rem;
-      font-weight: 600;
-      margin-bottom: 6px;
-      color: var(--text);
-    }
-
-    .tls-feature p {
-      font-size: 0.8rem;
-    }
-
-    .custom-domain-urls {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .custom-domain-url {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 8px 14px;
-      font-size: 0.8rem;
-    }
-
-    .custom-domain-url code {
-      font-family: 'SF Mono', 'Fira Code', Menlo, monospace;
-      color: var(--text-dim);
-    }
-
-    /* ===================== PARALLEL ENVIRONMENTS ===================== */
-    .env-lanes {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-      margin-top: 28px;
-    }
-
-    .env-lane {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 20px;
-      opacity: 0;
-      transform: translateX(-20px);
-      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.4s;
-    }
-
-    .env-lane.active {
-      opacity: 1;
-      transform: translateX(0);
-      border-color: rgba(34, 197, 94, 0.3);
-    }
-
-    .env-lane-header {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      flex-wrap: wrap;
-    }
-
-    .env-lane-icon {
-      width: 32px;
-      height: 32px;
-      border-radius: 8px;
-      background: rgba(34, 197, 94, 0.12);
-      color: var(--green);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      flex-shrink: 0;
-    }
-
-    .env-lane-icon.purple {
-      background: rgba(168, 85, 247, 0.12);
-      color: var(--purple);
-    }
-
-    .env-lane-icon.amber {
-      background: rgba(245, 158, 11, 0.12);
-      color: var(--amber);
-    }
-
-    .env-lane-title {
-      font-weight: 700;
-      font-size: 0.9rem;
-      color: var(--text);
-    }
-
-    .env-lane-dir {
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.7rem;
-      color: var(--text-muted);
-    }
-
-    .env-lane-cmd {
-      margin-left: auto;
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.7rem;
-      color: var(--text-muted);
-      background: var(--bg);
-      padding: 4px 10px;
-      border-radius: 4px;
-      white-space: nowrap;
-    }
-
-    @media (max-width: 640px) {
-      .env-lane-cmd {
-        margin-left: 0;
-        margin-top: 8px;
-        width: 100%;
-        overflow-x: auto;
+      .problems-overlay-badge {
+        opacity: 1 !important;
+        transform: scale(1) !important;
       }
     }
 
-    .env-lane-nodes {
-      display: flex;
-      gap: 12px;
-      flex-wrap: wrap;
-      margin-top: 12px;
+    /* ===================== TABLET TWEAKS ===================== */
+    @media (max-width: 900px) {
+      .chaos-windows-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
     }
 
-    .env-node {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.75rem;
-      color: var(--text-dim);
-    }
-
-    .env-node-dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: var(--text-muted);
-      transition: background 0.3s;
-    }
-
-    .env-lane.active .env-node-dot.green {
-      background: var(--green);
-      box-shadow: 0 0 6px rgba(34, 197, 94, 0.4);
-    }
-
-    .env-lane-urls {
-      display: flex;
-      flex-direction: column;
-      gap: 4px;
-      margin-top: 12px;
-    }
-
-    .env-lane-urls code {
-      font-family: 'SF Mono', Menlo, monospace;
-      font-size: 0.7rem;
-      color: var(--text-muted);
-    }
-
-    .env-lane.active .env-lane-urls code {
-      color: var(--text-dim);
-    }
-
-    .env-lane-urls code strong {
-      color: var(--cyan);
-      font-weight: 600;
-    }
-
-    /* Summary counter bar */
-    .env-summary {
-      display: flex;
-      gap: 32px;
-      justify-content: center;
-      margin-top: 28px;
-      padding: 20px;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-    }
-
-    .env-summary-stat {
-      text-align: center;
-    }
-
-    .env-summary-number {
-      display: block;
-      font-size: 2rem;
-      font-weight: 800;
-      letter-spacing: -0.02em;
-      color: var(--text);
-      line-height: 1;
-      font-variant-numeric: tabular-nums;
-    }
-
-    .env-summary-label {
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-top: 4px;
-      display: block;
+    /* ===================== MOBILE TWEAKS ===================== */
+    @media (max-width: 640px) {
+      .chaos-container { padding: 64px 16px 32px; }
+      .chaos-windows-grid {
+        grid-template-columns: 1fr 1fr;
+        gap: 8px;
+        margin: 0 -8px;
+      }
+      .chaos-window {
+        font-size: 0.65rem;
+      }
+      .feedback-split { gap: 20px; }
+      .nav-links { gap: 10px; font-size: 0.8rem; }
+      .install-box { font-size: 0.75rem; padding: 12px 14px; }
     }
   </style>
 </head>
 <body>
 
+  <!-- ===================== NAV ===================== -->
+  <nav class="nav">
+    <a href="index.html" class="nav-wordmark">veld<span class="nav-dot">.</span></a>
+    <div class="nav-links">
+      <a href="index.html" class="active">experience</a>
+      <span class="sep">&middot;</span>
+      <a href="humans.html">humans</a>
+      <span class="sep">&middot;</span>
+      <a href="agents.html">agents</a>
+      <span class="sep">&middot;</span>
+      <a href="https://github.com/prosperity-solutions/veld" class="nav-github" title="GitHub" aria-label="GitHub" target="_blank" rel="noopener">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+      </a>
+    </div>
+  </nav>
+
+  <h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">veld</h1>
+
   <main>
 
-  <!-- ==================== HERO ==================== -->
-  <section class="hero">
-    <div class="container">
-      <h1 class="hero-title">veld</h1>
-      <p style="font-size:0.85rem;color:var(--text-muted);letter-spacing:0.06em;text-transform:uppercase;font-weight:500;margin-bottom:4px">Local development orchestrator</p>
-      <p class="hero-tagline">One command. Every service. Real HTTPS.</p>
-      <div class="hero-badges">
-        <span class="badge">Open Source</span>
-        <span class="badge">MIT Licensed</span>
-        <span class="badge">Written in Rust</span>
-        <span class="badge">macOS &amp; Linux</span>
-      </div>
-      <div class="hero-cta">
-        <a href="https://github.com/prosperity-solutions/veld" class="btn btn-primary" rel="noopener" target="_blank">GitHub</a>
-        <a href="#demo" class="btn btn-secondary">See it in action</a>
-        <button class="btn btn-secondary" id="copy-llms" aria-label="Copy llms.txt URL" style="font-size:0.8rem;padding:12px 16px">llms.txt</button>
-      </div>
-      <div class="scroll-hint" aria-hidden="true">&#8595;</div>
-    </div>
-  </section>
+  <!-- ===================== ACT 1: CHAOS ===================== -->
+  <section class="act act-chaos" id="act-chaos">
+    <div class="chaos-container">
 
-  <!-- ==================== PROBLEM ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">The problem</span>
-      <h2>Local dev is broken</h2>
-      <p>Port conflicts, manual wiring, no HTTPS&mdash;sound familiar?</p>
-      <div class="terminal" style="margin-top: 24px">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
-          <span class="terminal-title">your-monorepo</span>
+      <div class="chaos-headline">You've been here before.</div>
+
+      <div class="chaos-windows-grid">
+
+      <div class="chaos-window cw-1">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Terminal</span>
         </div>
-        <div class="terminal-body"><span class="t-dim">$</span> npm run dev:backend
-<span class="t-red">Error: listen EADDRINUSE: address already in use :::3000</span>
-
-<span class="t-dim">$</span> lsof -i :3000
-<span class="t-dim">node    4821 dev   23u  IPv6  0x1a2b3c  TCP *:3000 (LISTEN)</span>
-
-<span class="t-dim">$</span> kill -9 4821 && npm run dev:backend &
-<span class="t-dim">$</span> npm run dev:frontend &
-<span class="t-dim">$</span> npm run dev:admin &
-
-<span class="t-amber">Wait, which port is which again?</span>
-<span class="t-dim">backend  → localhost:3000</span>
-<span class="t-dim">frontend → localhost:3001  ...or was it 3002?</span>
-<span class="t-dim">admin    → localhost:????</span>
-
-<span class="t-red">Mixed Content: blocked loading http:// from https://</span>
-<span class="t-red">ERR_SSL_PROTOCOL_ERROR</span></div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ==================== SOLUTION ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">The solution</span>
-      <h2>One command</h2>
-      <p>Declare your stack in <code style="color:var(--text);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">veld.json</code>, run <code style="color:var(--green);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">veld start</code>.</p>
-      <div class="terminal" style="margin-top: 24px">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
-          <span class="terminal-title">veld</span>
-        </div>
-        <div class="terminal-body"><span class="t-dim">$</span> veld start --preset fullstack --name my-feature
-
-<span class="t-white t-bold">veld</span> Starting environment 'my-feature'...
-
-<span class="t-bold">[1/4]</span> database:docker
-  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[2.1s]</span>
-
-<span class="t-bold">[2/4]</span> backend:local
-  <span class="t-green">&#10003;</span> Phase 1 (port check) passed
-  <span class="t-green">&#10003;</span> Phase 2 (HTTPS check) passed
-  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[1.2s]</span>
-
-<span class="t-bold">[3/4]</span> frontend:local
-  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[0.8s]</span>
-
-<span class="t-bold">[4/4]</span> admin:local
-  <span class="t-green">&#10003;</span> healthy                                  <span class="t-dim">[0.6s]</span>
-
-<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
-<span class="t-cyan">database</span>   <span class="t-dim">https://database.my-feature.myproject.localhost</span>
-<span class="t-cyan">backend</span>    <span class="t-dim">https://backend.my-feature.myproject.localhost</span>
-<span class="t-cyan">frontend</span>   <span class="t-dim">https://frontend.my-feature.myproject.localhost</span>
-<span class="t-cyan">admin</span>      <span class="t-dim">https://admin.my-feature.myproject.localhost</span>
-<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
-
-<span class="t-green">&#10003;</span> Environment 'my-feature' started. 4 URL(s) active.</div>
-      </div>
-    </div>
-  </section>
-
-  <!-- ==================== INTERACTIVE DEMO ==================== -->
-  <section class="demo-section" id="demo">
-    <div class="container wide reveal">
-      <span class="label">Same task, different world</span>
-      <h2>Start backend + frontend with HTTPS</h2>
-      <p>Same goal. Watch the difference.</p>
-
-      <div class="demo-layout">
-        <div class="demo-terminals">
-          <div class="terminal demo-terminal" id="demo-left-wrap">
-            <div class="terminal-header">
-              <span class="terminal-dot red"></span>
-              <span class="terminal-dot yellow"></span>
-              <span class="terminal-dot green"></span>
-              <span class="terminal-title">without veld</span>
-            </div>
-            <div class="terminal-body" id="demo-left"></div>
-          </div>
-          <div class="terminal demo-terminal" id="demo-right-wrap">
-            <div class="terminal-header">
-              <span class="terminal-dot red"></span>
-              <span class="terminal-dot yellow"></span>
-              <span class="terminal-dot green"></span>
-              <span class="terminal-title">with veld</span>
-            </div>
-            <div class="terminal-body" id="demo-right"></div>
-          </div>
-        </div>
-
-        <div class="timeline-controls">
-          <button class="timeline-btn" id="demo-play" aria-label="Play/Pause">
-            <svg id="play-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor"><polygon points="3,1 12,7 3,13"/></svg>
-            <svg id="pause-icon" width="14" height="14" viewBox="0 0 14 14" fill="currentColor" style="display:none"><rect x="2" y="1" width="3.5" height="12"/><rect x="8.5" y="1" width="3.5" height="12"/></svg>
-          </button>
-          <input type="range" class="timeline-slider" id="demo-slider" min="0" max="100" value="0" aria-label="Demo timeline">
-          <span class="timeline-time" id="demo-time">0s</span>
+        <div class="body">
+          <div><span class="prompt">$</span> <span class="cmd">npm run dev</span></div>
+          <div class="error">Error: Port 3000 already in use</div>
+          <div class="dim">EADDRINUSE: address already in use :::3000</div>
         </div>
       </div>
-    </div>
-  </section>
 
-  <!-- ==================== HTTPS ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Core feature</span>
-      <h2>Real HTTPS. Zero config.</h2>
-      <p>No self-signed cert warnings. No mixed content errors. Trusted by browsers out of the box.</p>
-
-      <div class="https-comparison">
-        <div class="https-card before">
-          <h3><span class="t-red">Before</span></h3>
-          <div class="https-url">
-            <span class="t-red">&#9888;</span>
-            <span>http://localhost:3000</span>
-          </div>
-          <div class="https-tags">
-            <span class="https-tag bad">Mixed Content</span>
-            <span class="https-tag bad">CORS errors</span>
-            <span class="https-tag bad">No TLS</span>
-            <span class="https-tag bad">Port conflicts</span>
-          </div>
+      <div class="chaos-window cw-2">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Terminal — backend</span>
         </div>
-        <div class="https-card after">
-          <h3><span class="t-green">With veld</span></h3>
-          <div class="https-url">
-            <span class="t-green">&#128274;</span>
-            <span>https://frontend.dev.myproject.localhost</span>
-          </div>
-          <div class="https-tags">
-            <span class="https-tag good">Auto TLS</span>
-            <span class="https-tag good">Auto DNS</span>
-            <span class="https-tag good">Auto ports</span>
-            <span class="https-tag good">Browser-trusted</span>
+        <div class="body">
+          <div><span class="prompt">$</span> <span class="cmd">cargo run</span></div>
+          <div class="dim">   Compiling backend v0.1.0</div>
+          <div><span style="color:var(--accent)">info</span>: listening on localhost:8080</div>
+        </div>
+      </div>
+
+      <div class="chaos-window cw-3">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Chrome</span>
+        </div>
+        <div class="body">
+          <div style="text-align:center;padding:16px 0;">
+            <div style="font-size:1.4rem;margin-bottom:8px;">&#9888;</div>
+            <div class="error" style="font-weight:600;font-size:0.9rem;">Your connection is not private</div>
+            <div class="dim" style="margin-top:4px;font-size:0.72rem;">NET::ERR_CERT_AUTHORITY_INVALID</div>
           </div>
         </div>
       </div>
 
-      <div class="tls-features">
-        <div class="tls-feature">
-          <h4>DNS</h4>
-          <p>RFC 6761 <code>.localhost</code>. No hosts file edits needed.</p>
+      <div class="chaos-window cw-4">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Terminal</span>
         </div>
-        <div class="tls-feature">
-          <h4>TLS</h4>
-          <p>mkcert auto-certs, trusted by your browser automatically.</p>
+        <div class="body">
+          <div><span class="prompt">$</span> <span class="cmd">lsof -i :3000</span></div>
+          <div class="dim">node  12847 dev  22u  IPv6 ... (LISTEN)</div>
+          <div><span class="prompt">$</span> <span class="cmd">kill -9 12847</span></div>
+          <div class="dim">... ugh</div>
         </div>
-        <div class="tls-feature">
-          <h4>Ports</h4>
-          <p>Auto-allocated. You never see or manage them.</p>
+      </div>
+
+      <div class="chaos-window cw-5">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Slack — #dev</span>
+        </div>
+        <div class="body">
+          <div><span class="slack-name">@mike</span> <span class="slack-msg">hey which port is the API again?</span></div>
+          <div style="margin-top:6px;"><span class="slack-name">@sarah</span> <span class="slack-msg">8080 I think? or 8081</span></div>
+          <div style="margin-top:6px;"><span class="slack-name">@mike</span> <span class="slack-msg">neither works lol</span></div>
+        </div>
+      </div>
+
+      <div class="chaos-window cw-6">
+        <div class="titlebar">
+          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+          <span class="titlebar-label">Terminal</span>
+        </div>
+        <div class="body">
+          <div><span class="prompt">$</span> <span class="cmd">./start-everything.sh</span></div>
+          <div class="dim">Starting database...</div>
+          <div class="dim">Starting backend...</div>
+          <div class="error">Error: backend not ready — connection refused</div>
+          <div class="dim">Retrying in 5s...</div>
+        </div>
+      </div>
+
+      </div><!-- end chaos-windows-grid -->
+
+      <div class="chaos-bottom">
+        <div class="cognitive-load">
+          Cognitive load: <span class="load-bar">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span> <span class="load-label">rising</span>
+        </div>
+
+        <div class="scroll-arrow">
+          <span style="font-family: 'Playfair Display', Georgia, 'Times New Roman', serif; font-size: 1.1rem; font-weight: 400; font-style: italic; letter-spacing: 0.02em;">there's a better way</span>
+          <span class="scroll-arrow-icon">&darr;</span>
         </div>
       </div>
 
     </div>
   </section>
 
-  <!-- ==================== CUSTOM DOMAINS ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Production parity</span>
-      <h2>Any domain. Real policies.</h2>
-      <p>Use your own apex domain locally. Test <code style="color:var(--text);background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:0.85em">frame-ancestors</code>, strict CSP, cookie scoping, and OAuth redirects against URLs that match production&mdash;not <code style="color:var(--text-dim);font-size:0.85em">localhost:3000</code>.</p>
+  <!-- ===================== ACT 2: THE CLEARING ===================== -->
+  <section class="act act-clearing" id="act-clearing">
+    <div class="clearing-terminal">
 
-      <div class="https-comparison" style="margin-top: 24px">
-        <div class="https-card before">
-          <h3><span class="t-red">localhost</span></h3>
-          <div class="https-url">
-            <span class="t-red">&#9888;</span>
-            <span>http://localhost:3000</span>
-          </div>
-          <div class="https-tags">
-            <span class="https-tag bad">CSP bypassed</span>
-            <span class="https-tag bad">Cookies leak</span>
-            <span class="https-tag bad">frame-ancestors fails</span>
-          </div>
+      <div class="type-line">
+        <span class="prompt-char">$ </span><span class="cmd-text">veld start </span><span class="flag">--preset</span><span class="cmd-text"> fullstack </span><span class="flag">--name</span><span class="cmd-text"> dev</span>
+      </div>
+
+      <div class="service-lines">
+        <div class="service-line sl-1-starting">
+          <span class="svc-icon starting">&#9679;</span>
+          <span class="svc-name">database</span>
+          <span class="svc-status">starting...</span>
         </div>
-        <div class="https-card after">
-          <h3><span class="t-green">Your domain</span></h3>
-          <div class="https-url">
-            <span class="t-green">&#128274;</span>
-            <span>https://app.feat-42.myapp.dev</span>
-          </div>
-          <div class="https-tags">
-            <span class="https-tag good">CSP enforced</span>
-            <span class="https-tag good">Cookies scoped</span>
-            <span class="https-tag good">Matches production</span>
-          </div>
+        <div class="service-line sl-1-healthy">
+          <span class="svc-icon healthy">&#10003;</span>
+          <span class="svc-name">database</span>
+          <span class="svc-status ok">healthy</span>
+          <span class="svc-url">database.dev.acme.com</span>
+        </div>
+
+        <div class="service-line sl-2-starting">
+          <span class="svc-icon starting">&#9679;</span>
+          <span class="svc-name">backend</span>
+          <span class="svc-status">starting...</span>
+        </div>
+        <div class="service-line sl-2-healthy">
+          <span class="svc-icon healthy">&#10003;</span>
+          <span class="svc-name">backend</span>
+          <span class="svc-status ok">healthy</span>
+          <span class="svc-url">backend.dev.acme.com</span>
+        </div>
+
+        <div class="service-line sl-3-starting">
+          <span class="svc-icon starting">&#9679;</span>
+          <span class="svc-name">frontend</span>
+          <span class="svc-status">starting...</span>
+        </div>
+        <div class="service-line sl-3-ready">
+          <span class="svc-icon healthy">&#10003;</span>
+          <span class="svc-name">frontend</span>
+          <span class="svc-status ok">ready</span>
+          <span class="svc-url">frontend.dev.acme.com</span>
+        </div>
+
+        <div class="service-line sl-final">
+          <span class="final-line">All services running. All HTTPS.</span>
         </div>
       </div>
 
-      <div class="terminal" style="margin-top: 24px">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
-          <span class="terminal-title">veld.json</span>
-        </div>
-        <div class="terminal-body" style="font-size:0.75rem;line-height:1.8"><span class="t-dim">// .localhost works out of the box (RFC 6761, zero DNS config)</span>
-<span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.{project}.localhost"</span>
-
-<span class="t-dim">// or use your own apex — veld handles DNS + TLS automatically</span>
-<span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.<span class="t-white" style="font-weight:700">myapp.dev</span>"</span></div>
+      <div class="cognitive-load-zero">
+        Cognitive load: &#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617; zero
       </div>
 
-      <div class="custom-domain-urls" style="margin-top: 16px">
-        <div class="custom-domain-url">
-          <span class="t-green" style="font-size:0.9em">&#128274;</span>
-          <code>https://frontend.feat-42.myapp.dev</code>
-        </div>
-        <div class="custom-domain-url">
-          <span class="t-green" style="font-size:0.9em">&#128274;</span>
-          <code>https://backend.feat-42.myapp.dev</code>
-        </div>
-        <div class="custom-domain-url">
-          <span class="t-green" style="font-size:0.9em">&#128274;</span>
-          <code>https://admin.feat-42.myapp.dev</code>
-        </div>
-      </div>
-
-      <div class="config-callouts" style="margin-top: 16px">
-        <span class="callout">CSP frame-ancestors</span>
-        <span class="callout">Cookie domain scoping</span>
-        <span class="callout">CORS origin matching</span>
-        <span class="callout">OAuth redirect URIs</span>
-        <span class="callout">iframe embedding</span>
-        <span class="callout">Prod-like URLs</span>
-      </div>
     </div>
   </section>
 
-  <!-- ==================== PARALLEL ENVIRONMENTS ==================== -->
-  <section class="parallel-section">
-    <div class="container reveal">
-      <span class="label">Parallel worlds</span>
-      <h2>Every worktree. Every variant. Zero collisions.</h2>
-      <p>Run the main branch, two feature worktrees, and a staging variant&mdash;all at the same time on the same machine. Every environment gets its own URLs.</p>
+  <!-- ===================== ACT 3: THE FEEDBACK LOOP ===================== -->
+  <section class="act act-feedback" id="act-feedback">
+    <div class="feedback-stage">
 
-      <div class="env-lanes" id="env-lanes">
-        <!-- Lane 1: main branch -->
-        <div class="env-lane" data-delay="0">
-          <div class="env-lane-header">
-            <div class="env-lane-icon">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 2v12M2 8h12"/></svg>
-            </div>
-            <div>
-              <div class="env-lane-title">main branch</div>
-              <div class="env-lane-dir">~/myproject</div>
-            </div>
-            <div class="env-lane-cmd">veld start --preset fullstack</div>
+      <div class="feedback-narrative">
+        Your agent built the UI.<br>Something's off.
+      </div>
+
+      <div class="feedback-split">
+        <!-- Terminal (left) -->
+        <div class="feedback-terminal">
+          <div class="titlebar">
+            <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+            <span class="titlebar-label" style="margin-left:8px;font-size:0.7rem;color:var(--muted);">Agent Terminal</span>
           </div>
-          <div class="env-lane-nodes">
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">database:docker</span>
+          <div class="body">
+            <div><span class="dim">$</span> <span class="accent">veld feedback</span> <span class="blue">--wait</span></div>
+            <div class="terminal-waiting">
+              <span class="dim">Waiting for human feedback<span class="terminal-waiting-dots"></span></span>
             </div>
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">backend:local</span>
+            <div class="json-float" style="margin-top:12px;">
+              <div class="dim">&#9484; feedback received</div>
+              <div style="margin-left:8px;">
+                <span class="dim">{</span><br>
+                <span style="margin-left:12px;"><span class="blue">"type"</span><span class="dim">:</span> <span class="accent">"comment"</span><span class="dim">,</span></span><br>
+                <span style="margin-left:12px;"><span class="blue">"text"</span><span class="dim">:</span> <span class="accent">"Spacing too tight on mobile"</span><span class="dim">,</span></span><br>
+                <span style="margin-left:12px;"><span class="blue">"selector"</span><span class="dim">:</span> <span class="accent">".app-header"</span><span class="dim">,</span></span><br>
+                <span style="margin-left:12px;"><span class="blue">"viewport"</span><span class="dim">:</span> <span class="accent">"375x812"</span></span><br>
+                <span class="dim">}</span>
+              </div>
             </div>
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">frontend:local</span>
+            <div class="agent-response resp-1" style="margin-top:12px;">
+              <div class="accent">&#9654; Reading .app-header styles...</div>
             </div>
-          </div>
-          <div class="env-lane-urls">
-            <code>https://frontend.<strong>cuddly-panda</strong>.myproject.localhost</code>
-            <code>https://backend.<strong>cuddly-panda</strong>.myproject.localhost</code>
+            <div class="agent-response resp-2">
+              <div class="accent">&#10003; Updated padding: 8px &rarr; 20px</div>
+            </div>
+            <div class="agent-response resp-3">
+              <div class="accent">&#10003; Hot-reload triggered &mdash; browser updated</div>
+            </div>
           </div>
         </div>
 
-        <!-- Lane 2: feature-auth worktree -->
-        <div class="env-lane" data-delay="1">
-          <div class="env-lane-header">
-            <div class="env-lane-icon purple">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3L10 8 6 13"/></svg>
-            </div>
-            <div>
-              <div class="env-lane-title">feature/auth-v2</div>
-              <div class="env-lane-dir">~/worktrees/auth-v2</div>
-            </div>
-            <div class="env-lane-cmd">veld start backend:local frontend:local</div>
+        <!-- Browser (right) -->
+        <div class="browser-mockup">
+          <div class="browser-bar">
+            <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
+            <div class="browser-url"><span class="lock">&#9919;</span> frontend.dev.acme.com</div>
           </div>
-          <div class="env-lane-nodes">
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">backend:local</span>
+          <div class="browser-content">
+            <div class="browser-update-indicator"></div>
+            <div class="browser-header browser-header-original">My Application</div>
+            <div class="browser-body-text">
+              Welcome to the dashboard. Your services are running smoothly across all environments.
             </div>
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">frontend:local</span>
+            <div class="feedback-comment">"Spacing too tight on mobile"</div>
+            <!-- Feedback overlay popover -->
+            <div class="feedback-overlay">
+              <div class="feedback-overlay-header">
+                <span class="icon">&#9998;</span> Leave feedback
+              </div>
+              <div class="feedback-overlay-body">
+                <div class="feedback-textarea-mock">
+                  <span class="feedback-typing-text">Spacing too tight on mobile</span>
+                </div>
+              </div>
+              <div class="feedback-overlay-footer">
+                <div class="feedback-submit-btn">Submit</div>
+              </div>
             </div>
-          </div>
-          <div class="env-lane-urls">
-            <code>https://frontend.<strong>fuzzy-tiger</strong>.myproject.localhost</code>
-            <code>https://backend.<strong>fuzzy-tiger</strong>.myproject.localhost</code>
-          </div>
-        </div>
-
-        <!-- Lane 3: feature-payments worktree with different variants -->
-        <div class="env-lane" data-delay="2">
-          <div class="env-lane-header">
-            <div class="env-lane-icon amber">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M6 3L10 8 6 13"/></svg>
-            </div>
-            <div>
-              <div class="env-lane-title">feature/payments</div>
-              <div class="env-lane-dir">~/worktrees/payments</div>
-            </div>
-            <div class="env-lane-cmd">veld start backend:<strong>docker</strong> frontend:local</div>
-          </div>
-          <div class="env-lane-nodes">
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">backend:<span class="t-amber">docker</span></span>
-            </div>
-            <div class="env-node">
-              <span class="env-node-dot green"></span>
-              <span class="env-node-name">frontend:local</span>
-            </div>
-          </div>
-          <div class="env-lane-urls">
-            <code>https://frontend.<strong>happy-fox</strong>.myproject.localhost</code>
-            <code>https://backend.<strong>happy-fox</strong>.myproject.localhost</code>
+            <div class="feedback-btn-mock"><svg viewBox="0 0 48 48" width="20" height="20"><path d="M20.1 36L10.9 12H15.3L22.6 31.8H22.7L30 12H34.4L25.2 36H20.1Z" fill="white"/><path d="M32 37C33.66 37 35 35.66 35 34C35 32.34 33.66 31 32 31C30.34 31 29 32.34 29 34C29 35.66 30.34 37 32 37Z" fill="#C4F56A"/></svg></div>
           </div>
         </div>
       </div>
 
-      <div class="env-summary" id="env-summary">
-        <div class="env-summary-stat">
-          <span class="env-summary-number" id="env-count">0</span>
-          <span class="env-summary-label">environments</span>
-        </div>
-        <div class="env-summary-stat">
-          <span class="env-summary-number" id="url-count">0</span>
-          <span class="env-summary-label">unique URLs</span>
-        </div>
-        <div class="env-summary-stat">
-          <span class="env-summary-number t-green">0</span>
-          <span class="env-summary-label">port conflicts</span>
-        </div>
+      <div class="feedback-narrative-2">
+        The agent reads. Adjusts. Ships.
       </div>
+
+      <div class="feedback-narrative-result">
+        The browser updates. The loop closes.
+      </div>
+
+      <div class="feedback-caption">
+        Humans and agents, collaborating in real time.<br>
+        No screenshots. No Slack. Just a loop that works.
+      </div>
+
     </div>
   </section>
 
-  <!-- ==================== CONFIG ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Configuration</span>
-      <h2>Your stack. One file.</h2>
-      <p>Declarative, version-controlled, with JSON Schema support for your editor.</p>
-      <div class="config-block terminal">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
-          <span class="terminal-title">veld.json</span>
+  <!-- ===================== ACT 3.5: CROSSED-OUT PROBLEMS ===================== -->
+  <section class="act act-problems" id="act-problems">
+    <div class="problems-stage">
+
+      <div class="problems-narrative">
+        Remember these?
+      </div>
+
+      <div class="problems-grid">
+
+        <div class="problem-card">
+          <div class="problem-title">Port conflicts</div>
+          <div class="problem-desc">"Was it 3000 or 3001? Someone's already using 8080."</div>
         </div>
-        <div class="terminal-body">{
-  <span class="t-cyan">"name"</span>: <span class="t-green">"myproject"</span>,
-  <span class="t-cyan">"url_template"</span>: <span class="t-green">"{service}.{run}.myproject.localhost"</span>,
-  <span class="t-cyan">"nodes"</span>: {
-    <span class="t-cyan">"database"</span>: {
-      <span class="t-cyan">"variants"</span>: {
-        <span class="t-cyan">"docker"</span>: {
-          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
-          <span class="t-cyan">"command"</span>: <span class="t-green">"docker run --rm -p ${veld.port}:5432 postgres:16"</span>,
-          <span class="t-cyan">"outputs"</span>: { <span class="t-dim">// <span class="t-amber">&#8592;</span> downstream nodes reference these</span>
-            <span class="t-cyan">"DATABASE_URL"</span>: <span class="t-green">"postgres://dev:dev@localhost:${veld.port}/app"</span>
-          },
-          <span class="t-cyan">"health_check"</span>: {
-            <span class="t-cyan">"type"</span>: <span class="t-green">"port"</span>,
-            <span class="t-cyan">"timeout_seconds"</span>: <span class="t-purple">15</span>
-          }
-        }
-      }
-    },
-    <span class="t-cyan">"backend"</span>: {
-      <span class="t-cyan">"variants"</span>: {
-        <span class="t-cyan">"local"</span>: {
-          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
-          <span class="t-cyan">"command"</span>: <span class="t-green">"cargo run -- --port ${veld.port}"</span>,
-          <span class="t-cyan">"env"</span>: {
-            <span class="t-cyan">"DATABASE_URL"</span>: <span class="t-green">"<span class="t-amber">${nodes.database.DATABASE_URL}</span>"</span> <span class="t-dim">// <span class="t-amber">&#8592;</span> wired</span>
-          },
-          <span class="t-cyan">"health_check"</span>: {
-            <span class="t-cyan">"type"</span>: <span class="t-green">"http"</span>,
-            <span class="t-cyan">"path"</span>: <span class="t-green">"/health"</span>
-          },
-          <span class="t-cyan">"depends_on"</span>: {
-            <span class="t-cyan">"database"</span>: <span class="t-green">"docker"</span>
-          }
-        }
-      }
-    },
-    <span class="t-cyan">"frontend"</span>: {
-      <span class="t-cyan">"variants"</span>: {
-        <span class="t-cyan">"local"</span>: {
-          <span class="t-cyan">"type"</span>: <span class="t-green">"start_server"</span>,
-          <span class="t-cyan">"command"</span>: <span class="t-green">"npm run dev -- --port ${veld.port}"</span>,
-          <span class="t-cyan">"health_check"</span>: {
-            <span class="t-cyan">"type"</span>: <span class="t-green">"http"</span>,
-            <span class="t-cyan">"path"</span>: <span class="t-green">"/"</span>
-          },
-          <span class="t-cyan">"env"</span>: {
-            <span class="t-cyan">"API_URL"</span>: <span class="t-green">"<span class="t-amber">${nodes.backend.url}</span>"</span> <span class="t-dim">// <span class="t-amber">&#8592;</span> HTTPS URL</span>
-          },
-          <span class="t-cyan">"depends_on"</span>: {
-            <span class="t-cyan">"backend"</span>: <span class="t-green">"local"</span>
-          }
-        }
-      }
-    }
-  },
-  <span class="t-cyan">"presets"</span>: {
-    <span class="t-cyan">"fullstack"</span>: [
-      <span class="t-green">"database:docker"</span>,
-      <span class="t-green">"backend:local"</span>,
-      <span class="t-green">"frontend:local"</span>
-    ],
-    <span class="t-cyan">"frontend-only"</span>: [
-      <span class="t-green">"frontend:local"</span>
-    ]
-  }
-}</div>
+
+        <div class="problem-card">
+          <div class="problem-title">Certificate warnings</div>
+          <div class="problem-desc">"Your connection is not private. Proceed anyway?"</div>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-title">Manual startup order</div>
+          <div class="problem-desc">"Start Postgres, wait, then the API, wait, then the frontend..."</div>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-title">No HTTPS in dev</div>
+          <div class="problem-desc">"OAuth redirects fail. Secure cookies don't work. WebSockets break."</div>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-title">Screenshot feedback</div>
+          <div class="problem-desc">"Take a screenshot, paste in Slack, describe what's wrong, hope the agent understands."</div>
+        </div>
+
+        <div class="problem-card">
+          <div class="problem-title">Environment drift</div>
+          <div class="problem-desc">"It works on my machine. Different ports, different configs, different results."</div>
+        </div>
+
+
       </div>
-      <div class="config-callouts">
-        <span class="callout">Dependency graph</span>
-        <span class="callout">Health checks</span>
-        <span class="callout">Output wiring</span>
-        <span class="callout">URL templates</span>
-        <span class="callout">Presets</span>
-        <span class="callout">Variable interpolation</span>
-        <span class="callout">Teardown hooks</span>
-        <span class="callout">JSON Schema</span>
-      </div>
+
+      <div class="problems-overlay-badge">Not a problem anymore</div>
+
     </div>
   </section>
 
-  <!-- ==================== FEATURES ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Features</span>
-      <h2>Built for real workflows</h2>
-      <div class="features-grid">
-        <div class="feature-card">
-          <h3>Dependency graph</h3>
-          <p>Nodes start in the right order. Parallel when possible. Reverse teardown on stop.</p>
-        </div>
-        <div class="feature-card">
-          <h3>Two-phase health checks</h3>
-          <p>TCP port check + HTTPS endpoint check. Precise error messages when something fails.</p>
-        </div>
-        <div class="feature-card">
-          <h3>Named runs</h3>
-          <p>Multiple environments coexist. Re-running by name is idempotent. Auto-generated fun names.</p>
-        </div>
-        <div class="feature-card">
-          <h3>Variable interpolation</h3>
-          <p><code style="font-size:0.8em;color:var(--cyan)">${veld.port}</code>, <code style="font-size:0.8em;color:var(--cyan)">${nodes.backend.url}</code>, git branch, username&mdash;wired automatically.</p>
-        </div>
-        <div class="feature-card">
-          <h3>Structured output</h3>
-          <p>Every command supports <code style="font-size:0.8em;color:var(--cyan)">--json</code>. Built for scripting, CI, and AI agents.</p>
-        </div>
-        <div class="feature-card">
-          <h3>Single binary</h3>
-          <p>Written in Rust. No runtime, no Node, no containers required for the tool itself.</p>
-        </div>
-      </div>
+  <!-- ===================== ACT 3.75: UNLEASHED ===================== -->
+  <section class="act act-unleashed" id="act-unleashed">
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Any AI agent. Any framework. <span class="accent">One feedback loop.</span></div>
+      <div class="unleashed-subtext">Claude Code, Cursor, Copilot, your custom agent — veld doesn't care. The feedback overlay works with all of them.</div>
     </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">No remote previews. No cloud. <span class="accent">Just your machine.</span></div>
+      <div class="unleashed-subtext">Skip the $200/month preview environment bill. Real HTTPS, locally, in seconds.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">You give feedback at <span class="accent">2:00pm</span>. Your agent ships the fix at <span class="accent">2:01pm</span>.</div>
+      <div class="unleashed-subtext">Live collaboration, not async screenshots. The feedback overlay turns hours of context-switching into a 60-second loop.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">React traces. Vue traces. <span class="accent">Even jQuery.</span>*</div>
+      <div class="unleashed-subtext">* jQuery support is a lie. But everything else is real. Full component stack traces in every feedback submission. The agent knows exactly what to change.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline"><span class="accent">20</span> services. <span class="accent">20</span> HTTPS URLs. One command. <span class="accent">Zero</span> configuration.</div>
+      <div class="unleashed-subtext">Dependency graphs resolve automatically. Health checks verify everything. You just type <code style="color:var(--accent);font-family:var(--font-mono);font-size:0.9em">veld start</code>.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Works in git worktrees. Works across branches. <span class="accent">Every environment is isolated.</span></div>
+      <div class="unleashed-subtext"><code style="color:var(--text);font-family:var(--font-mono);font-size:0.9em">feature-auth</code> and <code style="color:var(--text);font-family:var(--font-mono);font-size:0.9em">feature-payments</code> run simultaneously with zero conflicts.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Teams using veld report <span class="accent">847%</span> fewer messages starting with "which port is it again?"*</div>
+      <div class="unleashed-subtext">* We made this number up. But you know it's true.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Average time from "I have an idea" to running HTTPS preview: <span class="accent">43 seconds</span>.*</div>
+      <div class="unleashed-subtext">* Measured once, on a fast machine, with everything cached. Your mileage may vary. But not by much.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Number of developers who enjoy manually configuring mkcert: <span class="accent">0</span>.</div>
+      <div class="unleashed-subtext">This one we're actually confident about.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline">Port 3000 has been freed. Port 8080 has been freed. <span class="accent">All ports have been freed.</span></div>
+      <div class="unleashed-subtext">You never think about ports again. veld allocates them. Caddy routes them. You open a URL.</div>
+    </div>
+
+    <div class="unleashed-statement">
+      <div class="unleashed-headline"><span class="accent">100</span> microservices. <span class="accent">47</span> microfrontends. <span class="accent">12</span> databases. One person who actually knows why.*</div>
+      <div class="unleashed-subtext">* veld doesn't judge your architecture. It just starts everything in the right order, gives each service an HTTPS URL, and gets out of the way.</div>
+    </div>
+
+    <div class="unleashed-statement unleashed-disclaimer">
+      <div class="unleashed-headline">Disclaimer: <span class="accent">we made all of this up.</span></div>
+      <div class="unleashed-subtext">The numbers, the benchmarks, the "847%" — all fictional. What's real: one command, every service, HTTPS that works. The rest you'll figure out in about 43 seconds.* <br><span style="opacity:0.5;font-size:0.85em">(* This number is also made up.)</span></div>
+    </div>
+
   </section>
 
-  <!-- ==================== DX ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Developer experience</span>
-      <h2>Commands you'll actually use</h2>
-      <div class="dx-cards">
-        <div class="dx-card">
-          <h3>Check what's running</h3>
-          <div class="terminal">
-            <div class="terminal-header">
-              <span class="terminal-dot red"></span>
-              <span class="terminal-dot yellow"></span>
-              <span class="terminal-dot green"></span>
-            </div>
-            <div class="terminal-body"><span class="t-dim">$</span> veld status
+  <!-- ===================== ACT 4: THE HORIZON ===================== -->
+  <section class="act act-horizon" id="act-horizon">
 
-<span class="t-white t-bold">Environment:</span> my-feature
-<span class="t-white t-bold">State:</span> <span class="t-green">running</span>
-
-<span class="t-bold">NODE             STATUS              URL</span>
-<span class="t-dim">&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;&#9472;</span>
-<span class="t-cyan">backend:local</span>    <span class="t-green">&#10003; healthy</span>   https://backend.my-feature.myproject.localhost
-<span class="t-cyan">frontend:local</span>   <span class="t-green">&#10003; healthy</span>   https://frontend.my-feature.myproject.localhost</div>
-          </div>
-        </div>
-
-        <div class="dx-card">
-          <h3>Stream logs</h3>
-          <div class="terminal">
-            <div class="terminal-header">
-              <span class="terminal-dot red"></span>
-              <span class="terminal-dot yellow"></span>
-              <span class="terminal-dot green"></span>
-            </div>
-            <div class="terminal-body"><span class="t-dim">$</span> veld logs -f
-
-<span class="t-cyan">backend:local</span>  Server listening on allocated port
-<span class="t-cyan">backend:local</span>  Database connection established
-<span class="t-cyan">frontend:local</span> Dev server compiled in 340ms
-<span class="t-cyan">frontend:local</span> Connected to backend at https://backend....</div>
-          </div>
-        </div>
-      </div>
+    <div class="contour-bg">
+      <svg viewBox="0 0 1200 800" fill="none" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
+        <path d="M0 400 Q150 350 300 380 Q450 410 600 370 Q750 330 900 360 Q1050 390 1200 350" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.5"/>
+        <path d="M0 420 Q200 380 400 410 Q600 440 800 400 Q1000 360 1200 390" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.4"/>
+        <path d="M0 440 Q180 400 360 430 Q540 460 720 420 Q900 380 1080 410 L1200 405" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.3"/>
+        <path d="M0 460 Q250 430 500 455 Q750 480 1000 445 Q1100 435 1200 440" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.25"/>
+        <path d="M0 380 Q100 340 200 360 Q400 400 600 350 Q800 300 1000 340 Q1100 360 1200 330" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.35"/>
+        <path d="M0 360 Q300 310 600 340 Q900 370 1200 320" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
+        <path d="M0 480 Q200 460 400 475 Q600 490 800 470 Q1000 450 1200 465" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
+        <path d="M0 340 Q150 300 300 320 Q600 370 900 310 Q1050 290 1200 310" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
+        <!-- Closed contours (topographic islands) -->
+        <ellipse cx="350" cy="380" rx="120" ry="40" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
+        <ellipse cx="350" cy="380" rx="70" ry="22" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
+        <ellipse cx="850" cy="360" rx="100" ry="35" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
+        <ellipse cx="850" cy="360" rx="50" ry="18" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
+      </svg>
     </div>
-  </section>
 
-  <!-- ==================== AGENTIC ==================== -->
-  <section>
-    <div class="container reveal">
-      <span class="label">Agent-ready</span>
-      <h2>Built for AI agents</h2>
-      <div class="agentic-lines">
-        <div>AI agents spin up environments.</div>
-        <div>One <code style="color:var(--cyan)">veld.json</code>. Any machine. Any agent.</div>
-        <div class="dim">JSON in. HTTPS URLs out.</div>
-        <div class="dim">Structured, deterministic, machine-readable.</div>
-        <div class="dim">Every command supports <code style="color:var(--cyan)">--json</code>.</div>
+    <div class="horizon-content">
+
+      <div class="horizon-quote">
+        <span class="horizon-line">One command.</span><br>
+        <span class="horizon-line">Every service.</span><br>
+        <span class="horizon-line">You and your agent.</span>
       </div>
-      <div class="terminal" style="margin-top: 24px">
-        <div class="terminal-header">
-          <span class="terminal-dot red"></span>
-          <span class="terminal-dot yellow"></span>
-          <span class="terminal-dot green"></span>
-          <span class="terminal-title">ai-agent</span>
+
+      <div class="horizon-install">
+        <div class="install-box" id="install-cmd" role="button" tabindex="0" aria-label="Copy install command">
+          <span>curl -fsSL https://veld.oss.life.li/get | bash</span>
+          <span class="copy-icon">&#x2398;</span>
+          <span class="copy-toast" id="copy-toast">Copied!</span>
         </div>
-        <div class="terminal-body"><span class="t-purple">agent</span> <span class="t-dim">Reading veld.json...</span>
-<span class="t-purple">agent</span> <span class="t-dim">$</span> veld start --preset fullstack -d --json
-<span class="t-purple">agent</span> <span class="t-dim">$</span> veld urls --json
-<span class="t-dim">{</span>
-  <span class="t-cyan">"backend"</span>: <span class="t-green">"https://backend.agent-run.myproject.localhost"</span>,
-  <span class="t-cyan">"frontend"</span>: <span class="t-green">"https://frontend.agent-run.myproject.localhost"</span>
-<span class="t-dim">}</span>
-<span class="t-purple">agent</span> Running test suite against live URLs...
-<span class="t-purple">agent</span> <span class="t-green">&#10003;</span> All tests passed. Pushing changes.</div>
       </div>
-    </div>
-  </section>
 
-  <!-- ==================== CTA ==================== -->
-  <section class="cta-section">
-    <div class="container reveal">
-      <h2>Stop managing ports.<br>Start building.</h2>
-      <div class="install-cmd" id="install-cmd" role="button" tabindex="0" aria-label="Copy install command">
-        <span>curl -fsSL https://veld.oss.life.li/get | bash</span>
-        <svg class="copy-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="5" width="9" height="9" rx="1.5"/><path d="M5 11H3.5A1.5 1.5 0 012 9.5v-7A1.5 1.5 0 013.5 1h7A1.5 1.5 0 0112 2.5V5"/></svg>
+      <div class="horizon-links">
+        <a href="humans.html" class="primary">Get Started &rarr;</a>
+        <a href="agents.html" class="secondary">Read the docs &rarr;</a>
       </div>
-      <div class="copy-toast" id="copy-toast">Copied to clipboard</div>
-      <div style="margin-top: 24px;">
-        <a href="https://github.com/prosperity-solutions/veld" class="btn btn-secondary" rel="noopener" target="_blank">View on GitHub</a>
+
+      <div class="horizon-logo">
+        <img src="logo-wordmark.svg" alt="veld." class="horizon-logo-img">
       </div>
+
     </div>
   </section>
 
   </main>
 
-  <!-- ==================== FOOTER ==================== -->
-  <footer>
-    <div class="container">
-      <p>MIT Licensed &middot; Built by <a href="https://github.com/prosperity-solutions">Prosperity Solutions GmbH</a></p>
-    </div>
-  </footer>
+  <div class="legal-footer">
+    <a href="https://github.com/prosperity-solutions/veld">GitHub</a> &middot;
+    <a href="https://github.com/prosperity-solutions/veld/blob/main/LICENSE" style="color:inherit">MIT License</a> &middot;
+    <a href="https://github.com/prosperity-solutions">Prosperity Solutions</a> &middot;
+    <a href="https://prosperitysolutions.li/legal">Legal Notice</a>
+  </div>
 
+  <!-- ===================== JS ===================== -->
   <script>
-    // ========== Reveal on scroll ==========
+    // IntersectionObserver for scroll-driven animations
+    const acts = document.querySelectorAll('.act');
     const observer = new IntersectionObserver((entries) => {
-      entries.forEach(e => { if (e.isIntersecting) e.target.classList.add('visible'); });
-    }, { threshold: 0.15 });
-    document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('in-view');
 
-    // ========== Copy install command ==========
+          // Feedback section phased animation
+          if (entry.target.id === 'act-feedback') {
+            startFeedbackSequence(entry.target);
+          }
+
+          // Problems section staggered strikethrough
+          if (entry.target.id === 'act-problems') {
+            startProblemsSequence(entry.target);
+          }
+        }
+      });
+    }, { threshold: 0.05 });
+
+    acts.forEach(act => observer.observe(act));
+
+    // Feedback loop phased animation
+    function startFeedbackSequence(el) {
+      if (el.dataset.started) return;
+      el.dataset.started = '1';
+
+      // Phase 1: button pulses (already via CSS), then overlay opens
+      setTimeout(() => el.classList.add('phase-overlay'), 2500);
+
+      // Phase 2: typing appears in the textarea
+      setTimeout(() => el.classList.add('phase-typing'), 3500);
+
+      // Phase 3: submit — overlay dismisses, comment pins, JSON appears in terminal
+      setTimeout(() => el.classList.add('phase-submit'), 5500);
+
+      // Phase 4: agent processes and browser updates
+      setTimeout(() => el.classList.add('phase-fix'), 8000);
+    }
+
+    // Problems section animation: cards appear staggered, then all struck at once, then big overlay badge
+    function startProblemsSequence(el) {
+      if (el.dataset.started) return;
+      el.dataset.started = '1';
+
+      const cards = el.querySelectorAll('.problem-card');
+      const badge = el.querySelector('.problems-overlay-badge');
+
+      // Step 1: Cards appear one by one (staggered, 150ms between each)
+      cards.forEach((card, i) => {
+        setTimeout(() => card.classList.add('visible'), i * 150);
+      });
+
+      // Calculate when last card finishes appearing
+      const lastCardDelay = (cards.length - 1) * 150; // ms
+      const cardAppearDuration = 500; // transition duration from CSS
+      const pauseAfterCards = 1000; // 1 second pause
+
+      const strikeTime = lastCardDelay + cardAppearDuration + pauseAfterCards;
+
+      // Step 2: ALL cards get struck through at once
+      setTimeout(() => {
+        cards.forEach((card) => {
+          card.classList.add('struck');
+        });
+      }, strikeTime);
+
+      // Step 3: Big overlay badge appears (after strikethrough animation finishes)
+      setTimeout(() => {
+        badge.classList.add('visible');
+      }, strikeTime + 600);
+    }
+
+    // Unleashed section: individual statement reveal on scroll
+    const unleashedStatements = document.querySelectorAll('.unleashed-statement');
+    const statementObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('visible');
+          statementObserver.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.15 });
+
+    unleashedStatements.forEach(s => statementObserver.observe(s));
+
+    // Copy install command
     const installCmd = document.getElementById('install-cmd');
     const copyToast = document.getElementById('copy-toast');
-    installCmd.addEventListener('click', () => {
+
+    function doCopy() {
       navigator.clipboard.writeText('curl -fsSL https://veld.oss.life.li/get | bash').then(() => {
         copyToast.classList.add('show');
         setTimeout(() => copyToast.classList.remove('show'), 1500);
-      });
-    });
+      }).catch(function(){});
+    }
+
+    installCmd.addEventListener('click', doCopy);
     installCmd.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); installCmd.click(); }
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
     });
-
-    // ========== Copy llms.txt URL ==========
-    const copyLlmsBtn = document.getElementById('copy-llms');
-    copyLlmsBtn.addEventListener('click', () => {
-      navigator.clipboard.writeText('https://veld.oss.life.li/llms-full.txt').then(() => {
-        const orig = copyLlmsBtn.textContent;
-        copyLlmsBtn.textContent = 'Copied!';
-        setTimeout(() => { copyLlmsBtn.textContent = orig; }, 1500);
-      });
-    });
-
-    // ========== Interactive Demo — Typing Engine ==========
-    //
-    // Each terminal has a script: an array of actions.
-    //   { type: 'type', cmd: 'string', speed: N }  — type characters one per N ticks
-    //   { type: 'run' }                             — "press enter" (remove cursor)
-    //   { type: 'output', lines: ['...'], speed: N }— show output lines one per N ticks
-    //   { type: 'wait', ticks: N }                  — pause
-    //   { type: 'clear', keep: N }                  — clear all but last N lines of history
-    //
-    // The engine pre-compiles these into a flat array of snapshots (one per tick),
-    // so the slider can scrub to any point instantly.
-
-    const _$ = id => document.getElementById(id);
-    const demoLeft = _$('demo-left');
-    const demoRight = _$('demo-right');
-    const demoLeftWrap = _$('demo-left-wrap');
-    const demoRightWrap = _$('demo-right-wrap');
-    const slider = _$('demo-slider');
-    const playBtn = _$('demo-play');
-    const playIcon = _$('play-icon');
-    const pauseIcon = _$('pause-icon');
-    const timeDisplay = _$('demo-time');
-
-    const LOOP_PAUSE = 3000;
-    const TICK_MS = 60;
-
-    // Track which terminals the user has manually scrolled
-    const userScrolled = new WeakSet();
-
-    function autoScrollIfAtBottom(el) {
-      if (!userScrolled.has(el)) {
-        el.scrollTop = el.scrollHeight;
-      }
-    }
-
-    // Detect manual scroll (user scrolls up = opt out of auto-scroll)
-    function trackUserScroll(el) {
-      el.addEventListener('scroll', () => {
-        const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 10;
-        if (atBottom) {
-          userScrolled.delete(el);
-        } else {
-          userScrolled.add(el);
-        }
-      }, { passive: true });
-    }
-
-    // Will be initialized after DOM refs are set up (they already are above)
-    trackUserScroll(demoLeft);
-    trackUserScroll(demoRight);
-    let playing = false;
-    let animFrame = null;
-    let lastTick = 0;
-    let loopTimeout = null;
-    let userPaused = false;
-
-    // ── Color helpers ──
-    const s = (cls, txt) => `<span class="${cls}">${txt}</span>`;
-    const dim = t => s('t-dim', t);
-    const wht = t => s('t-white', t);
-    const grn = t => s('t-green', t);
-    const red = t => s('t-red', t);
-    const amb = t => s('t-amber', t);
-    const cyn = t => s('t-cyan', t);
-    const bld = t => s('t-bold', t);
-    const CURSOR = '<span class="cursor"></span>';
-    const LINE = dim('&#9472;'.repeat(44));
-    const PROMPT = dim('$') + ' ';
-
-    // ── Compile a script into an array of {history, prompt, cursor} snapshots ──
-    function compileScript(script, cwd) {
-      const snaps = [];
-      let history = []; // finished lines (HTML strings)
-      let promptLine = '';
-      let typed = '';
-
-      function snap(showCursor) {
-        const h = history.join('\n');
-        const p = promptLine ? (PROMPT + (typed ? wht(typed) : '')) : '';
-        const c = showCursor ? CURSOR : '';
-        const cwdLine = dim(cwd);
-        const parts = [cwdLine];
-        if (h) parts.push(h);
-        if (p || showCursor) parts.push(p + c);
-        snaps.push(parts.join('\n'));
-      }
-
-      // Initial state: just prompt with cursor
-      promptLine = '$';
-      snap(true);
-
-      for (const action of script) {
-        if (action.type === 'type') {
-          const speed = action.speed || 1;
-          const chars = action.cmd.split('');
-          typed = '';
-          let count = 0;
-          for (const ch of chars) {
-            typed += ch;
-            count++;
-            if (count % speed === 0 || count === chars.length) snap(true);
-          }
-        } else if (action.type === 'run') {
-          // "Press enter" — move typed command to history, show no cursor briefly
-          history.push(PROMPT + typed);
-          typed = '';
-          promptLine = '';
-          snap(false);
-        } else if (action.type === 'output') {
-          const speed = action.speed || 1;
-          let count = 0;
-          for (const line of action.lines) {
-            history.push(line);
-            count++;
-            if (count % speed === 0 || count === action.lines.length) snap(false);
-          }
-        } else if (action.type === 'prompt') {
-          // Show a new prompt
-          promptLine = '$';
-          typed = '';
-          snap(true);
-        } else if (action.type === 'wait') {
-          const n = action.ticks || 1;
-          const lastSnap = snaps[snaps.length - 1];
-          for (let i = 0; i < n; i++) snaps.push(lastSnap);
-        } else if (action.type === 'clear') {
-          const keep = action.keep || 0;
-          history = keep > 0 ? history.slice(-keep) : [];
-          snap(promptLine ? true : false);
-        }
-      }
-
-      return snaps;
-    }
-
-    // ─── LEFT SCRIPT: Without veld ───
-    const leftScript = [
-      // cd into project
-      { type: 'type', cmd: 'cd myproject/' },
-      { type: 'run' },
-      { type: 'wait', ticks: 6 },
-      // npm run backend — user thinks, then types
-      { type: 'prompt' },
-      { type: 'wait', ticks: 5 },
-      { type: 'type', cmd: 'npm run dev:backend' },
-      { type: 'run' },
-      { type: 'wait', ticks: 12 },          // npm takes a moment...
-      { type: 'output', lines: [red('Error: EADDRINUSE :::3000'), ''] },
-      { type: 'wait', ticks: 15 },          // stare at error, process it
-      // lsof — developer googles, then types
-      { type: 'prompt' },
-      { type: 'wait', ticks: 8 },           // thinking...
-      { type: 'type', cmd: 'lsof -i :3000' },
-      { type: 'run' },
-      { type: 'wait', ticks: 6 },
-      { type: 'output', lines: [dim('node  4821 dev  23u  IPv6  TCP *:3000'), ''] },
-      { type: 'wait', ticks: 8 },           // read the output, find the PID
-      // kill — okay, nuke it
-      { type: 'prompt' },
-      { type: 'wait', ticks: 4 },
-      { type: 'type', cmd: 'kill -9 4821' },
-      { type: 'run' },
-      { type: 'wait', ticks: 6 },
-      // restart backend in background
-      { type: 'prompt' },
-      { type: 'wait', ticks: 6 },           // remember the & this time
-      { type: 'type', cmd: 'npm run dev:backend &' },
-      { type: 'run' },
-      { type: 'wait', ticks: 10 },          // npm starting up...
-      { type: 'output', lines: [dim('[1] 5102  Listening on :3000'), ''] },
-      { type: 'wait', ticks: 6 },
-      // start frontend
-      { type: 'prompt' },
-      { type: 'wait', ticks: 4 },
-      { type: 'type', cmd: 'npm run dev:frontend &' },
-      { type: 'run' },
-      { type: 'wait', ticks: 10 },          // npm starting up...
-      { type: 'output', lines: [dim('[2] 5204  Listening on :3001'), ''] },
-      { type: 'wait', ticks: 10 },
-      // confusion — developer pauses, realizes they don't know
-      { type: 'output', lines: [
-        '',
-        amb('wait... which port is which?'),
-        dim('backend  = localhost:3000'),
-        dim('frontend = localhost:3001 ...right?'),
-        '',
-      ]},
-      { type: 'wait', ticks: 18 },          // staring at ports, unsure
-      // try HTTPS — new idea
-      { type: 'prompt' },
-      { type: 'wait', ticks: 8 },           // googling "mkcert localhost"
-      { type: 'type', cmd: 'mkcert localhost' },
-      { type: 'run' },
-      { type: 'wait', ticks: 8 },
-      { type: 'output', lines: [dim('Created ./localhost.pem'), ''] },
-      { type: 'wait', ticks: 6 },
-      { type: 'prompt' },
-      { type: 'wait', ticks: 10 },          // figuring out the env var
-      { type: 'type', cmd: 'HTTPS=true npm run dev:frontend' },
-      { type: 'run' },
-      { type: 'wait', ticks: 12 },          // waiting for it to start...
-      { type: 'output', lines: [
-        red('ERR_SSL_PROTOCOL_ERROR'),
-        red('Mixed Content: blocked http:// from https://'),
-        '',
-      ]},
-      { type: 'wait', ticks: 20 },          // long stare at the error
-      // despair
-      { type: 'output', lines: [''] },
-      { type: 'output', lines: [
-        dim('$ ... configure nginx reverse proxy?'),
-      ]},
-      { type: 'wait', ticks: 10 },
-      { type: 'output', lines: [
-        dim('$ ... edit /etc/hosts?'),
-      ]},
-      { type: 'wait', ticks: 10 },
-      { type: 'output', lines: [
-        dim('$ ... set up Caddy manually?'),
-        '',
-      ]},
-      { type: 'wait', ticks: 12 },
-      { type: 'output', lines: [
-        red('20 minutes later, still no HTTPS'),
-        '',
-        dim('Result: 2 processes, 0 HTTPS,'),
-        dim('unknown ports, no health checks'),
-      ]},
-      { type: 'wait', ticks: 30 },
-    ];
-
-    // ─── RIGHT SCRIPT: With veld ───
-    const rightScript = [
-      { type: 'type', cmd: 'veld start' },
-      { type: 'run' },
-      { type: 'wait', ticks: 2 },
-      { type: 'output', lines: [
-        '',
-        s('t-white t-bold', 'veld') + ' Starting environment...',
-        '',
-        dim('plan: 2 node(s) in 2 stage(s)'),
-      ]},
-      { type: 'wait', ticks: 3 },
-      { type: 'output', lines: [
-        '',
-        bld('[1/2]') + ' backend:local',
-        '  ' + amb('~') + ' ' + dim('starting... port 52341'),
-      ]},
-      { type: 'wait', ticks: 3 },
-      { type: 'output', lines: [
-        '  ' + grn('&#10003;') + ' Phase 1 passed',
-        '  ' + amb('~') + ' ' + dim('phase 2: HTTPS...'),
-      ]},
-      { type: 'wait', ticks: 3 },
-      { type: 'output', lines: [
-        '  ' + grn('&#10003;') + ' Phase 2 passed',
-        '  ' + grn('&#10003; healthy') + ' ' + dim('[1.2s]'),
-      ]},
-      { type: 'wait', ticks: 2 },
-      { type: 'output', lines: [
-        '',
-        bld('[2/2]') + ' frontend:local',
-        '  ' + amb('~') + ' ' + dim('depends on: backend:local'),
-        '  ' + amb('~') + ' ' + dim('starting... port 52342'),
-      ]},
-      { type: 'wait', ticks: 3 },
-      { type: 'output', lines: [
-        '  ' + grn('&#10003;') + ' Phase 1 passed',
-        '  ' + grn('&#10003;') + ' Phase 2 passed',
-        '  ' + grn('&#10003; healthy') + ' ' + dim('[0.8s]'),
-      ]},
-      { type: 'wait', ticks: 2 },
-      // Summary — URLs appear
-      { type: 'output', lines: [
-        '',
-        LINE,
-        cyn('backend') + '   ' + dim('https://backend.dev.myproject.localhost'),
-        cyn('frontend') + '  ' + dim('https://frontend.dev.myproject.localhost'),
-        LINE,
-        '',
-        grn('&#10003;') + ' Environment started. 2 URL(s) active.',
-      ]},
-      { type: 'prompt' },
-      // Idle — just a blinking cursor while left is still struggling
-      { type: 'wait', ticks: 300 },
-    ];
-
-    // Compile both
-    const leftSnaps = compileScript(leftScript, '~/myproject');
-    const rightSnaps = compileScript(rightScript, '~/myproject');
-
-    // Pad to same length
-    const TOTAL_STEPS = Math.max(leftSnaps.length, rightSnaps.length);
-    while (leftSnaps.length < TOTAL_STEPS) leftSnaps.push(leftSnaps[leftSnaps.length - 1]);
-    while (rightSnaps.length < TOTAL_STEPS) rightSnaps.push(rightSnaps[rightSnaps.length - 1]);
-
-    slider.max = TOTAL_STEPS;
-
-    // Find when right terminal shows the final summary (scan for "Environment started")
-    let RIGHT_DONE_STEP = TOTAL_STEPS;
-    for (let i = 0; i < rightSnaps.length; i++) {
-      if (rightSnaps[i].includes('Environment started')) { RIGHT_DONE_STEP = i; break; }
-    }
-    // Find when left terminal shows the failure
-    let LEFT_DONE_STEP = TOTAL_STEPS;
-    for (let i = 0; i < leftSnaps.length; i++) {
-      if (leftSnaps[i].includes('still no HTTPS')) { LEFT_DONE_STEP = i; break; }
-    }
-
-    function renderDemo(step) {
-      step = Math.min(step, TOTAL_STEPS - 1);
-      demoLeft.innerHTML = leftSnaps[step];
-      demoRight.innerHTML = rightSnaps[step];
-      // Auto-scroll to bottom unless user has scrolled up manually
-      autoScrollIfAtBottom(demoLeft);
-      autoScrollIfAtBottom(demoRight);
-      slider.value = step;
-      timeDisplay.textContent = (step * TICK_MS / 1000).toFixed(1) + 's';
-
-      // Badge & border for right terminal
-      if (step >= RIGHT_DONE_STEP) {
-        demoRightWrap.classList.add('done-good');
-        showBadge(demoRightWrap, 'good', 'done in ~2s');
-      } else {
-        demoRightWrap.classList.remove('done-good');
-        hideBadge(demoRightWrap);
-      }
-
-      // Badge & border for left terminal
-      if (step >= LEFT_DONE_STEP) {
-        demoLeftWrap.classList.add('done-bad');
-        showBadge(demoLeftWrap, 'bad', 'still broken');
-      } else {
-        demoLeftWrap.classList.remove('done-bad');
-        hideBadge(demoLeftWrap);
-      }
-    }
-
-    function showBadge(wrap, type, text) {
-      let badge = wrap.querySelector('.demo-done-badge');
-      if (!badge) {
-        badge = document.createElement('div');
-        badge.className = 'demo-done-badge ' + type;
-        wrap.style.position = 'relative';
-        wrap.appendChild(badge);
-      }
-      badge.textContent = text;
-      badge.className = 'demo-done-badge ' + type + ' visible';
-    }
-
-    function hideBadge(wrap) {
-      const badge = wrap.querySelector('.demo-done-badge');
-      if (badge) badge.classList.remove('visible');
-    }
-
-    function setPlayState(isPlaying) {
-      playing = isPlaying;
-      playIcon.style.display = isPlaying ? 'none' : 'block';
-      pauseIcon.style.display = isPlaying ? 'block' : 'none';
-    }
-
-    function togglePlay() {
-      if (playing) {
-        userPaused = true;
-        setPlayState(false);
-        cancelAnimationFrame(animFrame);
-        clearTimeout(loopTimeout);
-      } else {
-        userPaused = false;
-        if (parseInt(slider.value, 10) >= TOTAL_STEPS - 1) {
-          slider.value = 0;
-          renderDemo(0);
-        }
-        setPlayState(true);
-        lastTick = performance.now();
-        tick();
-      }
-    }
-
-    function tick() {
-      if (!playing) return;
-      const now = performance.now();
-      if (now - lastTick >= TICK_MS) {
-        let v = parseInt(slider.value, 10) + 1;
-        if (v >= TOTAL_STEPS) {
-          renderDemo(TOTAL_STEPS - 1);
-          loopTimeout = setTimeout(() => {
-            if (!playing) return;
-            // Reset scroll tracking on loop restart
-            userScrolled.delete(demoLeft);
-            userScrolled.delete(demoRight);
-            slider.value = 0;
-            renderDemo(0);
-            lastTick = performance.now();
-            animFrame = requestAnimationFrame(tick);
-          }, LOOP_PAUSE);
-          return;
-        }
-        renderDemo(v);
-        lastTick = now;
-      }
-      animFrame = requestAnimationFrame(tick);
-    }
-
-    playBtn.addEventListener('click', togglePlay);
-
-    slider.addEventListener('input', () => {
-      // Pause playback when user scrubs
-      if (playing) {
-        setPlayState(false);
-        cancelAnimationFrame(animFrame);
-      }
-      clearTimeout(loopTimeout);
-      renderDemo(parseInt(slider.value, 10));
-    });
-
-    // Auto-start on scroll into view (respect user pause and reduced motion)
-    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const demoObserver = new IntersectionObserver((entries) => {
-      entries.forEach(e => {
-        if (e.isIntersecting && !playing && !userPaused && !prefersReducedMotion) {
-          setTimeout(() => { if (!playing && !userPaused) togglePlay(); }, 400);
-        }
-      });
-    }, { threshold: 0.3 });
-    demoObserver.observe(document.querySelector('.demo-section'));
-
-    renderDemo(0);
-
-    // ========== Parallel Environments Animation ==========
-    const envLanes = document.querySelectorAll('.env-lane');
-    const envCountEl = document.getElementById('env-count');
-    const urlCountEl = document.getElementById('url-count');
-    let envAnimated = false;
-
-    function animateCount(el, target, duration) {
-      const start = performance.now();
-      const from = 0;
-      function step(now) {
-        const t = Math.min((now - start) / duration, 1);
-        el.textContent = Math.round(from + (target - from) * t);
-        if (t < 1) requestAnimationFrame(step);
-      }
-      requestAnimationFrame(step);
-    }
-
-    const envObserver = new IntersectionObserver((entries) => {
-      entries.forEach(e => {
-        if (e.isIntersecting && !envAnimated) {
-          envAnimated = true;
-          envLanes.forEach((lane, i) => {
-            setTimeout(() => {
-              lane.classList.add('active');
-              // Update counters as each lane appears
-              animateCount(envCountEl, i + 1, 300);
-              animateCount(urlCountEl, (i + 1) * 2, 300);
-            }, i * 600);
-          });
-        }
-      });
-    }, { threshold: 0.2 });
-    envObserver.observe(document.querySelector('.parallel-section'));
   </script>
+
 </body>
 </html>
