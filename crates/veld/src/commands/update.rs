@@ -35,8 +35,19 @@ pub async fn run() -> i32 {
     }
 }
 
+/// Read the setup mode from `~/.veld/setup.json`.
+fn read_setup_mode() -> Option<String> {
+    let path = dirs::home_dir()?.join(".veld").join("setup.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Restart daemon and helper so they run the newly installed binaries.
-/// This re-runs setup non-interactively via `veld setup` with sudo.
+/// Mode-aware: uses sudo only for privileged mode, runs without sudo otherwise.
 async fn restart_services() {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
@@ -49,12 +60,26 @@ async fn restart_services() {
         }
     };
 
-    // The updated binary is already installed — invoke it to run setup,
-    // which will restart daemon + helper with the new versions.
-    let status = std::process::Command::new("sudo")
-        .arg(&exe)
-        .arg("setup")
-        .status();
+    let mode = read_setup_mode();
+
+    let status = match mode.as_deref() {
+        Some("privileged") => {
+            // Use sudo to restart system services.
+            std::process::Command::new("sudo")
+                .arg(&exe)
+                .arg("setup")
+                .arg("privileged")
+                .status()
+        }
+        _ => {
+            // Restart user-level helper without sudo.
+            eprintln!("Restarting user-level services...");
+            std::process::Command::new(&exe)
+                .arg("setup")
+                .arg("unprivileged")
+                .status()
+        }
+    };
 
     match status {
         Ok(s) if s.success() => {

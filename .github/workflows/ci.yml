@@ -105,18 +105,12 @@ jobs:
           ../target/debug/veld nodes --json
           ../target/debug/veld graph frontend:local
 
-      - name: Verify setup guard (PRD assertion 13)
-        working-directory: testproject
+      - name: Verify setup subcommands exist
         run: |
           set -e
-          # status should fail with exit 1 before setup
-          if ../target/debug/veld status --json 2>&1; then
-            echo "ERROR: status should have failed before setup"
-            exit 1
-          fi
-          # verify the JSON error contains setup_required
-          output=$(../target/debug/veld status --json 2>&1 || true)
-          echo "$output" | grep -q '"setup_required"'
+          ./target/debug/veld setup --help | grep -q "unprivileged"
+          ./target/debug/veld setup --help | grep -q "privileged"
+          echo "Setup subcommands verified."
 
       - name: Test Python servers directly
         run: |

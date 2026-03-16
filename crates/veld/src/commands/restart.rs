@@ -6,10 +6,6 @@ use crate::output;
 
 /// `veld restart [--name <n>] [--debug]`
 pub async fn run(name: Option<String>, debug: bool) -> i32 {
-    if !super::require_setup(false).await {
-        return 1;
-    }
-
     let Some((config_path, config)) = super::load_config(false) else {
         return 1;
     };

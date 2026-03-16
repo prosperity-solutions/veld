@@ -1,5 +1,5 @@
 use serde_json::Value;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::caddy::CaddyManager;
 use crate::dns::{self, DnsManager};
@@ -9,13 +9,23 @@ use crate::protocol::{Request, Response};
 pub struct State {
     dns: DnsManager,
     caddy: CaddyManager,
+    https_port: u16,
+    http_port: u16,
+    shutdown_tx: tokio::sync::watch::Sender<bool>,
 }
 
 impl State {
-    pub fn new() -> Self {
+    pub fn new(
+        https_port: u16,
+        http_port: u16,
+        shutdown_tx: tokio::sync::watch::Sender<bool>,
+    ) -> Self {
         Self {
             dns: DnsManager::new(),
-            caddy: CaddyManager::new(),
+            caddy: CaddyManager::new(https_port, http_port),
+            https_port,
+            http_port,
+            shutdown_tx,
         }
     }
 
@@ -36,6 +46,7 @@ impl State {
             "caddy_stop" => self.handle_caddy_stop().await,
             "caddy_reload" => self.handle_caddy_reload().await,
             "status" => self.handle_status().await,
+            "shutdown" => self.handle_shutdown().await,
             other => {
                 warn!(command = other, "unknown command");
                 Response::err(format!("unknown command: {other}"))
@@ -162,6 +173,17 @@ impl State {
         Response::ok_with_data(serde_json::json!({
             "caddy": if caddy_running { "running" } else { "stopped" },
             "dns_entries": dns_entries,
+            "https_port": self.https_port,
+            "http_port": self.http_port,
         }))
+    }
+
+    async fn handle_shutdown(&self) -> Response {
+        info!("shutdown command received, stopping caddy and signalling exit");
+        if let Err(e) = self.caddy.stop().await {
+            warn!("error stopping caddy during shutdown: {e:#}");
+        }
+        let _ = self.shutdown_tx.send(true);
+        Response::ok()
     }
 }

@@ -64,8 +64,8 @@ pub async fn check_setup() -> SetupStatus {
 
 /// Try to contact veld-helper via its socket.
 async fn check_helper_running() -> bool {
-    let client = HelperClient::new(&helper::default_socket_path());
-    (client.status().await).is_ok()
+    // Try both system and user sockets.
+    HelperClient::connect().await.is_ok()
 }
 
 /// Enforce that setup is complete. Returns an error with structured info
@@ -79,6 +79,102 @@ pub async fn require_setup() -> Result<SetupStatus, SetupError> {
             missing: status.missing(),
         })
     }
+}
+
+/// Ensure a helper is running and reachable. Tries existing sockets first,
+/// then auto-bootstraps an unprivileged helper if needed.
+pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Error> {
+    use crate::helper::{HelperClient, user_socket_path};
+
+    // Migrate caddy-data from system install if needed.
+    if let Err(e) = migrate_from_system_install() {
+        tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
+    }
+
+    // Try connecting to an existing helper (system or user socket).
+    if let Ok(client) = HelperClient::connect().await {
+        return Ok(client);
+    }
+
+    // Auto-bootstrap: start a user-level helper.
+    eprintln!("Setting up Veld for first use...");
+
+    // Ensure Caddy is installed.
+    let caddy = crate::paths::caddy_bin();
+    if !caddy.exists() {
+        eprintln!("  Downloading Caddy...");
+        install_caddy(false)
+            .await
+            .context("failed to install Caddy during auto-bootstrap")?;
+    }
+
+    // Ensure ~/.veld/ directory exists.
+    let socket = user_socket_path();
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    // Find the helper binary.
+    let helper_bin = which_self("veld-helper")?;
+
+    // Spawn the helper as a background process.
+    eprintln!("  Starting helper...");
+    let _child = std::process::Command::new(&helper_bin)
+        .arg("--socket-path")
+        .arg(&socket)
+        .arg("--https-port")
+        .arg("8443")
+        .arg("--http-port")
+        .arg("8080")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("failed to spawn veld-helper")?;
+
+    // Wait for socket to become available.
+    let client = HelperClient::new(&socket);
+    for _ in 0..40 {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if client.status().await.is_ok() {
+            break;
+        }
+    }
+
+    if client.status().await.is_err() {
+        anyhow::bail!(
+            "veld-helper failed to start — socket not reachable at {}",
+            socket.display()
+        );
+    }
+
+    // Start Caddy via the helper.
+    eprintln!("  Starting Caddy...");
+    match tokio::time::timeout(std::time::Duration::from_secs(30), client.caddy_start()).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "could not start Caddy (may already be running)");
+        }
+        Err(_) => {
+            tracing::warn!("caddy_start timed out");
+        }
+    }
+
+    // Trust CA (best-effort, non-blocking).
+    eprintln!("  Trusting development CA...");
+    if let Err(e) = trust_caddy_ca().await {
+        tracing::warn!(error = %e, "CA trust failed (HTTPS may show warnings)");
+    }
+
+    // Write mode file.
+    let veld_dir = socket.parent().unwrap_or(std::path::Path::new("/tmp"));
+    let setup_json = veld_dir.join("setup.json");
+    let _ = std::fs::write(&setup_json, r#"{"mode":"auto"}"#);
+
+    eprintln!("  Done!");
+    eprintln!();
+
+    Ok(client)
 }
 
 /// Structured JSON representation of the setup-required error.
@@ -133,12 +229,12 @@ fn is_port_in_use(port: u16) -> bool {
     TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok()
 }
 
-/// Check that the required ports (80, 443, 2019) are free.
+/// Check that the required ports (https, http, 2019) are free.
 ///
 /// If Caddy is already running (admin API responds on 2019), all three ports
 /// are considered owned by Veld and the check passes — this makes `veld setup`
 /// idempotent.
-pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
+pub async fn check_ports(https_port: u16, http_port: u16) -> Result<StepResult, anyhow::Error> {
     // If our own Caddy is already running, ports are ours — skip the check.
     if is_caddy_running().await {
         return Ok(StepResult::success(
@@ -146,7 +242,7 @@ pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
         ));
     }
 
-    let ports = [80u16, 443, 2019];
+    let ports = [http_port, https_port, 2019];
     let mut in_use = Vec::new();
 
     for port in ports {
@@ -156,7 +252,9 @@ pub async fn check_ports() -> Result<StepResult, anyhow::Error> {
     }
 
     if in_use.is_empty() {
-        Ok(StepResult::success("Ports 80, 443, and 2019 are available"))
+        Ok(StepResult::success(format!(
+            "Ports {http_port}, {https_port}, and 2019 are available"
+        )))
     } else {
         let list: Vec<String> = in_use.iter().map(|p| p.to_string()).collect();
         anyhow::bail!(
@@ -187,6 +285,11 @@ async fn is_caddy_running() -> bool {
 /// kept; if it differs (e.g. new plugins were added) the old binary is
 /// replaced automatically.
 pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
+    // Migrate caddy-data from system install if needed.
+    if let Err(e) = migrate_from_system_install() {
+        tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
+    }
+
     let lib_dir = crate::paths::lib_dir();
     let caddy = lib_dir.join("caddy");
     let marker = crate::paths::caddy_url_marker();
@@ -237,7 +340,7 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
 /// Tries the helper RPC first (if veld-helper is running), then falls back to
 /// hitting the Caddy admin API directly.
 async fn stop_caddy_best_effort() {
-    let client = HelperClient::new(&helper::default_socket_path());
+    let client = HelperClient::new(&helper::system_socket_path());
     if client.caddy_stop().await.is_ok() {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         return;
@@ -503,11 +606,27 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     ))
 }
 
+/// Install (or verify) the Veld helper using an explicit binary path,
+/// then verify it is reachable and start Caddy through it.
+///
+/// This variant is used by `veld setup privileged` where the binary path
+/// was resolved before sudo escalation and passed as an argument.
+pub async fn install_helper_with_bin(
+    veld_helper_bin: &std::path::Path,
+) -> Result<StepResult, anyhow::Error> {
+    install_helper_inner(veld_helper_bin.to_path_buf()).await
+}
+
 /// Install (or verify) the Veld helper, then verify it is reachable and
 /// start Caddy through it.
 pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
     let veld_helper_bin = which_self("veld-helper")?;
-    let socket = crate::helper::default_socket_path();
+    install_helper_inner(veld_helper_bin).await
+}
+
+/// Shared implementation for `install_helper` and `install_helper_with_bin`.
+async fn install_helper_inner(veld_helper_bin: PathBuf) -> Result<StepResult, anyhow::Error> {
+    let socket = crate::helper::system_socket_path();
 
     // Try to register as a system service. If launchctl/systemctl fails
     // (e.g. in CI), fall back to starting the helper directly.
@@ -777,6 +896,14 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
                     .await;
                 let daemon_plist = home.join("Library/LaunchAgents/dev.veld.daemon.plist");
                 let _ = std::fs::remove_file(&daemon_plist);
+
+                // Stop and remove user-level helper LaunchAgent (unprivileged mode).
+                let _ = Command::new("launchctl")
+                    .args(["bootout", &format!("gui/{uid}/dev.veld.helper")])
+                    .status()
+                    .await;
+                let helper_agent_plist = home.join("Library/LaunchAgents/dev.veld.helper.plist");
+                let _ = std::fs::remove_file(&helper_agent_plist);
             }
         }
         "linux" => {
@@ -802,6 +929,17 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
                 .await;
             if let Some(home) = dirs::home_dir() {
                 let _ = std::fs::remove_file(home.join(".config/systemd/user/veld-daemon.service"));
+
+                // Stop and remove user-level helper service (unprivileged mode).
+                let _ = Command::new("systemctl")
+                    .args(["--user", "stop", "veld-helper"])
+                    .status()
+                    .await;
+                let _ = Command::new("systemctl")
+                    .args(["--user", "disable", "veld-helper"])
+                    .status()
+                    .await;
+                let _ = std::fs::remove_file(home.join(".config/systemd/user/veld-helper.service"));
             }
         }
         _ => {}
@@ -824,10 +962,20 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         }
     }
 
-    // Remove daemon socket.
-    let socket = helper::default_socket_path();
+    // Remove helper sockets (both system and user).
+    let socket = helper::system_socket_path();
     if socket.exists() {
         let _ = std::fs::remove_file(&socket);
+    }
+
+    // Remove ~/.veld directory (helper.sock, setup.json, hints.json, etc.).
+    if let Some(home) = dirs::home_dir() {
+        let veld_dir = home.join(".veld");
+        if veld_dir.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&veld_dir) {
+                tracing::warn!(path = %veld_dir.display(), error = %e, "failed to remove ~/.veld dir");
+            }
+        }
     }
 
     // Remove Hammerspoon Spoon (best-effort).
@@ -881,7 +1029,7 @@ async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
 
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable,
 /// or in the veld lib directory.
-fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
+pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
     let current = std::env::current_exe().context("cannot determine current executable path")?;
     let dir = current
         .parent()
@@ -1183,6 +1331,44 @@ async fn run_cmd(program: &str, args: &[&str]) -> Result<(), anyhow::Error> {
             args.join(" "),
             status.code().unwrap_or(-1)
         );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Migration from system-level install
+// ---------------------------------------------------------------------------
+
+/// Migrate Caddy data from a previous system-level install (`/usr/local/lib/veld/caddy-data`)
+/// to the user-level location (`~/.local/lib/veld/caddy-data`), preserving the CA and
+/// certificates so users don't have to re-trust a new root CA.
+pub fn migrate_from_system_install() -> Result<(), anyhow::Error> {
+    let system_data = PathBuf::from("/usr/local/lib/veld/caddy-data");
+    let user_lib = dirs::home_dir()
+        .context("cannot determine home directory")?
+        .join(".local/lib/veld");
+    let user_data = user_lib.join("caddy-data");
+
+    if system_data.exists() && !user_data.exists() {
+        tracing::info!("Migrating Caddy data from system install...");
+        std::fs::create_dir_all(&user_lib)?;
+        copy_dir_recursive(&system_data, &user_data)?;
+        tracing::info!("Migration complete");
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dst_path)?;
+        }
     }
     Ok(())
 }

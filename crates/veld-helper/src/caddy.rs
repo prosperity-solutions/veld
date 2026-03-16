@@ -12,6 +12,8 @@ const CADDY_ADMIN_API: &str = "http://localhost:2019";
 pub struct CaddyManager {
     inner: Arc<Mutex<CaddyState>>,
     client: reqwest::Client,
+    https_port: u16,
+    http_port: u16,
 }
 
 #[derive(Debug)]
@@ -21,10 +23,12 @@ struct CaddyState {
 }
 
 impl CaddyManager {
-    pub fn new() -> Self {
+    pub fn new(https_port: u16, http_port: u16) -> Self {
         Self {
             inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
             client: reqwest::Client::new(),
+            https_port,
+            http_port,
         }
     }
 
@@ -129,7 +133,7 @@ impl CaddyManager {
     /// Reload caddy configuration via the admin API.
     pub async fn reload(&self) -> Result<()> {
         let load_url = format!("{CADDY_ADMIN_API}/load");
-        let config = build_base_config();
+        let config = build_base_config(self.https_port, self.http_port);
 
         let resp = self
             .client
@@ -199,9 +203,11 @@ impl CaddyManager {
         Ok(())
     }
 
-    /// Check whether caddy is running and reachable.
+    /// Check whether caddy is running and reachable by querying the veld
+    /// sentinel route. Returns `true` only when our Caddy instance is running
+    /// (i.e. the sentinel route exists), not an unrelated Caddy process.
     pub async fn is_running(&self) -> bool {
-        let url = format!("{CADDY_ADMIN_API}/config/");
+        let url = format!("{CADDY_ADMIN_API}/id/veld-sentinel");
         matches!(self.client.get(&url).send().await, Ok(r) if r.status().is_success())
     }
 }
@@ -222,10 +228,13 @@ pub struct FeedbackConfig<'a> {
 // ---------------------------------------------------------------------------
 
 /// Build a minimal base Caddy config with a server block for Veld.
-fn build_base_config() -> serde_json::Value {
+fn build_base_config(https_port: u16, http_port: u16) -> serde_json::Value {
     let data_dir = veld_core::paths::caddy_data_dir();
     // Ensure the data directory exists so Caddy can write PKI data.
     let _ = std::fs::create_dir_all(&data_dir);
+
+    let https_listen = format!(":{https_port}");
+    let http_listen = format!(":{http_port}");
 
     serde_json::json!({
         "storage": {
@@ -236,8 +245,15 @@ fn build_base_config() -> serde_json::Value {
             "http": {
                 "servers": {
                     "veld": {
-                        "listen": [":443", ":80"],
-                        "routes": []
+                        "listen": [https_listen, http_listen],
+                        "routes": [
+                            {
+                                "@id": "veld-sentinel",
+                                "match": [{"path": ["/__veld_sentinel__"]}],
+                                "handle": [{"handler": "static_response", "body": "veld"}],
+                                "terminal": true
+                            }
+                        ]
                     }
                 }
             },
@@ -453,7 +469,28 @@ mod tests {
 
     #[test]
     fn test_build_base_config() {
-        let config = build_base_config();
+        let config = build_base_config(443, 80);
         assert!(config["apps"]["http"]["servers"]["veld"].is_object());
+        let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listen[0], ":443");
+        assert_eq!(listen[1], ":80");
+        // Sentinel route is present.
+        let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0]["@id"], "veld-sentinel");
+    }
+
+    #[test]
+    fn test_build_base_config_custom_ports() {
+        let config = build_base_config(8443, 8080);
+        let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
+            .as_array()
+            .unwrap();
+        assert_eq!(listen[0], ":8443");
+        assert_eq!(listen[1], ":8080");
     }
 }

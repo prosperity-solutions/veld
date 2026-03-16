@@ -6,7 +6,7 @@
 #
 # Options (via env vars):
 #   VELD_VERSION=1.0.0    Install a specific version (default: latest)
-#   VELD_INSTALL_DIR=/usr/local/bin   Where to put the veld binary (default: /usr/local/bin)
+#   VELD_INSTALL_DIR=$HOME/.local/bin   Where to put the veld binary
 
 set -euo pipefail
 
@@ -110,13 +110,44 @@ tar xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 
 # --- Determine install directories ---
 
-# If veld is already installed, update in the same location.
+# Default to user-level paths (no sudo required).
+NEED_SUDO=""
+
 EXISTING_VELD="$(command -v veld 2>/dev/null || true)"
 if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
-  INSTALL_DIR="$(dirname "$EXISTING_VELD")"
-  echo "Existing veld found at ${EXISTING_VELD}, updating in place."
+  EXISTING_DIR="$(dirname "$EXISTING_VELD")"
+  # If the existing install is under /usr/local, ask for sudo to update there.
+  case "$EXISTING_DIR" in
+    /usr/local/*)
+      echo "Existing veld found at ${EXISTING_VELD} (system path)."
+      if sudo -n true 2>/dev/null; then
+        NEED_SUDO="sudo"
+        INSTALL_DIR="$EXISTING_DIR"
+      else
+        echo "Sudo is needed to update ${EXISTING_DIR}. Grant access? [Y/n] "
+        read -r answer < /dev/tty 2>/dev/null || answer="n"
+        answer="${answer:-y}"
+        if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+          if sudo true </dev/tty; then
+            NEED_SUDO="sudo"
+            INSTALL_DIR="$EXISTING_DIR"
+          else
+            echo "Sudo failed. Installing to user paths instead."
+            INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
+          fi
+        else
+          echo "Installing to user paths instead."
+          INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
+        fi
+      fi
+      ;;
+    *)
+      INSTALL_DIR="$EXISTING_DIR"
+      echo "Existing veld found at ${EXISTING_VELD}, updating in place."
+      ;;
+  esac
 else
-  INSTALL_DIR="${VELD_INSTALL_DIR:-/usr/local/bin}"
+  INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
 fi
 
 # Determine lib directory based on install dir.
@@ -124,35 +155,6 @@ if [[ "$INSTALL_DIR" == /usr/local/* ]] || [[ "$INSTALL_DIR" == /usr/* ]]; then
   LIB_DIR="/usr/local/lib/veld"
 else
   LIB_DIR="$HOME/.local/lib/veld"
-fi
-
-# Also check if lib dir already exists elsewhere (from a previous install).
-if [ -d "/usr/local/lib/veld" ]; then
-  LIB_DIR="/usr/local/lib/veld"
-elif [ -d "$HOME/.local/lib/veld" ]; then
-  LIB_DIR="$HOME/.local/lib/veld"
-fi
-
-NEED_SUDO=""
-USED_FALLBACK=""
-
-# Prompt for sudo if we need it. Note: `sudo` reads passwords from /dev/tty,
-# not stdin, so it works even when piped (curl | bash).
-if [ ! -w "$INSTALL_DIR" ] 2>/dev/null || [ ! -w "$LIB_DIR" ] 2>/dev/null; then
-  if sudo -n true 2>/dev/null; then
-    NEED_SUDO="sudo"
-  else
-    echo "Installation to ${INSTALL_DIR} requires administrator privileges."
-    # sudo reads the password from /dev/tty, so this works in curl | bash.
-    if sudo true </dev/tty; then
-      NEED_SUDO="sudo"
-    else
-      echo "Warning: sudo failed. Falling back to ~/.local paths."
-      INSTALL_DIR="$HOME/.local/bin"
-      LIB_DIR="$HOME/.local/lib/veld"
-      USED_FALLBACK="1"
-    fi
-  fi
 fi
 
 # --- Install ---
@@ -173,16 +175,57 @@ for bin in veld-helper veld-daemon; do
   fi
 done
 
+# --- Download Caddy with replace-response plugin ---
+echo "Installing Caddy..."
+if [ ! -f "${LIB_DIR}/caddy" ]; then
+  CADDY_OS="$OS"
+  [ "$CADDY_OS" = "macos" ] && CADDY_OS="darwin"
+  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/caddyserver/replace-response"
+  curl -fSL -o "${TMP_DIR}/caddy" "$CADDY_URL"
+  $NEED_SUDO cp "${TMP_DIR}/caddy" "${LIB_DIR}/caddy"
+  $NEED_SUDO chmod +x "${LIB_DIR}/caddy"
+
+  # macOS: clear xattrs and re-sign
+  if [ "$OS" = "macos" ]; then
+    $NEED_SUDO xattr -cr "${LIB_DIR}/caddy" 2>/dev/null || true
+    $NEED_SUDO codesign --force --sign - "${LIB_DIR}/caddy" 2>/dev/null || true
+  fi
+  echo "Caddy installed."
+else
+  echo "Caddy already installed."
+fi
+
 # --- Restart running services (picks up new binaries) ---
 
+# Detect install mode from setup.json to determine how to restart the helper.
+SETUP_JSON="$HOME/.veld/setup.json"
+PRIVILEGED_MODE=""
+if [ -f "$SETUP_JSON" ]; then
+  if grep -q '"mode"' "$SETUP_JSON" 2>/dev/null; then
+    MODE_VALUE="$(grep -o '"mode" *: *"[^"]*"' "$SETUP_JSON" | cut -d'"' -f4)"
+    if [ "$MODE_VALUE" = "privileged" ]; then
+      PRIVILEGED_MODE="1"
+    fi
+  fi
+fi
+
 if [ "$OS" = "macos" ]; then
-  # Use the modern launchctl bootout/bootstrap API (load/unload is deprecated
-  # and unreliable for system-domain LaunchDaemons).
-  HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
-  if [ -f "$HELPER_PLIST" ]; then
-    echo "Restarting veld-helper service..."
-    $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
-    $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
+  if [ -n "$PRIVILEGED_MODE" ]; then
+    # Privileged mode: helper runs as a system LaunchDaemon.
+    HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
+    if [ -f "$HELPER_PLIST" ]; then
+      echo "Restarting veld-helper service (privileged)..."
+      sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
+      sudo launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
+    fi
+  else
+    # User mode: helper runs as a user LaunchAgent.
+    HELPER_PLIST="$HOME/Library/LaunchAgents/dev.veld.helper.plist"
+    if [ -f "$HELPER_PLIST" ]; then
+      echo "Restarting veld-helper service..."
+      launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
+      launchctl bootstrap "gui/$(id -u)" "$HELPER_PLIST" 2>/dev/null || true
+    fi
   fi
 
   DAEMON_PLIST="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
@@ -193,9 +236,16 @@ if [ "$OS" = "macos" ]; then
   fi
 else
   # Linux: restart systemd services if they exist.
-  if systemctl is-active --quiet veld-helper 2>/dev/null; then
-    echo "Restarting veld-helper service..."
-    $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
+  if [ -n "$PRIVILEGED_MODE" ]; then
+    if systemctl is-active --quiet veld-helper 2>/dev/null; then
+      echo "Restarting veld-helper service (privileged)..."
+      sudo systemctl restart veld-helper 2>/dev/null || true
+    fi
+  else
+    if systemctl --user is-active --quiet veld-helper 2>/dev/null; then
+      echo "Restarting veld-helper service..."
+      systemctl --user restart veld-helper 2>/dev/null || true
+    fi
   fi
   if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
     echo "Restarting veld-daemon service..."
@@ -222,36 +272,82 @@ if [ "$OS" = "macos" ]; then
   done
 fi
 
-# --- Clean up stale binaries from alternate install location ---
+# --- Clean up stale binaries from alternate install locations ---
 #
-# Previous installs may have placed binaries in ~/.local/lib/veld/ (fallback
-# when /usr/local was not writable). If we just installed to a different
-# location, remove the stale copies so `veld version` doesn't pick them up.
+# Previous installs may have placed binaries in a different location.
+# Remove stale copies so `veld version` doesn't pick them up.
 
+# Stale user-level binaries when installing to system paths.
 if [ "$LIB_DIR" != "$HOME/.local/lib/veld" ] && [ -d "$HOME/.local/lib/veld" ]; then
   echo "Removing stale binaries from $HOME/.local/lib/veld/..."
-  for bin in veld-helper veld-daemon; do
+  for bin in veld-helper veld-daemon caddy; do
     rm -f "$HOME/.local/lib/veld/$bin" 2>/dev/null || true
   done
-  # Remove the directory if empty.
   rmdir "$HOME/.local/lib/veld" 2>/dev/null || true
 fi
-
-# --- Auto-run veld setup in interactive mode ---
-# veld setup self-escalates to sudo when needed, so no need to wrap in sudo here.
-
-if [ -z "${VELD_NON_INTERACTIVE:-}" ] && [ -t 1 ]; then
-  echo ""
-  echo "Running veld setup..."
-  "${INSTALL_DIR}/veld" setup || echo "Warning: veld setup failed. You can re-run it manually: veld setup"
-else
-  echo ""
-  echo "Skipping 'veld setup' (non-interactive mode)."
-  echo "Run it manually if needed:"
-  echo "  veld setup"
+if [ "$INSTALL_DIR" != "$HOME/.local/bin" ] && [ -f "$HOME/.local/bin/veld" ]; then
+  echo "Removing stale veld binary from $HOME/.local/bin/..."
+  rm -f "$HOME/.local/bin/veld" 2>/dev/null || true
 fi
 
-# --- Print success and next steps ---
+# Stale system-level binaries when installing to user paths.
+if [ "$LIB_DIR" != "/usr/local/lib/veld" ] && [ -d "/usr/local/lib/veld" ]; then
+  echo "Removing stale binaries from /usr/local/lib/veld/..."
+  for bin in veld-helper veld-daemon caddy; do
+    sudo rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+  done
+  sudo rmdir "/usr/local/lib/veld" 2>/dev/null || true
+fi
+if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ -f "/usr/local/bin/veld" ]; then
+  echo "Removing stale veld binary from /usr/local/bin/..."
+  sudo rm -f "/usr/local/bin/veld" 2>/dev/null || true
+fi
+
+# --- Next steps (no auto-run of veld setup) ---
+
+echo ""
+echo "Run 'veld start' in any project to get going."
+echo "Run 'veld setup' for more options."
+
+# --- PATH handling ---
+
+if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
+  echo ""
+  echo "Note: ${INSTALL_DIR} is not on your PATH."
+
+  if [ -t 1 ] && [ -z "${VELD_NON_INTERACTIVE:-}" ]; then
+    # Interactive: offer to add to shell rc
+    SHELL_NAME="$(basename "$SHELL")"
+    case "$SHELL_NAME" in
+      zsh)  RC_FILE="$HOME/.zshrc" ;;
+      bash) RC_FILE="$HOME/.bashrc" ;;
+      fish) RC_FILE="$HOME/.config/fish/config.fish" ;;
+      *)    RC_FILE="" ;;
+    esac
+
+    if [ -n "$RC_FILE" ]; then
+      echo "Add it automatically to ${RC_FILE}? [Y/n] "
+      read -r answer < /dev/tty 2>/dev/null || answer="y"
+      answer="${answer:-y}"
+      if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+        if [ "$SHELL_NAME" = "fish" ]; then
+          echo "fish_add_path $INSTALL_DIR" >> "$RC_FILE"
+        else
+          echo "export PATH=\"${INSTALL_DIR}:\$PATH\"" >> "$RC_FILE"
+        fi
+        echo "Added to ${RC_FILE}. Restart your shell or run: source ${RC_FILE}"
+      fi
+    else
+      echo "Add this to your shell configuration:"
+      echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+    fi
+  else
+    echo "Add ${INSTALL_DIR} to your PATH:"
+    echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
+  fi
+fi
+
+# --- Print success ---
 
 echo ""
 echo "veld ${VERSION} installed successfully!"
@@ -259,20 +355,4 @@ echo ""
 echo "  veld binary:   ${INSTALL_DIR}/veld"
 echo "  veld-helper:   ${LIB_DIR}/veld-helper"
 echo "  veld-daemon:   ${LIB_DIR}/veld-daemon"
-
-if [ -n "$USED_FALLBACK" ]; then
-  echo ""
-  echo "Note: Installed to ${INSTALL_DIR} because /usr/local/bin is not writable."
-  echo "Make sure it is on your PATH:"
-  echo "  export PATH=\"${INSTALL_DIR}:\$PATH\""
-fi
-
-echo ""
-if [ -t 1 ]; then
-  echo "Next steps:"
-  echo "  Run 'veld init' in a project to get started."
-else
-  echo "Next steps:"
-  echo "  1. Run 'veld setup' to complete one-time system configuration."
-  echo "  2. Run 'veld init' in a project to get started."
-fi
+echo "  caddy:         ${LIB_DIR}/caddy"

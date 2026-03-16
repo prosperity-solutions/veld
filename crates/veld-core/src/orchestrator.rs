@@ -85,6 +85,8 @@ pub struct Orchestrator {
     pub project_root: PathBuf,
     pub port_allocator: PortAllocator,
     pub helper_client: HelperClient,
+    /// The HTTPS port that the helper's Caddy listens on (queried at start).
+    pub https_port: u16,
     /// Active child processes keyed by `"node:variant"`.
     children: HashMap<String, process::ServerHandle>,
     /// Debug mode — writes orchestration trace to `veld-debug.log`.
@@ -108,6 +110,7 @@ impl Orchestrator {
             project_root,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
+            https_port: 443,
             children: HashMap::new(),
             debug: false,
             debug_writer: None,
@@ -171,6 +174,20 @@ impl Orchestrator {
         // DNS/Caddy routes, clears state). This handles the case where a
         // previous run was not properly cleaned up or the user reuses a name.
         self.cleanup_stale_run(run_name).await;
+
+        // Ensure a helper is running (auto-bootstraps if needed) and
+        // query the HTTPS port so we can construct port-aware URLs.
+        match crate::setup::ensure_helper().await {
+            Ok(client) => {
+                if let Ok(port) = client.https_port().await {
+                    self.https_port = port;
+                }
+                self.helper_client = client;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "could not ensure helper — using default client");
+            }
+        }
 
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
@@ -447,7 +464,11 @@ impl Orchestrator {
             hostname,
         );
         let node_url = url::evaluate_url_template(effective_template, &url_values)?;
-        let https_url = format!("https://{node_url}");
+        let https_url = if self.https_port == 443 {
+            format!("https://{node_url}")
+        } else {
+            format!("https://{node_url}:{}", self.https_port)
+        };
         node_state.url = Some(https_url.clone());
 
         // Configure DNS + Caddy via helper (best-effort).

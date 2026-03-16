@@ -1,10 +1,29 @@
 mod commands;
+mod hints;
 mod output;
 
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use clap::{CommandFactory, Parser, Subcommand};
+
+#[derive(Subcommand)]
+pub enum SetupCommand {
+    /// No-sudo setup: Caddy, daemon, helper on port 8443.
+    Unprivileged,
+    /// One-time sudo: system daemon, ports 80/443, clean URLs.
+    Privileged {
+        /// Path to veld-helper binary (resolved before sudo escalation).
+        #[arg(long, hide = true)]
+        helper_bin: Option<std::path::PathBuf>,
+
+        /// Path to user socket (resolved before sudo escalation).
+        #[arg(long, hide = true)]
+        user_socket: Option<std::path::PathBuf>,
+    },
+    /// Install Hammerspoon menu bar widget (macOS only).
+    Hammerspoon,
+}
 
 /// Veld -- local development environment orchestrator.
 #[derive(Parser)]
@@ -190,11 +209,10 @@ enum Command {
     /// Garbage-collect stale state and logs.
     Gc,
 
-    /// Run the first-time setup sequence.
+    /// Run first-time setup or manage setup configuration.
     Setup {
-        /// Force re-download of components (e.g. Caddy) even if already present.
-        #[arg(long)]
-        force: bool,
+        #[command(subcommand)]
+        command: Option<SetupCommand>,
     },
 
     /// Update Veld to the latest version.
@@ -313,7 +331,7 @@ async fn main() {
 
         Command::Gc => commands::gc::run().await,
 
-        Command::Setup { force } => commands::setup::run(force).await,
+        Command::Setup { command } => commands::setup::run(command).await,
 
         Command::Update => commands::update::run().await,
 
