@@ -399,21 +399,37 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
     match std::env::consts::OS {
         "macos" => {
             // Add to the real user's login keychain as a trusted root CA.
-            // - `-d` adds to admin cert store (persists across sessions)
+            // - When running as root (privileged setup), use `-d` to add to
+            //   the admin cert store (persists across sessions, needs root).
+            // - When running as the user (unprivileged/auto), skip `-d` and
+            //   add to the login keychain only (no sudo needed, browsers
+            //   still trust it for the current user).
             // - `-r trustRoot` marks it as a trusted root (not just "present")
             // - We copy the cert to a temp file first because the caddy-data
-            //   directory is owned by root with mode 600, and `security` may
-            //   not be able to read it directly.
+            //   directory may be owned by root with mode 600, and `security`
+            //   may not be able to read it directly.
             let (_, _, real_home) = resolve_real_user_macos()?;
             let keychain = real_home.join("Library/Keychains/login.keychain-db");
 
             let tmp_cert = std::env::temp_dir().join("veld-ca.crt");
             std::fs::copy(&root_cert, &tmp_cert).context("failed to copy CA cert to temp file")?;
 
+            let is_root = std::process::Command::new("id")
+                .arg("-u")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
+                .unwrap_or(false);
+            let mut args = vec!["add-trusted-cert"];
+            if is_root {
+                // Admin cert store — persists across sessions, needs root.
+                args.push("-d");
+            }
+            args.extend(["-r", "trustRoot", "-k"]);
+
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
                 Command::new("security")
-                    .args(["add-trusted-cert", "-d", "-r", "trustRoot", "-k"])
+                    .args(&args)
                     .arg(&keychain)
                     .arg(&tmp_cert)
                     .stdin(std::process::Stdio::null())
@@ -429,7 +445,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                 Ok(Ok(status)) if status.success() => {}
                 Ok(Ok(_)) => {
                     return Ok(StepResult::success(
-                        "Caddy CA generated (could not add to keychain — run with sudo or add manually)",
+                        "Caddy CA generated (could not add to keychain — try `veld setup privileged` or add manually)",
                     ));
                 }
                 Ok(Err(e)) => {
@@ -455,7 +471,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
                 .is_err()
             {
                 return Ok(StepResult::success(
-                    "Caddy CA generated (could not copy to ca-certificates — run with sudo or add manually)",
+                    "Caddy CA generated (could not copy to ca-certificates — try `veld setup privileged` or add manually)",
                 ));
             }
             let _ = Command::new("update-ca-certificates").status().await;
