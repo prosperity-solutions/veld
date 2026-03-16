@@ -1358,7 +1358,7 @@
 <section id="setup">
   <div class="container reveal">
     <span class="label">5-Minute Setup</span>
-    <h2>From zero to running in four steps</h2>
+    <h2>From zero to running in five steps</h2>
     <p class="section-desc">Everything you need to go from a fresh machine to a fully orchestrated local stack.</p>
 
     <div class="step">
@@ -1374,6 +1374,15 @@
     <div class="step">
       <div class="step-number">2</div>
       <div class="step-content">
+        <h4>Teach your agent</h4>
+        <p>Install agent skills so your coding agent knows how to configure, use, and collaborate through veld. Works with Claude Code, Cursor, Codex, Windsurf, and <a href="https://github.com/vercel-labs/skills#supported-agents" style="color:var(--accent)">40+ more</a>.</p>
+        <div class="code-block"><button class="copy-btn" onclick="copyCode(this)">Copy</button>npx skills add prosperity-solutions/veld</div>
+      </div>
+    </div>
+
+    <div class="step">
+      <div class="step-number">3</div>
+      <div class="step-content">
         <h4>Initialize your project</h4>
         <p>Creates a <code style="font-family:var(--font-mono);background:var(--bg-code);padding:2px 6px;border-radius:4px;font-size:0.85rem;color:var(--accent)">veld.json</code> in your project root.</p>
         <div class="code-block"><button class="copy-btn" onclick="copyCode(this)">Copy</button>veld init</div>
@@ -1381,7 +1390,7 @@
     </div>
 
     <div class="step">
-      <div class="step-number">3</div>
+      <div class="step-number">4</div>
       <div class="step-content">
         <h4>Configure your services</h4>
         <p>Define your stack: services, dependencies, health checks, and URL templates.</p>
@@ -1407,7 +1416,7 @@
     </div>
 
     <div class="step">
-      <div class="step-number">4</div>
+      <div class="step-number">5</div>
       <div class="step-content">
         <h4>Start it up</h4>
         <p>Veld resolves the dependency graph, allocates ports, starts processes, runs health checks, and gives you HTTPS URLs.</p>
@@ -1493,7 +1502,7 @@
       </div>
       <div class="feature-card">
         <h4>Agent-first</h4>
-        <p>Every command supports --json. Built-in feedback overlay for human-agent collaboration.</p>
+        <p>Every command supports --json. Built-in feedback overlay for human-agent collaboration. <a href="https://github.com/vercel-labs/skills" style="color:var(--accent)">Agent skills</a> teach your coding agent how to use veld: <code style="font-family:var(--font-mono);font-size:0.8rem">npx skills add prosperity-solutions/veld</code></p>
       </div>
       <div class="feature-card">
         <h4>Worktree compatible</h4>
