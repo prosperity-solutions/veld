@@ -180,6 +180,22 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 - Ports 80, 443, and 2019 available
 - sudo access once for `veld setup`
 
+## Agent Skills
+
+Veld ships skills for AI coding agents (Claude Code, Cursor, Codex, Windsurf, and [40+ more](https://github.com/vercel-labs/skills#supported-agents)). Install them so your agent knows how to configure, use, and collaborate through Veld:
+
+```sh
+npx skills add prosperity-solutions/veld
+```
+
+This installs three skills:
+
+| Skill | Description |
+|-------|-------------|
+| **veld-config** | Write and edit `veld.json` — nodes, health checks, dependencies, URL templates |
+| **veld-feedback** | Human-in-the-loop feedback workflow — request reviews, read comments, iterate |
+| **veld-usage** | CLI reference — start, stop, logs, status, and all other commands |
+
 ## Contributing
 
 We only accept agentic contributions — see [CONTRIBUTING.md](CONTRIBUTING.md) for details.

@@ -1,6 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -38,17 +39,25 @@ pub async fn run_feedback_server() {
     });
 
     let app = Router::new()
-        // Overlay script (injected by Caddy's replace-response handler).
+        // Overlay assets (injected by Caddy's replace-response handler).
         .route("/feedback/script.js", get(overlay_script))
+        .route("/feedback/style.css", get(overlay_css))
+        .route("/feedback/logo.svg", get(logo_svg))
         // Feedback CRUD API.
         .route("/feedback/api/comments", get(list_comments))
         .route("/feedback/api/comments", post(create_comment))
         .route("/feedback/api/comments/{id}", put(update_comment))
         .route("/feedback/api/comments/{id}", delete(delete_comment))
+        // Screenshots.
+        .route("/feedback/api/screenshots/{id}", post(upload_screenshot))
+        .route("/feedback/api/screenshots/{id}", get(get_screenshot))
         // Submit / batches.
         .route("/feedback/api/submit", post(submit_batch))
         .route("/feedback/api/batches", get(list_batches))
         .route("/feedback/api/batches/wait", get(wait_for_batch))
+        // Wait-session signalling (browser ↔ CLI).
+        .route("/feedback/api/wait-status", get(get_wait_status))
+        .route("/feedback/api/cancel", post(cancel_feedback))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], FEEDBACK_PORT));
@@ -74,6 +83,7 @@ pub async fn run_feedback_server() {
 struct RunQuery {
     run: Option<String>,
     project: Option<String>,
+    page_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -100,6 +110,11 @@ fn resolve_store(
     let run_name = run
         .or_else(|| headers.get("x-veld-run").and_then(|v| v.to_str().ok()))
         .ok_or(StatusCode::BAD_REQUEST)?;
+
+    // Reject run names containing path separators to prevent path traversal.
+    if run_name.contains('/') || run_name.contains('\\') || run_name.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     // Try explicit project path first, then header, then search registry.
     if let Some(project_path) =
@@ -128,8 +143,33 @@ fn resolve_store(
 
 async fn overlay_script() -> Response {
     (
-        [(header::CONTENT_TYPE, "application/javascript")],
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
         feedback_assets::OVERLAY_JS,
+    )
+        .into_response()
+}
+
+async fn overlay_css() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        feedback_assets::OVERLAY_CSS,
+    )
+        .into_response()
+}
+
+async fn logo_svg() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "image/svg+xml"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        feedback_assets::LOGO_SVG,
     )
         .into_response()
 }
@@ -143,9 +183,19 @@ async fn list_comments(
     Query(q): Query<RunQuery>,
 ) -> Result<Json<Vec<FeedbackComment>>, StatusCode> {
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-    let comments = store
+    let mut comments = store
         .get_comments()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Filter by page URL (pathname only) when requested by the overlay.
+    if let Some(ref page_url) = q.page_url {
+        let pathname = page_url.split('?').next().unwrap_or(page_url);
+        comments.retain(|c| {
+            let comment_path = c.page_url.split('?').next().unwrap_or(&c.page_url);
+            comment_path == pathname
+        });
+    }
+
     Ok(Json(comments))
 }
 
@@ -218,6 +268,64 @@ async fn delete_comment(
 }
 
 // ---------------------------------------------------------------------------
+// Screenshots
+// ---------------------------------------------------------------------------
+
+async fn upload_screenshot(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, StatusCode> {
+    // Reject IDs containing path separators to prevent path traversal.
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    // Validate: must look like PNG data and be reasonably sized (max 10 MB).
+    if body.len() > 10 * 1024 * 1024 {
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    store
+        .save_screenshot(&id, &body)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::CREATED)
+}
+
+async fn get_screenshot(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<RunQuery>,
+) -> Result<Response, StatusCode> {
+    // Reject IDs containing path separators to prevent path traversal.
+    if id.contains('/') || id.contains('\\') || id.contains("..") {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
+    let filename = format!("{id}.png");
+    let path = store.screenshot_path(&filename);
+
+    let data = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        data,
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
 // Batch submission
 // ---------------------------------------------------------------------------
 
@@ -269,4 +377,42 @@ async fn wait_for_batch(
         .get_batches()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(batches))
+}
+
+// ---------------------------------------------------------------------------
+// Wait-session signalling
+// ---------------------------------------------------------------------------
+
+/// Returns `{ "waiting": true/false, "wait_id": "..." }` for the overlay to poll.
+async fn get_wait_status(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<RunQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
+    let waiting = store.is_waiting();
+    let wait_id = if waiting { store.waiting_id() } else { None };
+    Ok(Json(
+        serde_json::json!({ "waiting": waiting, "wait_id": wait_id }),
+    ))
+}
+
+/// Reviewer cancels the feedback session.
+async fn cancel_feedback(
+    headers: axum::http::HeaderMap,
+    state: State<Arc<AppState>>,
+) -> Result<StatusCode, StatusCode> {
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    store
+        .cancel()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Notify waiters so the CLI picks up the cancellation quickly.
+    state.batch_notify.notify_waiters();
+
+    Ok(StatusCode::NO_CONTENT)
 }

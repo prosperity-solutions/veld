@@ -1,0 +1,18 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "veld",
+  "url_template": "{service}.{run}.veld.localhost",
+  "nodes": {
+    "website": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "python3 -m http.server ${veld.port} --directory website",
+          "health_check": { "type": "http", "path": "/index.html", "timeout_seconds": 10 }
+        }
+      }
+    }
+  }
+}

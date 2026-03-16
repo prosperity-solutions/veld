@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+# LLM-readable content: /llms.txt

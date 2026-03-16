@@ -213,7 +213,18 @@ function obj:start()
     end
 
     menubar = hs.menubar.new(true, "VeldMenuBar")
-    menubar:setTitle("V")
+
+    -- Use bundled icon if available, fall back to text.
+    -- Prefer @2x for Retina clarity; fall back to 1x.
+    local spoonPath = hs.spoons.scriptPath()
+    local icon = hs.image.imageFromPath(spoonPath .. "/icon@2x.png")
+               or hs.image.imageFromPath(spoonPath .. "/icon.png")
+    if icon then
+        icon:size({ w = 18, h = 18 })
+        menubar:setIcon(icon, false)
+    else
+        menubar:setTitle("V")
+    end
     menubar:setTooltip("Veld Environments")
 
     local bin = self.veldBin
