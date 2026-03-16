@@ -304,6 +304,10 @@ fn build_route_json(
         // Main app proxy with HTML injection via the replace-response plugin.
         // We set Accept-Encoding: identity so the upstream sends uncompressed
         // responses — replace_response cannot match inside gzip'd bytes.
+        //
+        // Two replacements:
+        // 1. </head> → inject @font-face for JetBrains Mono + CSS link
+        // 2. </body> → inject overlay script + CSS link
         subroutes.push(serde_json::json!({
             "handle": [
                 {
@@ -313,10 +317,16 @@ fn build_route_json(
                             "Content-Type": ["text/html*"]
                         }
                     },
-                    "replacements": [{
-                        "search": "</body>",
-                        "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
-                    }]
+                    "replacements": [
+                        {
+                            "search": "</head>",
+                            "replace": "<style>@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}</style><link rel=\"stylesheet\" href=\"/__veld__/feedback/style.css\"></head>"
+                        },
+                        {
+                            "search": "</body>",
+                            "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
+                        }
+                    ]
                 },
                 {
                     "handler": "reverse_proxy",
@@ -409,6 +419,15 @@ mod tests {
             fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
             "/tmp/project"
         );
+        // Main app proxy has two replacements: </head> for font, </body> for script+CSS.
+        let replace_handler = &subroutes[1]["handle"][0];
+        let replacements = replace_handler["replacements"].as_array().unwrap();
+        assert_eq!(replacements.len(), 2);
+        assert_eq!(replacements[0]["search"], "</head>");
+        assert!(replacements[0]["replace"].as_str().unwrap().contains("@font-face"));
+        assert!(replacements[0]["replace"].as_str().unwrap().contains("style.css"));
+        assert_eq!(replacements[1]["search"], "</body>");
+        assert!(replacements[1]["replace"].as_str().unwrap().contains("script.js"));
         // Main app proxy strips compression so replace_response can work.
         let main_proxy = &subroutes[1]["handle"][1];
         assert_eq!(

@@ -622,8 +622,12 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     match result {
         Ok(Ok(status)) if status.success() => Ok(()),
         Ok(Ok(status)) => {
-            // bootstrap returns 37 if already loaded — try kickstart instead.
-            if status.code() == Some(37) {
+            // bootstrap returns 37 if already loaded, or 5 (I/O error) if the
+            // service is still registered from a previous install and the
+            // bootout hasn't fully completed. In both cases, kickstart the
+            // existing service instead.
+            let code = status.code().unwrap_or(-1);
+            if code == 37 || code == 5 {
                 let _ = Command::new("launchctl")
                     .args(["kickstart", "-k", &format!("system/{label}")])
                     .stdin(std::process::Stdio::null())
@@ -633,7 +637,7 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
             } else {
                 anyhow::bail!(
                     "launchctl bootstrap failed for veld-helper (exit {})",
-                    status.code().unwrap_or(-1)
+                    code
                 )
             }
         }
@@ -1011,6 +1015,12 @@ fn resolve_real_user_macos() -> Result<(String, String, PathBuf), anyhow::Error>
 const HAMMERSPOON_SPOON_LUA: &str =
     include_str!("../../../integrations/hammerspoon/Veld.spoon/init.lua");
 
+/// Embedded menu bar icons for the Hammerspoon Spoon.
+const HAMMERSPOON_ICON_PNG: &[u8] =
+    include_bytes!("../../../integrations/hammerspoon/Veld.spoon/icon.png");
+const HAMMERSPOON_ICON_2X_PNG: &[u8] =
+    include_bytes!("../../../integrations/hammerspoon/Veld.spoon/icon@2x.png");
+
 /// Install the Veld Spoon into ~/.hammerspoon/Spoons/ and load it via `hs` CLI.
 ///
 /// Returns a `HammerspoonResult` with details about what the CLI should prompt
@@ -1036,6 +1046,10 @@ pub async fn install_hammerspoon() -> Result<HammerspoonResult, anyhow::Error> {
     let init_lua = spoon_dir.join("init.lua");
     std::fs::write(&init_lua, HAMMERSPOON_SPOON_LUA)
         .context("failed to write Veld.spoon/init.lua")?;
+    std::fs::write(spoon_dir.join("icon.png"), HAMMERSPOON_ICON_PNG)
+        .context("failed to write Veld.spoon/icon.png")?;
+    std::fs::write(spoon_dir.join("icon@2x.png"), HAMMERSPOON_ICON_2X_PNG)
+        .context("failed to write Veld.spoon/icon@2x.png")?;
 
     // Fix ownership (setup runs as root via sudo).
     fix_owner_recursive(&spoon_dir, &user);
