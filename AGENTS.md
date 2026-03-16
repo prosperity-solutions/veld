@@ -50,6 +50,10 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 5. The agent makes changes based on feedback
 6. Repeat
 
+## Agent Skills
+
+Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
+
 ## Key Conventions
 
 - Domain: `veld.oss.life.li` (not `veld.dev`)

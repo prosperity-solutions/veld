@@ -18,6 +18,16 @@ veld is a Rust-based CLI tool that replaces the ritual of opening multiple termi
 - [Configuration Reference](https://raw.githubusercontent.com/prosperity-solutions/veld/main/docs/configuration.md): Full veld.json specification
 - [JSON Schema](https://veld.oss.life.li/schema/v1/veld.schema.json): Machine-readable schema for veld.json
 
+## Agent Skills
+
+Install skills so your coding agent knows how to use Veld:
+
+```sh
+npx skills add prosperity-solutions/veld
+```
+
+Installs: **veld-config** (write veld.json), **veld-feedback** (human-in-the-loop reviews), **veld-usage** (CLI reference). Works with Claude Code, Cursor, Codex, Windsurf, and 40+ more agents.
+
 ## Optional
 
 - [Releases](https://github.com/prosperity-solutions/veld/releases): Version history and release notes

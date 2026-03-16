@@ -406,6 +406,24 @@ Usage: `veld start --preset fullstack --name my-feature`
 
 ---
 
+## Agent Skills
+
+Veld ships skills for AI coding agents. Install them so your agent knows how to configure, use, and collaborate through Veld:
+
+```sh
+npx skills add prosperity-solutions/veld
+```
+
+This installs three skills:
+
+- **veld-config** — Write and edit `veld.json` configuration files (nodes, health checks, dependencies, URL templates, presets)
+- **veld-feedback** — Human-in-the-loop feedback workflow (request reviews, read structured comments with element selectors and component traces, iterate)
+- **veld-usage** — CLI reference for agents (start, stop, logs, status, feedback, and all other commands)
+
+Works with Claude Code, Cursor, Codex, Windsurf, Cline, GitHub Copilot, and [40+ more agents](https://github.com/vercel-labs/skills#supported-agents).
+
+---
+
 ## Requirements
 
 - macOS (arm64/x64) or Linux (x64/arm64)
