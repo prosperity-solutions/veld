@@ -302,8 +302,7 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
             let keychain = real_home.join("Library/Keychains/login.keychain-db");
 
             let tmp_cert = std::env::temp_dir().join("veld-ca.crt");
-            std::fs::copy(&root_cert, &tmp_cert)
-                .context("failed to copy CA cert to temp file")?;
+            std::fs::copy(&root_cert, &tmp_cert).context("failed to copy CA cert to temp file")?;
 
             let result = tokio::time::timeout(
                 std::time::Duration::from_secs(10),
@@ -635,10 +634,7 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
                     .await;
                 Ok(())
             } else {
-                anyhow::bail!(
-                    "launchctl bootstrap failed for veld-helper (exit {})",
-                    code
-                )
+                anyhow::bail!("launchctl bootstrap failed for veld-helper (exit {})", code)
             }
         }
         Ok(Err(e)) => Err(e.into()),

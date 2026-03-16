@@ -424,10 +424,25 @@ mod tests {
         let replacements = replace_handler["replacements"].as_array().unwrap();
         assert_eq!(replacements.len(), 2);
         assert_eq!(replacements[0]["search"], "</head>");
-        assert!(replacements[0]["replace"].as_str().unwrap().contains("@font-face"));
-        assert!(replacements[0]["replace"].as_str().unwrap().contains("style.css"));
+        assert!(
+            replacements[0]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("@font-face")
+        );
+        assert!(
+            replacements[0]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("style.css")
+        );
         assert_eq!(replacements[1]["search"], "</body>");
-        assert!(replacements[1]["replace"].as_str().unwrap().contains("script.js"));
+        assert!(
+            replacements[1]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("script.js")
+        );
         // Main app proxy strips compression so replace_response can work.
         let main_proxy = &subroutes[1]["handle"][1];
         assert_eq!(

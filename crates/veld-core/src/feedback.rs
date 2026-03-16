@@ -256,7 +256,9 @@ impl FeedbackStore {
 
     /// Read the current wait-session ID, if any.
     pub fn waiting_id(&self) -> Option<String> {
-        std::fs::read_to_string(self.waiting_path()).ok().filter(|s| !s.is_empty())
+        std::fs::read_to_string(self.waiting_path())
+            .ok()
+            .filter(|s| !s.is_empty())
     }
 
     /// Reviewer signals cancellation.

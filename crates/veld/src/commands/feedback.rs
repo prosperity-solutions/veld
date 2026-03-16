@@ -138,10 +138,7 @@ async fn run_wait(store: &FeedbackStore, run_name: &str, json: bool) -> i32 {
         if store.is_cancelled() {
             store.clear_cancelled();
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({ "outcome": "cancelled" })
-                );
+                println!("{}", serde_json::json!({ "outcome": "cancelled" }));
             } else {
                 output::print_info("Feedback cancelled by reviewer.");
             }
@@ -218,8 +215,14 @@ fn print_batch(batch: &veld_core::feedback::FeedbackBatch, store: Option<&Feedba
             if !screenshot.is_empty() {
                 // Resolve to full path if store is available, otherwise show the ID.
                 let display = if let Some(s) = store {
-                    let id = screenshot.trim_end_matches(".png").rsplit('/').next().unwrap_or(screenshot);
-                    s.screenshot_path(&format!("{id}.png")).display().to_string()
+                    let id = screenshot
+                        .trim_end_matches(".png")
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(screenshot);
+                    s.screenshot_path(&format!("{id}.png"))
+                        .display()
+                        .to_string()
                 } else {
                     screenshot.clone()
                 };

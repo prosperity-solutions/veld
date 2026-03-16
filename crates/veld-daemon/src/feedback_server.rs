@@ -391,7 +391,9 @@ async fn get_wait_status(
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
     let waiting = store.is_waiting();
     let wait_id = if waiting { store.waiting_id() } else { None };
-    Ok(Json(serde_json::json!({ "waiting": waiting, "wait_id": wait_id })))
+    Ok(Json(
+        serde_json::json!({ "waiting": waiting, "wait_id": wait_id }),
+    ))
 }
 
 /// Reviewer cancels the feedback session.
