@@ -51,7 +51,7 @@ No ports. No manual config. No mkcert commands. No hosts file editing.
 
 ### One Command Install
 ```sh
-curl -fsSL https://get.veld.dev | bash
+curl -fsSL https://veld.oss.life.li/get | bash
 ```
 
 The install script handles everything end to end. A developer runs this once and their machine is fully configured. The install script:
@@ -61,10 +61,9 @@ The install script handles everything end to end. A developer runs this once and
 3. Verifies SHA-256 checksums against `checksums.txt` from the release
 4. Places `veld` at `~/.local/bin/veld` (with a PATH reminder if needed)
 5. Places `veld-daemon` and `veld-helper` at `~/.local/lib/veld/`
-6. Automatically runs `veld setup` (see below)
-7. Prints success with next steps
+6. Prints success with next steps
 
-In non-interactive mode (non-TTY, piped), the install script skips `veld setup` and prints a clear reminder to run it manually. This handles CI install scenarios correctly.
+The install script does NOT auto-run `veld setup`; commands auto-bootstrap on first use.
 
 ### Binary Versioning
 All three binaries (`veld`, `veld-daemon`, `veld-helper`) are versioned together and released as a matched set. `veld --version` reports all three versions:
@@ -78,7 +77,7 @@ veld-helper   1.2.0
 A version mismatch between binaries is detected at startup and treated as a fatal error with a clear message directing the user to run `veld update`.
 
 ### `veld update`
-Re-runs the full install script, which downloads all three binaries, replaces them, re-runs `veld setup` idempotently (which restarts daemons if binaries changed), and verifies the result. One command updates everything — CLI, daemon, helper, and Caddy.
+Re-runs the full install script, which downloads all three binaries, replaces them, and restarts services in a mode-aware fashion (detecting the current setup mode and restarting the appropriate daemons). One command updates everything — CLI, daemon, helper, and Caddy.
 
 ---
 
@@ -107,8 +106,7 @@ Steps performed (privileged mode shown):
 ```
 [1/6] Checking port availability...       ✓ ports 80, 443, 2019 are free
 [2/6] Installing Caddy...                  ✓ caddy 2.8.4 → ~/.local/lib/veld/caddy
-[3/6] Installing mkcert...                 ✓ mkcert 1.4.4 → ~/.local/lib/veld/mkcert
-[4/6] Generating local CA and certs...     ✓ CA trusted, wildcard cert generated
+[3/6] Trusting Caddy CA...                 ✓ Caddy CA added to system trust store
 [5/6] Installing veld-helper daemon...     ✓ registered as LaunchDaemon (macOS)
 [6/6] Installing veld-daemon...            ✓ registered as LaunchAgent, running
 [6/6] Starting veld-helper...             ✓ running (pid 1234)
@@ -144,7 +142,7 @@ For a previous Veld install: `veld setup` detects its own running Caddy instance
 
 ### Caddy — Native Binary, Veld-Owned
 
-Veld downloads the official Caddy release binary from `github.com/caddyserver/caddy/releases`, verifies the checksum, and installs it to `~/.local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
+Veld downloads a custom Caddy build from `caddyserver.com/api/download` with the `replace-response` plugin, and installs it to `~/.local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
 
 **Why not Docker for Caddy?** Docker on macOS runs inside a Linux VM. A Caddy container cannot reach `localhost:{port}` on the host directly — `localhost` inside the container is the container itself. The workaround (`host.docker.internal`) only works on Docker Desktop, not Linux. The Caddy config would have to be platform-aware just for this reason. A native binary sidesteps all of this — `localhost:{port}` always means what you expect, the config is identical across platforms, and there is no dependency on Docker Desktop being running.
 
@@ -881,7 +879,7 @@ Unprivileged. Health monitoring. GC scheduling. State broadcasts. LaunchAgent / 
 
 ## Success Criteria
 
-- `curl -fsSL https://get.veld.dev | bash` installs Veld without sudo on a fresh machine; commands auto-bootstrap on first use
+- `curl -fsSL https://veld.oss.life.li/get | bash` installs Veld without sudo on a fresh machine; commands auto-bootstrap on first use
 - `veld setup` is idempotent, verifies each step, and never silently proceeds past a failure
 - Port conflicts are detected before setup proceeds with a precise, actionable error message
 - Any environment command run before setup completes exits non-zero with a clear structured error

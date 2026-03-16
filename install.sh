@@ -124,7 +124,7 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
         NEED_SUDO="sudo"
         INSTALL_DIR="$EXISTING_DIR"
       else
-        echo "Sudo is needed to update ${EXISTING_DIR}. Grant access? [Y/n] "
+        printf "Sudo is needed to update ${EXISTING_DIR}. Grant access? [Y/n] "
         read -r answer < /dev/tty 2>/dev/null || answer="n"
         answer="${answer:-y}"
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
@@ -294,13 +294,25 @@ fi
 if [ "$LIB_DIR" != "/usr/local/lib/veld" ] && [ -d "/usr/local/lib/veld" ]; then
   echo "Removing stale binaries from /usr/local/lib/veld/..."
   for bin in veld-helper veld-daemon caddy; do
-    sudo rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    if [ -n "$NEED_SUDO" ]; then
+      $NEED_SUDO rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    elif [ -w "/usr/local/lib/veld" ] 2>/dev/null; then
+      rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    fi
   done
-  sudo rmdir "/usr/local/lib/veld" 2>/dev/null || true
+  if [ -n "$NEED_SUDO" ]; then
+    $NEED_SUDO rmdir "/usr/local/lib/veld" 2>/dev/null || true
+  elif [ -w "/usr/local/lib/veld" ] 2>/dev/null; then
+    rmdir "/usr/local/lib/veld" 2>/dev/null || true
+  fi
 fi
 if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ -f "/usr/local/bin/veld" ]; then
   echo "Removing stale veld binary from /usr/local/bin/..."
-  sudo rm -f "/usr/local/bin/veld" 2>/dev/null || true
+  if [ -n "$NEED_SUDO" ]; then
+    $NEED_SUDO rm -f "/usr/local/bin/veld" 2>/dev/null || true
+  elif [ -w "/usr/local/bin" ] 2>/dev/null; then
+    rm -f "/usr/local/bin/veld" 2>/dev/null || true
+  fi
 fi
 
 # --- Next steps (no auto-run of veld setup) ---
@@ -326,7 +338,7 @@ if ! echo "$PATH" | tr ':' '\n' | grep -qx "$INSTALL_DIR"; then
     esac
 
     if [ -n "$RC_FILE" ]; then
-      echo "Add it automatically to ${RC_FILE}? [Y/n] "
+      printf "Add it automatically to ${RC_FILE}? [Y/n] "
       read -r answer < /dev/tty 2>/dev/null || answer="y"
       answer="${answer:-y}"
       if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then

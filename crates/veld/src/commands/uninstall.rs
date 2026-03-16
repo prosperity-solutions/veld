@@ -1,20 +1,9 @@
 use crate::output;
 use std::io::{self, BufRead, Write};
 
-/// Read the setup mode from `~/.veld/setup.json`.
-fn read_setup_mode() -> Option<String> {
-    let path = dirs::home_dir()?.join(".veld").join("setup.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 /// `veld uninstall` -- remove Veld and clean up.
 pub async fn run() -> i32 {
-    let mode = read_setup_mode();
+    let mode = super::read_setup_mode();
     let needs_sudo = mode.as_deref() == Some("privileged");
 
     // Only escalate to sudo for privileged installations.

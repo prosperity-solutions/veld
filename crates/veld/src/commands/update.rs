@@ -35,17 +35,6 @@ pub async fn run() -> i32 {
     }
 }
 
-/// Read the setup mode from `~/.veld/setup.json`.
-fn read_setup_mode() -> Option<String> {
-    let path = dirs::home_dir()?.join(".veld").join("setup.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-}
-
 /// Restart daemon and helper so they run the newly installed binaries.
 /// Mode-aware: uses sudo only for privileged mode, runs without sudo otherwise.
 async fn restart_services() {
@@ -60,7 +49,7 @@ async fn restart_services() {
         }
     };
 
-    let mode = read_setup_mode();
+    let mode = super::read_setup_mode();
 
     let status = match mode.as_deref() {
         Some("privileged") => {

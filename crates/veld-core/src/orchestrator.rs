@@ -795,6 +795,11 @@ impl Orchestrator {
     /// Stop a run in reverse dependency order. Returns whether the run was
     /// actually stopped or was already stopped.
     pub async fn stop(&mut self, run_name: &str) -> Result<StopResult, OrchestratorError> {
+        // Reconnect to whichever helper is running (system or user socket)
+        if let Ok(client) = crate::helper::HelperClient::connect().await {
+            self.helper_client = client;
+        }
+
         let mut project_state = ProjectState::load(&self.project_root)?;
         let run = project_state
             .get_run_mut(run_name)
@@ -832,6 +837,8 @@ impl Orchestrator {
                 // Remove DNS + Caddy route.
                 if let Some(ref url_str) = node_state.url {
                     let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+                    // Strip port if present (e.g., "host:8443" → "host")
+                    let hostname = hostname.split(':').next().unwrap_or(hostname);
                     let _ = self.helper_client.remove_host(hostname).await;
                     let route_id = format!(
                         "veld-{}-{}-{}",
@@ -889,6 +896,8 @@ impl Orchestrator {
             // Remove DNS + Caddy route.
             if let Some(ref url_str) = ns.url {
                 let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+                // Strip port if present (e.g., "host:8443" → "host")
+                let hostname = hostname.split(':').next().unwrap_or(hostname);
                 let _ = self.helper_client.remove_host(hostname).await;
                 let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
                 let _ = self.helper_client.remove_route(&route_id).await;

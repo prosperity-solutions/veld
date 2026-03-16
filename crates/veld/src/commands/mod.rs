@@ -19,6 +19,17 @@ pub mod version;
 
 use crate::output;
 
+/// Read the setup mode from `~/.veld/setup.json`.
+pub fn read_setup_mode() -> Option<String> {
+    let path = dirs::home_dir()?.join(".veld").join("setup.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
 /// Resolve the run name to use. If `name` is given, use it directly. Otherwise
 /// look at the project state: if exactly one active run exists, use that; if
 /// zero or multiple, print an actionable error and return `None`.

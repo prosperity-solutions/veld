@@ -71,6 +71,55 @@ pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i
         } else {
             print_step_ok("not running");
         }
+
+        // Remove user-level LaunchAgent to prevent KeepAlive restart
+        if cfg!(target_os = "macos") {
+            let uid = std::process::Command::new("id")
+                .arg("-u")
+                .arg(std::env::var("SUDO_USER").unwrap_or_default())
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default();
+            if !uid.is_empty() {
+                let _ = tokio::process::Command::new("launchctl")
+                    .args(["bootout", &format!("gui/{uid}/dev.veld.helper")])
+                    .status()
+                    .await;
+            }
+            // Also try to remove the plist file
+            if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+                let plist =
+                    format!("/Users/{sudo_user}/Library/LaunchAgents/dev.veld.helper.plist");
+                let _ = std::fs::remove_file(&plist);
+            }
+        }
+        if cfg!(target_os = "linux") {
+            // Stop and disable user-level systemd service
+            if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+                let _ = tokio::process::Command::new("sudo")
+                    .args([
+                        "-u",
+                        &sudo_user,
+                        "systemctl",
+                        "--user",
+                        "stop",
+                        "veld-helper",
+                    ])
+                    .status()
+                    .await;
+                let _ = tokio::process::Command::new("sudo")
+                    .args([
+                        "-u",
+                        &sudo_user,
+                        "systemctl",
+                        "--user",
+                        "disable",
+                        "veld-helper",
+                    ])
+                    .status()
+                    .await;
+            }
+        }
     }
 
     // Step 2: Check port availability.

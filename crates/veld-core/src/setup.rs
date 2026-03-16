@@ -270,11 +270,12 @@ async fn is_caddy_running() -> bool {
         .timeout(Duration::from_secs(2))
         .build()
         .unwrap_or_default();
+    // Check for our sentinel route to verify it's Veld's Caddy, not a foreign one.
     client
-        .get("http://localhost:2019/config/")
+        .get("http://localhost:2019/id/veld-sentinel")
         .send()
         .await
-        .is_ok()
+        .is_ok_and(|r| r.status().is_success())
 }
 
 /// Install, upgrade, or verify the Caddy web server.
@@ -340,10 +341,12 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
 /// Tries the helper RPC first (if veld-helper is running), then falls back to
 /// hitting the Caddy admin API directly.
 async fn stop_caddy_best_effort() {
-    let client = HelperClient::new(&helper::system_socket_path());
-    if client.caddy_stop().await.is_ok() {
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-        return;
+    // Try to stop via helper (try both sockets).
+    if let Ok(client) = HelperClient::connect().await {
+        if client.caddy_stop().await.is_ok() {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            return;
+        }
     }
 
     // Fallback: POST directly to Caddy admin API.
@@ -927,7 +930,7 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
                 .args(["--user", "disable", "veld-daemon"])
                 .status()
                 .await;
-            if let Some(home) = dirs::home_dir() {
+            if let Some(home) = resolve_real_user_home() {
                 let _ = std::fs::remove_file(home.join(".config/systemd/user/veld-daemon.service"));
 
                 // Stop and remove user-level helper service (unprivileged mode).
@@ -949,9 +952,10 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     remove_caddy_ca_trust().await;
 
     // Remove veld library directory (check both possible locations).
+    // Use resolve_real_user_home() so we clean the real user's dir under sudo.
     for lib_dir in &[
         PathBuf::from("/usr/local/lib/veld"),
-        dirs::home_dir()
+        resolve_real_user_home()
             .map(|h| h.join(".local").join("lib").join("veld"))
             .unwrap_or_default(),
     ] {
@@ -968,12 +972,12 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         let _ = std::fs::remove_file(&socket);
     }
 
-    // Remove ~/.veld directory (helper.sock, setup.json, hints.json, etc.).
-    if let Some(home) = dirs::home_dir() {
+    // Remove ~/.veld directory — use real user's home when running under sudo.
+    if let Some(home) = resolve_real_user_home() {
         let veld_dir = home.join(".veld");
         if veld_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&veld_dir) {
-                tracing::warn!(path = %veld_dir.display(), error = %e, "failed to remove ~/.veld dir");
+                tracing::warn!(path = %veld_dir.display(), error = %e, "failed to remove .veld dir");
             }
         }
     }
@@ -1051,9 +1055,10 @@ pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
 /// Remove the Caddy CA from the system trust store (best-effort).
 async fn remove_caddy_ca_trust() {
     // Try both possible caddy-data locations.
+    // Use resolve_real_user_home() so we find the real user's data under sudo.
     let candidates = [
         PathBuf::from("/usr/local/lib/veld/caddy-data"),
-        dirs::home_dir()
+        resolve_real_user_home()
             .map(|h| h.join(".local/lib/veld/caddy-data"))
             .unwrap_or_default(),
     ];
@@ -1086,6 +1091,23 @@ async fn remove_caddy_ca_trust() {
             _ => {}
         }
     }
+}
+
+/// Resolve the real user's home directory, accounting for `sudo`.
+///
+/// When running under `sudo`, `dirs::home_dir()` returns root's home
+/// (`/var/root` on macOS, `/root` on Linux). This helper checks `SUDO_USER`
+/// first and returns the real user's home, falling back to `dirs::home_dir()`.
+fn resolve_real_user_home() -> Option<PathBuf> {
+    if let Ok(sudo_user) = std::env::var("SUDO_USER") {
+        // Under sudo, use the real user's home
+        if cfg!(target_os = "macos") {
+            return Some(PathBuf::from(format!("/Users/{sudo_user}")));
+        } else {
+            return Some(PathBuf::from(format!("/home/{sudo_user}")));
+        }
+    }
+    dirs::home_dir()
 }
 
 /// Resolve the real (non-root) user when running under `sudo` on macOS.
