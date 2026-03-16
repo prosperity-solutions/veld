@@ -195,6 +195,28 @@ else
   echo "Caddy already installed."
 fi
 
+# --- macOS: clear extended attributes and re-sign binaries ---
+#
+# Downloaded binaries carry com.apple.quarantine and com.apple.provenance
+# attributes. On macOS Sequoia (15+), provenance alone can cause Gatekeeper
+# to SIGKILL unsigned/adhoc-signed binaries. Clearing all xattrs and
+# re-signing locally makes macOS treat them as trusted.
+#
+# This MUST happen before restarting services, otherwise Gatekeeper can
+# SIGKILL the freshly installed unsigned binaries on launch.
+
+if [ "$OS" = "macos" ]; then
+  echo "Clearing macOS extended attributes and re-signing binaries..."
+  $NEED_SUDO xattr -cr "${INSTALL_DIR}/veld" 2>/dev/null || true
+  $NEED_SUDO codesign --force --sign - "${INSTALL_DIR}/veld" 2>/dev/null || true
+  for bin in veld-helper veld-daemon; do
+    if [ -f "${LIB_DIR}/${bin}" ]; then
+      $NEED_SUDO xattr -cr "${LIB_DIR}/${bin}" 2>/dev/null || true
+      $NEED_SUDO codesign --force --sign - "${LIB_DIR}/${bin}" 2>/dev/null || true
+    fi
+  done
+fi
+
 # --- Restart running services (picks up new binaries) ---
 
 # Detect install mode from setup.json to determine how to restart the helper.
@@ -215,8 +237,8 @@ if [ "$OS" = "macos" ]; then
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
       echo "Restarting veld-helper service (privileged)..."
-      sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
-      sudo launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
+      $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
+      $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
     fi
   else
     # User mode: helper runs as a user LaunchAgent.
@@ -239,7 +261,7 @@ else
   if [ -n "$PRIVILEGED_MODE" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
       echo "Restarting veld-helper service (privileged)..."
-      sudo systemctl restart veld-helper 2>/dev/null || true
+      $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
     fi
   else
     if systemctl --user is-active --quiet veld-helper 2>/dev/null; then
@@ -251,25 +273,6 @@ else
     echo "Restarting veld-daemon service..."
     systemctl --user restart veld-daemon 2>/dev/null || true
   fi
-fi
-
-# --- macOS: clear extended attributes and re-sign binaries ---
-#
-# Downloaded binaries carry com.apple.quarantine and com.apple.provenance
-# attributes. On macOS Sequoia (15+), provenance alone can cause Gatekeeper
-# to SIGKILL unsigned/adhoc-signed binaries. Clearing all xattrs and
-# re-signing locally makes macOS treat them as trusted.
-
-if [ "$OS" = "macos" ]; then
-  echo "Clearing macOS extended attributes and re-signing binaries..."
-  $NEED_SUDO xattr -cr "${INSTALL_DIR}/veld" 2>/dev/null || true
-  $NEED_SUDO codesign --force --sign - "${INSTALL_DIR}/veld" 2>/dev/null || true
-  for bin in veld-helper veld-daemon; do
-    if [ -f "${LIB_DIR}/${bin}" ]; then
-      $NEED_SUDO xattr -cr "${LIB_DIR}/${bin}" 2>/dev/null || true
-      $NEED_SUDO codesign --force --sign - "${LIB_DIR}/${bin}" 2>/dev/null || true
-    fi
-  done
 fi
 
 # --- Clean up stale binaries from alternate install locations ---

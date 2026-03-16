@@ -650,7 +650,7 @@ async fn install_helper_inner(veld_helper_bin: PathBuf) -> Result<StepResult, an
         // Service registration may have failed or the daemon hasn't started
         // yet. Start the helper directly as a background process.
         tracing::info!("helper not reachable via service manager, starting directly");
-        let _child = tokio::process::Command::new(&veld_helper_bin)
+        let _child = std::process::Command::new(&veld_helper_bin)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

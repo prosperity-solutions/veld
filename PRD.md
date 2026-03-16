@@ -697,7 +697,7 @@ No cross-compilation until v1 is stable. No Tauri. No GTK. No npm in CI.
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",

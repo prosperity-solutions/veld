@@ -91,7 +91,7 @@ async fn install_unprivileged_helper() -> Result<String, anyhow::Error> {
         // Service registration may have failed or the process hasn't started
         // yet. Start the helper directly as a background process.
         tracing::info!("helper not reachable via service manager, starting directly");
-        let _child = tokio::process::Command::new(&veld_helper_bin)
+        let _child = std::process::Command::new(&veld_helper_bin)
             .arg("--socket-path")
             .arg(&socket_path)
             .arg("--https-port")
