@@ -116,7 +116,7 @@ jobs:
       - name: "Test: unprivileged setup lifecycle"
         run: |
           set -e
-          VELD="./target/debug/veld"
+          VELD="$(pwd)/target/debug/veld"
           echo "=== Unprivileged setup ==="
           $VELD setup unprivileged
           echo ""
@@ -190,7 +190,7 @@ jobs:
       - name: "Test: privileged setup lifecycle"
         run: |
           set -e
-          VELD="./target/debug/veld"
+          VELD="$(pwd)/target/debug/veld"
           echo "=== Privileged setup ==="
           sudo $VELD setup privileged
           echo ""
@@ -268,7 +268,7 @@ jobs:
       - name: "Test: auto-bootstrap (no setup)"
         run: |
           set -e
-          VELD="./target/debug/veld"
+          VELD="$(pwd)/target/debug/veld"
           echo "=== Auto-bootstrap: start without any setup ==="
           cd testproject
           $VELD start frontend:local --name auto-test 2>&1
