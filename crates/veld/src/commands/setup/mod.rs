@@ -14,7 +14,8 @@ pub async fn run(command: Option<SetupCommand>) -> i32 {
         Some(SetupCommand::Privileged {
             helper_bin,
             user_socket,
-        }) => privileged::run(helper_bin, user_socket).await,
+            caddy_bin,
+        }) => privileged::run(helper_bin, user_socket, caddy_bin).await,
         Some(SetupCommand::Hammerspoon) => hammerspoon::run().await,
     }
 }

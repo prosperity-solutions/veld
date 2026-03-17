@@ -7,7 +7,11 @@ use veld_core::helper::HelperClient;
 ///
 /// This is the original `veld setup` behaviour: it installs the system
 /// daemon on ports 80/443, trusts the Caddy CA, etc.
-pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i32 {
+pub async fn run(
+    helper_bin: Option<PathBuf>,
+    user_socket: Option<PathBuf>,
+    caddy_bin: Option<PathBuf>,
+) -> i32 {
     // Setup requires root for writing LaunchDaemons, binding /var/run socket,
     // etc. If we're not root, re-exec with sudo so the user gets a password
     // prompt automatically.
@@ -28,6 +32,7 @@ pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i
         let resolved_helper_bin =
             veld_core::setup::which_self("veld-helper").unwrap_or_else(|_| "veld-helper".into());
         let resolved_user_socket = veld_core::helper::user_socket_path();
+        let resolved_caddy_bin = veld_core::paths::caddy_bin();
 
         let status = std::process::Command::new("sudo")
             .arg(&exe)
@@ -37,6 +42,8 @@ pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i
             .arg(&resolved_helper_bin)
             .arg("--user-socket")
             .arg(&resolved_user_socket)
+            .arg("--caddy-bin")
+            .arg(&resolved_caddy_bin)
             .status();
         return match status {
             Ok(s) => s.code().unwrap_or(1),
@@ -54,6 +61,7 @@ pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i
         veld_core::setup::which_self("veld-helper").unwrap_or_else(|_| "veld-helper".into())
     });
     let user_socket_path = user_socket.unwrap_or_else(veld_core::helper::user_socket_path);
+    let caddy_bin_path = caddy_bin.unwrap_or_else(veld_core::paths::caddy_bin);
 
     println!("{}", output::bold("Veld Setup (privileged)"));
     println!();
@@ -155,7 +163,7 @@ pub async fn run(helper_bin: Option<PathBuf>, user_socket: Option<PathBuf>) -> i
     // Step 5: Install Veld helper (starts Caddy).
     // Use the pre-resolved helper binary path for the LaunchDaemon plist.
     print_step(5, total, "Installing Veld helper...");
-    match veld_core::setup::install_helper_with_bin(&helper_bin_path).await {
+    match veld_core::setup::install_helper_with_bin(&helper_bin_path, Some(&caddy_bin_path)).await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));

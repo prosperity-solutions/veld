@@ -20,6 +20,10 @@ pub enum SetupCommand {
         /// Path to user socket (resolved before sudo escalation).
         #[arg(long, hide = true)]
         user_socket: Option<std::path::PathBuf>,
+
+        /// Path to Caddy binary (resolved before sudo escalation).
+        #[arg(long, hide = true)]
+        caddy_bin: Option<std::path::PathBuf>,
     },
     /// Install Hammerspoon menu bar widget (macOS only).
     Hammerspoon,

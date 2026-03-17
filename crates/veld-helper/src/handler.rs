@@ -18,11 +18,12 @@ impl State {
     pub fn new(
         https_port: u16,
         http_port: u16,
+        caddy_bin: Option<std::path::PathBuf>,
         shutdown_tx: tokio::sync::watch::Sender<bool>,
     ) -> Self {
         Self {
             dns: DnsManager::new(),
-            caddy: CaddyManager::new(https_port, http_port),
+            caddy: CaddyManager::new(https_port, http_port, caddy_bin),
             https_port,
             http_port,
             shutdown_tx,

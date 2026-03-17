@@ -647,26 +647,38 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
 /// was resolved before sudo escalation and passed as an argument.
 pub async fn install_helper_with_bin(
     veld_helper_bin: &std::path::Path,
+    caddy_bin: Option<&std::path::Path>,
 ) -> Result<StepResult, anyhow::Error> {
-    install_helper_inner(veld_helper_bin.to_path_buf()).await
+    install_helper_inner(
+        veld_helper_bin.to_path_buf(),
+        caddy_bin.map(|p| p.to_path_buf()),
+    )
+    .await
 }
 
 /// Install (or verify) the Veld helper, then verify it is reachable and
 /// start Caddy through it.
 pub async fn install_helper() -> Result<StepResult, anyhow::Error> {
     let veld_helper_bin = which_self("veld-helper")?;
-    install_helper_inner(veld_helper_bin).await
+    install_helper_inner(veld_helper_bin, None).await
 }
 
 /// Shared implementation for `install_helper` and `install_helper_with_bin`.
-async fn install_helper_inner(veld_helper_bin: PathBuf) -> Result<StepResult, anyhow::Error> {
+async fn install_helper_inner(
+    veld_helper_bin: PathBuf,
+    caddy_bin: Option<PathBuf>,
+) -> Result<StepResult, anyhow::Error> {
     let socket = crate::helper::system_socket_path();
 
     // Try to register as a system service. If launchctl/systemctl fails
     // (e.g. in CI), fall back to starting the helper directly.
     let service_ok = match std::env::consts::OS {
-        "macos" => install_helper_macos(&veld_helper_bin).await.is_ok(),
-        "linux" => install_helper_linux(&veld_helper_bin).await.is_ok(),
+        "macos" => install_helper_macos(&veld_helper_bin, caddy_bin.as_deref())
+            .await
+            .is_ok(),
+        "linux" => install_helper_linux(&veld_helper_bin, caddy_bin.as_deref())
+            .await
+            .is_ok(),
         other => anyhow::bail!("unsupported OS: {other}"),
     };
 
@@ -723,9 +735,19 @@ async fn install_helper_inner(veld_helper_bin: PathBuf) -> Result<StepResult, an
     )))
 }
 
-async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
+async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
     let plist_path = Path::new("/Library/LaunchDaemons/dev.veld.helper.plist");
     let label = "dev.veld.helper";
+
+    // Build ProgramArguments with optional --caddy-bin.
+    let mut program_args = format!("        <string>{}</string>", bin.display());
+    if let Some(caddy) = caddy_bin {
+        program_args.push_str(&format!(
+            "\n        <string>--caddy-bin</string>\n        <string>{}</string>",
+            caddy.display()
+        ));
+    }
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -736,7 +758,7 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     <string>{label}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+{program_args}
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -745,7 +767,6 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
 </dict>
 </plist>
 "#,
-        bin.display()
     );
 
     // Stop the running service first (required for upgrades). Use the modern
@@ -795,11 +816,14 @@ async fn install_helper_macos(bin: &Path) -> Result<(), anyhow::Error> {
     }
 }
 
-async fn install_helper_linux(bin: &Path) -> Result<(), anyhow::Error> {
+async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
     let unit_path = Path::new("/etc/systemd/system/veld-helper.service");
+    let mut exec_start = bin.display().to_string();
+    if let Some(caddy) = caddy_bin {
+        exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
+    }
     let unit = format!(
-        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
-        bin.display()
+        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
     );
     std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
 

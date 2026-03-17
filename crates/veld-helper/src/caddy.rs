@@ -14,6 +14,8 @@ pub struct CaddyManager {
     client: reqwest::Client,
     https_port: u16,
     http_port: u16,
+    /// Override for the Caddy binary path (avoids lib_dir() issues under sudo).
+    caddy_bin_override: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug)]
@@ -23,12 +25,13 @@ struct CaddyState {
 }
 
 impl CaddyManager {
-    pub fn new(https_port: u16, http_port: u16) -> Self {
+    pub fn new(https_port: u16, http_port: u16, caddy_bin: Option<std::path::PathBuf>) -> Self {
         Self {
             inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
             client: reqwest::Client::new(),
             https_port,
             http_port,
+            caddy_bin_override: caddy_bin,
         }
     }
 
@@ -56,7 +59,10 @@ impl CaddyManager {
         }
 
         let mut state = self.inner.lock().await;
-        let caddy_bin = veld_core::paths::caddy_bin();
+        let caddy_bin = self
+            .caddy_bin_override
+            .clone()
+            .unwrap_or_else(veld_core::paths::caddy_bin);
         if !caddy_bin.exists() {
             anyhow::bail!("caddy not found at {}", caddy_bin.display());
         }
@@ -133,7 +139,7 @@ impl CaddyManager {
     /// Reload caddy configuration via the admin API.
     pub async fn reload(&self) -> Result<()> {
         let load_url = format!("{CADDY_ADMIN_API}/load");
-        let config = build_base_config(self.https_port, self.http_port);
+        let config = build_base_config(self.https_port, self.http_port, &self.caddy_bin_override);
 
         let resp = self
             .client
@@ -228,8 +234,17 @@ pub struct FeedbackConfig<'a> {
 // ---------------------------------------------------------------------------
 
 /// Build a minimal base Caddy config with a server block for Veld.
-fn build_base_config(https_port: u16, http_port: u16) -> serde_json::Value {
-    let data_dir = veld_core::paths::caddy_data_dir();
+fn build_base_config(
+    https_port: u16,
+    http_port: u16,
+    caddy_bin_override: &Option<std::path::PathBuf>,
+) -> serde_json::Value {
+    // If caddy_bin was overridden, derive data_dir from its parent (sibling "caddy-data").
+    let data_dir = caddy_bin_override
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("caddy-data"))
+        .unwrap_or_else(veld_core::paths::caddy_data_dir);
     // Ensure the data directory exists so Caddy can write PKI data.
     let _ = std::fs::create_dir_all(&data_dir);
 
@@ -469,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_build_base_config() {
-        let config = build_base_config(443, 80);
+        let config = build_base_config(443, 80, &None);
         assert!(config["apps"]["http"]["servers"]["veld"].is_object());
         let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
             .as_array()
@@ -486,7 +501,7 @@ mod tests {
 
     #[test]
     fn test_build_base_config_custom_ports() {
-        let config = build_base_config(8443, 8080);
+        let config = build_base_config(8443, 8080, &None);
         let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
             .as_array()
             .unwrap();

@@ -17,6 +17,8 @@ struct HelperConfig {
     socket_path: PathBuf,
     https_port: u16,
     http_port: u16,
+    /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
+    caddy_bin: Option<PathBuf>,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -32,6 +34,7 @@ fn parse_args() -> Result<HelperConfig> {
     let mut socket_path = default_socket_path();
     let mut https_port: u16 = 443;
     let mut http_port: u16 = 80;
+    let mut caddy_bin: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -59,6 +62,11 @@ fn parse_args() -> Result<HelperConfig> {
                     .parse()
                     .context("--http-port must be a valid port number")?;
             }
+            "--caddy-bin" => {
+                i += 1;
+                let path = args.get(i).context("--caddy-bin requires a value")?;
+                caddy_bin = Some(PathBuf::from(path));
+            }
             other => anyhow::bail!("unknown argument: {other}"),
         }
         i += 1;
@@ -68,6 +76,7 @@ fn parse_args() -> Result<HelperConfig> {
         socket_path,
         https_port,
         http_port,
+        caddy_bin,
     })
 }
 
@@ -131,6 +140,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(handler::State::new(
         config.https_port,
         config.http_port,
+        config.caddy_bin,
         shutdown_tx,
     ));
 
