@@ -21,10 +21,6 @@ pub async fn run(
     attach: bool,
     _debug: bool,
 ) -> i32 {
-    if !super::require_setup(false).await {
-        return 1;
-    }
-
     let Some((config_path, config)) = super::load_config(false) else {
         return 1;
     };
@@ -119,6 +115,9 @@ pub async fn run(
             // Final receipt: summary table.
             println!();
             print_start_receipt(&run_state);
+
+            // Show setup hint if in unprivileged mode.
+            crate::hints::maybe_show_privileged_hint(orchestrator.https_port);
 
             // Foreground mode: tail logs and stop on Ctrl+C.
             if foreground {

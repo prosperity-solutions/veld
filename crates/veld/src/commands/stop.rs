@@ -4,10 +4,6 @@ use crate::output;
 
 /// `veld stop [--name <n>] [--all]`
 pub async fn run(name: Option<String>, all: bool) -> i32 {
-    if !super::require_setup(false).await {
-        return 1;
-    }
-
     let Some((config_path, config)) = super::load_config(false) else {
         return 1;
     };

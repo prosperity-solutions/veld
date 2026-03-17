@@ -9,9 +9,26 @@ use tokio::net::UnixStream;
 // Constants
 // ---------------------------------------------------------------------------
 
+/// System socket path (used by privileged helper running as LaunchDaemon/systemd).
+pub fn system_socket_path() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        PathBuf::from("/var/run/veld-helper.sock")
+    } else {
+        PathBuf::from("/run/veld-helper.sock")
+    }
+}
+
+/// User socket path (used by unprivileged helper running as user process).
+pub fn user_socket_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|h| h.join(".veld").join("helper.sock"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/veld-helper.sock"))
+}
+
 /// Default socket path for veld-helper.
+#[deprecated(note = "use system_socket_path() or user_socket_path() instead")]
 pub fn default_socket_path() -> PathBuf {
-    PathBuf::from("/var/run/veld-helper.sock")
+    system_socket_path()
 }
 
 // ---------------------------------------------------------------------------
@@ -57,6 +74,7 @@ pub enum HelperCommand {
     CaddyStart,
     CaddyStop,
     Status,
+    Shutdown,
 }
 
 impl Serialize for HelperCommand {
@@ -85,6 +103,7 @@ impl Serialize for HelperCommand {
                 ("caddy_stop", serde_json::Value::Object(Default::default()))
             }
             HelperCommand::Status => ("status", serde_json::Value::Object(Default::default())),
+            HelperCommand::Shutdown => ("shutdown", serde_json::Value::Object(Default::default())),
         };
 
         let mut map = serializer.serialize_map(Some(2))?;
@@ -120,6 +139,7 @@ impl HelperClient {
     }
 
     /// Create a client using the default socket path.
+    #[allow(deprecated)]
     pub fn default_client() -> Self {
         Self::new(&default_socket_path())
     }
@@ -206,5 +226,59 @@ impl HelperClient {
 
     pub async fn status(&self) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::Status).await
+    }
+
+    pub async fn shutdown(&self) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::Shutdown).await
+    }
+
+    /// Connect to the helper, trying system socket first, then user socket.
+    /// Returns the connected client or an error if neither socket is reachable.
+    pub async fn connect() -> Result<Self, HelperError> {
+        // Try system socket first (privileged mode).
+        let system = system_socket_path();
+        if let Ok(client) = Self::try_connect(&system).await {
+            return Ok(client);
+        }
+        // Try user socket (unprivileged mode).
+        let user = user_socket_path();
+        if let Ok(client) = Self::try_connect(&user).await {
+            return Ok(client);
+        }
+        Err(HelperError::ConnectionFailed {
+            path: user,
+            source: std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "no helper reachable on system or user socket",
+            ),
+        })
+    }
+
+    /// Try to connect and verify the helper is responsive (status check).
+    async fn try_connect(socket_path: &Path) -> Result<Self, HelperError> {
+        let client = Self::new(socket_path);
+        // Use a timeout to avoid hanging on a wedged helper.
+        match tokio::time::timeout(std::time::Duration::from_secs(3), client.status()).await {
+            Ok(Ok(_)) => Ok(client),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(HelperError::ConnectionFailed {
+                path: socket_path.to_path_buf(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "helper status check timed out",
+                ),
+            }),
+        }
+    }
+
+    /// Query the helper's HTTPS port from its status response.
+    pub async fn https_port(&self) -> Result<u16, HelperError> {
+        let resp = self.status().await?;
+        Ok(resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("https_port"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(443) as u16)
     }
 }

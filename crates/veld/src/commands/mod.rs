@@ -1,3 +1,4 @@
+pub mod doctor;
 pub mod feedback;
 pub mod gc;
 pub mod graph;
@@ -18,6 +19,17 @@ pub mod urls;
 pub mod version;
 
 use crate::output;
+
+/// Read the setup mode from `~/.veld/setup.json`.
+pub fn read_setup_mode() -> Option<String> {
+    let path = dirs::home_dir()?.join(".veld").join("setup.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
 
 /// Resolve the run name to use. If `name` is given, use it directly. Otherwise
 /// look at the project state: if exactly one active run exists, use that; if
@@ -90,27 +102,6 @@ pub fn resolve_run_name(
 
     output::print_error("No runs found. Start one with `veld start`.", json);
     None
-}
-
-/// Check that the Veld setup has been completed. Returns `true` if ready,
-/// `false` (and prints an error) if not.
-///
-/// Commands that operate on environments should call this before doing
-/// anything else.
-pub async fn require_setup(json: bool) -> bool {
-    match veld_core::setup::require_setup().await {
-        Ok(_status) => true,
-        Err(e) => {
-            if json {
-                let veld_core::setup::SetupError::Incomplete { ref missing } = e;
-                let payload = veld_core::setup::setup_required_json(missing);
-                println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-            } else {
-                output::print_error("Veld is not set up yet. Run `veld setup` first.", false);
-            }
-            false
-        }
-    }
 }
 
 /// Load the project configuration from the current working directory.

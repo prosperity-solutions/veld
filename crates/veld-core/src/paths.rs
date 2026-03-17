@@ -1,31 +1,24 @@
 use std::path::PathBuf;
 
-/// Resolve the veld lib directory. Prefers `/usr/local/lib/veld` if it exists
-/// or can be created; falls back to `~/.local/lib/veld`.
+/// Resolve the veld lib directory. Prefers `~/.local/lib/veld` (user-level);
+/// falls back to `/usr/local/lib/veld` for existing system installs.
 ///
-/// On fresh installs, tries to create the system dir to test writability.
-/// This avoids HOME-dependent resolution that differs between processes
-/// (e.g. sudo'd setup vs LaunchDaemon).
+/// Never attempts to create the system directory — the user-local path is
+/// always the default for new installations.
 pub fn lib_dir() -> PathBuf {
-    let system_dir = PathBuf::from("/usr/local/lib/veld");
-    // Use system dir if it already exists.
-    if system_dir.exists() {
-        return system_dir;
-    }
-    // Check user-local dir.
+    // Prefer user-local directory (new default).
     let user_dir = dirs::home_dir().map(|h| h.join(".local").join("lib").join("veld"));
     if let Some(ref ud) = user_dir {
         if ud.exists() {
             return ud.clone();
         }
     }
-    // Neither exists yet. Try to create the system dir. If we can, use it.
-    // This ensures all processes (setup, helper daemon, CLI) agree on the
-    // same path regardless of HOME.
-    if std::fs::create_dir_all(&system_dir).is_ok() {
+    // Fall back to system directory for existing installs.
+    let system_dir = PathBuf::from("/usr/local/lib/veld");
+    if system_dir.exists() {
         return system_dir;
     }
-    // Fall back to user-local dir (non-root install).
+    // Default to user-local directory (never try to create system dir).
     user_dir.unwrap_or(system_dir)
 }
 

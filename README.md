@@ -33,16 +33,24 @@ curl -fsSL https://veld.oss.life.li/get | bash
 ```
 
 This detects your OS and architecture, downloads the latest release, and installs:
-- `veld` to `/usr/local/bin/`
-- `veld-helper` and `veld-daemon` to `/usr/local/lib/veld/`
+- `veld` to `~/.local/bin/`
+- `veld-helper` and `veld-daemon` to `~/.local/lib/veld/`
 
-Then run one-time setup:
+No sudo required. Ensure `~/.local/bin` is on your `PATH`.
+
+Setup is optional — commands auto-bootstrap on first use with HTTPS on port 18443.
+For the full experience with clean URLs (no port numbers), run the one-time privileged setup:
 
 ```sh
-veld setup
+veld setup privileged
 ```
 
-This installs Caddy, the helper/daemon services, and trusts Caddy's CA in your system keychain for HTTPS.
+This registers system services and binds ports 80/443, so your URLs are just
+`https://frontend.my-feature.myproject.localhost` — no `:18443` suffix. Requires
+sudo once; you won't be asked again.
+
+Alternatively, `veld setup unprivileged` does a no-sudo setup with HTTPS on port 18443.
+Both modes support the full feature set; the only difference is whether URLs include a port number.
 
 To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
 
@@ -128,7 +136,7 @@ veld stop --name dev
 | `veld runs` | List all runs |
 | `veld feedback [--name <n>] [--wait] [--history]` | Read or wait for in-browser feedback |
 | `veld gc` | Clean up stale state and logs |
-| `veld setup` | One-time system setup |
+| `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld init` | Create a new veld.json |
 
 ## Configuration
@@ -169,7 +177,7 @@ Commands and env values support `${veld.port}`, `${veld.run}`, `${veld.root}`, `
 Three binaries work together:
 
 - **`veld`** — CLI. Parses commands, orchestrates environments, displays output.
-- **`veld-helper`** — privileged daemon (root). Manages DNS entries and Caddy routes via a minimal Unix socket API.
+- **`veld-helper`** — manages DNS entries and Caddy routes via a minimal Unix socket API. Runs as either a system daemon (privileged, for clean URLs on ports 80/443) or a user process (unprivileged, on port 18443).
 - **`veld-daemon`** — user-space daemon. Monitors health, runs garbage collection, broadcasts state updates.
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
@@ -177,8 +185,7 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 ## Requirements
 
 - macOS (arm64/x64) or Linux (x64/arm64)
-- Ports 80, 443, and 2019 available
-- sudo access once for `veld setup`
+- Optional: sudo access for `veld setup privileged` (clean URLs without port numbers)
 
 ## Agent Skills
 

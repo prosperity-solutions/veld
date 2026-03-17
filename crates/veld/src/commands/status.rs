@@ -6,10 +6,6 @@ use crate::output;
 
 /// `veld status [--name <n>] [--outputs] [--json]`
 pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
-    if !super::require_setup(json).await {
-        return 1;
-    }
-
     let Some((config_path, _cfg)) = super::load_config(json) else {
         return 1;
     };

@@ -6,7 +6,7 @@ Veld is a local development environment orchestrator for monorepos. It enables d
 
 Veld abstracts away all port management, process coordination, and environment wiring. Users never deal with port numbers. They only ever see clean, stable, human-readable local HTTPS URLs.
 
-v1 ships as three binaries (CLI, privileged helper, user-space daemon) distributed via a single install script. No GUI. No MCP server. No Windows support.
+v1 ships as three binaries (CLI, helper, user-space daemon) distributed via a single install script. No sudo required for install. No GUI. No MCP server. No Windows support.
 
 ---
 
@@ -51,7 +51,7 @@ No ports. No manual config. No mkcert commands. No hosts file editing.
 
 ### One Command Install
 ```sh
-curl -fsSL https://get.veld.dev | bash
+curl -fsSL https://veld.oss.life.li/get | bash
 ```
 
 The install script handles everything end to end. A developer runs this once and their machine is fully configured. The install script:
@@ -59,12 +59,11 @@ The install script handles everything end to end. A developer runs this once and
 1. Detects platform (macOS arm64/x64, Linux arm64/x64)
 2. Downloads `veld`, `veld-daemon`, and `veld-helper` binaries from the latest GitHub Release as a matched versioned set
 3. Verifies SHA-256 checksums against `checksums.txt` from the release
-4. Places `veld` at `/usr/local/bin/veld`, or `~/.local/bin/veld` if `/usr/local/bin` is not writable (with a PATH reminder)
-5. Places `veld-daemon` and `veld-helper` at `/usr/local/lib/veld/`
-6. Automatically runs `veld setup` (see below)
-7. Prints success with next steps
+4. Places `veld` at `~/.local/bin/veld` (with a PATH reminder if needed)
+5. Places `veld-daemon` and `veld-helper` at `~/.local/lib/veld/`
+6. Prints success with next steps
 
-In non-interactive mode (non-TTY, piped), the install script skips `veld setup` and prints a clear reminder to run it manually. This handles CI install scenarios correctly.
+The install script does NOT auto-run `veld setup`; commands auto-bootstrap on first use.
 
 ### Binary Versioning
 All three binaries (`veld`, `veld-daemon`, `veld-helper`) are versioned together and released as a matched set. `veld --version` reports all three versions:
@@ -78,35 +77,41 @@ veld-helper   1.2.0
 A version mismatch between binaries is detected at startup and treated as a fatal error with a clear message directing the user to run `veld update`.
 
 ### `veld update`
-Re-runs the full install script, which downloads all three binaries, replaces them, re-runs `veld setup` idempotently (which restarts daemons if binaries changed), and verifies the result. One command updates everything — CLI, daemon, helper, and Caddy.
+Re-runs the full install script, which downloads all three binaries, replaces them, and restarts services in a mode-aware fashion (detecting the current setup mode and restarting the appropriate daemons). One command updates everything — CLI, daemon, helper, and Caddy.
 
 ---
 
 ## Setup
 
-### `veld setup` — The Most Critical Command
+### `veld setup` — Two Modes
 
-`veld setup` is a one-time system configuration command that installs Veld's infrastructure dependencies and registers its daemons. It is automatically invoked by the install script in interactive environments.
+`veld setup` is an optional system configuration command that installs Veld's infrastructure dependencies and registers its daemons. Commands auto-bootstrap on first use if setup has not been run explicitly.
 
-`veld setup` is:
-- **Idempotent** — re-running it detects what is already correctly installed and skips those steps
+`veld setup` operates in two modes:
+
+- **`veld setup unprivileged`** — no sudo required. Installs Caddy and daemons as user-level processes. Services run on port 18443 instead of 80/443. Ideal for environments without root access.
+- **`veld setup privileged`** — requires one-time sudo. Installs Caddy and daemons as system services on ports 80/443 for clean URLs without port numbers. The single sudo cost is paid once during setup.
+
+Running `veld setup` without a mode argument auto-detects: it uses unprivileged mode by default and prompts for privileged if conditions allow.
+
+Both modes are:
+- **Idempotent** — re-running detects what is already correctly installed and skips those steps
 - **Transparent** — prints clear per-step progress with success/failure indicators
 - **Verified** — each step is confirmed to have actually worked before proceeding
 - **Recoverable** — partial failures halt immediately with an actionable error message
 - **Atomic** — `veld-helper` is verified running before setup marks itself complete
 
-Steps performed:
+Steps performed (privileged mode shown):
 
 ```
 [1/6] Checking port availability...       ✓ ports 80, 443, 2019 are free
-[2/6] Installing Caddy...                  ✓ caddy 2.8.4 → /usr/local/lib/veld/caddy
-[3/6] Installing mkcert...                 ✓ mkcert 1.4.4 → /usr/local/lib/veld/mkcert
-[4/6] Generating local CA and certs...     ✓ CA trusted, wildcard cert generated
+[2/6] Installing Caddy...                  ✓ caddy 2.8.4 → ~/.local/lib/veld/caddy
+[3/6] Trusting Caddy CA...                 ✓ Caddy CA added to system trust store
 [5/6] Installing veld-helper daemon...     ✓ registered as LaunchDaemon (macOS)
 [6/6] Installing veld-daemon...            ✓ registered as LaunchAgent, running
 [6/6] Starting veld-helper...             ✓ running (pid 1234)
 
-✓ Veld setup complete.
+✓ Veld setup complete (privileged mode).
 
   Run `veld init` in a project to get started.
 ```
@@ -137,29 +142,23 @@ For a previous Veld install: `veld setup` detects its own running Caddy instance
 
 ### Caddy — Native Binary, Veld-Owned
 
-Veld downloads the official Caddy release binary from `github.com/caddyserver/caddy/releases`, verifies the checksum, and installs it to `/usr/local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
+Veld downloads a custom Caddy build from `caddyserver.com/api/download` with the `replace-response` plugin, and installs it to `~/.local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
 
 **Why not Docker for Caddy?** Docker on macOS runs inside a Linux VM. A Caddy container cannot reach `localhost:{port}` on the host directly — `localhost` inside the container is the container itself. The workaround (`host.docker.internal`) only works on Docker Desktop, not Linux. The Caddy config would have to be platform-aware just for this reason. A native binary sidesteps all of this — `localhost:{port}` always means what you expect, the config is identical across platforms, and there is no dependency on Docker Desktop being running.
 
-**Why not Homebrew?** Homebrew is not guaranteed to be installed, `brew install` is slow and can fail for unrelated reasons, and the installed version lives in the user's global environment where version conflicts or upgrades can break Veld unexpectedly. A Veld-owned binary under `/usr/local/lib/veld/` is fully controlled and updated atomically with the rest of Veld.
+**Why not Homebrew?** Homebrew is not guaranteed to be installed, `brew install` is slow and can fail for unrelated reasons, and the installed version lives in the user's global environment where version conflicts or upgrades can break Veld unexpectedly. A Veld-owned binary under `~/.local/lib/veld/` is fully controlled and updated atomically with the rest of Veld.
 
 Veld configures Caddy entirely via its JSON admin API — no config files, no manual reloads. Routes are added and removed dynamically per run. Caddy returns 502 gracefully for processes not yet bound.
 
 ### Setup State Enforcement — Veld Screams If Not Set Up
 
-Every command that touches environments — `veld start`, `veld stop`, `veld restart` — checks for a valid, complete setup state as its very first action. If setup is incomplete or `veld-helper` is not running:
-
-- Exits immediately with a non-zero status code
-- Prints a loud, unambiguous error in red:
+Every command that touches environments — `veld start`, `veld stop`, `veld restart` — checks for a valid setup state as its very first action. If setup is incomplete or `veld-helper` is not running, commands auto-bootstrap using unprivileged mode. Users can also run setup explicitly:
 
 ```
-✗ Veld setup has not been completed.
+✗ Veld setup has not been completed. Bootstrapping in unprivileged mode...
 
-  Run:  veld setup
-
-  This is a one-time step that installs Caddy, mkcert, and the
-  Veld system helper. It requires sudo and takes about 30 seconds.
-  You will never need sudo again after this completes.
+  For clean URLs without port numbers, run:
+    veld setup privileged
 ```
 
 - In `--json` mode:
@@ -175,13 +174,16 @@ This applies to all callers — humans, scripts, and agents all get a clear, str
 
 ---
 
-## The Privileged Helper: `veld-helper`
+## The Helper: `veld-helper`
 
-`veld-helper` is a small, root-owned background daemon installed once during `veld setup`. It is the **only component that ever runs with elevated privileges**.
+`veld-helper` is a small background daemon installed during `veld setup`. It can run in two modes:
+
+- **Privileged mode** (`veld setup privileged`): runs as a root-owned system daemon. Binds Caddy to ports 80/443 for clean URLs. This is the **only component that ever runs with elevated privileges**.
+- **Unprivileged mode** (`veld setup unprivileged`): runs as a user-level process. Binds Caddy to port 18443. No root access required at any point.
 
 ### Why a Permanent Daemon, Not a Short-Lived subprocess
 
-A short-lived `sudo -n` subprocess requires cached sudo credentials at the time of every `veld start`. If credentials are not cached — after a reboot, in CI, in agent environments — sudo prompts mid-command, breaking scripted and agent use entirely. A permanent launchd/systemd daemon requires no credentials after setup. The single sudo cost is paid once during install.
+A short-lived `sudo -n` subprocess requires cached sudo credentials at the time of every `veld start`. If credentials are not cached — after a reboot, in CI, in agent environments — sudo prompts mid-command, breaking scripted and agent use entirely. In privileged mode, a permanent launchd/systemd daemon requires no credentials after setup. The single sudo cost is paid once during install. In unprivileged mode, no sudo is ever needed.
 
 ### Responsibilities
 
@@ -210,8 +212,13 @@ No shell execution. No file system access beyond its specific managed paths. No 
 `veld-helper` exposes a Unix socket at a fixed path, owned by the installing user. The `veld` CLI and `veld-daemon` communicate with it via this socket — no auth token, no sudo, no prompts, ever.
 
 ### Installation
+**Privileged mode:**
 - **macOS:** `/Library/PrivilegedHelperTools/dev.veld.helper`, registered via `SMJobBless` as a LaunchDaemon. Auto-starts on boot.
-- **Linux:** `/usr/local/lib/veld/veld-helper`, registered as a systemd system unit. Auto-starts on boot.
+- **Linux:** systemd system unit. Auto-starts on boot.
+
+**Unprivileged mode:**
+- **macOS:** `~/.local/lib/veld/veld-helper`, registered as a LaunchAgent. Auto-starts on login.
+- **Linux:** `~/.local/lib/veld/veld-helper`, registered as a user-level systemd unit. Auto-starts on login.
 
 ### Uninstallation
 `veld uninstall` stops and removes the helper, its LaunchDaemon/systemd registration, all managed DNS entries, and all Caddy config. Leaves the machine completely clean.
@@ -690,7 +697,7 @@ No cross-compilation until v1 is stable. No Tauri. No GTK. No npm in CI.
 
 ```json
 {
-  "$schema": "https://veld.dev/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
   "schemaVersion": "1",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
@@ -835,8 +842,8 @@ All logic shared across binaries:
 ### `veld` (CLI)
 Thin wrapper over `veld-core`. Argument parsing, interactive TTY selectors, ASCII dependency graph rendering, `--json` mode, log streaming to terminal.
 
-### `veld-helper` (privileged daemon)
-Minimal. Root-owned. Permanent. DNS and Caddy management only. Unix socket interface. Installed by `veld setup`. Does nothing else.
+### `veld-helper` (daemon)
+Minimal. DNS and Caddy management only. Unix socket interface. Installed by `veld setup`. Runs as root-owned system daemon (privileged mode) or user-level process (unprivileged mode). Does nothing else.
 
 ### `veld-daemon` (user-space)
 Unprivileged. Health monitoring. GC scheduling. State broadcasts. LaunchAgent / user systemd unit. Auto-starts on login.
@@ -872,7 +879,7 @@ Unprivileged. Health monitoring. GC scheduling. State broadcasts. LaunchAgent / 
 
 ## Success Criteria
 
-- `curl -fsSL https://get.veld.dev | bash` installs and fully configures Veld in one step on a fresh machine
+- `curl -fsSL https://veld.oss.life.li/get | bash` installs Veld without sudo on a fresh machine; commands auto-bootstrap on first use
 - `veld setup` is idempotent, verifies each step, and never silently proceeds past a failure
 - Port conflicts are detected before setup proceeds with a precise, actionable error message
 - Any environment command run before setup completes exits non-zero with a clear structured error

@@ -36,7 +36,7 @@ pub async fn run() -> i32 {
 }
 
 /// Restart daemon and helper so they run the newly installed binaries.
-/// This re-runs setup non-interactively via `veld setup` with sudo.
+/// Mode-aware: uses sudo only for privileged mode, runs without sudo otherwise.
 async fn restart_services() {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
@@ -49,31 +49,74 @@ async fn restart_services() {
         }
     };
 
-    // The updated binary is already installed — invoke it to run setup,
-    // which will restart daemon + helper with the new versions.
-    let status = std::process::Command::new("sudo")
-        .arg(&exe)
-        .arg("setup")
-        .status();
+    let mode = super::read_setup_mode();
 
-    match status {
-        Ok(s) if s.success() => {
-            output::print_success("Services restarted.");
+    match mode.as_deref() {
+        Some("privileged") => {
+            // Use sudo to restart system services.
+            let status = std::process::Command::new("sudo")
+                .arg(&exe)
+                .arg("setup")
+                .arg("privileged")
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    output::print_success("Services restarted.");
+                }
+                Ok(s) => {
+                    output::print_error(
+                        &format!(
+                            "Setup exited with code {}. Run `veld setup` manually.",
+                            s.code().unwrap_or(-1)
+                        ),
+                        false,
+                    );
+                }
+                Err(e) => {
+                    output::print_error(
+                        &format!("Failed to run setup: {e}. Run `veld setup` manually."),
+                        false,
+                    );
+                }
+            }
         }
-        Ok(s) => {
-            output::print_error(
-                &format!(
-                    "Setup exited with code {}. Run `veld setup` manually.",
-                    s.code().unwrap_or(-1)
-                ),
-                false,
-            );
+        Some("unprivileged") => {
+            // Re-run unprivileged setup to restart user-level services.
+            eprintln!("Restarting user-level services...");
+            let status = std::process::Command::new(&exe)
+                .arg("setup")
+                .arg("unprivileged")
+                .status();
+            match status {
+                Ok(s) if s.success() => {
+                    output::print_success("Services restarted.");
+                }
+                Ok(s) => {
+                    output::print_error(
+                        &format!(
+                            "Setup exited with code {}. Run `veld setup` manually.",
+                            s.code().unwrap_or(-1)
+                        ),
+                        false,
+                    );
+                }
+                Err(e) => {
+                    output::print_error(
+                        &format!("Failed to run setup: {e}. Run `veld setup` manually."),
+                        false,
+                    );
+                }
+            }
         }
-        Err(e) => {
-            output::print_error(
-                &format!("Failed to run setup: {e}. Run `veld setup` manually."),
-                false,
-            );
+        _ => {
+            // "auto" mode or no mode — just kill the user-level helper.
+            // Next `veld start` will re-bootstrap with the new binary.
+            eprintln!("Restarting auto-bootstrapped helper...");
+            let user_socket = veld_core::helper::user_socket_path();
+            let client = veld_core::helper::HelperClient::new(&user_socket);
+            if client.shutdown().await.is_ok() {
+                eprintln!("Helper stopped. It will restart on next `veld start`.");
+            }
         }
     }
 }

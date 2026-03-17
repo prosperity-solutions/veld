@@ -18,10 +18,6 @@ pub async fn run(
     follow: bool,
     json: bool,
 ) -> i32 {
-    if !super::require_setup(json).await {
-        return 1;
-    }
-
     let Some((config_path, _cfg)) = super::load_config(json) else {
         return 1;
     };

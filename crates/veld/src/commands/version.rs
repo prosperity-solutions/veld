@@ -63,7 +63,7 @@ fn find_and_query_version(binary_name: &str) -> VersionResult {
 
 /// Build list of candidate paths for a binary.
 fn binary_candidates(binary_name: &str) -> Vec<String> {
-    let mut paths = vec![format!("/usr/local/lib/veld/{binary_name}")];
+    let mut paths = Vec::new();
     if let Some(home) = dirs::home_dir() {
         paths.push(
             home.join(".local")
@@ -74,6 +74,7 @@ fn binary_candidates(binary_name: &str) -> Vec<String> {
                 .into_owned(),
         );
     }
+    paths.push(format!("/usr/local/lib/veld/{binary_name}"));
     paths
 }
 

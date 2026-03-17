@@ -13,6 +13,14 @@ use tracing::{error, info};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+struct HelperConfig {
+    socket_path: PathBuf,
+    https_port: u16,
+    http_port: u16,
+    /// Override the Caddy binary path (avoids lib_dir() resolution issues under sudo).
+    caddy_bin: Option<PathBuf>,
+}
+
 fn default_socket_path() -> PathBuf {
     if cfg!(target_os = "macos") {
         PathBuf::from("/var/run/veld-helper.sock")
@@ -21,9 +29,12 @@ fn default_socket_path() -> PathBuf {
     }
 }
 
-fn parse_args() -> Result<PathBuf> {
+fn parse_args() -> Result<HelperConfig> {
     let args: Vec<String> = std::env::args().collect();
     let mut socket_path = default_socket_path();
+    let mut https_port: u16 = 443;
+    let mut http_port: u16 = 80;
+    let mut caddy_bin: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -37,12 +48,36 @@ fn parse_args() -> Result<PathBuf> {
                 let path = args.get(i).context("--socket-path requires a value")?;
                 socket_path = PathBuf::from(path);
             }
+            "--https-port" => {
+                i += 1;
+                let val = args.get(i).context("--https-port requires a value")?;
+                https_port = val
+                    .parse()
+                    .context("--https-port must be a valid port number")?;
+            }
+            "--http-port" => {
+                i += 1;
+                let val = args.get(i).context("--http-port requires a value")?;
+                http_port = val
+                    .parse()
+                    .context("--http-port must be a valid port number")?;
+            }
+            "--caddy-bin" => {
+                i += 1;
+                let path = args.get(i).context("--caddy-bin requires a value")?;
+                caddy_bin = Some(PathBuf::from(path));
+            }
             other => anyhow::bail!("unknown argument: {other}"),
         }
         i += 1;
     }
 
-    Ok(socket_path)
+    Ok(HelperConfig {
+        socket_path,
+        https_port,
+        http_port,
+        caddy_bin,
+    })
 }
 
 #[tokio::main]
@@ -54,59 +89,88 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let socket_path = parse_args()?;
+    let config = parse_args()?;
 
     // Remove stale socket if it exists.
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path).with_context(|| {
-            format!("failed to remove stale socket at {}", socket_path.display())
+    if config.socket_path.exists() {
+        std::fs::remove_file(&config.socket_path).with_context(|| {
+            format!(
+                "failed to remove stale socket at {}",
+                config.socket_path.display()
+            )
         })?;
     }
 
     // Ensure the parent directory exists.
-    if let Some(parent) = socket_path.parent() {
+    if let Some(parent) = config.socket_path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
 
-    let listener = UnixListener::bind(&socket_path)
-        .with_context(|| format!("failed to bind socket at {}", socket_path.display()))?;
+    let listener = UnixListener::bind(&config.socket_path)
+        .with_context(|| format!("failed to bind socket at {}", config.socket_path.display()))?;
 
-    // Allow non-root users to connect to the socket. The helper runs as root
-    // but the CLI and daemon run as the regular user.
+    // Set socket permissions based on location.
+    // System daemon sockets (/var/run, /run) need 0o777 so the unprivileged
+    // CLI can connect. User sockets only need owner access (0o700).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o777))
+        let socket_str = config.socket_path.to_string_lossy();
+        let mode = if socket_str.starts_with("/var/run") || socket_str.starts_with("/run") {
+            0o777
+        } else {
+            0o700
+        };
+        std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(mode))
             .with_context(|| {
                 format!(
                     "failed to set socket permissions on {}",
-                    socket_path.display()
+                    config.socket_path.display()
                 )
             })?;
     }
 
     info!(
         "veld-helper {VERSION} listening on {}",
-        socket_path.display()
+        config.socket_path.display()
     );
 
-    let state = Arc::new(handler::State::new());
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+
+    let state = Arc::new(handler::State::new(
+        config.https_port,
+        config.http_port,
+        config.caddy_bin,
+        shutdown_tx,
+    ));
 
     loop {
-        match listener.accept().await {
-            Ok((stream, _addr)) => {
-                let state = Arc::clone(&state);
-                tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, state).await {
-                        error!("connection handler error: {e:#}");
+        tokio::select! {
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, _addr)) => {
+                        let state = Arc::clone(&state);
+                        tokio::spawn(async move {
+                            if let Err(e) = handle_connection(stream, state).await {
+                                error!("connection handler error: {e:#}");
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("failed to accept connection: {e}");
+                    }
+                }
             }
-            Err(e) => {
-                error!("failed to accept connection: {e}");
+            _ = shutdown_rx.changed() => {
+                if *shutdown_rx.borrow() {
+                    info!("shutdown signal received, exiting");
+                    break;
+                }
             }
         }
     }
+
+    Ok(())
 }
 
 async fn handle_connection(

@@ -1819,6 +1819,7 @@ dependencies = [
  "clap",
  "dirs",
  "libc",
+ "reqwest",
  "serde_json",
  "tokio",
  "tracing",
