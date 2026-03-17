@@ -501,11 +501,11 @@ mod tests {
 
     #[test]
     fn test_build_base_config_custom_ports() {
-        let config = build_base_config(8443, 8080, &None);
+        let config = build_base_config(18443, 18080, &None);
         let listen = config["apps"]["http"]["servers"]["veld"]["listen"]
             .as_array()
             .unwrap();
-        assert_eq!(listen[0], ":8443");
-        assert_eq!(listen[1], ":8080");
+        assert_eq!(listen[0], ":18443");
+        assert_eq!(listen[1], ":18080");
     }
 }

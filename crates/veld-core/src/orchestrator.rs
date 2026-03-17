@@ -837,7 +837,7 @@ impl Orchestrator {
                 // Remove DNS + Caddy route.
                 if let Some(ref url_str) = node_state.url {
                     let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                    // Strip port if present (e.g., "host:8443" → "host")
+                    // Strip port if present (e.g., "host:18443" → "host")
                     let hostname = hostname.split(':').next().unwrap_or(hostname);
                     let _ = self.helper_client.remove_host(hostname).await;
                     let route_id = format!(
@@ -896,7 +896,7 @@ impl Orchestrator {
             // Remove DNS + Caddy route.
             if let Some(ref url_str) = ns.url {
                 let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                // Strip port if present (e.g., "host:8443" → "host")
+                // Strip port if present (e.g., "host:18443" → "host")
                 let hostname = hostname.split(':').next().unwrap_or(hostname);
                 let _ = self.helper_client.remove_host(hostname).await;
                 let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);

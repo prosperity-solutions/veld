@@ -7,16 +7,16 @@ use veld_core::helper::HelperClient;
 /// `veld setup unprivileged` -- run the unprivileged (no-sudo) setup sequence.
 ///
 /// Installs everything in user space: Caddy in `~/.local/lib/veld/`,
-/// helper as a user-level LaunchAgent/systemd unit on ports 8443/8080.
+/// helper as a user-level LaunchAgent/systemd unit on ports 18443/18080.
 pub async fn run() -> i32 {
     println!("{}", output::bold("Veld Setup (unprivileged)"));
     println!();
 
     let total = 4;
 
-    // Step 1: Check port availability (8443, 8080, 2019)
+    // Step 1: Check port availability (18443, 18080, 2019)
     print_step(1, total, "Checking port availability...");
-    match veld_core::setup::check_ports(8443, 8080).await {
+    match veld_core::setup::check_ports(18443, 18080).await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
@@ -34,7 +34,7 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 3: Install helper + start Caddy (user-level, ports 8443/8080)
+    // Step 3: Install helper + start Caddy (user-level, ports 18443/18080)
     print_step(3, total, "Starting Veld helper...");
     match install_unprivileged_helper().await {
         Ok(msg) => print_step_ok(&msg),
@@ -62,7 +62,7 @@ pub async fn run() -> i32 {
     println!();
     output::print_success("Setup complete! Run `veld start` to get going.");
     println!();
-    let tip = "Run `veld setup privileged` for clean URLs without :8443 (one-time sudo)";
+    let tip = "Run `veld setup privileged` for clean URLs without :18443 (one-time sudo)";
     eprintln!("  {} {tip}", output::bold("Tip:"));
 
     0
@@ -95,9 +95,9 @@ async fn install_unprivileged_helper() -> Result<String, anyhow::Error> {
             .arg("--socket-path")
             .arg(&socket_path)
             .arg("--https-port")
-            .arg("8443")
+            .arg("18443")
             .arg("--http-port")
-            .arg("8080")
+            .arg("18080")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -161,9 +161,9 @@ async fn install_helper_launchagent(
         <string>--socket-path</string>
         <string>{}</string>
         <string>--https-port</string>
-        <string>8443</string>
+        <string>18443</string>
         <string>--http-port</string>
-        <string>8080</string>
+        <string>18080</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -241,7 +241,7 @@ async fn install_helper_systemd_user(
          Description=Veld Helper (unprivileged)\n\
          \n\
          [Service]\n\
-         ExecStart={} --socket-path {} --https-port 8443 --http-port 8080\n\
+         ExecStart={} --socket-path {} --https-port 18443 --http-port 18080\n\
          Restart=always\n\
          \n\
          [Install]\n\

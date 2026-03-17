@@ -89,7 +89,7 @@ Re-runs the full install script, which downloads all three binaries, replaces th
 
 `veld setup` operates in two modes:
 
-- **`veld setup unprivileged`** — no sudo required. Installs Caddy and daemons as user-level processes. Services run on port 8443 instead of 80/443. Ideal for environments without root access.
+- **`veld setup unprivileged`** — no sudo required. Installs Caddy and daemons as user-level processes. Services run on port 18443 instead of 80/443. Ideal for environments without root access.
 - **`veld setup privileged`** — requires one-time sudo. Installs Caddy and daemons as system services on ports 80/443 for clean URLs without port numbers. The single sudo cost is paid once during setup.
 
 Running `veld setup` without a mode argument auto-detects: it uses unprivileged mode by default and prompts for privileged if conditions allow.
@@ -179,7 +179,7 @@ This applies to all callers — humans, scripts, and agents all get a clear, str
 `veld-helper` is a small background daemon installed during `veld setup`. It can run in two modes:
 
 - **Privileged mode** (`veld setup privileged`): runs as a root-owned system daemon. Binds Caddy to ports 80/443 for clean URLs. This is the **only component that ever runs with elevated privileges**.
-- **Unprivileged mode** (`veld setup unprivileged`): runs as a user-level process. Binds Caddy to port 8443. No root access required at any point.
+- **Unprivileged mode** (`veld setup unprivileged`): runs as a user-level process. Binds Caddy to port 18443. No root access required at any point.
 
 ### Why a Permanent Daemon, Not a Short-Lived subprocess
 

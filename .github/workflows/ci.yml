@@ -162,8 +162,8 @@ jobs:
           curl -sf http://localhost:2019/id/veld-sentinel | grep -q "veld"
 
           echo ""
-          echo "=== Verify Caddy on port 8443 (not 443) ==="
-          curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q "8443"
+          echo "=== Verify Caddy on port 18443 (not 443) ==="
+          curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q "18443"
 
           echo ""
           echo "=== Verify setup status ==="
@@ -176,8 +176,8 @@ jobs:
           sleep 2
 
           echo ""
-          echo "=== Verify URLs have :8443 ==="
-          $VELD urls --name unpriv-test --json | grep -q "8443"
+          echo "=== Verify URLs have :18443 ==="
+          $VELD urls --name unpriv-test --json | grep -q "18443"
 
           echo ""
           echo "=== Verify HTTPS works (with -k for self-signed) ==="
@@ -236,7 +236,7 @@ jobs:
           curl -sf http://localhost:2019/id/veld-sentinel | grep -q "veld"
 
           echo ""
-          echo "=== Verify Caddy on port 443 (not 8443) ==="
+          echo "=== Verify Caddy on port 443 (not 18443) ==="
           curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q '":443"'
 
           echo ""
@@ -246,10 +246,10 @@ jobs:
           sleep 2
 
           echo ""
-          echo "=== Verify URLs do NOT have :8443 ==="
+          echo "=== Verify URLs do NOT have :18443 ==="
           URLS=$($VELD urls --name priv-test --json 2>/dev/null)
-          if echo "$URLS" | grep -q "8443"; then
-            echo "FAIL: URLs contain :8443 in privileged mode"
+          if echo "$URLS" | grep -q "18443"; then
+            echo "FAIL: URLs contain :18443 in privileged mode"
             exit 1
           fi
           echo "Clean URLs OK"
@@ -308,8 +308,8 @@ jobs:
           grep -q '"auto"' ~/.veld/setup.json
 
           echo ""
-          echo "=== Verify URLs have :8443 ==="
-          $VELD urls --name auto-test --json | grep -q "8443"
+          echo "=== Verify URLs have :18443 ==="
+          $VELD urls --name auto-test --json | grep -q "18443"
 
           echo ""
           echo "=== Stop ==="

@@ -9,7 +9,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Subcommand)]
 pub enum SetupCommand {
-    /// No-sudo setup: Caddy, daemon, helper on port 8443.
+    /// No-sudo setup: Caddy, daemon, helper on port 18443.
     Unprivileged,
     /// One-time sudo: system daemon, ports 80/443, clean URLs.
     Privileged {
