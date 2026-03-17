@@ -120,11 +120,13 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
   case "$EXISTING_DIR" in
     /usr/local/*)
       echo "Existing veld found at ${EXISTING_VELD} (system path)."
+      echo "Sudo is needed to write binaries to ${EXISTING_DIR} — this is NOT for"
+      echo "port binding; only privileged setup (veld setup privileged) needs that."
       if sudo -n true 2>/dev/null; then
         NEED_SUDO="sudo"
         INSTALL_DIR="$EXISTING_DIR"
       else
-        printf "Sudo is needed to update ${EXISTING_DIR}. Grant access? [Y/n] "
+        printf "Grant sudo access to update binaries? [Y/n] "
         read -r answer < /dev/tty 2>/dev/null || answer="n"
         answer="${answer:-y}"
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then

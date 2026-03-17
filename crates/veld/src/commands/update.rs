@@ -16,6 +16,7 @@ pub async fn run() -> i32 {
                     output::print_success(&format!("Updated to {new_version}."));
                     output::print_info("Restarting services with new binaries...");
                     restart_services().await;
+                    refresh_hammerspoon().await;
                     0
                 }
                 Err(e) => {
@@ -31,6 +32,32 @@ pub async fn run() -> i32 {
         Err(e) => {
             output::print_error(&format!("Update check failed: {e}"), false);
             1
+        }
+    }
+}
+
+/// Re-install the Hammerspoon Spoon if it was previously set up.
+/// The Spoon files are embedded in the binary, so they need to be re-extracted
+/// after every CLI update to pick up any changes.
+async fn refresh_hammerspoon() {
+    let spoon_dir = match dirs::home_dir() {
+        Some(h) => h.join(".hammerspoon/Spoons/Veld.spoon"),
+        None => return,
+    };
+    if !spoon_dir.exists() {
+        return;
+    }
+
+    output::print_info("Updating Hammerspoon Veld.spoon...");
+    match veld_core::setup::install_hammerspoon().await {
+        Ok(result) => {
+            output::print_success(&result.message);
+        }
+        Err(e) => {
+            output::print_error(
+                &format!("Failed to update Hammerspoon Spoon: {e}. Run `veld setup hammerspoon` manually."),
+                false,
+            );
         }
     }
 }
