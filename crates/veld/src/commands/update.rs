@@ -82,7 +82,13 @@ async fn restart_services() {
 
     match mode.as_deref() {
         Some("privileged") => {
-            // Use sudo to restart system services.
+            // Privileged mode uses system-level LaunchDaemons/systemd services
+            // that require root to restart. Sudo is needed here — not for the
+            // update itself, but to re-install the system service that binds
+            // ports 80/443.
+            output::print_info(
+                "Sudo is required to restart the privileged system service (ports 80/443).",
+            );
             let status = std::process::Command::new("sudo")
                 .arg(&exe)
                 .arg("setup")
