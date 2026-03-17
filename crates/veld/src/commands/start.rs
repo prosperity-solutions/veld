@@ -70,7 +70,8 @@ pub async fn run(
     if !non_localhost.is_empty() {
         let mode = super::read_setup_mode().unwrap_or_else(|| "auto".to_owned());
         if mode != "privileged" {
-            let mut detail = String::from("Custom apex domains are only supported in privileged mode.\n");
+            let mut detail =
+                String::from("Custom apex domains are only supported in privileged mode.\n");
             detail.push_str("\n  Affected nodes:\n");
             for (label, hostname) in &non_localhost {
                 detail.push_str(&format!("    - {label} => {hostname}\n"));
@@ -649,9 +650,8 @@ fn find_non_localhost_domains(
 
     // Build dummy values to evaluate templates — the apex domain is the static
     // part of the template, so placeholder values are sufficient.
-    let dummy_values = url::build_url_template_values(
-        "svc", "var", "run", "proj", "branch", "wt", "user", "host",
-    );
+    let dummy_values =
+        url::build_url_template_values("svc", "var", "run", "proj", "branch", "wt", "user", "host");
 
     let mut offenders = Vec::new();
 
@@ -679,10 +679,7 @@ fn find_non_localhost_domains(
         // runtime, so we skip it here rather than producing a confusing error.
         if let Ok(hostname) = url::evaluate_url_template(effective_template, &dummy_values) {
             if !url::is_localhost_domain(&hostname) {
-                offenders.push((
-                    format!("{}:{}", sel.node, sel.variant),
-                    hostname,
-                ));
+                offenders.push((format!("{}:{}", sel.node, sel.variant), hostname));
             }
         }
     }

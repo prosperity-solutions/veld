@@ -104,7 +104,9 @@ mod tests {
     fn test_is_localhost_domain() {
         assert!(is_localhost_domain("localhost"));
         assert!(is_localhost_domain("app.localhost"));
-        assert!(is_localhost_domain("frontend.my-feature.myproject.localhost"));
+        assert!(is_localhost_domain(
+            "frontend.my-feature.myproject.localhost"
+        ));
         assert!(!is_localhost_domain("myapp.dev"));
         assert!(!is_localhost_domain("app.mycompany.dev"));
         assert!(!is_localhost_domain("notlocalhost"));
