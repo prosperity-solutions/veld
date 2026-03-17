@@ -110,7 +110,193 @@ jobs:
           set -e
           ./target/debug/veld setup --help | grep -q "unprivileged"
           ./target/debug/veld setup --help | grep -q "privileged"
+          ./target/debug/veld setup --help | grep -q "hammerspoon"
           echo "Setup subcommands verified."
+
+      - name: "Test: unprivileged setup lifecycle"
+        run: |
+          set -e
+          VELD="./target/debug/veld"
+          echo "=== Unprivileged setup ==="
+          $VELD setup unprivileged
+          echo ""
+
+          echo "=== Verify setup.json ==="
+          cat ~/.veld/setup.json
+          grep -q '"unprivileged"' ~/.veld/setup.json
+
+          echo ""
+          echo "=== Verify helper is running on user socket ==="
+          test -S ~/.veld/helper.sock
+
+          echo ""
+          echo "=== Verify Caddy is running (sentinel) ==="
+          curl -sf http://localhost:2019/id/veld-sentinel | grep -q "veld"
+
+          echo ""
+          echo "=== Verify Caddy on port 8443 (not 443) ==="
+          curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q "8443"
+
+          echo ""
+          echo "=== Verify setup status ==="
+          $VELD setup 2>&1 | grep -q "unprivileged"
+
+          echo ""
+          echo "=== Start a service in unprivileged mode ==="
+          cd testproject
+          $VELD start frontend:local --name unpriv-test
+          sleep 2
+
+          echo ""
+          echo "=== Verify URLs have :8443 ==="
+          $VELD urls --name unpriv-test --json | grep -q "8443"
+
+          echo ""
+          echo "=== Verify HTTPS works (with -k for self-signed) ==="
+          URL=$($VELD urls --name unpriv-test --json 2>/dev/null | grep -oE 'https://[^"]+' | head -1)
+          HOST=$(echo "$URL" | sed -E 's|https://([^/:]+).*|\1|')
+          PORT=$(echo "$URL" | sed -E 's|.*:([0-9]+)$|\1|')
+          curl -sk --resolve "${HOST}:${PORT}:127.0.0.1" --max-time 5 "$URL" >/dev/null
+          echo "HTTPS connectivity OK"
+
+          echo ""
+          echo "=== Stop and cleanup ==="
+          $VELD stop --name unpriv-test
+          cd ..
+
+          echo ""
+          echo "=== Uninstall (unprivileged) ==="
+          $VELD uninstall
+
+          echo ""
+          echo "=== Verify cleanup ==="
+          # Helper should be stopped
+          if curl -sf http://localhost:2019/config/ >/dev/null 2>&1; then
+            echo "FAIL: Caddy still running after uninstall"
+            exit 1
+          fi
+          echo "Caddy stopped OK"
+
+          # setup.json should be gone
+          if [ -f ~/.veld/setup.json ]; then
+            echo "FAIL: setup.json still exists after uninstall"
+            exit 1
+          fi
+          echo "setup.json removed OK"
+
+          echo ""
+          echo "=== Unprivileged lifecycle PASSED ==="
+
+      - name: "Test: privileged setup lifecycle"
+        run: |
+          set -e
+          VELD="./target/debug/veld"
+          echo "=== Privileged setup ==="
+          sudo $VELD setup privileged
+          echo ""
+
+          echo "=== Verify setup.json ==="
+          cat ~/.veld/setup.json
+          grep -q '"privileged"' ~/.veld/setup.json
+
+          echo ""
+          echo "=== Verify helper is running on system socket ==="
+          test -S /var/run/veld-helper.sock
+
+          echo ""
+          echo "=== Verify Caddy is running (sentinel) ==="
+          curl -sf http://localhost:2019/id/veld-sentinel | grep -q "veld"
+
+          echo ""
+          echo "=== Verify Caddy on port 443 (not 8443) ==="
+          curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q '":443"'
+
+          echo ""
+          echo "=== Start a service in privileged mode ==="
+          cd testproject
+          $VELD start frontend:local --name priv-test
+          sleep 2
+
+          echo ""
+          echo "=== Verify URLs do NOT have :8443 ==="
+          URLS=$($VELD urls --name priv-test --json 2>/dev/null)
+          if echo "$URLS" | grep -q "8443"; then
+            echo "FAIL: URLs contain :8443 in privileged mode"
+            exit 1
+          fi
+          echo "Clean URLs OK"
+
+          echo ""
+          echo "=== Verify HTTPS works ==="
+          URL=$(echo "$URLS" | grep -oE 'https://[^"]+' | head -1)
+          HOST=$(echo "$URL" | sed -E 's|https://([^/:]+).*|\1|')
+          curl -sk --resolve "${HOST}:443:127.0.0.1" --max-time 5 "$URL" >/dev/null
+          echo "HTTPS connectivity OK"
+
+          echo ""
+          echo "=== Stop and cleanup ==="
+          $VELD stop --name priv-test
+          cd ..
+
+          echo ""
+          echo "=== Uninstall (privileged) ==="
+          sudo $VELD uninstall
+
+          echo ""
+          echo "=== Verify cleanup ==="
+          if curl -sf http://localhost:2019/config/ >/dev/null 2>&1; then
+            echo "FAIL: Caddy still running after uninstall"
+            exit 1
+          fi
+          echo "Caddy stopped OK"
+
+          if [ -S /var/run/veld-helper.sock ]; then
+            echo "FAIL: system socket still exists after uninstall"
+            exit 1
+          fi
+          echo "System socket removed OK"
+
+          if [ -f ~/.veld/setup.json ]; then
+            echo "FAIL: setup.json still exists after uninstall"
+            exit 1
+          fi
+          echo "setup.json removed OK"
+
+          echo ""
+          echo "=== Privileged lifecycle PASSED ==="
+
+      - name: "Test: auto-bootstrap (no setup)"
+        run: |
+          set -e
+          VELD="./target/debug/veld"
+          echo "=== Auto-bootstrap: start without any setup ==="
+          cd testproject
+          $VELD start frontend:local --name auto-test 2>&1
+          sleep 2
+
+          echo ""
+          echo "=== Verify it auto-bootstrapped ==="
+          cat ~/.veld/setup.json
+          grep -q '"auto"' ~/.veld/setup.json
+
+          echo ""
+          echo "=== Verify URLs have :8443 ==="
+          $VELD urls --name auto-test --json | grep -q "8443"
+
+          echo ""
+          echo "=== Stop ==="
+          $VELD stop --name auto-test
+          cd ..
+
+          echo ""
+          echo "=== Cleanup auto-bootstrap state ==="
+          # Kill the auto-bootstrapped helper
+          if [ -S ~/.veld/helper.sock ]; then
+            curl -s http://localhost:2019/stop >/dev/null 2>&1 || true
+            sleep 1
+          fi
+          rm -rf ~/.veld
+          echo "=== Auto-bootstrap PASSED ==="
 
       - name: Test Python servers directly
         run: |

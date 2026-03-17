@@ -179,17 +179,17 @@ fi
 
 header "Setup"
 
-info "running 'veld setup' (may require sudo -- will skip if not available)"
+info "running 'veld setup privileged' (may require sudo -- will skip if not available)"
 
 if sudo -n true 2>/dev/null; then
     # Use timeout to prevent CI hangs (setup involves network downloads,
     # service registration, and CA trust which can block interactively).
-    assert_ok "veld setup completes" run_with_timeout 120 "$VELD_BIN" setup
+    assert_ok "veld setup privileged completes" run_with_timeout 120 "$VELD_BIN" setup privileged
 
     # PRD assertion 2: setup idempotency — running setup a second time should also succeed.
-    assert_ok "veld setup idempotent (second run)" run_with_timeout 120 "$VELD_BIN" setup
+    assert_ok "veld setup privileged idempotent (second run)" run_with_timeout 120 "$VELD_BIN" setup privileged
 else
-    skip "veld setup (sudo not available without password)"
+    skip "veld setup privileged (sudo not available without password)"
 fi
 
 # ---------------------------------------------------------------------------
