@@ -225,6 +225,13 @@ enum Command {
     /// Uninstall Veld and clean up.
     Uninstall,
 
+    /// Diagnose installation and service health.
+    Doctor {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print version information for all Veld binaries.
     Version,
 }
@@ -340,6 +347,8 @@ async fn main() {
         Command::Update => commands::update::run().await,
 
         Command::Uninstall => commands::uninstall::run().await,
+
+        Command::Doctor { json } => commands::doctor::run(json).await,
 
         Command::Version => {
             commands::version::print_version();
