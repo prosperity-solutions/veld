@@ -138,7 +138,10 @@ jobs:
         run: |
           sudo $(pwd)/target/debug/veld uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
-          rm -rf ~/.veld
+          sudo rm -rf ~/.veld ~/.local/lib/veld /usr/local/lib/veld 2>/dev/null || true
+          sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
           sleep 2
 
       - name: "Test: unprivileged setup lifecycle"
@@ -214,6 +217,14 @@ jobs:
 
           echo ""
           echo "=== Unprivileged lifecycle PASSED ==="
+
+      - name: "Cleanup between lifecycle tests (unpriv → priv)"
+        if: always()
+        run: |
+          curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
+          rm -rf ~/.veld ~/.local/lib/veld 2>/dev/null || true
+          sleep 1
 
       - name: "Test: privileged setup lifecycle"
         run: |
@@ -292,6 +303,14 @@ jobs:
 
           echo ""
           echo "=== Privileged lifecycle PASSED ==="
+
+      - name: "Cleanup between lifecycle tests (priv → auto)"
+        if: always()
+        run: |
+          sudo curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
+          sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
+          sudo rm -rf ~/.veld ~/.local/lib/veld /usr/local/lib/veld 2>/dev/null || true
+          sleep 1
 
       - name: "Test: auto-bootstrap (no setup)"
         run: |
