@@ -488,7 +488,7 @@ async fn maybe_show_update_banner() {
     if let Ok(latest) = std::fs::read_to_string(&cache) {
         let latest = latest.trim();
         let current = env!("CARGO_PKG_VERSION");
-        if !latest.is_empty() && latest != current {
+        if !latest.is_empty() && veld_core::setup::is_newer(latest, current) {
             eprintln!();
             eprintln!(
                 "  {} {} → {}. Run {} to upgrade.",
