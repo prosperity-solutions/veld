@@ -570,6 +570,8 @@ For custom apex domains, Veld manages exact DNS entries via `veld-helper`:
 
 Veld writes exact host entries only -- never wildcard rules. Real domains and unrelated subdomains continue resolving normally via public DNS.
 
+**Important:** Custom (non-`.localhost`) domains require `veld setup privileged`. In unprivileged or auto-bootstrap mode, Veld cannot write to `/etc/hosts` or manage system DNS, so only `.localhost` domains are supported. If you use a custom apex domain in your `url_template` and are not in privileged mode, `veld start` will exit with an error explaining how to fix it.
+
 ### URL Template Cascade
 
 URL templates can be overridden at three levels. Veld uses the most specific one:

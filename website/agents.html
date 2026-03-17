@@ -263,8 +263,8 @@ footer p{color:#4A4A50}
 <dl class="cdl">
 <dt>veld <span style="color:#9A9A9F;font-weight:400">(CLI)</span></dt>
 <dd>Parses commands, orchestrates environments, displays output. Communicates with the daemon via Unix socket.</dd>
-<dt>veld-helper <span style="color:#9A9A9F;font-weight:400">(privileged daemon, runs as root)</span></dt>
-<dd>Manages DNS entries and Caddy reverse-proxy routes via a minimal Unix socket API.</dd>
+<dt>veld-helper <span style="color:#9A9A9F;font-weight:400">(system or user daemon)</span></dt>
+<dd>Manages DNS entries and Caddy reverse-proxy routes via a minimal Unix socket API. Runs as a system daemon in privileged mode (ports 80/443, custom domains) or as a user process in unprivileged mode (port 18443, .localhost domains only).</dd>
 <dt>veld-daemon <span style="color:#9A9A9F;font-weight:400">(user-space daemon)</span></dt>
 <dd>Monitors service health, runs garbage collection, broadcasts state updates, serves the feedback overlay.</dd>
 <dt>Caddy <span style="color:#9A9A9F;font-weight:400">(reverse proxy)</span></dt>

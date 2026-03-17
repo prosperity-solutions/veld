@@ -50,7 +50,7 @@ This registers system services and binds ports 80/443, so your URLs are just
 sudo once; you won't be asked again.
 
 Alternatively, `veld setup unprivileged` does a no-sudo setup with HTTPS on port 18443.
-Both modes support the full feature set; the only difference is whether URLs include a port number.
+Both modes support the full feature set with one difference: unprivileged mode uses port 18443 in URLs and only supports `.localhost` domains (RFC 6761). Custom apex domains (e.g. `{service}.mycompany.dev`) require `veld setup privileged` since they need `/etc/hosts` or dnsmasq management.
 
 To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
 
@@ -199,7 +199,7 @@ Check extension status with `veld doctor`.
 ## Requirements
 
 - macOS (arm64/x64) or Linux (x64/arm64)
-- Optional: sudo access for `veld setup privileged` (clean URLs without port numbers)
+- Optional: sudo access for `veld setup privileged` (clean URLs without port numbers, custom apex domains)
 
 ## Agent Skills
 

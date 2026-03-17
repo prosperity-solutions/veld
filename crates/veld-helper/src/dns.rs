@@ -159,7 +159,7 @@ pub async fn reload_dns() -> Result<()> {
 // ---------------------------------------------------------------------------
 
 fn is_localhost_domain(hostname: &str) -> bool {
-    hostname == "localhost" || hostname.ends_with(".localhost")
+    veld_core::url::is_localhost_domain(hostname)
 }
 
 /// Build dnsmasq address directives for all non-localhost entries.
