@@ -55,7 +55,9 @@ async fn refresh_hammerspoon() {
         }
         Err(e) => {
             output::print_error(
-                &format!("Failed to update Hammerspoon Spoon: {e}. Run `veld setup hammerspoon` manually."),
+                &format!(
+                    "Failed to update Hammerspoon Spoon: {e}. Run `veld setup hammerspoon` manually."
+                ),
                 false,
             );
         }
