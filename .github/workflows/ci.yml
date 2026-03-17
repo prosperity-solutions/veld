@@ -224,7 +224,10 @@ jobs:
         run: |
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
-          rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
+          rm -rf "$HOME/.veld" 2>/dev/null || true
+          # Keep ~/.local/lib/veld/caddy so the next test doesn't need to re-download
+          rm -f "$HOME/.local/lib/veld/caddy-data" 2>/dev/null || true
           sleep 1
 
       - name: "Test: privileged setup lifecycle"
