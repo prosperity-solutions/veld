@@ -12,7 +12,7 @@ pub async fn run() -> i32 {
     println!("{}", output::bold("Veld Setup (unprivileged)"));
     println!();
 
-    let total = 4;
+    let total = 5;
 
     // Step 1: Check port availability (18443, 18080, 2019)
     print_step(1, total, "Checking port availability...");
@@ -34,8 +34,21 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 3: Install helper + start Caddy (user-level, ports 18443/18080)
-    print_step(3, total, "Starting Veld helper...");
+    // Step 3: Install daemon (user-level — feedback server, health monitor, GC)
+    print_step(3, total, "Installing Veld daemon...");
+    match veld_core::setup::install_daemon().await {
+        Ok(info) => print_step_ok(&info.message),
+        Err(e) => {
+            print_step_fail(&format!("{e:#}"));
+            // Non-fatal — daemon is optional for core functionality
+            eprintln!(
+                "  Feedback overlay may not work. You can retry with: veld setup unprivileged"
+            );
+        }
+    }
+
+    // Step 4: Install helper + start Caddy (user-level, ports 18443/18080)
+    print_step(4, total, "Starting Veld helper...");
     match install_unprivileged_helper().await {
         Ok(msg) => print_step_ok(&msg),
         Err(e) => {
@@ -49,8 +62,8 @@ pub async fn run() -> i32 {
         eprintln!("Warning: could not save setup mode: {e}");
     }
 
-    // Step 4: Trust Caddy CA (non-fatal — HTTPS will show warnings but still work)
-    print_step(4, total, "Trusting Caddy CA...");
+    // Step 5: Trust Caddy CA (non-fatal — HTTPS will show warnings but still work)
+    print_step(5, total, "Trusting Caddy CA...");
     match veld_core::setup::trust_caddy_ca().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
