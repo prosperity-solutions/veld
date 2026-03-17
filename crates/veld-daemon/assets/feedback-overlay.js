@@ -474,7 +474,7 @@
     if (cx < minXY) { cx = minXY; clamped = true; }
     if (cy > maxY) { cy = maxY; clamped = true; }
     if (cy < minXY) { cy = minXY; clamped = true; }
-    if (clamped) { positionFab(cx, cy, true); saveFabPos(cx, cy); }
+    if (clamped) { positionFab(cx, cy, false); saveFabPos(cx, cy); }
   }
 
   // ---------- toolbar toggle ----------------------------------------------
@@ -1833,6 +1833,7 @@
     buildDOM();
     updateBadge();
     restoreFabPos();
+    clampFabToViewport();
 
     if (__veld_hidden) {
       toolbarContainer.classList.add(PREFIX + "hidden");
