@@ -524,7 +524,6 @@ async fn check_caddy_status() -> String {
 /// Check CA trust status.
 fn check_ca_status() -> String {
     let ca_cert = veld_core::paths::caddy_data_dir()
-        .join("caddy")
         .join("pki")
         .join("authorities")
         .join("local")
