@@ -111,7 +111,8 @@ jobs:
           ./target/debug/veld setup --help | grep -q "unprivileged"
           ./target/debug/veld setup --help | grep -q "privileged"
           ./target/debug/veld setup --help | grep -q "hammerspoon"
-          echo "Setup subcommands verified."
+          ./target/debug/veld doctor --help | grep -q "json"
+          echo "Setup subcommands and doctor verified."
 
       - name: Test Python servers directly
         run: |
@@ -152,6 +153,12 @@ jobs:
           echo "=== Unprivileged setup ==="
           # Setup may fail on CA trust in CI (no keychain / Caddy timing) — allow partial success
           $VELD setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed in CI)"
+
+          echo ""
+          echo "=== Run doctor (diagnostics) ==="
+          $VELD doctor || echo "WARNING: doctor reported issues (expected in CI — Caddy may not start)"
+          $VELD doctor --json > /tmp/doctor-unpriv.json 2>/dev/null || true
+          cat /tmp/doctor-unpriv.json
 
           echo ""
           echo "=== Verify setup.json ==="
@@ -238,6 +245,12 @@ jobs:
           sudo $VELD setup privileged
           echo ""
 
+          echo "=== Run doctor (diagnostics) ==="
+          $VELD doctor || echo "WARNING: doctor reported issues (expected in CI)"
+          $VELD doctor --json > /tmp/doctor-priv.json 2>/dev/null || true
+          cat /tmp/doctor-priv.json
+
+          echo ""
           echo "=== Verify setup.json ==="
           cat ~/.veld/setup.json
           grep -q '"privileged"' ~/.veld/setup.json
