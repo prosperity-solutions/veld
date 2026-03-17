@@ -530,6 +530,10 @@
       acquireCaptureStream().then(function () {
         overlay.classList.add(PREFIX + "overlay-active");
         overlay.classList.add(PREFIX + "overlay-crosshair");
+        // After the browser's getDisplayMedia dialog, focus often shifts away
+        // from the page. Re-focus and hint the user to start drawing.
+        window.focus();
+        toast("Draw a rectangle to capture a screenshot");
       }).catch(function () {
         toast("Screen capture denied", true);
         // Revert mode since we can't capture.

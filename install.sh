@@ -124,7 +124,7 @@ if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
         NEED_SUDO="sudo"
         INSTALL_DIR="$EXISTING_DIR"
       else
-        printf "Sudo is needed to update ${EXISTING_DIR}. Grant access? [Y/n] "
+        printf "Grant sudo access to update binaries? [Y/n] "
         read -r answer < /dev/tty 2>/dev/null || answer="n"
         answer="${answer:-y}"
         if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then

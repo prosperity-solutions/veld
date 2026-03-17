@@ -168,10 +168,12 @@
 .veld-feedback-overlay-active { display: block; }
 
 
-/* Hover outline */
+/* Hover outline — dual-dashed for visibility on any background */
 .veld-feedback-hover-outline {
   position: absolute;
   border: 2px dashed var(--vf-accent);
+  outline: 2px dashed rgba(0, 0, 0, 0.6);
+  outline-offset: 2px;
   pointer-events: none;
   z-index: calc(var(--vf-z) - 1);
   border-radius: 3px;
@@ -347,10 +349,12 @@
   padding: 40px 0; font-size: 12px;
 }
 
-/* Screenshot selection rectangle */
+/* Screenshot selection rectangle — dual-dashed for visibility on any background */
 .veld-feedback-screenshot-rect {
   position: absolute;
   border: 2px dashed var(--vf-accent);
+  outline: 2px dashed rgba(0, 0, 0, 0.6);
+  outline-offset: 2px;
   background: rgba(196, 245, 106, 0.08);
   pointer-events: none;
   z-index: calc(var(--vf-z) - 1);
