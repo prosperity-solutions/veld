@@ -44,19 +44,20 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Step 4: Trust Caddy CA
+    // Write setup mode early — even if CA trust fails, the helper is running.
+    if let Err(e) = write_setup_mode("unprivileged") {
+        eprintln!("Warning: could not save setup mode: {e}");
+    }
+
+    // Step 4: Trust Caddy CA (non-fatal — HTTPS will show warnings but still work)
     print_step(4, total, "Trusting Caddy CA...");
     match veld_core::setup::trust_caddy_ca().await {
         Ok(info) => print_step_ok(&info.message),
         Err(e) => {
             print_step_fail(&format!("{e:#}"));
-            return 1;
+            eprintln!("  HTTPS will work but browsers may show certificate warnings.");
+            eprintln!("  You can retry later with: veld setup unprivileged");
         }
-    }
-
-    // Write setup mode
-    if let Err(e) = write_setup_mode("unprivileged") {
-        eprintln!("Warning: could not save setup mode: {e}");
     }
 
     println!();

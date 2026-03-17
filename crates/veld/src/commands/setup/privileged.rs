@@ -171,17 +171,8 @@ pub async fn run(
         }
     }
 
-    // Step 6: Trust Caddy's CA in the system store.
-    print_step(6, total, "Trusting Caddy CA...");
-    match veld_core::setup::trust_caddy_ca().await {
-        Ok(info) => print_step_ok(&info.message),
-        Err(e) => {
-            print_step_fail(&format!("{e:#}"));
-            return 1;
-        }
-    }
-
-    // Write setup.json for the real user (not root).
+    // Write setup.json early — even if CA trust fails, the system services are running.
+    //
     // Derive the real user's ~/.veld/ from the user_socket_path (which is ~/.veld/helper.sock).
     if let Some(veld_dir) = user_socket_path.parent() {
         let setup_json = veld_dir.join("setup.json");
@@ -199,6 +190,16 @@ pub async fn run(
                 .arg(format!("{sudo_user}:staff"))
                 .arg(veld_dir)
                 .output();
+        }
+    }
+
+    // Step 6: Trust Caddy's CA in the system store (non-fatal).
+    print_step(6, total, "Trusting Caddy CA...");
+    match veld_core::setup::trust_caddy_ca().await {
+        Ok(info) => print_step_ok(&info.message),
+        Err(e) => {
+            print_step_fail(&format!("{e:#}"));
+            eprintln!("  HTTPS will work but browsers may show certificate warnings.");
         }
     }
 
