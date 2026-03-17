@@ -383,6 +383,7 @@
   // ---------- FAB dragging ------------------------------------------------
 
   var FAB_MARGIN = 16; // minimum distance from viewport edge
+  var __fabCX = 0, __fabCY = 0; // logical center of FAB (avoids reading DOM)
 
   function initDrag() {
     var startX, startY, origX, origY, dragging = false, moved = false;
@@ -391,9 +392,8 @@
       if (e.button !== 0) return;
       dragging = true; moved = false;
       startX = e.clientX; startY = e.clientY;
-      var rect = fab.getBoundingClientRect();
-      origX = rect.left + rect.width / 2;
-      origY = rect.top + rect.height / 2;
+      origX = __fabCX;
+      origY = __fabCY;
       e.preventDefault();
     });
 
@@ -414,15 +414,14 @@
       if (moved) {
         fab._wasDragged = true;
         setTimeout(function () { fab._wasDragged = false; }, 300);
-        var rect = fab.getBoundingClientRect();
-        var cx = rect.left + rect.width / 2;
-        var cy = rect.top + rect.height / 2;
-        saveFabPos(cx, cy);
+        saveFabPos(__fabCX, __fabCY);
       }
     });
   }
 
   function positionFab(cx, cy, animate) {
+    __fabCX = cx;
+    __fabCY = cy;
     var onRight = cx > window.innerWidth / 2;
     toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
     toolbarContainer.style.top = (cy - 20) + "px";
@@ -463,9 +462,7 @@
   }
 
   function clampFabToViewport() {
-    var rect = fab.getBoundingClientRect();
-    var cx = rect.left + rect.width / 2;
-    var cy = rect.top + rect.height / 2;
+    var cx = __fabCX, cy = __fabCY;
     var clamped = false;
     var maxX = window.innerWidth - 20 - FAB_MARGIN;
     var maxY = window.innerHeight - 20 - FAB_MARGIN;
