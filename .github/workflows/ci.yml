@@ -136,9 +136,10 @@ jobs:
 
       - name: "Cleanup after integration tests"
         run: |
-          sudo $(pwd)/target/debug/veld uninstall 2>/dev/null || true
+          sudo "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
+          sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
           sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
@@ -310,6 +311,7 @@ jobs:
           sudo curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
+          sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
           sleep 1
 
       - name: "Test: auto-bootstrap (no setup)"
