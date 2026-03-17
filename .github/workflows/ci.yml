@@ -138,7 +138,7 @@ jobs:
         run: |
           sudo $(pwd)/target/debug/veld uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
-          sudo rm -rf ~/.veld ~/.local/lib/veld /usr/local/lib/veld 2>/dev/null || true
+          sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
@@ -223,7 +223,7 @@ jobs:
         run: |
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
-          rm -rf ~/.veld ~/.local/lib/veld 2>/dev/null || true
+          rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" 2>/dev/null || true
           sleep 1
 
       - name: "Test: privileged setup lifecycle"
@@ -309,7 +309,7 @@ jobs:
         run: |
           sudo curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
-          sudo rm -rf ~/.veld ~/.local/lib/veld /usr/local/lib/veld 2>/dev/null || true
+          sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sleep 1
 
       - name: "Test: auto-bootstrap (no setup)"
@@ -342,5 +342,5 @@ jobs:
             curl -s http://localhost:2019/stop >/dev/null 2>&1 || true
             sleep 1
           fi
-          rm -rf ~/.veld
+          rm -rf "$HOME/.veld"
           echo "=== Auto-bootstrap PASSED ==="
