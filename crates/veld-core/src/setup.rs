@@ -411,6 +411,21 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
             let (_, _, real_home) = resolve_real_user_macos()?;
             let keychain = real_home.join("Library/Keychains/login.keychain-db");
 
+            // Check if the CA is already trusted — skip if so (prevents duplicates).
+            let already_trusted = Command::new("security")
+                .args(["verify-cert", "-c"])
+                .arg(&root_cert)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .is_ok_and(|s| s.success());
+
+            if already_trusted {
+                return Ok(StepResult::success("Caddy CA already trusted in keychain"));
+            }
+
             let tmp_cert = std::env::temp_dir().join("veld-ca.crt");
             std::fs::copy(&root_cert, &tmp_cert).context("failed to copy CA cert to temp file")?;
 
