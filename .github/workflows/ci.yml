@@ -113,6 +113,34 @@ jobs:
           ./target/debug/veld setup --help | grep -q "hammerspoon"
           echo "Setup subcommands verified."
 
+      - name: Test Python servers directly
+        run: |
+          set -e
+          python3 testproject/backend/server.py 19555 &
+          PID_B=$!
+          python3 testproject/frontend/server.py 19556 &
+          PID_F=$!
+          sleep 2
+          curl -sf http://localhost:19555/health
+          curl -sf http://localhost:19555/
+          curl -sf http://localhost:19556/
+          kill $PID_B $PID_F
+          wait $PID_B $PID_F 2>/dev/null || true
+
+      - name: Run full integration tests
+        run: |
+          chmod +x tests/integration.sh
+          sudo ./tests/integration.sh \
+            --veld-bin "$(pwd)/target/debug/veld" \
+            --project-dir "$(pwd)/testproject"
+
+      - name: "Cleanup after integration tests"
+        run: |
+          sudo $(pwd)/target/debug/veld uninstall 2>/dev/null || true
+          curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
+          rm -rf ~/.veld
+          sleep 2
+
       - name: "Test: unprivileged setup lifecycle"
         run: |
           set -e
@@ -297,24 +325,3 @@ jobs:
           fi
           rm -rf ~/.veld
           echo "=== Auto-bootstrap PASSED ==="
-
-      - name: Test Python servers directly
-        run: |
-          set -e
-          python3 testproject/backend/server.py 19555 &
-          PID_B=$!
-          python3 testproject/frontend/server.py 19556 &
-          PID_F=$!
-          sleep 2
-          curl -sf http://localhost:19555/health
-          curl -sf http://localhost:19555/
-          curl -sf http://localhost:19556/
-          kill $PID_B $PID_F
-          wait $PID_B $PID_F 2>/dev/null || true
-
-      - name: Run full integration tests
-        run: |
-          chmod +x tests/integration.sh
-          sudo ./tests/integration.sh \
-            --veld-bin "$(pwd)/target/debug/veld" \
-            --project-dir "$(pwd)/testproject"
