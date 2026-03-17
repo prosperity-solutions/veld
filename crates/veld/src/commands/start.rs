@@ -65,6 +65,28 @@ pub async fn run(
         }
     };
 
+    // Validate: non-localhost URL templates require privileged mode.
+    let non_localhost = find_non_localhost_domains(&parsed_selections, &config);
+    if !non_localhost.is_empty() {
+        let mode = super::read_setup_mode().unwrap_or_else(|| "auto".to_owned());
+        if mode != "privileged" {
+            let mut detail = String::from("Custom apex domains are only supported in privileged mode.\n");
+            detail.push_str("\n  Affected nodes:\n");
+            for (label, hostname) in &non_localhost {
+                detail.push_str(&format!("    - {label} => {hostname}\n"));
+            }
+            detail.push_str(
+                "\n  In unprivileged/auto mode, veld cannot write to /etc/hosts or manage\n  \
+                 system DNS, so only .localhost domains work (RFC 6761).\n\
+                 \n  To fix this, either:\n  \
+                 - Change your url_template to use .localhost (e.g. {service}.{run}.{project}.localhost)\n  \
+                 - Run `veld setup privileged` (one-time sudo) to enable custom domains",
+            );
+            output::print_error(&detail, false);
+            return 1;
+        }
+    }
+
     let run_name = match name {
         Some(ref n) => n.clone(),
         None => generate_run_name(),
@@ -614,4 +636,56 @@ fn interactive_node_variant_picker(config: &VeldConfig) -> Option<Vec<NodeSelect
     }
 
     Some(selections)
+}
+
+/// Find all `start_server` nodes whose URL template resolves to a
+/// non-localhost domain. Returns a list of `(node:variant, hostname)` pairs.
+fn find_non_localhost_domains(
+    selections: &[veld_core::graph::NodeSelection],
+    config: &VeldConfig,
+) -> Vec<(String, String)> {
+    use veld_core::config::StepType;
+    use veld_core::url;
+
+    // Build dummy values to evaluate templates — the apex domain is the static
+    // part of the template, so placeholder values are sufficient.
+    let dummy_values = url::build_url_template_values(
+        "svc", "var", "run", "proj", "branch", "wt", "user", "host",
+    );
+
+    let mut offenders = Vec::new();
+
+    for sel in selections {
+        let node_cfg = match config.nodes.get(&sel.node) {
+            Some(n) => n,
+            None => continue,
+        };
+        let variant_cfg = match node_cfg.variants.get(&sel.variant) {
+            Some(v) => v,
+            None => continue,
+        };
+
+        if variant_cfg.step_type != StepType::StartServer {
+            continue;
+        }
+
+        let effective_template = url::resolve_url_template(
+            &config.url_template,
+            node_cfg.url_template.as_deref(),
+            variant_cfg.url_template.as_deref(),
+        );
+
+        // Err means an unrecognized variable — that template will also fail at
+        // runtime, so we skip it here rather than producing a confusing error.
+        if let Ok(hostname) = url::evaluate_url_template(effective_template, &dummy_values) {
+            if !url::is_localhost_domain(&hostname) {
+                offenders.push((
+                    format!("{}:{}", sel.node, sel.variant),
+                    hostname,
+                ));
+            }
+        }
+    }
+
+    offenders
 }

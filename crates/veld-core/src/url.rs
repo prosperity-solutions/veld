@@ -91,6 +91,28 @@ pub fn evaluate_url_template(
     variables::interpolate_url_template(template, values)
 }
 
+/// Check whether a hostname is a `.localhost` domain (RFC 6761).
+pub fn is_localhost_domain(hostname: &str) -> bool {
+    hostname == "localhost" || hostname.ends_with(".localhost")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_localhost_domain() {
+        assert!(is_localhost_domain("localhost"));
+        assert!(is_localhost_domain("app.localhost"));
+        assert!(is_localhost_domain("frontend.my-feature.myproject.localhost"));
+        assert!(!is_localhost_domain("myapp.dev"));
+        assert!(!is_localhost_domain("app.mycompany.dev"));
+        assert!(!is_localhost_domain("notlocalhost"));
+        assert!(!is_localhost_domain("foo.localhost.evil.com"));
+        assert!(!is_localhost_domain(""));
+    }
+}
+
 /// Build the template variables map for a given node in a run.
 #[allow(clippy::too_many_arguments)]
 pub fn build_url_template_values(
