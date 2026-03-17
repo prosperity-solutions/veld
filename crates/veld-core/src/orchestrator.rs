@@ -79,6 +79,20 @@ pub enum StopResult {
     AlreadyStopped,
 }
 
+/// Pre-computed port and URL for a `start_server` node, resolved before
+/// any node begins execution so that all nodes can reference any other
+/// node's URL/port without requiring a dependency edge.
+struct PrecomputedServer {
+    port: u16,
+    /// Raw hostname (without scheme), used for DNS/Caddy configuration.
+    hostname: String,
+    /// Full `https://` URL including port suffix when not 443.
+    https_url: String,
+    /// Held TCP listeners that reserve the port from other processes.
+    /// Taken (released) right before the child process is spawned.
+    reservation: Option<crate::port::PortReservation>,
+}
+
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
@@ -89,6 +103,11 @@ pub struct Orchestrator {
     pub https_port: u16,
     /// Active child processes keyed by `"node:variant"`.
     children: HashMap<String, process::ServerHandle>,
+    /// Pre-computed ports and URLs for all `start_server` nodes, keyed by
+    /// `"node:variant"`. Populated once before execution begins so that
+    /// every node can reference any `start_server` node's `url`/`port`
+    /// regardless of dependency order.
+    precomputed_servers: HashMap<String, PrecomputedServer>,
     /// Debug mode — writes orchestration trace to `veld-debug.log`.
     debug: bool,
     /// Debug log writer (created on demand when debug is true).
@@ -112,6 +131,7 @@ impl Orchestrator {
             helper_client: HelperClient::default_client(),
             https_port: 443,
             children: HashMap::new(),
+            precomputed_servers: HashMap::new(),
             debug: false,
             debug_writer: None,
             foreground: false,
@@ -237,6 +257,74 @@ impl Orchestrator {
         // Outputs collected as we execute stages (for variable resolution).
         let mut all_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
 
+        // Pre-compute ports and URLs for ALL start_server nodes before any
+        // execution begins.  This makes ${nodes.X.url} and ${nodes.X.port}
+        // available to every node regardless of dependency order — frontend
+        // can reference backend's URL and vice versa without a cycle.
+        self.precomputed_servers.clear();
+        for stage in &plan {
+            for sel in stage {
+                let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
+                if variant_cfg.step_type != config::StepType::StartServer {
+                    continue;
+                }
+
+                let reservation = self.port_allocator.allocate()?;
+                let port = reservation.port;
+
+                let node_cfg = &self.config.nodes[&sel.node];
+                let effective_template = url::resolve_url_template(
+                    &self.config.url_template,
+                    node_cfg.url_template.as_deref(),
+                    variant_cfg.url_template.as_deref(),
+                );
+                let url_values = url::build_url_template_values(
+                    &sel.node,
+                    &sel.variant,
+                    &run.name,
+                    &self.config.name,
+                    &branch,
+                    &worktree,
+                    &username,
+                    &hostname,
+                );
+                let node_url = url::evaluate_url_template(effective_template, &url_values)?;
+                let https_url = if self.https_port == 443 {
+                    format!("https://{node_url}")
+                } else {
+                    format!("https://{node_url}:{}", self.https_port)
+                };
+
+                let key = RunState::node_key(&sel.node, &sel.variant);
+                self.debug_log(&format!(
+                    "{}:{} — pre-computed port {} → {}",
+                    sel.node, sel.variant, port, https_url
+                ))
+                .await;
+
+                // Pre-populate all_outputs so every node can resolve
+                // ${nodes.X.url} and ${nodes.X.port} references.
+                let mut node_out = HashMap::new();
+                node_out.insert("port".to_owned(), port.to_string());
+                node_out.insert("url".to_owned(), https_url.clone());
+                all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
+                all_outputs
+                    .entry(sel.node.clone())
+                    .or_default()
+                    .extend(node_out);
+
+                self.precomputed_servers.insert(
+                    key,
+                    PrecomputedServer {
+                        port,
+                        hostname: node_url,
+                        https_url,
+                        reservation: Some(reservation),
+                    },
+                );
+            }
+        }
+
         // Count total nodes for progress reporting.
         let total_nodes: usize = plan.iter().map(|s| s.len()).sum();
         self.emit(ProgressEvent::PlanResolved {
@@ -244,32 +332,46 @@ impl Orchestrator {
             stages: plan.len(),
         });
 
-        // Execute stages in order.
+        // Execute stages in order. On failure, release any remaining port
+        // reservations so the ports become available again immediately.
         let mut node_index: usize = 0;
-        for stage in &plan {
-            let results = self
-                .execute_stage(
-                    stage,
-                    &run,
-                    &branch,
-                    &worktree,
-                    &username,
-                    &hostname,
-                    &mut all_outputs,
-                    total_nodes,
-                    &mut node_index,
-                )
-                .await?;
+        let execute_result: Result<(), OrchestratorError> = async {
+            for stage in &plan {
+                let results = self
+                    .execute_stage(
+                        stage,
+                        &run,
+                        &branch,
+                        &worktree,
+                        &username,
+                        &mut all_outputs,
+                        total_nodes,
+                        &mut node_index,
+                    )
+                    .await?;
 
-            for (key, node_state) in results {
-                run.execution_order.push(key.clone());
-                run.nodes.insert(key, node_state);
+                for (key, node_state) in results {
+                    run.execution_order.push(key.clone());
+                    run.nodes.insert(key, node_state);
+                }
+
+                // Save partial state after each stage so that Ctrl+C or crashes
+                // leave enough information for `veld stop` to find and kill PIDs.
+                self.save_state(&run)?;
             }
-
-            // Save partial state after each stage so that Ctrl+C or crashes
-            // leave enough information for `veld stop` to find and kill PIDs.
-            self.save_state(&run)?;
+            Ok(())
         }
+        .await;
+
+        if let Err(e) = execute_result {
+            // Release all remaining port reservations so the ports become
+            // available to the system immediately.
+            self.precomputed_servers.clear();
+            return Err(e);
+        }
+
+        // All reservations have been consumed — clear the map.
+        self.precomputed_servers.clear();
 
         run.status = RunStatus::Running;
 
@@ -287,7 +389,6 @@ impl Orchestrator {
         branch: &str,
         worktree: &str,
         username: &str,
-        hostname: &str,
         all_outputs: &mut HashMap<String, HashMap<String, String>>,
         total_nodes: usize,
         node_index: &mut usize,
@@ -308,7 +409,7 @@ impl Orchestrator {
             let key = RunState::node_key(&sel.node, &sel.variant);
             let start_time = std::time::Instant::now();
             let node_state = self
-                .execute_node(sel, run, branch, worktree, username, hostname, all_outputs)
+                .execute_node(sel, run, branch, worktree, username, all_outputs)
                 .await?;
 
             // Store this node's outputs for downstream resolution.
@@ -364,7 +465,6 @@ impl Orchestrator {
         branch: &str,
         worktree: &str,
         username: &str,
-        hostname: &str,
         all_outputs: &HashMap<String, HashMap<String, String>>,
     ) -> Result<NodeState, OrchestratorError> {
         let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
@@ -391,17 +491,8 @@ impl Orchestrator {
 
         match variant_cfg.step_type {
             StepType::StartServer => {
-                self.execute_start_server(
-                    sel,
-                    run,
-                    branch,
-                    worktree,
-                    username,
-                    hostname,
-                    &mut ctx,
-                    &mut node_state,
-                )
-                .await?;
+                self.execute_start_server(sel, run, &mut ctx, &mut node_state)
+                    .await?;
             }
             StepType::Command => {
                 self.execute_command(sel, &mut ctx, &mut node_state).await?;
@@ -422,54 +513,43 @@ impl Orchestrator {
         &mut self,
         sel: &NodeSelection,
         run: &RunState,
-        branch: &str,
-        worktree: &str,
-        username: &str,
-        hostname: &str,
         ctx: &mut VariableContext,
         node_state: &mut NodeState,
     ) -> Result<(), OrchestratorError> {
         let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
 
-        // Allocate port.
-        let port = self.port_allocator.allocate()?;
+        // Look up the pre-computed port and URL (allocated before any node
+        // executed so that cross-references work without dependency edges).
+        let key = RunState::node_key(&sel.node, &sel.variant);
+        let precomputed = self
+            .precomputed_servers
+            .get_mut(&key)
+            .expect("precomputed server info missing — bug in pre-computation phase");
+        let port = precomputed.port;
+        let node_url = precomputed.hostname.clone();
+        let https_url = precomputed.https_url.clone();
+        // Take the port reservation — we'll release it right before spawning
+        // the child process to minimise the TOCTOU window.
+        let port_reservation = precomputed
+            .reservation
+            .take()
+            .expect("port reservation already consumed — node executed twice?");
+
         node_state.port = Some(port);
         ctx.set_builtin("port", port.to_string());
+        node_state.url = Some(https_url.clone());
+        ctx.set_builtin("url", https_url.clone());
+
         self.emit(ProgressEvent::PortAllocated {
             node: sel.node.clone(),
             variant: sel.variant.clone(),
             port,
         });
         self.debug_log(&format!(
-            "{}:{} — allocated port {}",
-            sel.node, sel.variant, port
+            "{}:{} — using pre-computed port {} → {}",
+            sel.node, sel.variant, port, https_url
         ))
         .await;
-
-        // Build URL using the most specific template (variant > node > project).
-        let node_cfg = &self.config.nodes[&sel.node];
-        let effective_template = url::resolve_url_template(
-            &self.config.url_template,
-            node_cfg.url_template.as_deref(),
-            variant_cfg.url_template.as_deref(),
-        );
-        let url_values = url::build_url_template_values(
-            &sel.node,
-            &sel.variant,
-            &run.name,
-            &self.config.name,
-            branch,
-            worktree,
-            username,
-            hostname,
-        );
-        let node_url = url::evaluate_url_template(effective_template, &url_values)?;
-        let https_url = if self.https_port == 443 {
-            format!("https://{node_url}")
-        } else {
-            format!("https://{node_url}:{}", self.https_port)
-        };
-        node_state.url = Some(https_url.clone());
 
         // Configure DNS + Caddy via helper (best-effort).
         self.debug_log(&format!(
@@ -519,6 +599,12 @@ impl Orchestrator {
         // Start the process. stdout/stderr are redirected to the log file at
         // the OS level so the process survives after the CLI exits.
         let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
+
+        // Release the port reservation immediately before spawning so the
+        // child process can bind. The window between release and bind is
+        // microseconds — effectively eliminating the TOCTOU race between
+        // concurrent `veld start` commands.
+        port_reservation.release();
 
         let handle = process::start_server(
             &resolved_cmd,
