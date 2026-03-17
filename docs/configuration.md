@@ -184,6 +184,8 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 - Must specify `command` (required)
 - The process **must** bind to `${veld.port}` -- if it does not, the health check fails with a clear error
 - Built-in outputs: `url` (the full HTTPS URL) and `port` (the allocated port number)
+- Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `command`, `env`, and `outputs` templates
+- Ports and URLs are **pre-computed** before any node executes, so `${nodes.X.url}` and `${nodes.X.port}` for any `start_server` node are available everywhere -- no dependency edge required
 - Supports the `health_check` field (required)
 - Users never see or deal with port numbers -- only clean HTTPS URLs
 
@@ -329,7 +331,7 @@ Every `command` variant also automatically provides the built-in output `exit_co
 
 #### For `start_server` variants: Object (key-value map)
 
-Defines synthetic outputs whose values are string templates interpolated after the port is allocated. This is especially useful for Docker infrastructure nodes where stdout cannot be used for `VELD_OUTPUT`.
+Defines synthetic outputs whose values are string templates interpolated after the port and URL are resolved. Templates support all `${veld.*}` and `${nodes.*}` variables. This is especially useful for Docker infrastructure nodes where stdout cannot be used for `VELD_OUTPUT`.
 
 ```json
 {
@@ -340,6 +342,15 @@ Defines synthetic outputs whose values are string templates interpolated after t
     "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app",
     "REDIS_URL": "redis://localhost:${veld.port}"
   }
+}
+```
+
+Since `${veld.url}` is available in output templates, you can build derived URLs:
+
+```json
+"outputs": {
+  "API_URL": "${veld.url}/api/v1",
+  "WEBSOCKET_URL": "${veld.url}/ws"
 }
 ```
 
@@ -452,6 +463,7 @@ Available to all node variants without any declaration:
 | Variable            | Value                                                |
 |---------------------|------------------------------------------------------|
 | `${veld.port}`      | Allocated port for this node in this run             |
+| `${veld.url}`       | Full HTTPS URL for this node (`start_server` only)   |
 | `${veld.run}`       | Run name                                             |
 | `${veld.run_id}`    | Stable run UUID                                      |
 | `${veld.root}`      | Absolute path to the directory containing `veld.json`|
@@ -462,7 +474,28 @@ Available to all node variants without any declaration:
 
 ### Node Output References (`${nodes.*}`)
 
-Downstream nodes can reference outputs from their upstream dependencies.
+References to other nodes' outputs. There are two categories with different availability rules:
+
+#### Pre-computed outputs (available to ALL nodes)
+
+The built-in `url` and `port` outputs for `start_server` nodes are **pre-computed** before any node executes. This means every node in the graph can reference any `start_server` node's URL or port — regardless of dependency order.
+
+This is especially powerful for cross-referencing: the frontend can know the backend's URL and the backend can know the frontend's URL, without creating a dependency cycle. `depends_on` controls execution order only, not variable availability for URLs and ports.
+
+```
+${nodes.backend.url}               # start_server built-in: full HTTPS URL
+${nodes.backend.port}              # start_server built-in: allocated port (rarely needed)
+${nodes.frontend.url}              # works even if frontend runs AFTER this node
+```
+
+#### Execution-order outputs (available to downstream nodes only)
+
+Custom outputs — from synthetic output templates (`outputs` object) or `VELD_OUTPUT` lines in command nodes — are only available after the producing node has executed. These require a `depends_on` edge.
+
+```
+${nodes.database.DATABASE_URL}     # custom output from bash or outputs declaration
+${nodes.clone-db.exit_code}        # bash built-in: exit code
+```
 
 #### Short Form
 

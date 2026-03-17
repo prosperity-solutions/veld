@@ -91,7 +91,8 @@ cargo build --release
           "type": "start_server",
           "command": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
-          "depends_on": { "backend": "local" }
+          "depends_on": { "backend": "local" },
+          "env": { "NEXT_PUBLIC_API_URL": "${nodes.backend.url}" }
         }
       }
     }
@@ -170,7 +171,9 @@ Fallback operator: `{branch ?? run}` uses the first non-empty value.
 
 ### Variable interpolation
 
-Commands and env values support `${veld.port}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
+Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
+
+Ports and URLs for all `start_server` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
 
 ## Architecture
 
