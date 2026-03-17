@@ -459,7 +459,7 @@
         return;
       }
     } catch (_) {}
-    positionFab(window.innerWidth - 20 - FAB_MARGIN, window.innerHeight - 20 - FAB_MARGIN, false);
+    positionFab(20 + FAB_MARGIN, window.innerHeight - 20 - FAB_MARGIN, false);
   }
 
   function clampFabToViewport() {
