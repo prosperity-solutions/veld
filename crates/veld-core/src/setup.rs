@@ -893,7 +893,7 @@ pub async fn check_update() -> Result<Option<String>, anyhow::Error> {
 
 /// Compare two semver-like version strings. Returns true if `latest` is
 /// newer than `current`.
-fn is_newer(latest: &str, current: &str) -> bool {
+pub fn is_newer(latest: &str, current: &str) -> bool {
     let parse = |v: &str| -> (u64, u64, u64) {
         let mut parts = v.split('.');
         let major = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
