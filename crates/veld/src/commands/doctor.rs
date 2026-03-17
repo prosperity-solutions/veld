@@ -251,10 +251,13 @@ impl Diagnostics {
     // -- Tip -----------------------------------------------------------------
 
     fn gather_tip(&mut self) {
-        if self.config_mode == "privileged" {
-            self.tip = "All good — running in privileged mode.".to_string();
+        let all_pass = self.checks.iter().all(|c| c.pass);
+        if self.config_mode == "privileged" && all_pass {
+            self.tip = "All checks passed.".to_string();
+        } else if !all_pass {
+            self.tip = "Some checks failed — see above for details.".to_string();
         } else {
-            self.tip = "Run `veld setup privileged` for clean URLs without :18443.".to_string();
+            self.tip = String::new(); // Mode section already shows the upgrade hint
         }
     }
 
@@ -284,10 +287,49 @@ impl Diagnostics {
             println!("    {:<14}{} (not found)", "Caddy:", self.caddy_path);
         }
         println!("    {:<14}{}", "Lib dir:", self.lib_dir);
-        println!(
-            "    {:<14}{} (mode: {})",
-            "Config:", self.config_path, self.config_mode
-        );
+        println!("    {:<14}{}", "Config:", self.config_path);
+        println!();
+
+        // Mode (prominent)
+        println!("  {}", output::bold("Mode"));
+        match self.config_mode.as_str() {
+            "privileged" => {
+                println!(
+                    "    {} {}",
+                    output::checkmark(),
+                    output::green("Privileged — clean URLs on ports 80/443")
+                );
+            }
+            "unprivileged" => {
+                println!(
+                    "    {} Unprivileged — HTTPS on port 18443",
+                    output::cyan("●")
+                );
+                println!(
+                    "      {}",
+                    output::dim("Run `veld setup privileged` for clean URLs without :18443")
+                );
+            }
+            "auto" => {
+                println!(
+                    "    {} Auto-bootstrapped — HTTPS on port 18443",
+                    output::cyan("●")
+                );
+                println!(
+                    "      {}",
+                    output::dim("Run `veld setup privileged` for clean URLs without :18443")
+                );
+            }
+            _ => {
+                println!(
+                    "    {} {}",
+                    output::cross(),
+                    output::red(
+                        "Not configured — run `veld setup unprivileged` or `veld setup privileged`"
+                    )
+                );
+            }
+        }
         println!();
 
         // Services
@@ -321,8 +363,10 @@ impl Diagnostics {
         }
         println!();
 
-        // Tip
-        println!("  Tip: {}", output::dim(&self.tip));
+        // Tip (only if there's something to say)
+        if !self.tip.is_empty() {
+            println!("  {}", output::dim(&self.tip));
+        }
     }
 
     fn to_json(&self) -> serde_json::Value {
