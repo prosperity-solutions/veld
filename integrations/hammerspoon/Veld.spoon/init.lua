@@ -20,11 +20,22 @@ obj.homepage = "https://github.com/prosperity-solutions/veld"
 
 --- Veld.veldBin
 --- Variable
---- Path to the veld binary (default: "/usr/local/bin/veld").
-obj.veldBin = "/usr/local/bin/veld"
+--- Path to the veld binary (default: "veld", resolved via the user's login shell PATH).
+obj.veldBin = "veld"
 
 -- Internal state
 local menubar = nil
+
+-- ============================================================
+-- Shell helper
+-- ============================================================
+
+--- Run a command through the user's login shell so that PATH from
+--- .zshrc / .bashrc / .profile is available.
+local function loginShellExecute(cmd)
+    local shell = os.getenv("SHELL") or "/bin/zsh"
+    return hs.execute(string.format("%s -l -c %q", shell, cmd))
+end
 
 -- ============================================================
 -- Data
@@ -32,8 +43,9 @@ local menubar = nil
 
 --- Fetch all active environments via `veld list --json`.
 local function fetchEnvironments(veldBin)
-    local cmd = string.format("%s list --json 2>/dev/null", veldBin)
-    local output, status = hs.execute(cmd)
+    local output, status = loginShellExecute(
+        string.format("%s list --json 2>/dev/null", veldBin)
+    )
 
     if not status or not output or output == "" then
         return {}
@@ -104,7 +116,8 @@ local function stopRun(veldBin, projectRoot, runName)
         "cd %q && %s stop --name %q 2>&1",
         projectRoot, veldBin, runName
     )
-    hs.task.new("/bin/sh", function(exitCode, stdOut, stdErr)
+    local shell = os.getenv("SHELL") or "/bin/zsh"
+    hs.task.new(shell, function(exitCode, stdOut, stdErr)
         if exitCode == 0 then
             hs.notify.new({
                 title = "Veld",
@@ -119,7 +132,7 @@ local function stopRun(veldBin, projectRoot, runName)
                 withdrawAfter = 5,
             }):send()
         end
-    end, { "-c", cmd }):start()
+    end, { "-l", "-c", cmd }):start()
 end
 
 -- ============================================================
