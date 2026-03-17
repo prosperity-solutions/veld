@@ -182,6 +182,20 @@ Three binaries work together:
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
+## Extensions
+
+### Hammerspoon (macOS)
+
+If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar widget that shows running environments at a glance.
+
+```sh
+veld setup hammerspoon
+```
+
+This installs the `Veld.spoon` into `~/.hammerspoon/Spoons/` and offers to patch your `init.lua` to load it automatically. No sudo required.
+
+Check extension status with `veld doctor`.
+
 ## Requirements
 
 - macOS (arm64/x64) or Linux (x64/arm64)

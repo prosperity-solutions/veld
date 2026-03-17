@@ -47,6 +47,9 @@ struct Diagnostics {
     caddy_status: String,
     ca_status: String,
 
+    // Extensions
+    extensions: Vec<Extension>,
+
     // Checks
     checks: Vec<Check>,
 
@@ -59,10 +62,17 @@ struct Check {
     label: String,
 }
 
+struct Extension {
+    name: String,
+    status: String,
+    hint: String,
+}
+
 impl Diagnostics {
     async fn gather(&mut self) {
         self.gather_installation();
         self.gather_services().await;
+        self.gather_extensions();
         self.gather_checks().await;
         self.gather_tip();
     }
@@ -187,6 +197,38 @@ impl Diagnostics {
 
         // CA
         self.ca_status = check_ca_status();
+    }
+
+    // -- Extensions ----------------------------------------------------------
+
+    fn gather_extensions(&mut self) {
+        // Hammerspoon (macOS only)
+        if cfg!(target_os = "macos") {
+            let app_installed = Path::new("/Applications/Hammerspoon.app").exists();
+            let spoon_installed = dirs::home_dir()
+                .map(|h| h.join(".hammerspoon/Spoons/Veld.spoon/init.lua").exists())
+                .unwrap_or(false);
+
+            let (status, hint) = if !app_installed {
+                (
+                    "not installed".to_string(),
+                    "Install Hammerspoon from https://www.hammerspoon.org/".to_string(),
+                )
+            } else if !spoon_installed {
+                (
+                    "app installed, Veld.spoon missing".to_string(),
+                    "Run `veld setup hammerspoon` to install the menu bar widget".to_string(),
+                )
+            } else {
+                ("installed".to_string(), String::new())
+            };
+
+            self.extensions.push(Extension {
+                name: "Hammerspoon".to_string(),
+                status,
+                hint,
+            });
+        }
     }
 
     // -- Checks --------------------------------------------------------------
@@ -395,6 +437,22 @@ impl Diagnostics {
         }
         println!();
 
+        // Extensions
+        if !self.extensions.is_empty() {
+            println!("  {}", output::bold("Extensions"));
+            for ext in &self.extensions {
+                println!(
+                    "    {:<18}{}",
+                    format!("{}:", ext.name),
+                    colorize_status(&ext.status)
+                );
+                if !ext.hint.is_empty() {
+                    println!("    {:<18}{}", "", output::dim(&ext.hint));
+                }
+            }
+            println!();
+        }
+
         // Tip (only if there's something to say)
         if !self.tip.is_empty() {
             println!("  {}", output::dim(&self.tip));
@@ -409,6 +467,18 @@ impl Diagnostics {
                 serde_json::json!({
                     "pass": c.pass,
                     "label": c.label,
+                })
+            })
+            .collect();
+
+        let extensions: Vec<serde_json::Value> = self
+            .extensions
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "name": e.name,
+                    "status": e.status,
+                    "hint": e.hint,
                 })
             })
             .collect();
@@ -434,6 +504,7 @@ impl Diagnostics {
                 "ca": self.ca_status,
             },
             "checks": checks,
+            "extensions": extensions,
             "tip": self.tip,
         })
     }
