@@ -169,13 +169,17 @@ impl State {
 
     async fn handle_status(&self) -> Response {
         let caddy_running = self.caddy.is_running().await;
+        let caddy_pid = self.caddy.pid().await;
         let dns_entries = self.dns.entry_count().await;
+        let helper_pid = std::process::id();
 
         Response::ok_with_data(serde_json::json!({
             "caddy": if caddy_running { "running" } else { "stopped" },
+            "caddy_pid": caddy_pid,
             "dns_entries": dns_entries,
             "https_port": self.https_port,
             "http_port": self.http_port,
+            "helper_pid": helper_pid,
         }))
     }
 

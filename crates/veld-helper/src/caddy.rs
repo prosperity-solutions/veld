@@ -216,6 +216,11 @@ impl CaddyManager {
         let url = format!("{CADDY_ADMIN_API}/id/veld-sentinel");
         matches!(self.client.get(&url).send().await, Ok(r) if r.status().is_success())
     }
+
+    /// Return the stored Caddy child PID, if known.
+    pub async fn pid(&self) -> Option<u32> {
+        self.inner.lock().await.child_pid
+    }
 }
 
 // ---------------------------------------------------------------------------

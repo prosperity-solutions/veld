@@ -113,25 +113,33 @@ impl Diagnostics {
         // Helper
         match veld_core::helper::HelperClient::connect().await {
             Ok(client) => {
-                let port_info = match client.https_port().await {
-                    Ok(https) => {
+                let status_data = client.status().await.ok().and_then(|r| r.data);
+
+                let port_info = status_data
+                    .as_ref()
+                    .and_then(|d| d.get("https_port"))
+                    .and_then(|v| v.as_u64())
+                    .map(|https| {
                         let http = if https == 443 { 80 } else { 18080 };
                         format!("port {https}/{http}")
-                    }
-                    Err(_) => String::new(),
-                };
-                // Try to get PID from status data
-                let pid_info = match client.status().await {
-                    Ok(resp) => resp
-                        .data
-                        .as_ref()
-                        .and_then(|d| d.get("pid"))
-                        .and_then(|v| v.as_u64())
-                        .map(|p| format!("pid {p}"))
-                        .unwrap_or_default(),
-                    Err(_) => String::new(),
-                };
-                let parts: Vec<&str> = [pid_info.as_str(), port_info.as_str()]
+                    })
+                    .unwrap_or_default();
+
+                let helper_pid = status_data
+                    .as_ref()
+                    .and_then(|d| d.get("helper_pid"))
+                    .and_then(|v| v.as_u64())
+                    .map(|p| format!("pid {p}"))
+                    .unwrap_or_default();
+
+                let caddy_pid = status_data
+                    .as_ref()
+                    .and_then(|d| d.get("caddy_pid"))
+                    .and_then(|v| v.as_u64())
+                    .map(|p| format!("pid {p}"))
+                    .unwrap_or_default();
+
+                let parts: Vec<&str> = [helper_pid.as_str(), port_info.as_str()]
                     .iter()
                     .filter(|s| !s.is_empty())
                     .copied()
@@ -140,6 +148,28 @@ impl Diagnostics {
                     self.helper_status = "running".to_string();
                 } else {
                     self.helper_status = format!("running ({})", parts.join(", "));
+                }
+
+                // Caddy status from helper's perspective
+                let caddy_running = status_data
+                    .as_ref()
+                    .and_then(|d| d.get("caddy"))
+                    .and_then(|v| v.as_str())
+                    == Some("running");
+                if caddy_running {
+                    let caddy_parts: Vec<&str> = [caddy_pid.as_str()]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .copied()
+                        .collect();
+                    if caddy_parts.is_empty() {
+                        self.caddy_status = "running (admin API on 2019, sentinel OK)".to_string();
+                    } else {
+                        self.caddy_status = format!(
+                            "running ({}, admin API on 2019, sentinel OK)",
+                            caddy_parts.join(", ")
+                        );
+                    }
                 }
             }
             Err(_) => {
@@ -150,8 +180,10 @@ impl Diagnostics {
         // Daemon
         self.daemon_status = check_daemon_status().await;
 
-        // Caddy
-        self.caddy_status = check_caddy_status().await;
+        // Caddy (only check independently if helper didn't report it)
+        if self.caddy_status.is_empty() || self.caddy_status == "not running" {
+            self.caddy_status = check_caddy_status().await;
+        }
 
         // CA
         self.ca_status = check_ca_status();
