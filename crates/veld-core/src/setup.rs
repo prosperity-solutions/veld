@@ -328,6 +328,17 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
         std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755))?;
     }
 
+    // macOS: clear quarantine xattrs and re-sign so Gatekeeper doesn't SIGKILL.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("xattr")
+            .args(["-cr", &caddy.to_string_lossy()])
+            .output();
+        let _ = std::process::Command::new("codesign")
+            .args(["--force", "--sign", "-", &caddy.to_string_lossy()])
+            .output();
+    }
+
     // Write marker so subsequent runs can detect when the URL changes.
     let _ = std::fs::write(&marker, &desired_url);
 
