@@ -25,6 +25,8 @@ pub fn routes() -> Router {
         .route("/api/environments", get(list_environments))
         .route("/api/logs/{run}", get(get_logs))
         .route("/api/open-terminal", post(open_terminal))
+        .route("/api/environments/{run}/stop", post(stop_environment))
+        .route("/api/environments/{run}/restart", post(restart_environment))
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +257,66 @@ async fn open_terminal(Json(body): Json<OpenTerminalBody>) -> StatusCode {
         Ok(_) => StatusCode::NO_CONTENT,
         Err(e) => {
             warn!("failed to open terminal at {}: {e}", body.path);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stop / Restart
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct EnvActionBody {
+    project_root: String,
+}
+
+async fn stop_environment(
+    Path(run_name): Path<String>,
+    Json(body): Json<EnvActionBody>,
+) -> StatusCode {
+    run_veld_command(&body.project_root, &["stop", "--name", &run_name]).await
+}
+
+async fn restart_environment(
+    Path(run_name): Path<String>,
+    Json(body): Json<EnvActionBody>,
+) -> StatusCode {
+    run_veld_command(&body.project_root, &["restart", "--name", &run_name]).await
+}
+
+/// Spawn `veld <args>` in the given project directory as a detached process.
+async fn run_veld_command(project_root: &str, args: &[&str]) -> StatusCode {
+    let path = std::path::Path::new(project_root);
+    if !path.is_dir() {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let veld_bin = match std::env::current_exe() {
+        Ok(p) => {
+            // The daemon binary is at ~/.local/lib/veld/veld-daemon.
+            // The CLI binary is at ~/.local/bin/veld (sibling structure).
+            // Try to find `veld` relative to our own binary, fall back to PATH.
+            let lib_dir = p.parent().unwrap_or(std::path::Path::new("."));
+            let candidate = lib_dir.parent().map(|d| d.join("bin").join("veld"));
+            match candidate {
+                Some(c) if c.exists() => c,
+                _ => std::path::PathBuf::from("veld"),
+            }
+        }
+        Err(_) => std::path::PathBuf::from("veld"),
+    };
+
+    match std::process::Command::new(&veld_bin)
+        .args(args)
+        .current_dir(project_root)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => StatusCode::ACCEPTED,
+        Err(e) => {
+            warn!("failed to run veld {:?}: {e}", args);
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
