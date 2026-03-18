@@ -224,7 +224,7 @@ function render(data){
         for(const n of nodes){
           const url=n.url||'';
           h+='<tr><td class="svc-node">'+esc(n.name)+'<span class="health-dot '+esc(n.status)+'" title="'+esc(n.status)+'"></span></td>';
-          h+='<td class="svc-url">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a>':'')+'</td>';
+          h+='<td class="svc-url">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a>':'<span style="color:var(--dim)">&ndash;</span>')+'</td>';
           h+='<td class="svc-url-btns">';
           if(url){
             h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';
