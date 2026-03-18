@@ -450,11 +450,12 @@ async fn follow_logs_until_interrupt(
 
 /// Handle the case where no selections or preset were given.
 fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
-    let preset_names: Vec<String> = config
+    let mut preset_names: Vec<String> = config
         .presets
         .as_ref()
         .map(|p| p.keys().cloned().collect())
         .unwrap_or_default();
+    preset_names.sort();
 
     if is_tty() && !preset_names.is_empty() {
         match interactive_preset_selector(&preset_names) {
