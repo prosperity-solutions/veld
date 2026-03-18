@@ -39,7 +39,7 @@
 
   var __veld_threads = [];           // all threads across all pages
   var __veld_lastEventSeq = 0;       // sequence cursor for event polling
-  var __veld_lastHumanSeenSeq = {};  // threadId -> last seq human has seen
+  var __veld_lastSeenAt = {};  // threadId -> last seq human has seen
   var __veld_agentListening = false;
   var __veld_panelOpen = false;
   var __veld_panelTab = "active";    // "active" | "resolved"
@@ -1175,7 +1175,7 @@
 
   function hasUnread(thread) {
     if (!thread.messages) return false;
-    var lastSeen = __veld_lastHumanSeenSeq[thread.id] || 0;
+    var lastSeen = __veld_lastSeenAt[thread.id] || 0;
     // Check if the last message is from agent and thread has been updated since last seen
     var lastMsg = thread.messages[thread.messages.length - 1];
     return lastMsg && lastMsg.author === "agent" && (!lastSeen || new Date(thread.updated_at).getTime() > lastSeen);
@@ -1543,7 +1543,7 @@
   // ---------- mark seen ---------------------------------------------------
 
   function markThreadSeen(threadId) {
-    __veld_lastHumanSeenSeq[threadId] = Date.now();
+    __veld_lastSeenAt[threadId] = Date.now();
     var thread = findThread(threadId);
     if (thread) {
       api("PUT", "/threads/" + threadId + "/seen", { seq: __veld_lastEventSeq }).catch(function () {});
@@ -1556,7 +1556,7 @@
   function markAllRead() {
     __veld_threads.forEach(function (t) {
       if (t.status === "open" && hasUnread(t)) {
-        __veld_lastHumanSeenSeq[t.id] = Date.now();
+        __veld_lastSeenAt[t.id] = Date.now();
         api("PUT", "/threads/" + t.id + "/seen", { seq: __veld_lastEventSeq }).catch(function () {});
       }
     });
@@ -1713,8 +1713,27 @@
         updateListeningModule();
         break;
       case "thread_created":
+        // Could be from another tab — merge if not already known
+        if (event.thread && !findThread(event.thread.id)) {
+          __veld_threads.push(event.thread);
+          addPin(event.thread);
+          updateBadge();
+          if (__veld_panelOpen) renderPanel();
+        }
+        break;
       case "human_message":
-        // These are our own actions echoed back — useful for multi-tab sync
+        // Could be from another tab — update thread if known
+        if (event.thread_id && event.message) {
+          var hmThread = findThread(event.thread_id);
+          if (hmThread) {
+            var exists = hmThread.messages.some(function (m) { return m.id === event.message.id; });
+            if (!exists) {
+              hmThread.messages.push(event.message);
+              hmThread.updated_at = event.message.created_at || new Date().toISOString();
+              if (__veld_panelOpen) renderPanel();
+            }
+          }
+        }
         break;
     }
   }

@@ -358,26 +358,28 @@ impl FeedbackStore {
     }
 
     /// Get all events with `seq > after`, sorted ascending.
+    /// Probes sequential filenames instead of scanning the directory.
+    /// Skips corrupted event files instead of failing.
     pub fn get_events_after(&self, after: u64) -> anyhow::Result<Vec<Event>> {
         if !self.events_dir.exists() {
             return Ok(Vec::new());
         }
+        let max_seq = self.current_seq()?;
         let mut events = Vec::new();
-        for entry in std::fs::read_dir(&self.events_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
-                if let Ok(seq) = stem.parse::<u64>() {
-                    if seq > after {
-                        let data = std::fs::read_to_string(&path)?;
-                        let event: Event = serde_json::from_str(&data)?;
-                        events.push(event);
-                    }
+        let mut seq = after + 1;
+        while seq <= max_seq {
+            let path = self.events_dir.join(format!("{seq:06}.json"));
+            match std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|data| serde_json::from_str::<Event>(&data).ok())
+            {
+                Some(event) => events.push(event),
+                None => {
+                    // File missing or corrupted — skip (gaps from failed writes).
                 }
             }
+            seq += 1;
         }
-        events.sort_by_key(|e| e.seq);
         Ok(events)
     }
 
