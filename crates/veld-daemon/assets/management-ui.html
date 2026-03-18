@@ -332,10 +332,22 @@ function renderLogs(key,data,totalNodes){
   const scrollEl=s.panelEl.querySelector('.log-scroll');
   if(!linesEl||!scrollEl)return;
 
+  const raw=[];
+  for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
+  raw.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
+  if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml='';return;}
+
+  // Group continuation lines (message starts with whitespace) with their parent.
   const merged=[];
-  for(const nd of data.nodes)for(const line of nd.lines)merged.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
-  merged.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
-  if(!merged.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml='';return;}
+  for(const e of raw){
+    const msg=extractMsg(e.raw);
+    const isCont=merged.length>0&&e.node===merged[merged.length-1].node&&(msg.length===0||msg.charAt(0)===' '||msg.charAt(0)==='\t');
+    if(isCont){
+      merged[merged.length-1].fullMsg+='\n'+msg;
+    }else{
+      merged.push({...e,fullMsg:msg});
+    }
+  }
 
   const search=s.searchTerm.toLowerCase();
   const ctx=s.ctxLines||0;
@@ -351,8 +363,7 @@ function renderLogs(key,data,totalNodes){
     // Find matching indices.
     const matches=new Set();
     for(let i=0;i<merged.length;i++){
-      const msg=extractMsg(merged[i].raw);
-      if(msg.toLowerCase().indexOf(search)>=0||merged[i].node.toLowerCase().indexOf(search)>=0)matches.add(i);
+      if(merged[i].fullMsg.toLowerCase().indexOf(search)>=0||merged[i].node.toLowerCase().indexOf(search)>=0)matches.add(i);
     }
     matchCount=matches.size;
     // Expand context around matches.
@@ -382,7 +393,7 @@ function renderLogs(key,data,totalNodes){
 }
 
 function logLineHtml(e,multi,search,isCtx){
-  const msg=extractMsg(e.raw);const isAnn=msg.startsWith('[VELD]');
+  const msg=e.fullMsg;const isAnn=msg.startsWith('[VELD]');
   let h='<div class="log-line'+(isCtx?' ctx':'')+'">';
   if(e.ts)h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
   if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+':'+esc(e.variant)+'</span>';
