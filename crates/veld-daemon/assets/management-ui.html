@@ -24,8 +24,9 @@ a:hover{text-decoration:underline}
 /* layout */
 .shell{max-width:960px;margin:0 auto;padding:24px 20px}
 header{display:flex;align-items:center;gap:12px;margin-bottom:32px}
-header svg{width:28px;height:28px;flex-shrink:0}
-header h1{font-size:18px;font-weight:600;letter-spacing:-.02em}
+header .wordmark{height:22px;flex-shrink:0}
+header .wordmark path{fill:var(--text)}
+header .wordmark path:last-child{fill:#C4F56A}
 header .sep{color:var(--dim);font-weight:300;font-size:20px}
 header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .meta{display:flex;align-items:center;gap:16px;margin-left:auto;font-size:12px;color:var(--text2)}
@@ -106,11 +107,13 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 <body>
 <div class="shell">
   <header>
-    <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100" height="100" rx="20" fill="#6c8cff"/>
-      <path d="M30 70L50 30L70 70" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    <svg class="wordmark" viewBox="0 0 3837 1463" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M383 1463L0 423H183L470 1278H474L762 423H943L561 1463H383Z"/>
+      <path d="M1507 1463C1407.67 1463 1322.17 1441 1250.5 1397C1178.83 1353 1123.83 1290.83 1085.5 1210.5C1047.17 1130.17 1028 1035.67 1028 927V926C1028 818.667 1047.33 724.167 1086 642.5C1124.67 560.833 1179 497.167 1249 451.5C1319 405.833 1401.33 383 1496 383C1590.67 383 1672.17 404.833 1740.5 448.5C1808.83 492.167 1861.33 553.333 1898 632C1934.67 710.667 1953 802 1953 906V970H1115V834H1867L1779 960V893C1779 812.333 1766.83 745.667 1742.5 693C1718.17 640.333 1684.67 601.167 1642 575.5C1599.33 549.833 1550.33 537 1495 537C1439.67 537 1390 550.5 1346 577.5C1302 604.5 1267.33 644.5 1242 697.5C1216.67 750.5 1204 815.667 1204 893V960C1204 1033.33 1216.5 1096 1241.5 1148C1266.5 1200 1302 1239.83 1348 1267.5C1394 1295.17 1448.33 1309 1511 1309C1555 1309 1594.33 1302.33 1629 1289C1663.67 1275.67 1692.67 1257.33 1716 1234C1739.33 1210.67 1756 1184 1766 1154L1769 1145H1940L1938 1155C1929.33 1197.67 1912.83 1237.67 1888.5 1275C1864.17 1312.33 1833 1345.17 1795 1373.5C1757 1401.83 1713.67 1423.83 1665 1439.5C1616.33 1455.17 1563.67 1463 1507 1463Z"/>
+      <path d="M2137 1463V20H2311V1463H2137Z"/>
+      <path d="M2937 1463C2848.33 1463 2770.83 1440.83 2704.5 1396.5C2638.17 1352.17 2586.67 1289.5 2550 1208.5C2513.33 1127.5 2495 1032.33 2495 923V922C2495 812.667 2513.5 717.667 2550.5 637C2587.5 556.333 2639 493.833 2705 449.5C2771 405.167 2847.33 383 2934 383C2983.33 383 3029.17 390.833 3071.5 406.5C3113.83 422.167 3151.67 444.5 3185 473.5C3218.33 502.5 3245.67 537 3267 577H3271V0H3445V1443H3271V1267H3267C3245.67 1307.67 3218.67 1342.5 3186 1371.5C3153.33 1400.5 3116.17 1423 3074.5 1439C3032.83 1455 2987 1463 2937 1463ZM2971 1309C3029.67 1309 3081.67 1293 3127 1261C3172.33 1229 3207.83 1184 3233.5 1126C3259.17 1068 3272 1000.33 3272 923V922C3272 844.667 3259 777.167 3233 719.5C3207 661.833 3171.5 617 3126.5 585C3081.5 553 3029.67 537 2971 537C2909.67 537 2856.67 552.667 2812 584C2767.33 615.333 2733 659.667 2709 717C2685 774.333 2673 842.667 2673 922V923C2673 1002.33 2685 1071 2709 1129C2733 1187 2767.33 1231.5 2812 1262.5C2856.67 1293.5 2909.67 1309 2971 1309Z"/>
+      <path d="M3757 1463C3801.18 1463 3837 1427.18 3837 1383C3837 1338.82 3801.18 1303 3757 1303C3712.82 1303 3677 1338.82 3677 1383C3677 1427.18 3712.82 1463 3757 1463Z"/>
     </svg>
-    <h1>Veld</h1>
     <span class="sep">/</span>
     <span class="subtitle">Environments</span>
     <div class="meta">
@@ -148,8 +151,8 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       const data = await resp.json();
       const json = JSON.stringify(data);
 
-      statusDot.innerHTML = '<span class="dot"></span>';
       const running = data.projects.reduce((n, p) => n + p.runs.filter(r => r.status === 'running').length, 0);
+      statusDot.innerHTML = running > 0 ? '<span class="dot"></span>' : '<span class="dot off"></span>';
       statusText.textContent = running > 0 ? running + ' running' : 'all idle';
 
       if (json === lastJson) return;
