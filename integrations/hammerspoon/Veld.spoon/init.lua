@@ -185,9 +185,36 @@ local function buildRunSubmenu(env, veldBin)
     return items
 end
 
+--- Build the management UI URL, respecting the helper's HTTPS port.
+local function managementUrl(veldBin)
+    local output = loginShellExecute(
+        string.format("%s doctor --json 2>/dev/null", veldBin)
+    )
+    local port = 443
+    if output and output ~= "" then
+        local ok, diag = pcall(hs.json.decode, output)
+        if ok and diag and diag.services and diag.services.helper then
+            local p = diag.services.helper:match("port (%d+)")
+            if p then port = tonumber(p) end
+        end
+    end
+    if port == 443 then
+        return "https://veld.localhost"
+    else
+        return string.format("https://veld.localhost:%d", port)
+    end
+end
+
 local function buildMenu(veldBin)
     local envs = fetchEnvironments(veldBin)
     local items = {}
+
+    -- Top-level action: open management UI in browser.
+    table.insert(items, {
+        title = "Open Management UI",
+        fn = function() openUrl(managementUrl(veldBin)) end,
+    })
+    table.insert(items, { title = "-" })
 
     if #envs == 0 then
         table.insert(items, { title = "No active environments", disabled = true })

@@ -34,7 +34,8 @@ pub enum SetupCommand {
 #[command(
     name = "veld",
     version = env!("CARGO_PKG_VERSION"),
-    about = "Local development environment orchestrator"
+    about = "Local development environment orchestrator",
+    after_help = "Management UI: https://veld.localhost (run `veld ui` to open)"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -212,6 +213,9 @@ enum Command {
     /// Uninstall Veld and clean up.
     Uninstall,
 
+    /// Open the management dashboard in the browser.
+    Ui,
+
     /// Diagnose installation and service health.
     Doctor {
         /// Output as JSON.
@@ -329,6 +333,8 @@ async fn main() {
         Command::Update => commands::update::run().await,
 
         Command::Uninstall => commands::uninstall::run().await,
+
+        Command::Ui => commands::ui::run().await,
 
         Command::Doctor { json } => commands::doctor::run(json).await,
 
