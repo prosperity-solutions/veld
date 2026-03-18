@@ -19,6 +19,9 @@ use veld_core::state::GlobalRegistry;
 #[path = "feedback_assets.rs"]
 mod feedback_assets;
 
+#[path = "management.rs"]
+mod management;
+
 /// Port the feedback HTTP server listens on.
 pub const FEEDBACK_PORT: u16 = 19899;
 
@@ -65,7 +68,11 @@ pub async fn run_feedback_server() {
         // Screenshots (unchanged).
         .route("/feedback/api/screenshots/{id}", post(upload_screenshot))
         .route("/feedback/api/screenshots/{id}", get(get_screenshot))
-        .with_state(state);
+        .with_state(state)
+        // Management UI (served at _veld.localhost via Caddy, also reachable
+        // directly on this port for debugging). Merged after with_state()
+        // because management routes are stateless.
+        .merge(management::routes());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], FEEDBACK_PORT));
     info!("feedback server listening on {addr}");

@@ -7,6 +7,12 @@ use tracing::{debug, info, warn};
 /// Caddy admin API base URL.
 const CADDY_ADMIN_API: &str = "http://localhost:2019";
 
+/// Reserved hostname for the browser management UI.
+const MANAGEMENT_HOST: &str = "_veld.localhost";
+
+/// Port the daemon's HTTP server listens on (feedback + management).
+const DAEMON_HTTP_PORT: u16 = 19899;
+
 /// Manages the Caddy process and its routes.
 #[derive(Debug)]
 pub struct CaddyManager {
@@ -255,6 +261,7 @@ fn build_base_config(
 
     let https_listen = format!(":{https_port}");
     let http_listen = format!(":{http_port}");
+    let management_upstream = format!("127.0.0.1:{DAEMON_HTTP_PORT}");
 
     serde_json::json!({
         "storage": {
@@ -267,6 +274,15 @@ fn build_base_config(
                     "veld": {
                         "listen": [https_listen, http_listen],
                         "routes": [
+                            {
+                                "@id": "veld-management",
+                                "match": [{"host": [MANAGEMENT_HOST]}],
+                                "handle": [{
+                                    "handler": "reverse_proxy",
+                                    "upstreams": [{"dial": management_upstream}]
+                                }],
+                                "terminal": true
+                            },
                             {
                                 "@id": "veld-sentinel",
                                 "match": [{"path": ["/__veld_sentinel__"]}],
@@ -496,12 +512,14 @@ mod tests {
             .unwrap();
         assert_eq!(listen[0], ":443");
         assert_eq!(listen[1], ":80");
-        // Sentinel route is present.
+        // Management and sentinel routes are present.
         let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
             .as_array()
             .unwrap();
-        assert_eq!(routes.len(), 1);
-        assert_eq!(routes[0]["@id"], "veld-sentinel");
+        assert_eq!(routes.len(), 2);
+        assert_eq!(routes[0]["@id"], "veld-management");
+        assert_eq!(routes[0]["match"][0]["host"][0], MANAGEMENT_HOST);
+        assert_eq!(routes[1]["@id"], "veld-sentinel");
     }
 
     #[test]

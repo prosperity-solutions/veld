@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veld</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--surface:#181a24;--surface2:#1f2233;--border:#2a2d3e;
+  --text:#e0e0e6;--text2:#8b8fa3;--accent:#6c8cff;--accent2:#4a6adf;
+  --green:#3dd68c;--green-bg:rgba(61,214,140,.1);
+  --yellow:#f0c040;--yellow-bg:rgba(240,192,64,.1);
+  --red:#f06060;--red-bg:rgba(240,96,96,.1);
+  --dim:#555870;
+  --radius:8px;
+}
+html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;background:var(--bg);color:var(--text)}
+body{min-height:100vh;padding:0}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* layout */
+.shell{max-width:960px;margin:0 auto;padding:24px 20px}
+header{display:flex;align-items:center;gap:12px;margin-bottom:32px}
+header svg{width:28px;height:28px;flex-shrink:0}
+header h1{font-size:18px;font-weight:600;letter-spacing:-.02em}
+header .sep{color:var(--dim);font-weight:300;font-size:20px}
+header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
+.meta{display:flex;align-items:center;gap:16px;margin-left:auto;font-size:12px;color:var(--text2)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
+.dot.off{background:var(--dim)}
+
+/* empty */
+.empty{text-align:center;padding:80px 20px;color:var(--text2)}
+.empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
+.empty p{font-size:13px;line-height:1.6}
+.empty code{background:var(--surface2);padding:2px 8px;border-radius:4px;font-size:13px}
+
+/* project card */
+.project{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
+.project-header{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border)}
+.project-name{font-weight:600;font-size:15px}
+.project-path{color:var(--text2);font-size:12px;margin-left:auto;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;text-align:right}
+
+/* run */
+.run{padding:12px 18px;border-bottom:1px solid var(--border)}
+.run:last-child{border-bottom:none}
+.run-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+.run-name{font-weight:500;font-size:13px;font-family:'SF Mono',SFMono-Regular,Menlo,monospace}
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
+.badge.running{background:var(--green-bg);color:var(--green)}
+.badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
+.badge.starting,.badge.stopping{background:var(--yellow-bg);color:var(--yellow)}
+.badge.failed{background:var(--red-bg);color:var(--red)}
+
+/* urls */
+.urls{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
+.url-chip{display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);padding:4px 10px;border-radius:6px;font-size:12px;transition:border-color .15s,background .15s}
+.url-chip:hover{border-color:var(--accent);background:rgba(108,140,255,.06);text-decoration:none}
+.url-chip .label{color:var(--text2);margin-right:2px}
+
+/* no runs */
+.no-runs{padding:12px 18px;color:var(--text2);font-size:13px;font-style:italic}
+
+/* loading */
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* transitions */
+.fade-in{animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100" height="100" rx="20" fill="#6c8cff"/>
+      <path d="M30 70L50 30L70 70" stroke="#fff" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    <h1>Veld</h1>
+    <span class="sep">/</span>
+    <span class="subtitle">Environments</span>
+    <div class="meta">
+      <span id="status-dot"><span class="dot off"></span></span>
+      <span id="status-text">connecting...</span>
+    </div>
+  </header>
+  <main id="content">
+    <div class="empty"><div class="spinner"></div></div>
+  </main>
+</div>
+<script>
+(function(){
+  const content = document.getElementById('content');
+  const statusDot = document.getElementById('status-dot');
+  const statusText = document.getElementById('status-text');
+  let lastJson = '';
+
+  async function refresh() {
+    try {
+      const resp = await fetch('/api/environments');
+      if (!resp.ok) throw new Error(resp.status);
+      const data = await resp.json();
+      const json = JSON.stringify(data);
+
+      statusDot.innerHTML = '<span class="dot"></span>';
+      const running = data.projects.reduce((n, p) => n + p.runs.filter(r => r.status === 'running').length, 0);
+      statusText.textContent = running > 0 ? running + ' running' : 'all idle';
+
+      if (json === lastJson) return;
+      lastJson = json;
+      render(data);
+    } catch (e) {
+      statusDot.innerHTML = '<span class="dot off"></span>';
+      statusText.textContent = 'disconnected';
+    }
+  }
+
+  function render(data) {
+    if (!data.projects.length) {
+      content.innerHTML =
+        '<div class="empty fade-in">' +
+          '<h2>No environments yet</h2>' +
+          '<p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p>' +
+        '</div>';
+      return;
+    }
+
+    let html = '';
+    for (const proj of data.projects) {
+      html += '<div class="project fade-in">';
+      html += '<div class="project-header">';
+      html += '<span class="project-name">' + esc(proj.name) + '</span>';
+      html += '<span class="project-path" title="' + esc(proj.project_root) + '">' + esc(proj.project_root) + '</span>';
+      html += '</div>';
+
+      if (!proj.runs.length) {
+        html += '<div class="no-runs">No runs</div>';
+      }
+
+      // Sort runs: running first, then by name
+      const runs = proj.runs.slice().sort((a, b) => {
+        if (a.status === 'running' && b.status !== 'running') return -1;
+        if (b.status === 'running' && a.status !== 'running') return 1;
+        return a.name.localeCompare(b.name);
+      });
+
+      for (const run of runs) {
+        html += '<div class="run">';
+        html += '<div class="run-header">';
+        html += '<span class="run-name">' + esc(run.name) + '</span>';
+        html += '<span class="badge ' + esc(run.status) + '">' + esc(run.status) + '</span>';
+        html += '</div>';
+
+        const urlEntries = Object.entries(run.urls || {}).sort((a, b) => a[0].localeCompare(b[0]));
+        if (urlEntries.length && run.status === 'running') {
+          html += '<div class="urls">';
+          for (const [node, url] of urlEntries) {
+            const label = node.split(':')[0];
+            html += '<a class="url-chip" href="' + esc(url) + '" target="_blank" rel="noopener">';
+            html += '<span class="label">' + esc(label) + '</span>';
+            html += esc(shortUrl(url));
+            html += '</a>';
+          }
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+    }
+    content.innerHTML = html;
+  }
+
+  function shortUrl(url) {
+    try {
+      const u = new URL(url);
+      return u.hostname;
+    } catch { return url; }
+  }
+
+  function esc(s) {
+    const d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  refresh();
+  setInterval(refresh, 3000);
+})();
+</script>
+</body>
+</html>
