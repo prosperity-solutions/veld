@@ -256,7 +256,7 @@ function render(data){
 function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
-  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
+  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml=null;s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
   s.lastData=null; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
@@ -335,7 +335,7 @@ function renderLogs(key,data,totalNodes){
   const raw=[];
   for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
   raw.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
-  if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml='';return;}
+  if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml=null;return;}
 
   // Group continuation lines (message starts with whitespace) with their parent.
   const merged=[];
@@ -459,16 +459,16 @@ document.addEventListener('click',e=>{
 document.addEventListener('change',e=>{
   const sel=e.target.closest('[data-action="log-filter"]');
   if(sel){const card=sel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
-    if(s){s.logFilter=sel.value;s.prevHtml='';s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);doRenderLogs(key);}return;}
+    if(s){s.logFilter=sel.value;s.prevHtml=null;s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);doRenderLogs(key);}return;}
 });
 
 document.addEventListener('input',e=>{
   const input=e.target.closest('[data-action="log-search"]');
   if(input){const card=input.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
-    if(s){s.searchTerm=input.value;s.prevHtml='';doRenderLogs(key);}return;}
+    if(s){s.searchTerm=input.value;s.prevHtml=null;doRenderLogs(key);}return;}
   const ctxInput=e.target.closest('[data-action="ctx-change"]');
   if(ctxInput){const card=ctxInput.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
-    if(s){s.ctxLines=Math.max(0,Math.min(50,parseInt(ctxInput.value)||0));s.prevHtml='';doRenderLogs(key);}}
+    if(s){s.ctxLines=Math.max(0,Math.min(50,parseInt(ctxInput.value)||0));s.prevHtml=null;doRenderLogs(key);}}
 });
 
 function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');if(e<0)return null;const t=l.substring(1,e);return/^\d{4}-\d{2}-\d{2}T/.test(t)?t:null;}
