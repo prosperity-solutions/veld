@@ -1,3 +1,4 @@
+use std::io::{Read as _, Seek as _, Write as _};
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -8,31 +9,25 @@ use uuid::Uuid;
 // Data types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedbackComment {
-    #[serde(default)]
-    pub id: String,
-    pub page_url: String,
-    pub element_selector: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub selected_text: Option<String>,
-    pub comment: String,
-    pub position: Option<ElementPosition>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub screenshot: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub component_trace: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewport_width: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub viewport_height: Option<u32>,
-    #[serde(default = "Utc::now")]
-    pub created_at: DateTime<Utc>,
-    #[serde(default = "Utc::now")]
-    pub updated_at: DateTime<Utc>,
+/// Where a thread is anchored.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum ThreadScope {
+    /// Pinned to a specific element on a page.
+    Element {
+        page_url: String,
+        selector: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        position: Option<ElementPosition>,
+    },
+    /// Attached to a page but not a specific element.
+    Page { page_url: String },
+    /// Not attached to any page — global feedback.
+    Global,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Bounding-box position for an element on page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ElementPosition {
     pub x: f64,
     pub y: f64,
@@ -40,41 +35,135 @@ pub struct ElementPosition {
     pub height: f64,
 }
 
+// Manual Eq: f64 doesn't implement Eq but we need it for ThreadScope.
+// Positions are stored as-is and never compared for equality in practice.
+impl Eq for ElementPosition {}
+
+/// Who created a thread.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadOrigin {
+    Human,
+    Agent,
+}
+
+/// Whether a thread is open or resolved.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ThreadStatus {
+    Open,
+    Resolved,
+}
+
+/// Author of a message within a thread.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Author {
+    Human,
+    Agent,
+}
+
+/// A single message within a thread.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FeedbackBatch {
+pub struct Message {
     pub id: String,
-    pub run_name: String,
-    pub comments: Vec<FeedbackComment>,
-    pub submitted_at: DateTime<Utc>,
+    pub author: Author,
+    pub body: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub screenshot: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// A feedback thread — a conversation pinned to an element, page, or global.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Thread {
+    pub id: String,
+    pub scope: ThreadScope,
+    pub origin: ThreadOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component_trace: Option<Vec<String>>,
+    pub status: ThreadStatus,
+    pub messages: Vec<Message>,
+    /// The seq of the last message the human has viewed in this thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_human_seen_seq: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport_height: Option<u32>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+// ---------------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------------
+
+/// A single event in the append-only log.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Event {
+    pub seq: u64,
+    #[serde(flatten)]
+    pub event_type: EventType,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// The type of event that occurred.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "event")]
+pub enum EventType {
+    // -- Human → Agent --
+    ThreadCreated { thread: Thread },
+    HumanMessage { thread_id: String, message: Message },
+    Resolved { thread_id: String },
+    Reopened { thread_id: String },
+    SessionEnded,
+
+    // -- Agent → Browser --
+    AgentMessage { thread_id: String, message: Message },
+    AgentThreadCreated { thread: Thread },
+    AgentListening,
+    AgentStopped,
+}
+
+// ---------------------------------------------------------------------------
+// Session
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionStatus {
+    Listening,
+    Idle,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Session {
+    pub status: SessionStatus,
+    pub last_heartbeat: DateTime<Utc>,
 }
 
 // ---------------------------------------------------------------------------
 // Store
 // ---------------------------------------------------------------------------
 
-/// Outcome of a wait session, signalled by the reviewer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WaitOutcome {
-    /// Reviewer submitted feedback (normal batch).
-    Submitted,
-    /// Reviewer approved — no feedback needed.
-    Approved,
-    /// Reviewer cancelled the feedback session.
-    Cancelled,
-}
-
-/// File-based feedback store. Layout:
-///   .veld/feedback/{run_name}/drafts.json      — current draft comments
-///   .veld/feedback/{run_name}/batches/          — submitted batches
-///   .veld/feedback/{run_name}/screenshots/      — screenshot PNGs
-///   .veld/feedback/{run_name}/waiting           — marker: CLI is waiting
-///   .veld/feedback/{run_name}/cancelled         — marker: reviewer cancelled
+/// File-based feedback store.
+///
+/// Layout:
+/// ```text
+///   .veld/feedback/{run_name}/threads/{uuid}.json
+///   .veld/feedback/{run_name}/events/000001.json
+///   .veld/feedback/{run_name}/screenshots/
+///   .veld/feedback/{run_name}/session.json
+///   .veld/feedback/{run_name}/seq
+/// ```
 pub struct FeedbackStore {
     base: PathBuf,
-    drafts_path: PathBuf,
-    batches_dir: PathBuf,
+    threads_dir: PathBuf,
+    events_dir: PathBuf,
     screenshots_dir: PathBuf,
+    session_path: PathBuf,
+    seq_path: PathBuf,
     run_name: String,
 }
 
@@ -82,119 +171,274 @@ impl FeedbackStore {
     pub fn new(project_root: &Path, run_name: &str) -> Self {
         let base = project_root.join(".veld").join("feedback").join(run_name);
         Self {
-            drafts_path: base.join("drafts.json"),
-            batches_dir: base.join("batches"),
+            threads_dir: base.join("threads"),
+            events_dir: base.join("events"),
             screenshots_dir: base.join("screenshots"),
+            session_path: base.join("session.json"),
+            seq_path: base.join("seq"),
             base,
             run_name: run_name.to_owned(),
         }
     }
 
-    /// Check whether any feedback data (drafts or batches) exists for this run.
+    /// The run name this store is scoped to.
+    pub fn run_name(&self) -> &str {
+        &self.run_name
+    }
+
+    /// Check whether any feedback data exists for this run.
     pub fn has_data(&self) -> bool {
-        self.drafts_path.exists() || self.batches_dir.exists()
+        self.base.exists()
     }
 
     fn ensure_dirs(&self) -> anyhow::Result<()> {
-        if let Some(parent) = self.drafts_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::create_dir_all(&self.batches_dir)?;
+        std::fs::create_dir_all(&self.threads_dir)?;
+        std::fs::create_dir_all(&self.events_dir)?;
         Ok(())
     }
 
-    // -- Drafts ---------------------------------------------------------------
+    // -- Threads --------------------------------------------------------------
 
-    pub fn get_comments(&self) -> anyhow::Result<Vec<FeedbackComment>> {
-        if !self.drafts_path.exists() {
-            return Ok(Vec::new());
-        }
-        let data = std::fs::read_to_string(&self.drafts_path)?;
-        let comments: Vec<FeedbackComment> = serde_json::from_str(&data)?;
-        Ok(comments)
-    }
-
-    pub fn save_comment(&self, comment: &FeedbackComment) -> anyhow::Result<()> {
+    /// Save (create or overwrite) a thread.
+    pub fn save_thread(&self, thread: &Thread) -> anyhow::Result<()> {
         self.ensure_dirs()?;
-        let mut comments = self.get_comments()?;
-        comments.push(comment.clone());
-        std::fs::write(&self.drafts_path, serde_json::to_string_pretty(&comments)?)?;
+        let path = self.threads_dir.join(format!("{}.json", thread.id));
+        std::fs::write(&path, serde_json::to_string_pretty(thread)?)?;
         Ok(())
     }
 
-    pub fn update_comment(&self, updated: &FeedbackComment) -> anyhow::Result<bool> {
-        let mut comments = self.get_comments()?;
-        if let Some(existing) = comments.iter_mut().find(|c| c.id == updated.id) {
-            *existing = updated.clone();
-            std::fs::write(&self.drafts_path, serde_json::to_string_pretty(&comments)?)?;
-            Ok(true)
-        } else {
-            Ok(false)
+    /// Get a single thread by ID.
+    pub fn get_thread(&self, id: &str) -> anyhow::Result<Option<Thread>> {
+        let path = self.threads_dir.join(format!("{id}.json"));
+        if !path.exists() {
+            return Ok(None);
         }
+        let data = std::fs::read_to_string(&path)?;
+        Ok(Some(serde_json::from_str(&data)?))
     }
 
-    pub fn delete_comment(&self, id: &str) -> anyhow::Result<bool> {
-        let mut comments = self.get_comments()?;
-        let before = comments.len();
-        comments.retain(|c| c.id != id);
-        if comments.len() == before {
-            return Ok(false);
-        }
-        std::fs::write(&self.drafts_path, serde_json::to_string_pretty(&comments)?)?;
-        Ok(true)
-    }
-
-    // -- Batches --------------------------------------------------------------
-
-    pub fn submit_batch(&self) -> anyhow::Result<FeedbackBatch> {
-        self.ensure_dirs()?;
-        let comments = self.get_comments()?;
-        let batch = FeedbackBatch {
-            id: Uuid::new_v4().to_string(),
-            run_name: self.run_name.clone(),
-            comments,
-            submitted_at: Utc::now(),
-        };
-        let batch_path = self.batches_dir.join(format!("{}.json", batch.id));
-        std::fs::write(&batch_path, serde_json::to_string_pretty(&batch)?)?;
-        // Clear drafts after submit.
-        std::fs::write(&self.drafts_path, "[]")?;
-        Ok(batch)
-    }
-
-    pub fn get_batches(&self) -> anyhow::Result<Vec<FeedbackBatch>> {
-        if !self.batches_dir.exists() {
+    /// List all threads, optionally filtered by status.
+    pub fn list_threads(&self, filter: Option<ThreadStatus>) -> anyhow::Result<Vec<Thread>> {
+        if !self.threads_dir.exists() {
             return Ok(Vec::new());
         }
-        let mut batches = Vec::new();
-        for entry in std::fs::read_dir(&self.batches_dir)? {
+        let mut threads = Vec::new();
+        for entry in std::fs::read_dir(&self.threads_dir)? {
             let entry = entry?;
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json") {
                 let data = std::fs::read_to_string(&path)?;
-                if let Ok(batch) = serde_json::from_str::<FeedbackBatch>(&data) {
-                    batches.push(batch);
+                if let Ok(thread) = serde_json::from_str::<Thread>(&data) {
+                    if filter.is_none_or(|f| thread.status == f) {
+                        threads.push(thread);
+                    }
                 }
             }
         }
-        batches.sort_by(|a, b| a.submitted_at.cmp(&b.submitted_at));
-        Ok(batches)
+        threads.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        Ok(threads)
     }
 
-    pub fn get_latest_batch(&self) -> anyhow::Result<Option<FeedbackBatch>> {
-        let batches = self.get_batches()?;
-        Ok(batches.into_iter().last())
+    /// Read-modify-write a thread file under an exclusive file lock.
+    /// Reads and writes through the locked fd to ensure atomicity.
+    fn modify_thread(
+        &self,
+        thread_id: &str,
+        mutate: impl FnOnce(&mut Thread),
+    ) -> anyhow::Result<Thread> {
+        self.ensure_dirs()?;
+        let path = self.threads_dir.join(format!("{thread_id}.json"));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .map_err(|_| anyhow::anyhow!("thread {thread_id} not found"))?;
+
+        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_file, errno)| errno)?;
+
+        // Read through the locked fd.
+        let mut data = String::new();
+        locked.read_to_string(&mut data)?;
+        let mut thread: Thread = serde_json::from_str(&data)?;
+        mutate(&mut thread);
+        thread.updated_at = Utc::now();
+
+        // Write through the locked fd.
+        let new_data = serde_json::to_string_pretty(&thread)?;
+        locked.seek(std::io::SeekFrom::Start(0))?;
+        locked.set_len(0)?;
+        locked.write_all(new_data.as_bytes())?;
+
+        // Lock released when Flock is dropped.
+        Ok(thread)
     }
 
-    pub fn get_batches_since(&self, since: DateTime<Utc>) -> anyhow::Result<Vec<FeedbackBatch>> {
-        let batches = self.get_batches()?;
-        Ok(batches
-            .into_iter()
-            .filter(|b| b.submitted_at > since)
-            .collect())
+    /// Add a message to an existing thread. Returns the updated thread.
+    pub fn add_message(&self, thread_id: &str, message: &Message) -> anyhow::Result<Thread> {
+        let msg = message.clone();
+        self.modify_thread(thread_id, move |thread| {
+            thread.messages.push(msg);
+        })
     }
 
-    // -- Screenshots ----------------------------------------------------------
+    /// Set thread status (resolve / reopen). Returns the updated thread.
+    pub fn set_thread_status(
+        &self,
+        thread_id: &str,
+        status: ThreadStatus,
+    ) -> anyhow::Result<Thread> {
+        self.modify_thread(thread_id, move |thread| {
+            thread.status = status;
+        })
+    }
+
+    /// Update `last_human_seen_seq` for a thread.
+    pub fn mark_thread_seen(&self, thread_id: &str, seq: u64) -> anyhow::Result<()> {
+        self.modify_thread(thread_id, move |thread| {
+            thread.last_human_seen_seq = Some(seq);
+        })?;
+        Ok(())
+    }
+
+    // -- Event log ------------------------------------------------------------
+
+    /// Atomically increment the sequence counter and return the new value.
+    /// Uses an advisory file lock (flock) for cross-process safety.
+    fn next_seq(&self) -> anyhow::Result<u64> {
+        self.ensure_dirs()?;
+
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.seq_path)?;
+
+        // Exclusive advisory lock — blocks if another process holds it.
+        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_file, errno)| errno)?;
+
+        // Read current value.
+        let mut contents = String::new();
+        locked.read_to_string(&mut contents)?;
+        let current: u64 = contents.trim().parse().unwrap_or(0);
+        let next = current + 1;
+
+        // Seek to start, truncate, write new value.
+        locked.seek(std::io::SeekFrom::Start(0))?;
+        locked.set_len(0)?;
+        locked.write_all(next.to_string().as_bytes())?;
+
+        // Lock released when Flock is dropped.
+        Ok(next)
+    }
+
+    /// Append an event to the log. Returns the created event with its seq.
+    pub fn append_event(&self, event_type: EventType) -> anyhow::Result<Event> {
+        let seq = self.next_seq()?;
+        let event = Event {
+            seq,
+            event_type,
+            timestamp: Utc::now(),
+        };
+        let path = self.events_dir.join(format!("{seq:06}.json"));
+        std::fs::write(&path, serde_json::to_string_pretty(&event)?)?;
+        Ok(event)
+    }
+
+    /// Get a single event by sequence number.
+    pub fn get_event(&self, seq: u64) -> anyhow::Result<Option<Event>> {
+        let path = self.events_dir.join(format!("{seq:06}.json"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&path)?;
+        Ok(Some(serde_json::from_str(&data)?))
+    }
+
+    /// Get all events with `seq > after`, sorted ascending.
+    pub fn get_events_after(&self, after: u64) -> anyhow::Result<Vec<Event>> {
+        if !self.events_dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut events = Vec::new();
+        for entry in std::fs::read_dir(&self.events_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                if let Ok(seq) = stem.parse::<u64>() {
+                    if seq > after {
+                        let data = std::fs::read_to_string(&path)?;
+                        let event: Event = serde_json::from_str(&data)?;
+                        events.push(event);
+                    }
+                }
+            }
+        }
+        events.sort_by_key(|e| e.seq);
+        Ok(events)
+    }
+
+    /// Get the current (latest) sequence number. Returns 0 if no events.
+    pub fn current_seq(&self) -> anyhow::Result<u64> {
+        if !self.seq_path.exists() {
+            return Ok(0);
+        }
+        let contents = std::fs::read_to_string(&self.seq_path)?;
+        Ok(contents.trim().parse().unwrap_or(0))
+    }
+
+    // -- Session / heartbeat --------------------------------------------------
+
+    /// Write a heartbeat — marks session as listening with current timestamp.
+    pub fn heartbeat(&self) -> anyhow::Result<()> {
+        self.ensure_dirs()?;
+        let session = Session {
+            status: SessionStatus::Listening,
+            last_heartbeat: Utc::now(),
+        };
+        std::fs::write(&self.session_path, serde_json::to_string_pretty(&session)?)?;
+        Ok(())
+    }
+
+    /// Read the current session state.
+    pub fn get_session(&self) -> anyhow::Result<Option<Session>> {
+        if !self.session_path.exists() {
+            return Ok(None);
+        }
+        let data = std::fs::read_to_string(&self.session_path)?;
+        Ok(Some(serde_json::from_str(&data)?))
+    }
+
+    /// Check if an agent is actively listening (heartbeat within threshold).
+    pub fn is_listening(&self, threshold_secs: u64) -> anyhow::Result<bool> {
+        match self.get_session()? {
+            Some(session) if session.status == SessionStatus::Listening => {
+                let elapsed = Utc::now()
+                    .signed_duration_since(session.last_heartbeat)
+                    .num_seconds();
+                Ok(elapsed >= 0 && (elapsed as u64) < threshold_secs)
+            }
+            _ => Ok(false),
+        }
+    }
+
+    /// Explicitly end the session (set to idle).
+    pub fn end_session(&self) -> anyhow::Result<()> {
+        let session = Session {
+            status: SessionStatus::Idle,
+            last_heartbeat: Utc::now(),
+        };
+        if let Some(parent) = self.session_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.session_path, serde_json::to_string_pretty(&session)?)?;
+        Ok(())
+    }
+
+    // -- Screenshots (unchanged) ----------------------------------------------
 
     /// Save a screenshot PNG and return its filename.
     ///
@@ -215,158 +459,401 @@ impl FeedbackStore {
     ///
     /// The `filename` must not contain path separators or `..` sequences.
     pub fn screenshot_path(&self, filename: &str) -> PathBuf {
-        // Defense-in-depth: callers should already validate, but strip any
-        // path components and reject `..` just in case.
         let safe = filename.rsplit('/').next().unwrap_or(filename);
         let safe = safe.rsplit('\\').next().unwrap_or(safe);
         let safe = safe.replace("..", "");
         self.screenshots_dir.join(safe)
     }
+}
 
-    // -- Wait session ---------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Helper: create a new message.
+// ---------------------------------------------------------------------------
 
-    fn waiting_path(&self) -> PathBuf {
-        self.base.join("waiting")
-    }
-
-    fn cancelled_path(&self) -> PathBuf {
-        self.base.join("cancelled")
-    }
-
-    /// Mark that a CLI session is actively waiting for feedback.
-    /// Returns the unique wait-session ID.
-    pub fn set_waiting(&self) -> anyhow::Result<String> {
-        self.ensure_dirs()?;
-        // Clear any stale cancelled marker.
-        let _ = std::fs::remove_file(self.cancelled_path());
-        let id = Uuid::new_v4().to_string();
-        std::fs::write(self.waiting_path(), &id)?;
-        Ok(id)
-    }
-
-    /// Clear the waiting marker (CLI done waiting).
-    pub fn clear_waiting(&self) {
-        let _ = std::fs::remove_file(self.waiting_path());
-    }
-
-    /// Check whether a CLI session is waiting for feedback.
-    pub fn is_waiting(&self) -> bool {
-        self.waiting_path().exists()
-    }
-
-    /// Read the current wait-session ID, if any.
-    pub fn waiting_id(&self) -> Option<String> {
-        std::fs::read_to_string(self.waiting_path())
-            .ok()
-            .filter(|s| !s.is_empty())
-    }
-
-    /// Reviewer signals cancellation.
-    pub fn cancel(&self) -> anyhow::Result<()> {
-        self.ensure_dirs()?;
-        std::fs::write(self.cancelled_path(), Utc::now().to_rfc3339())?;
-        Ok(())
-    }
-
-    /// Check if the reviewer has cancelled.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled_path().exists()
-    }
-
-    /// Clear the cancelled marker.
-    pub fn clear_cancelled(&self) {
-        let _ = std::fs::remove_file(self.cancelled_path());
+pub fn new_message(author: Author, body: &str, screenshot: Option<String>) -> Message {
+    Message {
+        id: Uuid::new_v4().to_string(),
+        author,
+        body: body.to_owned(),
+        screenshot,
+        created_at: Utc::now(),
     }
 }
+
+/// Create a new thread with an initial message.
+pub fn new_thread(
+    scope: ThreadScope,
+    origin: ThreadOrigin,
+    component_trace: Option<Vec<String>>,
+    viewport_width: Option<u32>,
+    viewport_height: Option<u32>,
+    initial_message: Message,
+) -> Thread {
+    let now = Utc::now();
+    Thread {
+        id: Uuid::new_v4().to_string(),
+        scope,
+        origin,
+        component_trace,
+        status: ThreadStatus::Open,
+        messages: vec![initial_message],
+        last_human_seen_seq: None,
+        viewport_width,
+        viewport_height,
+        created_at: now,
+        updated_at: now,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn make_comment(text: &str) -> FeedbackComment {
-        FeedbackComment {
-            id: Uuid::new_v4().to_string(),
-            page_url: "https://example.com".into(),
-            element_selector: Some("div.main".into()),
-            selected_text: None,
-            comment: text.into(),
-            position: None,
-            screenshot: None,
-            component_trace: None,
-            viewport_width: None,
-            viewport_height: None,
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
+    fn make_store(tmp: &TempDir) -> FeedbackStore {
+        FeedbackStore::new(tmp.path(), "test-run")
+    }
+
+    fn make_thread(body: &str) -> Thread {
+        let msg = new_message(Author::Human, body, None);
+        new_thread(
+            ThreadScope::Element {
+                page_url: "/dashboard".into(),
+                selector: "h1.title".into(),
+                position: None,
+            },
+            ThreadOrigin::Human,
+            Some(vec!["App".into(), "Header".into()]),
+            Some(1440),
+            Some(900),
+            msg,
+        )
+    }
+
+    #[test]
+    fn test_thread_crud() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        // No threads initially.
+        assert!(store.list_threads(None).unwrap().is_empty());
+
+        // Create and save a thread.
+        let t = make_thread("Font is too big");
+        store.save_thread(&t).unwrap();
+
+        // Retrieve by ID.
+        let fetched = store.get_thread(&t.id).unwrap().unwrap();
+        assert_eq!(fetched.id, t.id);
+        assert_eq!(fetched.messages.len(), 1);
+        assert_eq!(fetched.messages[0].body, "Font is too big");
+        assert_eq!(fetched.status, ThreadStatus::Open);
+
+        // List all.
+        let all = store.list_threads(None).unwrap();
+        assert_eq!(all.len(), 1);
+
+        // Filter by status.
+        assert_eq!(store.list_threads(Some(ThreadStatus::Open)).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .list_threads(Some(ThreadStatus::Resolved))
+                .unwrap()
+                .len(),
+            0
+        );
+
+        // Non-existent thread.
+        assert!(store.get_thread("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_add_message() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Fix padding");
+        store.save_thread(&t).unwrap();
+
+        // Agent replies.
+        let reply = new_message(Author::Agent, "Fixed — reduced to 1.5rem", None);
+        let updated = store.add_message(&t.id, &reply).unwrap();
+        assert_eq!(updated.messages.len(), 2);
+        assert_eq!(updated.messages[1].author, Author::Agent);
+        assert_eq!(updated.messages[1].body, "Fixed — reduced to 1.5rem");
+
+        // Human follows up.
+        let followup = new_message(Author::Human, "Looks good, thanks", None);
+        let updated = store.add_message(&t.id, &followup).unwrap();
+        assert_eq!(updated.messages.len(), 3);
+
+        // Verify persistence.
+        let reloaded = store.get_thread(&t.id).unwrap().unwrap();
+        assert_eq!(reloaded.messages.len(), 3);
+    }
+
+    #[test]
+    fn test_thread_status() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Color is off");
+        store.save_thread(&t).unwrap();
+        assert_eq!(store.get_thread(&t.id).unwrap().unwrap().status, ThreadStatus::Open);
+
+        // Resolve.
+        store.set_thread_status(&t.id, ThreadStatus::Resolved).unwrap();
+        assert_eq!(
+            store.get_thread(&t.id).unwrap().unwrap().status,
+            ThreadStatus::Resolved
+        );
+
+        // Reopen.
+        store.set_thread_status(&t.id, ThreadStatus::Open).unwrap();
+        assert_eq!(store.get_thread(&t.id).unwrap().unwrap().status, ThreadStatus::Open);
+
+        // Filter.
+        let resolved = store.list_threads(Some(ThreadStatus::Resolved)).unwrap();
+        assert!(resolved.is_empty());
+    }
+
+    #[test]
+    fn test_event_append_and_read() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Test thread");
+        let e1 = store
+            .append_event(EventType::ThreadCreated { thread: t.clone() })
+            .unwrap();
+        assert_eq!(e1.seq, 1);
+
+        let msg = new_message(Author::Human, "Follow-up", None);
+        let e2 = store
+            .append_event(EventType::HumanMessage {
+                thread_id: t.id.clone(),
+                message: msg,
+            })
+            .unwrap();
+        assert_eq!(e2.seq, 2);
+
+        let e3 = store
+            .append_event(EventType::Resolved {
+                thread_id: t.id.clone(),
+            })
+            .unwrap();
+        assert_eq!(e3.seq, 3);
+
+        // Read all.
+        let all = store.get_events_after(0).unwrap();
+        assert_eq!(all.len(), 3);
+        assert_eq!(all[0].seq, 1);
+        assert_eq!(all[2].seq, 3);
+
+        // Read after seq 1.
+        let after1 = store.get_events_after(1).unwrap();
+        assert_eq!(after1.len(), 2);
+        assert_eq!(after1[0].seq, 2);
+
+        // Read after seq 3 (none).
+        let after3 = store.get_events_after(3).unwrap();
+        assert!(after3.is_empty());
+
+        // Get single event.
+        let single = store.get_event(2).unwrap().unwrap();
+        assert_eq!(single.seq, 2);
+        assert!(store.get_event(99).unwrap().is_none());
+    }
+
+    #[test]
+    fn test_seq_counter() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        assert_eq!(store.current_seq().unwrap(), 0);
+
+        for i in 1..=10 {
+            let t = make_thread(&format!("Thread {i}"));
+            let event = store
+                .append_event(EventType::ThreadCreated { thread: t })
+                .unwrap();
+            assert_eq!(event.seq, i);
         }
+
+        assert_eq!(store.current_seq().unwrap(), 10);
     }
 
     #[test]
-    fn test_crud_comments() {
+    fn test_session_heartbeat() {
         let tmp = TempDir::new().unwrap();
-        let store = FeedbackStore::new(tmp.path(), "test-run");
+        let store = make_store(&tmp);
 
-        assert!(store.get_comments().unwrap().is_empty());
+        // No session initially.
+        assert!(store.get_session().unwrap().is_none());
+        assert!(!store.is_listening(60).unwrap());
 
-        let c1 = make_comment("first");
-        store.save_comment(&c1).unwrap();
-        assert_eq!(store.get_comments().unwrap().len(), 1);
+        // Heartbeat.
+        store.heartbeat().unwrap();
+        let session = store.get_session().unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Listening);
+        assert!(store.is_listening(60).unwrap());
 
-        let c2 = make_comment("second");
-        store.save_comment(&c2).unwrap();
-        assert_eq!(store.get_comments().unwrap().len(), 2);
-
-        let mut updated = c1.clone();
-        updated.comment = "updated first".into();
-        assert!(store.update_comment(&updated).unwrap());
-
-        let comments = store.get_comments().unwrap();
-        assert_eq!(comments[0].comment, "updated first");
-
-        assert!(store.delete_comment(&c2.id).unwrap());
-        assert_eq!(store.get_comments().unwrap().len(), 1);
-
-        assert!(!store.delete_comment("nonexistent").unwrap());
+        // End session.
+        store.end_session().unwrap();
+        assert!(!store.is_listening(60).unwrap());
+        let session = store.get_session().unwrap().unwrap();
+        assert_eq!(session.status, SessionStatus::Idle);
     }
 
     #[test]
-    fn test_submit_batch() {
+    fn test_mark_thread_seen() {
         let tmp = TempDir::new().unwrap();
-        let store = FeedbackStore::new(tmp.path(), "test-run");
+        let store = make_store(&tmp);
 
-        store.save_comment(&make_comment("a")).unwrap();
-        store.save_comment(&make_comment("b")).unwrap();
+        let t = make_thread("Feedback");
+        store.save_thread(&t).unwrap();
 
-        let batch = store.submit_batch().unwrap();
-        assert_eq!(batch.comments.len(), 2);
-        assert_eq!(batch.run_name, "test-run");
+        assert!(store.get_thread(&t.id).unwrap().unwrap().last_human_seen_seq.is_none());
 
-        // Drafts should be cleared after submit.
-        assert!(store.get_comments().unwrap().is_empty());
-
-        // Batch should be retrievable.
-        let batches = store.get_batches().unwrap();
-        assert_eq!(batches.len(), 1);
-        assert_eq!(batches[0].id, batch.id);
+        store.mark_thread_seen(&t.id, 5).unwrap();
+        assert_eq!(
+            store.get_thread(&t.id).unwrap().unwrap().last_human_seen_seq,
+            Some(5)
+        );
     }
 
-    /// Old JSON (without screenshot/component_trace) must deserialize correctly.
     #[test]
-    fn test_backward_compat_deserialization() {
-        let old_json = r#"{
-            "id": "abc",
-            "page_url": "/test",
-            "comment": "hello",
-            "element_selector": "div",
-            "created_at": "2025-01-01T00:00:00Z",
-            "updated_at": "2025-01-01T00:00:00Z"
-        }"#;
-        let comment: FeedbackComment = serde_json::from_str(old_json).unwrap();
-        assert_eq!(comment.id, "abc");
-        assert_eq!(comment.comment, "hello");
-        assert!(comment.screenshot.is_none());
-        assert!(comment.component_trace.is_none());
-        assert!(comment.position.is_none());
-        assert!(comment.selected_text.is_none());
+    fn test_screenshot_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let filename = store.save_screenshot("ss_test_001", b"PNG_DATA").unwrap();
+        assert_eq!(filename, "ss_test_001.png");
+
+        let path = store.screenshot_path(&filename);
+        assert!(path.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), b"PNG_DATA");
+    }
+
+    #[test]
+    fn test_serde_event_types() {
+        // ThreadCreated
+        let t = make_thread("Test");
+        let event = Event {
+            seq: 1,
+            event_type: EventType::ThreadCreated { thread: t },
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"thread_created"#));
+        let _: Event = serde_json::from_str(&json).unwrap();
+
+        // SessionEnded
+        let event = Event {
+            seq: 2,
+            event_type: EventType::SessionEnded,
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"session_ended"#));
+        let _: Event = serde_json::from_str(&json).unwrap();
+
+        // AgentListening
+        let event = Event {
+            seq: 3,
+            event_type: EventType::AgentListening,
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"agent_listening"#));
+        let _: Event = serde_json::from_str(&json).unwrap();
+
+        // Resolved
+        let event = Event {
+            seq: 4,
+            event_type: EventType::Resolved {
+                thread_id: "t_123".into(),
+            },
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"resolved"#));
+        assert!(json.contains(r#""thread_id":"t_123"#));
+        let roundtrip: Event = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtrip.seq, 4);
+    }
+
+    #[test]
+    fn test_thread_scopes() {
+        // Element scope.
+        let scope = ThreadScope::Element {
+            page_url: "/test".into(),
+            selector: "div.main".into(),
+            position: Some(ElementPosition {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 50.0,
+            }),
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        assert!(json.contains(r#""type":"element"#));
+        let _: ThreadScope = serde_json::from_str(&json).unwrap();
+
+        // Page scope.
+        let scope = ThreadScope::Page {
+            page_url: "/dashboard".into(),
+        };
+        let json = serde_json::to_string(&scope).unwrap();
+        assert!(json.contains(r#""type":"page"#));
+        let _: ThreadScope = serde_json::from_str(&json).unwrap();
+
+        // Global scope.
+        let scope = ThreadScope::Global;
+        let json = serde_json::to_string(&scope).unwrap();
+        assert!(json.contains(r#""type":"global"#));
+        let _: ThreadScope = serde_json::from_str(&json).unwrap();
+    }
+
+    #[test]
+    fn test_concurrent_seq() {
+        let tmp = TempDir::new().unwrap();
+        let store_path = tmp.path().to_owned();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let p = store_path.clone();
+            handles.push(std::thread::spawn(move || {
+                let s = FeedbackStore::new(&p, "test-run");
+                let mut seqs = Vec::new();
+                for _ in 0..25 {
+                    let t = make_thread("concurrent");
+                    let event = s
+                        .append_event(EventType::ThreadCreated { thread: t })
+                        .unwrap();
+                    seqs.push(event.seq);
+                }
+                seqs
+            }));
+        }
+
+        let mut all_seqs: Vec<u64> = Vec::new();
+        for h in handles {
+            all_seqs.extend(h.join().unwrap());
+        }
+        all_seqs.sort();
+
+        // 4 threads × 25 events = 100 events, all unique seqs.
+        assert_eq!(all_seqs.len(), 100);
+        all_seqs.dedup();
+        assert_eq!(all_seqs.len(), 100);
+
+        // Should be 1..=100 with no gaps.
+        assert_eq!(all_seqs[0], 1);
+        assert_eq!(*all_seqs.last().unwrap(), 100);
     }
 }

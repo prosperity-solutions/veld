@@ -135,7 +135,10 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
-| `veld feedback [--name <n>] [--wait] [--history]` | Read or wait for in-browser feedback |
+| `veld feedback listen [--name <n>] [--after <seq>]` | Listen for feedback events (agent-facing) |
+| `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
+| `veld feedback ask "<msg>"` | Ask the reviewer a question |
+| `veld feedback threads [--name <n>]` | List feedback threads |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld init` | Create a new veld.json |
@@ -229,7 +232,7 @@ This installs three skills:
 | Skill | Description |
 |-------|-------------|
 | **veld-config** | Write and edit `veld.json` — nodes, health checks, dependencies, URL templates |
-| **veld-feedback** | Human-in-the-loop feedback workflow — request reviews, read comments, iterate |
+| **veld-feedback** | Bidirectional feedback threads — real-time conversation between agent and reviewer |
 | **veld-usage** | CLI reference — start, stop, logs, status, and all other commands |
 
 ## Contributing

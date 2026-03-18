@@ -1,5 +1,5 @@
 // ---------------------------------------------------------------------------
-// Veld Feedback Overlay
+// Veld Feedback Overlay — Thread-based bidirectional conversation system
 // Injected into the host page via Caddy's replace-response handler.
 // CSS is loaded externally. No other dependencies.
 // ---------------------------------------------------------------------------
@@ -30,24 +30,27 @@
     screenshot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 3v4M16 3v4M3 8h4M3 16h4M17 8h4M17 16h4M8 17v4M16 17v4"/></svg>',
     check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>',
     eyeOff: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>',
-    cancel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+    cancel: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+    robot: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="1.5" fill="currentColor" stroke="none"/><circle cx="15" cy="11" r="1.5" fill="currentColor" stroke="none"/><path d="M12 1v3M8 21h8"/></svg>',
+    resolve: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="16 9 10.5 15 8 12.5"/></svg>'
   };
 
   // ---------- state -------------------------------------------------------
 
-  var __veld_comments = []; // all comments across all pages
-  var __veld_nextLocalId = 1;
-  var __veld_activeMode = null; // null | 'select-element' | 'screenshot'
-  var __veld_hoveredEl = null;
-  var __veld_lockedEl = null; // element locked while comment popover is open
+  var __veld_threads = [];           // all threads across all pages
+  var __veld_lastEventSeq = 0;       // sequence cursor for event polling
+  var __veld_lastHumanSeenSeq = {};  // threadId -> last seq human has seen
+  var __veld_agentListening = false;
   var __veld_panelOpen = false;
+  var __veld_panelTab = "active";    // "active" | "resolved"
   var __veld_activePopover = null;
+  var __veld_activeMode = null;      // null | 'select-element' | 'screenshot'
+  var __veld_hoveredEl = null;
+  var __veld_lockedEl = null;
   var __veld_toolbarOpen = false;
   var __veld_hidden = false;
-  var __veld_waitActive = false; // CLI is waiting for feedback
-  var __veld_waitId = null; // current wait-session ID
-  var __veld_waitModalEl = null; // the "someone wants your feedback" modal
-  var __veld_notificationSent = false; // browser notification already sent this session
+  var __veld_expandedThreadId = null;
+  var __veld_pins = {};              // threadId -> pin DOM element
 
   // ---------- helpers -----------------------------------------------------
 
@@ -130,6 +133,19 @@
     };
   }
 
+  /** Wire Cmd+Enter (Mac) / Ctrl+Enter (others) on a textarea to click a button. */
+  function submitOnModEnter(textarea, btn) {
+    textarea.addEventListener("keydown", function (e) {
+      if (e.key === "Enter" && modKey(e)) {
+        e.preventDefault();
+        btn.click();
+      }
+    });
+  }
+
+  /** Build a button label with a kbd shortcut hint, e.g. "Send ⌘↵" */
+  var SUBMIT_HINT = IS_MAC ? " \u2318\u21A9" : " Ctrl\u21A9";
+
   // ---------- component trace detection -----------------------------------
 
   function getComponentTrace(el) {
@@ -205,10 +221,12 @@
   // ---------- DOM scaffolding ---------------------------------------------
 
   var toolbarContainer, fab, fabBadge, toolbar;
-  var toolBtnSelect, toolBtnScreenshot, toolBtnPageComment, toolBtnComments, toolBtnSubmit, toolBtnApprove, toolBtnCancel, toolBtnHide;
+  var toolBtnSelect, toolBtnScreenshot, toolBtnPageComment, toolBtnComments, toolBtnHide;
+  var listeningModule;
   var overlay, hoverOutline, componentTraceEl;
-  var screenshotRect; // the selection rectangle element
-  var panel, panelBody, panelFooter;
+  var screenshotRect;
+  var panel, panelBody, panelHeadTitle, segControl, panelBackBtn, markReadBtn;
+  var segBtnActive, segBtnResolved;
 
   function buildDOM() {
     initTooltip();
@@ -232,22 +250,37 @@
     toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair, tipHtml("Select element", [KEY_MOD, KEY_SHIFT, "F"]));
     toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot, tipHtml("Screenshot", [KEY_MOD, KEY_SHIFT, "S"]));
     toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment, tipHtml("Page comment", [KEY_MOD, KEY_SHIFT, "P"]));
-    toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Comments", [KEY_MOD, KEY_SHIFT, "C"]));
-    toolBtnSubmit = makeToolBtn("submit", ICONS.send, "Submit feedback");
-    toolBtnApprove = makeToolBtn("approve", ICONS.check, "All good");
-    toolBtnCancel = makeToolBtn("cancel-session", ICONS.cancel, "Cancel session");
-    toolBtnCancel.style.display = "none"; // only visible during active wait
-    var sep = mkEl("div", "separator");
-    toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
+    toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Threads", [KEY_MOD, KEY_SHIFT, "C"]));
 
     toolbar.appendChild(toolBtnSelect);
     toolbar.appendChild(toolBtnScreenshot);
     toolbar.appendChild(toolBtnPageComment);
     toolbar.appendChild(toolBtnComments);
-    toolbar.appendChild(toolBtnSubmit);
-    toolbar.appendChild(toolBtnApprove);
-    toolbar.appendChild(toolBtnCancel);
-    toolbar.appendChild(sep);
+
+    // Listening section — completely hidden when not listening
+    listeningModule = mkEl("div", "listening");
+
+    var listenSep = mkEl("div", "separator");
+    listeningModule.appendChild(listenSep);
+
+    // Pulsing dot + "All Good" button
+    var listenDot = mkEl("span", "listening-dot");
+    attachTooltip(listenDot, "Agent is listening");
+    listeningModule.appendChild(listenDot);
+
+    var allGoodBtn = mkEl("button", "listening-allgood", "All Good");
+    allGoodBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      sendAllGood();
+    });
+    listeningModule.appendChild(allGoodBtn);
+    toolbar.appendChild(listeningModule);
+
+    // Separator before hide
+    var sep2 = mkEl("div", "separator");
+    toolbar.appendChild(sep2);
+
+    toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
     toolbar.appendChild(toolBtnHide);
 
     // Screenshot selection rectangle (hidden until drag)
@@ -273,7 +306,44 @@
     // Panel
     panel = mkEl("div", "panel");
     var panelHead = mkEl("div", "panel-head");
-    panelHead.appendChild(mkEl("span", null, "Feedback"));
+    panelBackBtn = mkEl("button", "panel-back-btn");
+    panelBackBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>';
+    panelBackBtn.style.display = "none";
+    panelBackBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      showThreadList();
+    });
+    panelHead.appendChild(panelBackBtn);
+    panelHeadTitle = mkEl("span", "panel-head-title", "Threads");
+    panelHead.appendChild(panelHeadTitle);
+
+    // Segmented control
+    segControl = mkEl("div", "segmented");
+    segBtnActive = mkEl("button", "segmented-btn segmented-btn-active", "Active");
+    segBtnActive.addEventListener("click", function () {
+      __veld_panelTab = "active";
+      renderPanel();
+    });
+    segBtnResolved = mkEl("button", "segmented-btn", "Resolved");
+    segBtnResolved.addEventListener("click", function () {
+      __veld_panelTab = "resolved";
+      renderPanel();
+    });
+    segControl.appendChild(segBtnActive);
+    segControl.appendChild(segBtnResolved);
+    panelHead.appendChild(segControl);
+
+    // Mark all as read
+    markReadBtn = mkEl("button", "panel-mark-read");
+    markReadBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17"/></svg>';
+    markReadBtn.title = "Mark all as read";
+    markReadBtn.style.display = "none";
+    markReadBtn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      markAllRead();
+    });
+    panelHead.appendChild(markReadBtn);
+
     var closeBtn = mkEl("button", "panel-close");
     closeBtn.innerHTML = "&times;";
     closeBtn.addEventListener("click", togglePanel);
@@ -282,15 +352,6 @@
 
     panelBody = mkEl("div", "panel-body");
     panel.appendChild(panelBody);
-
-    panelFooter = mkEl("div", "panel-footer");
-    var approveBtn = mkEl("button", "btn btn-secondary", "All Good \u2714");
-    approveBtn.addEventListener("click", approveAll);
-    panelFooter.appendChild(approveBtn);
-    var submitBtn = mkEl("button", "btn btn-primary", "Submit Feedback");
-    submitBtn.addEventListener("click", submitAll);
-    panelFooter.appendChild(submitBtn);
-    panel.appendChild(panelFooter);
 
     document.body.appendChild(panel);
   }
@@ -326,7 +387,6 @@
     tooltip.style.display = "none";
   }
 
-  /** Build tooltip HTML: label with optional kbd shortcut */
   /** Build tooltip HTML. `keys` is an array of individual key labels, e.g. [KEY_MOD, KEY_SHIFT, "F"]. */
   function tipHtml(label, keys) {
     var h = label;
@@ -367,12 +427,6 @@
       setMode(__veld_activeMode === "screenshot" ? null : "screenshot");
     } else if (action === "page-comment") {
       togglePageComment();
-    } else if (action === "submit") {
-      showSubmitConfirm();
-    } else if (action === "approve") {
-      showApproveConfirm();
-    } else if (action === "cancel-session") {
-      cancelFeedbackSession();
     } else if (action === "show-comments") {
       togglePanel();
     } else if (action === "hide") {
@@ -484,14 +538,6 @@
     }
   }
 
-  // ---------- badge -------------------------------------------------------
-
-  function updateBadge() {
-    var count = __veld_comments.length;
-    fabBadge.textContent = count;
-    fabBadge.className = count > 0 ? PREFIX + "badge" : PREFIX + "badge " + PREFIX + "badge-hidden";
-  }
-
   // ---------- modes -------------------------------------------------------
 
   var __veld_captureStream = null; // persistent MediaStream for screenshot mode
@@ -539,6 +585,8 @@
       });
     }
   }
+
+  // ---------- screenshot capture -------------------------------------------
 
   function acquireCaptureStream() {
     if (__veld_captureStream) return Promise.resolve();
@@ -614,6 +662,195 @@
     }
   }
 
+  function captureScreenshot(viewX, viewY, viewW, viewH) {
+    // Hide veld UI so the screenshot is clean.
+    var veldEls = document.querySelectorAll(
+      "[class^='" + PREFIX + "'], [class*=' " + PREFIX + "']"
+    );
+    var hiddenEls = [];
+    veldEls.forEach(function (el) {
+      if (el.style.display !== "none") {
+        hiddenEls.push({ el: el, prev: el.style.visibility });
+        el.style.visibility = "hidden";
+      }
+    });
+
+    // Exit screenshot mode (removes backdrop) but keep the stream alive.
+    var stream = __veld_captureStream;
+    __veld_captureStream = null; // prevent setMode(null) from stopping it
+    setMode(null);
+    __veld_captureStream = stream; // restore for reuse
+
+    if (!stream) {
+      restoreVeldUI(hiddenEls);
+      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+      return;
+    }
+
+    var track = stream.getVideoTracks()[0];
+
+    function grabCleanFrame() {
+      var grabber = new ImageCapture(track);
+      grabber.grabFrame().then(function (bitmap) {
+        restoreVeldUI(hiddenEls);
+        cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
+      }).catch(function () {
+        restoreVeldUI(hiddenEls);
+        showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+      });
+    }
+
+    // Wait for the UI to fully repaint before capturing: two rAF cycles
+    // to flush styles + composite, plus a small timeout as safety margin
+    // for slower compositors.
+    requestAnimationFrame(function () {
+      requestAnimationFrame(function () {
+        setTimeout(grabCleanFrame, 50);
+      });
+    });
+  }
+
+  function restoreVeldUI(hiddenEls) {
+    hiddenEls.forEach(function (item) {
+      item.el.style.visibility = item.prev;
+    });
+  }
+
+  function cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH) {
+    // The captured bitmap may be at native resolution (dpr-scaled).
+    var scaleX = bitmap.width / window.innerWidth;
+    var scaleY = bitmap.height / window.innerHeight;
+
+    var canvas = document.createElement("canvas");
+    canvas.width = Math.round(viewW * scaleX);
+    canvas.height = Math.round(viewH * scaleY);
+    var ctx = canvas.getContext("2d");
+
+    // Crop: draw the full bitmap offset so only the selected area is visible.
+    ctx.drawImage(
+      bitmap,
+      Math.round(viewX * scaleX), Math.round(viewY * scaleY),
+      canvas.width, canvas.height,
+      0, 0,
+      canvas.width, canvas.height
+    );
+    bitmap.close();
+
+    canvas.toBlob(function (pngBlob) {
+      if (!pngBlob) {
+        showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+        return;
+      }
+      uploadAndShowEditor(pngBlob, viewX, viewY, viewW, viewH);
+    }, "image/png");
+  }
+
+  function uploadAndShowEditor(pngBlob, viewX, viewY, viewW, viewH) {
+    var screenshotId = "ss_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+
+    fetch(API + "/screenshots/" + screenshotId, {
+      method: "POST",
+      headers: { "Content-Type": "image/png" },
+      body: pngBlob
+    }).then(function (res) {
+      if (!res.ok) throw new Error("Upload failed: " + res.status);
+      showScreenshotThreadEditor(pngBlob, screenshotId, viewX, viewY, viewW, viewH);
+    }).catch(function (err) {
+      toast("Screenshot upload failed: " + err.message, true);
+      // Still show the editor, just without the stored screenshot.
+      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+    });
+  }
+
+  function showScreenshotThreadEditor(pngBlob, screenshotId, viewX, viewY, viewW, viewH) {
+    closeActivePopover();
+
+    var pop = mkEl("div", "popover");
+    pop._veldType = "screenshot";
+
+    // Screenshot preview (if available)
+    var previewUrl = null;
+    if (pngBlob) {
+      previewUrl = URL.createObjectURL(pngBlob);
+      var previewContainer = mkEl("div", "screenshot-preview");
+      var previewImg = document.createElement("img");
+      previewImg.src = previewUrl;
+      previewImg.className = PREFIX + "screenshot-img";
+      previewContainer.appendChild(previewImg);
+      pop.appendChild(previewContainer);
+    }
+
+    // Ensure the Object URL is revoked when the popover is closed by any means
+    pop._veldCleanup = function () {
+      if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
+    };
+
+    var header = mkEl("div", "popover-header", "Screenshot \u2014 " + window.location.pathname);
+    pop.appendChild(header);
+
+    var body = mkEl("div", "popover-body");
+    var ta = mkEl("textarea", "textarea");
+    ta.placeholder = "Describe what you see\u2026";
+    body.appendChild(ta);
+
+    var actions = mkEl("div", "popover-actions");
+    var cancelBtn = mkEl("button", "btn btn-secondary", "Cancel");
+    cancelBtn.addEventListener("click", function () {
+      closeActivePopover();
+    });
+    var sendBtn = mkEl("button", "btn btn-primary", "Send" + SUBMIT_HINT);
+    sendBtn.addEventListener("click", function () {
+      var text = ta.value.trim();
+      if (!text) { ta.focus(); return; }
+      if (sendBtn.disabled) return;
+      sendBtn.disabled = true;
+      var scope = {
+        type: "page",
+        page_url: window.location.pathname
+      };
+      var payload = {
+        scope: scope,
+        message: text,
+        component_trace: null,
+        screenshot: screenshotId || null,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight
+      };
+      api("POST", "/threads", payload).then(function (thread) {
+        __veld_threads.push(thread);
+        closeActivePopover();
+        addPin(thread);
+        updateBadge();
+        if (__veld_panelOpen) renderPanel();
+        toast("Thread created");
+      }).catch(function (err) {
+        sendBtn.disabled = false;
+        toast("Failed to create thread: " + err.message, true);
+      });
+    });
+    actions.appendChild(cancelBtn);
+    actions.appendChild(sendBtn);
+    submitOnModEnter(ta, sendBtn);
+    body.appendChild(actions);
+    pop.appendChild(body);
+
+    // Highlight screenshot toolbar button while editor is open.
+    toolBtnScreenshot.classList.add(PREFIX + "tool-active");
+
+    document.body.appendChild(pop);
+    __veld_activePopover = pop;
+
+    // Position in center of viewport.
+    var centerRect = {
+      x: window.scrollX + window.innerWidth / 2 - 160,
+      y: window.scrollY + window.innerHeight / 3,
+      width: 320,
+      height: 0
+    };
+    positionPopover(pop, centerRect);
+    ta.focus();
+  }
+
   // ---------- hide / show overlay -----------------------------------------
 
   function hideOverlay() {
@@ -656,6 +893,8 @@
     }
     return false;
   }
+
+  // ---------- backdrop events (select-element + screenshot drag) ----------
 
   function initBackdropEvents() {
     // --- Screenshot drag state ---
@@ -750,212 +989,6 @@
     });
   }
 
-  // ---------- screenshot capture -------------------------------------------
-
-  function captureScreenshot(viewX, viewY, viewW, viewH) {
-    // Hide veld UI so the screenshot is clean.
-    var veldEls = document.querySelectorAll(
-      "[class^='" + PREFIX + "'], [class*=' " + PREFIX + "']"
-    );
-    var hiddenEls = [];
-    veldEls.forEach(function (el) {
-      if (el.style.display !== "none") {
-        hiddenEls.push({ el: el, prev: el.style.visibility });
-        el.style.visibility = "hidden";
-      }
-    });
-
-    // Exit screenshot mode (removes backdrop) but keep the stream alive.
-    var stream = __veld_captureStream;
-    __veld_captureStream = null; // prevent setMode(null) from stopping it
-    setMode(null);
-    __veld_captureStream = stream; // restore for reuse
-
-    if (!stream) {
-      restoreVeldUI(hiddenEls);
-      showScreenshotCommentEditor(null, null, viewX, viewY, viewW, viewH);
-      return;
-    }
-
-    var track = stream.getVideoTracks()[0];
-
-    function grabCleanFrame() {
-      var grabber = new ImageCapture(track);
-      grabber.grabFrame().then(function (bitmap) {
-        restoreVeldUI(hiddenEls);
-        cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
-      }).catch(function () {
-        restoreVeldUI(hiddenEls);
-        showScreenshotCommentEditor(null, null, viewX, viewY, viewW, viewH);
-      });
-    }
-
-    // Wait for the UI to fully repaint before capturing: two rAF cycles
-    // to flush styles + composite, plus a small timeout as safety margin
-    // for slower compositors.
-    requestAnimationFrame(function () {
-      requestAnimationFrame(function () {
-        setTimeout(grabCleanFrame, 50);
-      });
-    });
-  }
-
-  function restoreVeldUI(hiddenEls) {
-    hiddenEls.forEach(function (item) {
-      item.el.style.visibility = item.prev;
-    });
-  }
-
-  function cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH) {
-    // The captured bitmap may be at native resolution (dpr-scaled).
-    var scaleX = bitmap.width / window.innerWidth;
-    var scaleY = bitmap.height / window.innerHeight;
-
-    var canvas = document.createElement("canvas");
-    canvas.width = Math.round(viewW * scaleX);
-    canvas.height = Math.round(viewH * scaleY);
-    var ctx = canvas.getContext("2d");
-
-    // Crop: draw the full bitmap offset so only the selected area is visible.
-    ctx.drawImage(
-      bitmap,
-      Math.round(viewX * scaleX), Math.round(viewY * scaleY),
-      canvas.width, canvas.height,
-      0, 0,
-      canvas.width, canvas.height
-    );
-    bitmap.close();
-
-    canvas.toBlob(function (pngBlob) {
-      if (!pngBlob) {
-        showScreenshotCommentEditor(null, null, viewX, viewY, viewW, viewH);
-        return;
-      }
-      uploadAndShowEditor(pngBlob, viewX, viewY, viewW, viewH);
-    }, "image/png");
-  }
-
-  function uploadAndShowEditor(pngBlob, viewX, viewY, viewW, viewH) {
-    var screenshotId = "ss_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-
-    fetch(API + "/screenshots/" + screenshotId, {
-      method: "POST",
-      headers: { "Content-Type": "image/png" },
-      body: pngBlob
-    }).then(function (res) {
-      if (!res.ok) throw new Error("Upload failed: " + res.status);
-      showScreenshotCommentEditor(pngBlob, screenshotId, viewX, viewY, viewW, viewH);
-    }).catch(function (err) {
-      toast("Screenshot upload failed: " + err.message, true);
-      // Still show the editor, just without the stored screenshot.
-      showScreenshotCommentEditor(null, null, viewX, viewY, viewW, viewH);
-    });
-  }
-
-  function showScreenshotCommentEditor(pngBlob, screenshotId, viewX, viewY, viewW, viewH) {
-    closeActivePopover();
-
-    var pop = mkEl("div", "popover");
-    pop._veldType = "screenshot";
-
-    // Screenshot preview (if available)
-    var previewUrl = null;
-    if (pngBlob) {
-      previewUrl = URL.createObjectURL(pngBlob);
-      var previewContainer = mkEl("div", "screenshot-preview");
-      var previewImg = document.createElement("img");
-      previewImg.src = previewUrl;
-      previewImg.className = PREFIX + "screenshot-img";
-      previewContainer.appendChild(previewImg);
-      pop.appendChild(previewContainer);
-    }
-
-    // Ensure the Object URL is revoked when the popover is closed by any means
-    // (cancel button, save button, Escape key, or another popover opening).
-    pop._veldCleanup = function () {
-      if (previewUrl) { URL.revokeObjectURL(previewUrl); previewUrl = null; }
-    };
-
-    var header = mkEl("div", "popover-header", "Screenshot comment \u2014 " + window.location.pathname);
-    pop.appendChild(header);
-
-    var body = mkEl("div", "popover-body");
-    var ta = mkEl("textarea", "textarea");
-    ta.placeholder = "Describe what you see\u2026";
-    body.appendChild(ta);
-
-    var actions = mkEl("div", "popover-actions");
-    var cancelBtn = mkEl("button", "btn btn-secondary", "Cancel");
-    cancelBtn.addEventListener("click", function () {
-      closeActivePopover();
-    });
-    var saveBtn = mkEl("button", "btn btn-primary", "Save");
-    saveBtn.addEventListener("click", function () {
-      var text = ta.value.trim();
-      if (!text) { ta.focus(); return; }
-      if (saveBtn.disabled) return;
-      saveBtn.disabled = true;
-      saveScreenshotComment(text, viewX, viewY, viewW, viewH, screenshotId, function () {
-        saveBtn.disabled = false;
-      });
-    });
-    actions.appendChild(cancelBtn);
-    actions.appendChild(saveBtn);
-    body.appendChild(actions);
-    pop.appendChild(body);
-
-    // Highlight screenshot toolbar button while editor is open.
-    toolBtnScreenshot.classList.add(PREFIX + "tool-active");
-
-    document.body.appendChild(pop);
-    __veld_activePopover = pop;
-
-    // Position in center of viewport.
-    var centerRect = {
-      x: window.scrollX + window.innerWidth / 2 - 160,
-      y: window.scrollY + window.innerHeight / 3,
-      width: 320,
-      height: 0
-    };
-    positionPopover(pop, centerRect);
-    ta.focus();
-  }
-
-  function saveScreenshotComment(comment, viewX, viewY, viewW, viewH, screenshotId, onError) {
-    var payload = {
-      page_url: window.location.pathname,
-      element_selector: null,
-      comment: comment,
-      position: {
-        x: viewX + window.scrollX,
-        y: viewY + window.scrollY,
-        width: viewW,
-        height: viewH
-      },
-      component_trace: null,
-      screenshot: screenshotId || null,
-      viewport_width: window.innerWidth,
-      viewport_height: window.innerHeight
-    };
-
-    api("POST", "/comments", payload)
-      .then(function (res) {
-        var c = res || payload;
-        if (!c.id) c.id = "local_" + (__veld_nextLocalId++);
-        __veld_comments.push(c);
-        updateBadge();
-        renderPanel();
-        addPin(c);
-        closeActivePopover();
-        toast("Screenshot comment saved");
-      })
-      .catch(function (err) {
-        if (onError) onError();
-        toast("Failed to save: " + err.message, true);
-      });
-  }
-
-
   // ---------- popover positioning (viewport-aware) ------------------------
 
   function positionPopover(pop, anchorRect) {
@@ -1022,7 +1055,7 @@
     if (toolBtnScreenshot) toolBtnScreenshot.classList.remove(PREFIX + "tool-active");
   }
 
-  // ---------- create popover ----------------------------------------------
+  // ---------- create popover (element-scoped thread) ----------------------
 
   function showCreatePopover(rect, selector, tagInfo, targetEl, trace) {
     closeActivePopover();
@@ -1030,175 +1063,611 @@
     // Lock the element highlight while the popover is open
     __veld_lockedEl = targetEl;
 
-    var pop = mkEl("div", "popover");
+    var popover = mkEl("div", "popover");
 
-    if (trace && trace.length) {
-      var header = mkEl("div", "popover-header", formatTrace(trace));
-      pop.appendChild(header);
+    // Header
+    if (selector) {
+      var selectorEl = mkEl("div", "popover-selector", selector);
+      popover.appendChild(selectorEl);
+    }
+    if (trace) {
+      var traceEl = mkEl("div", "popover-trace", formatTrace(trace));
+      popover.appendChild(traceEl);
     }
 
-    var body = mkEl("div", "popover-body");
-    var ta = mkEl("textarea", "textarea");
-    ta.placeholder = "Add your feedback\u2026";
-    body.appendChild(ta);
+    // Popover body (provides padding)
+    var popoverBody = mkEl("div", "popover-body");
 
+    // Textarea
+    var textarea = document.createElement("textarea");
+    textarea.className = PREFIX + "textarea";
+    textarea.placeholder = "Leave feedback...";
+    textarea.rows = 3;
+    popoverBody.appendChild(textarea);
+
+    // Actions
     var actions = mkEl("div", "popover-actions");
-    var cancelBtn = mkEl("button", "btn btn-secondary", "Cancel");
-    cancelBtn.addEventListener("click", function () { closeActivePopover(); });
-    var saveBtn = mkEl("button", "btn btn-primary", "Save");
-    saveBtn.addEventListener("click", function () {
-      var text = ta.value.trim();
-      if (!text) { ta.focus(); return; }
-      if (saveBtn.disabled) return;
-      saveBtn.disabled = true;
-      saveComment(selector, text, rect, trace, function () { saveBtn.disabled = false; });
-    });
+    var cancelBtn = mkEl("button", "btn btn-secondary btn-sm", "Cancel");
+    cancelBtn.addEventListener("click", closeActivePopover);
     actions.appendChild(cancelBtn);
-    actions.appendChild(saveBtn);
-    body.appendChild(actions);
-    pop.appendChild(body);
 
-    document.body.appendChild(pop);
-    __veld_activePopover = pop;
-    positionPopover(pop, rect);
-    ta.focus();
+    var sendBtn = mkEl("button", "btn btn-primary btn-sm", "Send" + SUBMIT_HINT);
+    sendBtn.addEventListener("click", function () {
+      var text = textarea.value.trim();
+      if (!text) return;
+      if (sendBtn.disabled) return;
+      sendBtn.disabled = true;
+      var scope = selector ? {
+        type: "element",
+        page_url: window.location.pathname,
+        selector: selector,
+        position: rect ? { x: rect.x, y: rect.y, width: rect.width, height: rect.height } : null
+      } : {
+        type: "page",
+        page_url: window.location.pathname
+      };
+      var body = {
+        scope: scope,
+        message: text,
+        component_trace: trace || null,
+        viewport_width: window.innerWidth,
+        viewport_height: window.innerHeight
+      };
+      api("POST", "/threads", body).then(function (thread) {
+        __veld_threads.push(thread);
+        closeActivePopover();
+        addPin(thread);
+        updateBadge();
+        if (__veld_panelOpen) renderPanel();
+        toast("Thread created");
+      }).catch(function () {
+        sendBtn.disabled = false;
+        toast("Failed to create thread", true);
+      });
+    });
+    actions.appendChild(sendBtn);
+    submitOnModEnter(textarea, sendBtn);
+    popoverBody.appendChild(actions);
+    popover.appendChild(popoverBody);
+
+    document.body.appendChild(popover);
+    __veld_activePopover = popover;
+    positionPopover(popover, rect);
+    textarea.focus();
   }
 
-  // ---------- page comment popover -----------------------------------------
+  // ---------- page comment (page-scoped thread) ---------------------------
 
   function togglePageComment() {
-    if (__veld_activePopover && __veld_activePopover._veldType === "page-comment") {
-      closeActivePopover();
+    if (__veld_activePopover) { closeActivePopover(); return; }
+    // Create a page-scoped thread (no element)
+    showCreatePopover(
+      { x: window.innerWidth / 2 - 180 + window.scrollX, y: 120 + window.scrollY, width: 0, height: 0 },
+      null, null, null, null
+    );
+    toolBtnPageComment.classList.add(PREFIX + "tool-active");
+  }
+
+  // ---------- thread helpers ----------------------------------------------
+
+  function findThread(id) {
+    for (var i = 0; i < __veld_threads.length; i++) {
+      if (__veld_threads[i].id === id) return __veld_threads[i];
+    }
+    return null;
+  }
+
+  function getThreadLabel(thread) {
+    if (thread.scope.type === "element") return thread.scope.selector || "Element";
+    if (thread.scope.type === "page") return "Page: " + thread.scope.page_url;
+    return "Global";
+  }
+
+  function getThreadPageUrl(thread) {
+    if (thread.scope.type === "element") return thread.scope.page_url;
+    if (thread.scope.type === "page") return thread.scope.page_url;
+    return null;
+  }
+
+  function getThreadPosition(thread) {
+    if (thread.scope.type === "element" && thread.scope.position) return thread.scope.position;
+    return null;
+  }
+
+  function isCurrentPage(url) {
+    var path = url.split("?")[0];
+    return path === window.location.pathname;
+  }
+
+  function hasUnread(thread) {
+    if (!thread.messages) return false;
+    var lastSeen = __veld_lastHumanSeenSeq[thread.id] || 0;
+    // Check if the last message is from agent and thread has been updated since last seen
+    var lastMsg = thread.messages[thread.messages.length - 1];
+    return lastMsg && lastMsg.author === "agent" && (!lastSeen || new Date(thread.updated_at).getTime() > lastSeen);
+  }
+
+  function timeAgo(dateStr) {
+    var d = new Date(dateStr);
+    var s = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (s < 60) return "just now";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
+  }
+
+  // ---------- badge -------------------------------------------------------
+
+  function updateBadge() {
+    var count = __veld_threads.filter(function (t) {
+      return t.status === "open" && hasUnread(t);
+    }).length;
+    fabBadge.textContent = count || "";
+    fabBadge.className = PREFIX + "badge" + (count ? "" : " " + PREFIX + "badge-hidden");
+  }
+
+  // ---------- panel -------------------------------------------------------
+
+  function togglePanel() {
+    __veld_panelOpen = !__veld_panelOpen;
+    // Opening the panel always shows the list view (not a stale detail)
+    if (__veld_panelOpen) __veld_expandedThreadId = null;
+    panel.classList.toggle(PREFIX + "panel-open", __veld_panelOpen);
+    if (__veld_panelOpen) renderPanel();
+  }
+
+  function showThreadDetail(threadId) {
+    __veld_expandedThreadId = threadId;
+    renderPanel();
+  }
+
+  function showThreadList() {
+    __veld_expandedThreadId = null;
+    renderPanel();
+  }
+
+  function openThreadInPanel(threadId) {
+    __veld_panelOpen = true;
+    __veld_panelTab = "active";
+    __veld_expandedThreadId = threadId;
+    panel.classList.add(PREFIX + "panel-open");
+    renderPanel();
+  }
+
+  function updateSegmentedControl() {
+    if (segBtnActive && segBtnResolved) {
+      var activeCount = __veld_threads.filter(function (t) { return t.status === "open"; }).length;
+      var resolvedCount = __veld_threads.filter(function (t) { return t.status === "resolved"; }).length;
+      segBtnActive.textContent = "Active" + (activeCount ? " (" + activeCount + ")" : "");
+      segBtnResolved.textContent = "Resolved" + (resolvedCount ? " (" + resolvedCount + ")" : "");
+      segBtnActive.className = PREFIX + "segmented-btn" + (__veld_panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
+      segBtnResolved.className = PREFIX + "segmented-btn" + (__veld_panelTab === "resolved" ? " " + PREFIX + "segmented-btn-active" : "");
+    }
+  }
+
+  function renderPanel() {
+    panelBody.innerHTML = "";
+
+    // Two-layer panel: if a thread is expanded, show detail view
+    if (__veld_expandedThreadId) {
+      var thread = findThread(__veld_expandedThreadId);
+      if (thread) {
+        // Detail view: back button, hide segmented control + mark-read
+        panelBackBtn.style.display = "";
+        segControl.style.display = "none";
+        if (markReadBtn) markReadBtn.style.display = "none";
+        panelHeadTitle.textContent = "Thread";
+        renderThreadDetail(thread);
+        return;
+      }
+      __veld_expandedThreadId = null;
+    }
+
+    // List view: hide back button, show segmented control
+    panelBackBtn.style.display = "none";
+    segControl.style.display = "";
+    panelHeadTitle.textContent = "Threads";
+    updateSegmentedControl();
+    updateMarkReadBtn();
+
+    if (__veld_panelTab === "active") {
+      renderActiveThreads();
+    } else {
+      renderResolvedThreads();
+    }
+  }
+
+  var COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
+
+  function makeCopyRow(label, value, cls) {
+    var row = mkEl("div", cls);
+    row.appendChild(document.createTextNode(label + value));
+    var icon = mkEl("span", "panel-detail-copy-icon");
+    icon.innerHTML = COPY_SVG;
+    row.appendChild(icon);
+    row.addEventListener("click", function (e) {
+      e.stopPropagation();
+      navigator.clipboard.writeText(value).then(function () {
+        icon.innerHTML = ICONS.check;
+        setTimeout(function () { icon.innerHTML = COPY_SVG; }, 1500);
+      });
+    });
+    return row;
+  }
+
+  function renderThreadDetail(thread) {
+    var header = mkEl("div", "panel-detail-header");
+
+    // 1. Thread ID (tiny, first)
+    header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id"));
+
+    // 2. Title — scope-aware with page context
+    var pageUrl = getThreadPageUrl(thread);
+    var titleText;
+    if (thread.scope.type === "global") {
+      titleText = "Global";
+    } else if (thread.scope.type === "page") {
+      titleText = "Page " + pageUrl;
+      if (pageUrl === "/") titleText += " (home)";
+    } else {
+      titleText = "Page " + (pageUrl || "?");
+      if (pageUrl === "/") titleText += " (home)";
+    }
+    var titleEl = mkEl("div", "panel-detail-title", titleText);
+    header.appendChild(titleEl);
+
+    // Page navigation link (only if on a different page)
+    if (pageUrl && pageUrl !== window.location.pathname) {
+      var pageLink = mkEl("a", "panel-detail-page-link", "Go to page \u2192");
+      pageLink.href = pageUrl;
+      pageLink.addEventListener("click", function (e) {
+        e.preventDefault();
+        window.location.href = pageUrl;
+      });
+      header.appendChild(pageLink);
+    }
+
+    // 3. Component trace or CSS selector (small, copyable)
+    if (thread.component_trace && thread.component_trace.length) {
+      var traceText = thread.component_trace.join(" > ");
+      header.appendChild(makeCopyRow("", traceText, "panel-detail-trace"));
+    }
+    if (thread.scope.type === "element" && thread.scope.selector) {
+      header.appendChild(makeCopyRow("", thread.scope.selector, "panel-detail-selector"));
+    }
+
+    panelBody.appendChild(header);
+
+    if (thread.status === "resolved") {
+      // Resolved: show messages read-only + reopen button
+      var msgList = mkEl("div", "thread-messages-list");
+      thread.messages.forEach(function (msg) {
+        var msgEl = mkEl("div", "message message-" + msg.author);
+        var icon = mkEl("span", "message-author-icon");
+        icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
+        msgEl.appendChild(icon);
+        var body = mkEl("div", "message-body");
+        body.appendChild(mkEl("div", "message-text", msg.body));
+        var authorLabel = msg.author === "agent" ? "Agent" : "You";
+        body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
+        msgEl.appendChild(body);
+        msgList.appendChild(msgEl);
+      });
+      panelBody.appendChild(msgList);
+
+      var reopenRow = mkEl("div", "thread-input-actions");
+      var reopenBtn = mkEl("button", "btn btn-primary btn-sm", "Reopen Thread");
+      reopenBtn.addEventListener("click", function () {
+        api("POST", "/threads/" + thread.id + "/reopen").then(function () {
+          thread.status = "open";
+          showThreadList();
+          renderAllPins();
+          toast("Thread reopened");
+        });
+      });
+      reopenRow.appendChild(reopenBtn);
+      panelBody.appendChild(reopenRow);
+    } else {
+      // Active: show messages + reply input + resolve
+      panelBody.appendChild(renderThreadMessages(thread));
+    }
+  }
+
+  function renderActiveThreads() {
+    var active = __veld_threads.filter(function (t) { return t.status === "open"; });
+    if (!active.length) {
+      panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
       return;
     }
-    showPageCommentPopover();
-  }
 
-  function showPageCommentPopover() {
-    setMode(null); // deactivate any active mode
-    closeActivePopover();
-
-    var pop = mkEl("div", "popover");
-    pop._veldType = "page-comment";
-
-    var header = mkEl("div", "popover-header", "Page comment \u2014 " + window.location.pathname);
-    pop.appendChild(header);
-
-    var body = mkEl("div", "popover-body");
-    var ta = mkEl("textarea", "textarea");
-    ta.placeholder = "Add a comment about this page\u2026";
-    body.appendChild(ta);
-
-    var actions = mkEl("div", "popover-actions");
-    var cancelBtn = mkEl("button", "btn btn-secondary", "Cancel");
-    cancelBtn.addEventListener("click", function () { closeActivePopover(); });
-    var saveBtn = mkEl("button", "btn btn-primary", "Save");
-    saveBtn.addEventListener("click", function () {
-      var text = ta.value.trim();
-      if (!text) { ta.focus(); return; }
-      if (saveBtn.disabled) return;
-      saveBtn.disabled = true;
-      saveComment(null, text, null, null, function () { saveBtn.disabled = false; });
+    // Group by page
+    var global = [];
+    var byPage = {};
+    var pageOrder = [];
+    active.forEach(function (t) {
+      var url = getThreadPageUrl(t);
+      if (!url) { global.push(t); return; }
+      var path = url.split("?")[0];
+      if (!byPage[path]) { byPage[path] = []; pageOrder.push(path); }
+      byPage[path].push(t);
     });
-    actions.appendChild(cancelBtn);
-    actions.appendChild(saveBtn);
-    body.appendChild(actions);
-    pop.appendChild(body);
 
-    document.body.appendChild(pop);
-    __veld_activePopover = pop;
-    toolBtnPageComment.classList.add(PREFIX + "tool-active");
+    // Current page first
+    pageOrder.sort(function (a, b) {
+      if (a === window.location.pathname) return -1;
+      if (b === window.location.pathname) return 1;
+      return a.localeCompare(b);
+    });
 
-    // Position in center of viewport
-    var centerRect = {
-      x: window.scrollX + window.innerWidth / 2 - 160,
-      y: window.scrollY + window.innerHeight / 3,
-      width: 320,
-      height: 0
-    };
-    positionPopover(pop, centerRect);
-    ta.focus();
+    if (global.length) renderThreadGroup("Global", global);
+    pageOrder.forEach(function (p) {
+      var label = "Page " + p;
+      if (p === "/") label += " (home)";
+      renderThreadGroup(label, byPage[p]);
+    });
   }
 
-  // ---------- save comment ------------------------------------------------
+  function renderResolvedThreads() {
+    var resolved = __veld_threads.filter(function (t) { return t.status === "resolved"; });
+    if (!resolved.length) {
+      panelBody.appendChild(mkEl("div", "panel-empty", "No resolved threads."));
+      return;
+    }
+    resolved.sort(function (a, b) {
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+    resolved.forEach(function (t) { panelBody.appendChild(makeThreadCard(t, true)); });
+  }
 
-  function saveComment(selector, comment, position, trace, onError) {
-    var payload = {
-      page_url: window.location.pathname,
-      element_selector: selector || null,
-      comment: comment,
-      position: position ? { x: position.x, y: position.y, width: position.width, height: position.height } : null,
-      component_trace: trace || null,
-      viewport_width: window.innerWidth,
-      viewport_height: window.innerHeight
-    };
+  function renderThreadGroup(label, threads) {
+    // Sort by latest activity (newest first)
+    threads.sort(function (a, b) {
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+    var section = mkEl("div", "panel-section");
+    var heading = mkEl("div", "panel-section-heading", label);
+    section.appendChild(heading);
+    threads.forEach(function (t) { section.appendChild(makeThreadCard(t, false)); });
+    panelBody.appendChild(section);
+  }
 
-    api("POST", "/comments", payload)
-      .then(function (res) {
-        var c = res || payload;
-        if (!c.id) c.id = "local_" + (__veld_nextLocalId++);
-        __veld_comments.push(c);
-        updateBadge();
-        renderPanel();
-        addPin(c);
-        closeActivePopover();
-        toast("Comment saved");
-      })
-      .catch(function (err) {
-        if (onError) onError();
-        toast("Failed to save comment: " + err.message, true);
+  // ---------- thread card -------------------------------------------------
+
+  function makeThreadCard(thread, isResolved) {
+    var card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
+    if (hasUnread(thread) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
+    card.dataset.threadId = thread.id;
+
+    // Row 1: preview text + meta (compact)
+    var row1 = mkEl("div", "thread-card-row");
+    var preview = (thread.messages && thread.messages[0]) ? thread.messages[0].body : "";
+    if (preview.length > 50) preview = preview.substring(0, 50) + "\u2026";
+    row1.appendChild(mkEl("span", "thread-card-preview", preview));
+    var msgCount = thread.messages ? thread.messages.length : 0;
+    var metaText = msgCount > 1 ? msgCount + " replies" : "";
+    if (metaText) metaText += " \u00B7 ";
+    metaText += timeAgo(thread.updated_at);
+    row1.appendChild(mkEl("span", "thread-card-meta", metaText));
+    card.appendChild(row1);
+
+    // Row 2: element selector (only for element-scoped, keeps it contextual)
+    if (thread.scope && thread.scope.type === "element" && thread.scope.selector) {
+      card.appendChild(mkEl("div", "thread-card-selector", thread.scope.selector));
+    }
+
+    // Click card to open detail view (both active and resolved)
+    card.addEventListener("click", function () {
+      showThreadDetail(thread.id);
+    });
+
+    return card;
+  }
+
+  // ---------- thread messages view ----------------------------------------
+
+  function renderThreadMessages(thread) {
+    var container = mkEl("div", "thread-messages");
+
+    // Messages
+    var msgList = mkEl("div", "thread-messages-list");
+    thread.messages.forEach(function (msg) {
+      var msgEl = mkEl("div", "message message-" + msg.author);
+      var icon = mkEl("span", "message-author-icon");
+      icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
+      msgEl.appendChild(icon);
+      var body = mkEl("div", "message-body");
+      body.appendChild(mkEl("div", "message-text", msg.body));
+      var authorLabel = msg.author === "agent" ? "Agent" : "You";
+      body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
+      msgEl.appendChild(body);
+      msgList.appendChild(msgEl);
+    });
+    container.appendChild(msgList);
+
+    // Mark as seen
+    markThreadSeen(thread.id);
+
+    // Reply input
+    var input = mkEl("div", "thread-input");
+    var textarea = document.createElement("textarea");
+    textarea.className = PREFIX + "textarea";
+    textarea.placeholder = "Reply...";
+    textarea.rows = 2;
+    input.appendChild(textarea);
+
+    var inputActions = mkEl("div", "thread-input-actions");
+    var resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
+    resolveBtn.addEventListener("click", function () {
+      var text = textarea.value.trim();
+      var doResolve = function () {
+        api("POST", "/threads/" + thread.id + "/resolve").then(function () {
+          thread.status = "resolved";
+          closeActivePopover();
+          showThreadList();
+          renderAllPins();
+          toast("Thread resolved");
+        });
+      };
+      // If there's text, send it as a comment first, then resolve
+      if (text) {
+        api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (msg) {
+          thread.messages.push(msg);
+          doResolve();
+        });
+      } else {
+        doResolve();
+      }
+    });
+    inputActions.appendChild(resolveBtn);
+
+    var sendBtn = mkEl("button", "btn btn-primary btn-sm", "Send" + SUBMIT_HINT);
+    sendBtn.addEventListener("click", function () {
+      var text = textarea.value.trim();
+      if (!text) return;
+      if (sendBtn.disabled) return;
+      sendBtn.disabled = true;
+      api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (msg) {
+        thread.messages.push(msg);
+        thread.updated_at = new Date().toISOString();
+        textarea.value = "";
+        sendBtn.disabled = false;
+        if (__veld_panelOpen) renderPanel();
+        renderAllPins();
+      }).catch(function () {
+        sendBtn.disabled = false;
+        toast("Failed to send reply", true);
       });
+    });
+    inputActions.appendChild(sendBtn);
+    submitOnModEnter(textarea, sendBtn);
+    input.appendChild(inputActions);
+    container.appendChild(input);
+
+    return container;
+  }
+
+  // ---------- thread popover (from pin click) -----------------------------
+
+  function showThreadPopover(threadId, anchor) {
+    closeActivePopover();
+    var thread = findThread(threadId);
+    if (!thread) return;
+
+    var popover = mkEl("div", "popover");
+    popover.appendChild(renderThreadMessages(thread));
+    document.body.appendChild(popover);
+    __veld_activePopover = popover;
+
+    var rect = anchor.getBoundingClientRect();
+    positionPopover(popover, { x: rect.left + window.scrollX, y: rect.top + window.scrollY, width: rect.width, height: rect.height });
+  }
+
+  // ---------- mark seen ---------------------------------------------------
+
+  function markThreadSeen(threadId) {
+    __veld_lastHumanSeenSeq[threadId] = Date.now();
+    var thread = findThread(threadId);
+    if (thread) {
+      api("PUT", "/threads/" + threadId + "/seen", { seq: __veld_lastEventSeq }).catch(function () {});
+      addPin(thread);
+      updateBadge();
+      updateMarkReadBtn();
+    }
+  }
+
+  function markAllRead() {
+    __veld_threads.forEach(function (t) {
+      if (t.status === "open" && hasUnread(t)) {
+        __veld_lastHumanSeenSeq[t.id] = Date.now();
+        api("PUT", "/threads/" + t.id + "/seen", { seq: __veld_lastEventSeq }).catch(function () {});
+      }
+    });
+    renderAllPins();
+    updateBadge();
+    updateMarkReadBtn();
+    if (__veld_panelOpen) renderPanel();
+    toast("All marked as read");
+  }
+
+  function updateMarkReadBtn() {
+    if (!markReadBtn) return;
+    var hasAny = __veld_threads.some(function (t) {
+      return t.status === "open" && hasUnread(t);
+    });
+    markReadBtn.style.display = hasAny ? "" : "none";
   }
 
   // ---------- pins --------------------------------------------------------
 
-  var __veld_pins = {};
+  function addPin(thread) {
+    if (thread.status === "resolved") return;
+    // Only pin element-scoped threads on the current page
+    var pageUrl = getThreadPageUrl(thread);
+    if (!pageUrl || !isCurrentPage(pageUrl)) return;
+    var pos = getThreadPosition(thread);
+    if (!pos) return;
 
-  function addPin(comment) {
-    removePin(comment.id);
-    var idx = __veld_comments.indexOf(comment);
-    var num = idx >= 0 ? idx + 1 : Object.keys(__veld_pins).length + 1;
+    removePin(thread.id);
 
-    var pin = mkEl("div", "pin", String(num));
-    pin.dataset.commentId = comment.id;
-    if (comment.position) {
-      pin.style.top = (comment.position.y - 12) + "px";
-      pin.style.left = (comment.position.x + comment.position.width - 12) + "px";
+    var pin = mkEl("div", "pin");
+    pin.dataset.threadId = thread.id;
+
+    // Chat icon
+    var icon = mkEl("span", "pin-icon");
+    icon.innerHTML = ICONS.chat;
+    pin.appendChild(icon);
+
+    // Message count (if > 1)
+    var msgCount = thread.messages ? thread.messages.length : 1;
+    if (msgCount > 1) {
+      var count = mkEl("span", "pin-count", String(msgCount));
+      pin.appendChild(count);
     }
+
+    // Unread dot
+    if (hasUnread(thread)) {
+      var dot = mkEl("span", "pin-unread-dot");
+      pin.appendChild(dot);
+    }
+
+    pin.style.position = "absolute";
+    pin.style.top = (pos.y - 12) + "px";
+    pin.style.left = (pos.x + pos.width - 12) + "px";
+    pin.style.zIndex = "calc(var(--vf-z) - 1)";
+
     pin.addEventListener("click", function (e) {
       e.stopPropagation();
-      showDetailPopover(comment, pin);
+      openThreadInPanel(thread.id);
     });
+
     document.body.appendChild(pin);
-    __veld_pins[comment.id] = pin;
+    __veld_pins[thread.id] = pin;
   }
 
-  function removePin(id) {
-    if (__veld_pins[id]) { __veld_pins[id].remove(); delete __veld_pins[id]; }
+  function removePin(threadId) {
+    if (__veld_pins[threadId]) {
+      __veld_pins[threadId].remove();
+      delete __veld_pins[threadId];
+    }
   }
 
   function renderAllPins() {
-    Object.keys(__veld_pins).forEach(function (id) { __veld_pins[id].remove(); });
-    __veld_pins = {};
-    __veld_comments.forEach(addPin);
-  }
-
-  function renderPinsForCurrentPage() {
-    Object.keys(__veld_pins).forEach(function (id) { __veld_pins[id].remove(); });
-    __veld_pins = {};
-    currentPageComments().forEach(addPin);
+    Object.keys(__veld_pins).forEach(removePin);
+    __veld_threads.forEach(function (t) {
+      if (t.status === "open") addPin(t);
+    });
   }
 
   function repositionPins() {
-    __veld_comments.forEach(function (c) {
-      var pin = __veld_pins[c.id];
+    __veld_threads.forEach(function (t) {
+      var pin = __veld_pins[t.id];
       if (!pin) return;
-      if (!c.element_selector) return;
+      if (!t.scope || t.scope.type !== "element" || !t.scope.selector) return;
       try {
-        var el = document.querySelector(c.element_selector);
+        var el = document.querySelector(t.scope.selector);
         if (el) {
           var r = docRect(el);
-          c.position = { x: r.x, y: r.y, width: r.width, height: r.height };
+          t.scope.position = { x: r.x, y: r.y, width: r.width, height: r.height };
           pin.style.top = (r.y - 12) + "px";
           pin.style.left = (r.x + r.width - 12) + "px";
         }
@@ -1216,339 +1685,203 @@
     });
   }
 
-  // ---------- detail popover ----------------------------------------------
+  // ---------- polling loops -----------------------------------------------
 
-  function showDetailPopover(comment, pinEl) {
-    closeActivePopover();
-
-    var pop = mkEl("div", "popover");
-    var pinRect = docRect(pinEl);
-
-    var headerText = comment.element_selector || "Comment";
-    if (comment.component_trace && comment.component_trace.length) {
-      headerText += " \u2014 " + formatTrace(comment.component_trace);
-    }
-    var header = mkEl("div", "popover-header", headerText);
-    pop.appendChild(header);
-
-    var body = mkEl("div", "popover-body");
-
-    var textEl = mkEl("div", "comment-text", comment.comment);
-    body.appendChild(textEl);
-
-    var actions = mkEl("div", "popover-actions");
-    var editBtn = mkEl("button", "btn btn-secondary btn-sm", "Edit");
-    var delBtn = mkEl("button", "btn btn-danger btn-sm", "Delete");
-    var cancelBtn = mkEl("button", "btn btn-secondary btn-sm", "Close");
-    cancelBtn.addEventListener("click", function () { closeActivePopover(); });
-
-    editBtn.addEventListener("click", function () {
-      var ta = mkEl("textarea", "textarea");
-      ta.value = comment.comment;
-      textEl.replaceWith(ta);
-      ta.focus();
-      editBtn.style.display = "none";
-      var saveBtn = mkEl("button", "btn btn-primary btn-sm", "Save");
-      saveBtn.addEventListener("click", function () {
-        var newText = ta.value.trim();
-        if (!newText) { ta.focus(); return; }
-        if (saveBtn.disabled) return;
-        saveBtn.disabled = true;
-        var updated = Object.assign({}, comment, { comment: newText });
-        api("PUT", "/comments/" + encodeURIComponent(comment.id), updated)
-          .then(function () {
-            comment.comment = newText;
-            renderPanel();
-            closeActivePopover();
-            toast("Comment updated");
-          })
-          .catch(function (err) { saveBtn.disabled = false; toast("Update failed: " + err.message, true); });
+  function pollEvents() {
+    api("GET", "/events?after=" + __veld_lastEventSeq).then(function (events) {
+      if (!events || !events.length) return;
+      events.forEach(function (event) {
+        handleEvent(event);
+        if (event.seq > __veld_lastEventSeq) __veld_lastEventSeq = event.seq;
       });
-      actions.insertBefore(saveBtn, delBtn);
-    });
+    }).catch(function () {});
+  }
 
-    delBtn.addEventListener("click", function () {
-      if (!confirm("Delete this comment?")) return;
-      if (delBtn.disabled) return;
-      delBtn.disabled = true;
-      api("DELETE", "/comments/" + encodeURIComponent(comment.id))
-        .then(function () {
-          __veld_comments = __veld_comments.filter(function (c) { return c.id !== comment.id; });
-          removePin(comment.id);
+  function pollListenStatus() {
+    api("GET", "/session").then(function (data) {
+      var wasListening = __veld_agentListening;
+      __veld_agentListening = data && data.listening;
+      if (__veld_agentListening !== wasListening) updateListeningModule();
+    }).catch(function () {});
+  }
+
+  // ---------- event handling ----------------------------------------------
+
+  function handleEvent(event) {
+    switch (event.event) {
+      case "agent_message":
+        handleAgentMessage(event);
+        break;
+      case "agent_thread_created":
+        handleAgentThreadCreated(event);
+        break;
+      case "resolved":
+        handleThreadResolved(event);
+        break;
+      case "reopened":
+        handleThreadReopened(event);
+        break;
+      case "thread_created":
+      case "human_message":
+        // These are our own actions echoed back — useful for multi-tab sync
+        break;
+    }
+  }
+
+  function handleAgentMessage(event) {
+    var thread = findThread(event.thread_id);
+    if (!thread) {
+      // Thread not loaded yet — fetch it individually
+      api("GET", "/threads/" + event.thread_id).then(function (t) {
+        if (t) {
+          __veld_threads.push(t);
+          addPin(t);
           updateBadge();
-          renderPanel();
-          closeActivePopover();
-          toast("Comment deleted");
-        })
-        .catch(function (err) { delBtn.disabled = false; toast("Delete failed: " + err.message, true); });
-    });
-
-    actions.appendChild(editBtn);
-    actions.appendChild(delBtn);
-    actions.appendChild(cancelBtn);
-    body.appendChild(actions);
-    pop.appendChild(body);
-
-    document.body.appendChild(pop);
-    __veld_activePopover = pop;
-    positionPopover(pop, pinRect);
-  }
-
-  // ---------- panel -------------------------------------------------------
-
-  function togglePanel() {
-    __veld_panelOpen = !__veld_panelOpen;
-    if (__veld_panelOpen) {
-      panel.classList.add(PREFIX + "panel-open");
-      toolBtnComments.classList.add(PREFIX + "tool-active");
-      renderPanel();
-    } else {
-      panel.classList.remove(PREFIX + "panel-open");
-      toolBtnComments.classList.remove(PREFIX + "tool-active");
-    }
-  }
-
-  function renderPanel() {
-    panelBody.innerHTML = "";
-
-    // Always show footer (for "All Good" button), toggle submit button visibility
-    var submitBtn = panelFooter.querySelector("." + PREFIX + "btn-primary");
-    if (submitBtn) submitBtn.style.display = __veld_comments.length > 0 ? "" : "none";
-
-    if (__veld_comments.length === 0) {
-      panelBody.appendChild(mkEl("div", "panel-empty", "No comments yet. Use the toolbar to add feedback, or approve with \"All Good\"."));
-      return;
-    }
-
-    // Group comments by page
-    var currentPath = window.location.pathname;
-    var pages = {};
-    var pageOrder = [];
-    __veld_comments.forEach(function (c) {
-      var p = (c.page_url || "").split("?")[0] || "/";
-      if (!pages[p]) { pages[p] = []; pageOrder.push(p); }
-      pages[p].push(c);
-    });
-
-    // Sort: current page first, then alphabetical
-    pageOrder.sort(function (a, b) {
-      if (a === currentPath) return -1;
-      if (b === currentPath) return 1;
-      return a.localeCompare(b);
-    });
-
-    var globalIdx = 0;
-    pageOrder.forEach(function (pagePath) {
-      var comments = pages[pagePath];
-      var isCurrent = pagePath === currentPath;
-
-      // Page group header
-      var groupHeader = mkEl("div", "panel-page-header");
-      var pathLabel = mkEl("span", "panel-page-path", pagePath);
-      groupHeader.appendChild(pathLabel);
-      if (isCurrent) {
-        var badge = mkEl("span", "panel-page-badge", "this page");
-        groupHeader.appendChild(badge);
-      } else {
-        var goBtn = mkEl("button", "btn btn-secondary btn-sm", "Go to page");
-        goBtn.addEventListener("click", function () { window.location.href = pagePath; });
-        groupHeader.appendChild(goBtn);
-      }
-      panelBody.appendChild(groupHeader);
-
-      comments.forEach(function (c) {
-        globalIdx++;
-        var idx = globalIdx; // capture current value for closures below
-        var item = mkEl("div", "panel-item");
-
-        var title = (c.component_trace && c.component_trace.length)
-          ? formatTrace(c.component_trace)
-          : (c.screenshot ? "Screenshot" : (c.element_selector || "Comment"));
-        var sel = mkEl("div", "panel-item-selector", idx + ". " + title);
-        item.appendChild(sel);
-
-        if (c.screenshot) {
-          var thumbContainer = mkEl("div", "panel-item-screenshot");
-          var thumb = document.createElement("img");
-          thumb.className = PREFIX + "panel-item-screenshot-img";
-          // Load via our API — the screenshot ID is the filename without extension
-          // screenshot field is now just the ID (e.g. "ss_123_abc") or legacy path.
-          var ssId = c.screenshot.split("/").pop().replace(".png", "");
-          thumb.src = "/__veld__/feedback/api/screenshots/" + ssId;
-          thumbContainer.appendChild(thumb);
-          item.appendChild(thumbContainer);
+          if (__veld_panelOpen) renderPanel();
+          showAgentReplyToast(t.id, event.message.body);
         }
-
-        var txt = mkEl("div", "panel-item-comment", c.comment);
-        item.appendChild(txt);
-
-        var acts = mkEl("div", "panel-item-actions");
-
-        var editBtn = mkEl("button", "btn btn-secondary btn-sm", "Edit");
-        editBtn.addEventListener("click", function () { startInlineEdit(c, item, idx); });
-        acts.appendChild(editBtn);
-
-        var delBtn = mkEl("button", "btn btn-danger btn-sm", "Delete");
-        delBtn.addEventListener("click", function () {
-          if (!confirm("Delete this comment?")) return;
-          if (delBtn.disabled) return;
-          delBtn.disabled = true;
-          api("DELETE", "/comments/" + encodeURIComponent(c.id))
-            .then(function () {
-              __veld_comments = __veld_comments.filter(function (x) { return x.id !== c.id; });
-              removePin(c.id);
-              updateBadge();
-              renderPanel();
-              toast("Comment deleted");
-            })
-            .catch(function (err) { delBtn.disabled = false; toast("Delete failed: " + err.message, true); });
-        });
-        acts.appendChild(delBtn);
-
-        item.appendChild(acts);
-        panelBody.appendChild(item);
-      });
-    });
-  }
-
-  function startInlineEdit(comment, itemEl, idx) {
-    itemEl.innerHTML = "";
-
-    var editTitle = (comment.component_trace && comment.component_trace.length)
-      ? formatTrace(comment.component_trace)
-      : (comment.element_selector || "Comment");
-    var sel = mkEl("div", "panel-item-selector", idx + ". " + editTitle);
-    itemEl.appendChild(sel);
-
-    var ta = mkEl("textarea", "textarea");
-    ta.value = comment.comment;
-    itemEl.appendChild(ta);
-
-    var acts = mkEl("div", "popover-actions");
-    acts.style.marginTop = "8px";
-
-    var saveBtn = mkEl("button", "btn btn-primary btn-sm", "Save");
-    saveBtn.addEventListener("click", function () {
-      var newText = ta.value.trim();
-      if (!newText) { ta.focus(); return; }
-      if (saveBtn.disabled) return;
-      saveBtn.disabled = true;
-      var updated = Object.assign({}, comment, { comment: newText });
-      api("PUT", "/comments/" + encodeURIComponent(comment.id), updated)
-        .then(function () {
-          comment.comment = newText;
-          renderPanel();
-          toast("Comment updated");
-        })
-        .catch(function (err) { saveBtn.disabled = false; toast("Update failed: " + err.message, true); });
-    });
-    acts.appendChild(saveBtn);
-
-    var cancelBtn = mkEl("button", "btn btn-secondary btn-sm", "Cancel");
-    cancelBtn.addEventListener("click", function () { renderPanel(); });
-    acts.appendChild(cancelBtn);
-
-    itemEl.appendChild(acts);
-    ta.focus();
-  }
-
-  // ---------- submit all --------------------------------------------------
-
-  /** Show a centered confirm modal with backdrop. Returns the backdrop element (stored as __veld_activePopover). */
-  function showCenteredConfirm(message, confirmLabel, confirmClass, onConfirm) {
-    closeActivePopover();
-    setMode(null);
-
-    var backdrop = mkEl("div", "confirm-backdrop");
-    var modal = mkEl("div", "confirm-modal");
-
-    var msg = mkEl("div", "confirm-message", message);
-    modal.appendChild(msg);
-
-    var actions = mkEl("div", "confirm-actions");
-    var cancelBtn = mkEl("button", "btn btn-secondary", "Cancel");
-    cancelBtn.addEventListener("click", function () { closeActivePopover(); });
-    var confirmBtn = mkEl("button", "btn " + confirmClass, confirmLabel);
-    confirmBtn.addEventListener("click", function () {
-      if (confirmBtn.disabled) return;
-      confirmBtn.disabled = true;
-      closeActivePopover();
-      onConfirm();
-    });
-    actions.appendChild(cancelBtn);
-    actions.appendChild(confirmBtn);
-    modal.appendChild(actions);
-
-    backdrop.appendChild(modal);
-    backdrop.addEventListener("click", function (e) {
-      if (e.target === backdrop) closeActivePopover();
-    });
-    document.body.appendChild(backdrop);
-    __veld_activePopover = backdrop;
-
-    requestAnimationFrame(function () {
-      backdrop.classList.add(PREFIX + "confirm-backdrop-visible");
-    });
-  }
-
-  function showSubmitConfirm() {
-    if (__veld_comments.length === 0) {
-      toast("No comments to submit", true);
+      }).catch(function () {});
       return;
     }
-    showCenteredConfirm(
-      "Submit " + __veld_comments.length + " comment(s) across all pages?",
-      "Submit", "btn-primary", submitAll
-    );
+
+    // Add the message if not already present
+    if (event.message) {
+      var exists = false;
+      for (var i = 0; i < thread.messages.length; i++) {
+        if (thread.messages[i].id === event.message.id) { exists = true; break; }
+      }
+      if (!exists) {
+        thread.messages.push(event.message);
+        thread.updated_at = event.message.created_at || new Date().toISOString();
+      }
+    }
+
+    // Re-render pin (show red dot for unread)
+    addPin(thread);
+    updateBadge();
+
+    // If panel is open, re-render panel
+    if (__veld_panelOpen) renderPanel();
+
+    // Show agent reply toast
+    var preview = event.message ? event.message.body : "New reply";
+    showAgentReplyToast(event.thread_id, preview);
+
+    // Send browser notification if tab not focused
+    if (!document.hasFocus()) {
+      sendBrowserNotification("Agent replied", preview, event.thread_id);
+    }
   }
 
-  function showApproveConfirm() {
-    showCenteredConfirm(
-      "Approve without feedback? This signals to the waiting agent that everything looks good.",
-      "All Good \u2714", "btn-primary", approveAll
-    );
-  }
-
-  function approveAll() {
-    if (__veld_submitting) return;
-    __veld_submitting = true;
-    // Submit an empty batch — signals "all good, no feedback needed"
-    api("POST", "/submit")
-      .then(function () {
-        __veld_submitting = false;
-        __veld_comments = [];
-        renderPinsForCurrentPage();
+  function handleAgentThreadCreated(event) {
+    if (event.thread) {
+      var existing = findThread(event.thread.id);
+      if (!existing) {
+        __veld_threads.push(event.thread);
+        addPin(event.thread);
         updateBadge();
-        renderPanel();
-        toast("Approved \u2014 all good!");
-        if (__veld_panelOpen) togglePanel();
-        if (__veld_toolbarOpen) toggleToolbar();
-        __veld_waitActive = false;
-        __veld_waitId = null;
-        onWaitEnded();
-      })
-      .catch(function (err) { __veld_submitting = false; toast("Approve failed: " + err.message, true); });
+        if (__veld_panelOpen) renderPanel();
+
+        var preview = event.thread.messages && event.thread.messages[0] ? event.thread.messages[0].body : "New thread";
+        showAgentReplyToast(event.thread.id, preview);
+
+        if (!document.hasFocus()) {
+          sendBrowserNotification("Agent started a thread", preview, event.thread.id);
+        }
+      }
+    } else {
+      loadThreads();
+    }
   }
 
-  var __veld_submitting = false;
-  function submitAll() {
-    if (__veld_submitting) return;
-    __veld_submitting = true;
-    api("POST", "/submit")
-      .then(function () {
-        __veld_submitting = false;
-        __veld_comments = [];
-        renderPinsForCurrentPage();
-        updateBadge();
-        renderPanel();
-        toast("Feedback submitted!");
-        if (__veld_panelOpen) togglePanel();
-        if (__veld_toolbarOpen) toggleToolbar();
-        __veld_waitActive = false;
-        __veld_waitId = null;
-        onWaitEnded();
-      })
-      .catch(function (err) { __veld_submitting = false; toast("Submit failed: " + err.message, true); });
+  function handleThreadResolved(event) {
+    var thread = findThread(event.thread_id);
+    if (thread) {
+      thread.status = "resolved";
+      removePin(thread.id);
+      updateBadge();
+      if (__veld_panelOpen) renderPanel();
+    }
+  }
+
+  function handleThreadReopened(event) {
+    var thread = findThread(event.thread_id);
+    if (thread) {
+      thread.status = "open";
+      addPin(thread);
+      updateBadge();
+      if (__veld_panelOpen) renderPanel();
+    }
+  }
+
+  // ---------- listening module --------------------------------------------
+
+  function updateListeningModule() {
+    if (listeningModule) {
+      listeningModule.style.display = __veld_agentListening ? "flex" : "none";
+    }
+    if (fab) {
+      fab.classList.toggle(PREFIX + "fab-pulse", __veld_agentListening);
+    }
+  }
+
+  function sendAllGood() {
+    api("POST", "/session/end").then(function () {
+      toast("All Good signal sent!");
+      __veld_agentListening = false;
+      updateListeningModule();
+    }).catch(function (err) {
+      toast("Failed: " + err.message, true);
+    });
+  }
+
+  // ---------- agent reply toast -------------------------------------------
+
+  function showAgentReplyToast(threadId, preview) {
+    var t = mkEl("div", "agent-toast");
+    t.appendChild(mkEl("div", "agent-toast-header", "Agent replied"));
+    var body = mkEl("div", "agent-toast-body");
+    body.textContent = preview.length > 60 ? preview.substring(0, 60) + "..." : preview;
+    t.appendChild(body);
+    var link = mkEl("button", "agent-toast-link", "Go to thread \u2192");
+    link.addEventListener("click", function () {
+      t.remove();
+      openThreadInPanel(threadId);
+    });
+    t.appendChild(link);
+    document.body.appendChild(t);
+    requestAnimationFrame(function () { t.classList.add(PREFIX + "agent-toast-show"); });
+    setTimeout(function () {
+      t.classList.remove(PREFIX + "agent-toast-show");
+      setTimeout(function () { t.remove(); }, 300);
+    }, 8000);
+  }
+
+  // ---------- browser notifications ---------------------------------------
+
+  function sendBrowserNotification(title, body, threadId) {
+    if (!("Notification" in window) || Notification.permission !== "granted") return;
+    var n = new Notification(title, {
+      body: body,
+      icon: "/__veld__/feedback/logo.svg",
+      tag: "veld-thread-" + threadId
+    });
+    n.addEventListener("click", function () {
+      window.focus();
+      openThreadInPanel(threadId);
+      n.close();
+    });
+  }
+
+  // ---------- load threads (initial hydration) ----------------------------
+
+  function loadThreads() {
+    api("GET", "/threads").then(function (threads) {
+      __veld_threads = threads || [];
+      renderAllPins();
+      updateBadge();
+      if (__veld_panelOpen) renderPanel();
+    }).catch(function () {});
   }
 
   // ---------- keyboard shortcuts ------------------------------------------
@@ -1598,7 +1931,7 @@
       return;
     }
 
-    // Mod+Shift+C: toggle comments panel
+    // Mod+Shift+C: toggle panel
     if (mod && e.code === "KeyC") {
       e.preventDefault();
       togglePanel();
@@ -1617,187 +1950,6 @@
     }
   }
 
-  // ---------- fetch existing comments on load -----------------------------
-
-  function currentPageComments() {
-    var path = window.location.pathname;
-    return __veld_comments.filter(function (c) {
-      return (c.page_url || "").split("?")[0] === path;
-    });
-  }
-
-  function loadAllComments() {
-    api("GET", "/comments")
-      .then(function (data) {
-        if (Array.isArray(data)) {
-          __veld_comments = data;
-          updateBadge();
-          renderPinsForCurrentPage();
-          if (__veld_panelOpen) renderPanel();
-        }
-      })
-      .catch(function () {});
-  }
-
-  // ---------- wait-session polling ----------------------------------------
-
-  function pollWaitStatus() {
-    api("GET", "/wait-status")
-      .then(function (data) {
-        var wasWaiting = __veld_waitActive;
-        __veld_waitActive = !!(data && data.waiting);
-        var newId = (data && data.wait_id) || null;
-
-        if (__veld_waitActive && newId) {
-          // New or changed wait session?
-          if (newId !== __veld_waitId) {
-            __veld_waitId = newId;
-            // Only show modal if we haven't acknowledged this specific session.
-            var acked = null;
-            try { acked = sessionStorage.getItem("veld-wait-acked"); } catch (_) {}
-            // Check if we already reloaded for this wait session.
-            var reloaded = null;
-            try { reloaded = sessionStorage.getItem("veld-wait-reload"); } catch (_) {}
-            if (reloaded === newId) {
-              // Post-reload: show the modal now.
-              try { sessionStorage.removeItem("veld-wait-reload"); } catch (_) {}
-              onWaitStarted();
-            } else if (acked !== newId) {
-              // First detection: hard-reload so reviewer sees fresh page state.
-              try { sessionStorage.setItem("veld-wait-reload", newId); } catch (_) {}
-              location.reload();
-              return;
-            } else {
-              // Already acked — still pulse FAB + show cancel, but no modal.
-              if (fab) fab.classList.add(PREFIX + "fab-pulse");
-              if (toolBtnCancel) toolBtnCancel.style.display = "";
-            }
-          }
-        } else if (!__veld_waitActive && wasWaiting) {
-          __veld_waitId = null;
-          try { sessionStorage.removeItem("veld-wait-acked"); } catch (_) {}
-          onWaitEnded();
-        }
-      })
-      .catch(function () {});
-  }
-
-  function onWaitStarted() {
-    // Unhide overlay if it was hidden.
-    if (__veld_hidden) showOverlay();
-    // Show the notification modal.
-    showWaitModal();
-    // Fire browser notification.
-    sendBrowserNotification();
-    // Pulse the FAB to attract attention.
-    if (fab) fab.classList.add(PREFIX + "fab-pulse");
-    // Show cancel button in toolbar.
-    if (toolBtnCancel) toolBtnCancel.style.display = "";
-  }
-
-  function onWaitEnded() {
-    dismissWaitModal();
-    if (fab) fab.classList.remove(PREFIX + "fab-pulse");
-    if (toolBtnCancel) toolBtnCancel.style.display = "none";
-    __veld_notificationSent = false;
-    // Release screen capture stream — session is over.
-    stopCaptureStream();
-  }
-
-  function sendBrowserNotification() {
-    if (__veld_notificationSent) return;
-    if (!("Notification" in window)) return;
-    if (Notification.permission === "granted") {
-      fireNotification();
-    } else if (Notification.permission !== "denied") {
-      Notification.requestPermission().then(function (perm) {
-        if (perm === "granted") fireNotification();
-      });
-    }
-  }
-
-  function fireNotification() {
-    __veld_notificationSent = true;
-    var n = new Notification("Veld — Feedback Requested", {
-      body: "Someone is waiting for your feedback.",
-      icon: "/__veld__/feedback/logo.svg",
-      tag: "veld-feedback-wait"
-    });
-    n.addEventListener("click", function () {
-      window.focus();
-      n.close();
-    });
-  }
-
-  // -- wait modal ---------------------------------------------------------
-
-  function showWaitModal() {
-    if (__veld_waitModalEl) return;
-
-    var backdrop = mkEl("div", "wait-backdrop");
-    var modal = mkEl("div", "wait-modal");
-
-    var icon = mkEl("div", "wait-modal-icon");
-    icon.innerHTML = ICONS.logo;
-    modal.appendChild(icon);
-
-    var title = mkEl("div", "wait-modal-title", "Feedback Requested");
-    modal.appendChild(title);
-
-    var desc = mkEl("div", "wait-modal-desc", "An agent is waiting for your review. Take a look and share your thoughts.");
-    modal.appendChild(desc);
-
-    var actions = mkEl("div", "wait-modal-actions");
-
-    var diveBtn = mkEl("button", "btn btn-primary", "Let\u2019s dive in");
-    diveBtn.addEventListener("click", function () {
-      dismissWaitModal();
-      if (!__veld_toolbarOpen) toggleToolbar();
-    });
-
-    var cancelBtn = mkEl("button", "btn btn-danger", "Cancel feedback");
-    cancelBtn.addEventListener("click", function () {
-      dismissWaitModal();
-      cancelFeedbackSession();
-    });
-
-    actions.appendChild(diveBtn);
-    actions.appendChild(cancelBtn);
-    modal.appendChild(actions);
-    backdrop.appendChild(modal);
-    document.body.appendChild(backdrop);
-    __veld_waitModalEl = backdrop;
-
-    // Animate in.
-    requestAnimationFrame(function () {
-      backdrop.classList.add(PREFIX + "wait-backdrop-visible");
-    });
-  }
-
-  function dismissWaitModal() {
-    if (!__veld_waitModalEl) return;
-    // Remember that we acknowledged this specific wait session.
-    if (__veld_waitId) {
-      try { sessionStorage.setItem("veld-wait-acked", __veld_waitId); } catch (_) {}
-    }
-    __veld_waitModalEl.classList.remove(PREFIX + "wait-backdrop-visible");
-    var el = __veld_waitModalEl;
-    __veld_waitModalEl = null;
-    setTimeout(function () { el.remove(); }, 250);
-  }
-
-  function cancelFeedbackSession() {
-    api("POST", "/cancel")
-      .then(function () {
-        toast("Feedback session cancelled.");
-        // Immediately update local state — don't wait for next poll.
-        __veld_waitActive = false;
-        __veld_waitId = null;
-        onWaitEnded();
-      })
-      .catch(function (err) { toast("Cancel failed: " + err.message, true); });
-  }
-
   // ---------- SPA navigation detection ------------------------------------
 
   var __veld_lastPathname = window.location.pathname;
@@ -1806,7 +1958,7 @@
     var newPath = window.location.pathname;
     if (newPath !== __veld_lastPathname) {
       __veld_lastPathname = newPath;
-      renderPinsForCurrentPage();
+      renderAllPins();
       if (__veld_panelOpen) renderPanel();
     }
   }
@@ -1832,7 +1984,6 @@
     } catch (_) {}
 
     buildDOM();
-    updateBadge();
     restoreFabPos();
     clampFabToViewport();
 
@@ -1848,11 +1999,16 @@
     });
     window.addEventListener("popstate", onNavigate);
 
-    loadAllComments();
+    loadThreads();
+    pollEvents();
+    pollListenStatus();
+    setInterval(pollEvents, 3000);
+    setInterval(pollListenStatus, 5000);
 
-    // Poll for active wait sessions every 3 seconds.
-    pollWaitStatus();
-    setInterval(pollWaitStatus, 3000);
+    // Request notification permission
+    if ("Notification" in window && Notification.permission === "default") {
+      Notification.requestPermission();
+    }
   }
 
   if (document.readyState === "loading") {

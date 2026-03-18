@@ -5,12 +5,15 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::sync::Notify;
 use tracing::{info, warn};
-use veld_core::feedback::{FeedbackComment, FeedbackStore};
+use veld_core::feedback::{
+    Author, EventType, FeedbackStore, Message, Thread, ThreadOrigin, ThreadScope, ThreadStatus,
+    new_message, new_thread,
+};
 use veld_core::state::GlobalRegistry;
 
 #[path = "feedback_assets.rs"]
@@ -24,8 +27,8 @@ pub const FEEDBACK_PORT: u16 = 19899;
 // ---------------------------------------------------------------------------
 
 struct AppState {
-    /// Notifier for long-poll: signalled whenever a batch is submitted.
-    batch_notify: Notify,
+    /// Notifier for event polling: signalled whenever a new event is appended.
+    event_notify: Notify,
 }
 
 // ---------------------------------------------------------------------------
@@ -35,7 +38,7 @@ struct AppState {
 /// Start the feedback HTTP server on `127.0.0.1:FEEDBACK_PORT`.
 pub async fn run_feedback_server() {
     let state = Arc::new(AppState {
-        batch_notify: Notify::new(),
+        event_notify: Notify::new(),
     });
 
     let app = Router::new()
@@ -43,21 +46,25 @@ pub async fn run_feedback_server() {
         .route("/feedback/script.js", get(overlay_script))
         .route("/feedback/style.css", get(overlay_css))
         .route("/feedback/logo.svg", get(logo_svg))
-        // Feedback CRUD API.
-        .route("/feedback/api/comments", get(list_comments))
-        .route("/feedback/api/comments", post(create_comment))
-        .route("/feedback/api/comments/{id}", put(update_comment))
-        .route("/feedback/api/comments/{id}", delete(delete_comment))
-        // Screenshots.
+        // Thread API.
+        .route("/feedback/api/threads", get(list_threads))
+        .route("/feedback/api/threads", post(create_thread))
+        .route("/feedback/api/threads/{id}", get(get_thread))
+        .route(
+            "/feedback/api/threads/{id}/messages",
+            post(add_thread_message),
+        )
+        .route("/feedback/api/threads/{id}/resolve", post(resolve_thread))
+        .route("/feedback/api/threads/{id}/reopen", post(reopen_thread))
+        .route("/feedback/api/threads/{id}/seen", put(mark_thread_seen))
+        // Event API.
+        .route("/feedback/api/events", get(get_events))
+        // Session API (browser polls to show "Agent is listening").
+        .route("/feedback/api/session", get(get_session))
+        .route("/feedback/api/session/end", post(end_session))
+        // Screenshots (unchanged).
         .route("/feedback/api/screenshots/{id}", post(upload_screenshot))
         .route("/feedback/api/screenshots/{id}", get(get_screenshot))
-        // Submit / batches.
-        .route("/feedback/api/submit", post(submit_batch))
-        .route("/feedback/api/batches", get(list_batches))
-        .route("/feedback/api/batches/wait", get(wait_for_batch))
-        // Wait-session signalling (browser ↔ CLI).
-        .route("/feedback/api/wait-status", get(get_wait_status))
-        .route("/feedback/api/cancel", post(cancel_feedback))
         .with_state(state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], FEEDBACK_PORT));
@@ -83,19 +90,27 @@ pub async fn run_feedback_server() {
 struct RunQuery {
     run: Option<String>,
     project: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ThreadListQuery {
+    run: Option<String>,
+    project: Option<String>,
+    status: Option<String>,
     page_url: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct WaitQuery {
+struct EventQuery {
     run: Option<String>,
     project: Option<String>,
-    #[serde(default = "default_timeout")]
-    timeout_secs: u64,
+    #[serde(default)]
+    after: u64,
 }
 
-fn default_timeout() -> u64 {
-    300
+#[derive(Deserialize)]
+struct SeenBody {
+    seq: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -175,81 +190,189 @@ async fn logo_svg() -> Response {
 }
 
 // ---------------------------------------------------------------------------
-// Comment CRUD
+// Thread API
 // ---------------------------------------------------------------------------
 
-async fn list_comments(
+async fn list_threads(
     headers: axum::http::HeaderMap,
-    Query(q): Query<RunQuery>,
-) -> Result<Json<Vec<FeedbackComment>>, StatusCode> {
+    Query(q): Query<ThreadListQuery>,
+) -> Result<Json<Vec<Thread>>, StatusCode> {
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-    let mut comments = store
-        .get_comments()
+
+    let status_filter = match q.status.as_deref() {
+        Some("open") => Some(ThreadStatus::Open),
+        Some("resolved") => Some(ThreadStatus::Resolved),
+        _ => None,
+    };
+
+    let mut threads = store
+        .list_threads(status_filter)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Filter by page URL (pathname only) when requested by the overlay.
+    // Filter by page URL if requested.
     if let Some(ref page_url) = q.page_url {
         let pathname = page_url.split('?').next().unwrap_or(page_url);
-        comments.retain(|c| {
-            let comment_path = c.page_url.split('?').next().unwrap_or(&c.page_url);
-            comment_path == pathname
+        threads.retain(|t| match &t.scope {
+            ThreadScope::Element { page_url: pu, .. } | ThreadScope::Page { page_url: pu } => {
+                let tp = pu.split('?').next().unwrap_or(pu);
+                tp == pathname
+            }
+            ThreadScope::Global => true, // global threads always included
         });
     }
 
-    Ok(Json(comments))
+    Ok(Json(threads))
 }
 
-async fn create_comment(
+#[derive(Deserialize)]
+struct CreateThreadBody {
+    scope: ThreadScope,
+    #[serde(default)]
+    component_trace: Option<Vec<String>>,
+    message: String,
+    #[serde(default)]
+    screenshot: Option<String>,
+    #[serde(default)]
+    viewport_width: Option<u32>,
+    #[serde(default)]
+    viewport_height: Option<u32>,
+}
+
+async fn create_thread(
     headers: axum::http::HeaderMap,
-    Json(mut comment): Json<FeedbackComment>,
-) -> Result<(StatusCode, Json<FeedbackComment>), StatusCode> {
+    state: State<Arc<AppState>>,
+    Json(body): Json<CreateThreadBody>,
+) -> Result<(StatusCode, Json<Thread>), StatusCode> {
     let run_name = headers
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    // Ensure ID and timestamps.
-    if comment.id.is_empty() {
-        comment.id = uuid::Uuid::new_v4().to_string();
-    }
-    let now = chrono::Utc::now();
-    comment.created_at = now;
-    comment.updated_at = now;
+    let msg = new_message(Author::Human, &body.message, body.screenshot);
+    let thread = new_thread(
+        body.scope,
+        ThreadOrigin::Human,
+        body.component_trace,
+        body.viewport_width,
+        body.viewport_height,
+        msg,
+    );
 
     store
-        .save_comment(&comment)
+        .save_thread(&thread)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok((StatusCode::CREATED, Json(comment)))
+
+    store
+        .append_event(EventType::ThreadCreated {
+            thread: thread.clone(),
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok((StatusCode::CREATED, Json(thread)))
 }
 
-async fn update_comment(
+async fn get_thread(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-    Json(mut comment): Json<FeedbackComment>,
-) -> Result<Json<FeedbackComment>, StatusCode> {
+    Query(q): Query<RunQuery>,
+) -> Result<Json<Thread>, StatusCode> {
+    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
+
+    store
+        .get_thread(&id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Deserialize)]
+struct AddMessageBody {
+    body: String,
+    #[serde(default)]
+    screenshot: Option<String>,
+}
+
+async fn add_thread_message(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    state: State<Arc<AppState>>,
+    Json(body): Json<AddMessageBody>,
+) -> Result<(StatusCode, Json<Message>), StatusCode> {
     let run_name = headers
         .get("x-veld-run")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    comment.id = id;
-    comment.updated_at = chrono::Utc::now();
+    let msg = new_message(Author::Human, &body.body, body.screenshot);
 
-    if store
-        .update_comment(&comment)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        Ok(Json(comment))
-    } else {
-        Err(StatusCode::NOT_FOUND)
-    }
+    store
+        .add_message(&id, &msg)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    store
+        .append_event(EventType::HumanMessage {
+            thread_id: id,
+            message: msg.clone(),
+        })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok((StatusCode::CREATED, Json(msg)))
 }
 
-async fn delete_comment(
+async fn resolve_thread(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
+    state: State<Arc<AppState>>,
+) -> Result<Json<Thread>, StatusCode> {
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    let thread = store
+        .set_thread_status(&id, ThreadStatus::Resolved)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    store
+        .append_event(EventType::Resolved { thread_id: id })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok(Json(thread))
+}
+
+async fn reopen_thread(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    state: State<Arc<AppState>>,
+) -> Result<Json<Thread>, StatusCode> {
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    let thread = store
+        .set_thread_status(&id, ThreadStatus::Open)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    store
+        .append_event(EventType::Reopened { thread_id: id })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok(Json(thread))
+}
+
+async fn mark_thread_seen(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SeenBody>,
 ) -> Result<StatusCode, StatusCode> {
     let run_name = headers
         .get("x-veld-run")
@@ -257,18 +380,71 @@ async fn delete_comment(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    if store
-        .delete_comment(&id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    {
-        Ok(StatusCode::NO_CONTENT)
-    } else {
-        Err(StatusCode::NOT_FOUND)
-    }
+    store
+        .mark_thread_seen(&id, body.seq)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 // ---------------------------------------------------------------------------
-// Screenshots
+// Event API
+// ---------------------------------------------------------------------------
+
+async fn get_events(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<EventQuery>,
+) -> Result<Json<Vec<veld_core::feedback::Event>>, StatusCode> {
+    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
+
+    let events = store
+        .get_events_after(q.after)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(events))
+}
+
+// ---------------------------------------------------------------------------
+// Session API
+// ---------------------------------------------------------------------------
+
+async fn get_session(
+    headers: axum::http::HeaderMap,
+    Query(q): Query<RunQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
+
+    let listening = store
+        .is_listening(60)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(serde_json::json!({ "listening": listening })))
+}
+
+async fn end_session(
+    headers: axum::http::HeaderMap,
+    state: State<Arc<AppState>>,
+) -> Result<StatusCode, StatusCode> {
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    store
+        .append_event(EventType::SessionEnded)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    store
+        .end_session()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------
+// Screenshots (unchanged)
 // ---------------------------------------------------------------------------
 
 async fn upload_screenshot(
@@ -287,7 +463,7 @@ async fn upload_screenshot(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    // Validate: must look like PNG data and be reasonably sized (max 10 MB).
+    // Validate: max 10 MB.
     if body.len() > 10 * 1024 * 1024 {
         return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
@@ -323,96 +499,4 @@ async fn get_screenshot(
         data,
     )
         .into_response())
-}
-
-// ---------------------------------------------------------------------------
-// Batch submission
-// ---------------------------------------------------------------------------
-
-async fn submit_batch(
-    headers: axum::http::HeaderMap,
-    state: State<Arc<AppState>>,
-) -> Result<Json<veld_core::feedback::FeedbackBatch>, StatusCode> {
-    let run_name = headers
-        .get("x-veld-run")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    let batch = store
-        .submit_batch()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Notify any long-poll waiters.
-    state.batch_notify.notify_waiters();
-
-    Ok(Json(batch))
-}
-
-async fn list_batches(
-    headers: axum::http::HeaderMap,
-    Query(q): Query<RunQuery>,
-) -> Result<Json<Vec<veld_core::feedback::FeedbackBatch>>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-    let batches = store
-        .get_batches()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(batches))
-}
-
-async fn wait_for_batch(
-    headers: axum::http::HeaderMap,
-    Query(q): Query<WaitQuery>,
-    state: State<Arc<AppState>>,
-) -> Result<Json<Vec<veld_core::feedback::FeedbackBatch>>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-
-    let timeout = tokio::time::Duration::from_secs(q.timeout_secs.min(600));
-
-    // Wait for a notification or timeout.
-    let _ = tokio::time::timeout(timeout, state.batch_notify.notified()).await;
-
-    // Return all batches (the caller can filter by timestamp).
-    let batches = store
-        .get_batches()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(batches))
-}
-
-// ---------------------------------------------------------------------------
-// Wait-session signalling
-// ---------------------------------------------------------------------------
-
-/// Returns `{ "waiting": true/false, "wait_id": "..." }` for the overlay to poll.
-async fn get_wait_status(
-    headers: axum::http::HeaderMap,
-    Query(q): Query<RunQuery>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
-    let waiting = store.is_waiting();
-    let wait_id = if waiting { store.waiting_id() } else { None };
-    Ok(Json(
-        serde_json::json!({ "waiting": waiting, "wait_id": wait_id }),
-    ))
-}
-
-/// Reviewer cancels the feedback session.
-async fn cancel_feedback(
-    headers: axum::http::HeaderMap,
-    state: State<Arc<AppState>>,
-) -> Result<StatusCode, StatusCode> {
-    let run_name = headers
-        .get("x-veld-run")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    store
-        .cancel()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    // Notify waiters so the CLI picks up the cancellation quickly.
-    state.batch_notify.notify_waiters();
-
-    Ok(StatusCode::NO_CONTENT)
 }
