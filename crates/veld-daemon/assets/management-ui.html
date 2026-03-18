@@ -146,7 +146,7 @@ const $$ = (s, p) => (p||document).querySelectorAll(s);
 const content = $('#content');
 const statusDot = $('#status-dot');
 const statusText = $('#status-text');
-let lastFP = '';
+let lastFP = null; // null = never rendered (distinct from '' = empty data)
 
 // Per-run UI state (survives refreshes).
 const runState = {}; // key -> { tab, logInterval, logFilter, autoScroll, fetching, knownNodes, prevHtml, panelEl }
@@ -174,8 +174,9 @@ async function refresh(){
     if(!resp.ok) throw new Error(resp.status);
     const data=await resp.json();
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
+    const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
-    statusText.textContent=running>0?running+' running':'all idle';
+    statusText.textContent=running>0?running+' running':total>0?'all stopped':'no environments';
     const f=fp(data);
     if(f===lastFP) return;
     lastFP=f;
