@@ -14,6 +14,7 @@
   --red:#f06060;--red-bg:rgba(240,96,96,.1);
   --dim:#555870;
   --radius:8px;
+  --mono:'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
 }
 html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;background:var(--bg);color:var(--text)}
 body{min-height:100vh;padding:0}
@@ -47,7 +48,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .run{padding:12px 18px;border-bottom:1px solid var(--border)}
 .run:last-child{border-bottom:none}
 .run-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-.run-name{font-weight:500;font-size:13px;font-family:'SF Mono',SFMono-Regular,Menlo,monospace}
+.run-name{font-weight:500;font-size:13px;font-family:var(--mono)}
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
 .badge.running{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
@@ -60,12 +61,42 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .url-chip:hover{border-color:var(--accent);background:rgba(108,140,255,.06);text-decoration:none}
 .url-chip .label{color:var(--text2);margin-right:2px}
 
+/* log toggle */
+.log-toggle{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer;font-family:inherit;transition:color .15s,border-color .15s;margin-left:auto}
+.log-toggle:hover{color:var(--text);border-color:var(--text2)}
+.log-toggle.active{color:var(--accent);border-color:var(--accent)}
+
+/* log viewer */
+.log-panel{background:#0a0c12;border:1px solid var(--border);border-radius:6px;margin-top:10px;overflow:hidden}
+.log-panel-header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text2)}
+.log-panel-header .node-filter{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
+.log-panel-header .node-filter:focus{outline:none;border-color:var(--accent)}
+.log-scroll{max-height:400px;overflow-y:auto;overflow-x:auto;scroll-behavior:smooth}
+.log-lines{padding:8px 0;min-height:40px}
+.log-line{display:flex;padding:1px 12px;font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre}
+.log-line:hover{background:rgba(255,255,255,.03)}
+.log-line .ts{color:var(--dim);flex-shrink:0;margin-right:8px;user-select:none}
+.log-line .node-tag{flex-shrink:0;margin-right:8px;font-weight:600;user-select:none}
+.log-line .msg{color:var(--text);white-space:pre-wrap;word-break:break-all;min-width:0}
+.log-line .msg .veld-annotation{color:var(--accent)}
+.log-empty{padding:20px;text-align:center;color:var(--dim);font-size:12px}
+
+/* node tag colors (cycled) */
+.node-c0{color:#6c8cff}.node-c1{color:#3dd68c}.node-c2{color:#f0c040}.node-c3{color:#f06060}
+.node-c4{color:#c084fc}.node-c5{color:#22d3ee}.node-c6{color:#fb923c}.node-c7{color:#f472b6}
+
 /* no runs */
 .no-runs{padding:12px 18px;color:var(--text2);font-size:13px;font-style:italic}
 
 /* loading */
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+
+/* scrollbar */
+.log-scroll::-webkit-scrollbar{width:6px;height:6px}
+.log-scroll::-webkit-scrollbar-track{background:transparent}
+.log-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.log-scroll::-webkit-scrollbar-thumb:hover{background:var(--dim)}
 
 /* transitions */
 .fade-in{animation:fadeIn .2s ease}
@@ -97,6 +128,18 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   let lastJson = '';
+
+  // Track which runs have their log panel open + polling state.
+  const openLogs = {};  // runName -> { interval, filter, autoScroll }
+  const nodeColors = {};
+  let colorIndex = 0;
+
+  function getNodeColor(node) {
+    if (!(node in nodeColors)) {
+      nodeColors[node] = 'node-c' + (colorIndex++ % 8);
+    }
+    return nodeColors[node];
+  }
 
   async function refresh() {
     try {
@@ -140,7 +183,6 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         html += '<div class="no-runs">No runs</div>';
       }
 
-      // Sort runs: running first, then by name
       const runs = proj.runs.slice().sort((a, b) => {
         if (a.status === 'running' && b.status !== 'running') return -1;
         if (b.status === 'running' && a.status !== 'running') return 1;
@@ -148,10 +190,12 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       });
 
       for (const run of runs) {
+        const isOpen = run.name in openLogs;
         html += '<div class="run">';
         html += '<div class="run-header">';
         html += '<span class="run-name">' + esc(run.name) + '</span>';
         html += '<span class="badge ' + esc(run.status) + '">' + esc(run.status) + '</span>';
+        html += '<button class="log-toggle' + (isOpen ? ' active' : '') + '" onclick="window.__veldToggleLogs(\'' + esc(run.name) + '\')">' + (isOpen ? 'Hide logs' : 'Logs') + '</button>';
         html += '</div>';
 
         const urlEntries = Object.entries(run.urls || {}).sort((a, b) => a[0].localeCompare(b[0]));
@@ -166,11 +210,173 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
           }
           html += '</div>';
         }
+
+        if (isOpen) {
+          html += '<div class="log-panel" id="logpanel-' + esc(run.name) + '">';
+          html += '<div class="log-panel-header">';
+          html += '<span>Logs</span>';
+          html += '<select class="node-filter" onchange="window.__veldFilterNode(\'' + esc(run.name) + '\', this.value)">';
+          html += '<option value="">All nodes</option>';
+          html += '</select>';
+          html += '</div>';
+          html += '<div class="log-scroll" id="logscroll-' + esc(run.name) + '">';
+          html += '<div class="log-lines" id="loglines-' + esc(run.name) + '">';
+          html += '<div class="log-empty">Loading logs...</div>';
+          html += '</div>';
+          html += '</div>';
+          html += '</div>';
+        }
+
         html += '</div>';
       }
       html += '</div>';
     }
     content.innerHTML = html;
+
+    // Re-fetch logs for any open panels after re-render.
+    for (const runName of Object.keys(openLogs)) {
+      fetchLogs(runName);
+    }
+  }
+
+  // --- Log panel logic ---
+
+  window.__veldToggleLogs = function(runName) {
+    if (runName in openLogs) {
+      clearInterval(openLogs[runName].interval);
+      delete openLogs[runName];
+    } else {
+      openLogs[runName] = { interval: null, filter: '', autoScroll: true };
+      openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
+    }
+    // Force re-render to show/hide panel.
+    lastJson = '';
+    refresh();
+  };
+
+  window.__veldFilterNode = function(runName, node) {
+    if (openLogs[runName]) {
+      openLogs[runName].filter = node;
+      fetchLogs(runName);
+    }
+  };
+
+  async function fetchLogs(runName) {
+    const state = openLogs[runName];
+    if (!state || state.fetching) return;
+    state.fetching = true;
+
+    const filter = state.filter ? '&node=' + encodeURIComponent(state.filter) : '';
+    try {
+      const resp = await fetch('/api/logs/' + encodeURIComponent(runName) + '?lines=300' + filter);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      renderLogs(runName, data);
+    } catch (e) { /* ignore */ }
+    finally { if (openLogs[runName]) openLogs[runName].fetching = false; }
+  }
+
+  // Track previous log HTML per run to skip no-op DOM updates.
+  const prevLogHtml = {};
+
+  function renderLogs(runName, data) {
+    const linesEl = document.getElementById('loglines-' + runName);
+    const scrollEl = document.getElementById('logscroll-' + runName);
+    if (!linesEl || !scrollEl) return;
+
+    // Update node filter dropdown.
+    const panel = document.getElementById('logpanel-' + runName);
+    if (panel) {
+      const select = panel.querySelector('.node-filter');
+      if (select && select.options.length <= 1) {
+        const nodes = data.nodes.map(n => n.node).sort();
+        for (const n of nodes) {
+          const opt = document.createElement('option');
+          opt.value = n;
+          opt.textContent = n;
+          select.appendChild(opt);
+        }
+      }
+    }
+
+    // Merge all lines with node tags, preserving timestamp order.
+    const merged = [];
+    for (const nodeData of data.nodes) {
+      for (const line of nodeData.lines) {
+        const ts = extractTs(line);
+        merged.push({ node: nodeData.node, variant: nodeData.variant, raw: line, ts: ts || '' });
+      }
+    }
+    // Sort by timestamp (ISO 8601 sorts correctly). Lines without timestamps sort first.
+    merged.sort((a, b) => {
+      const cmp = a.ts.localeCompare(b.ts);
+      if (cmp !== 0) return cmp;
+      return a.node.localeCompare(b.node);
+    });
+
+    if (!merged.length) {
+      linesEl.innerHTML = '<div class="log-empty">No log output yet</div>';
+      prevLogHtml[runName] = '';
+      return;
+    }
+
+    let html = '';
+    const multiNode = data.nodes.length > 1;
+    for (const entry of merged) {
+      const colorClass = getNodeColor(entry.node);
+      const msg = extractMsg(entry.raw);
+      const isAnnotation = msg.startsWith('[VELD]');
+
+      html += '<div class="log-line">';
+      if (entry.ts) {
+        html += '<span class="ts">' + esc(formatTs(entry.ts)) + '</span>';
+      }
+      if (multiNode) {
+        html += '<span class="node-tag ' + colorClass + '">' + esc(entry.node) + '</span>';
+      }
+      html += '<span class="msg">' + (isAnnotation ? '<span class="veld-annotation">' + esc(msg) + '</span>' : esc(msg)) + '</span>';
+      html += '</div>';
+    }
+
+    // Skip DOM update if nothing changed.
+    if (html === prevLogHtml[runName]) return;
+    prevLogHtml[runName] = html;
+
+    // Check if user has scrolled up (not at bottom).
+    const isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 40;
+
+    linesEl.innerHTML = html;
+
+    // Auto-scroll after browser has laid out the new content.
+    if (isAtBottom) {
+      requestAnimationFrame(() => { scrollEl.scrollTop = scrollEl.scrollHeight; });
+    }
+  }
+
+  function extractTs(line) {
+    if (line.charAt(0) !== '[') return null;
+    const end = line.indexOf(']');
+    if (end < 0) return null;
+    return line.substring(1, end);
+  }
+
+  function extractMsg(line) {
+    const end = line.indexOf(']');
+    if (end < 0 || line.charAt(0) !== '[') return line;
+    return line.substring(end + 2); // skip "] "
+  }
+
+  function formatTs(ts) {
+    // Show just HH:MM:SS.mmm from an ISO timestamp.
+    const i = ts.indexOf('T');
+    if (i < 0) return ts;
+    let time = ts.substring(i + 1);
+    // Trim timezone suffix.
+    time = time.replace(/[Z+].*$/, '');
+    // Keep up to milliseconds.
+    const dot = time.indexOf('.');
+    if (dot >= 0) time = time.substring(0, dot + 4);
+    return time;
   }
 
   function shortUrl(url) {
@@ -181,9 +387,8 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   }
 
   function esc(s) {
-    const d = document.createElement('div');
-    d.textContent = s;
-    return d.innerHTML;
+    if (s == null) return '';
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
   }
 
   refresh();
