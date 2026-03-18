@@ -26,8 +26,8 @@ _restart-services:
     if launchctl list dev.veld.daemon &>/dev/null; then
         launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
     fi
-    if sudo launchctl list dev.veld.helper &>/dev/null; then
-        sudo launchctl kickstart -k "system/dev.veld.helper" 2>/dev/null || true
+    if sudo -n launchctl list dev.veld.helper &>/dev/null 2>&1; then
+        sudo -n launchctl kickstart -k "system/dev.veld.helper" 2>/dev/null || true
     fi
     echo "Done."
 

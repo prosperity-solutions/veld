@@ -62,7 +62,11 @@ This blocks until a feedback event arrives. The browser overlay shows "Agent is 
 
 ### 3. Process events
 
-The listen command returns a single JSON event:
+The listen command returns a single JSON event. The `event` field tells you
+the type. For `human_message`, `resolved`, and `reopened` events, a
+`thread_context` field is included with the full thread (all messages,
+component trace, scope) so you have complete context without extra CLI calls.
+For `thread_created`, the full thread is already in the `thread` field.
 
 ```json
 {
@@ -84,7 +88,20 @@ The listen command returns a single JSON event:
 }
 ```
 
-Event types you'll receive:
+For follow-up messages, the event includes both the new message and the full thread:
+
+```json
+{
+  "seq": 3,
+  "event": "human_message",
+  "thread_id": "abc12345-...",
+  "message": { "id": "...", "author": "human", "body": "Actually it's fine on desktop but broken below 768px" },
+  "thread_context": { "id": "abc12345-...", "messages": ["...all messages..."], "..." },
+  "timestamp": "..."
+}
+```
+
+Event types you'll receive (check the `event` field):
 
 | Event | Meaning | Action |
 |-------|---------|--------|
@@ -211,9 +228,9 @@ You:
    "The gradient looks good but the text is hard to read against it"
    Components: App > DashboardLayout > Header
 6. You adjust the text color/contrast
-7. Run: veld feedback answer --name dev --thread t_1 "Increased contrast — white text with subtle shadow"
+7. Run: veld feedback answer --name dev --thread a3f8b2c1 "Increased contrast — white text with subtle shadow"
 8. Run: veld feedback listen --name dev --json --after 1
-9. Event: resolved (thread t_1)
+9. Event: resolved (thread a3f8b2c1)
 10. Run: veld feedback listen --name dev --json --after 2
 11. Event: session_ended
 12. Done.

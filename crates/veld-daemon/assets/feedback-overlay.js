@@ -1157,12 +1157,6 @@
     return null;
   }
 
-  function getThreadLabel(thread) {
-    if (thread.scope.type === "element") return thread.scope.selector || "Element";
-    if (thread.scope.type === "page") return "Page: " + thread.scope.page_url;
-    return "Global";
-  }
-
   function getThreadPageUrl(thread) {
     if (thread.scope.type === "element") return thread.scope.page_url;
     if (thread.scope.type === "page") return thread.scope.page_url;
@@ -1546,22 +1540,6 @@
     return container;
   }
 
-  // ---------- thread popover (from pin click) -----------------------------
-
-  function showThreadPopover(threadId, anchor) {
-    closeActivePopover();
-    var thread = findThread(threadId);
-    if (!thread) return;
-
-    var popover = mkEl("div", "popover");
-    popover.appendChild(renderThreadMessages(thread));
-    document.body.appendChild(popover);
-    __veld_activePopover = popover;
-
-    var rect = anchor.getBoundingClientRect();
-    positionPopover(popover, { x: rect.left + window.scrollX, y: rect.top + window.scrollY, width: rect.width, height: rect.height });
-  }
-
   // ---------- mark seen ---------------------------------------------------
 
   function markThreadSeen(threadId) {
@@ -1720,6 +1698,19 @@
         break;
       case "reopened":
         handleThreadReopened(event);
+        break;
+      case "agent_listening":
+        __veld_agentListening = true;
+        updateListeningModule();
+        break;
+      case "agent_stopped":
+        __veld_agentListening = false;
+        updateListeningModule();
+        toast("Agent stopped listening");
+        break;
+      case "session_ended":
+        __veld_agentListening = false;
+        updateListeningModule();
         break;
       case "thread_created":
       case "human_message":

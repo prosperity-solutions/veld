@@ -14,9 +14,10 @@ struct ListenOutput {
     #[serde(flatten)]
     event: Event,
     /// The full thread with all messages, for context.
-    /// Null for session_ended events.
+    /// Named `thread_context` to avoid collision with the `thread` field
+    /// in ThreadCreated/AgentThreadCreated event types.
     #[serde(skip_serializing_if = "Option::is_none")]
-    thread: Option<Thread>,
+    thread_context: Option<Thread>,
 }
 
 // ---------------------------------------------------------------------------
@@ -205,8 +206,9 @@ async fn run_listen(name: Option<String>, after: Option<u64>, timeout: u64, json
                     )
                 }) {
                     // Resolve the full thread for context.
+                    // Skip for ThreadCreated — the full thread is already in the event.
                     let thread = match &event.event_type {
-                        EventType::ThreadCreated { thread } => Some(thread.clone()),
+                        EventType::ThreadCreated { .. } => None,
                         EventType::HumanMessage { thread_id, .. }
                         | EventType::Resolved { thread_id }
                         | EventType::Reopened { thread_id } => {
@@ -216,7 +218,7 @@ async fn run_listen(name: Option<String>, after: Option<u64>, timeout: u64, json
                     };
 
                     if json {
-                        let output = ListenOutput { event, thread };
+                        let output = ListenOutput { event, thread_context: thread };
                         println!("{}", serde_json::to_string_pretty(&output).unwrap());
                     } else {
                         print_event(&event, thread.as_ref(), &store);
