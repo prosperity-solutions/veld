@@ -303,10 +303,23 @@ impl Orchestrator {
                 .await;
 
                 // Pre-populate all_outputs so every node can resolve
-                // ${nodes.X.url} and ${nodes.X.port} references.
+                // ${nodes.X.url}, ${nodes.X.port}, and URL piece references.
                 let mut node_out = HashMap::new();
                 node_out.insert("port".to_owned(), port.to_string());
                 node_out.insert("url".to_owned(), https_url.clone());
+                // Expose individual URL location pieces (mirrors the Web URL API).
+                node_out.insert("url.hostname".to_owned(), node_url.clone());
+                node_out.insert(
+                    "url.host".to_owned(),
+                    if self.https_port == 443 {
+                        node_url.clone()
+                    } else {
+                        format!("{}:{}", node_url, self.https_port)
+                    },
+                );
+                node_out.insert("url.origin".to_owned(), https_url.clone());
+                node_out.insert("url.scheme".to_owned(), "https".to_owned());
+                node_out.insert("url.port".to_owned(), self.https_port.to_string());
                 all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
                 all_outputs
                     .entry(sel.node.clone())
@@ -539,6 +552,19 @@ impl Orchestrator {
         ctx.set_builtin("port", port.to_string());
         node_state.url = Some(https_url.clone());
         ctx.set_builtin("url", https_url.clone());
+        // Expose individual URL location pieces (mirrors the Web URL API).
+        ctx.set_builtin("url.hostname", node_url.clone());
+        ctx.set_builtin(
+            "url.host",
+            if self.https_port == 443 {
+                node_url.clone()
+            } else {
+                format!("{}:{}", node_url, self.https_port)
+            },
+        );
+        ctx.set_builtin("url.origin", https_url.clone());
+        ctx.set_builtin("url.scheme", "https".to_owned());
+        ctx.set_builtin("url.port", self.https_port.to_string());
 
         self.emit(ProgressEvent::PortAllocated {
             node: sel.node.clone(),
