@@ -442,16 +442,16 @@ document.addEventListener('click',e=>{
   const openUrl=e.target.closest('[data-action="open-url"]');
   if(openUrl){window.open(openUrl.dataset.url,'_blank','noopener');return;}
   if(e.target.closest('[data-action="copy-path"]')&&card){const btn=e.target.closest('[data-action="copy-path"]');navigator.clipboard.writeText(card.dataset.path).then(()=>{btn.classList.add('ok');btn.textContent='Copied';setTimeout(()=>{btn.classList.remove('ok');btn.textContent='Copy path';},1500);});return;}
-  if(e.target.closest('[data-action="open-terminal"]')&&card){fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:card.dataset.path})});return;}
+  if(e.target.closest('[data-action="open-terminal"]')&&card){fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({path:card.dataset.path})});return;}
   if(e.target.closest('[data-action="stop-env"]')&&card){
     if(!confirm('Stop environment "'+card.dataset.run+'"?'))return;
     const btn=e.target.closest('[data-action="stop-env"]');btn.textContent='Stopping...';btn.disabled=true;
-    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_root:card.dataset.path})});
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/stop',{method:'POST',headers:{'X-Veld-Request':'1'}});
     return;
   }
   if(e.target.closest('[data-action="restart-env"]')&&card){
     const btn=e.target.closest('[data-action="restart-env"]');btn.textContent='Restarting...';btn.disabled=true;
-    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/restart',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({project_root:card.dataset.path})});
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/restart',{method:'POST',headers:{'X-Veld-Request':'1'}});
     return;
   }
 });

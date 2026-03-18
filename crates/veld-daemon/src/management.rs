@@ -226,6 +226,32 @@ async fn get_logs(
 }
 
 // ---------------------------------------------------------------------------
+// CSRF protection
+// ---------------------------------------------------------------------------
+
+/// Check that a mutating request has the `X-Veld-Request` header.
+/// Browsers won't send custom headers in cross-origin simple requests,
+/// forcing a CORS preflight that is blocked (no Access-Control-Allow-Origin).
+fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+    if headers.get("x-veld-request").is_some() {
+        Ok(())
+    } else {
+        Err(StatusCode::FORBIDDEN)
+    }
+}
+
+/// Validate that a run name contains only safe characters.
+fn validate_run_name(name: &str) -> Result<(), StatusCode> {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Open terminal
 // ---------------------------------------------------------------------------
 
@@ -234,10 +260,22 @@ struct OpenTerminalBody {
     path: String,
 }
 
-async fn open_terminal(Json(body): Json<OpenTerminalBody>) -> StatusCode {
+async fn open_terminal(
+    headers: axum::http::HeaderMap,
+    Json(body): Json<OpenTerminalBody>,
+) -> StatusCode {
+    if let Err(s) = check_csrf(&headers) {
+        return s;
+    }
+
+    // Validate the path belongs to a registered project.
+    let registry = match GlobalRegistry::load() {
+        Ok(r) => r,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+    };
     let path = std::path::Path::new(&body.path);
-    if !path.is_dir() {
-        return StatusCode::BAD_REQUEST;
+    if !registry.projects.values().any(|e| e.project_root == path) {
+        return StatusCode::FORBIDDEN;
     }
 
     let result = if cfg!(target_os = "macos") {
@@ -247,14 +285,19 @@ async fn open_terminal(Json(body): Json<OpenTerminalBody>) -> StatusCode {
             .arg(&body.path)
             .spawn()
     } else {
-        // Try common Linux terminal emulators.
         std::process::Command::new("xdg-open")
             .arg(&body.path)
             .spawn()
     };
 
     match result {
-        Ok(_) => StatusCode::NO_CONTENT,
+        Ok(mut child) => {
+            // Reap child in background to avoid zombies.
+            tokio::spawn(async move {
+                let _ = child.wait();
+            });
+            StatusCode::NO_CONTENT
+        }
         Err(e) => {
             warn!("failed to open terminal at {}: {e}", body.path);
             StatusCode::INTERNAL_SERVER_ERROR
@@ -266,41 +309,56 @@ async fn open_terminal(Json(body): Json<OpenTerminalBody>) -> StatusCode {
 // Stop / Restart
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
-struct EnvActionBody {
-    project_root: String,
-}
-
 async fn stop_environment(
+    headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
-    Json(body): Json<EnvActionBody>,
 ) -> StatusCode {
-    run_veld_command(&body.project_root, &["stop", "--name", &run_name]).await
+    if let Err(s) = check_csrf(&headers) {
+        return s;
+    }
+    if let Err(s) = validate_run_name(&run_name) {
+        return s;
+    }
+    run_veld_command(&run_name, "stop").await
 }
 
 async fn restart_environment(
+    headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
-    Json(body): Json<EnvActionBody>,
 ) -> StatusCode {
-    run_veld_command(&body.project_root, &["restart", "--name", &run_name]).await
+    if let Err(s) = check_csrf(&headers) {
+        return s;
+    }
+    if let Err(s) = validate_run_name(&run_name) {
+        return s;
+    }
+    run_veld_command(&run_name, "restart").await
 }
 
-/// Spawn `veld <args>` in the given project directory via a login shell.
-/// This ensures the user's PATH and environment (nvm, rbenv, etc.) are
-/// available, since the daemon runs under launchd with a minimal env.
-async fn run_veld_command(project_root: &str, args: &[&str]) -> StatusCode {
-    let path = std::path::Path::new(project_root);
-    if !path.is_dir() {
-        return StatusCode::BAD_REQUEST;
-    }
+/// Spawn `veld <action> --name <run>` in the project directory via a login
+/// shell. The project_root is looked up from the GlobalRegistry (never
+/// supplied by the client) to prevent directory traversal.
+async fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
+    let registry = match GlobalRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("failed to load registry for {action}: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let project_root = match find_project_for_run(&registry, run_name) {
+        Some(p) => p,
+        None => return StatusCode::NOT_FOUND,
+    };
 
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let veld_args = args
-        .iter()
-        .map(|a| shell_escape(a))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let cmd = format!("cd {} && veld {}", shell_escape(project_root), veld_args);
+    let cmd = format!(
+        "cd {} && veld {} --name {}",
+        shell_escape(&project_root.to_string_lossy()),
+        shell_escape(action),
+        shell_escape(run_name),
+    );
 
     match std::process::Command::new(&shell)
         .args(["-l", "-c", &cmd])
@@ -308,9 +366,15 @@ async fn run_veld_command(project_root: &str, args: &[&str]) -> StatusCode {
         .stderr(std::process::Stdio::null())
         .spawn()
     {
-        Ok(_) => StatusCode::ACCEPTED,
+        Ok(mut child) => {
+            // Reap child in background to avoid zombies.
+            tokio::spawn(async move {
+                let _ = child.wait();
+            });
+            StatusCode::ACCEPTED
+        }
         Err(e) => {
-            warn!("failed to run veld via login shell: {e}");
+            warn!("failed to run veld {action}: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
