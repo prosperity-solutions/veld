@@ -20,8 +20,8 @@ html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;f
 body{min-height:100vh;padding:0}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
+button{font-family:inherit;cursor:pointer}
 
-/* layout */
 .shell{max-width:960px;margin:0 auto;padding:24px 20px}
 header{display:flex;align-items:baseline;gap:12px;margin-bottom:32px}
 header .wordmark{height:22px;flex-shrink:0;align-self:baseline;position:relative;top:2px}
@@ -33,23 +33,16 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
 .dot.off{background:var(--dim)}
 
-/* empty */
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
 .empty p{font-size:13px;line-height:1.6}
 .empty code{background:var(--surface2);padding:2px 8px;border-radius:4px;font-size:13px}
 
-/* project card */
-.project{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
-.project-header{display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:1px solid var(--border)}
-.project-name{font-weight:600;font-size:15px}
-.project-path{color:var(--text2);font-size:12px;margin-left:auto;max-width:50%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;text-align:right}
-
-/* run */
-.run{padding:12px 18px;border-bottom:1px solid var(--border)}
-.run:last-child{border-bottom:none}
-.run-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
-.run-name{font-weight:500;font-size:13px;font-family:var(--mono)}
+/* card */
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
+.card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
+.card-project{font-weight:600;font-size:15px}
+.card-run{font-family:var(--mono);font-size:13px;font-weight:500;margin-left:auto}
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
 .badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
@@ -57,63 +50,72 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.failed{background:var(--red-bg);color:var(--red)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
 
-/* urls */
-.urls{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.url-group{display:inline-flex;align-items:center;gap:0;border-radius:6px;overflow:hidden;border:1px solid var(--border)}
-.url-open{display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:4px 10px;font-size:12px;color:var(--text);text-decoration:none;transition:background .15s}
-.url-open:hover{background:rgba(108,140,255,.06);text-decoration:none}
-.url-open .label{color:var(--text2);margin-right:2px}
-.url-copy{display:inline-flex;align-items:center;background:var(--surface2);border-left:1px solid var(--border);padding:4px 8px;cursor:pointer;color:var(--text2);font-size:11px;transition:background .15s,color .15s}
-.url-copy:hover{background:rgba(108,140,255,.06);color:var(--accent)}
-.url-copy.copied{color:var(--green)}
+.card-sub{display:flex;align-items:center;gap:8px;padding:0 18px 12px;font-size:12px;color:var(--text2)}
+.card-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;max-width:60%}
+.card-actions{display:flex;gap:4px;margin-left:auto}
+.card-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 8px;border-radius:5px;transition:color .15s,border-color .15s}
+.card-btn:hover{color:var(--text);border-color:var(--text2)}
+.card-btn.ok{color:var(--green);border-color:var(--green)}
 
-/* node table */
-.node-table{width:100%;margin-top:8px;font-size:12px;border-collapse:collapse}
-.node-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 8px 4px 0;border-bottom:1px solid var(--border)}
-.node-table td{padding:4px 8px 4px 0;vertical-align:middle}
-.node-table .node-name{font-family:var(--mono);font-weight:500}
-.node-table .node-variant{color:var(--text2)}
-.node-table .badge{font-size:10px;padding:1px 6px}
-.node-table .node-pid{color:var(--dim);font-family:var(--mono);font-size:11px}
+/* tabs */
+.tabs{display:flex;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
+.tab{flex:1;text-align:center;padding:8px 0;font-size:12px;font-weight:500;color:var(--text2);background:none;border:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
+.tab:hover{color:var(--text)}
+.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
 
-/* log toggle */
-.log-toggle{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer;font-family:inherit;transition:color .15s,border-color .15s;margin-left:auto}
-.log-toggle:hover{color:var(--text);border-color:var(--text2)}
-.log-toggle.active{color:var(--accent);border-color:var(--accent)}
+/* tab panels */
+.tab-panel{display:none;padding:14px 18px}
+.tab-panel.active{display:block}
 
-/* log viewer */
-.log-panel{background:#0a0c12;border:1px solid var(--border);border-radius:6px;margin-top:10px;overflow:hidden}
-.log-panel-header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--border);font-size:11px;color:var(--text2)}
-.log-panel-header .node-filter{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
-.log-panel-header .node-filter:focus{outline:none;border-color:var(--accent)}
-.log-scroll{max-height:400px;overflow-y:auto;overflow-x:auto;scroll-behavior:smooth}
+/* urls tab */
+.url-table{width:100%;font-size:12px;border-collapse:collapse}
+.url-table td{padding:5px 0;vertical-align:middle}
+.url-table .url-node{font-family:var(--mono);font-weight:500;width:30%;padding-right:12px}
+.url-table .url-link{color:var(--accent)}
+.url-table .url-link:hover{text-decoration:underline}
+.url-table .url-actions{text-align:right;white-space:nowrap}
+.url-table .url-actions button{background:none;border:none;color:var(--text2);font-size:11px;padding:2px 6px;cursor:pointer;border-radius:3px}
+.url-table .url-actions button:hover{color:var(--accent);background:rgba(108,140,255,.06)}
+.url-table .url-actions button.ok{color:var(--green)}
+.url-empty{color:var(--dim);font-size:12px;padding:8px 0}
+
+/* debug tab */
+.debug-table{width:100%;font-size:12px;border-collapse:collapse}
+.debug-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 8px 4px 0;border-bottom:1px solid var(--border)}
+.debug-table td{padding:5px 8px 5px 0;vertical-align:middle}
+.debug-table .nm{font-family:var(--mono);font-weight:500}
+.debug-table .dim{color:var(--text2)}
+.debug-table .badge{font-size:10px;padding:1px 6px}
+.debug-table .pid{color:var(--dim);font-family:var(--mono);font-size:11px}
+
+/* log tab */
+.log-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:11px;color:var(--text2);border-bottom:1px solid var(--border)}
+.log-bar select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
+.log-bar select:focus{outline:none;border-color:var(--accent)}
+.autoscroll-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:10px;padding:2px 8px;border-radius:4px;margin-left:auto;transition:color .15s,border-color .15s}
+.autoscroll-btn.on{color:var(--green);border-color:var(--green)}
+.log-scroll{max-height:450px;overflow-y:auto;overflow-x:auto}
 .log-lines{padding:8px 0;min-height:40px}
 .log-line{display:flex;padding:1px 12px;font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre}
 .log-line:hover{background:rgba(255,255,255,.03)}
 .log-line .ts{color:var(--dim);flex-shrink:0;margin-right:8px;user-select:none}
 .log-line .node-tag{flex-shrink:0;margin-right:8px;font-weight:600;user-select:none}
 .log-line .msg{color:var(--text);white-space:pre-wrap;word-break:break-all;min-width:0}
-.log-line .msg .veld-annotation{color:var(--accent)}
+.log-line .msg .ann{color:var(--accent)}
 .log-empty{padding:20px;text-align:center;color:var(--dim);font-size:12px}
 
-/* node tag colors (cycled) */
 .node-c0{color:#6c8cff}.node-c1{color:#3dd68c}.node-c2{color:#f0c040}.node-c3{color:#f06060}
 .node-c4{color:#c084fc}.node-c5{color:#22d3ee}.node-c6{color:#fb923c}.node-c7{color:#f472b6}
 
-/* no runs */
-.no-runs{padding:12px 18px;color:var(--text2);font-size:13px;font-style:italic}
-
-/* loading */
+.no-runs{padding:14px 18px;color:var(--text2);font-size:13px;font-style:italic}
 .spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 
-/* scrollbar */
 .log-scroll::-webkit-scrollbar{width:6px;height:6px}
 .log-scroll::-webkit-scrollbar-track{background:transparent}
 .log-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 .log-scroll::-webkit-scrollbar-thumb:hover{background:var(--dim)}
 
-/* transitions */
 .fade-in{animation:fadeIn .2s ease}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
 </style>
@@ -135,358 +137,366 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       <span id="status-text">connecting...</span>
     </div>
   </header>
-  <main id="content">
-    <div class="empty"><div class="spinner"></div></div>
-  </main>
+  <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
 <script>
 (function(){
-  const content = document.getElementById('content');
-  const statusDot = document.getElementById('status-dot');
-  const statusText = document.getElementById('status-text');
-  let lastFingerprint = '';
+const $ = (s, p) => (p||document).querySelector(s);
+const $$ = (s, p) => (p||document).querySelectorAll(s);
+const content = $('#content');
+const statusDot = $('#status-dot');
+const statusText = $('#status-text');
+let lastFP = '';
 
-  const openLogs = {};    // runName -> { interval, filter, fetching }
-  const logPanels = {};   // runName -> detached DOM element
-  const prevLogHtml = {}; // runName -> last rendered HTML
-  const knownNodes = {};  // runName -> Set of node names (persists across filtered fetches)
-  const nodeColors = {};
-  let colorIndex = 0;
+// Per-run UI state (survives refreshes).
+const runState = {}; // key -> { tab, logInterval, logFilter, autoScroll, fetching, knownNodes, prevHtml, panelEl }
+const nodeColors = {};
+let colorIdx = 0;
+function nc(n){ if(!(n in nodeColors)) nodeColors[n]='node-c'+(colorIdx++%8); return nodeColors[n]; }
 
-  function getNodeColor(node) {
-    if (!(node in nodeColors)) nodeColors[node] = 'node-c' + (colorIndex++ % 8);
-    return nodeColors[node];
+function fp(data){
+  return data.projects.map(p=>{
+    const rs=p.runs.map(r=>{
+      const u=Object.keys(r.urls||{}).sort().map(k=>k+'='+r.urls[k]).join('|');
+      const n=(r.nodes||[]).map(x=>x.name+':'+x.status).sort().join('|');
+      return r.name+':'+r.status+':'+u+':'+n;
+    }).sort().join(';');
+    return p.name+'/'+rs;
+  }).sort().join('\n');
+}
+
+// Unique key for a run within a project.
+function rk(proj,run){ return proj+'::'+run; }
+
+async function refresh(){
+  try{
+    const resp=await fetch('/api/environments');
+    if(!resp.ok) throw new Error(resp.status);
+    const data=await resp.json();
+    const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
+    statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
+    statusText.textContent=running>0?running+' running':'all idle';
+    const f=fp(data);
+    if(f===lastFP) return;
+    lastFP=f;
+    render(data);
+  }catch(e){
+    statusDot.innerHTML='<span class="dot off"></span>';
+    statusText.textContent='disconnected';
   }
+}
 
-  function fingerprint(data) {
-    return data.projects.map(p => {
-      const runs = p.runs.map(r => {
-        const urls = Object.keys(r.urls || {}).sort().map(k => k + '=' + r.urls[k]).join('|');
-        const nodes = (r.nodes || []).map(n => n.name + ':' + n.status).sort().join('|');
-        return r.name + ':' + r.status + ':' + urls + ':' + nodes;
-      }).sort().join(';');
-      return p.name + '/' + runs;
-    }).sort().join('\n');
+function render(data){
+  if(!data.projects.length){
+    content.innerHTML='<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
+    return;
   }
-
-  async function refresh() {
-    try {
-      const resp = await fetch('/api/environments');
-      if (!resp.ok) throw new Error(resp.status);
-      const data = await resp.json();
-
-      const running = data.projects.reduce((n, p) => n + p.runs.filter(r => r.status === 'running').length, 0);
-      statusDot.innerHTML = running > 0 ? '<span class="dot"></span>' : '<span class="dot off"></span>';
-      statusText.textContent = running > 0 ? running + ' running' : 'all idle';
-
-      const fp = fingerprint(data);
-      if (fp === lastFingerprint) return;
-      lastFingerprint = fp;
-      render(data);
-    } catch (e) {
-      statusDot.innerHTML = '<span class="dot off"></span>';
-      statusText.textContent = 'disconnected';
-    }
+  // Detach log panels.
+  for(const k of Object.keys(runState)){
+    const s=runState[k];
+    if(s.panelEl&&s.panelEl.parentNode) s.panelEl.parentNode.removeChild(s.panelEl);
   }
-
-  function render(data) {
-    if (!data.projects.length) {
-      content.innerHTML =
-        '<div class="empty fade-in">' +
-          '<h2>No environments yet</h2>' +
-          '<p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p>' +
-        '</div>';
-      return;
-    }
-
-    for (const rn of Object.keys(logPanels)) {
-      const p = logPanels[rn];
-      if (p.parentNode) p.parentNode.removeChild(p);
-    }
-
-    let html = '';
-    for (const proj of data.projects) {
-      html += '<div class="project fade-in">';
-      html += '<div class="project-header">';
-      html += '<span class="project-name">' + esc(proj.name) + '</span>';
-      html += '<span class="project-path" title="' + esc(proj.project_root) + '">' + esc(proj.project_root) + '</span>';
-      html += '</div>';
-
-      if (!proj.runs.length) {
-        html += '<div class="no-runs">No runs</div>';
-      }
-
-      const runs = proj.runs.slice().sort((a, b) => {
-        if (a.status === 'running' && b.status !== 'running') return -1;
-        if (b.status === 'running' && a.status !== 'running') return 1;
-        return a.name.localeCompare(b.name);
-      });
-
-      for (const run of runs) {
-        const isOpen = run.name in openLogs;
-        html += '<div class="run" data-run-container="' + esc(run.name) + '">';
-        html += '<div class="run-header">';
-        html += '<span class="run-name">' + esc(run.name) + '</span>';
-        html += '<span class="badge ' + esc(run.status) + '">' + esc(run.status) + '</span>';
-        html += '<button class="log-toggle' + (isOpen ? ' active' : '') + '" data-run="' + esc(run.name) + '" data-action="toggle-logs">' + (isOpen ? 'Hide logs' : 'Logs') + '</button>';
-        html += '</div>';
-
-        // URL chips with copy + open
-        const urlEntries = Object.entries(run.urls || {}).sort((a, b) => a[0].localeCompare(b[0]));
-        if (urlEntries.length && run.status === 'running') {
-          html += '<div class="urls">';
-          for (const [node, url] of urlEntries) {
-            const label = node.split(':')[0];
-            html += '<span class="url-group">';
-            html += '<a class="url-open" href="' + esc(url) + '" target="_blank" rel="noopener">';
-            html += '<span class="label">' + esc(label) + '</span>' + esc(shortUrl(url));
-            html += '</a>';
-            html += '<span class="url-copy" data-action="copy-url" data-url="' + esc(url) + '" title="Copy URL">&#x2398;</span>';
-            html += '</span>';
-          }
-          html += '</div>';
-        }
-
-        // Node health table
-        const nodes = run.nodes || [];
-        if (nodes.length) {
-          html += '<table class="node-table"><thead><tr>';
-          html += '<th>Node</th><th>Variant</th><th>Status</th><th>PID</th>';
-          html += '</tr></thead><tbody>';
-          for (const n of nodes) {
-            html += '<tr>';
-            html += '<td class="node-name">' + esc(n.name) + '</td>';
-            html += '<td class="node-variant">' + esc(n.variant) + '</td>';
-            html += '<td><span class="badge ' + esc(n.status) + '">' + esc(n.status) + '</span></td>';
-            html += '<td class="node-pid">' + (n.pid ? n.pid : '') + '</td>';
-            html += '</tr>';
-          }
-          html += '</tbody></table>';
-        }
-
-        html += '</div>';
-      }
-      html += '</div>';
-    }
-    content.innerHTML = html;
-
-    for (const rn of Object.keys(logPanels)) {
-      const c = document.querySelector('[data-run-container="' + CSS.escape(rn) + '"]');
-      if (c) c.appendChild(logPanels[rn]);
-    }
-  }
-
-  // --- Log panel lifecycle ---
-
-  function createLogPanel(runName) {
-    const panel = document.createElement('div');
-    panel.className = 'log-panel';
-    panel.setAttribute('data-logpanel', runName);
-    panel.innerHTML =
-      '<div class="log-panel-header">' +
-        '<span>Logs</span>' +
-        '<select class="node-filter" data-run="' + esc(runName) + '" data-action="filter-node">' +
-          '<option value="">All nodes</option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="log-scroll" data-logscroll="' + runName + '">' +
-        '<div class="log-lines" data-loglines="' + runName + '">' +
-          '<div class="log-empty">Loading logs...</div>' +
-        '</div>' +
-      '</div>';
-    return panel;
-  }
-
-  // --- Event delegation ---
-
-  document.addEventListener('click', function(e) {
-    const btn = e.target.closest('[data-action="toggle-logs"]');
-    if (btn) {
-      const runName = btn.dataset.run;
-      const container = btn.closest('[data-run-container]');
-      if (!container) return;
-
-      if (runName in openLogs) {
-        clearInterval(openLogs[runName].interval);
-        delete openLogs[runName];
-        delete prevLogHtml[runName];
-        delete knownNodes[runName];
-        if (logPanels[runName]) { logPanels[runName].remove(); delete logPanels[runName]; }
-        btn.classList.remove('active');
-        btn.textContent = 'Logs';
-      } else {
-        openLogs[runName] = { interval: null, filter: '', fetching: false };
-        knownNodes[runName] = new Set();
-        const panel = createLogPanel(runName);
-        logPanels[runName] = panel;
-        container.appendChild(panel);
-        btn.classList.add('active');
-        btn.textContent = 'Hide logs';
-        fetchLogs(runName);
-        openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
-      }
-      return;
-    }
-
-    const copyBtn = e.target.closest('[data-action="copy-url"]');
-    if (copyBtn) {
-      const url = copyBtn.dataset.url;
-      navigator.clipboard.writeText(url).then(() => {
-        copyBtn.classList.add('copied');
-        copyBtn.innerHTML = '&#x2713;';
-        setTimeout(() => { copyBtn.classList.remove('copied'); copyBtn.innerHTML = '&#x2398;'; }, 1500);
-      });
-    }
-  });
-
-  document.addEventListener('change', function(e) {
-    const sel = e.target.closest('[data-action="filter-node"]');
-    if (sel) {
-      const runName = sel.dataset.run;
-      if (openLogs[runName]) {
-        openLogs[runName].filter = sel.value;
-        delete prevLogHtml[runName];
-        fetchLogs(runName);
-      }
-    }
-  });
-
-  // --- Log fetching and rendering ---
-
-  async function fetchLogs(runName) {
-    const state = openLogs[runName];
-    if (!state || state.fetching) return;
-    state.fetching = true;
-
-    try {
-      // Always fetch unfiltered first to discover all nodes for the dropdown.
-      const resp = await fetch('/api/logs/' + encodeURIComponent(runName) + '?lines=300');
-      if (!resp.ok) return;
-      const fullData = await resp.json();
-
-      // Update known nodes from unfiltered response.
-      for (const nd of fullData.nodes) {
-        if (!knownNodes[runName]) knownNodes[runName] = new Set();
-        knownNodes[runName].add(nd.node);
-      }
-      updateNodeDropdown(runName);
-
-      // Apply client-side filter.
-      const filter = state.filter;
-      const data = filter
-        ? { nodes: fullData.nodes.filter(n => n.node === filter) }
-        : fullData;
-      renderLogs(runName, data, fullData.nodes.length);
-    } catch (e) { /* ignore */ }
-    finally { if (openLogs[runName]) openLogs[runName].fetching = false; }
-  }
-
-  function updateNodeDropdown(runName) {
-    const panel = logPanels[runName];
-    if (!panel) return;
-    const select = panel.querySelector('.node-filter');
-    if (!select) return;
-
-    const nodes = Array.from(knownNodes[runName] || []).sort();
-    const current = Array.from(select.options).slice(1).map(o => o.value);
-    if (nodes.join(',') === current.join(',')) return;
-
-    const savedValue = select.value;
-    while (select.options.length > 1) select.remove(1);
-    for (const n of nodes) {
-      const opt = document.createElement('option');
-      opt.value = n;
-      opt.textContent = n;
-      select.appendChild(opt);
-    }
-    select.value = savedValue;
-  }
-
-  function renderLogs(runName, data, totalNodeCount) {
-    const panel = logPanels[runName];
-    if (!panel) return;
-    const linesEl = panel.querySelector('[data-loglines]');
-    const scrollEl = panel.querySelector('[data-logscroll]');
-    if (!linesEl || !scrollEl) return;
-
-    const merged = [];
-    for (const nodeData of data.nodes) {
-      for (const line of nodeData.lines) {
-        const ts = extractTs(line);
-        merged.push({ node: nodeData.node, raw: line, ts: ts || '' });
-      }
-    }
-    merged.sort((a, b) => {
-      const cmp = a.ts.localeCompare(b.ts);
-      if (cmp !== 0) return cmp;
-      return a.node.localeCompare(b.node);
+  let h='';
+  for(const proj of data.projects){
+    const runs=proj.runs.slice().sort((a,b)=>{
+      if(a.status==='running'&&b.status!=='running') return -1;
+      if(b.status==='running'&&a.status!=='running') return 1;
+      return a.name.localeCompare(b.name);
     });
-
-    if (!merged.length) {
-      linesEl.innerHTML = '<div class="log-empty">No log output yet</div>';
-      prevLogHtml[runName] = '';
-      return;
+    for(const run of runs){
+      const key=rk(proj.name,run.name);
+      const st=runState[key]||{tab:'urls'};
+      h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
+      // Top header
+      h+='<div class="card-top">';
+      h+='<span class="card-project">'+esc(proj.name)+'</span>';
+      h+='<span class="card-run">'+esc(run.name)+'</span>';
+      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
+      h+='</div>';
+      // Sub header
+      h+='<div class="card-sub">';
+      h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
+      h+='<span class="card-actions">';
+      h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
+      h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
+      h+='</span>';
+      h+='</div>';
+      // Tabs
+      h+='<div class="tabs">';
+      h+='<button class="tab'+(st.tab==='urls'?' active':'')+'" data-action="tab" data-tab="urls">URLs</button>';
+      h+='<button class="tab'+(st.tab==='debug'?' active':'')+'" data-action="tab" data-tab="debug">Debug</button>';
+      h+='<button class="tab'+(st.tab==='logs'?' active':'')+'" data-action="tab" data-tab="logs">Logs</button>';
+      h+='</div>';
+      // URLs panel
+      h+='<div class="tab-panel'+(st.tab==='urls'?' active':'')+'" data-panel="urls">';
+      const urls=Object.entries(run.urls||{}).sort((a,b)=>a[0].localeCompare(b[0]));
+      if(urls.length){
+        h+='<table class="url-table">';
+        for(const [node,url] of urls){
+          h+='<tr><td class="url-node">'+esc(node.split(':')[0])+'</td>';
+          h+='<td><a class="url-link" href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a></td>';
+          h+='<td class="url-actions">';
+          h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';
+          h+='<button data-action="open-url" data-url="'+esc(url)+'">Open</button>';
+          h+='</td></tr>';
+        }
+        h+='</table>';
+      } else {
+        h+='<div class="url-empty">No URLs available</div>';
+      }
+      h+='</div>';
+      // Debug panel
+      h+='<div class="tab-panel'+(st.tab==='debug'?' active':'')+'" data-panel="debug">';
+      const nodes=run.nodes||[];
+      if(nodes.length){
+        h+='<table class="debug-table"><thead><tr><th>Node</th><th>Variant</th><th>Status</th><th>PID</th><th>URL</th></tr></thead><tbody>';
+        for(const n of nodes){
+          h+='<tr><td class="nm">'+esc(n.name)+'</td>';
+          h+='<td class="dim">'+esc(n.variant)+'</td>';
+          h+='<td><span class="badge '+esc(n.status)+'">'+esc(n.status)+'</span></td>';
+          h+='<td class="pid">'+(n.pid||'')+'</td>';
+          h+='<td>'+(n.url?'<a class="url-link" href="'+esc(n.url)+'" target="_blank" rel="noopener">'+esc(shortUrl(n.url))+'</a>':'')+'</td>';
+          h+='</tr>';
+        }
+        h+='</tbody></table>';
+      } else { h+='<div class="url-empty">No node info</div>'; }
+      h+='</div>';
+      // Logs panel placeholder (actual log DOM is managed separately)
+      h+='<div class="tab-panel'+(st.tab==='logs'?' active':'')+'" data-panel="logs" data-loghost="'+esc(key)+'"></div>';
+      h+='</div>';
     }
+  }
+  content.innerHTML=h;
 
-    let html = '';
-    const multiNode = totalNodeCount > 1;
-    for (const entry of merged) {
-      const colorClass = getNodeColor(entry.node);
-      const ts = entry.ts;
-      const msg = extractMsg(entry.raw);
-      const isAnnotation = msg.startsWith('[VELD]');
-
-      html += '<div class="log-line">';
-      if (ts) html += '<span class="ts">' + esc(formatTs(ts)) + '</span>';
-      if (multiNode) html += '<span class="node-tag ' + colorClass + '">' + esc(entry.node) + '</span>';
-      html += '<span class="msg">' + (isAnnotation ? '<span class="veld-annotation">' + esc(msg) + '</span>' : esc(msg)) + '</span>';
-      html += '</div>';
-    }
-
-    if (html === prevLogHtml[runName]) return;
-    prevLogHtml[runName] = html;
-
-    const isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 40;
-    linesEl.innerHTML = html;
-    if (isAtBottom) {
-      requestAnimationFrame(() => { scrollEl.scrollTop = scrollEl.scrollHeight; });
+  // Re-attach log panels & start/stop polling based on active tab.
+  for(const k of Object.keys(runState)){
+    const s=runState[k];
+    const host=$('[data-loghost="'+CSS.escape(k)+'"]');
+    if(host&&s.panelEl) host.appendChild(s.panelEl);
+    // Start polling if logs tab is active.
+    if(s.tab==='logs'&&!s.logInterval){
+      startLogPolling(k);
     }
   }
+}
 
-  function extractTs(line) {
-    if (line.charAt(0) !== '[') return null;
-    const end = line.indexOf(']');
-    if (end < 0) return null;
-    return line.substring(1, end);
+// --- Log panel ---
+
+function ensureLogPanel(key,runName){
+  let s=runState[key];
+  if(!s){ s=runState[key]={tab:'logs'}; }
+  if(s.panelEl) return s;
+  s.autoScroll=true;
+  s.knownNodes=new Set();
+  s.prevHtml='';
+  s.fetching=false;
+  s.logFilter='';
+  const el=document.createElement('div');
+  el.innerHTML=
+    '<div class="log-bar">'+
+      '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
+      '<button class="autoscroll-btn on" data-action="autoscroll">Auto-scroll ON</button>'+
+    '</div>'+
+    '<div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div>';
+  s.panelEl=el;
+  // Detect manual scroll.
+  const scroll=el.querySelector('.log-scroll');
+  scroll.addEventListener('scroll',()=>{
+    const atBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<40;
+    if(!atBottom&&s.autoScroll){
+      s.autoScroll=false;
+      updateAutoScrollBtn(el,false);
+    }
+  });
+  return s;
+}
+
+function updateAutoScrollBtn(el,on){
+  const btn=el.querySelector('.autoscroll-btn');
+  if(!btn) return;
+  btn.classList.toggle('on',on);
+  btn.textContent=on?'Auto-scroll ON':'Auto-scroll OFF';
+}
+
+function startLogPolling(key){
+  const s=runState[key];
+  if(!s||s.logInterval) return;
+  const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;
+  if(!runName) return;
+  ensureLogPanel(key,runName);
+  const host=$('[data-loghost="'+CSS.escape(key)+'"]');
+  if(host&&s.panelEl&&!s.panelEl.parentNode) host.appendChild(s.panelEl);
+  fetchLogs(key,runName);
+  s.logInterval=setInterval(()=>fetchLogs(key,runName),2000);
+}
+
+function stopLogPolling(key){
+  const s=runState[key];
+  if(!s) return;
+  if(s.logInterval){ clearInterval(s.logInterval); s.logInterval=null; }
+}
+
+async function fetchLogs(key,runName){
+  const s=runState[key];
+  if(!s||s.fetching) return;
+  s.fetching=true;
+  try{
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=300');
+    if(!resp.ok) return;
+    const data=await resp.json();
+    for(const nd of data.nodes){ s.knownNodes.add(nd.node); }
+    updateNodeDropdown(s);
+    const filtered=s.logFilter?{nodes:data.nodes.filter(n=>n.node===s.logFilter)}:data;
+    renderLogs(key,filtered,data.nodes.length);
+  }catch(e){}
+  finally{ if(runState[key]) runState[key].fetching=false; }
+}
+
+function updateNodeDropdown(s){
+  if(!s.panelEl) return;
+  const sel=s.panelEl.querySelector('.node-filter');
+  if(!sel) return;
+  const nodes=Array.from(s.knownNodes).sort();
+  const cur=Array.from(sel.options).slice(1).map(o=>o.value);
+  if(nodes.join(',')==cur.join(',')) return;
+  const v=sel.value;
+  while(sel.options.length>1) sel.remove(1);
+  for(const n of nodes){ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); }
+  sel.value=v;
+}
+
+function renderLogs(key,data,totalNodes){
+  const s=runState[key];
+  if(!s||!s.panelEl) return;
+  const linesEl=s.panelEl.querySelector('.log-lines');
+  const scrollEl=s.panelEl.querySelector('.log-scroll');
+  if(!linesEl||!scrollEl) return;
+
+  const merged=[];
+  for(const nd of data.nodes){
+    for(const line of nd.lines){
+      merged.push({node:nd.node,raw:line,ts:extractTs(line)||''});
+    }
+  }
+  merged.sort((a,b)=>{ const c=a.ts.localeCompare(b.ts); return c!==0?c:a.node.localeCompare(b.node); });
+
+  if(!merged.length){ linesEl.innerHTML='<div class="log-empty">No log output yet</div>'; s.prevHtml=''; return; }
+
+  let h='';
+  const multi=totalNodes>1;
+  for(const e of merged){
+    const msg=extractMsg(e.raw);
+    const isAnn=msg.startsWith('[VELD]');
+    h+='<div class="log-line">';
+    if(e.ts) h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
+    if(multi) h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+'</span>';
+    h+='<span class="msg">'+(isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg))+'</span></div>';
   }
 
-  function extractMsg(line) {
-    const end = line.indexOf(']');
-    if (end < 0 || line.charAt(0) !== '[') return line;
-    return line.substring(end + 2);
+  if(h===s.prevHtml) return;
+  s.prevHtml=h;
+  linesEl.innerHTML=h;
+  if(s.autoScroll) scrollEl.scrollTop=scrollEl.scrollHeight;
+}
+
+// --- Event delegation ---
+
+document.addEventListener('click',e=>{
+  const card=e.target.closest('.card');
+
+  // Tab switching
+  const tabBtn=e.target.closest('[data-action="tab"]');
+  if(tabBtn&&card){
+    const key=card.dataset.key;
+    const tab=tabBtn.dataset.tab;
+    let s=runState[key]; if(!s){ s=runState[key]={}; }
+    s.tab=tab;
+    $$('.tab',card).forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+    $$('.tab-panel',card).forEach(p=>p.classList.toggle('active',p.dataset.panel===tab));
+    if(tab==='logs'){
+      ensureLogPanel(key,card.dataset.run);
+      const host=$('[data-loghost="'+CSS.escape(key)+'"]');
+      if(host&&s.panelEl&&!s.panelEl.parentNode) host.appendChild(s.panelEl);
+      s.autoScroll=true;
+      if(s.panelEl) updateAutoScrollBtn(s.panelEl,true);
+      startLogPolling(key);
+    } else {
+      stopLogPolling(key);
+    }
+    return;
   }
 
-  function formatTs(ts) {
-    const i = ts.indexOf('T');
-    if (i < 0) return ts;
-    let time = ts.substring(i + 1);
-    time = time.replace(/[Z+].*$/, '');
-    const dot = time.indexOf('.');
-    if (dot >= 0) time = time.substring(0, dot + 4);
-    return time;
+  // Auto-scroll toggle
+  if(e.target.closest('[data-action="autoscroll"]')&&card){
+    const s=runState[card.dataset.key];
+    if(s){
+      s.autoScroll=!s.autoScroll;
+      updateAutoScrollBtn(s.panelEl,s.autoScroll);
+      if(s.autoScroll){
+        const sc=s.panelEl?.querySelector('.log-scroll');
+        if(sc) sc.scrollTop=sc.scrollHeight;
+      }
+    }
+    return;
   }
 
-  function shortUrl(url) {
-    try { return new URL(url).hostname; } catch { return url; }
+  // Copy URL
+  const copyUrl=e.target.closest('[data-action="copy-url"]');
+  if(copyUrl){
+    navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{
+      copyUrl.classList.add('ok'); copyUrl.textContent='Copied';
+      setTimeout(()=>{ copyUrl.classList.remove('ok'); copyUrl.textContent='Copy'; },1500);
+    });
+    return;
   }
 
-  function esc(s) {
-    if (s == null) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  // Open URL
+  const openUrl=e.target.closest('[data-action="open-url"]');
+  if(openUrl){ window.open(openUrl.dataset.url,'_blank','noopener'); return; }
+
+  // Copy path
+  if(e.target.closest('[data-action="copy-path"]')&&card){
+    const btn=e.target.closest('[data-action="copy-path"]');
+    navigator.clipboard.writeText(card.dataset.path).then(()=>{
+      btn.classList.add('ok'); btn.textContent='Copied';
+      setTimeout(()=>{ btn.classList.remove('ok'); btn.textContent='Copy path'; },1500);
+    });
+    return;
   }
 
-  refresh();
-  setInterval(refresh, 3000);
+  // Open in terminal
+  if(e.target.closest('[data-action="open-terminal"]')&&card){
+    fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:card.dataset.path})});
+    return;
+  }
+});
+
+document.addEventListener('change',e=>{
+  const sel=e.target.closest('[data-action="log-filter"]');
+  if(!sel) return;
+  const card=sel.closest('.card');
+  if(!card) return;
+  const key=card.dataset.key;
+  const s=runState[key];
+  if(s){
+    s.logFilter=sel.value;
+    s.prevHtml='';
+    s.autoScroll=true;
+    if(s.panelEl) updateAutoScrollBtn(s.panelEl,true);
+    fetchLogs(key,card.dataset.run);
+  }
+});
+
+// --- Helpers ---
+
+function extractTs(l){ if(l.charAt(0)!=='[') return null; const e=l.indexOf(']'); return e<0?null:l.substring(1,e); }
+function extractMsg(l){ const e=l.indexOf(']'); if(e<0||l.charAt(0)!=='[') return l; return l.substring(e+2); }
+function fmtTs(ts){ const i=ts.indexOf('T'); if(i<0) return ts; let t=ts.substring(i+1).replace(/[Z+].*$/,''); const d=t.indexOf('.'); if(d>=0) t=t.substring(0,d+4); return t; }
+function shortUrl(u){ try{return new URL(u).hostname;}catch{return u;} }
+function esc(s){ if(s==null) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
+refresh();
+setInterval(refresh,3000);
 })();
 </script>
 </body>

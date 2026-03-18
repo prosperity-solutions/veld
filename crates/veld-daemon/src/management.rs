@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use axum::extract::{Path, Query};
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
@@ -24,6 +24,7 @@ pub fn routes() -> Router {
         .route("/", get(dashboard))
         .route("/api/environments", get(list_environments))
         .route("/api/logs/{run}", get(get_logs))
+        .route("/api/open-terminal", post(open_terminal))
 }
 
 // ---------------------------------------------------------------------------
@@ -220,4 +221,41 @@ async fn get_logs(
 
     nodes.sort_by(|a, b| a.node.cmp(&b.node));
     Ok(Json(LogResponse { nodes }))
+}
+
+// ---------------------------------------------------------------------------
+// Open terminal
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct OpenTerminalBody {
+    path: String,
+}
+
+async fn open_terminal(Json(body): Json<OpenTerminalBody>) -> StatusCode {
+    let path = std::path::Path::new(&body.path);
+    if !path.is_dir() {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    let result = if cfg!(target_os = "macos") {
+        std::process::Command::new("open")
+            .arg("-a")
+            .arg("Terminal")
+            .arg(&body.path)
+            .spawn()
+    } else {
+        // Try common Linux terminal emulators.
+        std::process::Command::new("xdg-open")
+            .arg(&body.path)
+            .spawn()
+    };
+
+    match result {
+        Ok(_) => StatusCode::NO_CONTENT,
+        Err(e) => {
+            warn!("failed to open terminal at {}: {e}", body.path);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
 }
