@@ -560,7 +560,10 @@ mod tests {
         assert_eq!(all.len(), 1);
 
         // Filter by status.
-        assert_eq!(store.list_threads(Some(ThreadStatus::Open)).unwrap().len(), 1);
+        assert_eq!(
+            store.list_threads(Some(ThreadStatus::Open)).unwrap().len(),
+            1
+        );
         assert_eq!(
             store
                 .list_threads(Some(ThreadStatus::Resolved))
@@ -605,10 +608,15 @@ mod tests {
 
         let t = make_thread("Color is off");
         store.save_thread(&t).unwrap();
-        assert_eq!(store.get_thread(&t.id).unwrap().unwrap().status, ThreadStatus::Open);
+        assert_eq!(
+            store.get_thread(&t.id).unwrap().unwrap().status,
+            ThreadStatus::Open
+        );
 
         // Resolve.
-        store.set_thread_status(&t.id, ThreadStatus::Resolved).unwrap();
+        store
+            .set_thread_status(&t.id, ThreadStatus::Resolved)
+            .unwrap();
         assert_eq!(
             store.get_thread(&t.id).unwrap().unwrap().status,
             ThreadStatus::Resolved
@@ -616,7 +624,10 @@ mod tests {
 
         // Reopen.
         store.set_thread_status(&t.id, ThreadStatus::Open).unwrap();
-        assert_eq!(store.get_thread(&t.id).unwrap().unwrap().status, ThreadStatus::Open);
+        assert_eq!(
+            store.get_thread(&t.id).unwrap().unwrap().status,
+            ThreadStatus::Open
+        );
 
         // Filter.
         let resolved = store.list_threads(Some(ThreadStatus::Resolved)).unwrap();
@@ -719,11 +730,22 @@ mod tests {
         let t = make_thread("Feedback");
         store.save_thread(&t).unwrap();
 
-        assert!(store.get_thread(&t.id).unwrap().unwrap().last_human_seen_seq.is_none());
+        assert!(
+            store
+                .get_thread(&t.id)
+                .unwrap()
+                .unwrap()
+                .last_human_seen_seq
+                .is_none()
+        );
 
         store.mark_thread_seen(&t.id, 5).unwrap();
         assert_eq!(
-            store.get_thread(&t.id).unwrap().unwrap().last_human_seen_seq,
+            store
+                .get_thread(&t.id)
+                .unwrap()
+                .unwrap()
+                .last_human_seen_seq,
             Some(5)
         );
     }

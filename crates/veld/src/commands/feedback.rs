@@ -218,7 +218,10 @@ async fn run_listen(name: Option<String>, after: Option<u64>, timeout: u64, json
                     };
 
                     if json {
-                        let output = ListenOutput { event, thread_context: thread };
+                        let output = ListenOutput {
+                            event,
+                            thread_context: thread,
+                        };
                         println!("{}", serde_json::to_string_pretty(&output).unwrap());
                     } else {
                         print_event(&event, thread.as_ref(), &store);
@@ -282,7 +285,10 @@ async fn run_answer(name: Option<String>, thread_id: &str, body: &str) -> i32 {
         return 1;
     }
 
-    output::print_info(&format!("Replied to thread {}", &thread_id[..8.min(thread_id.len())]));
+    output::print_info(&format!(
+        "Replied to thread {}",
+        &thread_id[..8.min(thread_id.len())]
+    ));
     0
 }
 
@@ -503,7 +509,11 @@ fn print_thread_context(thread: &veld_core::feedback::Thread, store: &FeedbackSt
         "  Thread: {} ({} message(s), {})",
         &thread.id[..8.min(thread.id.len())],
         thread.messages.len(),
-        if thread.status == ThreadStatus::Open { "open" } else { "resolved" },
+        if thread.status == ThreadStatus::Open {
+            "open"
+        } else {
+            "resolved"
+        },
     );
     for msg in &thread.messages {
         let author = match msg.author {
@@ -572,11 +582,7 @@ fn print_thread(thread: &veld_core::feedback::Thread) {
             Author::Human => "human",
             Author::Agent => "agent",
         };
-        println!(
-            "  [{}] {}",
-            output::dim(author),
-            msg.body,
-        );
+        println!("  [{}] {}", output::dim(author), msg.body,);
     }
     println!();
 }

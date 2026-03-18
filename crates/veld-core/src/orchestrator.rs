@@ -988,7 +988,11 @@ impl Orchestrator {
     async fn cleanup_stale_run(&mut self, run_name: &str) {
         // Always clear stale feedback data so a reused run name starts fresh,
         // even if the run was already removed from state.
-        let feedback_dir = self.project_root.join(".veld").join("feedback").join(run_name);
+        let feedback_dir = self
+            .project_root
+            .join(".veld")
+            .join("feedback")
+            .join(run_name);
         if feedback_dir.exists() {
             tracing::info!(run_name, "clearing stale feedback data");
             let _ = std::fs::remove_dir_all(&feedback_dir);
