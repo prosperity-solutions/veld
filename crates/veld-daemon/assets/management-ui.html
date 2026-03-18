@@ -195,7 +195,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         html += '<div class="run-header">';
         html += '<span class="run-name">' + esc(run.name) + '</span>';
         html += '<span class="badge ' + esc(run.status) + '">' + esc(run.status) + '</span>';
-        html += '<button class="log-toggle' + (isOpen ? ' active' : '') + '" onclick="window.__veldToggleLogs(\'' + esc(run.name) + '\')">' + (isOpen ? 'Hide logs' : 'Logs') + '</button>';
+        html += '<button class="log-toggle' + (isOpen ? ' active' : '') + '" data-run="' + esc(run.name) + '" data-action="toggle-logs">' + (isOpen ? 'Hide logs' : 'Logs') + '</button>';
         html += '</div>';
 
         const urlEntries = Object.entries(run.urls || {}).sort((a, b) => a[0].localeCompare(b[0]));
@@ -212,15 +212,15 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         }
 
         if (isOpen) {
-          html += '<div class="log-panel" id="logpanel-' + esc(run.name) + '">';
+          html += '<div class="log-panel" data-logpanel="' + esc(run.name) + '">';
           html += '<div class="log-panel-header">';
           html += '<span>Logs</span>';
-          html += '<select class="node-filter" onchange="window.__veldFilterNode(\'' + esc(run.name) + '\', this.value)">';
+          html += '<select class="node-filter" data-run="' + esc(run.name) + '" data-action="filter-node">';
           html += '<option value="">All nodes</option>';
           html += '</select>';
           html += '</div>';
-          html += '<div class="log-scroll" id="logscroll-' + esc(run.name) + '">';
-          html += '<div class="log-lines" id="loglines-' + esc(run.name) + '">';
+          html += '<div class="log-scroll" data-logscroll="' + esc(run.name) + '">';
+          html += '<div class="log-lines" data-loglines="' + esc(run.name) + '">';
           html += '<div class="log-empty">Loading logs...</div>';
           html += '</div>';
           html += '</div>';
@@ -239,27 +239,35 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     }
   }
 
-  // --- Log panel logic ---
+  // --- Event delegation (avoids inline handlers and XSS via run names) ---
 
-  window.__veldToggleLogs = function(runName) {
-    if (runName in openLogs) {
-      clearInterval(openLogs[runName].interval);
-      delete openLogs[runName];
-    } else {
-      openLogs[runName] = { interval: null, filter: '', autoScroll: true };
-      openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
+  document.addEventListener('click', function(e) {
+    const btn = e.target.closest('[data-action="toggle-logs"]');
+    if (btn) {
+      const runName = btn.dataset.run;
+      if (runName in openLogs) {
+        clearInterval(openLogs[runName].interval);
+        delete openLogs[runName];
+        delete prevLogHtml[runName];
+      } else {
+        openLogs[runName] = { interval: null, filter: '', fetching: false };
+        openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
+      }
+      lastJson = '';
+      refresh();
     }
-    // Force re-render to show/hide panel.
-    lastJson = '';
-    refresh();
-  };
+  });
 
-  window.__veldFilterNode = function(runName, node) {
-    if (openLogs[runName]) {
-      openLogs[runName].filter = node;
-      fetchLogs(runName);
+  document.addEventListener('change', function(e) {
+    const sel = e.target.closest('[data-action="filter-node"]');
+    if (sel) {
+      const runName = sel.dataset.run;
+      if (openLogs[runName]) {
+        openLogs[runName].filter = sel.value;
+        fetchLogs(runName);
+      }
     }
-  };
+  });
 
   async function fetchLogs(runName) {
     const state = openLogs[runName];
@@ -280,21 +288,27 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   const prevLogHtml = {};
 
   function renderLogs(runName, data) {
-    const linesEl = document.getElementById('loglines-' + runName);
-    const scrollEl = document.getElementById('logscroll-' + runName);
+    const linesEl = document.querySelector('[data-loglines="' + CSS.escape(runName) + '"]');
+    const scrollEl = document.querySelector('[data-logscroll="' + CSS.escape(runName) + '"]');
     if (!linesEl || !scrollEl) return;
 
-    // Update node filter dropdown.
-    const panel = document.getElementById('logpanel-' + runName);
+    // Rebuild node filter dropdown if the node set has changed.
+    const panel = document.querySelector('[data-logpanel="' + CSS.escape(runName) + '"]');
     if (panel) {
       const select = panel.querySelector('.node-filter');
-      if (select && select.options.length <= 1) {
+      if (select) {
         const nodes = data.nodes.map(n => n.node).sort();
-        for (const n of nodes) {
-          const opt = document.createElement('option');
-          opt.value = n;
-          opt.textContent = n;
-          select.appendChild(opt);
+        const current = Array.from(select.options).slice(1).map(o => o.value);
+        if (nodes.join(',') !== current.join(',')) {
+          const savedValue = select.value;
+          while (select.options.length > 1) select.remove(1);
+          for (const n of nodes) {
+            const opt = document.createElement('option');
+            opt.value = n;
+            opt.textContent = n;
+            select.appendChild(opt);
+          }
+          select.value = savedValue;
         }
       }
     }
@@ -388,7 +402,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 
   function esc(s) {
     if (s == null) return '';
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   }
 
   refresh();

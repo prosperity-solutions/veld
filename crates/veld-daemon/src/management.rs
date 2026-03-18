@@ -158,7 +158,7 @@ async fn get_logs(
         .get_run(&run_name)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let lines_limit = q.lines.min(5000);
+    let lines_limit = q.lines.clamp(1, 5000);
     let mut nodes = Vec::new();
 
     for ns in run_state.nodes.values() {
