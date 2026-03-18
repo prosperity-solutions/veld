@@ -97,10 +97,10 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .log-search:focus{outline:none;border-color:var(--accent)}
 .log-search::placeholder{color:var(--dim)}
 .log-match-count{font-size:10px;color:var(--dim);min-width:40px}
-.ctx-ctl{display:flex;align-items:center;gap:3px;font-size:10px;color:var(--text2)}
-.ctx-ctl button{background:none;border:1px solid var(--border);color:var(--text2);width:18px;height:18px;font-size:11px;line-height:1;border-radius:3px;padding:0;text-align:center}
-.ctx-ctl button:hover{color:var(--text);border-color:var(--text2)}
-.ctx-ctl span{min-width:14px;text-align:center}
+.ctx-ctl{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2)}
+.ctx-input{background:var(--surface2);border:1px solid var(--border);color:var(--text);width:36px;font-size:10px;padding:2px 4px;border-radius:4px;font-family:inherit;text-align:center;-moz-appearance:textfield}
+.ctx-input::-webkit-inner-spin-button,.ctx-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.ctx-input:focus{outline:none;border-color:var(--accent)}
 .autoscroll-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:10px;padding:2px 8px;border-radius:4px;margin-left:auto;transition:color .15s,border-color .15s}
 .autoscroll-btn.on{color:var(--accent);border-color:var(--accent)}
 .log-terminal{background:#06080d;border:1px solid var(--border);border-radius:6px;overflow:hidden}
@@ -256,7 +256,7 @@ function render(data){
 function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
-  s.autoScroll=true;s.knownNodes=new Set();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=0;
+  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=0;
   s.lastData=null; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
@@ -264,7 +264,7 @@ function ensureLogPanel(key){
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
       '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
       '<span class="log-match-count"></span>'+
-      '<span class="ctx-ctl" style="display:none"><button data-action="ctx-dec">&minus;</button><span class="ctx-val">0</span><button data-action="ctx-inc">+</button> ctx</span>'+
+      '<span class="ctx-ctl" style="display:none">Context <input class="ctx-input" type="number" min="0" max="50" value="0" data-action="ctx-change"></span>'+
       '<button class="autoscroll-btn on" data-action="autoscroll">Auto-scroll ON</button>'+
     '</div>'+
     '<div class="log-terminal"><div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div></div>';
@@ -301,7 +301,7 @@ async function fetchLogs(key,runName){
     const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500');
     if(!resp.ok)return;
     const data=await resp.json();
-    for(const nd of data.nodes)s.knownNodes.add(nd.node);
+    for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
     updateNodeDropdown(s);
     s.lastData=data;
     doRenderLogs(key);
@@ -317,11 +317,12 @@ function doRenderLogs(key){
 
 function updateNodeDropdown(s){
   if(!s.panelEl)return;const sel=s.panelEl.querySelector('.node-filter');if(!sel)return;
-  const nodes=Array.from(s.knownNodes).sort();
+  const entries=Array.from(s.knownNodes.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
+  const keys=entries.map(e=>e[0]);
   const cur=Array.from(sel.options).slice(1).map(o=>o.value);
-  if(nodes.join(',')==cur.join(','))return;
+  if(keys.join(',')==cur.join(','))return;
   const v=sel.value;while(sel.options.length>1)sel.remove(1);
-  for(const n of nodes){const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);}
+  for(const[node,variant]of entries){const o=document.createElement('option');o.value=node;o.textContent=node+':'+variant;sel.appendChild(o);}
   sel.value=v;
 }
 
@@ -332,7 +333,7 @@ function renderLogs(key,data,totalNodes){
   if(!linesEl||!scrollEl)return;
 
   const merged=[];
-  for(const nd of data.nodes)for(const line of nd.lines)merged.push({node:nd.node,raw:line,ts:extractTs(line)||''});
+  for(const nd of data.nodes)for(const line of nd.lines)merged.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
   merged.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
   if(!merged.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml='';return;}
 
@@ -384,7 +385,7 @@ function logLineHtml(e,multi,search,isCtx){
   const msg=extractMsg(e.raw);const isAnn=msg.startsWith('[VELD]');
   let h='<div class="log-line'+(isCtx?' ctx':'')+'">';
   if(e.ts)h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
-  if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+'</span>';
+  if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+':'+esc(e.variant)+'</span>';
   let msgHtml=isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg);
   if(search)msgHtml=highlightSearch(msgHtml,search);
   h+='<span class="msg">'+msgHtml+'</span></div>';
@@ -422,21 +423,6 @@ document.addEventListener('click',e=>{
       if(s.autoScroll){const sc=s.panelEl?.querySelector('.log-scroll');if(sc)sc.scrollTop=sc.scrollHeight;}}
     return;
   }
-  // Context +/-
-  if(e.target.closest('[data-action="ctx-inc"]')){
-    const card2=e.target.closest('.card');if(!card2)return;
-    const s=runState[card2.dataset.key];if(!s)return;
-    s.ctxLines=Math.min((s.ctxLines||0)+1,20);s.prevHtml='';
-    const v=s.panelEl?.querySelector('.ctx-val');if(v)v.textContent=s.ctxLines;
-    doRenderLogs(card2.dataset.key);return;
-  }
-  if(e.target.closest('[data-action="ctx-dec"]')){
-    const card2=e.target.closest('.card');if(!card2)return;
-    const s=runState[card2.dataset.key];if(!s)return;
-    s.ctxLines=Math.max((s.ctxLines||0)-1,0);s.prevHtml='';
-    const v=s.panelEl?.querySelector('.ctx-val');if(v)v.textContent=s.ctxLines;
-    doRenderLogs(card2.dataset.key);return;
-  }
   const copyUrl=e.target.closest('[data-action="copy-url"]');
   if(copyUrl){navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{copyUrl.classList.add('ok');copyUrl.textContent='Copied';setTimeout(()=>{copyUrl.classList.remove('ok');copyUrl.textContent='Copy';},1500);});return;}
   const openUrl=e.target.closest('[data-action="open-url"]');
@@ -465,7 +451,10 @@ document.addEventListener('change',e=>{
 document.addEventListener('input',e=>{
   const input=e.target.closest('[data-action="log-search"]');
   if(input){const card=input.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
-    if(s){s.searchTerm=input.value;s.prevHtml='';doRenderLogs(key);}}
+    if(s){s.searchTerm=input.value;s.prevHtml='';doRenderLogs(key);}return;}
+  const ctxInput=e.target.closest('[data-action="ctx-change"]');
+  if(ctxInput){const card=ctxInput.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.ctxLines=Math.max(0,Math.min(50,parseInt(ctxInput.value)||0));s.prevHtml='';doRenderLogs(key);}}
 });
 
 function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');return e<0?null:l.substring(1,e);}
