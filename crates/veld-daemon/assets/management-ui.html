@@ -8,7 +8,9 @@
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   --bg:#0f1117;--surface:#181a24;--surface2:#1f2233;--border:#2a2d3e;
-  --text:#e0e0e6;--text2:#8b8fa3;--accent:#6c8cff;--accent2:#4a6adf;
+  --text:#e0e0e6;--text2:#8b8fa3;
+  --accent:#C4F56A;--accent-bg:rgba(196,245,106,.12);--accent-dim:rgba(196,245,106,.5);
+  --blue:#6c8cff;
   --green:#3dd68c;--green-bg:rgba(61,214,140,.1);
   --yellow:#f0c040;--yellow-bg:rgba(240,192,64,.1);
   --red:#f06060;--red-bg:rgba(240,96,96,.1);
@@ -18,7 +20,7 @@
 }
 html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;background:var(--bg);color:var(--text)}
 body{min-height:100vh;padding:0}
-a{color:var(--accent);text-decoration:none}
+a{color:var(--blue);text-decoration:none}
 a:hover{text-decoration:underline}
 button{font-family:inherit;cursor:pointer}
 
@@ -26,7 +28,7 @@ button{font-family:inherit;cursor:pointer}
 header{display:flex;align-items:baseline;gap:12px;margin-bottom:32px}
 header .wordmark{height:22px;flex-shrink:0;align-self:baseline;position:relative;top:2px}
 header .wordmark path{fill:var(--text)}
-header .wordmark path:last-child{fill:#C4F56A}
+header .wordmark path:last-child{fill:var(--accent)}
 header .sep{color:var(--dim);font-weight:300;font-size:20px}
 header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .meta{display:flex;align-items:center;gap:16px;margin-left:auto;font-size:12px;color:var(--text2)}
@@ -57,25 +59,33 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .card-btn:hover{color:var(--text);border-color:var(--text2)}
 .card-btn.ok{color:var(--green);border-color:var(--green)}
 
-/* tabs */
-.tabs{display:flex;border-top:1px solid var(--border);border-bottom:1px solid var(--border)}
-.tab{flex:1;text-align:center;padding:8px 0;font-size:12px;font-weight:500;color:var(--text2);background:none;border:none;border-bottom:2px solid transparent;transition:color .15s,border-color .15s}
-.tab:hover{color:var(--text)}
-.tab.active{color:var(--accent);border-bottom-color:var(--accent)}
+/* segmented control */
+.segmented{display:flex;gap:2px;padding:10px 18px;background:var(--surface)}
+.seg-btn{flex:1;text-align:center;padding:6px 0;font-size:12px;font-weight:500;color:var(--text2);background:transparent;border:none;border-radius:6px;transition:background .15s,color .15s}
+.seg-btn:hover{color:var(--text)}
+.seg-btn.active{background:var(--accent-bg);color:var(--accent)}
 
 /* tab panels */
 .tab-panel{display:none;padding:14px 18px}
 .tab-panel.active{display:block}
 
+/* health dot (inline circle indicator) */
+.health-dot{width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle;margin-right:4px}
+.health-dot.healthy,.health-dot.running{background:var(--green)}
+.health-dot.starting,.health-dot.health_checking,.health-dot.pending{background:var(--yellow)}
+.health-dot.failed{background:var(--red)}
+.health-dot.stopped,.health-dot.skipped{background:var(--dim)}
+
 /* urls tab */
 .url-table{width:100%;font-size:12px;border-collapse:collapse}
+.url-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 0 6px;border-bottom:1px solid var(--border)}
 .url-table td{padding:5px 0;vertical-align:middle}
 .url-table .url-node{font-family:var(--mono);font-weight:500;width:30%;padding-right:12px}
-.url-table .url-link{color:var(--accent)}
+.url-table .url-link{color:var(--blue)}
 .url-table .url-link:hover{text-decoration:underline}
 .url-table .url-actions{text-align:right;white-space:nowrap}
 .url-table .url-actions button{background:none;border:none;color:var(--text2);font-size:11px;padding:2px 6px;cursor:pointer;border-radius:3px}
-.url-table .url-actions button:hover{color:var(--accent);background:rgba(108,140,255,.06)}
+.url-table .url-actions button:hover{color:var(--blue);background:rgba(108,140,255,.06)}
 .url-table .url-actions button.ok{color:var(--green)}
 .url-empty{color:var(--dim);font-size:12px;padding:8px 0}
 
@@ -89,19 +99,25 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .debug-table .pid{color:var(--dim);font-family:var(--mono);font-size:11px}
 
 /* log tab */
-.log-bar{display:flex;align-items:center;gap:8px;padding:8px 12px;font-size:11px;color:var(--text2);border-bottom:1px solid var(--border)}
+.log-bar{display:flex;align-items:center;gap:8px;padding:0 0 8px;font-size:11px;color:var(--text2)}
 .log-bar select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
 .log-bar select:focus{outline:none;border-color:var(--accent)}
+.log-search{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:3px 8px;border-radius:4px;font-family:inherit;width:160px;transition:border-color .15s}
+.log-search:focus{outline:none;border-color:var(--accent)}
+.log-search::placeholder{color:var(--dim)}
+.log-match-count{font-size:10px;color:var(--dim);min-width:40px}
 .autoscroll-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:10px;padding:2px 8px;border-radius:4px;margin-left:auto;transition:color .15s,border-color .15s}
-.autoscroll-btn.on{color:var(--green);border-color:var(--green)}
+.autoscroll-btn.on{color:var(--accent);border-color:var(--accent)}
+.log-terminal{background:#06080d;border:1px solid var(--border);border-radius:6px;overflow:hidden}
 .log-scroll{max-height:450px;overflow-y:auto;overflow-x:auto}
-.log-lines{padding:8px 0;min-height:40px}
-.log-line{display:flex;padding:1px 12px;font-family:var(--mono);font-size:11.5px;line-height:1.6;white-space:pre}
+.log-lines{padding:6px 0;min-height:40px}
+.log-line{display:flex;padding:1px 10px;font-family:var(--mono);font-size:10.5px;line-height:1.6;white-space:pre}
 .log-line:hover{background:rgba(255,255,255,.03)}
 .log-line .ts{color:var(--dim);flex-shrink:0;margin-right:8px;user-select:none}
 .log-line .node-tag{flex-shrink:0;margin-right:8px;font-weight:600;user-select:none}
 .log-line .msg{color:var(--text);white-space:pre-wrap;word-break:break-all;min-width:0}
 .log-line .msg .ann{color:var(--accent)}
+.log-line mark{background:rgba(196,245,106,.25);color:var(--text);border-radius:2px;padding:0 1px}
 .log-empty{padding:20px;text-align:center;color:var(--dim);font-size:12px}
 
 .node-c0{color:#6c8cff}.node-c1{color:#3dd68c}.node-c2{color:#f0c040}.node-c3{color:#f06060}
@@ -141,18 +157,16 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 </div>
 <script>
 (function(){
-const $ = (s, p) => (p||document).querySelector(s);
-const $$ = (s, p) => (p||document).querySelectorAll(s);
-const content = $('#content');
-const statusDot = $('#status-dot');
-const statusText = $('#status-text');
-let lastFP = null; // null = never rendered (distinct from '' = empty data)
-
-// Per-run UI state (survives refreshes).
-const runState = {}; // key -> { tab, logInterval, logFilter, autoScroll, fetching, knownNodes, prevHtml, panelEl }
-const nodeColors = {};
-let colorIdx = 0;
-function nc(n){ if(!(n in nodeColors)) nodeColors[n]='node-c'+(colorIdx++%8); return nodeColors[n]; }
+const $=(s,p)=>(p||document).querySelector(s);
+const $$=(s,p)=>(p||document).querySelectorAll(s);
+const content=$('#content');
+const statusDot=$('#status-dot');
+const statusText=$('#status-text');
+let lastFP=null;
+const runState={};
+const nodeColors={};
+let colorIdx=0;
+function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
 
 function fp(data){
   return data.projects.map(p=>{
@@ -165,20 +179,19 @@ function fp(data){
   }).sort().join('\n');
 }
 
-// Unique key for a run within a project.
-function rk(proj,run){ return proj+'::'+run; }
+function rk(proj,run){return proj+'::'+run;}
 
 async function refresh(){
   try{
     const resp=await fetch('/api/environments');
-    if(!resp.ok) throw new Error(resp.status);
+    if(!resp.ok)throw 0;
     const data=await resp.json();
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
     statusText.textContent=running>0?running+' running':total>0?'all stopped':'no environments';
     const f=fp(data);
-    if(f===lastFP) return;
+    if(f===lastFP)return;
     lastFP=f;
     render(data);
   }catch(e){
@@ -192,59 +205,53 @@ function render(data){
     content.innerHTML='<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
     return;
   }
-  // Detach log panels.
-  for(const k of Object.keys(runState)){
-    const s=runState[k];
-    if(s.panelEl&&s.panelEl.parentNode) s.panelEl.parentNode.removeChild(s.panelEl);
-  }
+  for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
   for(const proj of data.projects){
     const runs=proj.runs.slice().sort((a,b)=>{
-      if(a.status==='running'&&b.status!=='running') return -1;
-      if(b.status==='running'&&a.status!=='running') return 1;
+      if(a.status==='running'&&b.status!=='running')return -1;
+      if(b.status==='running'&&a.status!=='running')return 1;
       return a.name.localeCompare(b.name);
     });
     for(const run of runs){
       const key=rk(proj.name,run.name);
       const st=runState[key]||{tab:'urls'};
+      // Build node status map for URL health dots.
+      const nodeStatus={};
+      for(const n of(run.nodes||[]))nodeStatus[n.name]=n.status;
+
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
-      // Top header
-      h+='<div class="card-top">';
-      h+='<span class="card-project">'+esc(proj.name)+'</span>';
+      h+='<div class="card-top"><span class="card-project">'+esc(proj.name)+'</span>';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
-      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
-      h+='</div>';
-      // Sub header
-      h+='<div class="card-sub">';
-      h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
+      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span></div>';
+      h+='<div class="card-sub"><span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
       h+='<span class="card-actions">';
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
       h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
-      h+='</span>';
-      h+='</div>';
-      // Tabs
-      h+='<div class="tabs">';
-      h+='<button class="tab'+(st.tab==='urls'?' active':'')+'" data-action="tab" data-tab="urls">URLs</button>';
-      h+='<button class="tab'+(st.tab==='debug'?' active':'')+'" data-action="tab" data-tab="debug">Debug</button>';
-      h+='<button class="tab'+(st.tab==='logs'?' active':'')+'" data-action="tab" data-tab="logs">Logs</button>';
+      h+='</span></div>';
+      // Segmented control
+      h+='<div class="segmented">';
+      h+='<button class="seg-btn'+(st.tab==='urls'?' active':'')+'" data-action="tab" data-tab="urls">URLs</button>';
+      h+='<button class="seg-btn'+(st.tab==='debug'?' active':'')+'" data-action="tab" data-tab="debug">Debug</button>';
+      h+='<button class="seg-btn'+(st.tab==='logs'?' active':'')+'" data-action="tab" data-tab="logs">Logs</button>';
       h+='</div>';
       // URLs panel
       h+='<div class="tab-panel'+(st.tab==='urls'?' active':'')+'" data-panel="urls">';
       const urls=Object.entries(run.urls||{}).sort((a,b)=>a[0].localeCompare(b[0]));
       if(urls.length){
-        h+='<table class="url-table">';
-        for(const [node,url] of urls){
-          h+='<tr><td class="url-node">'+esc(node.split(':')[0])+'</td>';
+        h+='<table class="url-table"><thead><tr><th>Service</th><th>URL</th><th></th></tr></thead><tbody>';
+        for(const[node,url]of urls){
+          const nodeName=node.split(':')[0];
+          const ns=nodeStatus[nodeName]||'';
+          h+='<tr><td class="url-node"><span class="health-dot '+esc(ns)+'"></span>'+esc(nodeName)+'</td>';
           h+='<td><a class="url-link" href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a></td>';
           h+='<td class="url-actions">';
           h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';
           h+='<button data-action="open-url" data-url="'+esc(url)+'">Open</button>';
           h+='</td></tr>';
         }
-        h+='</table>';
-      } else {
-        h+='<div class="url-empty">No URLs available</div>';
-      }
+        h+='</tbody></table>';
+      }else{h+='<div class="url-empty">No URLs available</div>';}
       h+='</div>';
       // Debug panel
       h+='<div class="tab-panel'+(st.tab==='debug'?' active':'')+'" data-panel="debug">';
@@ -252,59 +259,52 @@ function render(data){
       if(nodes.length){
         h+='<table class="debug-table"><thead><tr><th>Node</th><th>Variant</th><th>Status</th><th>PID</th><th>URL</th></tr></thead><tbody>';
         for(const n of nodes){
-          h+='<tr><td class="nm">'+esc(n.name)+'</td>';
-          h+='<td class="dim">'+esc(n.variant)+'</td>';
+          h+='<tr><td class="nm">'+esc(n.name)+'</td><td class="dim">'+esc(n.variant)+'</td>';
           h+='<td><span class="badge '+esc(n.status)+'">'+esc(n.status)+'</span></td>';
           h+='<td class="pid">'+(n.pid||'')+'</td>';
-          h+='<td>'+(n.url?'<a class="url-link" href="'+esc(n.url)+'" target="_blank" rel="noopener">'+esc(shortUrl(n.url))+'</a>':'')+'</td>';
-          h+='</tr>';
+          h+='<td>'+(n.url?'<a class="url-link" href="'+esc(n.url)+'" target="_blank" rel="noopener">'+esc(shortUrl(n.url))+'</a>':'')+'</td></tr>';
         }
         h+='</tbody></table>';
-      } else { h+='<div class="url-empty">No node info</div>'; }
+      }else{h+='<div class="url-empty">No node info</div>';}
       h+='</div>';
-      // Logs panel placeholder (actual log DOM is managed separately)
+      // Logs placeholder
       h+='<div class="tab-panel'+(st.tab==='logs'?' active':'')+'" data-panel="logs" data-loghost="'+esc(key)+'"></div>';
       h+='</div>';
     }
   }
   content.innerHTML=h;
-
-  // Re-attach log panels & start/stop polling based on active tab.
   for(const k of Object.keys(runState)){
     const s=runState[k];
     const host=$('[data-loghost="'+CSS.escape(k)+'"]');
-    if(host&&s.panelEl) host.appendChild(s.panelEl);
-    // Start polling if logs tab is active.
-    if(s.tab==='logs'&&!s.logInterval){
-      startLogPolling(k);
-    }
+    if(host&&s.panelEl)host.appendChild(s.panelEl);
+    if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
   }
 }
 
 // --- Log panel ---
 
-function ensureLogPanel(key,runName){
+function ensureLogPanel(key){
   let s=runState[key];
-  if(!s){ s=runState[key]={tab:'logs'}; }
-  if(s.panelEl) return s;
-  s.autoScroll=true;
-  s.knownNodes=new Set();
-  s.prevHtml='';
-  s.fetching=false;
-  s.logFilter='';
+  if(!s){s=runState[key]={tab:'logs'};}
+  if(s.panelEl)return s;
+  s.autoScroll=true;s.knownNodes=new Set();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';
   const el=document.createElement('div');
   el.innerHTML=
     '<div class="log-bar">'+
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
+      '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
+      '<span class="log-match-count"></span>'+
       '<button class="autoscroll-btn on" data-action="autoscroll">Auto-scroll ON</button>'+
     '</div>'+
-    '<div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div>';
+    '<div class="log-terminal"><div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div></div>';
   s.panelEl=el;
-  // Detect manual scroll.
   const scroll=el.querySelector('.log-scroll');
   scroll.addEventListener('scroll',()=>{
     const atBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<40;
-    if(!atBottom&&s.autoScroll){
+    if(atBottom&&!s.autoScroll){
+      s.autoScroll=true;
+      updateAutoScrollBtn(el,true);
+    }else if(!atBottom&&s.autoScroll){
       s.autoScroll=false;
       updateAutoScrollBtn(el,false);
     }
@@ -314,90 +314,106 @@ function ensureLogPanel(key,runName){
 
 function updateAutoScrollBtn(el,on){
   const btn=el.querySelector('.autoscroll-btn');
-  if(!btn) return;
+  if(!btn)return;
   btn.classList.toggle('on',on);
   btn.textContent=on?'Auto-scroll ON':'Auto-scroll OFF';
 }
 
 function startLogPolling(key){
   const s=runState[key];
-  if(!s||s.logInterval) return;
+  if(!s||s.logInterval)return;
   const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;
-  if(!runName) return;
-  ensureLogPanel(key,runName);
+  if(!runName)return;
+  ensureLogPanel(key);
   const host=$('[data-loghost="'+CSS.escape(key)+'"]');
-  if(host&&s.panelEl&&!s.panelEl.parentNode) host.appendChild(s.panelEl);
+  if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
   fetchLogs(key,runName);
   s.logInterval=setInterval(()=>fetchLogs(key,runName),2000);
 }
 
 function stopLogPolling(key){
-  const s=runState[key];
-  if(!s) return;
-  if(s.logInterval){ clearInterval(s.logInterval); s.logInterval=null; }
+  const s=runState[key];if(!s)return;
+  if(s.logInterval){clearInterval(s.logInterval);s.logInterval=null;}
 }
 
 async function fetchLogs(key,runName){
-  const s=runState[key];
-  if(!s||s.fetching) return;
+  const s=runState[key];if(!s||s.fetching)return;
   s.fetching=true;
   try{
     const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=300');
-    if(!resp.ok) return;
+    if(!resp.ok)return;
     const data=await resp.json();
-    for(const nd of data.nodes){ s.knownNodes.add(nd.node); }
+    for(const nd of data.nodes)s.knownNodes.add(nd.node);
     updateNodeDropdown(s);
     const filtered=s.logFilter?{nodes:data.nodes.filter(n=>n.node===s.logFilter)}:data;
     renderLogs(key,filtered,data.nodes.length);
   }catch(e){}
-  finally{ if(runState[key]) runState[key].fetching=false; }
+  finally{if(runState[key])runState[key].fetching=false;}
 }
 
 function updateNodeDropdown(s){
-  if(!s.panelEl) return;
-  const sel=s.panelEl.querySelector('.node-filter');
-  if(!sel) return;
+  if(!s.panelEl)return;
+  const sel=s.panelEl.querySelector('.node-filter');if(!sel)return;
   const nodes=Array.from(s.knownNodes).sort();
   const cur=Array.from(sel.options).slice(1).map(o=>o.value);
-  if(nodes.join(',')==cur.join(',')) return;
+  if(nodes.join(',')==cur.join(','))return;
   const v=sel.value;
-  while(sel.options.length>1) sel.remove(1);
-  for(const n of nodes){ const o=document.createElement('option'); o.value=n; o.textContent=n; sel.appendChild(o); }
+  while(sel.options.length>1)sel.remove(1);
+  for(const n of nodes){const o=document.createElement('option');o.value=n;o.textContent=n;sel.appendChild(o);}
   sel.value=v;
 }
 
 function renderLogs(key,data,totalNodes){
-  const s=runState[key];
-  if(!s||!s.panelEl) return;
+  const s=runState[key];if(!s||!s.panelEl)return;
   const linesEl=s.panelEl.querySelector('.log-lines');
   const scrollEl=s.panelEl.querySelector('.log-scroll');
-  if(!linesEl||!scrollEl) return;
+  if(!linesEl||!scrollEl)return;
 
   const merged=[];
   for(const nd of data.nodes){
-    for(const line of nd.lines){
-      merged.push({node:nd.node,raw:line,ts:extractTs(line)||''});
-    }
+    for(const line of nd.lines)merged.push({node:nd.node,raw:line,ts:extractTs(line)||''});
   }
-  merged.sort((a,b)=>{ const c=a.ts.localeCompare(b.ts); return c!==0?c:a.node.localeCompare(b.node); });
+  merged.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
 
-  if(!merged.length){ linesEl.innerHTML='<div class="log-empty">No log output yet</div>'; s.prevHtml=''; return; }
+  if(!merged.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml='';return;}
 
-  let h='';
+  const search=s.searchTerm.toLowerCase();
   const multi=totalNodes>1;
+  let h='';let matchCount=0;
+
   for(const e of merged){
     const msg=extractMsg(e.raw);
     const isAnn=msg.startsWith('[VELD]');
+    // Search filter: hide non-matching lines if search is active.
+    if(search&&msg.toLowerCase().indexOf(search)<0&&e.node.toLowerCase().indexOf(search)<0)continue;
     h+='<div class="log-line">';
-    if(e.ts) h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
-    if(multi) h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+'</span>';
-    h+='<span class="msg">'+(isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg))+'</span></div>';
+    if(e.ts)h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
+    if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+'</span>';
+    let msgHtml=isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg);
+    if(search){
+      matchCount++;
+      msgHtml=highlightSearch(msgHtml,search);
+    }
+    h+='<span class="msg">'+msgHtml+'</span></div>';
   }
 
-  if(h===s.prevHtml) return;
+  // Update match count.
+  const countEl=s.panelEl.querySelector('.log-match-count');
+  if(countEl)countEl.textContent=search?(matchCount+' match'+(matchCount!==1?'es':'')):'';
+
+  if(h===s.prevHtml)return;
   s.prevHtml=h;
-  linesEl.innerHTML=h;
-  if(s.autoScroll) scrollEl.scrollTop=scrollEl.scrollHeight;
+  linesEl.innerHTML=h||'<div class="log-empty">No matching lines</div>';
+  if(s.autoScroll)scrollEl.scrollTop=scrollEl.scrollHeight;
+}
+
+function highlightSearch(html,term){
+  // html is already escaped. Find the escaped term and wrap in <mark>.
+  const escTerm=esc(term);
+  if(!escTerm)return html;
+  // Case-insensitive replace while preserving original case.
+  const re=new RegExp('('+escTerm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+  return html.replace(re,'<mark>$1</mark>');
 }
 
 // --- Event delegation ---
@@ -405,67 +421,55 @@ function renderLogs(key,data,totalNodes){
 document.addEventListener('click',e=>{
   const card=e.target.closest('.card');
 
-  // Tab switching
   const tabBtn=e.target.closest('[data-action="tab"]');
   if(tabBtn&&card){
-    const key=card.dataset.key;
-    const tab=tabBtn.dataset.tab;
-    let s=runState[key]; if(!s){ s=runState[key]={}; }
+    const key=card.dataset.key;const tab=tabBtn.dataset.tab;
+    let s=runState[key];if(!s){s=runState[key]={};}
     s.tab=tab;
-    $$('.tab',card).forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+    $$('.seg-btn',card).forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
     $$('.tab-panel',card).forEach(p=>p.classList.toggle('active',p.dataset.panel===tab));
     if(tab==='logs'){
-      ensureLogPanel(key,card.dataset.run);
+      ensureLogPanel(key);
       const host=$('[data-loghost="'+CSS.escape(key)+'"]');
-      if(host&&s.panelEl&&!s.panelEl.parentNode) host.appendChild(s.panelEl);
+      if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
       s.autoScroll=true;
-      if(s.panelEl) updateAutoScrollBtn(s.panelEl,true);
+      if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
       startLogPolling(key);
-    } else {
-      stopLogPolling(key);
-    }
+    }else{stopLogPolling(key);}
     return;
   }
 
-  // Auto-scroll toggle
   if(e.target.closest('[data-action="autoscroll"]')&&card){
     const s=runState[card.dataset.key];
     if(s){
       s.autoScroll=!s.autoScroll;
       updateAutoScrollBtn(s.panelEl,s.autoScroll);
-      if(s.autoScroll){
-        const sc=s.panelEl?.querySelector('.log-scroll');
-        if(sc) sc.scrollTop=sc.scrollHeight;
-      }
+      if(s.autoScroll){const sc=s.panelEl?.querySelector('.log-scroll');if(sc)sc.scrollTop=sc.scrollHeight;}
     }
     return;
   }
 
-  // Copy URL
   const copyUrl=e.target.closest('[data-action="copy-url"]');
   if(copyUrl){
     navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{
-      copyUrl.classList.add('ok'); copyUrl.textContent='Copied';
-      setTimeout(()=>{ copyUrl.classList.remove('ok'); copyUrl.textContent='Copy'; },1500);
+      copyUrl.classList.add('ok');copyUrl.textContent='Copied';
+      setTimeout(()=>{copyUrl.classList.remove('ok');copyUrl.textContent='Copy';},1500);
     });
     return;
   }
 
-  // Open URL
   const openUrl=e.target.closest('[data-action="open-url"]');
-  if(openUrl){ window.open(openUrl.dataset.url,'_blank','noopener'); return; }
+  if(openUrl){window.open(openUrl.dataset.url,'_blank','noopener');return;}
 
-  // Copy path
   if(e.target.closest('[data-action="copy-path"]')&&card){
     const btn=e.target.closest('[data-action="copy-path"]');
     navigator.clipboard.writeText(card.dataset.path).then(()=>{
-      btn.classList.add('ok'); btn.textContent='Copied';
-      setTimeout(()=>{ btn.classList.remove('ok'); btn.textContent='Copy path'; },1500);
+      btn.classList.add('ok');btn.textContent='Copied';
+      setTimeout(()=>{btn.classList.remove('ok');btn.textContent='Copy path';},1500);
     });
     return;
   }
 
-  // Open in terminal
   if(e.target.closest('[data-action="open-terminal"]')&&card){
     fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path:card.dataset.path})});
     return;
@@ -474,27 +478,38 @@ document.addEventListener('click',e=>{
 
 document.addEventListener('change',e=>{
   const sel=e.target.closest('[data-action="log-filter"]');
-  if(!sel) return;
-  const card=sel.closest('.card');
-  if(!card) return;
-  const key=card.dataset.key;
-  const s=runState[key];
-  if(s){
-    s.logFilter=sel.value;
-    s.prevHtml='';
-    s.autoScroll=true;
-    if(s.panelEl) updateAutoScrollBtn(s.panelEl,true);
-    fetchLogs(key,card.dataset.run);
+  if(sel){
+    const card=sel.closest('.card');if(!card)return;
+    const key=card.dataset.key;const s=runState[key];
+    if(s){s.logFilter=sel.value;s.prevHtml='';s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);fetchLogs(key,card.dataset.run);}
+    return;
   }
 });
 
-// --- Helpers ---
+document.addEventListener('input',e=>{
+  const input=e.target.closest('[data-action="log-search"]');
+  if(input){
+    const card=input.closest('.card');if(!card)return;
+    const key=card.dataset.key;const s=runState[key];
+    if(s){s.searchTerm=input.value;s.prevHtml='';renderLogsFromCache(key);}
+  }
+});
 
-function extractTs(l){ if(l.charAt(0)!=='[') return null; const e=l.indexOf(']'); return e<0?null:l.substring(1,e); }
-function extractMsg(l){ const e=l.indexOf(']'); if(e<0||l.charAt(0)!=='[') return l; return l.substring(e+2); }
-function fmtTs(ts){ const i=ts.indexOf('T'); if(i<0) return ts; let t=ts.substring(i+1).replace(/[Z+].*$/,''); const d=t.indexOf('.'); if(d>=0) t=t.substring(0,d+4); return t; }
-function shortUrl(u){ try{return new URL(u).hostname;}catch{return u;} }
-function esc(s){ if(s==null) return ''; return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+// Re-render logs from the last fetched data when search changes (no new fetch needed).
+function renderLogsFromCache(key){
+  const s=runState[key];if(!s)return;
+  // Force re-render by clearing prevHtml (already done by caller).
+  // The next fetchLogs will pick it up, but we also want immediate feedback.
+  // Trigger a render with the existing data by fetching again.
+  const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;
+  if(runName)fetchLogs(key,runName);
+}
+
+function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');return e<0?null:l.substring(1,e);}
+function extractMsg(l){const e=l.indexOf(']');if(e<0||l.charAt(0)!=='[')return l;return l.substring(e+2);}
+function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i+1).replace(/[Z+].*$/,'');const d=t.indexOf('.');if(d>=0)t=t.substring(0,d+4);return t;}
+function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
+function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 refresh();
 setInterval(refresh,3000);
