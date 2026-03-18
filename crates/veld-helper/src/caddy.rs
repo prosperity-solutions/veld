@@ -56,11 +56,14 @@ impl CaddyManager {
         }
 
         // Check if Caddy is already running externally (e.g. from a previous
-        // helper instance). If the admin API responds, nothing to do — routes
-        // are added individually via add_route(), not via base config reload.
+        // helper instance). If it is, reload the base config to ensure any new
+        // built-in routes (e.g. management UI) are registered.
         drop(state);
         if self.is_running().await {
-            info!("caddy admin API already reachable, skipping startup");
+            info!("caddy admin API already reachable, reloading base config");
+            self.reload()
+                .await
+                .context("failed to reload caddy base config on existing instance")?;
             return Ok(());
         }
 
