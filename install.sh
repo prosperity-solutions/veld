@@ -114,30 +114,81 @@ tar xzf "${TMP_DIR}/${TARBALL}" -C "$TMP_DIR"
 NEED_SUDO=""
 
 EXISTING_VELD="$(command -v veld 2>/dev/null || true)"
+SWITCHING_TO_USER_PATHS=""  # set to "1" when downgrading from system install
 if [ -n "$EXISTING_VELD" ] && [ -z "${VELD_INSTALL_DIR:-}" ]; then
   EXISTING_DIR="$(dirname "$EXISTING_VELD")"
-  # If the existing install is under /usr/local, ask for sudo to update there.
   case "$EXISTING_DIR" in
     /usr/local/*)
-      echo "Existing veld found at ${EXISTING_VELD} (system path)."
-      if sudo -n true 2>/dev/null; then
-        NEED_SUDO="sudo"
-        INSTALL_DIR="$EXISTING_DIR"
+      if [ -n "${VELD_NON_INTERACTIVE:-}" ]; then
+        # Non-interactive mode (e.g. called from `veld update`).
+        # Try passwordless sudo; if unavailable, FAIL rather than silently
+        # moving binaries (which would break a privileged LaunchDaemon that
+        # still references /usr/local paths).
+        echo "Existing veld found at ${EXISTING_VELD} (system path)."
+        if sudo -n true 2>/dev/null; then
+          echo "Sudo available — updating in place."
+          NEED_SUDO="sudo"
+          INSTALL_DIR="$EXISTING_DIR"
+        else
+          echo ""
+          echo "============================================================"
+          echo "  SUDO REQUIRED"
+          echo "============================================================"
+          echo ""
+          echo "  Your veld binary is installed in a system path:"
+          echo "    ${EXISTING_VELD}"
+          echo ""
+          echo "  Updating requires administrator (sudo) access, but sudo"
+          echo "  is not available in non-interactive mode."
+          echo ""
+          echo "  To update, run the installer directly:"
+          echo "    curl -fsSL https://veld.oss.life.li/get | bash"
+          echo ""
+          echo "============================================================"
+          exit 1
+        fi
       else
-        printf "Grant sudo access to update binaries? [Y/n] "
-        read -r answer < /dev/tty 2>/dev/null || answer="n"
-        answer="${answer:-y}"
-        if [ "$answer" = "y" ] || [ "$answer" = "Y" ]; then
+        # Interactive mode — show the full choice.
+        echo ""
+        echo "============================================================"
+        echo "  EXISTING SYSTEM-LEVEL INSTALLATION DETECTED"
+        echo "============================================================"
+        echo ""
+        echo "  Your current veld binary is installed at:"
+        echo "    ${EXISTING_VELD}"
+        echo ""
+        echo "  Because this is a system path (/usr/local/...), updating"
+        echo "  the binaries in place requires administrator (sudo) access."
+        echo ""
+        echo "  You have two options:"
+        echo ""
+        echo "    [1] Update in place (requires sudo)"
+        echo "        Keeps binaries in ${EXISTING_DIR}"
+        echo ""
+        echo "    [2] Move to user-level install (no sudo needed)"
+        echo "        Installs to ~/.local/bin instead. If you are in"
+        echo "        privileged mode, you will need to run"
+        echo "        'veld setup unprivileged' afterwards."
+        echo ""
+        echo "============================================================"
+        echo ""
+        printf "Choose [1] or [2] (default: 1): "
+        read -r answer < /dev/tty 2>/dev/null || answer="1"
+        answer="${answer:-1}"
+        if [ "$answer" = "2" ]; then
+          echo "Switching to user-level install (no sudo required)."
+          INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
+          SWITCHING_TO_USER_PATHS="1"
+        else
+          echo "Updating in place — sudo is needed to write to ${EXISTING_DIR}."
           if sudo true </dev/tty; then
             NEED_SUDO="sudo"
             INSTALL_DIR="$EXISTING_DIR"
           else
-            echo "Sudo failed. Installing to user paths instead."
+            echo "Sudo failed. Falling back to user-level install."
             INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
+            SWITCHING_TO_USER_PATHS="1"
           fi
-        else
-          echo "Installing to user paths instead."
-          INSTALL_DIR="${VELD_INSTALL_DIR:-$HOME/.local/bin}"
         fi
       fi
       ;;
@@ -231,16 +282,67 @@ if [ -f "$SETUP_JSON" ]; then
   fi
 fi
 
+# If the user chose to move from system to user paths while in privileged mode,
+# stop the system LaunchDaemon and remove the plist so it doesn't try to launch
+# a binary that no longer exists. The user must run `veld setup unprivileged`
+# to set up user-level services.
+if [ -n "$SWITCHING_TO_USER_PATHS" ] && [ -n "$PRIVILEGED_MODE" ]; then
+  echo ""
+  echo "Stopping privileged system service before switching to user paths..."
+  if [ "$OS" = "macos" ]; then
+    HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
+    if [ -f "$HELPER_PLIST" ]; then
+      # Need sudo to stop a system LaunchDaemon — request it for this one-off.
+      if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
+        sudo launchctl bootout system/dev.veld.helper 2>/dev/null || true
+        sudo rm -f "$HELPER_PLIST" 2>/dev/null || true
+        echo "System LaunchDaemon stopped and removed."
+      else
+        echo "Warning: could not stop system LaunchDaemon (sudo unavailable)."
+        echo "  The old service at $HELPER_PLIST may still be running."
+        echo "  Stop it manually: sudo launchctl bootout system/dev.veld.helper"
+      fi
+    fi
+  else
+    # Linux: stop the system-level systemd service.
+    if systemctl is-active --quiet veld-helper 2>/dev/null; then
+      if sudo -n true 2>/dev/null || sudo true </dev/tty 2>/dev/null; then
+        sudo systemctl stop veld-helper 2>/dev/null || true
+        sudo systemctl disable veld-helper 2>/dev/null || true
+        echo "System service stopped and disabled."
+      else
+        echo "Warning: could not stop system veld-helper service (sudo unavailable)."
+        echo "  Stop it manually: sudo systemctl stop veld-helper"
+      fi
+    fi
+  fi
+
+  # Clear privileged mode from setup.json so veld doesn't think it's still
+  # running in privileged mode.
+  if [ -f "$SETUP_JSON" ]; then
+    echo "Clearing privileged mode from setup.json..."
+    # Simple: overwrite with empty mode. `veld setup unprivileged` will set it properly.
+    echo '{}' > "$SETUP_JSON"
+  fi
+
+  echo ""
+  echo "============================================================"
+  echo "  IMPORTANT: Run 'veld setup unprivileged' to set up"
+  echo "  user-level services after this install completes."
+  echo "============================================================"
+  echo ""
+fi
+
 if [ "$OS" = "macos" ]; then
-  if [ -n "$PRIVILEGED_MODE" ]; then
-    # Privileged mode: helper runs as a system LaunchDaemon.
+  if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
+    # Privileged mode (staying in place): helper runs as a system LaunchDaemon.
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
       echo "Restarting veld-helper service (privileged)..."
       $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
       $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
     fi
-  else
+  elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # User mode: helper runs as a user LaunchAgent.
     HELPER_PLIST="$HOME/Library/LaunchAgents/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
@@ -257,21 +359,23 @@ if [ "$OS" = "macos" ]; then
     launchctl bootstrap "gui/$(id -u)" "$DAEMON_PLIST" 2>/dev/null || true
   fi
 else
-  # Linux: restart systemd services if they exist.
-  if [ -n "$PRIVILEGED_MODE" ]; then
+  # Linux: restart systemd services if they exist (skip if switching to user paths).
+  if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     if systemctl is-active --quiet veld-helper 2>/dev/null; then
       echo "Restarting veld-helper service (privileged)..."
       $NEED_SUDO systemctl restart veld-helper 2>/dev/null || true
     fi
-  else
+  elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     if systemctl --user is-active --quiet veld-helper 2>/dev/null; then
       echo "Restarting veld-helper service..."
       systemctl --user restart veld-helper 2>/dev/null || true
     fi
   fi
-  if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
-    echo "Restarting veld-daemon service..."
-    systemctl --user restart veld-daemon 2>/dev/null || true
+  if [ -z "$SWITCHING_TO_USER_PATHS" ]; then
+    if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
+      echo "Restarting veld-daemon service..."
+      systemctl --user restart veld-daemon 2>/dev/null || true
+    fi
   fi
 fi
 
@@ -294,27 +398,40 @@ if [ "$INSTALL_DIR" != "$HOME/.local/bin" ] && [ -f "$HOME/.local/bin/veld" ]; t
 fi
 
 # Stale system-level binaries when installing to user paths.
+# When switching from a system install, these are root-owned and need sudo.
 if [ "$LIB_DIR" != "/usr/local/lib/veld" ] && [ -d "/usr/local/lib/veld" ]; then
   echo "Removing stale binaries from /usr/local/lib/veld/..."
-  for bin in veld-helper veld-daemon caddy; do
-    if [ -n "$NEED_SUDO" ]; then
-      $NEED_SUDO rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
-    elif [ -w "/usr/local/lib/veld" ] 2>/dev/null; then
-      rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
-    fi
-  done
   if [ -n "$NEED_SUDO" ]; then
+    for bin in veld-helper veld-daemon caddy; do
+      $NEED_SUDO rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    done
     $NEED_SUDO rmdir "/usr/local/lib/veld" 2>/dev/null || true
-  elif [ -w "/usr/local/lib/veld" ] 2>/dev/null; then
+  elif [ -w "/usr/local/lib/veld" ]; then
+    for bin in veld-helper veld-daemon caddy; do
+      rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    done
     rmdir "/usr/local/lib/veld" 2>/dev/null || true
+  elif sudo -n true 2>/dev/null || { [ -n "$SWITCHING_TO_USER_PATHS" ] && sudo true </dev/tty 2>/dev/null; }; then
+    for bin in veld-helper veld-daemon caddy; do
+      sudo rm -f "/usr/local/lib/veld/$bin" 2>/dev/null || true
+    done
+    sudo rmdir "/usr/local/lib/veld" 2>/dev/null || true
+  else
+    echo "Warning: cannot remove stale binaries in /usr/local/lib/veld/ (sudo required)."
+    echo "  Remove manually: sudo rm -rf /usr/local/lib/veld"
   fi
 fi
 if [ "$INSTALL_DIR" != "/usr/local/bin" ] && [ -f "/usr/local/bin/veld" ]; then
   echo "Removing stale veld binary from /usr/local/bin/..."
   if [ -n "$NEED_SUDO" ]; then
     $NEED_SUDO rm -f "/usr/local/bin/veld" 2>/dev/null || true
-  elif [ -w "/usr/local/bin" ] 2>/dev/null; then
+  elif [ -w "/usr/local/bin" ]; then
     rm -f "/usr/local/bin/veld" 2>/dev/null || true
+  elif sudo -n true 2>/dev/null || { [ -n "$SWITCHING_TO_USER_PATHS" ] && sudo true </dev/tty 2>/dev/null; }; then
+    sudo rm -f "/usr/local/bin/veld" 2>/dev/null || true
+  else
+    echo "Warning: cannot remove stale /usr/local/bin/veld (sudo required)."
+    echo "  Remove manually: sudo rm -f /usr/local/bin/veld"
   fi
 fi
 

@@ -65,92 +65,35 @@ async fn refresh_hammerspoon() {
 }
 
 /// Restart daemon and helper so they run the newly installed binaries.
-/// Mode-aware: uses sudo only for privileged mode, runs without sudo otherwise.
+///
+/// The install script (run by `perform_update`) already restarts launchd /
+/// systemd services for both privileged and unprivileged modes. This function
+/// only needs to handle the "auto" case (no persistent service) and print
+/// mode-specific guidance after the update.
 async fn restart_services() {
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            output::print_error(
-                &format!("Cannot determine executable path: {e}. Run `veld setup` manually."),
-                false,
-            );
-            return;
-        }
-    };
-
     let mode = super::read_setup_mode();
 
     match mode.as_deref() {
         Some("privileged") => {
-            // Privileged mode uses system-level LaunchDaemons/systemd services
-            // that require root to restart. Sudo is needed here — not for the
-            // update itself, but to re-install the system service that binds
-            // ports 80/443.
-            output::print_info(
-                "Sudo is required to restart the privileged system service (ports 80/443).",
-            );
-            let status = std::process::Command::new("sudo")
-                .arg(&exe)
-                .arg("setup")
-                .arg("privileged")
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    output::print_success("Services restarted.");
-                }
-                Ok(s) => {
-                    output::print_error(
-                        &format!(
-                            "Setup exited with code {}. Run `veld setup` manually.",
-                            s.code().unwrap_or(-1)
-                        ),
-                        false,
-                    );
-                }
-                Err(e) => {
-                    output::print_error(
-                        &format!("Failed to run setup: {e}. Run `veld setup` manually."),
-                        false,
-                    );
-                }
-            }
+            // The install script already bounced the system LaunchDaemon /
+            // systemd service with the new binaries — no second sudo needed.
+            // The plist on disk still has the correct binary paths since this
+            // is an in-place update (paths unchanged).
+            output::print_success("Services restarted by the installer (privileged mode).");
         }
         Some("unprivileged") => {
-            // Re-run unprivileged setup to restart user-level services.
-            eprintln!("Restarting user-level services...");
-            let status = std::process::Command::new(&exe)
-                .arg("setup")
-                .arg("unprivileged")
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    output::print_success("Services restarted.");
-                }
-                Ok(s) => {
-                    output::print_error(
-                        &format!(
-                            "Setup exited with code {}. Run `veld setup` manually.",
-                            s.code().unwrap_or(-1)
-                        ),
-                        false,
-                    );
-                }
-                Err(e) => {
-                    output::print_error(
-                        &format!("Failed to run setup: {e}. Run `veld setup` manually."),
-                        false,
-                    );
-                }
-            }
+            // Install script already restarted the user-level LaunchAgent /
+            // systemd --user service.
+            output::print_success("Services restarted by the installer.");
         }
         _ => {
             // "auto" mode or no mode — just kill the user-level helper.
             // Next `veld start` will re-bootstrap with the new binary.
-            eprintln!("Restarting auto-bootstrapped helper...");
+            output::print_info("Restarting auto-bootstrapped helper...");
             let user_socket = veld_core::helper::user_socket_path();
             let client = veld_core::helper::HelperClient::new(&user_socket);
             if client.shutdown().await.is_ok() {
-                eprintln!("Helper stopped. It will restart on next `veld start`.");
+                output::print_info("Helper stopped. It will restart on next `veld start`.");
             }
         }
     }
