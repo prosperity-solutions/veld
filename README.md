@@ -23,6 +23,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`)
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
 - **Structured output** — all commands support `--json` for scripting and CI
+- **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 
 ## Install
 
@@ -139,6 +140,7 @@ veld stop --name dev
 | `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
+| `veld ui` | Open the management dashboard in the browser |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld init` | Create a new veld.json |
@@ -202,6 +204,16 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 
 ## Extensions
 
+### Management UI
+
+Veld includes a browser-based dashboard at `https://veld.localhost` (or `https://veld.localhost:18443` in unprivileged mode). It shows all environments with:
+
+- **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID
+- **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter
+- **Stop/Restart** — control environments directly from the browser
+
+Open it with `veld ui` or visit the URL directly.
+
 ### Hammerspoon (macOS)
 
 If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar widget that shows running environments at a glance.
@@ -210,7 +222,7 @@ If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar wi
 veld setup hammerspoon
 ```
 
-This installs the `Veld.spoon` into `~/.hammerspoon/Spoons/` and offers to patch your `init.lua` to load it automatically. No sudo required.
+This installs the `Veld.spoon` into `~/.hammerspoon/Spoons/` and offers to patch your `init.lua` to load it automatically. No sudo required. The menu includes an "Open Management UI" item for quick access to the browser dashboard.
 
 Check extension status with `veld doctor`.
 

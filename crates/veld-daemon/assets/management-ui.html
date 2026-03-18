@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Veld</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0f1117;--surface:#181a24;--surface2:#1f2233;--border:#2a2d3e;
+  --text:#e0e0e6;--text2:#8b8fa3;
+  --accent:#C4F56A;--accent-bg:rgba(196,245,106,.12);
+  --blue:#6c8cff;
+  --green:#3dd68c;--green-bg:rgba(61,214,140,.1);
+  --yellow:#f0c040;--yellow-bg:rgba(240,192,64,.1);
+  --red:#f06060;--red-bg:rgba(240,96,96,.1);
+  --dim:#555870;
+  --radius:8px;
+  --mono:'SF Mono',SFMono-Regular,Menlo,Consolas,monospace;
+}
+html{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:14px;background:var(--bg);color:var(--text)}
+body{min-height:100vh;padding:0}
+a{color:var(--blue);text-decoration:none}
+a:hover{text-decoration:underline}
+button{font-family:inherit;cursor:pointer}
+
+.shell{max-width:960px;margin:0 auto;padding:24px 20px}
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:32px}
+header .wordmark{height:22px;flex-shrink:0;align-self:baseline;position:relative;top:2px}
+header .wordmark path{fill:var(--text)}
+header .wordmark path:last-child{fill:var(--accent)}
+header .sep{color:var(--dim);font-weight:300;font-size:20px}
+header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
+.meta{display:flex;align-items:center;gap:16px;margin-left:auto;font-size:12px;color:var(--text2)}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
+.dot.off{background:var(--dim)}
+
+.empty{text-align:center;padding:80px 20px;color:var(--text2)}
+.empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
+.empty p{font-size:13px;line-height:1.6}
+.empty code{background:var(--surface2);padding:2px 8px;border-radius:4px;font-size:13px}
+
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
+.card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
+.card-project{font-weight:600;font-size:15px}
+.card-run{font-family:var(--mono);font-size:13px;font-weight:500;margin-left:auto}
+.badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
+.badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
+.badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
+.badge.starting,.badge.stopping,.badge.health_checking,.badge.pending{background:var(--yellow-bg);color:var(--yellow)}
+.badge.failed{background:var(--red-bg);color:var(--red)}
+.badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
+
+.card-sub{display:flex;align-items:center;gap:8px;padding:0 18px 12px;font-size:12px;color:var(--text2)}
+.card-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;max-width:60%}
+.card-actions{display:flex;gap:4px;margin-left:auto}
+.card-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 8px;border-radius:5px;transition:color .15s,border-color .15s}
+.card-btn:hover{color:var(--text);border-color:var(--text2)}
+.card-btn.ok{color:var(--green);border-color:var(--green)}
+
+/* segmented control */
+.segmented{display:flex;gap:2px;padding:4px;margin:0 14px 10px;background:var(--bg);border-radius:8px}
+.seg-btn{flex:1;text-align:center;padding:6px 0;font-size:12px;font-weight:500;color:var(--text2);background:transparent;border:none;border-radius:6px;transition:background .15s,color .15s}
+.seg-btn:hover{color:var(--text);background:rgba(255,255,255,.04)}
+.seg-btn.active{background:var(--accent-bg);color:var(--accent)}
+
+.tab-panel{display:none;padding:14px 18px}
+.tab-panel.active{display:block}
+
+/* health dot */
+.health-dot{width:7px;height:7px;border-radius:50%;display:inline-block;vertical-align:middle;margin-left:6px;cursor:default}
+.health-dot.healthy,.health-dot.running{background:var(--green)}
+.health-dot.starting,.health-dot.health_checking,.health-dot.pending{background:var(--yellow)}
+.health-dot.failed{background:var(--red)}
+.health-dot.stopped,.health-dot.skipped{background:var(--dim)}
+
+/* services table (merged URLs + debug) */
+.svc-table{width:100%;font-size:12px;border-collapse:collapse}
+.svc-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 8px 6px 0;border-bottom:1px solid var(--border)}
+.svc-table td{padding:5px 8px 5px 0;vertical-align:middle}
+.svc-table .svc-node{font-family:var(--mono);font-weight:500;white-space:nowrap}
+.svc-table .svc-url a{color:var(--blue)}
+.svc-table .svc-url a:hover{text-decoration:underline}
+.svc-table .svc-url-btns{white-space:nowrap}
+.svc-table .svc-url-btns button{background:none;border:none;color:var(--text2);font-size:11px;padding:2px 5px;cursor:pointer;border-radius:3px}
+.svc-table .svc-url-btns button:hover{color:var(--blue);background:rgba(108,140,255,.06)}
+.svc-table .svc-url-btns button.ok{color:var(--green)}
+.svc-table .svc-dim{color:var(--text2)}
+.svc-table .svc-pid{color:var(--dim);font-family:var(--mono);font-size:11px}
+.svc-empty{color:var(--dim);font-size:12px;padding:8px 0}
+
+/* log tab */
+.log-bar{display:flex;align-items:center;gap:8px;padding:0 0 8px;font-size:11px;color:var(--text2)}
+.log-bar select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit}
+.log-bar select:focus{outline:none;border-color:var(--accent)}
+.log-search{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:3px 8px;border-radius:4px;font-family:inherit;width:160px;transition:border-color .15s}
+.log-search:focus{outline:none;border-color:var(--accent)}
+.log-search::placeholder{color:var(--dim)}
+.log-match-count{font-size:10px;color:var(--dim);min-width:40px}
+.ctx-ctl{display:flex;align-items:center;gap:4px;font-size:10px;color:var(--text2)}
+.ctx-input{background:var(--surface2);border:1px solid var(--border);color:var(--text);width:36px;font-size:10px;padding:2px 4px;border-radius:4px;font-family:inherit;text-align:center;-moz-appearance:textfield}
+.ctx-input::-webkit-inner-spin-button,.ctx-input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.ctx-input:focus{outline:none;border-color:var(--accent)}
+.autoscroll-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:10px;padding:2px 8px;border-radius:4px;margin-left:auto;transition:color .15s,border-color .15s}
+.autoscroll-btn.on{color:var(--accent);border-color:var(--accent)}
+.log-terminal{background:#06080d;border:1px solid var(--border);border-radius:6px;overflow:hidden}
+.log-scroll{max-height:450px;overflow-y:auto;overflow-x:auto}
+.log-lines{padding:6px 0;min-height:40px}
+.log-line{display:flex;padding:1px 10px;font-family:var(--mono);font-size:10.5px;line-height:1.6;white-space:pre}
+.log-line.ctx{opacity:.45}
+.log-line:hover{background:rgba(255,255,255,.03)}
+.log-line .ts{color:var(--dim);flex-shrink:0;margin-right:8px;user-select:none}
+.log-line .node-tag{flex-shrink:0;margin-right:8px;font-weight:600;user-select:none}
+.log-line .msg{color:var(--text);white-space:pre-wrap;word-break:break-all;min-width:0}
+.log-line .msg .ann{color:var(--accent)}
+.log-line mark{background:rgba(196,245,106,.25);color:var(--text);border-radius:2px;padding:0 1px}
+.log-ctx-sep{text-align:center;padding:2px 0;font-size:9px;color:var(--dim);user-select:none;letter-spacing:2px}
+.log-empty{padding:20px;text-align:center;color:var(--dim);font-size:12px}
+
+.node-c0{color:#6c8cff}.node-c1{color:#3dd68c}.node-c2{color:#f0c040}.node-c3{color:#f06060}
+.node-c4{color:#c084fc}.node-c5{color:#22d3ee}.node-c6{color:#fb923c}.node-c7{color:#f472b6}
+
+.spinner{display:inline-block;width:16px;height:16px;border:2px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .6s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.log-scroll::-webkit-scrollbar{width:6px;height:6px}
+.log-scroll::-webkit-scrollbar-track{background:transparent}
+.log-scroll::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+.log-scroll::-webkit-scrollbar-thumb:hover{background:var(--dim)}
+.fade-in{animation:fadeIn .2s ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+</style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <svg class="wordmark" viewBox="0 0 3837 1463" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M383 1463L0 423H183L470 1278H474L762 423H943L561 1463H383Z"/>
+      <path d="M1507 1463C1407.67 1463 1322.17 1441 1250.5 1397C1178.83 1353 1123.83 1290.83 1085.5 1210.5C1047.17 1130.17 1028 1035.67 1028 927V926C1028 818.667 1047.33 724.167 1086 642.5C1124.67 560.833 1179 497.167 1249 451.5C1319 405.833 1401.33 383 1496 383C1590.67 383 1672.17 404.833 1740.5 448.5C1808.83 492.167 1861.33 553.333 1898 632C1934.67 710.667 1953 802 1953 906V970H1115V834H1867L1779 960V893C1779 812.333 1766.83 745.667 1742.5 693C1718.17 640.333 1684.67 601.167 1642 575.5C1599.33 549.833 1550.33 537 1495 537C1439.67 537 1390 550.5 1346 577.5C1302 604.5 1267.33 644.5 1242 697.5C1216.67 750.5 1204 815.667 1204 893V960C1204 1033.33 1216.5 1096 1241.5 1148C1266.5 1200 1302 1239.83 1348 1267.5C1394 1295.17 1448.33 1309 1511 1309C1555 1309 1594.33 1302.33 1629 1289C1663.67 1275.67 1692.67 1257.33 1716 1234C1739.33 1210.67 1756 1184 1766 1154L1769 1145H1940L1938 1155C1929.33 1197.67 1912.83 1237.67 1888.5 1275C1864.17 1312.33 1833 1345.17 1795 1373.5C1757 1401.83 1713.67 1423.83 1665 1439.5C1616.33 1455.17 1563.67 1463 1507 1463Z"/>
+      <path d="M2137 1463V20H2311V1463H2137Z"/>
+      <path d="M2937 1463C2848.33 1463 2770.83 1440.83 2704.5 1396.5C2638.17 1352.17 2586.67 1289.5 2550 1208.5C2513.33 1127.5 2495 1032.33 2495 923V922C2495 812.667 2513.5 717.667 2550.5 637C2587.5 556.333 2639 493.833 2705 449.5C2771 405.167 2847.33 383 2934 383C2983.33 383 3029.17 390.833 3071.5 406.5C3113.83 422.167 3151.67 444.5 3185 473.5C3218.33 502.5 3245.67 537 3267 577H3271V0H3445V1443H3271V1267H3267C3245.67 1307.67 3218.67 1342.5 3186 1371.5C3153.33 1400.5 3116.17 1423 3074.5 1439C3032.83 1455 2987 1463 2937 1463ZM2971 1309C3029.67 1309 3081.67 1293 3127 1261C3172.33 1229 3207.83 1184 3233.5 1126C3259.17 1068 3272 1000.33 3272 923V922C3272 844.667 3259 777.167 3233 719.5C3207 661.833 3171.5 617 3126.5 585C3081.5 553 3029.67 537 2971 537C2909.67 537 2856.67 552.667 2812 584C2767.33 615.333 2733 659.667 2709 717C2685 774.333 2673 842.667 2673 922V923C2673 1002.33 2685 1071 2709 1129C2733 1187 2767.33 1231.5 2812 1262.5C2856.67 1293.5 2909.67 1309 2971 1309Z"/>
+      <path d="M3757 1463C3801.18 1463 3837 1427.18 3837 1383C3837 1338.82 3801.18 1303 3757 1303C3712.82 1303 3677 1338.82 3677 1383C3677 1427.18 3712.82 1463 3757 1463Z"/>
+    </svg>
+    <span class="sep">/</span>
+    <span class="subtitle">Environments</span>
+    <div class="meta">
+      <span id="status-dot"><span class="dot off"></span></span>
+      <span id="status-text">connecting...</span>
+    </div>
+  </header>
+  <main id="content"><div class="empty"><div class="spinner"></div></div></main>
+</div>
+<script>
+(function(){
+const $=(s,p)=>(p||document).querySelector(s);
+const $$=(s,p)=>(p||document).querySelectorAll(s);
+const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
+let lastFP=null;
+const runState={},nodeColors={};
+let colorIdx=0;
+function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
+function rk(proj,run){return proj+'::'+run;}
+function fp(data){
+  return data.projects.map(p=>{
+    const rs=p.runs.map(r=>{
+      const u=Object.keys(r.urls||{}).sort().map(k=>k+'='+r.urls[k]).join('|');
+      const n=(r.nodes||[]).map(x=>x.name+':'+x.status).sort().join('|');
+      return r.name+':'+r.status+':'+u+':'+n;
+    }).sort().join(';');
+    return p.name+'/'+rs;
+  }).sort().join('\n');
+}
+
+async function refresh(){
+  try{
+    const resp=await fetch('/api/environments');if(!resp.ok)throw 0;
+    const data=await resp.json();
+    const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
+    const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
+    statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
+    statusText.textContent=running>0?running+' running':total>0?'all stopped':'no environments';
+    const f=fp(data);if(f===lastFP)return;lastFP=f;render(data);
+  }catch(e){statusDot.innerHTML='<span class="dot off"></span>';statusText.textContent='disconnected';}
+}
+
+function render(data){
+  if(!data.projects.length){content.innerHTML='<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';return;}
+  for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
+  let h='';
+  for(const proj of data.projects){
+    const runs=proj.runs.slice().sort((a,b)=>{
+      if(a.status==='running'&&b.status!=='running')return -1;
+      if(b.status==='running'&&a.status!=='running')return 1;
+      return a.name.localeCompare(b.name);
+    });
+    for(const run of runs){
+      const key=rk(proj.name,run.name);
+      const st=runState[key]||{tab:'services'};
+      const nodes=run.nodes||[];
+      const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
+
+      h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
+      h+='<div class="card-top"><span class="card-project">'+esc(proj.name)+'</span>';
+      h+='<span class="card-run">'+esc(run.name)+'</span>';
+      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
+      if(run.status==='running'||run.status==='starting'){
+        h+='<button class="card-btn" data-action="restart-env" style="margin-left:6px" title="Restart environment">Restart</button>';
+        h+='<button class="card-btn" data-action="stop-env" title="Stop environment">Stop</button>';
+      }
+      h+='</div>';
+      h+='<div class="card-sub"><span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
+      h+='<span class="card-actions">';
+      h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
+      h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
+      h+='</span></div>';
+      // Segmented control
+      h+='<div class="segmented">';
+      h+='<button class="seg-btn'+(st.tab==='services'?' active':'')+'" data-action="tab" data-tab="services">Services</button>';
+      h+='<button class="seg-btn'+(st.tab==='logs'?' active':'')+'" data-action="tab" data-tab="logs">Logs</button>';
+      h+='</div>';
+      // Services panel (merged URLs + debug)
+      h+='<div class="tab-panel'+(st.tab==='services'?' active':'')+'" data-panel="services">';
+      if(nodes.length){
+        h+='<table class="svc-table"><thead><tr><th>Node</th><th>URL</th><th></th><th>Variant</th><th>PID</th></tr></thead><tbody>';
+        for(const n of nodes){
+          const url=n.url||'';
+          h+='<tr><td class="svc-node">'+esc(n.name)+'<span class="health-dot '+esc(n.status)+'" title="'+esc(n.status)+'"></span></td>';
+          h+='<td class="svc-url">'+(url?'<a href="'+esc(url)+'" target="_blank" rel="noopener">'+esc(shortUrl(url))+'</a>':'<span style="color:var(--dim)">&ndash;</span>')+'</td>';
+          h+='<td class="svc-url-btns">';
+          if(url){
+            h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';
+            h+='<button data-action="open-url" data-url="'+esc(url)+'">Open</button>';
+          }
+          h+='</td>';
+          h+='<td class="svc-dim">'+esc(n.variant)+'</td>';
+          h+='<td class="svc-pid">'+(n.pid||'')+'</td></tr>';
+        }
+        h+='</tbody></table>';
+      }else{h+='<div class="svc-empty">No services</div>';}
+      h+='</div>';
+      // Logs placeholder
+      h+='<div class="tab-panel'+(st.tab==='logs'?' active':'')+'" data-panel="logs" data-loghost="'+esc(key)+'"></div>';
+      h+='</div>';
+    }
+  }
+  content.innerHTML=h;
+  for(const k of Object.keys(runState)){
+    const s=runState[k];
+    const host=$('[data-loghost="'+CSS.escape(k)+'"]');
+    if(host&&s.panelEl)host.appendChild(s.panelEl);
+    if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
+  }
+}
+
+// --- Log panel ---
+
+function ensureLogPanel(key){
+  let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
+  if(s.panelEl)return s;
+  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml=null;s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
+  s.lastData=null; // cache raw data for re-renders
+  const el=document.createElement('div');
+  el.innerHTML=
+    '<div class="log-bar">'+
+      '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
+      '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
+      '<span class="log-match-count"></span>'+
+      '<span class="ctx-ctl" style="display:none">Context <input class="ctx-input" type="number" min="0" max="50" value="5" data-action="ctx-change"></span>'+
+      '<button class="autoscroll-btn on" data-action="autoscroll">Auto-scroll ON</button>'+
+    '</div>'+
+    '<div class="log-terminal"><div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div></div>';
+  s.panelEl=el;
+  const scroll=el.querySelector('.log-scroll');
+  scroll.addEventListener('scroll',()=>{
+    const atBottom=scroll.scrollHeight-scroll.scrollTop-scroll.clientHeight<40;
+    if(atBottom&&!s.autoScroll){s.autoScroll=true;updateAutoScrollBtn(el,true);}
+    else if(!atBottom&&s.autoScroll){s.autoScroll=false;updateAutoScrollBtn(el,false);}
+  });
+  return s;
+}
+
+function updateAutoScrollBtn(el,on){
+  const btn=el.querySelector('.autoscroll-btn');if(!btn)return;
+  btn.classList.toggle('on',on);btn.textContent=on?'Auto-scroll ON':'Auto-scroll OFF';
+}
+
+function startLogPolling(key){
+  const s=runState[key];if(!s||s.logInterval)return;
+  const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;if(!runName)return;
+  ensureLogPanel(key);
+  const host=$('[data-loghost="'+CSS.escape(key)+'"]');
+  if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
+  fetchLogs(key,runName);
+  s.logInterval=setInterval(()=>fetchLogs(key,runName),2000);
+}
+
+function stopLogPolling(key){const s=runState[key];if(!s)return;if(s.logInterval){clearInterval(s.logInterval);s.logInterval=null;}}
+
+async function fetchLogs(key,runName){
+  const s=runState[key];if(!s||s.fetching)return;s.fetching=true;
+  try{
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500');
+    if(!resp.ok)return;
+    const data=await resp.json();
+    for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
+    updateNodeDropdown(s);
+    s.lastData=data;
+    doRenderLogs(key);
+  }catch(e){}
+  finally{if(runState[key])runState[key].fetching=false;}
+}
+
+function doRenderLogs(key){
+  const s=runState[key];if(!s||!s.lastData)return;
+  const data=s.logFilter?{nodes:s.lastData.nodes.filter(n=>n.node===s.logFilter)}:s.lastData;
+  renderLogs(key,data,s.lastData.nodes.length);
+}
+
+function updateNodeDropdown(s){
+  if(!s.panelEl)return;const sel=s.panelEl.querySelector('.node-filter');if(!sel)return;
+  const entries=Array.from(s.knownNodes.entries()).sort((a,b)=>a[0].localeCompare(b[0]));
+  const keys=entries.map(e=>e[0]);
+  const cur=Array.from(sel.options).slice(1).map(o=>o.value);
+  if(keys.join(',')==cur.join(','))return;
+  const v=sel.value;while(sel.options.length>1)sel.remove(1);
+  for(const[node,variant]of entries){const o=document.createElement('option');o.value=node;o.textContent=node+':'+variant;sel.appendChild(o);}
+  sel.value=v;
+}
+
+function renderLogs(key,data,totalNodes){
+  const s=runState[key];if(!s||!s.panelEl)return;
+  const linesEl=s.panelEl.querySelector('.log-lines');
+  const scrollEl=s.panelEl.querySelector('.log-scroll');
+  if(!linesEl||!scrollEl)return;
+
+  const raw=[];
+  for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
+  raw.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
+  if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml=null;return;}
+
+  // Group continuation lines (message starts with whitespace) with their parent.
+  const merged=[];
+  for(const e of raw){
+    const msg=extractMsg(e.raw);
+    const isCont=merged.length>0&&e.node===merged[merged.length-1].node&&(msg.length===0||msg.charAt(0)===' '||msg.charAt(0)==='\t');
+    if(isCont){
+      merged[merged.length-1].fullMsg+='\n'+msg;
+    }else{
+      merged.push({...e,fullMsg:msg});
+    }
+  }
+
+  const search=s.searchTerm.toLowerCase();
+  const ctx=s.ctxLines||0;
+  const multi=totalNodes>1;
+
+  // Show/hide context controls.
+  const ctxCtl=s.panelEl.querySelector('.ctx-ctl');
+  if(ctxCtl)ctxCtl.style.display=search?'':'none';
+
+  let h='',matchCount=0;
+
+  if(search){
+    // Find matching indices.
+    const matches=new Set();
+    const searchRe=new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i');
+    for(let i=0;i<merged.length;i++){
+      if(searchRe.test(merged[i].fullMsg)||searchRe.test(merged[i].node))matches.add(i);
+    }
+    matchCount=matches.size;
+    // Expand context around matches.
+    const visible=new Set();
+    for(const i of matches){
+      for(let j=Math.max(0,i-ctx);j<=Math.min(merged.length-1,i+ctx);j++)visible.add(j);
+    }
+    let prevIdx=-2;
+    for(let i=0;i<merged.length;i++){
+      if(!visible.has(i))continue;
+      if(prevIdx>=0&&i-prevIdx>1)h+='<div class="log-ctx-sep">...</div>';
+      const e=merged[i];const isMatch=matches.has(i);
+      h+=logLineHtml(e,multi,isMatch?search:'',!isMatch);
+      prevIdx=i;
+    }
+  }else{
+    for(const e of merged)h+=logLineHtml(e,multi,'',false);
+  }
+
+  const countEl=s.panelEl.querySelector('.log-match-count');
+  if(countEl)countEl.textContent=search?(matchCount+' match'+(matchCount!==1?'es':'')):'';
+
+  if(h===s.prevHtml)return;
+  s.prevHtml=h;
+  linesEl.innerHTML=h||'<div class="log-empty">No matching lines</div>';
+  if(s.autoScroll)scrollEl.scrollTop=scrollEl.scrollHeight;
+}
+
+function logLineHtml(e,multi,search,isCtx){
+  const msg=e.fullMsg;const isAnn=msg.startsWith('[VELD]');
+  let h='<div class="log-line'+(isCtx?' ctx':'')+'">';
+  if(e.ts)h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
+  if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+':'+esc(e.variant)+'</span>';
+  let msgHtml=isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg);
+  if(search)msgHtml=highlightSearch(msgHtml,search);
+  h+='<span class="msg">'+msgHtml+'</span></div>';
+  return h;
+}
+
+function highlightSearch(html,term){
+  const escTerm=esc(term);if(!escTerm)return html;
+  // Only highlight inside text content, not inside HTML tags or attributes.
+  const re=new RegExp('('+escTerm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+  return html.replace(/(<[^>]*>)|([^<]+)/g,(m,tag,text)=>tag?tag:text.replace(re,'<mark>$1</mark>'));
+}
+
+// --- Event delegation ---
+
+document.addEventListener('click',e=>{
+  const card=e.target.closest('.card');
+  const tabBtn=e.target.closest('[data-action="tab"]');
+  if(tabBtn&&card){
+    const key=card.dataset.key,tab=tabBtn.dataset.tab;
+    let s=runState[key];if(!s){s=runState[key]={};}
+    s.tab=tab;
+    $$('.seg-btn',card).forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+    $$('.tab-panel',card).forEach(p=>p.classList.toggle('active',p.dataset.panel===tab));
+    if(tab==='logs'){
+      ensureLogPanel(key);
+      const host=$('[data-loghost="'+CSS.escape(key)+'"]');
+      if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
+      s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
+      startLogPolling(key);
+    }else{stopLogPolling(key);}
+    return;
+  }
+  if(e.target.closest('[data-action="autoscroll"]')&&card){
+    const s=runState[card.dataset.key];
+    if(s){s.autoScroll=!s.autoScroll;updateAutoScrollBtn(s.panelEl,s.autoScroll);
+      if(s.autoScroll){const sc=s.panelEl?.querySelector('.log-scroll');if(sc)sc.scrollTop=sc.scrollHeight;}}
+    return;
+  }
+  const copyUrl=e.target.closest('[data-action="copy-url"]');
+  if(copyUrl){navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{copyUrl.classList.add('ok');copyUrl.textContent='Copied';setTimeout(()=>{copyUrl.classList.remove('ok');copyUrl.textContent='Copy';},1500);});return;}
+  const openUrl=e.target.closest('[data-action="open-url"]');
+  if(openUrl){window.open(openUrl.dataset.url,'_blank','noopener');return;}
+  if(e.target.closest('[data-action="copy-path"]')&&card){const btn=e.target.closest('[data-action="copy-path"]');navigator.clipboard.writeText(card.dataset.path).then(()=>{btn.classList.add('ok');btn.textContent='Copied';setTimeout(()=>{btn.classList.remove('ok');btn.textContent='Copy path';},1500);});return;}
+  if(e.target.closest('[data-action="open-terminal"]')&&card){fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({path:card.dataset.path})});return;}
+  if(e.target.closest('[data-action="stop-env"]')&&card){
+    if(!confirm('Stop environment "'+card.dataset.run+'"?'))return;
+    const btn=e.target.closest('[data-action="stop-env"]');btn.textContent='Stopping...';btn.disabled=true;
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/stop',{method:'POST',headers:{'X-Veld-Request':'1'}});
+    return;
+  }
+  if(e.target.closest('[data-action="restart-env"]')&&card){
+    const btn=e.target.closest('[data-action="restart-env"]');btn.textContent='Restarting...';btn.disabled=true;
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/restart',{method:'POST',headers:{'X-Veld-Request':'1'}});
+    return;
+  }
+});
+
+document.addEventListener('change',e=>{
+  const sel=e.target.closest('[data-action="log-filter"]');
+  if(sel){const card=sel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.logFilter=sel.value;s.prevHtml=null;s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);doRenderLogs(key);}return;}
+});
+
+document.addEventListener('input',e=>{
+  const input=e.target.closest('[data-action="log-search"]');
+  if(input){const card=input.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.searchTerm=input.value;s.prevHtml=null;doRenderLogs(key);}return;}
+  const ctxInput=e.target.closest('[data-action="ctx-change"]');
+  if(ctxInput){const card=ctxInput.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.ctxLines=Math.max(0,Math.min(50,parseInt(ctxInput.value)||0));s.prevHtml=null;doRenderLogs(key);}}
+});
+
+function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');if(e<0)return null;const t=l.substring(1,e);return/^\d{4}-\d{2}-\d{2}T/.test(t)?t:null;}
+function extractMsg(l){const e=l.indexOf(']');if(e<0||l.charAt(0)!=='[')return l;return l.substring(e+2);}
+function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i+1).replace(/[Z+].*$/,'');const d=t.indexOf('.');if(d>=0)t=t.substring(0,d+4);return t;}
+function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
+function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+
+refresh();setInterval(refresh,3000);
+})();
+</script>
+</body>
+</html>
