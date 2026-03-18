@@ -285,38 +285,38 @@ async fn restart_environment(
     run_veld_command(&body.project_root, &["restart", "--name", &run_name]).await
 }
 
-/// Spawn `veld <args>` in the given project directory as a detached process.
+/// Spawn `veld <args>` in the given project directory via a login shell.
+/// This ensures the user's PATH and environment (nvm, rbenv, etc.) are
+/// available, since the daemon runs under launchd with a minimal env.
 async fn run_veld_command(project_root: &str, args: &[&str]) -> StatusCode {
     let path = std::path::Path::new(project_root);
     if !path.is_dir() {
         return StatusCode::BAD_REQUEST;
     }
 
-    // The daemon binary is at ~/.local/lib/veld/veld-daemon.
-    // The CLI binary is at ~/.local/bin/veld.
-    // Go up two levels from lib/veld/ to ~/.local/, then into bin/veld.
-    let veld_bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| {
-            p.parent()?
-                .parent()?
-                .parent()
-                .map(|d| d.join("bin").join("veld"))
-        })
-        .filter(|p| p.exists())
-        .unwrap_or_else(|| std::path::PathBuf::from("veld"));
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let veld_args = args
+        .iter()
+        .map(|a| shell_escape(a))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cmd = format!("cd {} && veld {}", shell_escape(project_root), veld_args);
 
-    match std::process::Command::new(&veld_bin)
-        .args(args)
-        .current_dir(project_root)
+    match std::process::Command::new(&shell)
+        .args(["-l", "-c", &cmd])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(_) => StatusCode::ACCEPTED,
         Err(e) => {
-            warn!("failed to run veld {:?}: {e}", args);
+            warn!("failed to run veld via login shell: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// Simple single-quote shell escaping.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
