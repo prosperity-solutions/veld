@@ -8,7 +8,7 @@ use tracing::{debug, info, warn};
 const CADDY_ADMIN_API: &str = "http://localhost:2019";
 
 /// Reserved hostname for the browser management UI.
-const MANAGEMENT_HOST: &str = "_veld.localhost";
+const MANAGEMENT_HOST: &str = "veld.localhost";
 
 /// Port the daemon's HTTP server listens on (feedback + management).
 const DAEMON_HTTP_PORT: u16 = 19899;

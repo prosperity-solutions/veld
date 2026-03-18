@@ -69,7 +69,7 @@ pub async fn run_feedback_server() {
         .route("/feedback/api/screenshots/{id}", post(upload_screenshot))
         .route("/feedback/api/screenshots/{id}", get(get_screenshot))
         .with_state(state)
-        // Management UI (served at _veld.localhost via Caddy, also reachable
+        // Management UI (served at veld.localhost via Caddy, also reachable
         // directly on this port for debugging). Merged after with_state()
         // because management routes are stateless.
         .merge(management::routes());

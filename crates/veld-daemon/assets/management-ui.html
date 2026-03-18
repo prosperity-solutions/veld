@@ -23,8 +23,8 @@ a:hover{text-decoration:underline}
 
 /* layout */
 .shell{max-width:960px;margin:0 auto;padding:24px 20px}
-header{display:flex;align-items:center;gap:12px;margin-bottom:32px}
-header .wordmark{height:22px;flex-shrink:0}
+header{display:flex;align-items:baseline;gap:12px;margin-bottom:32px}
+header .wordmark{height:22px;flex-shrink:0;align-self:baseline;position:relative;top:2px}
 header .wordmark path{fill:var(--text)}
 header .wordmark path:last-child{fill:#C4F56A}
 header .sep{color:var(--dim);font-weight:300;font-size:20px}
@@ -51,16 +51,30 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .run-header{display:flex;align-items:center;gap:10px;margin-bottom:6px}
 .run-name{font-weight:500;font-size:13px;font-family:var(--mono)}
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
-.badge.running{background:var(--green-bg);color:var(--green)}
+.badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
-.badge.starting,.badge.stopping{background:var(--yellow-bg);color:var(--yellow)}
+.badge.starting,.badge.stopping,.badge.health_checking,.badge.pending{background:var(--yellow-bg);color:var(--yellow)}
 .badge.failed{background:var(--red-bg);color:var(--red)}
+.badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
 
 /* urls */
 .urls{display:flex;flex-wrap:wrap;gap:6px;margin-top:4px}
-.url-chip{display:inline-flex;align-items:center;gap:4px;background:var(--surface2);border:1px solid var(--border);padding:4px 10px;border-radius:6px;font-size:12px;transition:border-color .15s,background .15s}
-.url-chip:hover{border-color:var(--accent);background:rgba(108,140,255,.06);text-decoration:none}
-.url-chip .label{color:var(--text2);margin-right:2px}
+.url-group{display:inline-flex;align-items:center;gap:0;border-radius:6px;overflow:hidden;border:1px solid var(--border)}
+.url-open{display:inline-flex;align-items:center;gap:4px;background:var(--surface2);padding:4px 10px;font-size:12px;color:var(--text);text-decoration:none;transition:background .15s}
+.url-open:hover{background:rgba(108,140,255,.06);text-decoration:none}
+.url-open .label{color:var(--text2);margin-right:2px}
+.url-copy{display:inline-flex;align-items:center;background:var(--surface2);border-left:1px solid var(--border);padding:4px 8px;cursor:pointer;color:var(--text2);font-size:11px;transition:background .15s,color .15s}
+.url-copy:hover{background:rgba(108,140,255,.06);color:var(--accent)}
+.url-copy.copied{color:var(--green)}
+
+/* node table */
+.node-table{width:100%;margin-top:8px;font-size:12px;border-collapse:collapse}
+.node-table th{text-align:left;color:var(--text2);font-weight:500;padding:4px 8px 4px 0;border-bottom:1px solid var(--border)}
+.node-table td{padding:4px 8px 4px 0;vertical-align:middle}
+.node-table .node-name{font-family:var(--mono);font-weight:500}
+.node-table .node-variant{color:var(--text2)}
+.node-table .badge{font-size:10px;padding:1px 6px}
+.node-table .node-pid{color:var(--dim);font-family:var(--mono);font-size:11px}
 
 /* log toggle */
 .log-toggle{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 10px;border-radius:6px;cursor:pointer;font-family:inherit;transition:color .15s,border-color .15s;margin-left:auto}
@@ -132,26 +146,24 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   const statusText = document.getElementById('status-text');
   let lastFingerprint = '';
 
-  // Track which runs have their log panel open + polling state.
   const openLogs = {};    // runName -> { interval, filter, fetching }
-  const logPanels = {};   // runName -> detached DOM element (survives re-renders)
-  const prevLogHtml = {}; // runName -> last rendered HTML (skip no-op updates)
+  const logPanels = {};   // runName -> detached DOM element
+  const prevLogHtml = {}; // runName -> last rendered HTML
+  const knownNodes = {};  // runName -> Set of node names (persists across filtered fetches)
   const nodeColors = {};
   let colorIndex = 0;
 
   function getNodeColor(node) {
-    if (!(node in nodeColors)) {
-      nodeColors[node] = 'node-c' + (colorIndex++ % 8);
-    }
+    if (!(node in nodeColors)) nodeColors[node] = 'node-c' + (colorIndex++ % 8);
     return nodeColors[node];
   }
 
-  // Build a stable fingerprint from environment data (immune to HashMap order).
   function fingerprint(data) {
     return data.projects.map(p => {
       const runs = p.runs.map(r => {
         const urls = Object.keys(r.urls || {}).sort().map(k => k + '=' + r.urls[k]).join('|');
-        return r.name + ':' + r.status + ':' + urls;
+        const nodes = (r.nodes || []).map(n => n.name + ':' + n.status).sort().join('|');
+        return r.name + ':' + r.status + ':' + urls + ':' + nodes;
       }).sort().join(';');
       return p.name + '/' + runs;
     }).sort().join('\n');
@@ -187,10 +199,9 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       return;
     }
 
-    // Detach open log panels so they survive the innerHTML replacement.
-    for (const runName of Object.keys(logPanels)) {
-      const panel = logPanels[runName];
-      if (panel.parentNode) panel.parentNode.removeChild(panel);
+    for (const rn of Object.keys(logPanels)) {
+      const p = logPanels[rn];
+      if (p.parentNode) p.parentNode.removeChild(p);
     }
 
     let html = '';
@@ -220,36 +231,52 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         html += '<button class="log-toggle' + (isOpen ? ' active' : '') + '" data-run="' + esc(run.name) + '" data-action="toggle-logs">' + (isOpen ? 'Hide logs' : 'Logs') + '</button>';
         html += '</div>';
 
+        // URL chips with copy + open
         const urlEntries = Object.entries(run.urls || {}).sort((a, b) => a[0].localeCompare(b[0]));
         if (urlEntries.length && run.status === 'running') {
           html += '<div class="urls">';
           for (const [node, url] of urlEntries) {
             const label = node.split(':')[0];
-            html += '<a class="url-chip" href="' + esc(url) + '" target="_blank" rel="noopener">';
-            html += '<span class="label">' + esc(label) + '</span>';
-            html += esc(shortUrl(url));
+            html += '<span class="url-group">';
+            html += '<a class="url-open" href="' + esc(url) + '" target="_blank" rel="noopener">';
+            html += '<span class="label">' + esc(label) + '</span>' + esc(shortUrl(url));
             html += '</a>';
+            html += '<span class="url-copy" data-action="copy-url" data-url="' + esc(url) + '" title="Copy URL">&#x2398;</span>';
+            html += '</span>';
           }
           html += '</div>';
         }
 
-        // Log panel placeholder — actual panel is re-attached below.
+        // Node health table
+        const nodes = run.nodes || [];
+        if (nodes.length) {
+          html += '<table class="node-table"><thead><tr>';
+          html += '<th>Node</th><th>Variant</th><th>Status</th><th>PID</th>';
+          html += '</tr></thead><tbody>';
+          for (const n of nodes) {
+            html += '<tr>';
+            html += '<td class="node-name">' + esc(n.name) + '</td>';
+            html += '<td class="node-variant">' + esc(n.variant) + '</td>';
+            html += '<td><span class="badge ' + esc(n.status) + '">' + esc(n.status) + '</span></td>';
+            html += '<td class="node-pid">' + (n.pid ? n.pid : '') + '</td>';
+            html += '</tr>';
+          }
+          html += '</tbody></table>';
+        }
+
         html += '</div>';
       }
       html += '</div>';
     }
     content.innerHTML = html;
 
-    // Re-attach preserved log panels into their run containers.
-    for (const runName of Object.keys(logPanels)) {
-      const container = document.querySelector('[data-run-container="' + CSS.escape(runName) + '"]');
-      if (container) {
-        container.appendChild(logPanels[runName]);
-      }
+    for (const rn of Object.keys(logPanels)) {
+      const c = document.querySelector('[data-run-container="' + CSS.escape(rn) + '"]');
+      if (c) c.appendChild(logPanels[rn]);
     }
   }
 
-  // --- Log panel lifecycle (independent of environment refresh) ---
+  // --- Log panel lifecycle ---
 
   function createLogPanel(runName) {
     const panel = document.createElement('div');
@@ -280,19 +307,16 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       if (!container) return;
 
       if (runName in openLogs) {
-        // Close: stop polling, remove panel.
         clearInterval(openLogs[runName].interval);
         delete openLogs[runName];
         delete prevLogHtml[runName];
-        if (logPanels[runName]) {
-          logPanels[runName].remove();
-          delete logPanels[runName];
-        }
+        delete knownNodes[runName];
+        if (logPanels[runName]) { logPanels[runName].remove(); delete logPanels[runName]; }
         btn.classList.remove('active');
         btn.textContent = 'Logs';
       } else {
-        // Open: create panel, start polling.
         openLogs[runName] = { interval: null, filter: '', fetching: false };
+        knownNodes[runName] = new Set();
         const panel = createLogPanel(runName);
         logPanels[runName] = panel;
         container.appendChild(panel);
@@ -301,6 +325,17 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         fetchLogs(runName);
         openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
       }
+      return;
+    }
+
+    const copyBtn = e.target.closest('[data-action="copy-url"]');
+    if (copyBtn) {
+      const url = copyBtn.dataset.url;
+      navigator.clipboard.writeText(url).then(() => {
+        copyBtn.classList.add('copied');
+        copyBtn.innerHTML = '&#x2713;';
+        setTimeout(() => { copyBtn.classList.remove('copied'); copyBtn.innerHTML = '&#x2398;'; }, 1500);
+      });
     }
   });
 
@@ -310,7 +345,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       const runName = sel.dataset.run;
       if (openLogs[runName]) {
         openLogs[runName].filter = sel.value;
-        delete prevLogHtml[runName]; // force re-render with new filter
+        delete prevLogHtml[runName];
         fetchLogs(runName);
       }
     }
@@ -323,47 +358,62 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     if (!state || state.fetching) return;
     state.fetching = true;
 
-    const filter = state.filter ? '&node=' + encodeURIComponent(state.filter) : '';
     try {
-      const resp = await fetch('/api/logs/' + encodeURIComponent(runName) + '?lines=300' + filter);
+      // Always fetch unfiltered first to discover all nodes for the dropdown.
+      const resp = await fetch('/api/logs/' + encodeURIComponent(runName) + '?lines=300');
       if (!resp.ok) return;
-      const data = await resp.json();
-      renderLogs(runName, data);
+      const fullData = await resp.json();
+
+      // Update known nodes from unfiltered response.
+      for (const nd of fullData.nodes) {
+        if (!knownNodes[runName]) knownNodes[runName] = new Set();
+        knownNodes[runName].add(nd.node);
+      }
+      updateNodeDropdown(runName);
+
+      // Apply client-side filter.
+      const filter = state.filter;
+      const data = filter
+        ? { nodes: fullData.nodes.filter(n => n.node === filter) }
+        : fullData;
+      renderLogs(runName, data, fullData.nodes.length);
     } catch (e) { /* ignore */ }
     finally { if (openLogs[runName]) openLogs[runName].fetching = false; }
   }
 
-  function renderLogs(runName, data) {
+  function updateNodeDropdown(runName) {
+    const panel = logPanels[runName];
+    if (!panel) return;
+    const select = panel.querySelector('.node-filter');
+    if (!select) return;
+
+    const nodes = Array.from(knownNodes[runName] || []).sort();
+    const current = Array.from(select.options).slice(1).map(o => o.value);
+    if (nodes.join(',') === current.join(',')) return;
+
+    const savedValue = select.value;
+    while (select.options.length > 1) select.remove(1);
+    for (const n of nodes) {
+      const opt = document.createElement('option');
+      opt.value = n;
+      opt.textContent = n;
+      select.appendChild(opt);
+    }
+    select.value = savedValue;
+  }
+
+  function renderLogs(runName, data, totalNodeCount) {
     const panel = logPanels[runName];
     if (!panel) return;
     const linesEl = panel.querySelector('[data-loglines]');
     const scrollEl = panel.querySelector('[data-logscroll]');
     if (!linesEl || !scrollEl) return;
 
-    // Rebuild node filter dropdown if the node set has changed.
-    const select = panel.querySelector('.node-filter');
-    if (select) {
-      const nodes = data.nodes.map(n => n.node).sort();
-      const current = Array.from(select.options).slice(1).map(o => o.value);
-      if (nodes.join(',') !== current.join(',')) {
-        const savedValue = select.value;
-        while (select.options.length > 1) select.remove(1);
-        for (const n of nodes) {
-          const opt = document.createElement('option');
-          opt.value = n;
-          opt.textContent = n;
-          select.appendChild(opt);
-        }
-        select.value = savedValue;
-      }
-    }
-
-    // Merge all lines with node tags, preserving timestamp order.
     const merged = [];
     for (const nodeData of data.nodes) {
       for (const line of nodeData.lines) {
         const ts = extractTs(line);
-        merged.push({ node: nodeData.node, variant: nodeData.variant, raw: line, ts: ts || '' });
+        merged.push({ node: nodeData.node, raw: line, ts: ts || '' });
       }
     }
     merged.sort((a, b) => {
@@ -379,32 +429,25 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     }
 
     let html = '';
-    const multiNode = data.nodes.length > 1;
+    const multiNode = totalNodeCount > 1;
     for (const entry of merged) {
       const colorClass = getNodeColor(entry.node);
+      const ts = entry.ts;
       const msg = extractMsg(entry.raw);
       const isAnnotation = msg.startsWith('[VELD]');
 
       html += '<div class="log-line">';
-      if (entry.ts) {
-        html += '<span class="ts">' + esc(formatTs(entry.ts)) + '</span>';
-      }
-      if (multiNode) {
-        html += '<span class="node-tag ' + colorClass + '">' + esc(entry.node) + '</span>';
-      }
+      if (ts) html += '<span class="ts">' + esc(formatTs(ts)) + '</span>';
+      if (multiNode) html += '<span class="node-tag ' + colorClass + '">' + esc(entry.node) + '</span>';
       html += '<span class="msg">' + (isAnnotation ? '<span class="veld-annotation">' + esc(msg) + '</span>' : esc(msg)) + '</span>';
       html += '</div>';
     }
 
-    // Skip DOM update if nothing changed.
     if (html === prevLogHtml[runName]) return;
     prevLogHtml[runName] = html;
 
-    // Only auto-scroll if user is at the bottom.
     const isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 40;
-
     linesEl.innerHTML = html;
-
     if (isAtBottom) {
       requestAnimationFrame(() => { scrollEl.scrollTop = scrollEl.scrollHeight; });
     }
@@ -420,27 +463,21 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   function extractMsg(line) {
     const end = line.indexOf(']');
     if (end < 0 || line.charAt(0) !== '[') return line;
-    return line.substring(end + 2); // skip "] "
+    return line.substring(end + 2);
   }
 
   function formatTs(ts) {
-    // Show just HH:MM:SS.mmm from an ISO timestamp.
     const i = ts.indexOf('T');
     if (i < 0) return ts;
     let time = ts.substring(i + 1);
-    // Trim timezone suffix.
     time = time.replace(/[Z+].*$/, '');
-    // Keep up to milliseconds.
     const dot = time.indexOf('.');
     if (dot >= 0) time = time.substring(0, dot + 4);
     return time;
   }
 
   function shortUrl(url) {
-    try {
-      const u = new URL(url);
-      return u.hostname;
-    } catch { return url; }
+    try { return new URL(url).hostname; } catch { return url; }
   }
 
   function esc(s) {

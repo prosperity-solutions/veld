@@ -1,4 +1,4 @@
-//! Browser-based management dashboard served at `_veld.localhost`.
+//! Browser-based management dashboard served at `veld.localhost`.
 //!
 //! Provides a read-only overview of all Veld environments on the machine,
 //! with clickable service URLs and live status badges.
@@ -13,7 +13,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use veld_core::logging;
-use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
+use veld_core::state::{GlobalRegistry, NodeStatus, ProjectState, RunStatus};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -58,6 +58,16 @@ struct RunInfo {
     name: String,
     status: RunStatus,
     urls: HashMap<String, String>,
+    nodes: Vec<NodeInfo>,
+}
+
+#[derive(Serialize)]
+struct NodeInfo {
+    name: String,
+    variant: String,
+    status: NodeStatus,
+    url: Option<String>,
+    pid: Option<u32>,
 }
 
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
@@ -70,13 +80,37 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         .projects
         .values()
         .map(|entry| {
+            // Load full project state for node-level detail.
+            let project_state = ProjectState::load(&entry.project_root).ok();
+
             let mut runs: Vec<RunInfo> = entry
                 .runs
                 .values()
-                .map(|r| RunInfo {
-                    name: r.name.clone(),
-                    status: r.status.clone(),
-                    urls: r.urls.clone(),
+                .map(|r| {
+                    let mut nodes: Vec<NodeInfo> = project_state
+                        .as_ref()
+                        .and_then(|ps| ps.get_run(&r.name))
+                        .map(|rs| {
+                            rs.nodes
+                                .values()
+                                .map(|ns| NodeInfo {
+                                    name: ns.node_name.clone(),
+                                    variant: ns.variant.clone(),
+                                    status: ns.status.clone(),
+                                    url: ns.url.clone(),
+                                    pid: ns.pid,
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    nodes.sort_by(|a, b| a.name.cmp(&b.name));
+
+                    RunInfo {
+                        name: r.name.clone(),
+                        status: r.status.clone(),
+                        urls: r.urls.clone(),
+                        nodes,
+                    }
                 })
                 .collect();
             runs.sort_by(|a, b| a.name.cmp(&b.name));
