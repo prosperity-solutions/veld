@@ -286,6 +286,12 @@ For `command` variants — array (captured from VELD_OUTPUT):
 | Variable | Value |
 |----------|-------|
 | `${veld.port}` | Allocated port (start_server only) |
+| `${veld.url}` | Full HTTPS URL (start_server only) |
+| `${veld.url.hostname}` | DNS name only (e.g. `app.my-run.proj.localhost`) |
+| `${veld.url.host}` | hostname:port (omits port if 443) |
+| `${veld.url.origin}` | scheme + host (same as `${veld.url}`) |
+| `${veld.url.scheme}` | Protocol scheme (`https`) |
+| `${veld.url.port}` | HTTPS port (`${veld.port}` is the backend bind port) |
 | `${veld.run}` | Run name |
 | `${veld.run_id}` | Stable run UUID |
 | `${veld.root}` | Path to directory containing veld.json |
@@ -299,7 +305,12 @@ For `command` variants — array (captured from VELD_OUTPUT):
 ```
 ${nodes.database.DATABASE_URL}   # custom output
 ${nodes.backend.url}             # start_server built-in: HTTPS URL
-${nodes.backend.port}            # start_server built-in: port
+${nodes.backend.url.hostname}    # start_server built-in: DNS name only
+${nodes.backend.url.host}        # start_server built-in: hostname:port
+${nodes.backend.url.origin}      # start_server built-in: scheme + host
+${nodes.backend.url.scheme}      # start_server built-in: protocol scheme
+${nodes.backend.url.port}        # start_server built-in: HTTPS port
+${nodes.backend.port}            # start_server built-in: backend bind port
 ${nodes.backend:local.url}       # qualified form (when multiple variants active)
 ```
 

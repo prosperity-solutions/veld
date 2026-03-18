@@ -414,6 +414,12 @@ Available to all node variants without declaration:
 | Variable | Value |
 |---|---|
 | `${veld.port}` | Allocated port for this node in this run |
+| `${veld.url}` | Full HTTPS URL for this node (`start_server` only) |
+| `${veld.url.hostname}` | DNS name only (e.g. `app.my-run.proj.localhost`) |
+| `${veld.url.host}` | hostname:port (omits port when HTTPS port is 443) |
+| `${veld.url.origin}` | scheme + host (same as `${veld.url}`) |
+| `${veld.url.scheme}` | Protocol scheme (`https`) |
+| `${veld.url.port}` | HTTPS port (note: `${veld.port}` is the backend bind port) |
 | `${veld.run}` | Run name |
 | `${veld.run_id}` | Stable run UUID |
 | `${veld.root}` | Absolute path to directory containing `veld.json` |
@@ -427,6 +433,8 @@ Node output references available to downstream nodes:
 ```
 ${nodes.database.DATABASE_URL}        # custom command or outputs declaration
 ${nodes.backend.url}                  # start_server built-in (unambiguous)
+${nodes.backend.url.hostname}         # DNS name only
+${nodes.backend.url.host}             # hostname:port
 ${nodes.backend:local.url}            # qualified form (two variants running)
 ${nodes.backend:local.port}           # internal port (rarely needed)
 ${nodes.clone-db.exit_code}           # command built-in
