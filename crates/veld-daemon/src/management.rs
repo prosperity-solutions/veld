@@ -292,20 +292,19 @@ async fn run_veld_command(project_root: &str, args: &[&str]) -> StatusCode {
         return StatusCode::BAD_REQUEST;
     }
 
-    let veld_bin = match std::env::current_exe() {
-        Ok(p) => {
-            // The daemon binary is at ~/.local/lib/veld/veld-daemon.
-            // The CLI binary is at ~/.local/bin/veld (sibling structure).
-            // Try to find `veld` relative to our own binary, fall back to PATH.
-            let lib_dir = p.parent().unwrap_or(std::path::Path::new("."));
-            let candidate = lib_dir.parent().map(|d| d.join("bin").join("veld"));
-            match candidate {
-                Some(c) if c.exists() => c,
-                _ => std::path::PathBuf::from("veld"),
-            }
-        }
-        Err(_) => std::path::PathBuf::from("veld"),
-    };
+    // The daemon binary is at ~/.local/lib/veld/veld-daemon.
+    // The CLI binary is at ~/.local/bin/veld.
+    // Go up two levels from lib/veld/ to ~/.local/, then into bin/veld.
+    let veld_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent()?
+                .parent()?
+                .parent()
+                .map(|d| d.join("bin").join("veld"))
+        })
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("veld"));
 
     match std::process::Command::new(&veld_bin)
         .args(args)
