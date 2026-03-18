@@ -54,8 +54,10 @@ impl VariableContext {
 /// Interpolate all `${...}` references in a template string.
 ///
 /// Supported forms:
-/// - `${veld.port}`, `${veld.run}`, etc.
+/// - `${veld.port}`, `${veld.url}`, `${veld.run}`, etc.
+/// - `${veld.url.hostname}`, `${veld.url.host}`, `${veld.url.origin}`, `${veld.url.scheme}`, `${veld.url.port}`
 /// - `${nodes.name.field}`, `${nodes.name:variant.field}`
+/// - `${nodes.name.url.hostname}`, `${nodes.name.url.host}`, etc.
 pub fn interpolate(template: &str, ctx: &VariableContext) -> Result<String, VariableError> {
     let mut result = String::with_capacity(template.len());
     let mut rest = template;

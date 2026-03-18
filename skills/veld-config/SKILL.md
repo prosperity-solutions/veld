@@ -87,6 +87,12 @@ Every `start_server` variant **requires** a health check. Three types:
 | Variable | Description |
 |----------|-------------|
 | `${veld.port}` | Allocated port (only for `start_server`) |
+| `${veld.url}` | Full HTTPS URL (only for `start_server`) |
+| `${veld.url.hostname}` | DNS name only (e.g. `app.my-run.proj.localhost`) |
+| `${veld.url.host}` | hostname:port (omits port if 443) |
+| `${veld.url.origin}` | scheme + host (same as `${veld.url}`) |
+| `${veld.url.scheme}` | Protocol scheme (`https`) |
+| `${veld.url.port}` | HTTPS port (note: `${veld.port}` is the backend bind port) |
 | `${veld.run}` | Run name |
 | `${veld.root}` | Absolute path to directory containing veld.json |
 | `${veld.project}` | Project name |
@@ -95,6 +101,11 @@ Every `start_server` variant **requires** a health check. Three types:
 | `${veld.username}` | OS username |
 | `${nodes.<node>.<output>}` | Output from another node |
 | `${nodes.<node>.url}` | Built-in: HTTPS URL of a start_server node |
+| `${nodes.<node>.url.hostname}` | Built-in: DNS name of a start_server node |
+| `${nodes.<node>.url.host}` | Built-in: hostname:port of a start_server node |
+| `${nodes.<node>.url.origin}` | Built-in: scheme + host of a start_server node |
+| `${nodes.<node>.url.scheme}` | Built-in: protocol scheme of a start_server node |
+| `${nodes.<node>.url.port}` | Built-in: HTTPS port of a start_server node |
 | `${nodes.<node>.port}` | Built-in: allocated port of a start_server node |
 
 When two variants of the same node run simultaneously, use qualified references: `${nodes.backend:local.url}`.

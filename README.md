@@ -173,6 +173,18 @@ Fallback operator: `{branch ?? run}` uses the first non-empty value.
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
 
+For `start_server` nodes, individual URL location pieces are also available (mirrors the Web URL API):
+
+| Variable | Example | Description |
+|----------|---------|-------------|
+| `${veld.url.hostname}` | `app.my-run.proj.localhost` | DNS name only |
+| `${veld.url.host}` | `app.my-run.proj.localhost:19443` | hostname:port (omits port if 443) |
+| `${veld.url.origin}` | `https://app.my-run.proj.localhost:19443` | scheme + host (same as `${veld.url}`) |
+| `${veld.url.scheme}` | `https` | Protocol scheme |
+| `${veld.url.port}` | `19443` | HTTPS port (note: `${veld.port}` is the backend bind port) |
+
+These are also available as cross-node references: `${nodes.backend.url.hostname}`, `${nodes.backend.url.host}`, etc.
+
 Ports and URLs for all `start_server` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
 
 ## Architecture

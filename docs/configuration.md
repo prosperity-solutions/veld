@@ -462,15 +462,20 @@ Available to all node variants without any declaration:
 
 | Variable            | Value                                                |
 |---------------------|------------------------------------------------------|
-| `${veld.port}`      | Allocated port for this node in this run             |
-| `${veld.url}`       | Full HTTPS URL for this node (`start_server` only)   |
-| `${veld.run}`       | Run name                                             |
-| `${veld.run_id}`    | Stable run UUID                                      |
-| `${veld.root}`      | Absolute path to the directory containing `veld.json`|
-| `${veld.project}`   | Project name from `veld.json`                        |
-| `${veld.worktree}`  | Slugified worktree directory name                    |
-| `${veld.branch}`    | Current git branch, slugified (empty string if not in git) |
-| `${veld.username}`  | OS username                                          |
+| `${veld.port}`          | Allocated port for this node in this run             |
+| `${veld.url}`           | Full HTTPS URL for this node (`start_server` only)   |
+| `${veld.url.hostname}`  | DNS name only (e.g. `app.my-run.proj.localhost`)     |
+| `${veld.url.host}`      | hostname:port (omits port when HTTPS port is 443)    |
+| `${veld.url.origin}`    | scheme + host (same as `${veld.url}`)                |
+| `${veld.url.scheme}`    | Protocol scheme (`https`)                            |
+| `${veld.url.port}`      | HTTPS port (note: `${veld.port}` is the backend bind port) |
+| `${veld.run}`           | Run name                                             |
+| `${veld.run_id}`        | Stable run UUID                                      |
+| `${veld.root}`          | Absolute path to the directory containing `veld.json`|
+| `${veld.project}`       | Project name from `veld.json`                        |
+| `${veld.worktree}`      | Slugified worktree directory name                    |
+| `${veld.branch}`        | Current git branch, slugified (empty string if not in git) |
+| `${veld.username}`      | OS username                                          |
 
 ### Node Output References (`${nodes.*}`)
 
@@ -484,6 +489,11 @@ This is especially powerful for cross-referencing: the frontend can know the bac
 
 ```
 ${nodes.backend.url}               # start_server built-in: full HTTPS URL
+${nodes.backend.url.hostname}      # start_server built-in: DNS name only
+${nodes.backend.url.host}          # start_server built-in: hostname:port
+${nodes.backend.url.origin}        # start_server built-in: scheme + host
+${nodes.backend.url.scheme}        # start_server built-in: protocol scheme
+${nodes.backend.url.port}          # start_server built-in: HTTPS port
 ${nodes.backend.port}              # start_server built-in: allocated port (rarely needed)
 ${nodes.frontend.url}              # works even if frontend runs AFTER this node
 ```
@@ -504,6 +514,8 @@ When only one variant of a node is active in the current dependency graph:
 ```
 ${nodes.database.DATABASE_URL}     # custom output from bash or outputs declaration
 ${nodes.backend.url}               # start_server built-in: full HTTPS URL
+${nodes.backend.url.hostname}      # start_server built-in: DNS name only
+${nodes.backend.url.host}          # start_server built-in: hostname:port
 ${nodes.backend.port}              # start_server built-in: allocated port (rarely needed)
 ${nodes.clone-db.exit_code}        # bash built-in: exit code
 ```
