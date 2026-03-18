@@ -362,8 +362,9 @@ function renderLogs(key,data,totalNodes){
   if(search){
     // Find matching indices.
     const matches=new Set();
+    const searchRe=new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g,'\\$&'),'i');
     for(let i=0;i<merged.length;i++){
-      if(merged[i].fullMsg.toLowerCase().indexOf(search)>=0||merged[i].node.toLowerCase().indexOf(search)>=0)matches.add(i);
+      if(searchRe.test(merged[i].fullMsg)||searchRe.test(merged[i].node))matches.add(i);
     }
     matchCount=matches.size;
     // Expand context around matches.
@@ -405,7 +406,9 @@ function logLineHtml(e,multi,search,isCtx){
 
 function highlightSearch(html,term){
   const escTerm=esc(term);if(!escTerm)return html;
-  return html.replace(new RegExp('('+escTerm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi'),'<mark>$1</mark>');
+  // Only highlight inside text content, not inside HTML tags or attributes.
+  const re=new RegExp('('+escTerm.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+')','gi');
+  return html.replace(/(<[^>]*>)|([^<]+)/g,(m,tag,text)=>tag?tag:text.replace(re,'<mark>$1</mark>'));
 }
 
 // --- Event delegation ---
