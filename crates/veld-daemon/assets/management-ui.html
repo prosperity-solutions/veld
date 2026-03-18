@@ -256,7 +256,7 @@ function render(data){
 function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
-  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=0;
+  s.autoScroll=true;s.knownNodes=new Map();s.prevHtml='';s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
   s.lastData=null; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
@@ -264,7 +264,7 @@ function ensureLogPanel(key){
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
       '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
       '<span class="log-match-count"></span>'+
-      '<span class="ctx-ctl" style="display:none">Context <input class="ctx-input" type="number" min="0" max="50" value="0" data-action="ctx-change"></span>'+
+      '<span class="ctx-ctl" style="display:none">Context <input class="ctx-input" type="number" min="0" max="50" value="5" data-action="ctx-change"></span>'+
       '<button class="autoscroll-btn on" data-action="autoscroll">Auto-scroll ON</button>'+
     '</div>'+
     '<div class="log-terminal"><div class="log-scroll"><div class="log-lines"><div class="log-empty">Loading logs...</div></div></div></div>';
