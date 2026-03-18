@@ -6,6 +6,7 @@ dev-setup:
     cp ./target/debug/veld-helper ~/.local/lib/veld/veld-helper
     cp ./target/debug/veld-daemon ~/.local/lib/veld/veld-daemon
     ./target/debug/veld setup unprivileged
+    @just _update-hammerspoon
     @just _restart-services
 
 # Build and install with privileged ports (80/443, requires sudo once).
@@ -16,7 +17,17 @@ dev-setup-privileged:
     cp ./target/debug/veld-helper ~/.local/lib/veld/veld-helper
     cp ./target/debug/veld-daemon ~/.local/lib/veld/veld-daemon
     sudo ./target/debug/veld setup privileged
+    @just _update-hammerspoon
     @just _restart-services
+
+# Update the Hammerspoon Spoon from source (if installed).
+_update-hammerspoon:
+    #!/usr/bin/env bash
+    spoon_dir="$HOME/.hammerspoon/Spoons/Veld.spoon"
+    if [ -d "$spoon_dir" ]; then
+        cp integrations/hammerspoon/Veld.spoon/init.lua "$spoon_dir/init.lua"
+        echo "Updated Hammerspoon Spoon."
+    fi
 
 # Restart daemon and helper so they pick up new binaries, then verify.
 _restart-services:

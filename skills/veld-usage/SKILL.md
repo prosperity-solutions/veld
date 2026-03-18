@@ -168,6 +168,14 @@ Create a new veld.json interactively. Auto-detects workspaces (pnpm, npm, Cargo)
 veld init
 ```
 
+### `veld ui`
+
+Open the management dashboard (`https://veld.localhost`) in the default browser. Shows all environments with service health, URLs, logs, and stop/restart controls.
+
+```bash
+veld ui
+```
+
 ### `veld gc`
 
 Garbage-collect stale state, orphaned processes, and old feedback directories.
