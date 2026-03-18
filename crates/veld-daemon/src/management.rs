@@ -171,13 +171,7 @@ async fn get_logs(
     Path(run_name): Path<String>,
     Query(q): Query<LogQuery>,
 ) -> Result<Json<LogResponse>, StatusCode> {
-    // Allow only safe characters in run names (alphanumeric, hyphens, underscores, dots).
-    if !run_name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-    {
-        return Err(StatusCode::BAD_REQUEST);
-    }
+    validate_run_name(&run_name)?;
 
     let registry = GlobalRegistry::load().map_err(|e| {
         warn!("failed to load registry for logs: {e}");
@@ -242,9 +236,10 @@ fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
 
 /// Validate that a run name contains only safe characters.
 fn validate_run_name(name: &str) -> Result<(), StatusCode> {
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
     {
         return Err(StatusCode::BAD_REQUEST);
     }
@@ -285,9 +280,26 @@ async fn open_terminal(
             .arg(&body.path)
             .spawn()
     } else {
-        std::process::Command::new("xdg-open")
+        // Try common Linux terminal emulators with working-directory support.
+        std::process::Command::new("x-terminal-emulator")
+            .arg("--working-directory")
             .arg(&body.path)
             .spawn()
+            .or_else(|_| {
+                std::process::Command::new("gnome-terminal")
+                    .arg("--working-directory")
+                    .arg(&body.path)
+                    .spawn()
+            })
+            .or_else(|_| {
+                std::process::Command::new("xterm")
+                    .arg("-e")
+                    .arg(format!(
+                        "cd '{}' && $SHELL",
+                        body.path.replace('\'', "'\\''")
+                    ))
+                    .spawn()
+            })
     };
 
     match result {
