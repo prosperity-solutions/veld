@@ -457,7 +457,7 @@ document.addEventListener('input',e=>{
     if(s){s.ctxLines=Math.max(0,Math.min(50,parseInt(ctxInput.value)||0));s.prevHtml='';doRenderLogs(key);}}
 });
 
-function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');return e<0?null:l.substring(1,e);}
+function extractTs(l){if(l.charAt(0)!=='[')return null;const e=l.indexOf(']');if(e<0)return null;const t=l.substring(1,e);return/^\d{4}-\d{2}-\d{2}T/.test(t)?t:null;}
 function extractMsg(l){const e=l.indexOf(']');if(e<0||l.charAt(0)!=='[')return l;return l.substring(e+2);}
 function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i+1).replace(/[Z+].*$/,'');const d=t.indexOf('.');if(d>=0)t=t.substring(0,d+4);return t;}
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
