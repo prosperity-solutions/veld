@@ -130,10 +130,12 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   const content = document.getElementById('content');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
-  let lastJson = '';
+  let lastFingerprint = '';
 
   // Track which runs have their log panel open + polling state.
-  const openLogs = {};  // runName -> { interval, filter, autoScroll }
+  const openLogs = {};    // runName -> { interval, filter, fetching }
+  const logPanels = {};   // runName -> detached DOM element (survives re-renders)
+  const prevLogHtml = {}; // runName -> last rendered HTML (skip no-op updates)
   const nodeColors = {};
   let colorIndex = 0;
 
@@ -144,19 +146,30 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     return nodeColors[node];
   }
 
+  // Build a stable fingerprint from environment data (immune to HashMap order).
+  function fingerprint(data) {
+    return data.projects.map(p => {
+      const runs = p.runs.map(r => {
+        const urls = Object.keys(r.urls || {}).sort().map(k => k + '=' + r.urls[k]).join('|');
+        return r.name + ':' + r.status + ':' + urls;
+      }).sort().join(';');
+      return p.name + '/' + runs;
+    }).sort().join('\n');
+  }
+
   async function refresh() {
     try {
       const resp = await fetch('/api/environments');
       if (!resp.ok) throw new Error(resp.status);
       const data = await resp.json();
-      const json = JSON.stringify(data);
 
       const running = data.projects.reduce((n, p) => n + p.runs.filter(r => r.status === 'running').length, 0);
       statusDot.innerHTML = running > 0 ? '<span class="dot"></span>' : '<span class="dot off"></span>';
       statusText.textContent = running > 0 ? running + ' running' : 'all idle';
 
-      if (json === lastJson) return;
-      lastJson = json;
+      const fp = fingerprint(data);
+      if (fp === lastFingerprint) return;
+      lastFingerprint = fp;
       render(data);
     } catch (e) {
       statusDot.innerHTML = '<span class="dot off"></span>';
@@ -172,6 +185,12 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
           '<p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p>' +
         '</div>';
       return;
+    }
+
+    // Detach open log panels so they survive the innerHTML replacement.
+    for (const runName of Object.keys(logPanels)) {
+      const panel = logPanels[runName];
+      if (panel.parentNode) panel.parentNode.removeChild(panel);
     }
 
     let html = '';
@@ -194,7 +213,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 
       for (const run of runs) {
         const isOpen = run.name in openLogs;
-        html += '<div class="run">';
+        html += '<div class="run" data-run-container="' + esc(run.name) + '">';
         html += '<div class="run-header">';
         html += '<span class="run-name">' + esc(run.name) + '</span>';
         html += '<span class="badge ' + esc(run.status) + '">' + esc(run.status) + '</span>';
@@ -214,50 +233,74 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
           html += '</div>';
         }
 
-        if (isOpen) {
-          html += '<div class="log-panel" data-logpanel="' + esc(run.name) + '">';
-          html += '<div class="log-panel-header">';
-          html += '<span>Logs</span>';
-          html += '<select class="node-filter" data-run="' + esc(run.name) + '" data-action="filter-node">';
-          html += '<option value="">All nodes</option>';
-          html += '</select>';
-          html += '</div>';
-          html += '<div class="log-scroll" data-logscroll="' + esc(run.name) + '">';
-          html += '<div class="log-lines" data-loglines="' + esc(run.name) + '">';
-          html += '<div class="log-empty">Loading logs...</div>';
-          html += '</div>';
-          html += '</div>';
-          html += '</div>';
-        }
-
+        // Log panel placeholder — actual panel is re-attached below.
         html += '</div>';
       }
       html += '</div>';
     }
     content.innerHTML = html;
 
-    // Re-fetch logs for any open panels after re-render.
-    for (const runName of Object.keys(openLogs)) {
-      fetchLogs(runName);
+    // Re-attach preserved log panels into their run containers.
+    for (const runName of Object.keys(logPanels)) {
+      const container = document.querySelector('[data-run-container="' + CSS.escape(runName) + '"]');
+      if (container) {
+        container.appendChild(logPanels[runName]);
+      }
     }
   }
 
-  // --- Event delegation (avoids inline handlers and XSS via run names) ---
+  // --- Log panel lifecycle (independent of environment refresh) ---
+
+  function createLogPanel(runName) {
+    const panel = document.createElement('div');
+    panel.className = 'log-panel';
+    panel.setAttribute('data-logpanel', runName);
+    panel.innerHTML =
+      '<div class="log-panel-header">' +
+        '<span>Logs</span>' +
+        '<select class="node-filter" data-run="' + esc(runName) + '" data-action="filter-node">' +
+          '<option value="">All nodes</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="log-scroll" data-logscroll="' + runName + '">' +
+        '<div class="log-lines" data-loglines="' + runName + '">' +
+          '<div class="log-empty">Loading logs...</div>' +
+        '</div>' +
+      '</div>';
+    return panel;
+  }
+
+  // --- Event delegation ---
 
   document.addEventListener('click', function(e) {
     const btn = e.target.closest('[data-action="toggle-logs"]');
     if (btn) {
       const runName = btn.dataset.run;
+      const container = btn.closest('[data-run-container]');
+      if (!container) return;
+
       if (runName in openLogs) {
+        // Close: stop polling, remove panel.
         clearInterval(openLogs[runName].interval);
         delete openLogs[runName];
         delete prevLogHtml[runName];
+        if (logPanels[runName]) {
+          logPanels[runName].remove();
+          delete logPanels[runName];
+        }
+        btn.classList.remove('active');
+        btn.textContent = 'Logs';
       } else {
+        // Open: create panel, start polling.
         openLogs[runName] = { interval: null, filter: '', fetching: false };
+        const panel = createLogPanel(runName);
+        logPanels[runName] = panel;
+        container.appendChild(panel);
+        btn.classList.add('active');
+        btn.textContent = 'Hide logs';
+        fetchLogs(runName);
         openLogs[runName].interval = setInterval(() => fetchLogs(runName), 2000);
       }
-      lastJson = '';
-      refresh();
     }
   });
 
@@ -267,10 +310,13 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       const runName = sel.dataset.run;
       if (openLogs[runName]) {
         openLogs[runName].filter = sel.value;
+        delete prevLogHtml[runName]; // force re-render with new filter
         fetchLogs(runName);
       }
     }
   });
+
+  // --- Log fetching and rendering ---
 
   async function fetchLogs(runName) {
     const state = openLogs[runName];
@@ -287,32 +333,28 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     finally { if (openLogs[runName]) openLogs[runName].fetching = false; }
   }
 
-  // Track previous log HTML per run to skip no-op DOM updates.
-  const prevLogHtml = {};
-
   function renderLogs(runName, data) {
-    const linesEl = document.querySelector('[data-loglines="' + CSS.escape(runName) + '"]');
-    const scrollEl = document.querySelector('[data-logscroll="' + CSS.escape(runName) + '"]');
+    const panel = logPanels[runName];
+    if (!panel) return;
+    const linesEl = panel.querySelector('[data-loglines]');
+    const scrollEl = panel.querySelector('[data-logscroll]');
     if (!linesEl || !scrollEl) return;
 
     // Rebuild node filter dropdown if the node set has changed.
-    const panel = document.querySelector('[data-logpanel="' + CSS.escape(runName) + '"]');
-    if (panel) {
-      const select = panel.querySelector('.node-filter');
-      if (select) {
-        const nodes = data.nodes.map(n => n.node).sort();
-        const current = Array.from(select.options).slice(1).map(o => o.value);
-        if (nodes.join(',') !== current.join(',')) {
-          const savedValue = select.value;
-          while (select.options.length > 1) select.remove(1);
-          for (const n of nodes) {
-            const opt = document.createElement('option');
-            opt.value = n;
-            opt.textContent = n;
-            select.appendChild(opt);
-          }
-          select.value = savedValue;
+    const select = panel.querySelector('.node-filter');
+    if (select) {
+      const nodes = data.nodes.map(n => n.node).sort();
+      const current = Array.from(select.options).slice(1).map(o => o.value);
+      if (nodes.join(',') !== current.join(',')) {
+        const savedValue = select.value;
+        while (select.options.length > 1) select.remove(1);
+        for (const n of nodes) {
+          const opt = document.createElement('option');
+          opt.value = n;
+          opt.textContent = n;
+          select.appendChild(opt);
         }
+        select.value = savedValue;
       }
     }
 
@@ -324,7 +366,6 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
         merged.push({ node: nodeData.node, variant: nodeData.variant, raw: line, ts: ts || '' });
       }
     }
-    // Sort by timestamp (ISO 8601 sorts correctly). Lines without timestamps sort first.
     merged.sort((a, b) => {
       const cmp = a.ts.localeCompare(b.ts);
       if (cmp !== 0) return cmp;
@@ -359,12 +400,11 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     if (html === prevLogHtml[runName]) return;
     prevLogHtml[runName] = html;
 
-    // Check if user has scrolled up (not at bottom).
+    // Only auto-scroll if user is at the bottom.
     const isAtBottom = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight < 40;
 
     linesEl.innerHTML = html;
 
-    // Auto-scroll after browser has laid out the new content.
     if (isAtBottom) {
       requestAnimationFrame(() => { scrollEl.scrollTop = scrollEl.scrollHeight; });
     }
