@@ -63,11 +63,17 @@ function stringify(args){
 function captureStack(){
   try{
     var e=new Error();var s=e.stack||'';
-    // Strip the "Error" first line — it's just the constructor message, not a real frame.
-    var i=s.indexOf('\n');if(i>=0)s=s.substring(i+1);
-    // Strip our own frames (captureStack + the monkey-patched console method).
-    i=s.indexOf('\n');if(i>=0)s=s.substring(i+1);
-    return s;
+    // Strip veld-internal frames: the "Error" header (Chrome only),
+    // captureStack itself, and the monkey-patched console wrapper.
+    // Filter by script URL to handle all browsers (Chrome, Firefox, Safari).
+    var scriptUrl=sc&&sc.src?sc.src:'client-log.js';
+    var lines=s.split('\n');var out=[];
+    for(var j=0;j<lines.length;j++){
+      var ln=lines[j];
+      if(ln==='Error'||ln.indexOf(scriptUrl)>=0)continue;
+      out.push(ln);
+    }
+    return out.join('\n');
   }catch(x){return '';}
 }
 

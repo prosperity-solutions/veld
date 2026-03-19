@@ -348,17 +348,11 @@ function renderLogs(key,data,totalNodes){
   raw.sort((a,b)=>{const da=new Date(a.ts),db=new Date(b.ts);const va=isNaN(da)?Infinity:da.getTime(),vb=isNaN(db)?Infinity:db.getTime();const c=va-vb;return c!==0?c:a.node.localeCompare(b.node);});
   if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml=null;return;}
 
-  // Group continuation lines (message starts with whitespace) with their parent.
+  // Build merged entries. Continuation lines are pre-merged by the API
+  // (merge_continuation_lines on the server), so each raw entry is a
+  // complete logical log entry that may contain embedded newlines.
   const merged=[];
-  for(const e of raw){
-    const msg=extractMsg(e.raw);
-    const isCont=merged.length>0&&e.node===merged[merged.length-1].node&&e.source===merged[merged.length-1].source&&(msg.length===0||msg.charAt(0)===' '||msg.charAt(0)==='\t');
-    if(isCont){
-      merged[merged.length-1].fullMsg+='\n'+msg;
-    }else{
-      merged.push({...e,fullMsg:msg});
-    }
-  }
+  for(const e of raw)merged.push({...e,fullMsg:extractMsg(e.raw)});
 
   const search=s.searchTerm.toLowerCase();
   const ctx=s.ctxLines||0;
