@@ -54,6 +54,32 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
+## PR Workflow
+
+Follow this workflow for every feature or fix:
+
+1. **Implement** — Make the code changes.
+2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
+3. **Self-review rounds** — Use sub-agents to review the diff. Iterate (review → fix → review → fix) until no issues remain.
+4. **Push to draft PR** — Push the branch and open a draft PR on GitHub.
+5. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet.
+6. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
+
+## Documentation Checklist
+
+When a change introduces new config fields, CLI flags, subcommands, or user-visible behavior, update **all** of the following:
+
+| File | What to update |
+|------|----------------|
+| `README.md` | Features list, CLI reference table, Configuration section |
+| `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
+| `skills/veld-config/SKILL.md` | Agent-facing config reference |
+| `skills/veld-usage/SKILL.md` | Agent-facing CLI reference |
+| `schema/v1/veld.schema.json` | JSON Schema (usually updated in code, but verify) |
+| `website/llms-full.txt` | LLM-facing docs (if applicable, see `website/AGENTS.md`) |
+
+If the change is purely internal (refactor, bugfix with no new surface area), this checklist does not apply.
+
 ## Key Conventions
 
 - Domain: `veld.oss.life.li` (not `veld.dev`)

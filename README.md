@@ -24,6 +24,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
+- **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
 
 ## Install
 
@@ -131,7 +132,7 @@ veld stop --name dev
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
-| `veld logs [--name <n>] [--node <n>] [--lines <n>]` | View logs |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [--source <s>]` | View logs (source: `all`, `server`, `client`) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
@@ -174,6 +175,18 @@ veld stop --name dev
 
 Fallback operator: `{branch ?? run}` uses the first non-empty value.
 
+### Client-side log levels
+
+Veld automatically captures browser `console.log`, `console.warn`, `console.error`, unhandled exceptions, and promise rejections from `start_server` nodes. Configure which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
+
+```json
+"client_log_levels": ["log", "warn", "error"]
+```
+
+Valid levels: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Default: `["log", "warn", "error"]`. Unhandled exceptions are always captured regardless of this setting.
+
+View client logs with `veld logs --source client` or filter by source in the management UI.
+
 ### Variable interpolation
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.
@@ -209,7 +222,7 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 Veld includes a browser-based dashboard at `https://veld.localhost` (or `https://veld.localhost:18443` in unprivileged mode). It shows all environments with:
 
 - **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID
-- **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter
+- **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter, source filter (server/client/all)
 - **Stop/Restart** — control environments directly from the browser
 
 Open it with `veld ui` or visit the URL directly.

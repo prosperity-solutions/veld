@@ -32,6 +32,7 @@ Always include the `$schema` field for editor autocompletion:
 | `name` | string | Yes | Project name (alphanumeric, dots, hyphens, underscores) |
 | `url_template` | string | No | Default: `{service}.{run}.{project}.localhost` |
 | `presets` | object | No | Named shortcuts for node:variant selections |
+| `client_log_levels` | array | No | Browser log levels to capture: `["log", "warn", "error"]` (default). Valid: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Exceptions always captured. |
 | `nodes` | object | Yes | At least one node required |
 
 ## Node Types
@@ -265,6 +266,16 @@ Use `command` type with `verify` — the verify script runs first, and if it exi
 
 ### Wiring environment variables between nodes
 Use `${nodes.<node>.<output>}` in the `env` block of dependent nodes. Veld resolves these after dependencies complete.
+
+### Client-side log levels
+
+Captures browser console output from `start_server` nodes. Cascades: variant > node > project.
+
+```json
+"client_log_levels": ["log", "warn", "error", "info", "debug"]
+```
+
+Set at project, node, or variant level. Unhandled exceptions are always captured.
 
 ## Common Mistakes
 

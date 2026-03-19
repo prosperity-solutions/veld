@@ -36,9 +36,12 @@ All relative paths in the configuration resolve relative to the directory contai
 | `$schema`        | string | No       | JSON Schema URL for editor autocompletion         |
 | `schemaVersion`  | string | Yes      | Must be `"1"` for the current version             |
 | `name`           | string | Yes      | Human-readable project name                       |
-| `url_template`   | string | No       | URL template for services (see [URL Templates])   |
-| `presets`        | object | No       | Named shortcuts for node:variant selections       |
-| `nodes`          | object | Yes      | The dependency graph nodes                        |
+| `url_template`      | string | No       | URL template for services (see [URL Templates])   |
+| `presets`           | object | No       | Named shortcuts for node:variant selections       |
+| `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
+| `nodes`             | object | Yes      | The dependency graph nodes                        |
+
+[Client-Side Log Levels]: #client-side-log-levels
 
 [URL Templates]: #url-templates
 
@@ -73,6 +76,38 @@ Defines how Veld generates HTTPS URLs for your services. See the full [URL Templ
 ```
 
 **Default:** `{service}.{run}.{project}.localhost`
+
+### `client_log_levels`
+
+Controls which browser console levels Veld captures from `start_server` nodes. Veld injects a small script into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`. Captured logs are sent to the Veld daemon and appear in `veld logs` and the management UI alongside server logs.
+
+```json
+"client_log_levels": ["log", "warn", "error"]
+```
+
+**Valid values:** `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`
+
+**Default:** `["log", "warn", "error"]`
+
+Unhandled exceptions and promise rejections are always captured regardless of this setting.
+
+The setting cascades: variant-level overrides node-level overrides project-level. Set it to an empty array to capture only unhandled exceptions.
+
+```json
+{
+  "client_log_levels": ["warn", "error"],
+  "nodes": {
+    "frontend": {
+      "client_log_levels": ["log", "warn", "error", "info"],
+      "variants": {
+        "local": {
+          "client_log_levels": ["debug", "log", "warn", "error", "info"]
+        }
+      }
+    }
+  }
+}
+```
 
 ---
 
@@ -119,6 +154,17 @@ When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes 
 }
 ```
 
+### `client_log_levels` (node-level)
+
+Overrides the project-level `client_log_levels` for all variants of this node. See [Client-Side Log Levels](#client-side-log-levels) for details.
+
+```json
+"frontend": {
+  "client_log_levels": ["log", "warn", "error", "info"],
+  "variants": { ... }
+}
+```
+
 ### `url_template` (node-level)
 
 Overrides the project-level `url_template` for all variants of this node. See [URL Template Cascade](#url-template-cascade) for resolution order.
@@ -155,6 +201,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
 | `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
 | `verify`            | string           | No       | `command` only    | Idempotency verification command                      |
+| `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 
 ### `type`
 
