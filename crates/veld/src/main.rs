@@ -229,6 +229,15 @@ enum Command {
 
     /// Print version information for all Veld binaries.
     Version,
+
+    /// Internal: read stdin, prepend timestamps, write to log file.
+    /// Used by detached server mode to timestamp process output.
+    #[command(name = "_timestamp", hide = true)]
+    InternalTimestamp {
+        /// Path to the log file to append to.
+        #[arg(long)]
+        log: std::path::PathBuf,
+    },
 }
 
 fn init_tracing(debug: bool) {
@@ -355,6 +364,32 @@ async fn main() {
 
         Command::Version => {
             commands::version::print_version();
+            0
+        }
+
+        Command::InternalTimestamp { log } => {
+            // Fast path: no config loading, no network, just stdin → timestamped log file.
+            // Used internally by detached server mode.
+            use std::io::BufRead;
+            let stdin = std::io::stdin();
+            for line in stdin.lock().lines() {
+                let line = match line {
+                    Ok(l) => l,
+                    Err(_) => break,
+                };
+                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let formatted = format!("[{ts}] {line}\n");
+                // Open-append-close per line to match LogWriter behavior and
+                // allow concurrent readers (like `veld logs -f`) to see data.
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&log)
+                {
+                    use std::io::Write;
+                    let _ = f.write_all(formatted.as_bytes());
+                }
+            }
             0
         }
     };

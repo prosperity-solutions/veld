@@ -156,9 +156,10 @@ async fn start_server_foreground(
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
 ///
-/// stdout/stderr are piped through a perl one-liner that prepends ISO 8601
-/// timestamps with millisecond precision. The entire pipeline (server +
-/// timestamper) runs in the same process group and survives CLI exit.
+/// stdout/stderr are piped through `veld _timestamp` which prepends ISO 8601
+/// timestamps with millisecond precision (pure Rust, no external deps). The
+/// entire pipeline (server + timestamper) runs in the same process group and
+/// survives CLI exit.
 fn start_server_detached(
     command: &str,
     working_dir: &Path,
@@ -172,18 +173,17 @@ fn start_server_detached(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Wrap the command in a pipeline that timestamps each line.
-    // The server's stdout+stderr are merged and piped through a perl one-liner
-    // that prepends UTC timestamps with millisecond precision.
-    // perl + Time::HiRes is available on macOS and all mainstream Linux distros.
-    // The entire pipeline runs in its own process group (process_group(0))
+    // Wrap the command in a pipeline that timestamps each line via `veld _timestamp`.
+    // This is a pure Rust timestamper (no perl/python dependency) with millisecond
+    // precision. The entire pipeline runs in its own process group (process_group(0))
     // so it survives CLI exit.
     let log_path_escaped = log_file.to_string_lossy().replace('\'', "'\\''");
-    let wrapper = format!(
-        "{{ {command} ; }} 2>&1 | perl -MTime::HiRes=gettimeofday -MPOSIX=strftime -ne \
-         'my($s,$us)=gettimeofday();printf \"[%s.%03dZ] %s\",strftime(\"%Y-%m-%dT%H:%M:%S\",gmtime($s)),$us/1000,$_' \
-         >> '{log_path_escaped}'"
-    );
+    let veld_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
+        .to_string_lossy()
+        .replace('\'', "'\\''");
+    let wrapper =
+        format!("{{ {command} ; }} 2>&1 | '{veld_bin}' _timestamp --log '{log_path_escaped}'");
 
     let child = std::process::Command::new("sh")
         .arg("-c")
