@@ -304,11 +304,23 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
+    // Guard against dangerous PIDs:
+    // - pid 0: kill(0, sig) sends to our own process group
+    // - pid 1: kill(-1, sig) sends to ALL processes we can signal
+    // - pid > i32::MAX: wraps negative on cast, producing wrong target
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return Err(ProcessError::SignalFailed {
+            pid,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to signal dangerous pid {pid}"),
+            ),
+        });
+    }
+
     // Send to the process group (negative PID) to kill all children.
-    // For processes NOT spawned with process_group(0), this sends to the
-    // group they belong to, which is typically the veld CLI's own group —
-    // but we only call kill_process on detached server PIDs which always
-    // have their own group.
+    // Detached servers run in their own process group (process_group(0))
+    // and the tracked PID is the group leader.
     let nix_pgid = Pid::from_raw(-(pid as i32));
     let nix_pid = Pid::from_raw(pid as i32);
 
@@ -337,9 +349,13 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     }
 
     // Wait up to 5 seconds for graceful exit.
+    // Check both the group leader and the process group itself to ensure
+    // the entire pipeline (server + _timestamp) has exited.
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if !is_alive(pid) {
+        let leader_alive = is_alive(pid);
+        let group_alive = kill(nix_pgid, None).is_ok();
+        if !leader_alive && !group_alive {
             return Ok(());
         }
     }

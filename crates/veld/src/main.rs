@@ -370,24 +370,44 @@ async fn main() {
         Command::InternalTimestamp { log } => {
             // Fast path: no config loading, no network, just stdin → timestamped log file.
             // Used internally by detached server mode.
-            use std::io::BufRead;
+            use std::io::{BufRead, Write};
             let stdin = std::io::stdin();
-            for line in stdin.lock().lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => break,
-                };
-                let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-                let formatted = format!("[{ts}] {line}\n");
-                // Open-append-close per line to match LogWriter behavior and
-                // allow concurrent readers (like `veld logs -f`) to see data.
-                if let Ok(mut f) = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(&log)
-                {
-                    use std::io::Write;
-                    let _ = f.write_all(formatted.as_bytes());
+            let mut reader = stdin.lock();
+            let mut buf = String::new();
+
+            // Keep file handle open for performance; flush after each line
+            // so `veld logs -f` can see data immediately.
+            let mut file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("veld _timestamp: failed to open log file: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            loop {
+                buf.clear();
+                match reader.read_line(&mut buf) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let ts =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+                        let formatted = format!("[{ts}] {trimmed}\n");
+                        if let Err(e) = file.write_all(formatted.as_bytes()) {
+                            eprintln!("veld _timestamp: write error: {e}");
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Invalid UTF-8 line — skip it rather than terminating.
+                        // This handles binary output from misbehaving processes.
+                        continue;
+                    }
                 }
             }
             0
