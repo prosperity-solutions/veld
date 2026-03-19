@@ -237,6 +237,18 @@ struct ClientLogEntry {
     stack: Option<String>,
 }
 
+/// Find the largest byte index <= `max_bytes` that is a valid UTF-8 char boundary.
+fn safe_truncate_boundary(s: &str, max_bytes: usize) -> usize {
+    if s.len() <= max_bytes {
+        return s.len();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 async fn ingest_client_logs(
     headers: axum::http::HeaderMap,
     Json(batch): Json<ClientLogBatch>,
@@ -356,8 +368,10 @@ async fn ingest_client_logs(
         }
         // Sanitize the message: replace newlines to preserve log line format.
         // Truncate to 32KB to prevent abuse from forged requests.
+        // Use a char boundary to avoid panicking on multi-byte UTF-8.
         let msg_truncated = if entry.msg.len() > 32_768 {
-            format!("{}...(truncated)", &entry.msg[..32_768])
+            let end = safe_truncate_boundary(&entry.msg, 32_768);
+            format!("{}...(truncated)", &entry.msg[..end])
         } else {
             entry.msg.clone()
         };
@@ -371,8 +385,8 @@ async fn ingest_client_logs(
         let mut line = format!("[{}] [{}] {}", sanitized_ts, level, sanitized_msg);
         if let Some(ref stack) = entry.stack {
             // Limit stack trace to first 50 frames / 16KB to prevent abuse.
-            let stack_limit = stack.len().min(16_384);
-            let stack_slice = &stack[..stack_limit];
+            let stack_end = safe_truncate_boundary(stack, 16_384);
+            let stack_slice = &stack[..stack_end];
             let mut frame_count = 0;
             for stack_line in stack_slice.lines() {
                 let trimmed = stack_line.trim();
