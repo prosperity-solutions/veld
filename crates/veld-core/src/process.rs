@@ -155,6 +155,10 @@ async fn start_server_foreground(
 /// CLI (e.g. SIGHUP on terminal close, SIGINT from Ctrl-C).
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
+///
+/// stdout/stderr are piped through a shell `while read` loop that prepends
+/// ISO 8601 timestamps to each line. The entire pipeline (server + timestamp
+/// loop) runs in the same process group and survives CLI exit.
 fn start_server_detached(
     command: &str,
     working_dir: &Path,
@@ -163,21 +167,29 @@ fn start_server_detached(
 ) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .map_err(ProcessError::SpawnFailed)?;
-    let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
+    // Ensure log directory exists and log file is created.
+    if let Some(parent) = log_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Wrap the command in a pipeline that timestamps each line.
+    // The server's stdout+stderr are merged and piped through a `while read`
+    // loop that prepends UTC timestamps in ISO 8601 format.
+    // The entire pipeline runs in its own process group (process_group(0))
+    // so it survives CLI exit.
+    let log_path_escaped = log_file.to_string_lossy().replace('\'', "'\\''");
+    let wrapper = format!(
+        "{{ {command} ; }} 2>&1 | while IFS= read -r _veld_line; do printf '[%sZ] %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%S')\" \"$_veld_line\"; done >> '{log_path_escaped}'"
+    );
 
     let child = std::process::Command::new("sh")
         .arg("-c")
-        .arg(command)
+        .arg(&wrapper)
         .current_dir(working_dir)
         .envs(env)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(stderr_file))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0) // own process group — immune to parent signals
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
@@ -280,23 +292,45 @@ pub fn is_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Kill a process: send SIGTERM, wait briefly, then SIGKILL if still alive.
+/// Kill a process and its process group: send SIGTERM, wait briefly, then
+/// SIGKILL if still alive. Signals are sent to the process group (negative
+/// PID) because detached servers run in their own process group
+/// (`process_group(0)`) and the tracked PID is the group leader. This
+/// ensures the entire pipeline (server + timestamp wrapper) is cleaned up.
 pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
+    // Send to the process group (negative PID) to kill all children.
+    // For processes NOT spawned with process_group(0), this sends to the
+    // group they belong to, which is typically the veld CLI's own group —
+    // but we only call kill_process on detached server PIDs which always
+    // have their own group.
+    let nix_pgid = Pid::from_raw(-(pid as i32));
     let nix_pid = Pid::from_raw(pid as i32);
 
-    // SIGTERM
-    if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-        // ESRCH = process already gone — not an error.
-        if e != nix::errno::Errno::ESRCH {
+    // Try killing the process group first.
+    let group_kill_result = kill(nix_pgid, Signal::SIGTERM);
+
+    // Fall back to individual PID if group kill fails (ESRCH on the group
+    // means the process may not be a group leader).
+    if let Err(e) = group_kill_result {
+        if e == nix::errno::Errno::ESRCH {
+            // Try individual PID — process might already be gone.
+            if let Err(e2) = kill(nix_pid, Signal::SIGTERM) {
+                if e2 != nix::errno::Errno::ESRCH {
+                    return Err(ProcessError::SignalFailed {
+                        pid,
+                        source: std::io::Error::from_raw_os_error(e2 as i32),
+                    });
+                }
+            }
+        } else {
             return Err(ProcessError::SignalFailed {
                 pid,
                 source: std::io::Error::from_raw_os_error(e as i32),
             });
         }
-        return Ok(());
     }
 
     // Wait up to 5 seconds for graceful exit.
@@ -307,14 +341,16 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
         }
     }
 
-    // SIGKILL
+    // SIGKILL the group, then fall back to the individual PID.
     tracing::warn!(pid, "process did not exit after SIGTERM, sending SIGKILL");
-    if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-        if e != nix::errno::Errno::ESRCH {
-            return Err(ProcessError::SignalFailed {
-                pid,
-                source: std::io::Error::from_raw_os_error(e as i32),
-            });
+    if let Err(_) = kill(nix_pgid, Signal::SIGKILL) {
+        if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
+            if e != nix::errno::Errno::ESRCH {
+                return Err(ProcessError::SignalFailed {
+                    pid,
+                    source: std::io::Error::from_raw_os_error(e as i32),
+                });
+            }
         }
     }
 
