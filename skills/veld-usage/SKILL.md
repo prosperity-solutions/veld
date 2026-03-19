@@ -101,6 +101,8 @@ veld logs --name dev --lines 200              # More lines
 veld logs --name dev --since 5m               # Last 5 minutes
 veld logs --name dev --follow                 # Stream (like tail -f)
 veld logs --name dev --node backend --follow  # Stream single node
+veld logs --name dev --source client          # Client-side (browser) logs only
+veld logs --name dev --source server          # Server logs only (default: all)
 veld logs --name dev --json                   # NDJSON format
 ```
 

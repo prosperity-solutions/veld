@@ -121,7 +121,7 @@ veld stop --name dev
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
-| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f]` | View logs (`-f` to follow) |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--source <s>]` | View logs (`-f` to follow, source: `all`/`server`/`client`) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
@@ -180,6 +180,32 @@ This makes veld uniquely suited for agentic workflows where AI agents build UI a
 
 ---
 
+## Client-Side Log Collection
+
+Veld automatically captures browser console output from `start_server` nodes. A small script is injected into proxied HTML responses that hooks `console.log`, `console.warn`, `console.error`, `console.info`, and `console.debug`, plus `window.onerror` and `onunhandledrejection`.
+
+Captured logs appear alongside server logs in `veld logs` and the management UI. Filter by source:
+
+```sh
+veld logs --source client          # Browser logs only
+veld logs --source server          # Server logs only
+veld logs --source all             # Both (default)
+```
+
+### Configuration
+
+Control which levels to capture with `client_log_levels` at the project, node, or variant level (most specific wins):
+
+```json
+"client_log_levels": ["log", "warn", "error", "info", "debug"]
+```
+
+Valid levels: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Default: `["log", "warn", "error"]`. Unhandled exceptions and promise rejections are always captured regardless of this setting.
+
+The management UI also provides source filter controls (All / Server / Client) in the Logs tab.
+
+---
+
 ## Configuration Reference
 
 ### Top-Level Structure
@@ -191,6 +217,7 @@ This makes veld uniquely suited for agentic workflows where AI agents build UI a
 | `name` | string | Yes | Project name (used in URLs) |
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
+| `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
 | `nodes` | object | Yes | The dependency graph nodes |
 
 ### Step Types
@@ -361,6 +388,7 @@ Usage: `veld start --preset fullstack --name my-feature`
 | `on_stop` | string | All | Teardown command on `veld stop` |
 | `verify` | string | `command` only | Idempotency check (exit 0 = skip) |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
+| `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
 | `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
 
 ---
