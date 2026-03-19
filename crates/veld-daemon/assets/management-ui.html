@@ -345,7 +345,7 @@ function renderLogs(key,data,totalNodes){
 
   const raw=[];
   for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,source:nd.source||'server',raw:line,ts:extractTs(line)||''});
-  raw.sort((a,b)=>{const da=new Date(a.ts),db=new Date(b.ts);const c=(isNaN(da)?0:da.getTime())-(isNaN(db)?0:db.getTime());return c!==0?c:a.node.localeCompare(b.node);});
+  raw.sort((a,b)=>{const da=new Date(a.ts),db=new Date(b.ts);const va=isNaN(da)?Infinity:da.getTime(),vb=isNaN(db)?Infinity:db.getTime();const c=va-vb;return c!==0?c:a.node.localeCompare(b.node);});
   if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml=null;return;}
 
   // Group continuation lines (message starts with whitespace) with their parent.

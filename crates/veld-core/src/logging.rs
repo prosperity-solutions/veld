@@ -186,6 +186,29 @@ pub async fn lines_since(path: &Path, since: chrono::Duration) -> Result<Vec<Str
     Ok(result)
 }
 
+/// Merge continuation lines (those starting with whitespace) with their parent.
+///
+/// Log entries can span multiple lines — the primary line starts with
+/// `[timestamp]` and continuation lines (e.g. stack traces) start with
+/// whitespace. This function joins them into single strings so that each
+/// returned entry is a complete logical log entry that sorts correctly.
+pub fn merge_continuation_lines(lines: Vec<String>) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for line in lines {
+        let is_continuation = !line.is_empty()
+            && (line.starts_with(' ') || line.starts_with('\t'))
+            && !merged.is_empty();
+        if is_continuation {
+            let last = merged.last_mut().unwrap();
+            last.push('\n');
+            last.push_str(&line);
+        } else {
+            merged.push(line);
+        }
+    }
+    merged
+}
+
 /// Extract the timestamp string from a log line (between first `[` and `]`).
 pub fn extract_timestamp(line: &str) -> Option<&str> {
     let start = line.find('[')? + 1;

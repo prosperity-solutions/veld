@@ -61,7 +61,14 @@ function stringify(args){
 }
 
 function captureStack(){
-  try{var e=new Error();return e.stack||'';}catch(x){return '';}
+  try{
+    var e=new Error();var s=e.stack||'';
+    // Strip the "Error" first line — it's just the constructor message, not a real frame.
+    var i=s.indexOf('\n');if(i>=0)s=s.substring(i+1);
+    // Strip our own frames (captureStack + the monkey-patched console method).
+    i=s.indexOf('\n');if(i>=0)s=s.substring(i+1);
+    return s;
+  }catch(x){return '';}
 }
 
 var needsStack={'error':1,'warn':1};

@@ -212,9 +212,10 @@ async fn get_logs(
         if include_server {
             let log_path = logging::log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
             let lines = if log_path.exists() {
-                logging::tail_lines(&log_path, lines_limit)
+                let raw = logging::tail_lines(&log_path, lines_limit)
                     .await
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                logging::merge_continuation_lines(raw)
             } else {
                 Vec::new()
             };
@@ -230,9 +231,10 @@ async fn get_logs(
             let log_path =
                 logging::client_log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
             let lines = if log_path.exists() {
-                logging::tail_lines(&log_path, lines_limit)
+                let raw = logging::tail_lines(&log_path, lines_limit)
                     .await
-                    .unwrap_or_default()
+                    .unwrap_or_default();
+                logging::merge_continuation_lines(raw)
             } else {
                 Vec::new()
             };

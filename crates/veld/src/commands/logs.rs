@@ -128,7 +128,7 @@ pub async fn run(
         let log_lines = if let Some(secs) = since_duration {
             let dur = chrono::Duration::seconds(secs as i64);
             match logging::lines_since(log_path, dur).await {
-                Ok(l) => l,
+                Ok(l) => logging::merge_continuation_lines(l),
                 Err(e) => {
                     output::print_error(
                         &format!("Failed to read log for {node_name}:{variant} ({src}): {e}"),
@@ -139,7 +139,7 @@ pub async fn run(
             }
         } else {
             match logging::tail_lines(log_path, lines).await {
-                Ok(l) => l,
+                Ok(l) => logging::merge_continuation_lines(l),
                 Err(e) => {
                     output::print_error(
                         &format!("Failed to read log for {node_name}:{variant} ({src}): {e}"),
