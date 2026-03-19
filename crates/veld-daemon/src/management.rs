@@ -144,6 +144,13 @@ struct LogQuery {
     #[serde(default = "default_lines")]
     lines: usize,
     node: Option<String>,
+    /// Filter by source: "all" (default), "server", or "client".
+    #[serde(default = "default_source")]
+    source: String,
+}
+
+fn default_source() -> String {
+    "all".to_owned()
 }
 
 #[derive(Serialize)]
@@ -155,6 +162,7 @@ struct LogResponse {
 struct NodeLogs {
     node: String,
     variant: String,
+    source: String,
     lines: Vec<String>,
 }
 
@@ -190,6 +198,8 @@ async fn get_logs(
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let lines_limit = q.lines.clamp(1, 5000);
+    let include_server = q.source == "all" || q.source == "server";
+    let include_client = q.source == "all" || q.source == "client";
     let mut nodes = Vec::new();
 
     for ns in run_state.nodes.values() {
@@ -199,23 +209,45 @@ async fn get_logs(
             }
         }
 
-        let log_path = logging::log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
-        let lines = if log_path.exists() {
-            logging::tail_lines(&log_path, lines_limit)
-                .await
-                .unwrap_or_default()
-        } else {
-            Vec::new()
-        };
+        if include_server {
+            let log_path = logging::log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
+            let lines = if log_path.exists() {
+                let raw = logging::tail_lines(&log_path, lines_limit)
+                    .await
+                    .unwrap_or_default();
+                logging::merge_continuation_lines(raw)
+            } else {
+                Vec::new()
+            };
+            nodes.push(NodeLogs {
+                node: ns.node_name.clone(),
+                variant: ns.variant.clone(),
+                source: "server".to_owned(),
+                lines,
+            });
+        }
 
-        nodes.push(NodeLogs {
-            node: ns.node_name.clone(),
-            variant: ns.variant.clone(),
-            lines,
-        });
+        if include_client {
+            let log_path =
+                logging::client_log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
+            let lines = if log_path.exists() {
+                let raw = logging::tail_lines(&log_path, lines_limit)
+                    .await
+                    .unwrap_or_default();
+                logging::merge_continuation_lines(raw)
+            } else {
+                Vec::new()
+            };
+            nodes.push(NodeLogs {
+                node: ns.node_name.clone(),
+                variant: ns.variant.clone(),
+                source: "client".to_owned(),
+                lines,
+            });
+        }
     }
 
-    nodes.sort_by(|a, b| a.node.cmp(&b.node));
+    nodes.sort_by(|a, b| a.node.cmp(&b.node).then_with(|| a.source.cmp(&b.source)));
     Ok(Json(LogResponse { nodes }))
 }
 
@@ -237,6 +269,9 @@ fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
 /// Validate that a run name contains only safe characters.
 fn validate_run_name(name: &str) -> Result<(), StatusCode> {
     if name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.contains("..")
         || !name
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')

@@ -53,6 +53,12 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presets: Option<HashMap<String, Vec<String>>>,
 
+    /// Client-side log levels to capture (project-level default).
+    /// Supported values: "log", "warn", "error", "info", "debug".
+    /// "exception" is always captured regardless of this setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_log_levels: Option<Vec<String>>,
+
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
 }
@@ -78,6 +84,10 @@ pub struct NodeConfig {
     /// Hidden nodes still participate in the dependency graph normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hidden: Option<bool>,
+
+    /// Client-side log levels override for all variants of this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_log_levels: Option<Vec<String>>,
 
     pub variants: HashMap<String, VariantConfig>,
 }
@@ -136,6 +146,10 @@ pub struct VariantConfig {
     /// Executed in reverse dependency order during `veld stop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_stop: Option<String>,
+
+    /// Client-side log levels override for this specific variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_log_levels: Option<Vec<String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -301,10 +315,100 @@ pub fn load_config_from_cwd() -> Result<(PathBuf, VeldConfig), ConfigError> {
     Ok((path, config))
 }
 
+/// Default client log levels when none are configured.
+pub const DEFAULT_CLIENT_LOG_LEVELS: &[&str] = &["log", "warn", "error"];
+
+/// Valid client log level values.
+const VALID_CLIENT_LOG_LEVELS: &[&str] = &["log", "warn", "error", "info", "debug"];
+
+/// Resolve the effective client log levels for a given node+variant,
+/// using the most specific override: variant > node > project > default.
+/// Invalid level values are silently filtered out.
+pub fn resolve_client_log_levels(
+    project_levels: Option<&[String]>,
+    node_levels: Option<&[String]>,
+    variant_levels: Option<&[String]>,
+) -> Vec<String> {
+    let raw = if let Some(levels) = variant_levels {
+        levels.to_vec()
+    } else if let Some(levels) = node_levels {
+        levels.to_vec()
+    } else if let Some(levels) = project_levels {
+        levels.to_vec()
+    } else {
+        return DEFAULT_CLIENT_LOG_LEVELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+    };
+    // Filter to only valid values. If nothing remains, fall back to defaults.
+    let filtered: Vec<String> = raw
+        .into_iter()
+        .filter(|l| VALID_CLIENT_LOG_LEVELS.contains(&l.as_str()))
+        .collect();
+    if filtered.is_empty() {
+        DEFAULT_CLIENT_LOG_LEVELS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        filtered
+    }
+}
+
 /// Return the project root directory (parent of veld.json).
 pub fn project_root(config_path: &Path) -> PathBuf {
     config_path
         .parent()
         .expect("veld.json must have a parent directory")
         .to_path_buf()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_client_log_levels_defaults() {
+        let result = resolve_client_log_levels(None, None, None);
+        assert_eq!(result, vec!["log", "warn", "error"]);
+    }
+
+    #[test]
+    fn test_resolve_client_log_levels_project_override() {
+        let project = vec!["warn".to_string(), "error".to_string()];
+        let result = resolve_client_log_levels(Some(&project), None, None);
+        assert_eq!(result, vec!["warn", "error"]);
+    }
+
+    #[test]
+    fn test_resolve_client_log_levels_node_overrides_project() {
+        let project = vec!["warn".to_string()];
+        let node = vec!["log".to_string(), "info".to_string()];
+        let result = resolve_client_log_levels(Some(&project), Some(&node), None);
+        assert_eq!(result, vec!["log", "info"]);
+    }
+
+    #[test]
+    fn test_resolve_client_log_levels_variant_overrides_all() {
+        let project = vec!["warn".to_string()];
+        let node = vec!["log".to_string()];
+        let variant = vec!["debug".to_string()];
+        let result = resolve_client_log_levels(Some(&project), Some(&node), Some(&variant));
+        assert_eq!(result, vec!["debug"]);
+    }
+
+    #[test]
+    fn test_resolve_client_log_levels_filters_invalid() {
+        let project = vec!["log".to_string(), "bogus".to_string(), "error".to_string()];
+        let result = resolve_client_log_levels(Some(&project), None, None);
+        assert_eq!(result, vec!["log", "error"]);
+    }
+
+    #[test]
+    fn test_resolve_client_log_levels_all_invalid_falls_back_to_default() {
+        let project = vec!["bogus".to_string(), "invalid".to_string()];
+        let result = resolve_client_log_levels(Some(&project), None, None);
+        assert_eq!(result, vec!["log", "warn", "error"]);
+    }
 }

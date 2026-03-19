@@ -14,6 +14,7 @@ use veld_core::feedback::{
     Author, EventType, FeedbackStore, Message, Thread, ThreadOrigin, ThreadScope, ThreadStatus,
     new_message, new_thread,
 };
+use veld_core::logging;
 use veld_core::state::GlobalRegistry;
 
 #[path = "feedback_assets.rs"]
@@ -45,6 +46,13 @@ pub async fn run_feedback_server() {
     });
 
     let app = Router::new()
+        // Client log collector (injected into <head> by Caddy).
+        .route("/api/client-log.js", get(client_log_script))
+        // Client log ingest endpoint (2MB body limit).
+        .route(
+            "/api/client-logs",
+            post(ingest_client_logs).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
         // Overlay assets (injected by Caddy's replace-response handler).
         .route("/feedback/script.js", get(overlay_script))
         .route("/feedback/style.css", get(overlay_css))
@@ -194,6 +202,216 @@ async fn logo_svg() -> Response {
         feedback_assets::LOGO_SVG,
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Client log collector
+// ---------------------------------------------------------------------------
+
+async fn client_log_script() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
+        ],
+        feedback_assets::CLIENT_LOG_JS,
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Client log ingest
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ClientLogBatch {
+    entries: Vec<ClientLogEntry>,
+}
+
+#[derive(Deserialize)]
+struct ClientLogEntry {
+    ts: String,
+    level: String,
+    msg: String,
+    #[serde(default)]
+    stack: Option<String>,
+}
+
+/// Find the largest byte index <= `max_bytes` that is a valid UTF-8 char boundary.
+fn safe_truncate_boundary(s: &str, max_bytes: usize) -> usize {
+    if s.len() <= max_bytes {
+        return s.len();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
+async fn ingest_client_logs(
+    headers: axum::http::HeaderMap,
+    Json(batch): Json<ClientLogBatch>,
+) -> StatusCode {
+    // Limit batch size to prevent abuse.
+    if batch.entries.len() > 500 {
+        return StatusCode::PAYLOAD_TOO_LARGE;
+    }
+
+    // Resolve run/project from Caddy-injected headers.
+    let run_name = match headers.get("x-veld-run").and_then(|v| v.to_str().ok()) {
+        Some(r) => r,
+        None => return StatusCode::BAD_REQUEST,
+    };
+
+    // Validate run name to prevent path traversal.
+    if run_name.is_empty()
+        || run_name.contains('/')
+        || run_name.contains('\\')
+        || run_name.contains("..")
+        || !run_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    // Resolve node:variant from the Host header via the registry.
+    let host = match headers.get("host").and_then(|v| v.to_str().ok()) {
+        Some(h) => h.to_string(),
+        None => return StatusCode::BAD_REQUEST,
+    };
+
+    // Look up the project root from the registry instead of trusting the header.
+    // This prevents path traversal via crafted X-Veld-Project values.
+    let registry = match GlobalRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("failed to load registry for client logs: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let project_path = match registry
+        .projects
+        .values()
+        .find(|entry| entry.runs.contains_key(run_name))
+        .map(|entry| entry.project_root.clone())
+    {
+        Some(p) => p,
+        None => return StatusCode::NOT_FOUND,
+    };
+    let project_state = match veld_core::state::ProjectState::load(&project_path) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("failed to load project state for client logs: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let run_state = match project_state.get_run(run_name) {
+        Some(r) => r,
+        None => return StatusCode::NOT_FOUND,
+    };
+
+    // Find the node whose URL matches this host.
+    let mut node_name = None;
+    let mut variant_name = None;
+    for ns in run_state.nodes.values() {
+        if let Some(ref url) = ns.url {
+            // Compare hostname from the URL against the Host header.
+            let url_host = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://")
+                .split('/')
+                .next()
+                .unwrap_or("");
+            if url_host == host || url_host == host.split(':').next().unwrap_or("") {
+                node_name = Some(ns.node_name.clone());
+                variant_name = Some(ns.variant.clone());
+                break;
+            }
+        }
+    }
+
+    let (node, variant) = match (node_name, variant_name) {
+        (Some(n), Some(v)) => (n, v),
+        _ => {
+            warn!("could not resolve host '{host}' to a node for client logs");
+            return StatusCode::NOT_FOUND;
+        }
+    };
+
+    // Write entries to the client log file.
+    // Build the entire batch as a single string, then write it in one call
+    // to avoid interleaving with concurrent requests from other tabs.
+    let log_path = logging::client_log_file(&project_path, run_name, &node, &variant);
+    let writer = match logging::LogWriter::new(log_path).await {
+        Ok(w) => w,
+        Err(e) => {
+            warn!("failed to create client log writer: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+
+    let mut batch_buf = String::new();
+    for entry in &batch.entries {
+        // Sanitize timestamp: strip characters that could break log line parsing.
+        let sanitized_ts = entry
+            .ts
+            .chars()
+            .filter(|c| !matches!(c, '\n' | '\r' | '[' | ']'))
+            .take(40) // ISO 8601 is at most ~30 chars
+            .collect::<String>();
+        if sanitized_ts.is_empty() {
+            continue;
+        }
+        // Sanitize the message: replace newlines to preserve log line format.
+        // Truncate to 32KB to prevent abuse from forged requests.
+        // Use a char boundary to avoid panicking on multi-byte UTF-8.
+        let msg_truncated = if entry.msg.len() > 32_768 {
+            let end = safe_truncate_boundary(&entry.msg, 32_768);
+            format!("{}...(truncated)", &entry.msg[..end])
+        } else {
+            entry.msg.clone()
+        };
+        let sanitized_msg = msg_truncated.replace('\n', "\\n").replace('\r', "\\r");
+        // Validate level against known values.
+        let level = match entry.level.as_str() {
+            "log" | "warn" | "error" | "info" | "debug" | "exception" => &entry.level,
+            _ => continue,
+        };
+        // Format: [client_timestamp] [level] message\n    stack_line\n...
+        let mut line = format!("[{}] [{}] {}", sanitized_ts, level, sanitized_msg);
+        if let Some(ref stack) = entry.stack {
+            // Limit stack trace to first 50 frames / 16KB to prevent abuse.
+            let stack_end = safe_truncate_boundary(stack, 16_384);
+            let stack_slice = &stack[..stack_end];
+            let mut frame_count = 0;
+            for stack_line in stack_slice.lines() {
+                let trimmed = stack_line.trim();
+                if !trimmed.is_empty() {
+                    line.push('\n');
+                    line.push_str("    ");
+                    line.push_str(&trimmed.replace('\r', ""));
+                    frame_count += 1;
+                    if frame_count >= 50 {
+                        break;
+                    }
+                }
+            }
+        }
+        line.push('\n');
+        batch_buf.push_str(&line);
+    }
+
+    if !batch_buf.is_empty() {
+        if let Err(e) = writer.write_raw(&batch_buf).await {
+            warn!("failed to write client log batch: {e}");
+        }
+    }
+
+    StatusCode::NO_CONTENT
 }
 
 // ---------------------------------------------------------------------------

@@ -596,6 +596,14 @@ impl Orchestrator {
         route["feedback_upstream"] = serde_json::json!("localhost:19899");
         route["run_name"] = serde_json::json!(&run.name);
         route["project_root"] = serde_json::json!(self.project_root.to_string_lossy());
+        // Resolve client log levels (variant > node > project > default).
+        let node_cfg = &self.config.nodes[&sel.node];
+        let client_log_levels = config::resolve_client_log_levels(
+            self.config.client_log_levels.as_deref(),
+            node_cfg.client_log_levels.as_deref(),
+            variant_cfg.client_log_levels.as_deref(),
+        );
+        route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
         if let Err(e) = self.helper_client.add_route(route).await {
             tracing::warn!(error = %e, "failed to add Caddy route via helper");
         }

@@ -196,7 +196,12 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 
                         if age_hours > MAX_LOG_AGE_HOURS {
                             debug!("pruning old log: {}", path.display());
-                            let _ = tokio::fs::remove_file(&path).await;
+                            // Log entries can be files or per-run directories.
+                            if meta.is_dir() {
+                                let _ = tokio::fs::remove_dir_all(&path).await;
+                            } else {
+                                let _ = tokio::fs::remove_file(&path).await;
+                            }
                             summary.logs_pruned += 1;
                         }
                     }

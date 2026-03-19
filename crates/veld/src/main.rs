@@ -155,6 +155,10 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Filter by log source: all, server, or client.
+        #[arg(long, default_value = "all")]
+        source: String,
     },
 
     /// Print the dependency graph for the given selections.
@@ -225,6 +229,15 @@ enum Command {
 
     /// Print version information for all Veld binaries.
     Version,
+
+    /// Internal: read stdin, prepend timestamps, write to log file.
+    /// Used by detached server mode to timestamp process output.
+    #[command(name = "_timestamp", hide = true)]
+    InternalTimestamp {
+        /// Path to the log file to append to.
+        #[arg(long)]
+        log: std::path::PathBuf,
+    },
 }
 
 fn init_tracing(debug: bool) {
@@ -312,7 +325,18 @@ async fn main() {
             since,
             follow,
             json,
-        } => commands::logs::run(name, node, lines, since, follow, json).await,
+            source,
+        } => {
+            let source_filter =
+                commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
+                    output::print_error(
+                        &format!("Invalid --source value '{source}'. Use: all, server, client"),
+                        json,
+                    );
+                    std::process::exit(1);
+                });
+            commands::logs::run(name, node, lines, since, follow, json, source_filter).await
+        }
 
         Command::Graph { selections } => commands::graph::run(selections).await,
 
@@ -340,6 +364,52 @@ async fn main() {
 
         Command::Version => {
             commands::version::print_version();
+            0
+        }
+
+        Command::InternalTimestamp { log } => {
+            // Fast path: no config loading, no network, just stdin → timestamped log file.
+            // Used internally by detached server mode.
+            use std::io::{BufRead, Write};
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            let mut buf = String::new();
+
+            // Keep file handle open for performance; flush after each line
+            // so `veld logs -f` can see data immediately.
+            let mut file = match std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log)
+            {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("veld _timestamp: failed to open log file: {e}");
+                    std::process::exit(1);
+                }
+            };
+
+            loop {
+                buf.clear();
+                match reader.read_line(&mut buf) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let ts =
+                            chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+                        let formatted = format!("[{ts}] {trimmed}\n");
+                        if let Err(e) = file.write_all(formatted.as_bytes()) {
+                            eprintln!("veld _timestamp: write error: {e}");
+                            break;
+                        }
+                    }
+                    Err(_) => {
+                        // Invalid UTF-8 line — skip it rather than terminating.
+                        // This handles binary output from misbehaving processes.
+                        continue;
+                    }
+                }
+            }
             0
         }
     };

@@ -44,6 +44,11 @@ pub fn log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) 
     log_dir(project_root, run_name).join(format!("{node}-{variant}.log"))
 }
 
+/// Return the client-side log file path for a node+variant.
+pub fn client_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
+    log_dir(project_root, run_name).join(format!("{node}-{variant}-client.log"))
+}
+
 /// Return the setup (command step) log file path.
 pub fn setup_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
     log_dir(project_root, run_name).join(format!("{node}-{variant}-setup.log"))
@@ -107,6 +112,29 @@ impl LogWriter {
     pub async fn write_annotation(&self, message: &str) -> Result<(), LogError> {
         self.write_line(&format!("[VELD] {message}")).await
     }
+
+    /// Write a pre-formatted line (with timestamp already included).
+    /// Used for client logs where the client provides its own timestamp.
+    pub async fn write_raw(&self, formatted: &str) -> Result<(), LogError> {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)
+            .await
+            .map_err(|e| LogError::WriteFailed {
+                path: self.path.clone(),
+                source: e,
+            })?;
+
+        file.write_all(formatted.as_bytes())
+            .await
+            .map_err(|e| LogError::WriteFailed {
+                path: self.path.clone(),
+                source: e,
+            })?;
+
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -158,15 +186,44 @@ pub async fn lines_since(path: &Path, since: chrono::Duration) -> Result<Vec<Str
     Ok(result)
 }
 
+/// Merge continuation lines (those starting with whitespace) with their parent.
+///
+/// Log entries can span multiple lines — the primary line starts with
+/// `[timestamp]` and continuation lines (e.g. stack traces) start with
+/// whitespace. This function joins them into single strings so that each
+/// returned entry is a complete logical log entry that sorts correctly.
+pub fn merge_continuation_lines(lines: Vec<String>) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    for line in lines {
+        let is_continuation = !line.is_empty()
+            && (line.starts_with(' ') || line.starts_with('\t'))
+            && !merged.is_empty();
+        if is_continuation {
+            let last = merged.last_mut().unwrap();
+            last.push('\n');
+            last.push_str(&line);
+        } else {
+            merged.push(line);
+        }
+    }
+    merged
+}
+
 /// Extract the timestamp string from a log line (between first `[` and `]`).
-fn extract_timestamp(line: &str) -> Option<&str> {
+pub fn extract_timestamp(line: &str) -> Option<&str> {
     let start = line.find('[')? + 1;
     let end = line[start..].find(']')? + start;
     Some(&line[start..end])
 }
 
 /// Format a log line as JSON for `--json` output.
-pub fn line_to_json(line: &str, run: &str, node: &str, variant: &str) -> serde_json::Value {
+pub fn line_to_json(
+    line: &str,
+    run: &str,
+    node: &str,
+    variant: &str,
+    source: &str,
+) -> serde_json::Value {
     let (timestamp, content) = if let Some(ts) = extract_timestamp(line) {
         let after_bracket = line.find(']').map(|i| i + 2).unwrap_or(0);
         (
@@ -182,6 +239,7 @@ pub fn line_to_json(line: &str, run: &str, node: &str, variant: &str) -> serde_j
         "run": run,
         "node": node,
         "variant": variant,
+        "source": source,
         "line": content,
     })
 }

@@ -155,6 +155,11 @@ async fn start_server_foreground(
 /// CLI (e.g. SIGHUP on terminal close, SIGINT from Ctrl-C).
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
+///
+/// stdout/stderr are piped through `veld _timestamp` which prepends ISO 8601
+/// timestamps with millisecond precision (pure Rust, no external deps). The
+/// entire pipeline (server + timestamper) runs in the same process group and
+/// survives CLI exit.
 fn start_server_detached(
     command: &str,
     working_dir: &Path,
@@ -163,21 +168,31 @@ fn start_server_detached(
 ) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_file)
-        .map_err(ProcessError::SpawnFailed)?;
-    let stderr_file = file.try_clone().map_err(ProcessError::SpawnFailed)?;
+    // Ensure log directory exists and log file is created.
+    if let Some(parent) = log_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+
+    // Wrap the command in a pipeline that timestamps each line via `veld _timestamp`.
+    // This is a pure Rust timestamper (no perl/python dependency) with millisecond
+    // precision. The entire pipeline runs in its own process group (process_group(0))
+    // so it survives CLI exit.
+    let log_path_escaped = log_file.to_string_lossy().replace('\'', "'\\''");
+    let veld_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
+        .to_string_lossy()
+        .replace('\'', "'\\''");
+    let wrapper =
+        format!("{{ {command} ; }} 2>&1 | '{veld_bin}' _timestamp --log '{log_path_escaped}'");
 
     let child = std::process::Command::new("sh")
         .arg("-c")
-        .arg(command)
+        .arg(&wrapper)
         .current_dir(working_dir)
         .envs(env)
         .stdin(Stdio::null())
-        .stdout(Stdio::from(file))
-        .stderr(Stdio::from(stderr_file))
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .process_group(0) // own process group — immune to parent signals
         .spawn()
         .map_err(ProcessError::SpawnFailed)?;
@@ -280,41 +295,81 @@ pub fn is_alive(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-/// Kill a process: send SIGTERM, wait briefly, then SIGKILL if still alive.
+/// Kill a process and its process group: send SIGTERM, wait briefly, then
+/// SIGKILL if still alive. Signals are sent to the process group (negative
+/// PID) because detached servers run in their own process group
+/// (`process_group(0)`) and the tracked PID is the group leader. This
+/// ensures the entire pipeline (server + timestamp wrapper) is cleaned up.
 pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
+    // Guard against dangerous PIDs:
+    // - pid 0: kill(0, sig) sends to our own process group
+    // - pid 1: kill(-1, sig) sends to ALL processes we can signal
+    // - pid > i32::MAX: wraps negative on cast, producing wrong target
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return Err(ProcessError::SignalFailed {
+            pid,
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("refusing to signal dangerous pid {pid}"),
+            ),
+        });
+    }
+
+    // Send to the process group (negative PID) to kill all children.
+    // Detached servers run in their own process group (process_group(0))
+    // and the tracked PID is the group leader.
+    let nix_pgid = Pid::from_raw(-(pid as i32));
     let nix_pid = Pid::from_raw(pid as i32);
 
-    // SIGTERM
-    if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-        // ESRCH = process already gone — not an error.
-        if e != nix::errno::Errno::ESRCH {
+    // Try killing the process group first.
+    let group_kill_result = kill(nix_pgid, Signal::SIGTERM);
+
+    // Fall back to individual PID if group kill fails (ESRCH on the group
+    // means the process may not be a group leader).
+    if let Err(e) = group_kill_result {
+        if e == nix::errno::Errno::ESRCH {
+            // Try individual PID — process might already be gone.
+            if let Err(e2) = kill(nix_pid, Signal::SIGTERM) {
+                if e2 != nix::errno::Errno::ESRCH {
+                    return Err(ProcessError::SignalFailed {
+                        pid,
+                        source: std::io::Error::from_raw_os_error(e2 as i32),
+                    });
+                }
+            }
+        } else {
             return Err(ProcessError::SignalFailed {
                 pid,
                 source: std::io::Error::from_raw_os_error(e as i32),
             });
         }
-        return Ok(());
     }
 
     // Wait up to 5 seconds for graceful exit.
+    // Check both the group leader and the process group itself to ensure
+    // the entire pipeline (server + _timestamp) has exited.
     for _ in 0..50 {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        if !is_alive(pid) {
+        let leader_alive = is_alive(pid);
+        let group_alive = kill(nix_pgid, None).is_ok();
+        if !leader_alive && !group_alive {
             return Ok(());
         }
     }
 
-    // SIGKILL
+    // SIGKILL the group, then fall back to the individual PID.
     tracing::warn!(pid, "process did not exit after SIGTERM, sending SIGKILL");
-    if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-        if e != nix::errno::Errno::ESRCH {
-            return Err(ProcessError::SignalFailed {
-                pid,
-                source: std::io::Error::from_raw_os_error(e as i32),
-            });
+    if kill(nix_pgid, Signal::SIGKILL).is_err() {
+        if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
+            if e != nix::errno::Errno::ESRCH {
+                return Err(ProcessError::SignalFailed {
+                    pid,
+                    source: std::io::Error::from_raw_os_error(e as i32),
+                });
+            }
         }
     }
 
