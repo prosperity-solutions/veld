@@ -156,9 +156,9 @@ async fn start_server_foreground(
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
 ///
-/// stdout/stderr are piped through a shell `while read` loop that prepends
-/// ISO 8601 timestamps to each line. The entire pipeline (server + timestamp
-/// loop) runs in the same process group and survives CLI exit.
+/// stdout/stderr are piped through a perl one-liner that prepends ISO 8601
+/// timestamps with millisecond precision. The entire pipeline (server +
+/// timestamper) runs in the same process group and survives CLI exit.
 fn start_server_detached(
     command: &str,
     working_dir: &Path,
@@ -173,13 +173,16 @@ fn start_server_detached(
     }
 
     // Wrap the command in a pipeline that timestamps each line.
-    // The server's stdout+stderr are merged and piped through a `while read`
-    // loop that prepends UTC timestamps in ISO 8601 format.
+    // The server's stdout+stderr are merged and piped through a perl one-liner
+    // that prepends UTC timestamps with millisecond precision.
+    // perl + Time::HiRes is available on macOS and all mainstream Linux distros.
     // The entire pipeline runs in its own process group (process_group(0))
     // so it survives CLI exit.
     let log_path_escaped = log_file.to_string_lossy().replace('\'', "'\\''");
     let wrapper = format!(
-        "{{ {command} ; }} 2>&1 | while IFS= read -r _veld_line; do printf '[%sZ] %s\\n' \"$(date -u '+%Y-%m-%dT%H:%M:%S')\" \"$_veld_line\"; done >> '{log_path_escaped}'"
+        "{{ {command} ; }} 2>&1 | perl -MTime::HiRes=gettimeofday -MPOSIX=strftime -ne \
+         'my($s,$us)=gettimeofday();printf \"[%s.%03dZ] %s\",strftime(\"%Y-%m-%dT%H:%M:%S\",gmtime($s)),$us/1000,$_' \
+         >> '{log_path_escaped}'"
     );
 
     let child = std::process::Command::new("sh")
