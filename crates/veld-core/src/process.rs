@@ -362,7 +362,7 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
 
     // SIGKILL the group, then fall back to the individual PID.
     tracing::warn!(pid, "process did not exit after SIGTERM, sending SIGKILL");
-    if let Err(_) = kill(nix_pgid, Signal::SIGKILL) {
+    if kill(nix_pgid, Signal::SIGKILL).is_err() {
         if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
             if e != nix::errno::Errno::ESRCH {
                 return Err(ProcessError::SignalFailed {
