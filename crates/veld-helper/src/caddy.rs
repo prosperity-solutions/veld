@@ -241,6 +241,8 @@ pub struct FeedbackConfig<'a> {
     pub upstream: &'a str,
     pub run_name: &'a str,
     pub project_root: &'a str,
+    /// Comma-separated client log levels (e.g. "log,warn,error").
+    pub client_log_levels: &'a str,
 }
 
 // ---------------------------------------------------------------------------
@@ -360,9 +362,22 @@ fn build_route_json(
         // We set Accept-Encoding: identity so the upstream sends uncompressed
         // responses — replace_response cannot match inside gzip'd bytes.
         //
-        // Two replacements:
-        // 1. </head> → inject @font-face for JetBrains Mono + CSS link
-        // 2. </body> → inject overlay script + CSS link
+        // Four replacements (all fire on every HTML response):
+        // 1. <head...> → inject client log collector script (primary)
+        // 2. </head> → inject @font-face for JetBrains Mono + CSS link
+        // 3. <body...> → inject client log collector script (fallback for
+        //    HTML without a <head> tag). Dedup guard prevents double execution.
+        // 4. </body> → inject feedback overlay script
+        //
+        // Opening tags use `search_regexp` to match attributes
+        // (e.g. `<body class="dark">`). `$0` is the full match.
+        // Closing tags are plain string search (no attributes on closers).
+        let collector_script_tag = format!(
+            "<script src=\"/__veld__/api/client-log.js\" data-veld-levels=\"{}\"></script>",
+            fb.client_log_levels
+        );
+        let head_open_replace = format!("$0{collector_script_tag}");
+        let body_open_fallback = format!("$0{collector_script_tag}");
         subroutes.push(serde_json::json!({
             "handle": [
                 {
@@ -374,8 +389,16 @@ fn build_route_json(
                     },
                     "replacements": [
                         {
+                            "search_regexp": "<head(\\s[^>]*)?>",
+                            "replace": head_open_replace
+                        },
+                        {
                             "search": "</head>",
                             "replace": "<style>@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}</style><link rel=\"stylesheet\" href=\"/__veld__/feedback/style.css\"></head>"
+                        },
+                        {
+                            "search_regexp": "<body(\\s[^>]*)?>",
+                            "replace": body_open_fallback
                         },
                         {
                             "search": "</body>",
@@ -458,6 +481,7 @@ mod tests {
                 upstream: "localhost:19899",
                 run_name: "my-run",
                 project_root: "/tmp/project",
+                client_log_levels: "log,warn,error",
             }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
@@ -474,26 +498,60 @@ mod tests {
             fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
             "/tmp/project"
         );
-        // Main app proxy has two replacements: </head> for font, </body> for script+CSS.
+        // Main app proxy has four replacements.
         let replace_handler = &subroutes[1]["handle"][0];
         let replacements = replace_handler["replacements"].as_array().unwrap();
-        assert_eq!(replacements.len(), 2);
-        assert_eq!(replacements[0]["search"], "</head>");
+        assert_eq!(replacements.len(), 4);
+        // 1: client log collector injection at <head...> (primary, regex).
+        assert!(
+            replacements[0]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("head")
+        );
         assert!(
             replacements[0]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("client-log.js")
+        );
+        assert!(
+            replacements[0]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("data-veld-levels=\"log,warn,error\"")
+        );
+        // 2: @font-face + CSS at </head>.
+        assert_eq!(replacements[1]["search"], "</head>");
+        assert!(
+            replacements[1]["replace"]
                 .as_str()
                 .unwrap()
                 .contains("@font-face")
         );
         assert!(
-            replacements[0]["replace"]
+            replacements[1]["replace"]
                 .as_str()
                 .unwrap()
                 .contains("style.css")
         );
-        assert_eq!(replacements[1]["search"], "</body>");
+        // 3: client log collector fallback at <body...> (regex, for HTML without <head>).
         assert!(
-            replacements[1]["replace"]
+            replacements[2]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("body")
+        );
+        assert!(
+            replacements[2]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("client-log.js")
+        );
+        // 4: overlay script at </body>.
+        assert_eq!(replacements[3]["search"], "</body>");
+        assert!(
+            replacements[3]["replace"]
                 .as_str()
                 .unwrap()
                 .contains("script.js")

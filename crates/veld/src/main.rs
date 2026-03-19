@@ -155,6 +155,10 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Filter by log source: all, server, or client.
+        #[arg(long, default_value = "all")]
+        source: String,
     },
 
     /// Print the dependency graph for the given selections.
@@ -312,7 +316,18 @@ async fn main() {
             since,
             follow,
             json,
-        } => commands::logs::run(name, node, lines, since, follow, json).await,
+            source,
+        } => {
+            let source_filter =
+                commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
+                    output::print_error(
+                        &format!("Invalid --source value '{source}'. Use: all, server, client"),
+                        json,
+                    );
+                    std::process::exit(1);
+                });
+            commands::logs::run(name, node, lines, since, follow, json, source_filter).await
+        }
 
         Command::Graph { selections } => commands::graph::run(selections).await,
 

@@ -98,6 +98,10 @@ impl State {
         };
 
         // Build feedback config if the orchestrator included feedback fields.
+        let client_log_levels = args
+            .get("client_log_levels")
+            .and_then(Value::as_str)
+            .unwrap_or("log,warn,error");
         let feedback = match (
             args.get("feedback_upstream").and_then(Value::as_str),
             args.get("run_name").and_then(Value::as_str),
@@ -108,6 +112,7 @@ impl State {
                     upstream: fb_upstream,
                     run_name,
                     project_root,
+                    client_log_levels,
                 })
             }
             (None, None, None) => None,

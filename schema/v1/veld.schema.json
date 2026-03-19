@@ -42,6 +42,10 @@
         "minItems": 1
       }
     },
+    "client_log_levels": {
+      "$ref": "#/$defs/ClientLogLevels",
+      "description": "Client-side log levels to capture (project-level default). Overridable at node and variant level."
+    },
     "nodes": {
       "type": "object",
       "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
@@ -70,6 +74,10 @@
           "type": "boolean",
           "description": "When true, this node is hidden from `veld nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
           "default": false
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/ClientLogLevels",
+          "description": "Client-side log levels override for all variants of this node."
         },
         "variants": {
           "type": "object",
@@ -160,6 +168,10 @@
         "on_stop": {
           "type": "string",
           "description": "Teardown command to run when the environment is stopped. Executed in reverse dependency order. Supports Veld variable substitution."
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/ClientLogLevels",
+          "description": "Client-side log levels override for this specific variant."
         }
       },
       "allOf": [
@@ -185,6 +197,16 @@
           }
         }
       ]
+    },
+    "ClientLogLevels": {
+      "type": "array",
+      "description": "Client-side console log levels to capture. Supported values: \"log\", \"warn\", \"error\", \"info\", \"debug\". Unhandled exceptions (\"exception\") are always captured regardless of this setting.",
+      "items": {
+        "type": "string",
+        "enum": ["log", "warn", "error", "info", "debug"]
+      },
+      "default": ["log", "warn", "error"],
+      "uniqueItems": true
     },
     "HealthCheck": {
       "type": "object",

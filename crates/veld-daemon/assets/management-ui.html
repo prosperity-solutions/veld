@@ -116,6 +116,11 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .log-line mark{background:rgba(196,245,106,.25);color:var(--text);border-radius:2px;padding:0 1px}
 .log-ctx-sep{text-align:center;padding:2px 0;font-size:9px;color:var(--dim);user-select:none;letter-spacing:2px}
 .log-empty{padding:20px;text-align:center;color:var(--dim);font-size:12px}
+.log-line .client-badge{color:var(--yellow);font-size:9px;font-weight:600;margin-right:4px;user-select:none;text-transform:uppercase;opacity:.75}
+.source-filter{display:flex;gap:2px;background:var(--bg);border-radius:6px;padding:2px}
+.source-filter button{background:none;border:none;color:var(--text2);font-size:10px;padding:2px 8px;border-radius:4px;cursor:pointer}
+.source-filter button:hover{color:var(--text)}
+.source-filter button.active{background:var(--accent-bg);color:var(--accent)}
 
 .node-c0{color:#6c8cff}.node-c1{color:#3dd68c}.node-c2{color:#f0c040}.node-c3{color:#f06060}
 .node-c4{color:#c084fc}.node-c5{color:#22d3ee}.node-c6{color:#fb923c}.node-c7{color:#f472b6}
@@ -257,11 +262,16 @@ function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
   s.autoScroll=true;s.knownNodes=new Map();s.prevHtml=null;s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
-  s.lastData=null; // cache raw data for re-renders
+  s.lastData=null;s.sourceFilter='all'; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
     '<div class="log-bar">'+
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
+      '<div class="source-filter">'+
+        '<button class="active" data-action="source-filter" data-source="all">All</button>'+
+        '<button data-action="source-filter" data-source="server">Server</button>'+
+        '<button data-action="source-filter" data-source="client">Client</button>'+
+      '</div>'+
       '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
       '<span class="log-match-count"></span>'+
       '<span class="ctx-ctl" style="display:none">Context <input class="ctx-input" type="number" min="0" max="50" value="5" data-action="ctx-change"></span>'+
@@ -298,7 +308,8 @@ function stopLogPolling(key){const s=runState[key];if(!s)return;if(s.logInterval
 async function fetchLogs(key,runName){
   const s=runState[key];if(!s||s.fetching)return;s.fetching=true;
   try{
-    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500');
+    const src=s.sourceFilter||'all';
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src);
     if(!resp.ok)return;
     const data=await resp.json();
     for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
@@ -333,15 +344,15 @@ function renderLogs(key,data,totalNodes){
   if(!linesEl||!scrollEl)return;
 
   const raw=[];
-  for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,raw:line,ts:extractTs(line)||''});
-  raw.sort((a,b)=>{const c=a.ts.localeCompare(b.ts);return c!==0?c:a.node.localeCompare(b.node);});
+  for(const nd of data.nodes)for(const line of nd.lines)raw.push({node:nd.node,variant:nd.variant,source:nd.source||'server',raw:line,ts:extractTs(line)||''});
+  raw.sort((a,b)=>{const da=new Date(a.ts),db=new Date(b.ts);const c=(isNaN(da)?0:da.getTime())-(isNaN(db)?0:db.getTime());return c!==0?c:a.node.localeCompare(b.node);});
   if(!raw.length){linesEl.innerHTML='<div class="log-empty">No log output yet</div>';s.prevHtml=null;return;}
 
   // Group continuation lines (message starts with whitespace) with their parent.
   const merged=[];
   for(const e of raw){
     const msg=extractMsg(e.raw);
-    const isCont=merged.length>0&&e.node===merged[merged.length-1].node&&(msg.length===0||msg.charAt(0)===' '||msg.charAt(0)==='\t');
+    const isCont=merged.length>0&&e.node===merged[merged.length-1].node&&e.source===merged[merged.length-1].source&&(msg.length===0||msg.charAt(0)===' '||msg.charAt(0)==='\t');
     if(isCont){
       merged[merged.length-1].fullMsg+='\n'+msg;
     }else{
@@ -394,10 +405,11 @@ function renderLogs(key,data,totalNodes){
 }
 
 function logLineHtml(e,multi,search,isCtx){
-  const msg=e.fullMsg;const isAnn=msg.startsWith('[VELD]');
+  const msg=e.fullMsg;const isAnn=msg.startsWith('[VELD]');const isClient=e.source==='client';
   let h='<div class="log-line'+(isCtx?' ctx':'')+'">';
   if(e.ts)h+='<span class="ts">'+esc(fmtTs(e.ts))+'</span>';
-  if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+':'+esc(e.variant)+'</span>';
+  if(multi)h+='<span class="node-tag '+nc(e.node)+'">'+esc(e.node)+':'+esc(e.variant)+(isClient?':client':'')+'</span>';
+  else if(isClient)h+='<span class="client-badge">client</span>';
   let msgHtml=isAnn?'<span class="ann">'+esc(msg)+'</span>':esc(msg);
   if(search)msgHtml=highlightSearch(msgHtml,search);
   h+='<span class="msg">'+msgHtml+'</span></div>';
@@ -429,6 +441,19 @@ document.addEventListener('click',e=>{
       s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
       startLogPolling(key);
     }else{stopLogPolling(key);}
+    return;
+  }
+  const srcBtn=e.target.closest('[data-action="source-filter"]');
+  if(srcBtn&&card){
+    const key=card.dataset.key,s=runState[key];
+    if(s){
+      s.sourceFilter=srcBtn.dataset.source;
+      s.prevHtml=null;s.lastData=null;
+      const btns=srcBtn.parentElement.querySelectorAll('button');
+      btns.forEach(b=>b.classList.toggle('active',b.dataset.source===s.sourceFilter));
+      // Immediately re-fetch with new source filter.
+      const runName=card.dataset.run;if(runName)fetchLogs(key,runName);
+    }
     return;
   }
   if(e.target.closest('[data-action="autoscroll"]')&&card){
