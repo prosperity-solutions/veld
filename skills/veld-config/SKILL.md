@@ -45,7 +45,7 @@ Always include the `$schema` field for editor autocompletion:
 | `hidden` | boolean | No | Hide from `veld nodes` output (default: `false`) |
 | `client_log_levels` | array | No | Client-side log levels override |
 | `features` | object | No | Feature toggles override |
-| `cwd` | string | No | Working directory for all variants, relative to veld.json. Overridable at variant level. Supports `${...}` variable substitution. |
+| `cwd` | string | No | Working directory for all variants. Relative paths resolve from the project root. Overridable at variant level. Supports `${...}` variable substitution. |
 | `variants` | object | Yes | At least one variant required |
 
 ## Node Types

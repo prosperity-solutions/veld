@@ -89,7 +89,7 @@
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory for all variants of this node, relative to veld.json. Overridable at variant level. Supports Veld variable substitution."
+          "description": "Working directory for all variants of this node. Relative paths are resolved from the project root. Overridable at variant level. Supports Veld variable substitution."
         },
         "variants": {
           "type": "object",
@@ -191,7 +191,7 @@
         },
         "cwd": {
           "type": "string",
-          "description": "Working directory for this variant, relative to veld.json. Overrides node-level cwd. Supports Veld variable substitution."
+          "description": "Working directory for this variant. Relative paths are resolved from the project root. Overrides node-level cwd. Supports Veld variable substitution."
         }
       },
       "allOf": [

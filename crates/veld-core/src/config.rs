@@ -98,7 +98,7 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
 
-    /// Working directory for all variants of this node (relative to veld.json).
+    /// Working directory for all variants of this node. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overridable at variant level. Supports variable substitution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
@@ -169,7 +169,7 @@ pub struct VariantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
 
-    /// Working directory for this variant (relative to veld.json).
+    /// Working directory for this variant. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overrides node-level `cwd`. Supports variable substitution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
