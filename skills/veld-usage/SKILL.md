@@ -103,6 +103,8 @@ veld logs --name dev --follow                 # Stream (like tail -f)
 veld logs --name dev --node backend --follow  # Stream single node
 veld logs --name dev --source client          # Client-side (browser) logs only
 veld logs --name dev --source server          # Server logs only (default: all)
+veld logs --name dev --search "error"         # Filter by search term (case-insensitive)
+veld logs --name dev --search "timeout" --context 3  # Search with 3 context lines
 veld logs --name dev --json                   # NDJSON format
 ```
 
