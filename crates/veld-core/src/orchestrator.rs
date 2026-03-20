@@ -625,12 +625,27 @@ impl Orchestrator {
             tracing::warn!(error = %e, "failed to add Caddy route via helper");
         }
 
+        // Resolve working directory (variant > node > project root).
+        let raw_cwd = variant_cfg.cwd.as_deref().or(node_cfg.cwd.as_deref());
+        let working_dir = match raw_cwd {
+            Some(cwd_tmpl) => {
+                let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
+                let p = std::path::Path::new(&resolved);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.project_root.join(p)
+                }
+            }
+            None => self.project_root.clone(),
+        };
+
         // Resolve command.
         let command = variant_cfg.command.as_deref().unwrap_or_default();
         let resolved_cmd = crate::variables::interpolate(command, ctx)?;
         self.debug_log(&format!(
-            "{}:{} — resolved command: {}",
-            sel.node, sel.variant, resolved_cmd
+            "{}:{} — resolved command: {} (cwd: {})",
+            sel.node, sel.variant, resolved_cmd, working_dir.display()
         ))
         .await;
 
@@ -659,7 +674,7 @@ impl Orchestrator {
 
         let handle = process::start_server(
             &resolved_cmd,
-            &self.project_root,
+            &working_dir,
             &env,
             &log_path,
             self.foreground,
@@ -813,7 +828,7 @@ impl Orchestrator {
                         if let Some(cmd) = &hc.command {
                             health::wait_for_command_check(
                                 cmd,
-                                &self.project_root,
+                                &working_dir,
                                 hc,
                                 Some(&phase2_notifier),
                             )
@@ -888,6 +903,22 @@ impl Orchestrator {
         node_state: &mut NodeState,
     ) -> Result<(), OrchestratorError> {
         let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
+        let node_cfg = &self.config.nodes[&sel.node];
+
+        // Resolve working directory (variant > node > project root).
+        let raw_cwd = variant_cfg.cwd.as_deref().or(node_cfg.cwd.as_deref());
+        let working_dir = match raw_cwd {
+            Some(cwd_tmpl) => {
+                let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
+                let p = std::path::Path::new(&resolved);
+                if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    self.project_root.join(p)
+                }
+            }
+            None => self.project_root.clone(),
+        };
 
         // Resolve command or script.
         let raw_cmd = if let Some(ref script) = variant_cfg.script {
@@ -903,7 +934,7 @@ impl Orchestrator {
         if let Some(ref verify_cmd) = variant_cfg.verify {
             let verify_resolved = crate::variables::interpolate(verify_cmd, ctx)?;
             let verify_result =
-                process::run_command(&verify_resolved, &self.project_root, &env).await;
+                process::run_command(&verify_resolved, &working_dir, &env).await;
             if let Ok(ref out) = verify_result {
                 if out.exit_code == 0 {
                     tracing::info!(
@@ -925,7 +956,7 @@ impl Orchestrator {
             node: sel.node.clone(),
             variant: sel.variant.clone(),
         });
-        let result = process::run_command(&resolved_cmd, &self.project_root, &env).await?;
+        let result = process::run_command(&resolved_cmd, &working_dir, &env).await?;
 
         node_state
             .outputs
@@ -1256,7 +1287,37 @@ impl Orchestrator {
             }
         };
 
-        match process::run_command(&resolved_cmd, &self.project_root, &env).await {
+        // Resolve working directory (variant > node > project root).
+        let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
+        let raw_cwd = variant_cfg
+            .cwd
+            .as_deref()
+            .or(node_cfg_opt.and_then(|n| n.cwd.as_deref()));
+        let working_dir = match raw_cwd {
+            Some(cwd_tmpl) => {
+                match crate::variables::interpolate(cwd_tmpl, &ctx) {
+                    Ok(resolved) => {
+                        let p = std::path::Path::new(&resolved);
+                        if p.is_absolute() {
+                            p.to_path_buf()
+                        } else {
+                            self.project_root.join(p)
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            node = node_state.node_name,
+                            error = %e,
+                            "failed to resolve on_stop cwd, falling back to project root"
+                        );
+                        self.project_root.clone()
+                    }
+                }
+            }
+            None => self.project_root.clone(),
+        };
+
+        match process::run_command(&resolved_cmd, &working_dir, &env).await {
             Ok(result) => {
                 if result.exit_code != 0 {
                     tracing::warn!(

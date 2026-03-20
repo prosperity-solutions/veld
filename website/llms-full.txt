@@ -401,6 +401,7 @@ Usage: `veld start --preset fullstack --name my-feature`
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
 | `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
 | `features` | object | `start_server` | Feature toggles override (variant > node > project) |
+| `cwd` | string | All | Working directory (relative to veld.json). Cascade: variant > node. Supports `${...}` substitution. |
 | `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
 
 ---
