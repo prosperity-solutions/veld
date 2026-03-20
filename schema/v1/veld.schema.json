@@ -139,7 +139,7 @@
           }
         },
         "outputs": {
-          "description": "Output declarations. For command steps: an array of output names captured from VELD_OUTPUT. For start_server steps: an object mapping output names to template strings.",
+          "description": "Output declarations. For command steps: an array of output names captured from $VELD_OUTPUT_FILE (preferred) or VELD_OUTPUT stdout lines (legacy). For start_server steps: an object mapping output names to template strings.",
           "oneOf": [
             {
               "type": "array",
@@ -167,7 +167,7 @@
         "strict_outputs": {
           "type": "boolean",
           "default": true,
-          "description": "When true (default), fail if the command produces VELD_OUTPUT keys not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
+          "description": "When true (default), fail if the command produces output keys (via $VELD_OUTPUT_FILE or stdout) not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
         },
         "verify": {
           "type": "string",

@@ -253,14 +253,14 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 
 - The working directory defaults to `${veld.root}` (the directory containing `veld.json`)
 - Must specify either `command` or `script` (mutually exclusive)
-- Can declare outputs via `VELD_OUTPUT key=value` written to stdout
+- Can declare outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged — exposes values in terminal/logs)
 - Built-in output: `exit_code`
 - Supports the `verify` field for idempotency
 
 ```json
 {
   "type": "command",
-  "command": "echo 'VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb'",
+  "command": "echo 'DATABASE_URL=postgresql://localhost:5432/mydb' >> \"$VELD_OUTPUT_FILE\"",
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -399,7 +399,7 @@ Output declarations differ based on the variant type.
 
 #### For `command` variants: Array of strings
 
-Declares the output names that the script will emit via `VELD_OUTPUT` lines written to stdout. Your script prints `VELD_OUTPUT key=value` to stdout, and Veld captures the values.
+Declares the output names that the script will produce. Veld provides a `$VELD_OUTPUT_FILE` environment variable pointing to a temporary file — your script writes `key=value` lines there. This keeps sensitive values (database passwords, API keys) off stdout and out of terminal scrollback and log aggregators.
 
 ```json
 {
@@ -412,15 +412,17 @@ Declares the output names that the script will emit via `VELD_OUTPUT` lines writ
 Inside the script:
 ```bash
 #!/bin/bash
-echo "VELD_OUTPUT DATABASE_URL=postgresql://localhost:5432/mydb"
-echo "VELD_OUTPUT DB_NAME=mydb"
+echo "DATABASE_URL=postgresql://localhost:5432/mydb" >> "$VELD_OUTPUT_FILE"
+echo "DB_NAME=mydb" >> "$VELD_OUTPUT_FILE"
 ```
+
+> **Legacy fallback (discouraged):** For backward compatibility, Veld also parses `VELD_OUTPUT key=value` lines from stdout. This method is **discouraged** because it exposes output values in the terminal, log aggregators, and CI build output. Prefer `$VELD_OUTPUT_FILE` for all new scripts. If both channels emit the same key, the file-based value takes precedence.
 
 Every `command` variant also automatically provides the built-in output `exit_code`.
 
 #### For `start_server` variants: Object (key-value map)
 
-Defines synthetic outputs whose values are string templates interpolated after the port and URL are resolved. Templates support all `${veld.*}` and `${nodes.*}` variables. This is especially useful for Docker infrastructure nodes where stdout cannot be used for `VELD_OUTPUT`.
+Defines synthetic outputs whose values are string templates interpolated after the port and URL are resolved. Templates support all `${veld.*}` and `${nodes.*}` variables. This is especially useful for Docker infrastructure nodes where the process cannot write to `$VELD_OUTPUT_FILE`.
 
 ```json
 {
@@ -589,7 +591,7 @@ ${nodes.frontend.url}              # works even if frontend runs AFTER this node
 
 #### Execution-order outputs (available to downstream nodes only)
 
-Custom outputs — from synthetic output templates (`outputs` object) or `VELD_OUTPUT` lines in command nodes — are only available after the producing node has executed. These require a `depends_on` edge.
+Custom outputs — from synthetic output templates (`outputs` object) or `$VELD_OUTPUT_FILE` / `VELD_OUTPUT` lines in command nodes — are only available after the producing node has executed. These require a `depends_on` edge.
 
 ```
 ${nodes.database.DATABASE_URL}     # custom output from bash or outputs declaration
@@ -829,7 +831,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT BACKEND_URL=https://api.staging.my-project.com'",
+          "command": "echo 'BACKEND_URL=https://api.staging.my-project.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["BACKEND_URL"]
         }
       }

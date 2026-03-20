@@ -151,7 +151,7 @@ veld stop --name dev
 ### Step types
 
 - **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
-- **`command`** — runs a command to completion. Can emit outputs via `VELD_OUTPUT key=value` on stdout. Optional `verify` command for idempotency.
+- **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `verify` command for idempotency.
 
 ### Health checks
 

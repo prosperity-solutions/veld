@@ -150,7 +150,7 @@ For the full field reference, see [configuration.md](./configuration.md).
 
 **What happens:** Veld pre-computes URLs and ports for all three `start_server` nodes before starting anything. The backend receives `${nodes.frontend.url}` and `${nodes.admin.url}` as CORS origins even though neither frontend nor admin has started yet. No `depends_on` is needed between them -- all three start in parallel. This is only possible because the built-in `url` and `port` outputs are available before execution.
 
-Note: This pre-computation only applies to the built-in `url` and `port` outputs. Custom outputs (from `outputs` templates or `VELD_OUTPUT` lines) still require the producing node to have executed first, so they still need `depends_on`.
+Note: This pre-computation only applies to the built-in `url` and `port` outputs. Custom outputs (from `$VELD_OUTPUT_FILE` or `VELD_OUTPUT` lines) still require the producing node to have executed first, so they still need `depends_on`.
 
 ---
 
@@ -273,7 +273,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
         },
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT BACKEND_URL=https://api.staging.dashboard.example.com'",
+          "command": "echo 'BACKEND_URL=https://api.staging.dashboard.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["BACKEND_URL"]
         }
       }
@@ -651,7 +651,7 @@ The `verify` commands on the setup nodes make subsequent `veld start` calls fast
 
 ## 8. Docker Infrastructure with Synthetic Outputs
 
-**When to use:** You run Postgres, Redis, and Elasticsearch as Docker containers. Each needs to expose a connection string to downstream nodes. Since Docker containers cannot write `VELD_OUTPUT` to stdout in a way Veld captures, you use synthetic outputs.
+**When to use:** You run Postgres, Redis, and Elasticsearch as Docker containers. Each needs to expose a connection string to downstream nodes. Since Docker containers cannot write to `$VELD_OUTPUT_FILE` in a way Veld captures, you use synthetic outputs.
 
 ```json
 {
@@ -736,7 +736,7 @@ The `verify` commands on the setup nodes make subsequent `veld start` calls fast
 }
 ```
 
-**What happens:** All three infrastructure containers start in parallel. Synthetic outputs are template strings that are interpolated after port allocation -- no `VELD_OUTPUT` lines needed. The `api` node depends on all three and receives five connection strings. Note the Redis node exposes three different database numbers for different concerns (main, cache, queue).
+**What happens:** All three infrastructure containers start in parallel. Synthetic outputs are template strings that are interpolated after port allocation -- no `$VELD_OUTPUT_FILE` writes needed. The `api` node depends on all three and receives five connection strings. Note the Redis node exposes three different database numbers for different concerns (main, cache, queue).
 
 ---
 
@@ -885,7 +885,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
       "variants": {
         "default": {
           "type": "command",
-          "command": "vault read -format=json secret/dev/payment-gateway | jq -r '.data | to_entries[] | \"VELD_OUTPUT \\(.key)=\\(.value)\"'",
+          "command": "vault read -format=json secret/dev/payment-gateway | jq -r '.data | to_entries[] | \"\\(.key)=\\(.value)\"' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"],
           "sensitive_outputs": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]
         }
@@ -1018,7 +1018,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
         },
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT SERVICE_URL=https://user-service.staging.marketplace.example.com'",
+          "command": "echo 'SERVICE_URL=https://user-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1034,7 +1034,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
         },
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT SERVICE_URL=https://catalog-service.staging.marketplace.example.com'",
+          "command": "echo 'SERVICE_URL=https://catalog-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1050,7 +1050,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
         },
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT SERVICE_URL=https://payment-service.staging.marketplace.example.com'",
+          "command": "echo 'SERVICE_URL=https://payment-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1061,7 +1061,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "staging": {
           "type": "command",
-          "command": "echo 'VELD_OUTPUT SERVICE_URL=https://notification-service.staging.marketplace.example.com'",
+          "command": "echo 'SERVICE_URL=https://notification-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }

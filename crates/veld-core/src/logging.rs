@@ -59,6 +59,17 @@ pub fn debug_log_file(project_root: &Path, run_name: &str) -> PathBuf {
     log_dir(project_root, run_name).join("veld-debug.log")
 }
 
+/// Return a temporary output file path for a command node.
+///
+/// Scripts write `key=value` lines to this file instead of emitting
+/// `VELD_OUTPUT` on stdout, keeping sensitive values off the terminal.
+pub fn output_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
+    project_root
+        .join(".veld")
+        .join("tmp")
+        .join(format!("{run_name}-{node}-{variant}.outputs"))
+}
+
 // ---------------------------------------------------------------------------
 // Log writer
 // ---------------------------------------------------------------------------

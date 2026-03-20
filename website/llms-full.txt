@@ -256,7 +256,7 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 Runs a shell command or script to completion. Used for setup tasks.
 
 - Must specify either `command` or `script` (mutually exclusive)
-- Can emit outputs via `VELD_OUTPUT key=value` on stdout
+- Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged)
 - Declares outputs as an array of strings
 - Built-in output: `exit_code`
 - Supports `verify` for idempotency
@@ -312,7 +312,7 @@ For `start_server` variants — object (synthetic templates):
 }
 ```
 
-For `command` variants — array (captured from VELD_OUTPUT):
+For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `VELD_OUTPUT` stdout):
 ```json
 "outputs": ["DATABASE_URL", "DB_NAME"]
 ```

@@ -859,7 +859,7 @@ impl Orchestrator {
             self.project_root.clone()
         });
 
-        match process::run_command(&resolved_cmd, &working_dir, &env).await {
+        match process::run_command(&resolved_cmd, &working_dir, &env, None).await {
             Ok(result) => {
                 if result.exit_code != 0 {
                     tracing::warn!(
@@ -1492,7 +1492,7 @@ async fn execute_command_isolated(
     // Verify step (idempotency).
     if let Some(ref verify_cmd) = variant_cfg.verify {
         let verify_resolved = crate::variables::interpolate(verify_cmd, var_ctx)?;
-        let verify_result = process::run_command(&verify_resolved, &working_dir, &env).await;
+        let verify_result = process::run_command(&verify_resolved, &working_dir, &env, None).await;
         if let Ok(ref out) = verify_result {
             if out.exit_code == 0 {
                 tracing::info!(
@@ -1517,7 +1517,10 @@ async fn execute_command_isolated(
             variant: sel.variant.clone(),
         },
     );
-    let result = process::run_command(&resolved_cmd, &working_dir, &env).await?;
+    let output_file =
+        logging::output_file(&ctx.project_root, &ctx.run_name, &sel.node, &sel.variant);
+    let result =
+        process::run_command(&resolved_cmd, &working_dir, &env, Some(&output_file)).await?;
 
     node_state
         .outputs
