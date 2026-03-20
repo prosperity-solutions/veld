@@ -1310,15 +1310,21 @@
     var titleEl = mkEl("div", "panel-detail-title", titleText);
     header.appendChild(titleEl);
 
-    // Page navigation link (only if on a different page)
-    if (pageUrl && pageUrl !== window.location.pathname) {
-      var pageLink = mkEl("a", "panel-detail-page-link", "Go to page \u2192");
-      pageLink.href = pageUrl;
-      pageLink.addEventListener("click", function (e) {
+    // "Go to comment" link — scrolls to the pin/element on the page.
+    // Works cross-page too (navigates first, then scrolls).
+    // Only show for element-scoped threads (which have pins), or for
+    // any thread on a different page (navigates there).
+    var onDifferentPage = pageUrl && pageUrl !== window.location.pathname;
+    var hasScrollTarget = thread.scope.type === "element";
+    if (hasScrollTarget || onDifferentPage) {
+      var goLabel = onDifferentPage ? "Go to page \u2192" : "Go to comment \u2192";
+      var goLink = mkEl("a", "panel-detail-page-link", goLabel);
+      goLink.href = pageUrl || "#";
+      goLink.addEventListener("click", function (e) {
         e.preventDefault();
-        window.location.href = pageUrl;
+        scrollToThread(thread.id);
       });
-      header.appendChild(pageLink);
+      header.appendChild(goLink);
     }
 
     // 3. Component trace or CSS selector (small, copyable)
@@ -1588,6 +1594,7 @@
     removePin(thread.id);
 
     var pin = mkEl("div", "pin");
+    pin.id = PREFIX + "pin-" + thread.id;
     pin.dataset.threadId = thread.id;
 
     // Chat icon
@@ -1661,6 +1668,65 @@
       __veld_rafPending = false;
       repositionPins();
     });
+  }
+
+  // ---------- go-to-comment ------------------------------------------------
+
+  var SCROLL_TO_KEY = "veld-feedback-scroll-to-thread";
+
+  /**
+   * Scroll the page so that the pin (bubble) for the given thread is visible,
+   * then briefly highlight it.  If the thread lives on a different page,
+   * navigate there first — the scroll will happen after navigation via
+   * sessionStorage.
+   */
+  function scrollToThread(threadId) {
+    var thread = findThread(threadId);
+    if (!thread) return;
+
+    var pageUrl = getThreadPageUrl(thread);
+
+    // Different page — navigate first, scroll after load.
+    if (pageUrl && !isCurrentPage(pageUrl)) {
+      try { sessionStorage.setItem(SCROLL_TO_KEY, threadId); } catch (_) {}
+      window.location.href = pageUrl;
+      return;
+    }
+
+    // Same page — try to scroll to the target element first (more useful
+    // than scrolling to the pin itself), fall back to the pin.
+    var target = null;
+    if (thread.scope && thread.scope.type === "element" && thread.scope.selector) {
+      try { target = document.querySelector(thread.scope.selector); } catch (_) {}
+    }
+    if (!target) target = __veld_pins[threadId] || document.getElementById(PREFIX + "pin-" + threadId);
+    if (!target) return;
+
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+
+    // Highlight the pin after scroll settles.
+    var pin = __veld_pins[threadId];
+    if (pin) {
+      setTimeout(function () {
+        // Remove + reflow to restart animation if already highlighted.
+        pin.classList.remove(PREFIX + "pin-highlight");
+        void pin.offsetWidth;
+        pin.classList.add(PREFIX + "pin-highlight");
+        setTimeout(function () { pin.classList.remove(PREFIX + "pin-highlight"); }, 1500);
+      }, 400);
+    }
+  }
+
+  /** Check sessionStorage for a pending scroll-to-thread request. */
+  function checkPendingScroll() {
+    try {
+      var id = sessionStorage.getItem(SCROLL_TO_KEY);
+      if (id) {
+        sessionStorage.removeItem(SCROLL_TO_KEY);
+        // Give the page a moment to render / hydrate before scrolling.
+        setTimeout(function () { scrollToThread(id); }, 300);
+      }
+    } catch (_) {}
   }
 
   // ---------- polling loops -----------------------------------------------
@@ -1857,6 +1923,7 @@
     link.addEventListener("click", function () {
       t.remove();
       openThreadInPanel(threadId);
+      scrollToThread(threadId);
     });
     t.appendChild(link);
     document.body.appendChild(t);
@@ -1879,6 +1946,7 @@
     n.addEventListener("click", function () {
       window.focus();
       openThreadInPanel(threadId);
+      scrollToThread(threadId);
       n.close();
     });
   }
@@ -1890,6 +1958,7 @@
       __veld_threads = threads || [];
       renderAllPins();
       updateBadge();
+      checkPendingScroll();
       if (__veld_panelOpen) renderPanel();
     }).catch(function () {});
   }
@@ -1970,6 +2039,7 @@
       __veld_lastPathname = newPath;
       renderAllPins();
       if (__veld_panelOpen) renderPanel();
+      checkPendingScroll();
     }
   }
 
@@ -2014,6 +2084,9 @@
     pollListenStatus();
     setInterval(pollEvents, 3000);
     setInterval(pollListenStatus, 5000);
+
+    // Pending scroll is checked inside loadThreads() callback, after threads
+    // are hydrated — not here, where the async fetch hasn't completed yet.
 
     // Request notification permission
     if ("Notification" in window && Notification.permission === "default") {

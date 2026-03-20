@@ -277,6 +277,15 @@
   width: 7px; height: 7px; border-radius: 50%;
   background: var(--vf-danger); flex-shrink: 0;
 }
+.veld-feedback-pin-highlight {
+  animation: veld-feedback-pin-pulse 1.5s ease;
+}
+@keyframes veld-feedback-pin-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.7); transform: scale(1); }
+  20% { box-shadow: 0 0 0 8px rgba(196, 245, 106, 0.4); transform: scale(1.15); }
+  50% { box-shadow: 0 0 0 12px rgba(196, 245, 106, 0); transform: scale(1.1); }
+  100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0); transform: scale(1); }
+}
 
 /* Side panel */
 .veld-feedback-panel {
