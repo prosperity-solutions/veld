@@ -28,18 +28,31 @@ impl SourceFilter {
     }
 }
 
+pub struct LogsOptions {
+    pub name: Option<String>,
+    pub node: Option<String>,
+    pub lines: usize,
+    pub since: Option<String>,
+    pub follow: bool,
+    pub json: bool,
+    pub source: SourceFilter,
+    pub search: Option<String>,
+    pub context_lines: usize,
+}
+
 /// `veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--json] [--source <s>] [--search <term>] [--context <n>]`
-pub async fn run(
-    name: Option<String>,
-    node: Option<String>,
-    lines: usize,
-    since: Option<String>,
-    follow: bool,
-    json: bool,
-    source: SourceFilter,
-    search: Option<String>,
-    context_lines: usize,
-) -> i32 {
+pub async fn run(opts: LogsOptions) -> i32 {
+    let LogsOptions {
+        name,
+        node,
+        lines,
+        since,
+        follow,
+        json,
+        source,
+        search,
+        context_lines,
+    } = opts;
     let Some((config_path, _cfg)) = super::load_config(json) else {
         return 1;
     };
@@ -197,8 +210,8 @@ pub async fn run(
         for &idx in &match_indices {
             let start = idx.saturating_sub(context_lines);
             let end = (idx + context_lines + 1).min(all_entries.len());
-            for i in start..end {
-                visible[i] = true;
+            for v in &mut visible[start..end] {
+                *v = true;
             }
         }
         (0..all_entries.len()).filter(|i| visible[*i]).collect()
@@ -238,7 +251,7 @@ pub async fn run(
             };
             let is_match = search_lower
                 .as_ref()
-                .map_or(true, |n| entry.line.to_lowercase().contains(n.as_str()));
+                .is_none_or(|n| entry.line.to_lowercase().contains(n.as_str()));
             if is_match {
                 println!("{label} {}", entry.line);
             } else {

@@ -345,17 +345,17 @@ async fn main() {
                     );
                     std::process::exit(1);
                 });
-            commands::logs::run(
+            commands::logs::run(commands::logs::LogsOptions {
                 name,
                 node,
                 lines,
                 since,
                 follow,
                 json,
-                source_filter,
+                source: source_filter,
                 search,
-                context,
-            )
+                context_lines: context,
+            })
             .await
         }
 
