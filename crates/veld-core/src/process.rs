@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use thiserror::Error;
@@ -24,6 +24,12 @@ pub enum ProcessError {
 
     #[error("failed to send signal to pid {pid}: {source}")]
     SignalFailed { pid: u32, source: std::io::Error },
+
+    #[error("failed to read output file {path}: {source}")]
+    OutputFileError {
+        path: PathBuf,
+        source: std::io::Error,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -240,28 +246,80 @@ async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &P
 // Run a command to completion, capturing VELD_OUTPUT lines
 // ---------------------------------------------------------------------------
 
-/// Run a command/script to completion. Parses `VELD_OUTPUT key=value`
-/// lines from stdout. Returns the collected outputs and exit code.
+/// Run a command/script to completion. Collects outputs from two channels:
+///
+/// 1. **File-based (preferred):** If `output_file` is `Some`, the file is
+///    created before spawning and `VELD_OUTPUT_FILE` is set in the child env.
+///    The script writes `key=value` lines to this file. After the process
+///    exits the file is read and deleted.
+///
+/// 2. **Stdout-based (legacy fallback):** `VELD_OUTPUT key=value` lines on
+///    stdout are still parsed for backward compatibility but this channel is
+///    discouraged because it exposes values in the terminal and logs.
+///
+/// When both channels produce the same key, the file-based value wins.
 pub async fn run_command(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
+    output_file: Option<&Path>,
 ) -> Result<CommandOutput, ProcessError> {
-    let mut child = Command::new("sh")
+    // Prepare the output file and augmented env.
+    let mut env = env.clone();
+    if let Some(path) = output_file {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ProcessError::OutputFileError {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+        }
+        // Create (or truncate) the file with restrictive permissions (0600)
+        // since it may contain sensitive values like database passwords.
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| ProcessError::OutputFileError {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+        }
+        env.insert(
+            "VELD_OUTPUT_FILE".to_owned(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
+
+    let spawn_result = Command::new("sh")
         .arg("-c")
         .arg(command)
         .current_dir(working_dir)
-        .envs(env)
+        .envs(&env)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(ProcessError::SpawnFailed)?;
+        .stderr(Stdio::inherit())
+        .spawn();
+
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(e) => {
+            // Clean up the output file on spawn failure.
+            if let Some(path) = output_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(ProcessError::SpawnFailed(e));
+        }
+    };
 
     let stdout = child.stdout.take().expect("stdout should be piped");
 
     let mut reader = BufReader::new(stdout).lines();
     let mut outputs = HashMap::new();
 
+    // Legacy stdout channel.
     while let Ok(Some(line)) = reader.next_line().await {
         if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
             if let Some((key, value)) = kv.split_once('=') {
@@ -271,6 +329,44 @@ pub async fn run_command(
     }
 
     let status = child.wait().await.map_err(ProcessError::SpawnFailed)?;
+
+    // Read file-based outputs (overrides stdout for duplicate keys).
+    if let Some(path) = output_file {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        outputs.insert(key.trim().to_owned(), value.trim().to_owned());
+                    } else {
+                        tracing::warn!(
+                            line,
+                            "ignoring malformed line in output file (expected key=value)"
+                        );
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "output file was deleted by the script"
+                );
+            }
+            Err(e) => {
+                // Clean up before returning error.
+                let _ = std::fs::remove_file(path);
+                return Err(ProcessError::OutputFileError {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
+        }
+        // Always clean up the temp file.
+        let _ = std::fs::remove_file(path);
+    }
 
     let exit_code = status.code().unwrap_or(-1);
 

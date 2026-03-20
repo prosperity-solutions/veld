@@ -182,7 +182,7 @@ pub struct VariantConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum Outputs {
-    /// Declared output names for `command` steps (captured from VELD_OUTPUT).
+    /// Declared output names for `command` steps (captured from `$VELD_OUTPUT_FILE` or legacy `VELD_OUTPUT` stdout).
     Declared(Vec<String>),
     /// Synthetic output templates for `start_server` steps.
     Synthetic(HashMap<String, String>),

@@ -33,7 +33,7 @@ The website has **two audiences** — humans and LLMs. When you change content, 
 ### Correctness constraints
 
 - `command` type steps do NOT get `${veld.port}` allocated — only `start_server` does.
-- `start_server` outputs are objects (synthetic templates); `command` outputs are arrays (captured from VELD_OUTPUT).
+- `start_server` outputs are objects (synthetic templates); `command` outputs are arrays (captured from `$VELD_OUTPUT_FILE` or legacy `VELD_OUTPUT` stdout).
 - The domain is `veld.oss.life.li`, not `veld.dev`.
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`.
 - The install URL is `https://veld.oss.life.li/get` (nginx redirects to GitHub).

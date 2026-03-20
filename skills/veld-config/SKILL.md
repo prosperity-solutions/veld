@@ -77,7 +77,7 @@ For setup steps, migrations, data seeding. Can emit outputs via stdout.
 }
 ```
 
-The script emits outputs by printing `VELD_OUTPUT key=value` lines to stdout.
+The script emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred). The legacy method of printing `VELD_OUTPUT key=value` to stdout is still supported but discouraged as it exposes values in the terminal.
 
 ## Health Checks
 

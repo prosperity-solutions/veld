@@ -361,7 +361,7 @@ If two selected end nodes transitively require the same dependency node with *di
 Runs a shell script or inline command to completion. Used for setup tasks — database cloning, seeding, exporting remote service URLs, etc.
 
 - Working directory defaults to `${veld.root}`
-- Declares outputs via `VELD_OUTPUT key=value` written to stdout
+- Declares outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged)
 - Built-in outputs: `exit_code`
 - Optional `verify` command for idempotency of steps with external side effects:
   - Exit `0` → skip, previous result still valid
@@ -385,7 +385,7 @@ Starts and manages a long-lived process.
 }
 ```
 
-This is particularly useful for Docker infrastructure nodes where stdout cannot be used for `VELD_OUTPUT`.
+This is particularly useful for Docker infrastructure nodes where the process cannot write to `$VELD_OUTPUT_FILE`.
 
 - stdout/stderr streamed to the run's log store (see Logging)
 
@@ -835,7 +835,7 @@ All logic shared across binaries:
 - Node graph construction, topological sort, cycle detection, variant resolution
 - Variable reference validation and ambiguity detection at graph resolution time
 - Parallel execution engine (dependency-ordered startup, reverse-order teardown)
-- Bash runner (`VELD_OUTPUT` stdout parsing, `verify` execution)
+- Bash runner (`$VELD_OUTPUT_FILE` + legacy `VELD_OUTPUT` stdout parsing, `verify` execution)
 - Server launcher (process management, port allocation from managed range)
 - `outputs` interpolation for `start_server` (post-port-allocation)
 - Two-phase health check polling (port check + HTTPS URL check)
