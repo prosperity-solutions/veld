@@ -176,6 +176,8 @@ footer p{color:#4A4A50}
 <section>
 <h2>Core concepts</h2>
 <dl class="cpt">
+<dt>Working Directory</dt>
+<dd>Set <code>cwd</code> at the node or variant level to run commands from a subdirectory. In monorepos, this replaces repetitive <code>cd &lt;dir&gt; &amp;&amp;</code> prefixes. Variant-level overrides node-level.</dd>
 <dt>Dependency Graphs</dt>
 <dd>Declare which services depend on which. Veld resolves the graph, starts in topological order, parallelizes where possible, and tears down in reverse.</dd>
 <dt>HTTPS Everywhere</dt>

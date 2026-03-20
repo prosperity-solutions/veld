@@ -87,6 +87,10 @@
           "$ref": "#/$defs/FeaturesConfig",
           "description": "Feature toggles override for all variants of this node."
         },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for all variants of this node. Relative paths are resolved from the project root. Overridable at variant level. Supports Veld variable substitution."
+        },
         "variants": {
           "type": "object",
           "description": "Available variants for this node. Each key is a variant name.",
@@ -184,6 +188,10 @@
         "features": {
           "$ref": "#/$defs/FeaturesConfig",
           "description": "Feature toggles override for this specific variant."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for this variant. Relative paths are resolved from the project root. Overrides node-level cwd. Supports Veld variable substitution."
         }
       },
       "allOf": [

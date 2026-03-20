@@ -98,6 +98,11 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
 
+    /// Working directory for all variants of this node. Relative paths are resolved from the project root (the directory containing veld.json).
+    /// Overridable at variant level. Supports variable substitution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+
     pub variants: HashMap<String, VariantConfig>,
 }
 
@@ -163,6 +168,11 @@ pub struct VariantConfig {
     /// Feature toggles override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
+
+    /// Working directory for this variant. Relative paths are resolved from the project root (the directory containing veld.json).
+    /// Overrides node-level `cwd`. Supports variable substitution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +437,28 @@ pub fn resolve_client_log_levels(
     }
 }
 
+/// Resolve the effective working directory for a node+variant.
+/// Uses the most specific override: variant > node > project root.
+/// Relative paths are resolved against the project root.
+pub fn resolve_cwd(
+    project_root: &Path,
+    node_cwd: Option<&str>,
+    variant_cwd: Option<&str>,
+) -> PathBuf {
+    let raw = variant_cwd.or(node_cwd);
+    match raw {
+        Some(dir) => {
+            let p = Path::new(dir);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                project_root.join(p)
+            }
+        }
+        None => project_root.to_path_buf(),
+    }
+}
+
 /// Return the project root directory (parent of veld.json).
 pub fn project_root(config_path: &Path) -> PathBuf {
     config_path
@@ -535,5 +567,42 @@ mod tests {
         let result = resolve_features(Some(&project), Some(&node), Some(&variant));
         assert!(!result.feedback_overlay);
         assert!(!result.client_logs);
+    }
+
+    // -- cwd resolution tests -------------------------------------------------
+
+    #[test]
+    fn test_resolve_cwd_defaults_to_project_root() {
+        let root = PathBuf::from("/projects/myapp");
+        let result = resolve_cwd(&root, None, None);
+        assert_eq!(result, PathBuf::from("/projects/myapp"));
+    }
+
+    #[test]
+    fn test_resolve_cwd_node_level() {
+        let root = PathBuf::from("/projects/myapp");
+        let result = resolve_cwd(&root, Some("packages/api"), None);
+        assert_eq!(result, PathBuf::from("/projects/myapp/packages/api"));
+    }
+
+    #[test]
+    fn test_resolve_cwd_variant_overrides_node() {
+        let root = PathBuf::from("/projects/myapp");
+        let result = resolve_cwd(&root, Some("packages/api"), Some("packages/frontend"));
+        assert_eq!(result, PathBuf::from("/projects/myapp/packages/frontend"));
+    }
+
+    #[test]
+    fn test_resolve_cwd_absolute_path() {
+        let root = PathBuf::from("/projects/myapp");
+        let result = resolve_cwd(&root, None, Some("/opt/services/api"));
+        assert_eq!(result, PathBuf::from("/opt/services/api"));
+    }
+
+    #[test]
+    fn test_resolve_cwd_variant_none_falls_through_to_node() {
+        let root = PathBuf::from("/projects/myapp");
+        let result = resolve_cwd(&root, Some("subdir"), None);
+        assert_eq!(result, PathBuf::from("/projects/myapp/subdir"));
     }
 }

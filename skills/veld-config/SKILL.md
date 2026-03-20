@@ -36,6 +36,18 @@ Always include the `$schema` field for editor autocompletion:
 | `features` | object | No | Feature toggles: `{"feedback_overlay": bool, "client_logs": bool}`. All default `true`. Cascades: variant > node > project. |
 | `nodes` | object | Yes | At least one node required |
 
+## Node-Level Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `default_variant` | string | No | The variant to use when none is specified |
+| `url_template` | string | No | URL template override for all variants of this node |
+| `hidden` | boolean | No | Hide from `veld nodes` output (default: `false`) |
+| `client_log_levels` | array | No | Client-side log levels override |
+| `features` | object | No | Feature toggles override |
+| `cwd` | string | No | Working directory for all variants. Relative paths resolve from the project root. Overridable at variant level. Supports `${...}` variable substitution. |
+| `variants` | object | Yes | At least one variant required |
+
 ## Node Types
 
 ### `start_server` — Long-Running Processes
@@ -254,7 +266,23 @@ Optional cleanup command that runs on `veld stop`:
 ## Common Patterns
 
 ### Monorepo with workspaces
-Use `${veld.root}` as the working directory anchor. All commands run from the veld.json directory, so use relative paths like `cd packages/frontend && npm run dev`.
+Set `cwd` at the node level so all commands run from the right subdirectory. This replaces verbose `cd <dir> && ...` prefixes:
+
+```json
+"api": {
+  "cwd": "packages/api",
+  "variants": {
+    "local": {
+      "type": "start_server",
+      "command": "pnpm run dev --port ${veld.port}",
+      "on_stop": "./scripts/cleanup.sh",
+      "health_check": { "type": "http", "path": "/health" }
+    }
+  }
+}
+```
+
+`cwd` cascades: variant-level overrides node-level. Supports variable substitution (e.g., `"cwd": "${veld.project}/api"`). Relative paths resolve from the veld.json directory.
 
 ### Branch-based URLs
 Use `{branch ?? run}` in `url_template` so each git branch gets its own URL namespace, falling back to run name if not in a git repo.
