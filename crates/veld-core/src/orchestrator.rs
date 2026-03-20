@@ -1044,9 +1044,10 @@ async fn execute_node_isolated(
     }
 
     let server_handle = match variant_cfg.step_type {
-        StepType::StartServer => {
-            Some(execute_start_server_isolated(&ctx, &sel, &mut var_ctx, &mut node_state, precomputed).await?)
-        }
+        StepType::StartServer => Some(
+            execute_start_server_isolated(&ctx, &sel, &mut var_ctx, &mut node_state, precomputed)
+                .await?,
+        ),
         StepType::Command => {
             execute_command_isolated(&ctx, &sel, &mut var_ctx, &mut node_state).await?;
             None
@@ -1104,8 +1105,8 @@ async fn execute_start_server_isolated(
     let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
     let node_cfg = &ctx.config.nodes[&sel.node];
 
-    let mut precomputed = precomputed
-        .expect("precomputed server info missing for start_server node");
+    let mut precomputed =
+        precomputed.expect("precomputed server info missing for start_server node");
     let port = precomputed.port;
     let node_url = precomputed.hostname.clone();
     let https_url = precomputed.https_url.clone();
@@ -1237,14 +1238,8 @@ async fn execute_start_server_isolated(
     // Release the port reservation immediately before spawning.
     port_reservation.release();
 
-    let handle = process::start_server(
-        &resolved_cmd,
-        &working_dir,
-        &env,
-        &log_path,
-        ctx.foreground,
-    )
-    .await?;
+    let handle =
+        process::start_server(&resolved_cmd, &working_dir, &env, &log_path, ctx.foreground).await?;
     let pid = handle.pid();
     node_state.pid = Some(pid);
 
@@ -1260,8 +1255,8 @@ async fn execute_start_server_isolated(
             (checkpoint.run.clone(), checkpoint.project_root.clone())
         };
         // File I/O outside the lock to avoid blocking the tokio runtime.
-        let mut project_state = ProjectState::load(&project_root)
-            .unwrap_or_else(|_| ProjectState::default());
+        let mut project_state =
+            ProjectState::load(&project_root).unwrap_or_else(|_| ProjectState::default());
         project_state
             .runs
             .insert(run_snapshot.name.clone(), run_snapshot);
@@ -1356,10 +1351,7 @@ async fn execute_start_server_isolated(
         );
         debug_log_free(
             &ctx.debug_writer,
-            &format!(
-                "{}:{} — phase 1 passed (port open)",
-                sel.node, sel.variant
-            ),
+            &format!("{}:{} — phase 1 passed (port open)", sel.node, sel.variant),
         )
         .await;
 

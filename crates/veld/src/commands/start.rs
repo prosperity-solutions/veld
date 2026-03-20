@@ -364,7 +364,11 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             state.redraw(*total, "starting...");
             ctx.bars.insert(key, state);
         }
-        ProgressEvent::PortAllocated { node, variant, port } => {
+        ProgressEvent::PortAllocated {
+            node,
+            variant,
+            port,
+        } => {
             let key = format!("{node}:{variant}");
             if let Some(state) = ctx.bars.get_mut(&key) {
                 state.port = Some(*port);
