@@ -1124,9 +1124,10 @@ impl Orchestrator {
                 continue;
             }
 
-            let any_alive = run_state.nodes.values().any(|ns| {
-                ns.pid.is_some_and(process::is_alive)
-            });
+            let any_alive = run_state
+                .nodes
+                .values()
+                .any(|ns| ns.pid.is_some_and(process::is_alive));
 
             if !any_alive {
                 dead_run_names.push(run_name.clone());
@@ -1148,8 +1149,7 @@ impl Orchestrator {
                         let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
                         let hostname = hostname.split(':').next().unwrap_or(hostname);
                         let _ = self.helper_client.remove_host(hostname).await;
-                        let route_id =
-                            format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+                        let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
                         let _ = self.helper_client.remove_route(&route_id).await;
                     }
                 }
