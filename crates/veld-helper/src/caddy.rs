@@ -661,8 +661,18 @@ mod tests {
             .unwrap();
         // Only client log replacements (head + body fallback), no feedback overlay.
         assert_eq!(replacements.len(), 2);
-        assert!(replacements[0]["search_regexp"].as_str().unwrap().contains("head"));
-        assert!(replacements[1]["search_regexp"].as_str().unwrap().contains("body"));
+        assert!(
+            replacements[0]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("head")
+        );
+        assert!(
+            replacements[1]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("body")
+        );
     }
 
     #[test]
