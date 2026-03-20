@@ -495,6 +495,10 @@ veld logs --node frontend                        # specific node
 veld logs --node frontend --lines 100            # last N lines
 veld logs --node frontend --since 5m             # since duration
 veld logs --name my-feature --node backend       # specific run + node
+veld logs --follow                               # stream (like tail -f)
+veld logs --source client                        # client-side logs only
+veld logs --search "error"                       # filter by search term
+veld logs --search "timeout" --context 3         # search with context lines
 veld logs --json                                 # structured per-line output
 ```
 
@@ -587,7 +591,7 @@ veld runs [--all] [--name <n>]
 veld runs purge --name <n>
 veld status [--name <n>]
 veld urls [--name <n>]
-veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [--json]
+veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--source <s>] [-s <term>] [-C <n>] [--json]
 veld graph [<node:variant>...]
 
 # Project

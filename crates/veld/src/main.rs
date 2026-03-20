@@ -159,6 +159,14 @@ enum Command {
         /// Filter by log source: all, server, or client.
         #[arg(long, default_value = "all")]
         source: String,
+
+        /// Filter log lines by search term (case-insensitive substring match).
+        #[arg(long, short = 's')]
+        search: Option<String>,
+
+        /// Number of context lines to show around search matches.
+        #[arg(long, short = 'C', default_value = "0")]
+        context: usize,
     },
 
     /// Print the dependency graph for the given selections.
@@ -326,6 +334,8 @@ async fn main() {
             follow,
             json,
             source,
+            search,
+            context,
         } => {
             let source_filter =
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
@@ -335,7 +345,18 @@ async fn main() {
                     );
                     std::process::exit(1);
                 });
-            commands::logs::run(name, node, lines, since, follow, json, source_filter).await
+            commands::logs::run(commands::logs::LogsOptions {
+                name,
+                node,
+                lines,
+                since,
+                follow,
+                json,
+                source: source_filter,
+                search,
+                context_lines: context,
+            })
+            .await
         }
 
         Command::Graph { selections } => commands::graph::run(selections).await,
