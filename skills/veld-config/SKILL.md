@@ -33,6 +33,7 @@ Always include the `$schema` field for editor autocompletion:
 | `url_template` | string | No | Default: `{service}.{run}.{project}.localhost` |
 | `presets` | object | No | Named shortcuts for node:variant selections |
 | `client_log_levels` | array | No | Browser log levels to capture: `["log", "warn", "error"]` (default). Valid: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Exceptions always captured. |
+| `features` | object | No | Feature toggles: `{"feedback_overlay": bool, "client_logs": bool}`. All default `true`. Cascades: variant > node > project. |
 | `nodes` | object | Yes | At least one node required |
 
 ## Node Types
@@ -276,6 +277,16 @@ Captures browser console output from `start_server` nodes. Cascades: variant > n
 ```
 
 Set at project, node, or variant level. Unhandled exceptions are always captured.
+
+### Feature toggles
+
+Control which Veld capabilities are injected into `start_server` HTML responses. Cascades: variant > node > project.
+
+```json
+"features": { "feedback_overlay": false, "client_logs": true }
+```
+
+Available: `feedback_overlay` (toolbar/comments), `client_logs` (browser log collector). All default `true`.
 
 ## Common Mistakes
 

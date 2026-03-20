@@ -39,6 +39,7 @@ All relative paths in the configuration resolve relative to the directory contai
 | `url_template`      | string | No       | URL template for services (see [URL Templates])   |
 | `presets`           | object | No       | Named shortcuts for node:variant selections       |
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
+| `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
 
 [Client-Side Log Levels]: #client-side-log-levels
@@ -109,6 +110,35 @@ The setting cascades: variant-level overrides node-level overrides project-level
 }
 ```
 
+### `features`
+
+Controls which Veld capabilities are injected into `start_server` nodes' HTML responses. Each feature defaults to `true` (enabled). Set a feature to `false` to disable it. The same override hierarchy applies: variant > node > project.
+
+| Feature             | Type    | Default | Description |
+|---------------------|---------|---------|-------------|
+| `feedback_overlay`  | boolean | `true`  | Inject the feedback overlay toolbar (FAB, screenshot, comments) |
+| `client_logs`       | boolean | `true`  | Inject the client-side log collector |
+
+```json
+{
+  "features": {
+    "feedback_overlay": false
+  },
+  "nodes": {
+    "api": {
+      "features": { "client_logs": false },
+      "variants": {
+        "local": {
+          "features": { "feedback_overlay": true }
+        }
+      }
+    }
+  }
+}
+```
+
+In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
+
 ---
 
 ## Nodes
@@ -165,6 +195,17 @@ Overrides the project-level `client_log_levels` for all variants of this node. S
 }
 ```
 
+### `features` (node-level)
+
+Overrides the project-level `features` for all variants of this node. See [Features](#features) for details.
+
+```json
+"api": {
+  "features": { "feedback_overlay": false },
+  "variants": { ... }
+}
+```
+
 ### `url_template` (node-level)
 
 Overrides the project-level `url_template` for all variants of this node. See [URL Template Cascade](#url-template-cascade) for resolution order.
@@ -202,6 +243,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
 | `verify`            | string           | No       | `command` only    | Idempotency verification command                      |
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
+| `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
 
 ### `type`
 

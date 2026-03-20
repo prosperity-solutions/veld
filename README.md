@@ -187,6 +187,19 @@ Valid levels: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Default: `["log
 
 View client logs with `veld logs --source client` or filter by source in the management UI.
 
+### Feature toggles
+
+Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+
+```json
+"features": {
+  "feedback_overlay": false,
+  "client_logs": true
+}
+```
+
+Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector). All default to `true`.
+
 ### Variable interpolation
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.

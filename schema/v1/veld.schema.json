@@ -46,6 +46,10 @@
       "$ref": "#/$defs/ClientLogLevels",
       "description": "Client-side log levels to capture (project-level default). Overridable at node and variant level."
     },
+    "features": {
+      "$ref": "#/$defs/FeaturesConfig",
+      "description": "Feature toggles (project-level defaults). Overridable at node and variant level."
+    },
     "nodes": {
       "type": "object",
       "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
@@ -78,6 +82,10 @@
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",
           "description": "Client-side log levels override for all variants of this node."
+        },
+        "features": {
+          "$ref": "#/$defs/FeaturesConfig",
+          "description": "Feature toggles override for all variants of this node."
         },
         "variants": {
           "type": "object",
@@ -172,6 +180,10 @@
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",
           "description": "Client-side log levels override for this specific variant."
+        },
+        "features": {
+          "$ref": "#/$defs/FeaturesConfig",
+          "description": "Feature toggles override for this specific variant."
         }
       },
       "allOf": [
@@ -197,6 +209,23 @@
           }
         }
       ]
+    },
+    "FeaturesConfig": {
+      "type": "object",
+      "description": "Feature toggles for controlling which Veld capabilities are injected into a server's HTML responses. All properties are optional — omitted values inherit from the parent level (variant inherits from node, node from project). The built-in default for all features is true (enabled).",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_overlay": {
+          "type": "boolean",
+          "description": "Inject the feedback overlay toolbar (FAB, screenshot, comments) into HTML responses. Default: true.",
+          "default": true
+        },
+        "client_logs": {
+          "type": "boolean",
+          "description": "Inject the client-side log collector into HTML responses. Default: true.",
+          "default": true
+        }
+      }
     },
     "ClientLogLevels": {
       "type": "array",

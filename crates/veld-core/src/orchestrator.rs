@@ -595,13 +595,26 @@ impl Orchestrator {
             "hostname": &node_url,
             "upstream": format!("localhost:{port}"),
         });
-        // Include feedback config so Caddy routes /__veld__/* to the daemon
-        // and injects the overlay script into HTML responses.
-        route["feedback_upstream"] = serde_json::json!("localhost:19899");
-        route["run_name"] = serde_json::json!(&run.name);
-        route["project_root"] = serde_json::json!(self.project_root.to_string_lossy());
-        // Resolve client log levels (variant > node > project > default).
+        // Resolve per-node feature flags (variant > node > project > default).
         let node_cfg = &self.config.nodes[&sel.node];
+        let features = config::resolve_features(
+            self.config.features.as_ref(),
+            node_cfg.features.as_ref(),
+            variant_cfg.features.as_ref(),
+        );
+
+        // Include feedback/injection config so Caddy routes /__veld__/* to the
+        // daemon and selectively injects scripts into HTML responses.
+        if features.feedback_overlay || features.client_logs {
+            route["feedback_upstream"] = serde_json::json!("localhost:19899");
+            route["run_name"] = serde_json::json!(&run.name);
+            route["project_root"] = serde_json::json!(self.project_root.to_string_lossy());
+        }
+
+        route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
+        route["inject_client_logs"] = serde_json::json!(features.client_logs);
+
+        // Resolve client log levels (variant > node > project > default).
         let client_log_levels = config::resolve_client_log_levels(
             self.config.client_log_levels.as_deref(),
             node_cfg.client_log_levels.as_deref(),

@@ -102,6 +102,14 @@ impl State {
             .get("client_log_levels")
             .and_then(Value::as_str)
             .unwrap_or("log,warn,error");
+        let inject_feedback_overlay = args
+            .get("inject_feedback_overlay")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let inject_client_logs = args
+            .get("inject_client_logs")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
         let feedback = match (
             args.get("feedback_upstream").and_then(Value::as_str),
             args.get("run_name").and_then(Value::as_str),
@@ -113,11 +121,13 @@ impl State {
                     run_name,
                     project_root,
                     client_log_levels,
+                    inject_feedback_overlay,
+                    inject_client_logs,
                 })
             }
             (None, None, None) => None,
             _ => {
-                warn!("partial feedback config in add_route args — disabling feedback overlay");
+                warn!("partial feedback config in add_route args — disabling injection");
                 None
             }
         };
