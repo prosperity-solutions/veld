@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use thiserror::Error;
 use tracing;
@@ -91,6 +92,45 @@ struct PrecomputedServer {
     /// Held TCP listeners that reserve the port from other processes.
     /// Taken (released) right before the child process is spawned.
     reservation: Option<crate::port::PortReservation>,
+}
+
+/// Read-only context shared by all node execution tasks within a stage.
+/// Cloned once per stage, then each spawned task gets its own copy.
+#[derive(Clone)]
+struct NodeExecutionContext {
+    config: Arc<VeldConfig>,
+    project_root: Arc<PathBuf>,
+    https_port: u16,
+    foreground: bool,
+    helper_client: HelperClient,
+    progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    debug_writer: Option<LogWriter>,
+    run_name: String,
+    run_id: uuid::Uuid,
+    branch: String,
+    worktree: String,
+    username: String,
+    /// Snapshot of all outputs from prior stages for variable resolution.
+    all_outputs: Arc<HashMap<String, HashMap<String, String>>>,
+    /// Shared run state for PID checkpointing. Uses `std::sync::Mutex`
+    /// (not tokio) so the lock is acquired without an `.await` point —
+    /// this makes the spawn→checkpoint sequence cancellation-safe.
+    checkpoint: Arc<std::sync::Mutex<CheckpointState>>,
+}
+
+/// Shared mutable state for PID checkpointing during parallel execution.
+struct CheckpointState {
+    run: RunState,
+    project_root: PathBuf,
+}
+
+/// Result of executing a single node, collected after the task completes.
+struct NodeExecutionResult {
+    key: String,
+    sel: NodeSelection,
+    index: usize,
+    node_state: NodeState,
+    server_handle: Option<process::ServerHandle>,
 }
 
 pub struct Orchestrator {
@@ -349,6 +389,10 @@ impl Orchestrator {
             stages: plan.len(),
         });
 
+        // Wrap immutable data in Arc once for all stages.
+        let shared_config = Arc::new(self.config.clone());
+        let shared_project_root = Arc::new(self.project_root.clone());
+
         // Execute stages in order. On failure, release any remaining port
         // reservations so the ports become available again immediately.
         let mut node_index: usize = 0;
@@ -364,6 +408,8 @@ impl Orchestrator {
                         &mut all_outputs,
                         total_nodes,
                         &mut node_index,
+                        &shared_config,
+                        &shared_project_root,
                     )
                     .await?;
 
@@ -398,7 +444,7 @@ impl Orchestrator {
         Ok(run)
     }
 
-    /// Execute a single stage (parallel nodes).
+    /// Execute a single stage: all nodes run in parallel via `JoinSet`.
     async fn execute_stage(
         &mut self,
         stage: &[NodeSelection],
@@ -409,613 +455,120 @@ impl Orchestrator {
         all_outputs: &mut HashMap<String, HashMap<String, String>>,
         total_nodes: usize,
         node_index: &mut usize,
+        shared_config: &Arc<VeldConfig>,
+        shared_project_root: &Arc<PathBuf>,
     ) -> Result<Vec<(String, NodeState)>, OrchestratorError> {
-        let mut results = Vec::new();
+        // Build shared context (cloned once per stage).
+        let ctx = NodeExecutionContext {
+            config: Arc::clone(shared_config),
+            project_root: Arc::clone(shared_project_root),
+            https_port: self.https_port,
+            foreground: self.foreground,
+            helper_client: self.helper_client.clone(),
+            progress_tx: self.progress_tx.clone(),
+            debug_writer: self.debug_writer.clone(),
+            run_name: run.name.clone(),
+            run_id: run.run_id,
+            branch: branch.to_owned(),
+            worktree: worktree.to_owned(),
+            username: username.to_owned(),
+            all_outputs: Arc::new(all_outputs.clone()),
+            checkpoint: Arc::new(std::sync::Mutex::new(CheckpointState {
+                run: run.clone(),
+                project_root: self.project_root.clone(),
+            })),
+        };
 
-        // Nodes within a stage are independent. We run them sequentially here;
-        // the CLI layer can wrap in tokio::spawn for true parallelism.
+        // Assign indices and extract precomputed servers before spawning.
+        let mut assignments: Vec<(NodeSelection, usize, Option<PrecomputedServer>)> = Vec::new();
         for sel in stage {
             *node_index += 1;
-            self.emit(ProgressEvent::NodeStarting {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                index: *node_index,
-                total: total_nodes,
-            });
-
             let key = RunState::node_key(&sel.node, &sel.variant);
-            let start_time = std::time::Instant::now();
-            let node_state = self
-                .execute_node(sel, run, branch, worktree, username, all_outputs)
-                .await?;
+            let server = self.precomputed_servers.remove(&key);
+            assignments.push((sel.clone(), *node_index, server));
+        }
 
-            // Store this node's outputs for downstream resolution.
-            let mut node_out = HashMap::new();
-            for (k, v) in &node_state.outputs {
-                node_out.insert(k.clone(), v.clone());
+        // Spawn all nodes into a JoinSet.
+        let mut join_set = tokio::task::JoinSet::new();
+        for (sel, index, precomputed) in assignments {
+            let task_ctx = ctx.clone();
+            join_set.spawn(execute_node_isolated(
+                task_ctx,
+                sel,
+                precomputed,
+                index,
+                total_nodes,
+            ));
+        }
+
+        // Collect results; fail-fast on first error.
+        let mut results: Vec<NodeExecutionResult> = Vec::new();
+        while let Some(join_result) = join_set.join_next().await {
+            let task_result = join_result.map_err(|e| OrchestratorError::NodeFailed {
+                node: "unknown".into(),
+                variant: "unknown".into(),
+                reason: format!("task panicked: {e}"),
+            })?;
+
+            match task_result {
+                Ok(node_result) => {
+                    results.push(node_result);
+                }
+                Err(e) => {
+                    // Cancel all remaining tasks.
+                    join_set.abort_all();
+                    // Drain: collect any already-completed Ok results so we
+                    // can register their server handles for cleanup.
+                    while let Some(drain_result) = join_set.join_next().await {
+                        if let Ok(Ok(node_result)) = drain_result {
+                            results.push(node_result);
+                        }
+                    }
+                    // Merge handles from successful tasks into self.children
+                    // so the caller's stop() can find and kill them.
+                    for result in &mut results {
+                        if let Some(handle) = result.server_handle.take() {
+                            self.children.insert(result.key.clone(), handle);
+                        }
+                    }
+                    return Err(e);
+                }
             }
-            if let Some(port) = node_state.port {
+        }
+
+        // Sort by pre-assigned index for deterministic execution_order.
+        results.sort_by_key(|r| r.index);
+
+        // Merge server handles back into self.children.
+        for result in &mut results {
+            if let Some(handle) = result.server_handle.take() {
+                self.children.insert(result.key.clone(), handle);
+            }
+        }
+
+        // Merge outputs back into all_outputs for downstream stages.
+        let mut stage_results: Vec<(String, NodeState)> = Vec::new();
+        for result in results {
+            let mut node_out = result.node_state.outputs.clone();
+            if let Some(port) = result.node_state.port {
                 node_out.insert("port".to_owned(), port.to_string());
             }
-            if let Some(ref u) = node_state.url {
+            if let Some(ref u) = result.node_state.url {
                 node_out.insert("url".to_owned(), u.clone());
             }
-            // Store under both qualified and unqualified keys.
-            all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
+            all_outputs.insert(
+                format!("{}:{}", result.sel.node, result.sel.variant),
+                node_out.clone(),
+            );
             all_outputs
-                .entry(sel.node.clone())
+                .entry(result.sel.node.clone())
                 .or_default()
                 .extend(node_out);
 
-            // Emit completion event.
-            let elapsed_ms = start_time.elapsed().as_millis() as u64;
-            match node_state.status {
-                NodeStatus::Healthy => {
-                    self.emit(ProgressEvent::NodeHealthy {
-                        node: sel.node.clone(),
-                        variant: sel.variant.clone(),
-                        url: node_state.url.clone(),
-                        elapsed_ms,
-                    });
-                }
-                NodeStatus::Skipped => {
-                    self.emit(ProgressEvent::NodeSkipped {
-                        node: sel.node.clone(),
-                        variant: sel.variant.clone(),
-                    });
-                }
-                _ => {}
-            }
-
-            results.push((key, node_state));
+            stage_results.push((result.key, result.node_state));
         }
 
-        Ok(results)
-    }
-
-    /// Execute a single node: allocate port, resolve variables, start process,
-    /// run health checks.
-    async fn execute_node(
-        &mut self,
-        sel: &NodeSelection,
-        run: &RunState,
-        branch: &str,
-        worktree: &str,
-        username: &str,
-        all_outputs: &HashMap<String, HashMap<String, String>>,
-    ) -> Result<NodeState, OrchestratorError> {
-        let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-        let sensitive_outputs = variant_cfg.sensitive_outputs.clone();
-        let mut node_state = NodeState::new(&sel.node, &sel.variant);
-        node_state.status = NodeStatus::Starting;
-
-        // Build variable context.
-        let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run.name.clone());
-        ctx.set_builtin("run_id", run.run_id.to_string());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("worktree", url::slugify(worktree));
-        ctx.set_builtin("branch", url::slugify(branch));
-        ctx.set_builtin("username", username.to_owned());
-
-        // Populate node output references from already-executed nodes.
-        for (node_key, outputs) in all_outputs {
-            for (field, value) in outputs {
-                ctx.set_node_output(&format!("nodes.{node_key}.{field}"), value.clone());
-            }
-        }
-
-        match variant_cfg.step_type {
-            StepType::StartServer => {
-                self.execute_start_server(sel, run, &mut ctx, &mut node_state)
-                    .await?;
-            }
-            StepType::Command => {
-                self.execute_command(sel, &mut ctx, &mut node_state).await?;
-            }
-        }
-
-        // Mark sensitive output keys so they are encrypted at rest and masked
-        // in display. The list comes from the variant config.
-        if let Some(sensitive) = sensitive_outputs {
-            node_state.sensitive_keys = sensitive;
-        }
-
-        Ok(node_state)
-    }
-
-    /// Execute a `start_server` node.
-    async fn execute_start_server(
-        &mut self,
-        sel: &NodeSelection,
-        run: &RunState,
-        ctx: &mut VariableContext,
-        node_state: &mut NodeState,
-    ) -> Result<(), OrchestratorError> {
-        let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-
-        // Look up the pre-computed port and URL (allocated before any node
-        // executed so that cross-references work without dependency edges).
-        let key = RunState::node_key(&sel.node, &sel.variant);
-        let precomputed = self
-            .precomputed_servers
-            .get_mut(&key)
-            .expect("precomputed server info missing — bug in pre-computation phase");
-        let port = precomputed.port;
-        let node_url = precomputed.hostname.clone();
-        let https_url = precomputed.https_url.clone();
-        // Take the port reservation — we'll release it right before spawning
-        // the child process to minimise the TOCTOU window.
-        let port_reservation = precomputed
-            .reservation
-            .take()
-            .expect("port reservation already consumed — node executed twice?");
-
-        node_state.port = Some(port);
-        ctx.set_builtin("port", port.to_string());
-        node_state.url = Some(https_url.clone());
-        ctx.set_builtin("url", https_url.clone());
-        // Expose individual URL location pieces (mirrors the Web URL API).
-        ctx.set_builtin("url.hostname", node_url.clone());
-        ctx.set_builtin(
-            "url.host",
-            if self.https_port == 443 {
-                node_url.clone()
-            } else {
-                format!("{}:{}", node_url, self.https_port)
-            },
-        );
-        ctx.set_builtin("url.origin", https_url.clone());
-        ctx.set_builtin("url.scheme", "https".to_owned());
-        ctx.set_builtin("url.port", self.https_port.to_string());
-
-        self.emit(ProgressEvent::PortAllocated {
-            node: sel.node.clone(),
-            variant: sel.variant.clone(),
-            port,
-        });
-        self.debug_log(&format!(
-            "{}:{} — using pre-computed port {} → {}",
-            sel.node, sel.variant, port, https_url
-        ))
-        .await;
-
-        // Configure DNS + Caddy via helper (best-effort).
-        self.debug_log(&format!(
-            "{}:{} — adding DNS host {} → 127.0.0.1",
-            sel.node, sel.variant, node_url
-        ))
-        .await;
-        if let Err(e) = self.helper_client.add_host(&node_url, "127.0.0.1").await {
-            tracing::warn!(error = %e, "failed to add DNS host via helper");
-        }
-        let mut route = serde_json::json!({
-            "route_id": format!("veld-{}-{}-{}", run.name, sel.node, sel.variant),
-            "hostname": &node_url,
-            "upstream": format!("localhost:{port}"),
-        });
-        // Resolve per-node feature flags (variant > node > project > default).
-        let node_cfg = &self.config.nodes[&sel.node];
-        let features = config::resolve_features(
-            self.config.features.as_ref(),
-            node_cfg.features.as_ref(),
-            variant_cfg.features.as_ref(),
-        );
-
-        // Include feedback/injection config so Caddy routes /__veld__/* to the
-        // daemon and selectively injects scripts into HTML responses.
-        if features.feedback_overlay || features.client_logs {
-            route["feedback_upstream"] = serde_json::json!("localhost:19899");
-            route["run_name"] = serde_json::json!(&run.name);
-            route["project_root"] = serde_json::json!(self.project_root.to_string_lossy());
-        }
-
-        route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
-        route["inject_client_logs"] = serde_json::json!(features.client_logs);
-
-        // Resolve client log levels (variant > node > project > default).
-        let client_log_levels = config::resolve_client_log_levels(
-            self.config.client_log_levels.as_deref(),
-            node_cfg.client_log_levels.as_deref(),
-            variant_cfg.client_log_levels.as_deref(),
-        );
-        route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
-        if let Err(e) = self.helper_client.add_route(route).await {
-            tracing::warn!(error = %e, "failed to add Caddy route via helper");
-        }
-
-        // Resolve working directory (variant > node > project root).
-        let raw_cwd = variant_cfg.cwd.as_deref().or(node_cfg.cwd.as_deref());
-        let working_dir = match raw_cwd {
-            Some(cwd_tmpl) => {
-                let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
-                let p = std::path::Path::new(&resolved);
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    self.project_root.join(p)
-                }
-            }
-            None => self.project_root.clone(),
-        };
-
-        // Resolve command.
-        let command = variant_cfg.command.as_deref().unwrap_or_default();
-        let resolved_cmd = crate::variables::interpolate(command, ctx)?;
-        self.debug_log(&format!(
-            "{}:{} — resolved command: {} (cwd: {})",
-            sel.node,
-            sel.variant,
-            resolved_cmd,
-            working_dir.display()
-        ))
-        .await;
-
-        // Build env.
-        let mut env = build_env(variant_cfg.env.as_ref(), ctx)?;
-        env.insert("VELD_PORT".to_owned(), port.to_string());
-        env.insert("VELD_URL".to_owned(), https_url.clone());
-
-        // Resolve synthetic outputs.
-        if let Some(Outputs::Synthetic(ref map)) = variant_cfg.outputs {
-            for (key, tmpl) in map {
-                let val = crate::variables::interpolate(tmpl, ctx)?;
-                node_state.outputs.insert(key.clone(), val);
-            }
-        }
-
-        // Start the process. stdout/stderr are redirected to the log file at
-        // the OS level so the process survives after the CLI exits.
-        let log_path = logging::log_file(&self.project_root, &run.name, &sel.node, &sel.variant);
-
-        // Release the port reservation immediately before spawning so the
-        // child process can bind. The window between release and bind is
-        // microseconds — effectively eliminating the TOCTOU race between
-        // concurrent `veld start` commands.
-        port_reservation.release();
-
-        let handle = process::start_server(
-            &resolved_cmd,
-            &working_dir,
-            &env,
-            &log_path,
-            self.foreground,
-        )
-        .await?;
-        let pid = handle.pid();
-        node_state.pid = Some(pid);
-
-        self.children
-            .insert(RunState::node_key(&sel.node, &sel.variant), handle);
-
-        // Checkpoint: persist the PID immediately so Ctrl+C during health
-        // checks still allows `veld stop` to find and kill this process.
-        {
-            let key = RunState::node_key(&sel.node, &sel.variant);
-            let mut checkpoint_run = run.clone();
-            checkpoint_run.execution_order.push(key.clone());
-            checkpoint_run.nodes.insert(key, node_state.clone());
-            let _ = self.save_state(&checkpoint_run);
-        }
-
-        // Health check — inlined to emit progress events between phases.
-        // Each phase races against a process-death watcher so we fail
-        // immediately if the server exits instead of waiting for the full
-        // health-check timeout.
-        self.debug_log(&format!(
-            "{}:{} — process started (pid {}), beginning health checks",
-            sel.node, sel.variant, pid
-        ))
-        .await;
-        if let Some(ref hc) = variant_cfg.health_check {
-            node_state.status = NodeStatus::HealthChecking;
-            node_state.health_phases.push(HealthCheckPhase {
-                phase: 1,
-                passed: false,
-                last_error: None,
-                passed_at: None,
-            });
-            node_state.health_phases.push(HealthCheckPhase {
-                phase: 2,
-                passed: false,
-                last_error: None,
-                passed_at: None,
-            });
-
-            // Build attempt notifiers for health check phases.
-            let phase1_notifier: health::AttemptNotifier = {
-                let tx = self.progress_tx.clone();
-                let node = sel.node.clone();
-                let variant = sel.variant.clone();
-                Box::new(move |attempt| {
-                    if let Some(ref tx) = tx {
-                        let _ = tx.send(ProgressEvent::HealthCheckAttempt {
-                            node: node.clone(),
-                            variant: variant.clone(),
-                            phase: 1,
-                            attempt,
-                        });
-                    }
-                })
-            };
-            let phase2_notifier: health::AttemptNotifier = {
-                let tx = self.progress_tx.clone();
-                let node = sel.node.clone();
-                let variant = sel.variant.clone();
-                Box::new(move |attempt| {
-                    if let Some(ref tx) = tx {
-                        let _ = tx.send(ProgressEvent::HealthCheckAttempt {
-                            node: node.clone(),
-                            variant: variant.clone(),
-                            phase: 2,
-                            attempt,
-                        });
-                    }
-                })
-            };
-
-            // Phase 1: TCP port check.
-            self.emit(ProgressEvent::HealthCheckPhase {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                phase: 1,
-                description: format!("waiting for port {port}"),
-            });
-
-            let phase1_result = tokio::select! {
-                result = health::wait_for_port(port, hc, Some(&phase1_notifier)) => result,
-                _ = wait_for_process_exit(pid) => {
-                    Err(health::HealthError::PortCheckFailed(
-                        "server process exited before binding to port".into(),
-                    ))
-                }
-            };
-
-            if let Err(e) = phase1_result {
-                let msg = format!("process did not bind to port {port}: {e}");
-                node_state.status = NodeStatus::Failed;
-                node_state.health_phases[0].last_error = Some(msg.clone());
-                self.debug_log(&format!(
-                    "{}:{} — health check phase 1 FAILED: {}",
-                    sel.node, sel.variant, msg
-                ))
-                .await;
-                self.emit(ProgressEvent::NodeFailed {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                    error: msg.clone(),
-                });
-                return Err(OrchestratorError::NodeFailed {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                    reason: msg,
-                });
-            }
-
-            let now = chrono::Utc::now();
-            node_state.health_phases[0].passed = true;
-            node_state.health_phases[0].passed_at = Some(now);
-            self.emit(ProgressEvent::HealthCheckPassed {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                phase: 1,
-            });
-            self.debug_log(&format!(
-                "{}:{} — phase 1 passed (port open)",
-                sel.node, sel.variant
-            ))
-            .await;
-
-            // Phase 2: depends on check type.
-            let phase2_desc = match hc.check_type.as_str() {
-                "http" => format!("HTTP check on port {port}"),
-                "command" | "bash" => "command health check".to_owned(),
-                "port" => "port-only (no phase 2)".to_owned(),
-                other => format!("unknown check type: {other}"),
-            };
-            self.emit(ProgressEvent::HealthCheckPhase {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                phase: 2,
-                description: phase2_desc,
-            });
-
-            let phase2_future = async {
-                match hc.check_type.as_str() {
-                    "http" => {
-                        let direct_url = format!("http://127.0.0.1:{port}");
-                        health::wait_for_http(&direct_url, hc, Some(&phase2_notifier)).await
-                    }
-                    "command" | "bash" => {
-                        if let Some(cmd) = &hc.command {
-                            health::wait_for_command_check(
-                                cmd,
-                                &working_dir,
-                                hc,
-                                Some(&phase2_notifier),
-                            )
-                            .await
-                        } else {
-                            Ok(())
-                        }
-                    }
-                    _ => Ok(()), // "port" and unknown — phase 1 already covers.
-                }
-            };
-
-            let phase2_result = tokio::select! {
-                result = phase2_future => result,
-                _ = wait_for_process_exit(pid) => {
-                    Err(health::HealthError::PortCheckFailed(
-                        "server process exited during health check".into(),
-                    ))
-                }
-            };
-
-            match phase2_result {
-                Ok(()) => {
-                    let now = chrono::Utc::now();
-                    node_state.health_phases[1].passed = true;
-                    node_state.health_phases[1].passed_at = Some(now);
-                    node_state.status = NodeStatus::Healthy;
-                    self.emit(ProgressEvent::HealthCheckPassed {
-                        node: sel.node.clone(),
-                        variant: sel.variant.clone(),
-                        phase: 2,
-                    });
-                    self.debug_log(&format!(
-                        "{}:{} — health check passed, node is healthy",
-                        sel.node, sel.variant
-                    ))
-                    .await;
-                }
-                Err(e) => {
-                    node_state.status = NodeStatus::Failed;
-                    let msg = e.to_string();
-                    node_state.health_phases[1].last_error = Some(msg.clone());
-                    self.debug_log(&format!(
-                        "{}:{} — health check phase 2 FAILED: {}",
-                        sel.node, sel.variant, msg
-                    ))
-                    .await;
-                    self.emit(ProgressEvent::NodeFailed {
-                        node: sel.node.clone(),
-                        variant: sel.variant.clone(),
-                        error: msg.clone(),
-                    });
-                    return Err(OrchestratorError::NodeFailed {
-                        node: sel.node.clone(),
-                        variant: sel.variant.clone(),
-                        reason: msg,
-                    });
-                }
-            }
-        } else {
-            node_state.status = NodeStatus::Healthy;
-        }
-
-        Ok(())
-    }
-
-    /// Execute a `command` node.
-    async fn execute_command(
-        &mut self,
-        sel: &NodeSelection,
-        ctx: &mut VariableContext,
-        node_state: &mut NodeState,
-    ) -> Result<(), OrchestratorError> {
-        let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-        let node_cfg = &self.config.nodes[&sel.node];
-
-        // Resolve working directory (variant > node > project root).
-        let raw_cwd = variant_cfg.cwd.as_deref().or(node_cfg.cwd.as_deref());
-        let working_dir = match raw_cwd {
-            Some(cwd_tmpl) => {
-                let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
-                let p = std::path::Path::new(&resolved);
-                if p.is_absolute() {
-                    p.to_path_buf()
-                } else {
-                    self.project_root.join(p)
-                }
-            }
-            None => self.project_root.clone(),
-        };
-
-        // Resolve command or script.
-        let raw_cmd = if let Some(ref script) = variant_cfg.script {
-            format!("sh {}", self.project_root.join(script).display())
-        } else {
-            variant_cfg.command.clone().unwrap_or_default()
-        };
-        let resolved_cmd = crate::variables::interpolate(&raw_cmd, ctx)?;
-
-        let env = build_env(variant_cfg.env.as_ref(), ctx)?;
-
-        // Verify step (idempotency).
-        if let Some(ref verify_cmd) = variant_cfg.verify {
-            let verify_resolved = crate::variables::interpolate(verify_cmd, ctx)?;
-            let verify_result = process::run_command(&verify_resolved, &working_dir, &env).await;
-            if let Ok(ref out) = verify_result {
-                if out.exit_code == 0 {
-                    tracing::info!(
-                        node = sel.node,
-                        variant = sel.variant,
-                        "verify passed — skipping command step"
-                    );
-                    node_state.status = NodeStatus::Skipped;
-                    node_state
-                        .outputs
-                        .insert("exit_code".to_owned(), "0".to_owned());
-                    return Ok(());
-                }
-            }
-        }
-
-        // Run command step.
-        self.emit(ProgressEvent::CommandRunning {
-            node: sel.node.clone(),
-            variant: sel.variant.clone(),
-        });
-        let result = process::run_command(&resolved_cmd, &working_dir, &env).await?;
-
-        node_state
-            .outputs
-            .insert("exit_code".to_owned(), result.exit_code.to_string());
-
-        // Filter outputs against declared keys.
-        let declared_keys = variant_cfg
-            .outputs
-            .as_ref()
-            .map(|o| o.declared_keys())
-            .unwrap_or_default();
-
-        for (k, v) in &result.outputs {
-            if declared_keys.contains(k.as_str()) {
-                node_state.outputs.insert(k.clone(), v.clone());
-            } else if variant_cfg.strict_outputs {
-                let reason = format!(
-                    "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
-                );
-                self.emit(ProgressEvent::NodeFailed {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                    error: reason.clone(),
-                });
-                return Err(OrchestratorError::NodeFailed {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                    reason,
-                });
-            } else {
-                tracing::warn!(
-                    node = sel.node,
-                    variant = sel.variant,
-                    key = k,
-                    "ignoring undeclared output"
-                );
-            }
-        }
-
-        if result.exit_code == 0 {
-            node_state.status = NodeStatus::Healthy;
-        } else {
-            node_state.status = NodeStatus::Failed;
-            let reason = format!("command step exited with code {}", result.exit_code);
-            self.emit(ProgressEvent::NodeFailed {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                error: reason.clone(),
-            });
-            return Err(OrchestratorError::NodeFailed {
-                node: sel.node.clone(),
-                variant: sel.variant.clone(),
-                reason,
-            });
-        }
-
-        Ok(())
+        Ok(stage_results)
     }
 
     // -----------------------------------------------------------------------
@@ -1291,31 +844,20 @@ impl Orchestrator {
 
         // Resolve working directory (variant > node > project root).
         let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
-        let raw_cwd = variant_cfg
-            .cwd
-            .as_deref()
-            .or(node_cfg_opt.and_then(|n| n.cwd.as_deref()));
-        let working_dir = match raw_cwd {
-            Some(cwd_tmpl) => match crate::variables::interpolate(cwd_tmpl, &ctx) {
-                Ok(resolved) => {
-                    let p = std::path::Path::new(&resolved);
-                    if p.is_absolute() {
-                        p.to_path_buf()
-                    } else {
-                        self.project_root.join(p)
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        node = node_state.node_name,
-                        error = %e,
-                        "failed to resolve on_stop cwd, falling back to project root"
-                    );
-                    self.project_root.clone()
-                }
-            },
-            None => self.project_root.clone(),
-        };
+        let working_dir = resolve_working_dir(
+            variant_cfg.cwd.as_deref(),
+            node_cfg_opt.and_then(|n| n.cwd.as_deref()),
+            &self.project_root,
+            &ctx,
+        )
+        .unwrap_or_else(|e| {
+            tracing::warn!(
+                node = node_state.node_name,
+                error = %e,
+                "failed to resolve on_stop cwd, falling back to project root"
+            );
+            self.project_root.clone()
+        });
 
         match process::run_command(&resolved_cmd, &working_dir, &env).await {
             Ok(result) => {
@@ -1393,6 +935,652 @@ impl Orchestrator {
 
         Ok(())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Isolated node execution (free functions for parallel spawning)
+// ---------------------------------------------------------------------------
+
+/// Emit a progress event (no-op if no sender is set).
+fn emit_progress(tx: &Option<mpsc::UnboundedSender<ProgressEvent>>, event: ProgressEvent) {
+    if let Some(tx) = tx {
+        let _ = tx.send(event);
+    }
+}
+
+/// Write a line to the debug log (no-op when writer is None).
+async fn debug_log_free(writer: &Option<LogWriter>, message: &str) {
+    if let Some(writer) = writer {
+        let _ = writer.write_line(&format!("[VELD] {message}")).await;
+    }
+}
+
+/// Build a health-check attempt notifier that sends progress events.
+fn make_attempt_notifier(
+    tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
+    node: &str,
+    variant: &str,
+    phase: u8,
+) -> health::AttemptNotifier {
+    let tx = tx.clone();
+    let node = node.to_owned();
+    let variant = variant.to_owned();
+    Box::new(move |attempt| {
+        if let Some(tx) = &tx {
+            let _ = tx.send(ProgressEvent::HealthCheckAttempt {
+                node: node.clone(),
+                variant: variant.clone(),
+                phase,
+                attempt,
+            });
+        }
+    })
+}
+
+/// Resolve working directory from variant > node > project root.
+fn resolve_working_dir(
+    variant_cwd: Option<&str>,
+    node_cwd: Option<&str>,
+    project_root: &Path,
+    ctx: &VariableContext,
+) -> Result<PathBuf, crate::variables::VariableError> {
+    let raw_cwd = variant_cwd.or(node_cwd);
+    match raw_cwd {
+        Some(cwd_tmpl) => {
+            let resolved = crate::variables::interpolate(cwd_tmpl, ctx)?;
+            let p = std::path::Path::new(&resolved);
+            if p.is_absolute() {
+                Ok(p.to_path_buf())
+            } else {
+                Ok(project_root.join(p))
+            }
+        }
+        None => Ok(project_root.to_path_buf()),
+    }
+}
+
+/// Execute a single node in isolation (no `&self`). Designed to be spawned
+/// into a `JoinSet` for parallel execution within a stage.
+async fn execute_node_isolated(
+    ctx: NodeExecutionContext,
+    sel: NodeSelection,
+    precomputed: Option<PrecomputedServer>,
+    index: usize,
+    total: usize,
+) -> Result<NodeExecutionResult, OrchestratorError> {
+    let start_time = std::time::Instant::now();
+    let key = RunState::node_key(&sel.node, &sel.variant);
+
+    emit_progress(
+        &ctx.progress_tx,
+        ProgressEvent::NodeStarting {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+            index,
+            total,
+        },
+    );
+
+    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
+    let sensitive_outputs = variant_cfg.sensitive_outputs.clone();
+    let mut node_state = NodeState::new(&sel.node, &sel.variant);
+    node_state.status = NodeStatus::Starting;
+
+    // Build variable context.
+    let mut var_ctx = VariableContext::new();
+    var_ctx.set_builtin("run", ctx.run_name.clone());
+    var_ctx.set_builtin("run_id", ctx.run_id.to_string());
+    var_ctx.set_builtin("root", ctx.project_root.to_string_lossy().into_owned());
+    var_ctx.set_builtin("project", ctx.config.name.clone());
+    var_ctx.set_builtin("worktree", url::slugify(&ctx.worktree));
+    var_ctx.set_builtin("branch", url::slugify(&ctx.branch));
+    var_ctx.set_builtin("username", ctx.username.clone());
+
+    // Populate node output references from already-executed nodes.
+    for (node_key, outputs) in ctx.all_outputs.as_ref() {
+        for (field, value) in outputs {
+            var_ctx.set_node_output(&format!("nodes.{node_key}.{field}"), value.clone());
+        }
+    }
+
+    let server_handle = match variant_cfg.step_type {
+        StepType::StartServer => Some(
+            execute_start_server_isolated(&ctx, &sel, &mut var_ctx, &mut node_state, precomputed)
+                .await?,
+        ),
+        StepType::Command => {
+            execute_command_isolated(&ctx, &sel, &mut var_ctx, &mut node_state).await?;
+            None
+        }
+    };
+
+    // Mark sensitive output keys.
+    if let Some(sensitive) = sensitive_outputs {
+        node_state.sensitive_keys = sensitive;
+    }
+
+    // Emit completion event.
+    let elapsed_ms = start_time.elapsed().as_millis() as u64;
+    match node_state.status {
+        NodeStatus::Healthy => {
+            emit_progress(
+                &ctx.progress_tx,
+                ProgressEvent::NodeHealthy {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    url: node_state.url.clone(),
+                    elapsed_ms,
+                },
+            );
+        }
+        NodeStatus::Skipped => {
+            emit_progress(
+                &ctx.progress_tx,
+                ProgressEvent::NodeSkipped {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                },
+            );
+        }
+        _ => {}
+    }
+
+    Ok(NodeExecutionResult {
+        key,
+        sel,
+        index,
+        node_state,
+        server_handle,
+    })
+}
+
+/// Execute a `start_server` node without `&self`. Returns the `ServerHandle`.
+async fn execute_start_server_isolated(
+    ctx: &NodeExecutionContext,
+    sel: &NodeSelection,
+    var_ctx: &mut VariableContext,
+    node_state: &mut NodeState,
+    precomputed: Option<PrecomputedServer>,
+) -> Result<process::ServerHandle, OrchestratorError> {
+    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
+    let node_cfg = &ctx.config.nodes[&sel.node];
+
+    let mut precomputed =
+        precomputed.expect("precomputed server info missing for start_server node");
+    let port = precomputed.port;
+    let node_url = precomputed.hostname.clone();
+    let https_url = precomputed.https_url.clone();
+    let port_reservation = precomputed
+        .reservation
+        .take()
+        .expect("port reservation already consumed — node executed twice?");
+
+    node_state.port = Some(port);
+    var_ctx.set_builtin("port", port.to_string());
+    node_state.url = Some(https_url.clone());
+    var_ctx.set_builtin("url", https_url.clone());
+    // Expose individual URL location pieces (mirrors the Web URL API).
+    var_ctx.set_builtin("url.hostname", node_url.clone());
+    var_ctx.set_builtin(
+        "url.host",
+        if ctx.https_port == 443 {
+            node_url.clone()
+        } else {
+            format!("{}:{}", node_url, ctx.https_port)
+        },
+    );
+    var_ctx.set_builtin("url.origin", https_url.clone());
+    var_ctx.set_builtin("url.scheme", "https".to_owned());
+    var_ctx.set_builtin("url.port", ctx.https_port.to_string());
+
+    emit_progress(
+        &ctx.progress_tx,
+        ProgressEvent::PortAllocated {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+            port,
+        },
+    );
+    debug_log_free(
+        &ctx.debug_writer,
+        &format!(
+            "{}:{} — using pre-computed port {} → {}",
+            sel.node, sel.variant, port, https_url
+        ),
+    )
+    .await;
+
+    // Configure DNS + Caddy via helper (best-effort).
+    debug_log_free(
+        &ctx.debug_writer,
+        &format!(
+            "{}:{} — adding DNS host {} → 127.0.0.1",
+            sel.node, sel.variant, node_url
+        ),
+    )
+    .await;
+    if let Err(e) = ctx.helper_client.add_host(&node_url, "127.0.0.1").await {
+        tracing::warn!(error = %e, "failed to add DNS host via helper");
+    }
+    let mut route = serde_json::json!({
+        "route_id": format!("veld-{}-{}-{}", ctx.run_name, sel.node, sel.variant),
+        "hostname": &node_url,
+        "upstream": format!("localhost:{port}"),
+    });
+    // Resolve per-node feature flags (variant > node > project > default).
+    let features = config::resolve_features(
+        ctx.config.features.as_ref(),
+        node_cfg.features.as_ref(),
+        variant_cfg.features.as_ref(),
+    );
+
+    // Include feedback/injection config so Caddy routes /__veld__/* to the
+    // daemon and selectively injects scripts into HTML responses.
+    if features.feedback_overlay || features.client_logs {
+        route["feedback_upstream"] = serde_json::json!("localhost:19899");
+        route["run_name"] = serde_json::json!(&ctx.run_name);
+        route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
+    }
+
+    route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
+    route["inject_client_logs"] = serde_json::json!(features.client_logs);
+
+    // Resolve client log levels (variant > node > project > default).
+    let client_log_levels = config::resolve_client_log_levels(
+        ctx.config.client_log_levels.as_deref(),
+        node_cfg.client_log_levels.as_deref(),
+        variant_cfg.client_log_levels.as_deref(),
+    );
+    route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
+    if let Err(e) = ctx.helper_client.add_route(route).await {
+        tracing::warn!(error = %e, "failed to add Caddy route via helper");
+    }
+
+    // Resolve working directory (variant > node > project root).
+    let working_dir = resolve_working_dir(
+        variant_cfg.cwd.as_deref(),
+        node_cfg.cwd.as_deref(),
+        &ctx.project_root,
+        var_ctx,
+    )?;
+
+    // Resolve command.
+    let command = variant_cfg.command.as_deref().unwrap_or_default();
+    let resolved_cmd = crate::variables::interpolate(command, var_ctx)?;
+    debug_log_free(
+        &ctx.debug_writer,
+        &format!(
+            "{}:{} — resolved command: {} (cwd: {})",
+            sel.node,
+            sel.variant,
+            resolved_cmd,
+            working_dir.display()
+        ),
+    )
+    .await;
+
+    // Build env.
+    let mut env = build_env(variant_cfg.env.as_ref(), var_ctx)?;
+    env.insert("VELD_PORT".to_owned(), port.to_string());
+    env.insert("VELD_URL".to_owned(), https_url.clone());
+
+    // Resolve synthetic outputs.
+    if let Some(Outputs::Synthetic(ref map)) = variant_cfg.outputs {
+        for (okey, tmpl) in map {
+            let val = crate::variables::interpolate(tmpl, var_ctx)?;
+            node_state.outputs.insert(okey.clone(), val);
+        }
+    }
+
+    // Start the process.
+    let log_path = logging::log_file(&ctx.project_root, &ctx.run_name, &sel.node, &sel.variant);
+
+    // Release the port reservation immediately before spawning.
+    port_reservation.release();
+
+    let handle =
+        process::start_server(&resolved_cmd, &working_dir, &env, &log_path, ctx.foreground).await?;
+    let pid = handle.pid();
+    node_state.pid = Some(pid);
+
+    // Checkpoint: persist the PID immediately so Ctrl+C during health
+    // checks still allows `veld stop` to find and kill this process.
+    {
+        let key = RunState::node_key(&sel.node, &sel.variant);
+        // Lock briefly for in-memory update only (no .await = cancellation-safe).
+        let (run_snapshot, project_root) = {
+            let mut checkpoint = ctx.checkpoint.lock().expect("checkpoint mutex poisoned");
+            checkpoint.run.execution_order.push(key.clone());
+            checkpoint.run.nodes.insert(key, node_state.clone());
+            (checkpoint.run.clone(), checkpoint.project_root.clone())
+        };
+        // File I/O outside the lock to avoid blocking the tokio runtime.
+        let mut project_state =
+            ProjectState::load(&project_root).unwrap_or_else(|_| ProjectState::default());
+        project_state
+            .runs
+            .insert(run_snapshot.name.clone(), run_snapshot);
+        let _ = project_state.save(&project_root);
+    }
+
+    // Health check — inlined to emit progress events between phases.
+    debug_log_free(
+        &ctx.debug_writer,
+        &format!(
+            "{}:{} — process started (pid {}), beginning health checks",
+            sel.node, sel.variant, pid
+        ),
+    )
+    .await;
+    if let Some(ref hc) = variant_cfg.health_check {
+        node_state.status = NodeStatus::HealthChecking;
+        node_state.health_phases.push(HealthCheckPhase {
+            phase: 1,
+            passed: false,
+            last_error: None,
+            passed_at: None,
+        });
+        node_state.health_phases.push(HealthCheckPhase {
+            phase: 2,
+            passed: false,
+            last_error: None,
+            passed_at: None,
+        });
+
+        // Build attempt notifiers for health check phases.
+        let phase1_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
+        let phase2_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 2);
+
+        // Phase 1: TCP port check.
+        emit_progress(
+            &ctx.progress_tx,
+            ProgressEvent::HealthCheckPhase {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 1,
+                description: format!("waiting for port {port}"),
+            },
+        );
+
+        let phase1_result = tokio::select! {
+            result = health::wait_for_port(port, hc, Some(&phase1_notifier)) => result,
+            _ = wait_for_process_exit(pid) => {
+                Err(health::HealthError::PortCheckFailed(
+                    "server process exited before binding to port".into(),
+                ))
+            }
+        };
+
+        if let Err(e) = phase1_result {
+            let msg = format!("process did not bind to port {port}: {e}");
+            node_state.status = NodeStatus::Failed;
+            node_state.health_phases[0].last_error = Some(msg.clone());
+            debug_log_free(
+                &ctx.debug_writer,
+                &format!(
+                    "{}:{} — health check phase 1 FAILED: {}",
+                    sel.node, sel.variant, msg
+                ),
+            )
+            .await;
+            emit_progress(
+                &ctx.progress_tx,
+                ProgressEvent::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    error: msg.clone(),
+                },
+            );
+            return Err(OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason: msg,
+            });
+        }
+
+        let now = chrono::Utc::now();
+        node_state.health_phases[0].passed = true;
+        node_state.health_phases[0].passed_at = Some(now);
+        emit_progress(
+            &ctx.progress_tx,
+            ProgressEvent::HealthCheckPassed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 1,
+            },
+        );
+        debug_log_free(
+            &ctx.debug_writer,
+            &format!("{}:{} — phase 1 passed (port open)", sel.node, sel.variant),
+        )
+        .await;
+
+        // Phase 2: depends on check type.
+        let phase2_desc = match hc.check_type.as_str() {
+            "http" => format!("HTTP check on port {port}"),
+            "command" | "bash" => "command health check".to_owned(),
+            "port" => "port-only (no phase 2)".to_owned(),
+            other => format!("unknown check type: {other}"),
+        };
+        emit_progress(
+            &ctx.progress_tx,
+            ProgressEvent::HealthCheckPhase {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                phase: 2,
+                description: phase2_desc,
+            },
+        );
+
+        let phase2_future = async {
+            match hc.check_type.as_str() {
+                "http" => {
+                    let direct_url = format!("http://127.0.0.1:{port}");
+                    health::wait_for_http(&direct_url, hc, Some(&phase2_notifier)).await
+                }
+                "command" | "bash" => {
+                    if let Some(cmd) = &hc.command {
+                        health::wait_for_command_check(
+                            cmd,
+                            &working_dir,
+                            hc,
+                            Some(&phase2_notifier),
+                        )
+                        .await
+                    } else {
+                        Ok(())
+                    }
+                }
+                _ => Ok(()), // "port" and unknown — phase 1 already covers.
+            }
+        };
+
+        let phase2_result = tokio::select! {
+            result = phase2_future => result,
+            _ = wait_for_process_exit(pid) => {
+                Err(health::HealthError::PortCheckFailed(
+                    "server process exited during health check".into(),
+                ))
+            }
+        };
+
+        match phase2_result {
+            Ok(()) => {
+                let now = chrono::Utc::now();
+                node_state.health_phases[1].passed = true;
+                node_state.health_phases[1].passed_at = Some(now);
+                node_state.status = NodeStatus::Healthy;
+                emit_progress(
+                    &ctx.progress_tx,
+                    ProgressEvent::HealthCheckPassed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        phase: 2,
+                    },
+                );
+                debug_log_free(
+                    &ctx.debug_writer,
+                    &format!(
+                        "{}:{} — health check passed, node is healthy",
+                        sel.node, sel.variant
+                    ),
+                )
+                .await;
+            }
+            Err(e) => {
+                node_state.status = NodeStatus::Failed;
+                let msg = e.to_string();
+                node_state.health_phases[1].last_error = Some(msg.clone());
+                debug_log_free(
+                    &ctx.debug_writer,
+                    &format!(
+                        "{}:{} — health check phase 2 FAILED: {}",
+                        sel.node, sel.variant, msg
+                    ),
+                )
+                .await;
+                emit_progress(
+                    &ctx.progress_tx,
+                    ProgressEvent::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        error: msg.clone(),
+                    },
+                );
+                return Err(OrchestratorError::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    reason: msg,
+                });
+            }
+        }
+    } else {
+        node_state.status = NodeStatus::Healthy;
+    }
+
+    Ok(handle)
+}
+
+/// Execute a `command` node without `&self`.
+async fn execute_command_isolated(
+    ctx: &NodeExecutionContext,
+    sel: &NodeSelection,
+    var_ctx: &mut VariableContext,
+    node_state: &mut NodeState,
+) -> Result<(), OrchestratorError> {
+    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
+    let node_cfg = &ctx.config.nodes[&sel.node];
+
+    // Resolve working directory (variant > node > project root).
+    let working_dir = resolve_working_dir(
+        variant_cfg.cwd.as_deref(),
+        node_cfg.cwd.as_deref(),
+        &ctx.project_root,
+        var_ctx,
+    )?;
+
+    // Resolve command or script.
+    let raw_cmd = if let Some(ref script) = variant_cfg.script {
+        format!("sh {}", ctx.project_root.join(script).display())
+    } else {
+        variant_cfg.command.clone().unwrap_or_default()
+    };
+    let resolved_cmd = crate::variables::interpolate(&raw_cmd, var_ctx)?;
+
+    let env = build_env(variant_cfg.env.as_ref(), var_ctx)?;
+
+    // Verify step (idempotency).
+    if let Some(ref verify_cmd) = variant_cfg.verify {
+        let verify_resolved = crate::variables::interpolate(verify_cmd, var_ctx)?;
+        let verify_result = process::run_command(&verify_resolved, &working_dir, &env).await;
+        if let Ok(ref out) = verify_result {
+            if out.exit_code == 0 {
+                tracing::info!(
+                    node = sel.node,
+                    variant = sel.variant,
+                    "verify passed — skipping command step"
+                );
+                node_state.status = NodeStatus::Skipped;
+                node_state
+                    .outputs
+                    .insert("exit_code".to_owned(), "0".to_owned());
+                return Ok(());
+            }
+        }
+    }
+
+    // Run command step.
+    emit_progress(
+        &ctx.progress_tx,
+        ProgressEvent::CommandRunning {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+        },
+    );
+    let result = process::run_command(&resolved_cmd, &working_dir, &env).await?;
+
+    node_state
+        .outputs
+        .insert("exit_code".to_owned(), result.exit_code.to_string());
+
+    // Filter outputs against declared keys.
+    let declared_keys = variant_cfg
+        .outputs
+        .as_ref()
+        .map(|o| o.declared_keys())
+        .unwrap_or_default();
+
+    for (k, v) in &result.outputs {
+        if declared_keys.contains(k.as_str()) {
+            node_state.outputs.insert(k.clone(), v.clone());
+        } else if variant_cfg.strict_outputs {
+            let reason = format!(
+                "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
+            );
+            emit_progress(
+                &ctx.progress_tx,
+                ProgressEvent::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    error: reason.clone(),
+                },
+            );
+            return Err(OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason,
+            });
+        } else {
+            tracing::warn!(
+                node = sel.node,
+                variant = sel.variant,
+                key = k,
+                "ignoring undeclared output"
+            );
+        }
+    }
+
+    if result.exit_code == 0 {
+        node_state.status = NodeStatus::Healthy;
+    } else {
+        node_state.status = NodeStatus::Failed;
+        let reason = format!("command step exited with code {}", result.exit_code);
+        emit_progress(
+            &ctx.progress_tx,
+            ProgressEvent::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                error: reason.clone(),
+            },
+        );
+        return Err(OrchestratorError::NodeFailed {
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+            reason,
+        });
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

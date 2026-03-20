@@ -253,12 +253,10 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
 
 /// Render live progress events from the orchestrator.
 ///
-/// TTY mode: Uses `\r` carriage returns for in-place updates, finalizing with `\n`.
+/// TTY mode: Uses `indicatif::MultiProgress` for concurrent node spinners.
 /// Non-TTY/JSON mode: Emits NDJSON for agent consumption.
 async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bool) {
-    // Track current node progress so we can redraw the status line
-    // in-place when health check attempts update.
-    let mut ctx = TtyProgressCtx::default();
+    let mut ctx = TtyProgressCtx::new();
 
     while let Some(event) = rx.recv().await {
         if tty {
@@ -270,14 +268,27 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bo
             }
         }
     }
+
+    // Clean up any spinners left running (e.g., from aborted parallel tasks
+    // that never emitted a completion event).
+    for (_key, state) in ctx.bars.drain() {
+        state.bar.finish_and_clear();
+    }
 }
 
-/// State tracked across TTY progress events so we can redraw the current
-/// node's status line in-place (e.g., updating the attempt counter).
-#[derive(Default)]
+/// State tracked across TTY progress events. Uses `indicatif::MultiProgress`
+/// to show concurrent spinners for parallel node execution within a stage.
 struct TtyProgressCtx {
-    index: usize,
+    multi: indicatif::MultiProgress,
+    /// Active spinner bars keyed by `"node:variant"`.
+    bars: std::collections::HashMap<String, NodeBarState>,
     total: usize,
+}
+
+/// Per-node state for its progress bar.
+struct NodeBarState {
+    bar: indicatif::ProgressBar,
+    index: usize,
     label: String,
     port: Option<u16>,
     phase: u8,
@@ -285,24 +296,38 @@ struct TtyProgressCtx {
 }
 
 impl TtyProgressCtx {
-    /// Redraw the in-progress status line with the given suffix.
-    fn redraw(&self, suffix: &str) {
-        eprint!(
-            "\x1b[2K\r{}",
-            output::step(self.index, self.total, &output::pad_right(&self.label, 30)),
-        );
+    fn new() -> Self {
+        Self {
+            multi: indicatif::MultiProgress::new(),
+            bars: std::collections::HashMap::new(),
+            total: 0,
+        }
+    }
+}
+
+impl NodeBarState {
+    /// Build the full status message for the spinner.
+    fn build_message(&self, total: usize, suffix: &str) -> String {
+        let step = output::step(self.index, total, &output::pad_right(&self.label, 30));
+        let mut msg = step;
         if let Some(port) = self.port {
-            eprint!(" {}", output::dim(&format!("port {port}")));
+            msg.push_str(&format!(" {}", output::dim(&format!("port {port}"))));
         }
         if !self.phase_desc.is_empty() {
-            eprint!(
+            msg.push_str(&format!(
                 " {}",
                 output::dim(&format!("[phase {}: {}]", self.phase, self.phase_desc)),
-            );
+            ));
         }
         if !suffix.is_empty() {
-            eprint!(" {}", output::dim(suffix));
+            msg.push_str(&format!(" {}", output::dim(suffix)));
         }
+        msg
+    }
+
+    /// Update the spinner's message with the given suffix.
+    fn redraw(&self, total: usize, suffix: &str) {
+        self.bar.set_message(self.build_message(total, suffix));
     }
 }
 
@@ -313,11 +338,11 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             total_nodes,
             stages,
         } => {
-            eprintln!(
-                "  {} {total_nodes} node(s) in {stages} stage(s)",
+            ctx.total = *total_nodes;
+            let _ = ctx.multi.println(format!(
+                "  {} {total_nodes} node(s) in {stages} stage(s)\n",
                 output::dim("plan:"),
-            );
-            eprintln!();
+            ));
         }
         ProgressEvent::NodeStarting {
             node,
@@ -325,39 +350,54 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             index,
             total,
         } => {
-            ctx.index = *index;
-            ctx.total = *total;
-            ctx.label = format!("{node}:{variant}");
-            ctx.port = None;
-            ctx.phase = 0;
-            ctx.phase_desc.clear();
-            ctx.redraw("starting...");
+            let key = format!("{node}:{variant}");
+            let bar = ctx.multi.add(indicatif::ProgressBar::new_spinner());
+            bar.enable_steady_tick(std::time::Duration::from_millis(200));
+            let state = NodeBarState {
+                bar,
+                index: *index,
+                label: key.clone(),
+                port: None,
+                phase: 0,
+                phase_desc: String::new(),
+            };
+            state.redraw(*total, "starting...");
+            ctx.bars.insert(key, state);
         }
         ProgressEvent::PortAllocated {
-            node: _,
-            variant: _,
+            node,
+            variant,
             port,
         } => {
-            ctx.port = Some(*port);
-            ctx.redraw("starting...");
+            let key = format!("{node}:{variant}");
+            if let Some(state) = ctx.bars.get_mut(&key) {
+                state.port = Some(*port);
+                state.redraw(ctx.total, "starting...");
+            }
         }
         ProgressEvent::HealthCheckPhase {
-            node: _,
-            variant: _,
+            node,
+            variant,
             phase,
             description,
         } => {
-            ctx.phase = *phase;
-            ctx.phase_desc = description.clone();
-            ctx.redraw("");
+            let key = format!("{node}:{variant}");
+            if let Some(state) = ctx.bars.get_mut(&key) {
+                state.phase = *phase;
+                state.phase_desc = description.clone();
+                state.redraw(ctx.total, "");
+            }
         }
         ProgressEvent::HealthCheckAttempt {
-            node: _,
-            variant: _,
+            node,
+            variant,
             phase: _,
             attempt,
         } => {
-            ctx.redraw(&format!("attempt {attempt}"));
+            let key = format!("{node}:{variant}");
+            if let Some(state) = ctx.bars.get(&key) {
+                state.redraw(ctx.total, &format!("attempt {attempt}"));
+            }
         }
         ProgressEvent::HealthCheckPassed {
             node: _,
@@ -372,46 +412,55 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             url,
             elapsed_ms,
         } => {
-            let label = format!("{node}:{variant}");
+            let key = format!("{node}:{variant}");
             let detail = match url {
                 Some(u) => u.clone(),
                 None => "healthy".to_owned(),
             };
             let elapsed = format!("{elapsed_ms}ms");
-            eprintln!(
-                "\x1b[2K\r  {} {} {}",
+            let finish_msg = format!(
+                "  {} {} {}",
                 output::checkmark(),
-                output::pad_right(&label, 30),
+                output::pad_right(&key, 30),
                 output::dim(&format!("{detail} ({elapsed})")),
             );
+            if let Some(state) = ctx.bars.remove(&key) {
+                state.bar.finish_with_message(finish_msg);
+            }
         }
         ProgressEvent::NodeSkipped { node, variant } => {
-            let label = format!("{node}:{variant}");
-            eprintln!(
-                "\x1b[2K\r  {} {} {}",
+            let key = format!("{node}:{variant}");
+            let finish_msg = format!(
+                "  {} {} {}",
                 output::dim("~"),
-                output::pad_right(&label, 30),
+                output::pad_right(&key, 30),
                 output::dim("skipped (verify passed)"),
             );
+            if let Some(state) = ctx.bars.remove(&key) {
+                state.bar.finish_with_message(finish_msg);
+            }
         }
         ProgressEvent::NodeFailed {
             node,
             variant,
             error,
         } => {
-            let label = format!("{node}:{variant}");
-            eprintln!(
-                "\x1b[2K\r  {} {} {}",
+            let key = format!("{node}:{variant}");
+            let finish_msg = format!(
+                "  {} {} {}",
                 output::cross(),
-                output::pad_right(&label, 30),
+                output::pad_right(&key, 30),
                 output::red(error),
             );
+            if let Some(state) = ctx.bars.remove(&key) {
+                state.bar.finish_with_message(finish_msg);
+            }
         }
-        ProgressEvent::CommandRunning {
-            node: _,
-            variant: _,
-        } => {
-            ctx.redraw("running...");
+        ProgressEvent::CommandRunning { node, variant } => {
+            let key = format!("{node}:{variant}");
+            if let Some(state) = ctx.bars.get(&key) {
+                state.redraw(ctx.total, "running...");
+            }
         }
     }
 }
