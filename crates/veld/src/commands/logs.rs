@@ -253,8 +253,16 @@ pub async fn run(
 
     // Follow mode: tail all log files continuously.
     if follow {
-        if let Err(e) =
-            follow_logs(&targets, &project_root, run_name, json, source, positions, &search_lower).await
+        if let Err(e) = follow_logs(
+            &targets,
+            &project_root,
+            run_name,
+            json,
+            source,
+            positions,
+            &search_lower,
+        )
+        .await
         {
             output::print_error(&format!("Follow error: {e}"), json);
             return 1;

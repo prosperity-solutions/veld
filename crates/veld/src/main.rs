@@ -345,7 +345,18 @@ async fn main() {
                     );
                     std::process::exit(1);
                 });
-            commands::logs::run(name, node, lines, since, follow, json, source_filter, search, context).await
+            commands::logs::run(
+                name,
+                node,
+                lines,
+                since,
+                follow,
+                json,
+                source_filter,
+                search,
+                context,
+            )
+            .await
         }
 
         Command::Graph { selections } => commands::graph::run(selections).await,
