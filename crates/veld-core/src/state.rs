@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -243,7 +244,8 @@ impl ProjectState {
 
         let data =
             serde_json::to_string_pretty(&state_for_disk).expect("state serialization cannot fail");
-        std::fs::write(&path, data).map_err(|e| StateError::WriteError { path, source: e })
+
+        atomic_write(&path, &data)
     }
 
     pub fn get_run(&self, name: &str) -> Option<&RunState> {
@@ -257,6 +259,32 @@ impl ProjectState {
 
 fn state_file_path(project_root: &Path) -> PathBuf {
     project_root.join(".veld").join("state.json")
+}
+
+/// Write `data` to `path` atomically via a temp file + rename.
+/// The temp file lives in the same directory so the rename never crosses
+/// filesystem boundaries.
+fn atomic_write(path: &Path, data: &str) -> Result<(), StateError> {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_name = format!(
+        ".{}.{}.{}.tmp",
+        path.file_name().unwrap_or_default().to_string_lossy(),
+        std::process::id(),
+        seq,
+    );
+    let tmp_path = path.with_file_name(tmp_name);
+    std::fs::write(&tmp_path, data).map_err(|e| StateError::WriteError {
+        path: tmp_path.clone(),
+        source: e,
+    })?;
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp_path);
+        StateError::WriteError {
+            path: path.to_path_buf(),
+            source: e,
+        }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -315,6 +343,7 @@ impl GlobalRegistry {
             })?;
         }
         let data = serde_json::to_string_pretty(self).expect("registry serialization cannot fail");
-        std::fs::write(&path, data).map_err(|e| StateError::WriteError { path, source: e })
+
+        atomic_write(&path, &data)
     }
 }
