@@ -127,6 +127,7 @@ pub struct HelperResponse {
 // ---------------------------------------------------------------------------
 
 /// Client for communicating with the veld-helper daemon over a Unix socket.
+#[derive(Clone)]
 pub struct HelperClient {
     socket_path: PathBuf,
 }

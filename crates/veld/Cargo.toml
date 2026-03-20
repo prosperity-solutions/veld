@@ -22,3 +22,4 @@ chrono = { workspace = true }
 dirs = { workspace = true }
 reqwest = { workspace = true }
 libc = "0.2"
+indicatif = { workspace = true }
