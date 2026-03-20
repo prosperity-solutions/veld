@@ -59,6 +59,11 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_log_levels: Option<Vec<String>>,
 
+    /// Feature toggles (project-level defaults).
+    /// Overridable at node and variant level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<FeaturesConfig>,
+
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
 }
@@ -88,6 +93,10 @@ pub struct NodeConfig {
     /// Client-side log levels override for all variants of this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_log_levels: Option<Vec<String>>,
+
+    /// Feature toggles override for all variants of this node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<FeaturesConfig>,
 
     pub variants: HashMap<String, VariantConfig>,
 }
@@ -150,6 +159,10 @@ pub struct VariantConfig {
     /// Client-side log levels override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_log_levels: Option<Vec<String>>,
+
+    /// Feature toggles override for this specific variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub features: Option<FeaturesConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +219,64 @@ impl<'de> Deserialize<'de> for Outputs {
                 "outputs must be an array of strings or an object of string values",
             )),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Features
+// ---------------------------------------------------------------------------
+
+/// Per-node feature toggles. All fields are optional — `None` means "inherit
+/// from the parent level". The resolution order is variant > node > project,
+/// with the built-in defaults as final fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeaturesConfig {
+    /// Inject the feedback overlay toolbar into HTML responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback_overlay: Option<bool>,
+
+    /// Inject the client-side log collector into HTML responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_logs: Option<bool>,
+}
+
+/// Resolved (concrete) feature flags — no more `Option`s.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedFeatures {
+    pub feedback_overlay: bool,
+    pub client_logs: bool,
+}
+
+impl Default for ResolvedFeatures {
+    fn default() -> Self {
+        Self {
+            feedback_overlay: true,
+            client_logs: true,
+        }
+    }
+}
+
+/// Resolve feature flags using the most specific override:
+/// variant > node > project > default (`true`).
+pub fn resolve_features(
+    project: Option<&FeaturesConfig>,
+    node: Option<&FeaturesConfig>,
+    variant: Option<&FeaturesConfig>,
+) -> ResolvedFeatures {
+    let layers: &[Option<&FeaturesConfig>] = &[variant, node, project];
+    let defaults = ResolvedFeatures::default();
+
+    ResolvedFeatures {
+        feedback_overlay: layers
+            .iter()
+            .filter_map(|l| l.and_then(|f| f.feedback_overlay))
+            .next()
+            .unwrap_or(defaults.feedback_overlay),
+        client_logs: layers
+            .iter()
+            .filter_map(|l| l.and_then(|f| f.client_logs))
+            .next()
+            .unwrap_or(defaults.client_logs),
     }
 }
 
@@ -410,5 +481,59 @@ mod tests {
         let project = vec!["bogus".to_string(), "invalid".to_string()];
         let result = resolve_client_log_levels(Some(&project), None, None);
         assert_eq!(result, vec!["log", "warn", "error"]);
+    }
+
+    // -- Features resolution tests --------------------------------------------
+
+    #[test]
+    fn test_resolve_features_defaults() {
+        let result = resolve_features(None, None, None);
+        assert!(result.feedback_overlay);
+        assert!(result.client_logs);
+    }
+
+    #[test]
+    fn test_resolve_features_project_override() {
+        let project = FeaturesConfig {
+            feedback_overlay: Some(false),
+            client_logs: None,
+        };
+        let result = resolve_features(Some(&project), None, None);
+        assert!(!result.feedback_overlay);
+        assert!(result.client_logs);
+    }
+
+    #[test]
+    fn test_resolve_features_node_overrides_project() {
+        let project = FeaturesConfig {
+            feedback_overlay: Some(false),
+            client_logs: Some(false),
+        };
+        let node = FeaturesConfig {
+            feedback_overlay: Some(true),
+            client_logs: None,
+        };
+        let result = resolve_features(Some(&project), Some(&node), None);
+        assert!(result.feedback_overlay); // node wins
+        assert!(!result.client_logs); // falls through to project
+    }
+
+    #[test]
+    fn test_resolve_features_variant_overrides_all() {
+        let project = FeaturesConfig {
+            feedback_overlay: Some(true),
+            client_logs: Some(true),
+        };
+        let node = FeaturesConfig {
+            feedback_overlay: Some(true),
+            client_logs: Some(true),
+        };
+        let variant = FeaturesConfig {
+            feedback_overlay: Some(false),
+            client_logs: Some(false),
+        };
+        let result = resolve_features(Some(&project), Some(&node), Some(&variant));
+        assert!(!result.feedback_overlay);
+        assert!(!result.client_logs);
     }
 }

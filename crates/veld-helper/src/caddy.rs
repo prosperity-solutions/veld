@@ -236,13 +236,17 @@ impl CaddyManager {
 // Feedback config
 // ---------------------------------------------------------------------------
 
-/// Configuration for feedback overlay injection on a route.
+/// Configuration for feedback overlay / client-side injection on a route.
 pub struct FeedbackConfig<'a> {
     pub upstream: &'a str,
     pub run_name: &'a str,
     pub project_root: &'a str,
     /// Comma-separated client log levels (e.g. "log,warn,error").
     pub client_log_levels: &'a str,
+    /// Whether to inject the feedback overlay toolbar.
+    pub inject_feedback_overlay: bool,
+    /// Whether to inject the client-side log collector.
+    pub inject_client_logs: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -358,67 +362,81 @@ fn build_route_json(
             ]
         }));
 
-        // Main app proxy with HTML injection via the replace-response plugin.
+        // Main app proxy with conditional HTML injection via replace-response.
         // We set Accept-Encoding: identity so the upstream sends uncompressed
         // responses — replace_response cannot match inside gzip'd bytes.
-        //
-        // Four replacements (all fire on every HTML response):
-        // 1. <head...> → inject client log collector script (primary)
-        // 2. </head> → inject @font-face for JetBrains Mono + CSS link
-        // 3. <body...> → inject client log collector script (fallback for
-        //    HTML without a <head> tag). Dedup guard prevents double execution.
-        // 4. </body> → inject feedback overlay script
         //
         // Opening tags use `search_regexp` to match attributes
         // (e.g. `<body class="dark">`). `$0` is the full match.
         // Closing tags are plain string search (no attributes on closers).
-        let collector_script_tag = format!(
-            "<script src=\"/__veld__/api/client-log.js\" data-veld-levels=\"{}\"></script>",
-            fb.client_log_levels
-        );
-        let head_open_replace = format!("$0{collector_script_tag}");
-        let body_open_fallback = format!("$0{collector_script_tag}");
-        subroutes.push(serde_json::json!({
-            "handle": [
-                {
-                    "handler": "replace_response",
-                    "match": {
-                        "headers": {
-                            "Content-Type": ["text/html*"]
-                        }
-                    },
-                    "replacements": [
-                        {
-                            "search_regexp": "<head(\\s[^>]*)?>",
-                            "replace": head_open_replace
-                        },
-                        {
-                            "search": "</head>",
-                            "replace": "<style>@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}</style><link rel=\"stylesheet\" href=\"/__veld__/feedback/style.css\"></head>"
-                        },
-                        {
-                            "search_regexp": "<body(\\s[^>]*)?>",
-                            "replace": body_open_fallback
-                        },
-                        {
-                            "search": "</body>",
-                            "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
-                        }
-                    ]
-                },
-                {
+        let mut replacements = Vec::new();
+
+        if fb.inject_client_logs {
+            let collector_script_tag = format!(
+                "<script src=\"/__veld__/api/client-log.js\" data-veld-levels=\"{}\"></script>",
+                fb.client_log_levels
+            );
+            // 1. <head...> → inject client log collector script (primary)
+            replacements.push(serde_json::json!({
+                "search_regexp": "<head(\\s[^>]*)?>",
+                "replace": format!("$0{collector_script_tag}")
+            }));
+            // 3. <body...> → inject client log collector script (fallback for
+            //    HTML without a <head> tag). Dedup guard prevents double execution.
+            replacements.push(serde_json::json!({
+                "search_regexp": "<body(\\s[^>]*)?>",
+                "replace": format!("$0{collector_script_tag}")
+            }));
+        }
+
+        if fb.inject_feedback_overlay {
+            // 2. </head> → inject @font-face for JetBrains Mono + CSS link
+            replacements.push(serde_json::json!({
+                "search": "</head>",
+                "replace": "<style>@font-face{font-family:'JetBrains Mono';font-style:normal;font-weight:400;font-display:swap;src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}</style><link rel=\"stylesheet\" href=\"/__veld__/feedback/style.css\"></head>"
+            }));
+            // 4. </body> → inject feedback overlay script
+            replacements.push(serde_json::json!({
+                "search": "</body>",
+                "replace": "<script src=\"/__veld__/feedback/script.js\"></script></body>"
+            }));
+        }
+
+        if replacements.is_empty() {
+            // Both features disabled but we still have the /__veld__/* API route
+            // above — just do a plain reverse proxy for the main app.
+            subroutes.push(serde_json::json!({
+                "handle": [{
                     "handler": "reverse_proxy",
-                    "headers": {
-                        "request": {
-                            "set": {
-                                "Accept-Encoding": ["identity"]
-                            }
-                        }
-                    },
                     "upstreams": [{ "dial": upstream }]
-                }
-            ]
-        }));
+                }]
+            }));
+        } else {
+            subroutes.push(serde_json::json!({
+                "handle": [
+                    {
+                        "handler": "replace_response",
+                        "match": {
+                            "headers": {
+                                "Content-Type": ["text/html*"]
+                            }
+                        },
+                        "replacements": replacements
+                    },
+                    {
+                        "handler": "reverse_proxy",
+                        "headers": {
+                            "request": {
+                                "set": {
+                                    "Accept-Encoding": ["identity"]
+                                }
+                            }
+                        },
+                        "upstreams": [{ "dial": upstream }]
+                    }
+                ]
+            }));
+        }
     } else {
         // No feedback — plain reverse proxy.
         subroutes.push(serde_json::json!({
@@ -482,6 +500,8 @@ mod tests {
                 run_name: "my-run",
                 project_root: "/tmp/project",
                 client_log_levels: "log,warn,error",
+                inject_feedback_overlay: true,
+                inject_client_logs: true,
             }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
@@ -498,7 +518,7 @@ mod tests {
             fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
             "/tmp/project"
         );
-        // Main app proxy has four replacements.
+        // Main app proxy has four replacements (client logs: 2 + feedback: 2).
         let replace_handler = &subroutes[1]["handle"][0];
         let replacements = replace_handler["replacements"].as_array().unwrap();
         assert_eq!(replacements.len(), 4);
@@ -521,32 +541,32 @@ mod tests {
                 .unwrap()
                 .contains("data-veld-levels=\"log,warn,error\"")
         );
-        // 2: @font-face + CSS at </head>.
-        assert_eq!(replacements[1]["search"], "</head>");
+        // 2: client log collector fallback at <body...> (regex, for HTML without <head>).
         assert!(
-            replacements[1]["replace"]
-                .as_str()
-                .unwrap()
-                .contains("@font-face")
-        );
-        assert!(
-            replacements[1]["replace"]
-                .as_str()
-                .unwrap()
-                .contains("style.css")
-        );
-        // 3: client log collector fallback at <body...> (regex, for HTML without <head>).
-        assert!(
-            replacements[2]["search_regexp"]
+            replacements[1]["search_regexp"]
                 .as_str()
                 .unwrap()
                 .contains("body")
         );
         assert!(
-            replacements[2]["replace"]
+            replacements[1]["replace"]
                 .as_str()
                 .unwrap()
                 .contains("client-log.js")
+        );
+        // 3: @font-face + CSS at </head>.
+        assert_eq!(replacements[2]["search"], "</head>");
+        assert!(
+            replacements[2]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("@font-face")
+        );
+        assert!(
+            replacements[2]["replace"]
+                .as_str()
+                .unwrap()
+                .contains("style.css")
         );
         // 4: overlay script at </body>.
         assert_eq!(replacements[3]["search"], "</body>");
@@ -591,5 +611,91 @@ mod tests {
             .unwrap();
         assert_eq!(listen[0], ":18443");
         assert_eq!(listen[1], ":18080");
+    }
+
+    #[test]
+    fn test_build_route_json_feedback_overlay_only() {
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "my-run",
+                project_root: "/tmp/project",
+                client_log_levels: "log,warn,error",
+                inject_feedback_overlay: true,
+                inject_client_logs: false,
+            }),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        assert_eq!(subroutes.len(), 2); // /__veld__/* + main proxy
+        let replacements = subroutes[1]["handle"][0]["replacements"]
+            .as_array()
+            .unwrap();
+        // Only feedback overlay replacements (CSS + script), no client log.
+        assert_eq!(replacements.len(), 2);
+        assert_eq!(replacements[0]["search"], "</head>");
+        assert_eq!(replacements[1]["search"], "</body>");
+    }
+
+    #[test]
+    fn test_build_route_json_client_logs_only() {
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "my-run",
+                project_root: "/tmp/project",
+                client_log_levels: "warn,error",
+                inject_feedback_overlay: false,
+                inject_client_logs: true,
+            }),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        assert_eq!(subroutes.len(), 2);
+        let replacements = subroutes[1]["handle"][0]["replacements"]
+            .as_array()
+            .unwrap();
+        // Only client log replacements (head + body fallback), no feedback overlay.
+        assert_eq!(replacements.len(), 2);
+        assert!(
+            replacements[0]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("head")
+        );
+        assert!(
+            replacements[1]["search_regexp"]
+                .as_str()
+                .unwrap()
+                .contains("body")
+        );
+    }
+
+    #[test]
+    fn test_build_route_json_all_features_disabled() {
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "my-run",
+                project_root: "/tmp/project",
+                client_log_levels: "log,warn,error",
+                inject_feedback_overlay: false,
+                inject_client_logs: false,
+            }),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        // /__veld__/* API route + plain proxy (no replace_response).
+        assert_eq!(subroutes.len(), 2);
+        // Second subroute has no replace_response, just reverse_proxy.
+        let handlers = subroutes[1]["handle"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["handler"], "reverse_proxy");
     }
 }

@@ -204,6 +204,16 @@ Valid levels: `"log"`, `"warn"`, `"error"`, `"info"`, `"debug"`. Default: `["log
 
 The management UI also provides source filter controls (All / Server / Client) in the Logs tab.
 
+### Feature Toggles
+
+Control which Veld capabilities are injected into `start_server` nodes' HTML responses with `features` at the project, node, or variant level (most specific wins):
+
+```json
+"features": { "feedback_overlay": false, "client_logs": true }
+```
+
+Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector). All default to `true`.
+
 ---
 
 ## Configuration Reference
@@ -218,6 +228,7 @@ The management UI also provides source filter controls (All / Server / Client) i
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
 | `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
+| `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs` (all default `true`, cascade: variant > node > project) |
 | `nodes` | object | Yes | The dependency graph nodes |
 
 ### Step Types
@@ -389,6 +400,7 @@ Usage: `veld start --preset fullstack --name my-feature`
 | `verify` | string | `command` only | Idempotency check (exit 0 = skip) |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
 | `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
+| `features` | object | `start_server` | Feature toggles override (variant > node > project) |
 | `hidden` (node-level) | boolean | All | Hide from `veld nodes` output |
 
 ---
