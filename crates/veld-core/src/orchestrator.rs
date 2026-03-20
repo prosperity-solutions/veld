@@ -190,6 +190,10 @@ impl Orchestrator {
         selections: &[NodeSelection],
         run_name: &str,
     ) -> Result<RunState, OrchestratorError> {
+        // Clean up any runs whose processes have all died. This catches
+        // orphaned runs from previous sessions (crash, kill -9, etc.).
+        self.cleanup_dead_runs().await;
+
         // Clean up any stale run with the same name (kills processes, removes
         // DNS/Caddy routes, clears state). This handles the case where a
         // previous run was not properly cleaned up or the user reuses a name.
@@ -665,6 +669,9 @@ impl Orchestrator {
         }
 
         // Health check — inlined to emit progress events between phases.
+        // Each phase races against a process-death watcher so we fail
+        // immediately if the server exits instead of waiting for the full
+        // health-check timeout.
         self.debug_log(&format!(
             "{}:{} — process started (pid {}), beginning health checks",
             sel.node, sel.variant, pid
@@ -685,6 +692,38 @@ impl Orchestrator {
                 passed_at: None,
             });
 
+            // Build attempt notifiers for health check phases.
+            let phase1_notifier: health::AttemptNotifier = {
+                let tx = self.progress_tx.clone();
+                let node = sel.node.clone();
+                let variant = sel.variant.clone();
+                Box::new(move |attempt| {
+                    if let Some(ref tx) = tx {
+                        let _ = tx.send(ProgressEvent::HealthCheckAttempt {
+                            node: node.clone(),
+                            variant: variant.clone(),
+                            phase: 1,
+                            attempt,
+                        });
+                    }
+                })
+            };
+            let phase2_notifier: health::AttemptNotifier = {
+                let tx = self.progress_tx.clone();
+                let node = sel.node.clone();
+                let variant = sel.variant.clone();
+                Box::new(move |attempt| {
+                    if let Some(ref tx) = tx {
+                        let _ = tx.send(ProgressEvent::HealthCheckAttempt {
+                            node: node.clone(),
+                            variant: variant.clone(),
+                            phase: 2,
+                            attempt,
+                        });
+                    }
+                })
+            };
+
             // Phase 1: TCP port check.
             self.emit(ProgressEvent::HealthCheckPhase {
                 node: sel.node.clone(),
@@ -693,7 +732,16 @@ impl Orchestrator {
                 description: format!("waiting for port {port}"),
             });
 
-            if let Err(e) = health::wait_for_port(port, hc).await {
+            let phase1_result = tokio::select! {
+                result = health::wait_for_port(port, hc, Some(&phase1_notifier)) => result,
+                _ = wait_for_process_exit(pid) => {
+                    Err(health::HealthError::PortCheckFailed(
+                        "server process exited before binding to port".into(),
+                    ))
+                }
+            };
+
+            if let Err(e) = phase1_result {
                 let msg = format!("process did not bind to port {port}: {e}");
                 node_state.status = NodeStatus::Failed;
                 node_state.health_phases[0].last_error = Some(msg.clone());
@@ -742,20 +790,36 @@ impl Orchestrator {
                 description: phase2_desc,
             });
 
-            let phase2_result = match hc.check_type.as_str() {
-                "http" => {
-                    let direct_url = format!("http://127.0.0.1:{port}");
-                    health::wait_for_http(&direct_url, hc).await
-                }
-                "command" | "bash" => {
-                    if let Some(cmd) = &hc.command {
-                        health::wait_for_command_check(cmd, &self.project_root, hc).await
-                    } else {
-                        Ok(())
+            let phase2_future = async {
+                match hc.check_type.as_str() {
+                    "http" => {
+                        let direct_url = format!("http://127.0.0.1:{port}");
+                        health::wait_for_http(&direct_url, hc, Some(&phase2_notifier)).await
                     }
+                    "command" | "bash" => {
+                        if let Some(cmd) = &hc.command {
+                            health::wait_for_command_check(
+                                cmd,
+                                &self.project_root,
+                                hc,
+                                Some(&phase2_notifier),
+                            )
+                            .await
+                        } else {
+                            Ok(())
+                        }
+                    }
+                    _ => Ok(()), // "port" and unknown — phase 1 already covers.
                 }
-                "port" => Ok(()), // Phase 1 already covers this.
-                _ => Ok(()),
+            };
+
+            let phase2_result = tokio::select! {
+                result = phase2_future => result,
+                _ = wait_for_process_exit(pid) => {
+                    Err(health::HealthError::PortCheckFailed(
+                        "server process exited during health check".into(),
+                    ))
+                }
             };
 
             match phase2_result {
@@ -1043,6 +1107,66 @@ impl Orchestrator {
         self.remove_from_registry(run_name);
     }
 
+    /// Clean up ALL runs in the project whose processes have died.
+    /// This catches orphaned runs from previous sessions that were not
+    /// properly stopped (e.g., due to a crash or `kill -9`).
+    async fn cleanup_dead_runs(&mut self) {
+        let project_state = match ProjectState::load(&self.project_root) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+
+        let mut dead_run_names = Vec::new();
+
+        for (run_name, run_state) in &project_state.runs {
+            // Only check runs that are supposedly active.
+            if run_state.status != RunStatus::Running && run_state.status != RunStatus::Starting {
+                continue;
+            }
+
+            let any_alive = run_state.nodes.values().any(|ns| {
+                ns.pid.is_some_and(process::is_alive)
+            });
+
+            if !any_alive {
+                dead_run_names.push(run_name.clone());
+            }
+        }
+
+        for run_name in &dead_run_names {
+            tracing::info!(run_name, "cleaning up dead run (all processes exited)");
+
+            if let Some(run_state) = project_state.runs.get(run_name) {
+                // Kill any stragglers and clean up routes.
+                for ns in run_state.nodes.values() {
+                    if let Some(pid) = ns.pid {
+                        if process::is_alive(pid) {
+                            let _ = process::kill_process(pid).await;
+                        }
+                    }
+                    if let Some(ref url_str) = ns.url {
+                        let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+                        let hostname = hostname.split(':').next().unwrap_or(hostname);
+                        let _ = self.helper_client.remove_host(hostname).await;
+                        let route_id =
+                            format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+                        let _ = self.helper_client.remove_route(&route_id).await;
+                    }
+                }
+            }
+        }
+
+        // Persist the cleanup.
+        if !dead_run_names.is_empty() {
+            let mut project_state = project_state;
+            for run_name in &dead_run_names {
+                project_state.runs.remove(run_name);
+                self.remove_from_registry(run_name);
+            }
+            let _ = project_state.save(&self.project_root);
+        }
+    }
+
     /// Run the `on_stop` hook for a node if one is defined in the config.
     async fn run_on_stop_hook(&self, run_name: &str, node_state: &NodeState) {
         let variant_cfg = match self
@@ -1200,6 +1324,18 @@ impl Orchestrator {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Poll until a process is no longer alive. Checks every 250ms.
+/// Used to race health checks against premature process death so the
+/// orchestrator can fail fast instead of waiting for the full timeout.
+async fn wait_for_process_exit(pid: u32) {
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        if !process::is_alive(pid) {
+            return;
+        }
+    }
+}
 
 /// Build the environment map, resolving variable references in values.
 fn build_env(

@@ -245,7 +245,17 @@ fn is_process_alive(pid: u32) -> bool {
 }
 
 fn kill_process(pid: u32) {
+    // Guard against dangerous PIDs (same as veld-core::process::kill_process).
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return;
+    }
     unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        // Send to the process group first (negative PID) to kill the entire
+        // pipeline (server + _timestamp wrapper). Fall back to the individual
+        // PID if the group kill fails (process may not be a group leader).
+        let pgid = -(pid as libc::pid_t);
+        if libc::kill(pgid, libc::SIGTERM) != 0 {
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
     }
 }
