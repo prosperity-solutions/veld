@@ -256,9 +256,13 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
 /// TTY mode: Uses `\r` carriage returns for in-place updates, finalizing with `\n`.
 /// Non-TTY/JSON mode: Emits NDJSON for agent consumption.
 async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bool) {
+    // Track current node progress so we can redraw the status line
+    // in-place when health check attempts update.
+    let mut ctx = TtyProgressCtx::default();
+
     while let Some(event) = rx.recv().await {
         if tty {
-            render_progress_tty(&event);
+            render_progress_tty(&event, &mut ctx);
         } else {
             // NDJSON for non-TTY / agent mode.
             if let Ok(json) = serde_json::to_string(&event) {
@@ -268,8 +272,42 @@ async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bo
     }
 }
 
+/// State tracked across TTY progress events so we can redraw the current
+/// node's status line in-place (e.g., updating the attempt counter).
+#[derive(Default)]
+struct TtyProgressCtx {
+    index: usize,
+    total: usize,
+    label: String,
+    port: Option<u16>,
+    phase: u8,
+    phase_desc: String,
+}
+
+impl TtyProgressCtx {
+    /// Redraw the in-progress status line with the given suffix.
+    fn redraw(&self, suffix: &str) {
+        eprint!(
+            "\x1b[2K\r{}",
+            output::step(self.index, self.total, &output::pad_right(&self.label, 30)),
+        );
+        if let Some(port) = self.port {
+            eprint!(" {}", output::dim(&format!("port {port}")));
+        }
+        if !self.phase_desc.is_empty() {
+            eprint!(
+                " {}",
+                output::dim(&format!("[phase {}: {}]", self.phase, self.phase_desc)),
+            );
+        }
+        if !suffix.is_empty() {
+            eprint!(" {}", output::dim(suffix));
+        }
+    }
+}
+
 /// Render a single progress event for TTY output.
-fn render_progress_tty(event: &ProgressEvent) {
+fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
     match event {
         ProgressEvent::PlanResolved {
             total_nodes,
@@ -287,19 +325,21 @@ fn render_progress_tty(event: &ProgressEvent) {
             index,
             total,
         } => {
-            let label = format!("{node}:{variant}");
-            eprint!(
-                "\x1b[2K\r{}",
-                output::step(*index, *total, &output::pad_right(&label, 30)),
-            );
-            eprint!(" {}", output::dim("starting..."));
+            ctx.index = *index;
+            ctx.total = *total;
+            ctx.label = format!("{node}:{variant}");
+            ctx.port = None;
+            ctx.phase = 0;
+            ctx.phase_desc.clear();
+            ctx.redraw("starting...");
         }
         ProgressEvent::PortAllocated {
             node: _,
             variant: _,
             port,
         } => {
-            eprint!(" {}", output::dim(&format!("port {port}")));
+            ctx.port = Some(*port);
+            ctx.redraw("starting...");
         }
         ProgressEvent::HealthCheckPhase {
             node: _,
@@ -307,10 +347,17 @@ fn render_progress_tty(event: &ProgressEvent) {
             phase,
             description,
         } => {
-            eprint!(
-                " {}",
-                output::dim(&format!("[phase {phase}: {description}]"))
-            );
+            ctx.phase = *phase;
+            ctx.phase_desc = description.clone();
+            ctx.redraw("");
+        }
+        ProgressEvent::HealthCheckAttempt {
+            node: _,
+            variant: _,
+            phase: _,
+            attempt,
+        } => {
+            ctx.redraw(&format!("attempt {attempt}"));
         }
         ProgressEvent::HealthCheckPassed {
             node: _,
@@ -364,7 +411,7 @@ fn render_progress_tty(event: &ProgressEvent) {
             node: _,
             variant: _,
         } => {
-            eprint!(" {}", output::dim("running..."));
+            ctx.redraw("running...");
         }
     }
 }

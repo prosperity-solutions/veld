@@ -111,23 +111,23 @@ local function copyUrl(url)
     }):send()
 end
 
-local function stopRun(veldBin, projectRoot, runName)
+local function runVeldCommand(veldBin, projectRoot, args, successMsg, failTitle)
     local cmd = string.format(
-        "cd %q && %s stop --name %q 2>&1",
-        projectRoot, veldBin, runName
+        "cd %q && %s %s 2>&1",
+        projectRoot, veldBin, args
     )
     local shell = os.getenv("SHELL") or "/bin/zsh"
     hs.task.new(shell, function(exitCode, stdOut, stdErr)
         if exitCode == 0 then
             hs.notify.new({
                 title = "Veld",
-                informativeText = "Stopped: " .. runName,
+                informativeText = successMsg,
                 withdrawAfter = 3,
             }):send()
         else
             local msg = (stdErr or stdOut or "Unknown error"):sub(1, 200)
             hs.notify.new({
-                title = "Veld - Stop Failed",
+                title = failTitle,
                 informativeText = msg,
                 withdrawAfter = 5,
             }):send()
@@ -135,31 +135,48 @@ local function stopRun(veldBin, projectRoot, runName)
     end, { "-l", "-c", cmd }):start()
 end
 
+local function stopRun(veldBin, projectRoot, runName)
+    runVeldCommand(
+        veldBin, projectRoot,
+        string.format("stop --name %q", runName),
+        "Stopped: " .. runName,
+        "Veld - Stop Failed"
+    )
+end
+
+local function restartRun(veldBin, projectRoot, runName)
+    runVeldCommand(
+        veldBin, projectRoot,
+        string.format("restart --name %q", runName),
+        "Restarted: " .. runName,
+        "Veld - Restart Failed"
+    )
+end
+
 -- ============================================================
 -- Menu building
 -- ============================================================
-
-local function buildUrlSubmenu(url)
-    return {
-        {
-            title = "Open in Browser",
-            fn = function() openUrl(url) end,
-        },
-        {
-            title = "Copy URL",
-            fn = function() copyUrl(url) end,
-        },
-    }
-end
 
 local function buildRunSubmenu(env, veldBin)
     local items = {}
 
     if #env.urls > 0 then
         for _, entry in ipairs(env.urls) do
+            -- Node label (not clickable).
             table.insert(items, {
-                title = entry.node .. "  " .. entry.url,
-                menu = buildUrlSubmenu(entry.url),
+                title = entry.node,
+                disabled = true,
+            })
+            -- Indented actions for this node's URL.
+            table.insert(items, {
+                title = "Open in Browser",
+                indent = 1,
+                fn = function() openUrl(entry.url) end,
+            })
+            table.insert(items, {
+                title = "Copy URL",
+                indent = 1,
+                fn = function() copyUrl(entry.url) end,
             })
         end
     else
@@ -167,6 +184,13 @@ local function buildRunSubmenu(env, veldBin)
     end
 
     table.insert(items, { title = "-" })
+
+    table.insert(items, {
+        title = "Restart",
+        fn = function()
+            restartRun(veldBin, env.root, env.run)
+        end,
+    })
 
     table.insert(items, {
         title = "Stop",

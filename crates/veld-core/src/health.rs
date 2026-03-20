@@ -7,6 +7,9 @@ use tokio::time::{sleep, timeout};
 
 use crate::config::HealthCheck;
 
+/// Callback invoked on each health check retry with the attempt number.
+pub type AttemptNotifier = Box<dyn Fn(u32) + Send + Sync>;
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -34,7 +37,11 @@ pub enum HealthError {
 ///
 /// Tries both IPv4 (127.0.0.1) and IPv6 (::1) on each attempt since modern
 /// runtimes (Node.js 18+, Next.js, etc.) may bind to either address family.
-pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthError> {
+pub async fn wait_for_port(
+    port: u16,
+    hc: &HealthCheck,
+    on_attempt: Option<&AttemptNotifier>,
+) -> Result<(), HealthError> {
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
 
@@ -42,7 +49,12 @@ pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthErro
     let ipv6: std::net::SocketAddr = ([0, 0, 0, 0, 0, 0, 0, 1], port).into();
 
     let result = timeout(deadline, async {
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
+            if let Some(f) = &on_attempt {
+                f(attempt);
+            }
             // Accept either IPv4 or IPv6 — whichever the process bound to.
             if TcpStream::connect(ipv4).await.is_ok() || TcpStream::connect(ipv6).await.is_ok() {
                 return Ok(());
@@ -78,7 +90,11 @@ pub async fn wait_for_port(port: u16, hc: &HealthCheck) -> Result<(), HealthErro
 // ---------------------------------------------------------------------------
 
 /// Repeatedly GET an HTTP URL until success or timeout.
-pub async fn wait_for_http(url: &str, hc: &HealthCheck) -> Result<(), HealthError> {
+pub async fn wait_for_http(
+    url: &str,
+    hc: &HealthCheck,
+    on_attempt: Option<&AttemptNotifier>,
+) -> Result<(), HealthError> {
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
 
@@ -102,7 +118,12 @@ pub async fn wait_for_http(url: &str, hc: &HealthCheck) -> Result<(), HealthErro
         .map_err(|e| HealthError::HttpsCheckFailed(e.to_string()))?;
 
     let result = timeout(deadline, async {
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
+            if let Some(f) = &on_attempt {
+                f(attempt);
+            }
             match client.get(&full_url).send().await {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
@@ -143,6 +164,7 @@ pub async fn wait_for_command_check(
     command: &str,
     working_dir: &Path,
     hc: &HealthCheck,
+    on_attempt: Option<&AttemptNotifier>,
 ) -> Result<(), HealthError> {
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
@@ -151,7 +173,12 @@ pub async fn wait_for_command_check(
     let dir = working_dir.to_path_buf();
 
     let result = timeout(deadline, async {
+        let mut attempt: u32 = 0;
         loop {
+            attempt += 1;
+            if let Some(f) = &on_attempt {
+                f(attempt);
+            }
             let status = tokio::process::Command::new("sh")
                 .arg("-c")
                 .arg(&cmd)
@@ -208,7 +235,7 @@ pub async fn run_health_check(
 ) -> Result<(), HealthError> {
     // Phase 1: always check the port is bound.
     tracing::info!(port, "health check phase 1: waiting for port");
-    wait_for_port(port, hc).await.map_err(|e| {
+    wait_for_port(port, hc, None).await.map_err(|e| {
         HealthError::PortCheckFailed(format!("process did not bind to port {port}: {e}"))
     })?;
     tracing::info!(port, "health check phase 1: port is open");
@@ -221,13 +248,13 @@ pub async fn run_health_check(
             // for multi-level .localhost subdomains.
             let direct_url = format!("http://127.0.0.1:{port}");
             tracing::info!(url = direct_url, "health check phase 2: waiting for HTTP");
-            wait_for_http(&direct_url, hc).await?;
+            wait_for_http(&direct_url, hc, None).await?;
             tracing::info!(url = direct_url, "health check phase 2: HTTP check passed");
         }
         "command" | "bash" => {
             if let Some(cmd) = &hc.command {
                 tracing::info!(command = cmd, "health check phase 2: running command check");
-                wait_for_command_check(cmd, working_dir, hc).await?;
+                wait_for_command_check(cmd, working_dir, hc, None).await?;
                 tracing::info!("health check phase 2: command check passed");
             }
         }

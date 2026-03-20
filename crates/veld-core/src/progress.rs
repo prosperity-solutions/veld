@@ -33,6 +33,14 @@ pub enum ProgressEvent {
         description: String,
     },
 
+    /// Health check attempt (retry) within a phase.
+    HealthCheckAttempt {
+        node: String,
+        variant: String,
+        phase: u8,
+        attempt: u32,
+    },
+
     /// Health check phase passed.
     HealthCheckPassed {
         node: String,
@@ -128,5 +136,19 @@ mod tests {
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"health_check_phase\""));
         assert!(json.contains("\"phase\":1"));
+    }
+
+    #[test]
+    fn test_health_check_attempt_serialization() {
+        let event = ProgressEvent::HealthCheckAttempt {
+            node: "api".into(),
+            variant: "local".into(),
+            phase: 1,
+            attempt: 5,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"health_check_attempt\""));
+        assert!(json.contains("\"phase\":1"));
+        assert!(json.contains("\"attempt\":5"));
     }
 }
