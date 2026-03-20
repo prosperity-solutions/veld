@@ -645,7 +645,10 @@ impl Orchestrator {
         let resolved_cmd = crate::variables::interpolate(command, ctx)?;
         self.debug_log(&format!(
             "{}:{} — resolved command: {} (cwd: {})",
-            sel.node, sel.variant, resolved_cmd, working_dir.display()
+            sel.node,
+            sel.variant,
+            resolved_cmd,
+            working_dir.display()
         ))
         .await;
 
@@ -933,8 +936,7 @@ impl Orchestrator {
         // Verify step (idempotency).
         if let Some(ref verify_cmd) = variant_cfg.verify {
             let verify_resolved = crate::variables::interpolate(verify_cmd, ctx)?;
-            let verify_result =
-                process::run_command(&verify_resolved, &working_dir, &env).await;
+            let verify_result = process::run_command(&verify_resolved, &working_dir, &env).await;
             if let Ok(ref out) = verify_result {
                 if out.exit_code == 0 {
                     tracing::info!(
@@ -1294,26 +1296,24 @@ impl Orchestrator {
             .as_deref()
             .or(node_cfg_opt.and_then(|n| n.cwd.as_deref()));
         let working_dir = match raw_cwd {
-            Some(cwd_tmpl) => {
-                match crate::variables::interpolate(cwd_tmpl, &ctx) {
-                    Ok(resolved) => {
-                        let p = std::path::Path::new(&resolved);
-                        if p.is_absolute() {
-                            p.to_path_buf()
-                        } else {
-                            self.project_root.join(p)
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            node = node_state.node_name,
-                            error = %e,
-                            "failed to resolve on_stop cwd, falling back to project root"
-                        );
-                        self.project_root.clone()
+            Some(cwd_tmpl) => match crate::variables::interpolate(cwd_tmpl, &ctx) {
+                Ok(resolved) => {
+                    let p = std::path::Path::new(&resolved);
+                    if p.is_absolute() {
+                        p.to_path_buf()
+                    } else {
+                        self.project_root.join(p)
                     }
                 }
-            }
+                Err(e) => {
+                    tracing::warn!(
+                        node = node_state.node_name,
+                        error = %e,
+                        "failed to resolve on_stop cwd, falling back to project root"
+                    );
+                    self.project_root.clone()
+                }
+            },
             None => self.project_root.clone(),
         };
 
