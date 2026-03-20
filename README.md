@@ -265,13 +265,7 @@ Veld ships skills for AI coding agents (Claude Code, Cursor, Codex, Windsurf, an
 npx skills add prosperity-solutions/veld
 ```
 
-This installs three skills:
-
-| Skill | Description |
-|-------|-------------|
-| **veld-config** | Write and edit `veld.json` — nodes, health checks, dependencies, URL templates |
-| **veld-feedback** | Bidirectional feedback threads — real-time conversation between agent and reviewer |
-| **veld-usage** | CLI reference — start, stop, logs, status, and all other commands |
+This installs the **veld** skill — a single skill covering CLI usage, `veld.json` configuration, and the bidirectional feedback workflow. It loads live project state (nodes, presets, active runs, current config) at invocation time so your agent can act immediately without discovery steps.
 
 ## Contributing
 

@@ -1,23 +1,6 @@
----
-name: veld-config
-description: Write and edit veld.json configuration files. Use when the user asks to configure Veld, add nodes/services, set up dependencies, create presets, configure health checks, define URL templates, or troubleshoot veld.json issues.
-allowed-tools: Read, Edit, Bash(veld *)
-metadata:
-  author: prosperity-solutions
-  version: "2.0.0"
----
-
-# Veld Configuration
-
-Write correct `veld.json` files for Veld, the local development environment orchestrator.
-
-## Current Configuration
-
-!`cat veld.json 2>&1`
+# Veld Configuration Reference
 
 ## Schema
-
-Always include `$schema` for editor autocompletion:
 
 ```json
 {
@@ -34,7 +17,7 @@ Always include `$schema` for editor autocompletion:
 
 ### `start_server` — Long-running processes
 
-For dev servers, databases, anything that stays alive. Must bind to `${veld.port}`. Requires `health_check`.
+Must bind to `${veld.port}`. Requires `health_check`.
 
 ```json
 {
@@ -51,7 +34,7 @@ For dev servers, databases, anything that stays alive. Must bind to `${veld.port
 
 ### `command` — Run-to-completion tasks
 
-For setup steps, migrations, seeding. Emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE`.
+Emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE`.
 
 ```json
 {
@@ -64,7 +47,7 @@ For setup steps, migrations, seeding. Emits outputs by writing `key=value` lines
 
 ## Health Checks
 
-Every `start_server` variant **requires** one. Three types:
+Every `start_server` variant requires one. Three types:
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
@@ -72,7 +55,10 @@ Every `start_server` variant **requires** one. Three types:
 { "type": "command", "command": "./scripts/check-ready.sh", "timeout_seconds": 45 }
 ```
 
-Defaults: `timeout_seconds`: 60, `interval_ms`: 1000 (min: 100).
+- `http`: Two-phase — TCP port check first, then HTTP. Default status: 200, path: `/`.
+- `port`: Just checks TCP connection.
+- `command`: Exit 0 = healthy.
+- Defaults: `timeout_seconds`: 60, `interval_ms`: 1000 (min: 100).
 
 ## Variable Interpolation
 
@@ -97,13 +83,15 @@ Defaults: `timeout_seconds`: 60, `interval_ms`: 1000 (min: 100).
 | `${nodes.<node>.url}` | HTTPS URL of a start_server node |
 | `${nodes.<node>.port}` | Allocated port of a start_server node |
 
-Qualified references when two variants run: `${nodes.backend:local.url}`.
+Qualified references when two variants run simultaneously: `${nodes.backend:local.url}`.
 
 ### In URL templates: `{...}`
 
 `{service}`, `{run}`, `{project}`, `{branch}`, `{worktree}`, `{username}`, `{hostname}`
 
-Fallback: `{branch ?? run}` — uses first non-empty value. Cascades: variant > node > project.
+Fallback operator: `{branch ?? run}` — uses first non-empty value.
+
+Cascades: variant > node > project level.
 
 ## Dependencies
 
@@ -113,9 +101,11 @@ Explicit `node → variant` mapping. Default variants are **never** silently ass
 "depends_on": { "database": "docker", "backend": "local" }
 ```
 
+Dependencies start before dependents. Independent branches run in parallel. Teardown is reverse order.
+
 ## Presets
 
-Named shortcuts:
+Named shortcuts for common selections:
 
 ```json
 "presets": {
@@ -128,15 +118,9 @@ Named shortcuts:
 
 | Field | Level | Description |
 |-------|-------|-------------|
-| `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. |
+| `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld nodes` output |
-| `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]` |
+| `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
 | `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool}`. All default `true`. |
-
-## Common Mistakes
-
-- Missing `health_check` on `start_server` variants (required)
-- Using `${veld.port}` in `command` variants (only for `start_server`)
-- Using `{...}` syntax in commands (that's URL templates — use `${...}`)
-- Not specifying variant in `depends_on` (`"backend"` instead of `"backend": "local"`)
-- `outputs` as object on `command` (must be array) or array on `start_server` (must be object)
+| `on_stop` | variant | Teardown command that runs on `veld stop`. |
+| `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |
