@@ -451,14 +451,11 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build Caddy with veld_inject
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           XCADDY_VERSION=$(cat .xcaddy-version)
           go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
-          xcaddy build \
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output /dev/null
 
