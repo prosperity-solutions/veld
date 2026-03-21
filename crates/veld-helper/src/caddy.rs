@@ -449,8 +449,8 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
         // Escape levels for safe embedding in JS string.
         let levels = escape_js_string(fb.client_log_levels);
         js.push_str(&format!(
-            "var L={levels}.split(','),B=window.__veld_early_logs=[],O={{}};\
-             L.forEach(function(n){{\
+            "var V={levels}.split(','),B=window.__veld_early_logs=[],O={{}};\
+             V.forEach(function(n){{\
              var o=console[n];if(typeof o!=='function')return;\
              O[n]=o;\
              console[n]=function(){{\
@@ -475,7 +475,7 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
 
     // --- Dynamic asset loading ---
     js.push_str(
-        "function L(t,a){var e=document.createElement(t);\
+        "function E(t,a){var e=document.createElement(t);\
          for(var k in a)e.setAttribute(k,a[k]);\
          (document.head||document.documentElement).appendChild(e);return e;}\
          function R(fn){document.readyState==='loading'?\
@@ -483,22 +483,22 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     );
 
     if fb.inject_client_logs {
-        let levels = escape_js_string(fb.client_log_levels);
+        let levels = escape_js_string_bare(fb.client_log_levels);
         js.push_str(&format!(
-            "L('script',{{'src':'/__veld__/api/client-log.js','data-veld-levels':'{levels}'}});",
+            "E('script',{{'src':'/__veld__/api/client-log.js','data-veld-levels':'{levels}'}});",
             levels = levels,
         ));
     }
 
     if fb.inject_feedback_overlay {
         js.push_str(
-            "L('link',{'rel':'stylesheet','href':'/__veld__/feedback/style.css'});\
+            "E('link',{'rel':'stylesheet','href':'/__veld__/feedback/style.css'});\
              var s=document.createElement('style');\
              s.textContent=\"@font-face{font-family:'JetBrains Mono';font-style:normal;\
              font-weight:400;font-display:swap;\
              src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}\";\
              (document.head||document.documentElement).appendChild(s);\
-             L('script',{'src':'/__veld__/feedback/script.js'});",
+             E('script',{'src':'/__veld__/feedback/script.js'});",
         );
     }
 
@@ -508,9 +508,15 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
 }
 
 /// Escape a string for safe embedding inside a JavaScript single-quoted string.
+/// Returns the value wrapped in single quotes: `'escaped'`.
 fn escape_js_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('\'');
+    format!("'{}'", escape_js_string_bare(s))
+}
+
+/// Escape a string for safe embedding in JS without adding outer quotes.
+/// Use this when the string will be placed inside an already-quoted context.
+fn escape_js_string_bare(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
             '\'' => out.push_str("\\'"),
@@ -522,7 +528,6 @@ fn escape_js_string(s: &str) -> String {
             _ => out.push(c),
         }
     }
-    out.push('\'');
     out
 }
 
@@ -893,5 +898,57 @@ mod tests {
         // Should capture unhandled errors and promise rejections.
         assert!(script.contains("addEventListener('error'"));
         assert!(script.contains("addEventListener('unhandledrejection'"));
+    }
+
+    /// Regression: the bootstrap script must not have duplicate variable/function
+    /// names. Previously `L` was used for both the levels array and the DOM
+    /// element helper, causing `Uncaught SyntaxError: Unexpected identifier`.
+    #[test]
+    fn test_bootstrap_script_no_duplicate_identifiers() {
+        let script = build_bootstrap_script(&make_fb(true, true, "log,warn,error"));
+        let js = script
+            .strip_prefix("<script>")
+            .unwrap()
+            .strip_suffix("</script>")
+            .unwrap();
+
+        // Collect all single-letter `var X=` and `function X(` declarations.
+        let mut decls: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
+        for pattern in ["var ", "function "] {
+            let mut search_from = 0;
+            while let Some(pos) = js[search_from..].find(pattern) {
+                let abs = search_from + pos + pattern.len();
+                if let Some(ch) = js[abs..].chars().next() {
+                    if ch.is_ascii_uppercase() {
+                        *decls.entry(ch).or_default() += 1;
+                    }
+                }
+                search_from = abs + 1;
+            }
+        }
+        for (name, count) in &decls {
+            assert_eq!(
+                *count, 1,
+                "identifier '{name}' declared {count} times — would cause SyntaxError"
+            );
+        }
+    }
+
+    /// Regression: the data-veld-levels attribute value must not have nested
+    /// quotes. Previously `escape_js_string` wrapped the value in quotes,
+    /// then it was placed inside an already-quoted JS object literal property,
+    /// producing `'data-veld-levels':''log,warn,error''`.
+    #[test]
+    fn test_bootstrap_script_no_nested_quotes_in_attributes() {
+        let script = build_bootstrap_script(&make_fb(true, true, "log,warn,error"));
+        // The attribute value should be 'log,warn,error' not ''log,warn,error''
+        assert!(
+            !script.contains("':''"),
+            "attribute value has nested quotes — would produce invalid JS"
+        );
+        assert!(
+            script.contains("'data-veld-levels':'log,warn,error'"),
+            "attribute value should be properly single-quoted"
+        );
     }
 }
