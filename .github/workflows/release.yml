@@ -12,9 +12,9 @@ env:
 permissions: {}
 
 jobs:
-  # ── Plan: determine what would be released ─────────────────────────
-  # On push to main: full semantic-release dry run (version + notes).
-  # On PR: log the conventional commits that would be included.
+  # ── Plan: semantic-release dry run to show next version ──────────────
+  # Runs on both push and PR. On PR, checks out the merge ref and
+  # pretends it's main so semantic-release computes the real version.
   plan:
     name: Plan Release
     runs-on: ubuntu-latest
@@ -29,33 +29,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      # On PR, the checkout is a detached merge ref — semantic-release
+      # needs to see branch "main" to match .releaserc.json config.
+      - name: Point local main at merge commit
+        if: github.event_name == 'pull_request'
+        run: git checkout -B main
+
       - uses: actions/setup-node@v4
-        if: github.event_name == 'push'
         with:
           node-version: "22"
 
       - uses: cycjimmy/semantic-release-action@v4
-        if: github.event_name == 'push'
         id: semantic
         with:
           dry_run: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Preview release commits
-        if: github.event_name == 'pull_request'
-        run: |
-          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          if [ -z "$LAST_TAG" ]; then
-            echo "No previous tags — all commits on main would be included."
-            git log --oneline origin/main
-          else
-            echo "Commits since $LAST_TAG that would be in the next release:"
-            git log --oneline "$LAST_TAG"..origin/main
-            echo ""
-            echo "Plus this PR:"
-            git log --oneline origin/main..HEAD
-          fi
 
   # ── Build ALL artifacts BEFORE tagging ─────────────────────────────
   build:
