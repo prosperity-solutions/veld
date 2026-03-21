@@ -9,6 +9,11 @@ use tokio::process::Command;
 
 use crate::helper::{self, HelperClient};
 
+/// Pinned version of the veld_inject Caddy module. Updated by the release
+/// workflow alongside Cargo.toml. Uses v0.x to stay under Go's major-version
+/// suffix threshold (v2+ requires /vN in the module path).
+const VELD_INJECT_VERSION: &str = "v0.4.0.0";
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -299,8 +304,9 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
     // Use Caddy's build API to get a custom binary with the veld-inject
     // plugin, which prepends a bootstrap script to HTML responses without
     // buffering (enabling streaming SSR, WebSocket, and SSE).
+    // The version is pinned and updated by the release workflow.
     let desired_url = format!(
-        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/prosperity-solutions/veld/caddy/inject"
+        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/prosperity-solutions/veld/caddy/inject@{VELD_INJECT_VERSION}"
     );
 
     if caddy.exists() && !force {

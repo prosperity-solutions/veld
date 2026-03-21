@@ -134,6 +134,17 @@ jobs:
           VERSION="${{ needs.release.outputs.new_release_version }}"
           sed -i'' -e "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" Cargo.toml
 
+      - name: Pin veld_inject module version
+        run: |
+          VERSION="${{ needs.release.outputs.new_release_version }}"
+          GO_VERSION="v0.${VERSION}"
+          # Update pinned version in Rust source.
+          sed -i'' -e "s/VELD_INJECT_VERSION: &str = \"[^\"]*\"/VELD_INJECT_VERSION: \&str = \"${GO_VERSION}\"/" \
+            crates/veld-core/src/setup.rs
+          # Update pinned version in install.sh.
+          sed -i'' -e "s/VELD_INJECT_VERSION=\"[^\"]*\"/VELD_INJECT_VERSION=\"${GO_VERSION}\"/" \
+            install.sh
+
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 

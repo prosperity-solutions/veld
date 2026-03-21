@@ -227,11 +227,13 @@ for bin in veld-helper veld-daemon; do
 done
 
 # --- Download Caddy with veld-inject plugin ---
+# Version is pinned and updated by the release workflow.
+VELD_INJECT_VERSION="v0.4.0.0"
 echo "Installing Caddy..."
 if [ ! -f "${LIB_DIR}/caddy" ]; then
   CADDY_OS="$OS"
   [ "$CADDY_OS" = "macos" ] && CADDY_OS="darwin"
-  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject"
+  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${VELD_INJECT_VERSION}"
   curl -fSL -o "${TMP_DIR}/caddy" "$CADDY_URL"
   $NEED_SUDO cp "${TMP_DIR}/caddy" "${LIB_DIR}/caddy"
   $NEED_SUDO chmod +x "${LIB_DIR}/caddy"
