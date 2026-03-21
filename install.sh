@@ -102,7 +102,7 @@ TAR_CONTENTS="$(tar -tzf "${TMP_DIR}/${TARBALL}")"
 for entry in $TAR_CONTENTS; do
   entry="${entry#./}"
   case "$entry" in
-    veld|veld-helper|veld-daemon|"") ;;
+    veld|veld-helper|veld-daemon|caddy|"") ;;
     *) echo "Error: unexpected file in tarball: ${entry}"; exit 1 ;;
   esac
 done
