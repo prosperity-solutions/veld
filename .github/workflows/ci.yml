@@ -269,7 +269,7 @@ jobs:
           set -e
           VELD="$(pwd)/target/debug/veld"
           echo "=== Privileged setup ==="
-          sudo $VELD setup privileged
+          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" $VELD setup privileged
           echo ""
 
           echo "=== Run doctor (diagnostics) ==="
@@ -325,7 +325,7 @@ jobs:
 
           echo ""
           echo "=== Uninstall (privileged) ==="
-          sudo $VELD uninstall || echo "WARNING: uninstall returned non-zero"
+          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" $VELD uninstall || echo "WARNING: uninstall returned non-zero"
 
           echo ""
           echo "=== Verify cleanup ==="
