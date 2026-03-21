@@ -1,5 +1,9 @@
 import { Suspense } from 'react';
 
+// Force dynamic rendering so this page actually streams on every request
+// instead of being statically optimized at build time.
+export const dynamic = 'force-dynamic';
+
 async function SlowData() {
   await new Promise(r => setTimeout(r, 500));
   return <p id="streamed-content">Streamed content loaded</p>;

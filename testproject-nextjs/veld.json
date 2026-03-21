@@ -9,7 +9,7 @@
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npx next dev --port ${veld.port}",
+          "command": "npx next dev --turbopack --port ${veld.port}",
           "health_check": { "type": "http", "path": "/", "expect_status": 200, "timeout_seconds": 60 }
         }
       }
