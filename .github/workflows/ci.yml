@@ -457,7 +457,8 @@ jobs:
           go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-            --output /dev/null
+            --output ./caddy-build-test
+          rm -f ./caddy-build-test
 
   injection-test:
     name: Injection E2E (macOS)
