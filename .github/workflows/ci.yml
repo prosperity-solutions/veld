@@ -108,17 +108,34 @@ jobs:
       - name: Build all binaries
         run: cargo build
 
-      # Build Caddy locally with the veld_inject plugin from this branch.
-      # VELD_CADDY_BIN tells install_caddy() and caddy_bin() to use this
-      # binary instead of downloading from the Caddy build API.
+      # Build Caddy locally with the veld_inject plugin from this branch
+      # and install it where lib_dir() resolves + write a matching URL
+      # marker so install_caddy() sees it as up-to-date and skips download.
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+
+          # Extract the pinned version that install_caddy() uses.
+          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+          # Build the exact URL that install_caddy() constructs for comparison.
+          # macOS CI runners are darwin/arm64.
+          MARKER="https://caddyserver.com/api/download?os=darwin&arch=arm64&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
+
+          # lib_dir() prefers ~/.local/lib/veld if it exists. Create it and
+          # install there — this is where both user and sudo-with-preserved-HOME
+          # will resolve to on macOS GH runners.
+          LIB_DIR="$HOME/.local/lib/veld"
+          mkdir -p "$LIB_DIR"
+
           xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-            --output /tmp/caddy-veld
-          chmod +x /tmp/caddy-veld
-          echo "VELD_CADDY_BIN=/tmp/caddy-veld" >> "$GITHUB_ENV"
+            --output "$LIB_DIR/caddy"
+          chmod +x "$LIB_DIR/caddy"
+          echo "$MARKER" > "$LIB_DIR/.caddy-url"
+
+          echo "Installed Caddy to $LIB_DIR/caddy"
+          echo "Marker: $MARKER"
 
       - name: Verify CLI basics
         run: |
@@ -158,7 +175,7 @@ jobs:
       - name: Run full integration tests
         run: |
           chmod +x tests/integration.sh
-          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" ./tests/integration.sh \
+          sudo ./tests/integration.sh \
             --veld-bin "$(pwd)/target/debug/veld" \
             --project-dir "$(pwd)/testproject"
 
@@ -269,7 +286,7 @@ jobs:
           set -e
           VELD="$(pwd)/target/debug/veld"
           echo "=== Privileged setup ==="
-          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" $VELD setup privileged
+          sudo $VELD setup privileged
           echo ""
 
           echo "=== Run doctor (diagnostics) ==="
@@ -325,7 +342,7 @@ jobs:
 
           echo ""
           echo "=== Uninstall (privileged) ==="
-          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" $VELD uninstall || echo "WARNING: uninstall returned non-zero"
+          sudo $VELD uninstall || echo "WARNING: uninstall returned non-zero"
 
           echo ""
           echo "=== Verify cleanup ==="
@@ -406,15 +423,18 @@ jobs:
         working-directory: testproject-nextjs
         run: npm install
 
-      # Build Caddy locally with the veld_inject plugin from this branch.
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          MARKER="https://caddyserver.com/api/download?os=darwin&arch=arm64&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
+          LIB_DIR="$HOME/.local/lib/veld"
+          mkdir -p "$LIB_DIR"
           xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-            --output /tmp/caddy-veld
-          chmod +x /tmp/caddy-veld
-          echo "VELD_CADDY_BIN=/tmp/caddy-veld" >> "$GITHUB_ENV"
+            --output "$LIB_DIR/caddy"
+          chmod +x "$LIB_DIR/caddy"
+          echo "$MARKER" > "$LIB_DIR/.caddy-url"
 
       - name: Setup veld (unprivileged)
         run: |

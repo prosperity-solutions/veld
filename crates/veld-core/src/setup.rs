@@ -291,35 +291,6 @@ async fn is_caddy_running() -> bool {
 /// kept; if it differs (e.g. new plugins were added) the old binary is
 /// replaced automatically.
 pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
-    // If VELD_CADDY_BIN is set, copy it to the standard lib_dir location
-    // instead of downloading. This lets CI / developers provide their own
-    // Caddy binary (e.g. built with xcaddy) and have it work with the
-    // helper, which always looks at lib_dir()/caddy.
-    if let Ok(path) = std::env::var("VELD_CADDY_BIN") {
-        let src = std::path::PathBuf::from(&path);
-        if !src.exists() {
-            anyhow::bail!("VELD_CADDY_BIN is set to {path} but the file does not exist");
-        }
-        let lib_dir = crate::paths::lib_dir();
-        std::fs::create_dir_all(&lib_dir)
-            .context(format!("failed to create {}", lib_dir.display()))?;
-        let dest = lib_dir.join("caddy");
-        std::fs::copy(&src, &dest)
-            .context(format!("failed to copy {} to {}", src.display(), dest.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755))?;
-        }
-        // Write a marker so subsequent runs without the env var don't
-        // re-download (the binary is already in place).
-        let marker = crate::paths::caddy_url_marker();
-        let _ = std::fs::write(&marker, "VELD_CADDY_BIN");
-        return Ok(StepResult::success(format!(
-            "Installed custom Caddy binary from VELD_CADDY_BIN ({path})"
-        )));
-    }
-
     // Migrate caddy-data from system install if needed.
     if let Err(e) = migrate_from_system_install() {
         tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
