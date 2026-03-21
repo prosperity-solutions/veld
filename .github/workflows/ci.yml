@@ -110,9 +110,9 @@ jobs:
 
       # Build Caddy locally with the veld_inject plugin from this branch
       # so that `veld setup` doesn't need the Go module to be published.
-      # Install to BOTH user-level (~/.local/lib/veld) and system-level
-      # (/usr/local/lib/veld) paths because privileged setup runs as root
-      # which resolves lib_dir() to the system path.
+      # install_caddy() skips download when the binary exists AND the URL
+      # marker matches. We install to every path that lib_dir() could
+      # resolve to (user home, root home, /usr/local).
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -127,15 +127,17 @@ jobs:
           ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
           MARKER_URL="https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
 
-          # User-level (unprivileged setup / auto-bootstrap).
-          mkdir -p ~/.local/lib/veld
-          cp /tmp/caddy-veld ~/.local/lib/veld/caddy
-          echo "$MARKER_URL" > ~/.local/lib/veld/.caddy-url
-
-          # System-level (privileged setup runs as root, resolves to /usr/local).
-          sudo mkdir -p /usr/local/lib/veld
-          sudo cp /tmp/caddy-veld /usr/local/lib/veld/caddy
-          echo "$MARKER_URL" | sudo tee /usr/local/lib/veld/.caddy-url > /dev/null
+          # Install to every path that lib_dir() could resolve to.
+          for DIR in \
+            "$HOME/.local/lib/veld" \
+            "/usr/local/lib/veld" \
+            "/var/root/.local/lib/veld" \
+            "/private/var/root/.local/lib/veld"; do
+            sudo mkdir -p "$DIR"
+            sudo cp /tmp/caddy-veld "$DIR/caddy"
+            sudo chmod +x "$DIR/caddy"
+            echo "$MARKER_URL" | sudo tee "$DIR/.caddy-url" > /dev/null
+          done
 
       - name: Verify CLI basics
         run: |
@@ -429,17 +431,22 @@ jobs:
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
-          mkdir -p ~/.local/lib/veld
           xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
-            --output ~/.local/lib/veld/caddy
-          chmod +x ~/.local/lib/veld/caddy
-          # Write the exact URL that install_caddy() expects so the marker
-          # check passes and it doesn't try to re-download.
+            --output /tmp/caddy-veld
+          chmod +x /tmp/caddy-veld
+
           INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | grep -o '"[^"]*"' | tr -d '"')
           OS=$(uname -s | tr '[:upper:]' '[:lower:]')
           ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
-          echo "https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}" > ~/.local/lib/veld/.caddy-url
+          MARKER_URL="https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
+
+          for DIR in "$HOME/.local/lib/veld" "/usr/local/lib/veld" "/var/root/.local/lib/veld"; do
+            sudo mkdir -p "$DIR"
+            sudo cp /tmp/caddy-veld "$DIR/caddy"
+            sudo chmod +x "$DIR/caddy"
+            echo "$MARKER_URL" | sudo tee "$DIR/.caddy-url" > /dev/null
+          done
 
       - name: Setup veld (unprivileged)
         run: |
