@@ -278,7 +278,10 @@ mod tests {
     #[test]
     fn test_slugify_branch_names() {
         assert_eq!(slugify("feature/auth-flow"), "feature-auth-flow");
-        assert_eq!(slugify("feature/JIRA-1234-oauth"), "feature-jira-1234-oauth");
+        assert_eq!(
+            slugify("feature/JIRA-1234-oauth"),
+            "feature-jira-1234-oauth"
+        );
         assert_eq!(slugify("bugfix/fix_login"), "bugfix-fix-login");
         assert_eq!(slugify("release/1.2.3"), "release-1-2-3");
         assert_eq!(slugify("refs/heads/main"), "refs-heads-main");
@@ -436,12 +439,7 @@ mod tests {
     fn test_run_name_non_git_uses_folder() {
         let tmp = tempfile::TempDir::new().unwrap();
         let result = generate_run_name(tmp.path());
-        let folder = tmp
-            .path()
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
+        let folder = tmp.path().file_name().unwrap().to_str().unwrap();
         assert_eq!(result, slugify(folder));
     }
 

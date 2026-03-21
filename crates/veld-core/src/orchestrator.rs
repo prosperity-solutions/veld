@@ -1617,7 +1617,6 @@ fn build_env(
     Ok(env)
 }
 
-
 fn whoami_username() -> String {
     std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
