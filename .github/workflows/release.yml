@@ -101,7 +101,9 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          XCADDY_VERSION=$(cat .xcaddy-version)
+          go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
           xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output dist/caddy
