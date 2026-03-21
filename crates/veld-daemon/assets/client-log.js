@@ -1,6 +1,6 @@
 // Veld client-side log collector.
 // Captures console output and unhandled errors, posts them to veld-daemon.
-// Injected automatically by Caddy into HTML responses for veld services.
+// Loaded dynamically by the veld_inject bootstrap script.
 (function(){
 'use strict';
 try{
@@ -11,7 +11,9 @@ window.__veld_cl=2;
 // Top-frame only — avoid double-collection in iframes.
 if(window!==window.top)return;
 
-var sc=document.currentScript;
+// document.currentScript is null when loaded via dynamic <script> append.
+// Fall back to finding our script element by src attribute.
+var sc=document.currentScript||document.querySelector('script[src*="client-log.js"]');
 var levelsAttr=sc&&sc.getAttribute('data-veld-levels');
 var levels=levelsAttr?levelsAttr.split(','):([]); // empty = capture nothing except exceptions
 var levelSet={};

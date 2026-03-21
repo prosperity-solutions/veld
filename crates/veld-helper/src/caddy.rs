@@ -905,32 +905,41 @@ mod tests {
     /// element helper, causing `Uncaught SyntaxError: Unexpected identifier`.
     #[test]
     fn test_bootstrap_script_no_duplicate_identifiers() {
-        let script = build_bootstrap_script(&make_fb(true, true, "log,warn,error"));
-        let js = script
-            .strip_prefix("<script>")
-            .unwrap()
-            .strip_suffix("</script>")
-            .unwrap();
+        // Test all feature combinations that produce a non-empty script.
+        let configs = [
+            make_fb(true, true, "log,warn,error"),
+            make_fb(true, false, "log"),
+            make_fb(false, true, "log"),
+        ];
+        for fb in &configs {
+            let script = build_bootstrap_script(fb);
+            let js = script
+                .strip_prefix("<script>")
+                .unwrap()
+                .strip_suffix("</script>")
+                .unwrap();
 
-        // Collect all single-letter `var X=` and `function X(` declarations.
-        let mut decls: std::collections::HashMap<char, usize> = std::collections::HashMap::new();
-        for pattern in ["var ", "function "] {
-            let mut search_from = 0;
-            while let Some(pos) = js[search_from..].find(pattern) {
-                let abs = search_from + pos + pattern.len();
-                if let Some(ch) = js[abs..].chars().next() {
-                    if ch.is_ascii_uppercase() {
-                        *decls.entry(ch).or_default() += 1;
+            let mut decls: std::collections::HashMap<char, usize> =
+                std::collections::HashMap::new();
+            for pattern in ["var ", "function "] {
+                let mut search_from = 0;
+                while let Some(pos) = js[search_from..].find(pattern) {
+                    let abs = search_from + pos + pattern.len();
+                    if let Some(ch) = js[abs..].chars().next() {
+                        if ch.is_ascii_uppercase() {
+                            *decls.entry(ch).or_default() += 1;
+                        }
                     }
+                    search_from = abs + 1;
                 }
-                search_from = abs + 1;
             }
-        }
-        for (name, count) in &decls {
-            assert_eq!(
-                *count, 1,
-                "identifier '{name}' declared {count} times — would cause SyntaxError"
-            );
+            for (name, count) in &decls {
+                assert_eq!(
+                    *count, 1,
+                    "identifier '{name}' declared {count} times (overlay={}, logs={})",
+                    fb.inject_feedback_overlay, fb.inject_client_logs
+                );
+            }
         }
     }
 
@@ -950,5 +959,78 @@ mod tests {
             script.contains("'data-veld-levels':'log,warn,error'"),
             "attribute value should be properly single-quoted"
         );
+    }
+
+    /// Verify that the bootstrap script's IIFE is properly closed for all
+    /// feature combinations — unbalanced parens would cause a SyntaxError.
+    #[test]
+    fn test_bootstrap_script_balanced_structure() {
+        let configs = [
+            make_fb(true, true, "log,warn,error"),
+            make_fb(true, false, "log"),
+            make_fb(false, true, "warn"),
+        ];
+        for fb in &configs {
+            let script = build_bootstrap_script(fb);
+            let js = script
+                .strip_prefix("<script>")
+                .unwrap()
+                .strip_suffix("</script>")
+                .unwrap();
+
+            // Count parens, braces, brackets — they must balance.
+            let mut parens = 0i32;
+            let mut braces = 0i32;
+            let mut brackets = 0i32;
+            let mut in_string = false;
+            let mut escape_next = false;
+            let mut quote_char = ' ';
+
+            for ch in js.chars() {
+                if escape_next {
+                    escape_next = false;
+                    continue;
+                }
+                if ch == '\\' && in_string {
+                    escape_next = true;
+                    continue;
+                }
+                if in_string {
+                    if ch == quote_char {
+                        in_string = false;
+                    }
+                    continue;
+                }
+                match ch {
+                    '\'' | '"' => {
+                        in_string = true;
+                        quote_char = ch;
+                    }
+                    '(' => parens += 1,
+                    ')' => parens -= 1,
+                    '{' => braces += 1,
+                    '}' => braces -= 1,
+                    '[' => brackets += 1,
+                    ']' => brackets -= 1,
+                    _ => {}
+                }
+            }
+
+            assert_eq!(
+                parens, 0,
+                "unbalanced parentheses (overlay={}, logs={})",
+                fb.inject_feedback_overlay, fb.inject_client_logs
+            );
+            assert_eq!(
+                braces, 0,
+                "unbalanced braces (overlay={}, logs={})",
+                fb.inject_feedback_overlay, fb.inject_client_logs
+            );
+            assert_eq!(
+                brackets, 0,
+                "unbalanced brackets (overlay={}, logs={})",
+                fb.inject_feedback_overlay, fb.inject_client_logs
+            );
+        }
     }
 }
