@@ -412,6 +412,38 @@ fn build_route_json(
                 }]
             }));
         } else {
+            // WebSocket / HTTP upgrade requests bypass replace_response —
+            // response rewriting wraps the ResponseWriter which prevents
+            // the connection hijack needed for protocol upgrades (e.g. HMR).
+            subroutes.push(serde_json::json!({
+                "match": [{
+                    "header": {
+                        "Connection": ["*Upgrade*"]
+                    }
+                }],
+                "handle": [{
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": upstream }]
+                }]
+            }));
+
+            // Server-Sent Events (SSE) bypass replace_response — the
+            // wrapped ResponseWriter may not forward http.Flusher, which
+            // would cause event-stream responses to buffer indefinitely.
+            // Several frameworks use SSE for HMR (Vite fallback, Remix,
+            // Turbopack).
+            subroutes.push(serde_json::json!({
+                "match": [{
+                    "header": {
+                        "Accept": ["text/event-stream"]
+                    }
+                }],
+                "handle": [{
+                    "handler": "reverse_proxy",
+                    "upstreams": [{ "dial": upstream }]
+                }]
+            }));
+
             subroutes.push(serde_json::json!({
                 "handle": [
                     {
@@ -484,9 +516,15 @@ mod tests {
         let route = build_route_json("test-route", "app.test.localhost", "localhost:3000", None);
         assert_eq!(route["@id"], "test-route");
         assert_eq!(route["match"][0]["host"][0], "app.test.localhost");
-        // Without feedback, only one subroute (the main proxy).
+        // Without feedback, only one subroute (the main proxy) — no upgrade
+        // bypass needed since plain reverse_proxy handles upgrades natively.
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 1);
+        assert_eq!(subroutes[0]["handle"][0]["handler"], "reverse_proxy");
+        assert!(
+            subroutes[0]["match"].is_null(),
+            "catch-all route has no matcher"
+        );
     }
 
     #[test]
@@ -505,7 +543,7 @@ mod tests {
             }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        assert_eq!(subroutes.len(), 2);
+        assert_eq!(subroutes.len(), 4);
         // First subroute matches /__veld__/*
         assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
         // Verify headers are set on the feedback proxy.
@@ -518,8 +556,28 @@ mod tests {
             fb_proxy["headers"]["request"]["set"]["X-Veld-Project"][0],
             "/tmp/project"
         );
+        // Second subroute: WebSocket/upgrade bypass.
+        assert_eq!(
+            subroutes[1]["match"][0]["header"]["Connection"][0],
+            "*Upgrade*"
+        );
+        assert_eq!(subroutes[1]["handle"][0]["handler"], "reverse_proxy");
+        assert_eq!(
+            subroutes[1]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
+        // Third subroute: SSE bypass.
+        assert_eq!(
+            subroutes[2]["match"][0]["header"]["Accept"][0],
+            "text/event-stream"
+        );
+        assert_eq!(subroutes[2]["handle"][0]["handler"], "reverse_proxy");
+        assert_eq!(
+            subroutes[2]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
         // Main app proxy has four replacements (client logs: 2 + feedback: 2).
-        let replace_handler = &subroutes[1]["handle"][0];
+        let replace_handler = &subroutes[3]["handle"][0];
         let replacements = replace_handler["replacements"].as_array().unwrap();
         assert_eq!(replacements.len(), 4);
         // 1: client log collector injection at <head...> (primary, regex).
@@ -577,7 +635,7 @@ mod tests {
                 .contains("script.js")
         );
         // Main app proxy strips compression so replace_response can work.
-        let main_proxy = &subroutes[1]["handle"][1];
+        let main_proxy = &subroutes[3]["handle"][1];
         assert_eq!(
             main_proxy["headers"]["request"]["set"]["Accept-Encoding"][0],
             "identity"
@@ -629,8 +687,26 @@ mod tests {
             }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        assert_eq!(subroutes.len(), 2); // /__veld__/* + main proxy
-        let replacements = subroutes[1]["handle"][0]["replacements"]
+        assert_eq!(subroutes.len(), 4); // /__veld__/* + upgrade bypass + SSE bypass + main proxy
+        // WebSocket upgrade bypass route dials the app upstream.
+        assert_eq!(
+            subroutes[1]["match"][0]["header"]["Connection"][0],
+            "*Upgrade*"
+        );
+        assert_eq!(
+            subroutes[1]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
+        // SSE bypass route dials the app upstream.
+        assert_eq!(
+            subroutes[2]["match"][0]["header"]["Accept"][0],
+            "text/event-stream"
+        );
+        assert_eq!(
+            subroutes[2]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
+        let replacements = subroutes[3]["handle"][0]["replacements"]
             .as_array()
             .unwrap();
         // Only feedback overlay replacements (CSS + script), no client log.
@@ -655,8 +731,26 @@ mod tests {
             }),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
-        assert_eq!(subroutes.len(), 2);
-        let replacements = subroutes[1]["handle"][0]["replacements"]
+        assert_eq!(subroutes.len(), 4); // /__veld__/* + upgrade bypass + SSE bypass + main proxy
+        // WebSocket upgrade bypass route dials the app upstream.
+        assert_eq!(
+            subroutes[1]["match"][0]["header"]["Connection"][0],
+            "*Upgrade*"
+        );
+        assert_eq!(
+            subroutes[1]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
+        // SSE bypass route dials the app upstream.
+        assert_eq!(
+            subroutes[2]["match"][0]["header"]["Accept"][0],
+            "text/event-stream"
+        );
+        assert_eq!(
+            subroutes[2]["handle"][0]["upstreams"][0]["dial"],
+            "localhost:3000"
+        );
+        let replacements = subroutes[3]["handle"][0]["replacements"]
             .as_array()
             .unwrap();
         // Only client log replacements (head + body fallback), no feedback overlay.
@@ -692,10 +786,69 @@ mod tests {
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         // /__veld__/* API route + plain proxy (no replace_response).
+        // No upgrade bypass needed — plain reverse_proxy handles upgrades natively.
         assert_eq!(subroutes.len(), 2);
+        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
         // Second subroute has no replace_response, just reverse_proxy.
         let handlers = subroutes[1]["handle"].as_array().unwrap();
         assert_eq!(handlers.len(), 1);
         assert_eq!(handlers[0]["handler"], "reverse_proxy");
+        assert!(
+            subroutes[1]["match"].is_null(),
+            "catch-all route has no matcher"
+        );
+    }
+
+    /// Verify the streaming bypass routes (WebSocket + SSE) are structurally
+    /// correct: they must sit between the /__veld__/* route and the
+    /// replace_response route, use plain reverse_proxy to the app upstream,
+    /// and not modify headers.
+    #[test]
+    fn test_streaming_bypass_routes_structure() {
+        let route = build_route_json(
+            "ws-test",
+            "app.test.localhost",
+            "localhost:5555",
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "run",
+                project_root: "/tmp",
+                client_log_levels: "log",
+                inject_feedback_overlay: true,
+                inject_client_logs: false,
+            }),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+
+        // Route ordering: /__veld__/* → upgrade bypass → SSE bypass → replace_response proxy.
+        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
+        assert_eq!(subroutes[3]["handle"][0]["handler"], "replace_response");
+
+        // --- WebSocket / HTTP upgrade bypass ---
+        let ws_route = &subroutes[1];
+        assert_eq!(ws_route["match"][0]["header"]["Connection"][0], "*Upgrade*");
+        let ws_handlers = ws_route["handle"].as_array().unwrap();
+        assert_eq!(ws_handlers.len(), 1);
+        assert_eq!(ws_handlers[0]["handler"], "reverse_proxy");
+        assert_eq!(ws_handlers[0]["upstreams"][0]["dial"], "localhost:5555");
+        assert!(
+            ws_handlers[0]["headers"].is_null(),
+            "upgrade route should not modify request headers"
+        );
+
+        // --- SSE bypass ---
+        let sse_route = &subroutes[2];
+        assert_eq!(
+            sse_route["match"][0]["header"]["Accept"][0],
+            "text/event-stream"
+        );
+        let sse_handlers = sse_route["handle"].as_array().unwrap();
+        assert_eq!(sse_handlers.len(), 1);
+        assert_eq!(sse_handlers[0]["handler"], "reverse_proxy");
+        assert_eq!(sse_handlers[0]["upstreams"][0]["dial"], "localhost:5555");
+        assert!(
+            sse_handlers[0]["headers"].is_null(),
+            "SSE route should not modify request headers"
+        );
     }
 }
