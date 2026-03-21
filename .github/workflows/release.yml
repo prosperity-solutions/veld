@@ -51,13 +51,16 @@ jobs:
         with:
           go-version: '1.22'
 
-      # Tag the Go submodule with a path-based version so the Go module
-      # proxy can resolve it. Users downloading the Caddy binary with our
-      # plugin need this tag to exist before the build API call.
+      # Tag the Go submodule with a v0.x version derived from the veld
+      # release. We keep the Go module under v2 to avoid Go's major-version
+      # suffix requirement (v2+ needs the module path to end in /vN).
+      # Mapping: veld X.Y.Z → caddy/inject/v0.X.Y
       - name: Tag Go module
         run: |
           VERSION="${{ needs.release.outputs.new_release_version }}"
-          TAG="caddy/inject/v${VERSION}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          TAG="caddy/inject/v0.${MAJOR}.${MINOR}"
           git tag "$TAG" "${{ needs.release.outputs.new_release_git_tag }}"
           git push origin "$TAG"
 
@@ -66,7 +69,9 @@ jobs:
       - name: Warm Go module proxy
         run: |
           VERSION="${{ needs.release.outputs.new_release_version }}"
-          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v${VERSION}"
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f2)
+          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v0.${MAJOR}.${MINOR}"
           GOPROXY=https://proxy.golang.org go list -m "$MODULE" || true
           sleep 10
           GOPROXY=https://proxy.golang.org go list -m "$MODULE"
