@@ -142,7 +142,7 @@ For a previous Veld install: `veld setup` detects its own running Caddy instance
 
 ### Caddy — Native Binary, Veld-Owned
 
-Veld downloads a custom Caddy build from `caddyserver.com/api/download` with the `replace-response` plugin, and installs it to `~/.local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
+Veld downloads a custom Caddy build from `caddyserver.com/api/download` with the `veld-inject` plugin, and installs it to `~/.local/lib/veld/caddy`. This is a Veld-owned installation — completely separate from any system or Homebrew Caddy.
 
 **Why not Docker for Caddy?** Docker on macOS runs inside a Linux VM. A Caddy container cannot reach `localhost:{port}` on the host directly — `localhost` inside the container is the container itself. The workaround (`host.docker.internal`) only works on Docker Desktop, not Linux. The Caddy config would have to be platform-aware just for this reason. A native binary sidesteps all of this — `localhost:{port}` always means what you expect, the config is identical across platforms, and there is no dependency on Docker Desktop being running.
 

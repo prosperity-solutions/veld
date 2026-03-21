@@ -296,10 +296,11 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
     let marker = crate::paths::caddy_url_marker();
 
     let (os, arch) = platform_pair()?;
-    // Use Caddy's build API to get a custom binary with the replace-response
-    // plugin, which lets us inject the feedback overlay script into HTML responses.
+    // Use Caddy's build API to get a custom binary with the veld-inject
+    // plugin, which prepends a bootstrap script to HTML responses without
+    // buffering (enabling streaming SSR, WebSocket, and SSE).
     let desired_url = format!(
-        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/caddyserver/replace-response"
+        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/prosperity-solutions/veld/caddy/inject"
     );
 
     if caddy.exists() && !force {
@@ -343,7 +344,7 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
     let _ = std::fs::write(&marker, &desired_url);
 
     Ok(StepResult::success(
-        "Caddy installed (with replace-response plugin)",
+        "Caddy installed (with veld-inject plugin)",
     ))
 }
 

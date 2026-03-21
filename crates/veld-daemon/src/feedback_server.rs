@@ -53,7 +53,7 @@ pub async fn run_feedback_server() {
             "/api/client-logs",
             post(ingest_client_logs).layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
         )
-        // Overlay assets (injected by Caddy's replace-response handler).
+        // Overlay assets (loaded dynamically by the veld_inject bootstrap script).
         .route("/feedback/script.js", get(overlay_script))
         .route("/feedback/style.css", get(overlay_css))
         .route("/feedback/logo.svg", get(logo_svg))

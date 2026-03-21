@@ -226,12 +226,12 @@ for bin in veld-helper veld-daemon; do
   fi
 done
 
-# --- Download Caddy with replace-response plugin ---
+# --- Download Caddy with veld-inject plugin ---
 echo "Installing Caddy..."
 if [ ! -f "${LIB_DIR}/caddy" ]; then
   CADDY_OS="$OS"
   [ "$CADDY_OS" = "macos" ] && CADDY_OS="darwin"
-  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/caddyserver/replace-response"
+  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject"
   curl -fSL -o "${TMP_DIR}/caddy" "$CADDY_URL"
   $NEED_SUDO cp "${TMP_DIR}/caddy" "${LIB_DIR}/caddy"
   $NEED_SUDO chmod +x "${LIB_DIR}/caddy"

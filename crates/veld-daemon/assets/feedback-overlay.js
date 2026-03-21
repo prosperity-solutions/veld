@@ -1,6 +1,6 @@
 // ---------------------------------------------------------------------------
 // Veld Feedback Overlay — Thread-based bidirectional conversation system
-// Injected into the host page via Caddy's replace-response handler.
+// Loaded dynamically by the veld_inject bootstrap script.
 // CSS is loaded externally. No other dependencies.
 // ---------------------------------------------------------------------------
 

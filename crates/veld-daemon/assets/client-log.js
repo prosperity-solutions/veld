@@ -4,9 +4,10 @@
 (function(){
 'use strict';
 try{
-// Dedup guard — if injected via both <head> and <body> fallback, only run once.
-if(window.__veld_cl)return;
-window.__veld_cl=1;
+// Dedup guard — bootstrap sets __veld_cl=1, full script upgrades to 2.
+// If already at 2, another copy of this script was loaded — skip.
+if(window.__veld_cl>=2)return;
+window.__veld_cl=2;
 // Top-frame only — avoid double-collection in iframes.
 if(window!==window.top)return;
 
@@ -17,6 +18,9 @@ var levelSet={};
 for(var i=0;i<levels.length;i++)levelSet[levels[i]]=1;
 
 var buf=[];
+// Drain early logs captured by the bootstrap script (if present).
+var early=window.__veld_early_logs;
+if(early&&early.length){for(var j=0;j<early.length;j++)buf.push(early[j]);window.__veld_early_logs=null;}
 var timer=null;
 var endpoint='/__veld__/api/client-logs';
 var MAX_BUF=50;
