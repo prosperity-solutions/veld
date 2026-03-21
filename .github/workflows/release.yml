@@ -46,6 +46,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.release.outputs.new_release_git_tag }}
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -54,27 +55,39 @@ jobs:
       # Tag the Go submodule with a v0.x version derived from the veld
       # release. We keep the Go module under v2 to avoid Go's major-version
       # suffix requirement (v2+ needs the module path to end in /vN).
-      # Mapping: veld X.Y.Z → caddy/inject/v0.X.Y
+      # Mapping: veld X.Y.Z → caddy/inject/v0.X.Y+Z (full semver to avoid
+      # duplicate tags on patch releases).
       - name: Tag Go module
         run: |
           VERSION="${{ needs.release.outputs.new_release_version }}"
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          TAG="caddy/inject/v0.${MAJOR}.${MINOR}"
-          git tag "$TAG" "${{ needs.release.outputs.new_release_git_tag }}"
-          git push origin "$TAG"
+          TAG="caddy/inject/v0.${VERSION}"
+          # Skip if tag already exists (e.g. re-run of the workflow).
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping"
+          else
+            git tag "$TAG" "${{ needs.release.outputs.new_release_git_tag }}"
+            git push origin "$TAG"
+          fi
+          echo "GO_MODULE_TAG=$TAG" >> "$GITHUB_ENV"
 
       # Warm the Go module proxy so it indexes the new version before
-      # anyone tries to download Caddy with our plugin.
+      # anyone tries to download Caddy with our plugin. Retry for up to
+      # 3 minutes — first-time indexing can be slow.
       - name: Warm Go module proxy
         run: |
           VERSION="${{ needs.release.outputs.new_release_version }}"
-          MAJOR=$(echo "$VERSION" | cut -d. -f1)
-          MINOR=$(echo "$VERSION" | cut -d. -f2)
-          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v0.${MAJOR}.${MINOR}"
-          GOPROXY=https://proxy.golang.org go list -m "$MODULE" || true
-          sleep 10
-          GOPROXY=https://proxy.golang.org go list -m "$MODULE"
+          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v0.${VERSION}"
+          for i in $(seq 1 18); do
+            if GOPROXY=https://proxy.golang.org go list -m "$MODULE" 2>/dev/null; then
+              echo "Go module indexed (attempt $i)"
+              exit 0
+            fi
+            echo "Attempt $i/18: not yet indexed, waiting 10s..."
+            sleep 10
+          done
+          echo "WARNING: Go module not indexed after 3 minutes."
+          echo "The Caddy download API may fail for early adopters."
+          echo "Module will be indexed eventually — users can retry setup."
 
   build:
     name: Build (${{ matrix.suffix }})
