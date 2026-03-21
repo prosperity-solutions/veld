@@ -22,7 +22,12 @@ pub fn lib_dir() -> PathBuf {
     user_dir.unwrap_or(system_dir)
 }
 
+/// Resolve the Caddy binary path. Respects `VELD_CADDY_BIN` env var to
+/// allow using a custom binary (e.g. built with xcaddy for development).
 pub fn caddy_bin() -> PathBuf {
+    if let Ok(p) = std::env::var("VELD_CADDY_BIN") {
+        return PathBuf::from(p);
+    }
     lib_dir().join("caddy")
 }
 

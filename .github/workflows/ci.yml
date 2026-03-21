@@ -108,11 +108,9 @@ jobs:
       - name: Build all binaries
         run: cargo build
 
-      # Build Caddy locally with the veld_inject plugin from this branch
-      # so that `veld setup` doesn't need the Go module to be published.
-      # install_caddy() skips download when the binary exists AND the URL
-      # marker matches. We install to every path that lib_dir() could
-      # resolve to (user home, root home, /usr/local).
+      # Build Caddy locally with the veld_inject plugin from this branch.
+      # VELD_CADDY_BIN tells install_caddy() and caddy_bin() to use this
+      # binary instead of downloading from the Caddy build API.
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -120,24 +118,7 @@ jobs:
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output /tmp/caddy-veld
           chmod +x /tmp/caddy-veld
-
-          # Construct the exact URL marker that install_caddy() expects.
-          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | grep -o '"[^"]*"' | tr -d '"')
-          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-          ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
-          MARKER_URL="https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
-
-          # Install to every path that lib_dir() could resolve to.
-          for DIR in \
-            "$HOME/.local/lib/veld" \
-            "/usr/local/lib/veld" \
-            "/var/root/.local/lib/veld" \
-            "/private/var/root/.local/lib/veld"; do
-            sudo mkdir -p "$DIR"
-            sudo cp /tmp/caddy-veld "$DIR/caddy"
-            sudo chmod +x "$DIR/caddy"
-            echo "$MARKER_URL" | sudo tee "$DIR/.caddy-url" > /dev/null
-          done
+          echo "VELD_CADDY_BIN=/tmp/caddy-veld" >> "$GITHUB_ENV"
 
       - name: Verify CLI basics
         run: |
@@ -177,7 +158,7 @@ jobs:
       - name: Run full integration tests
         run: |
           chmod +x tests/integration.sh
-          sudo ./tests/integration.sh \
+          sudo VELD_CADDY_BIN="$VELD_CADDY_BIN" ./tests/integration.sh \
             --veld-bin "$(pwd)/target/debug/veld" \
             --project-dir "$(pwd)/testproject"
 
@@ -426,8 +407,6 @@ jobs:
         run: npm install
 
       # Build Caddy locally with the veld_inject plugin from this branch.
-      # This avoids depending on the Go module proxy (which only has tagged
-      # releases) and ensures we test the exact code from the PR.
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -435,18 +414,7 @@ jobs:
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output /tmp/caddy-veld
           chmod +x /tmp/caddy-veld
-
-          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | grep -o '"[^"]*"' | tr -d '"')
-          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-          ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
-          MARKER_URL="https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}"
-
-          for DIR in "$HOME/.local/lib/veld" "/usr/local/lib/veld" "/var/root/.local/lib/veld"; do
-            sudo mkdir -p "$DIR"
-            sudo cp /tmp/caddy-veld "$DIR/caddy"
-            sudo chmod +x "$DIR/caddy"
-            echo "$MARKER_URL" | sudo tee "$DIR/.caddy-url" > /dev/null
-          done
+          echo "VELD_CADDY_BIN=/tmp/caddy-veld" >> "$GITHUB_ENV"
 
       - name: Setup veld (unprivileged)
         run: |
