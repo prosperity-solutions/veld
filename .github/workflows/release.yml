@@ -10,17 +10,15 @@ env:
 permissions: {}
 
 jobs:
-  release:
-    name: Semantic Release
+  # ── Step 1: Determine next version WITHOUT creating a tag ──────────
+  plan:
+    name: Plan Release
     runs-on: ubuntu-latest
     permissions:
-      contents: write
-      issues: write
+      contents: read
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic.outputs.new_release_version }}
-      new_release_git_tag: ${{ steps.semantic.outputs.new_release_git_tag }}
-      new_release_notes: ${{ steps.semantic.outputs.new_release_notes }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -32,16 +30,20 @@ jobs:
 
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic
+        with:
+          dry_run: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # ── Step 2: Build ALL artifacts BEFORE tagging ─────────────────────
   build:
     name: Build (${{ matrix.suffix }})
     permissions:
       contents: read
-    needs: release
-    if: needs.release.outputs.new_release_published == 'true'
+    needs: plan
+    if: needs.plan.outputs.new_release_published == 'true'
     strategy:
+      fail-fast: true
       matrix:
         include:
           - target: aarch64-apple-darwin
@@ -68,8 +70,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release.outputs.new_release_git_tag }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -88,23 +88,18 @@ jobs:
 
       - name: Set release version in Cargo.toml
         run: |
-          VERSION="${{ needs.release.outputs.new_release_version }}"
+          VERSION="${{ needs.plan.outputs.new_release_version }}"
           sed -i'' -e "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" Cargo.toml
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
 
-      # Build Caddy with the veld_inject plugin from this repo.
-      # xcaddy builds from local source — no Go module proxy needed.
       - name: Build Caddy with veld_inject
-        env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
         run: |
           export PATH="$(go env GOPATH)/bin:$PATH"
           XCADDY_VERSION=$(cat .xcaddy-version)
           go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
-          xcaddy build \
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} xcaddy build \
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output dist/caddy
           chmod +x dist/caddy
@@ -115,7 +110,7 @@ jobs:
           for bin in veld veld-helper veld-daemon; do
             cp target/${{ matrix.target }}/release/$bin dist/
           done
-          tar -czf veld-${{ needs.release.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
+          tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -123,11 +118,37 @@ jobs:
           name: veld-${{ matrix.suffix }}
           path: veld-*.tar.gz
 
-  publish:
-    name: Publish Release
+  # ── Step 3: All builds passed → create the tag + release ───────────
+  release:
+    name: Tag & Release
+    needs: [plan, build]
+    runs-on: ubuntu-latest
     permissions:
       contents: write
-    needs: [release, build]
+      issues: write
+    outputs:
+      new_release_git_tag: ${{ steps.semantic.outputs.new_release_git_tag }}
+      new_release_notes: ${{ steps.semantic.outputs.new_release_notes }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: cycjimmy/semantic-release-action@v4
+        id: semantic
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ── Step 4: Attach pre-built artifacts to the release ──────────────
+  publish:
+    name: Publish Artifacts
+    permissions:
+      contents: write
+    needs: [plan, release]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -146,7 +167,7 @@ jobs:
         env:
           RELEASE_NOTES: ${{ needs.release.outputs.new_release_notes }}
 
-      - name: Create GitHub Release
+      - name: Upload assets to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.release.outputs.new_release_git_tag }}
