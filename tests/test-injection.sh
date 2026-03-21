@@ -177,12 +177,12 @@ assert_contains \
   "$STREAM_HTML" \
   "streamed-content"
 
-# Verify the page is dynamically rendered (no-store = not statically cached).
+# Verify the page is dynamically rendered (not statically cached).
 STREAM_HEADERS=$(curl -sk -D- -o /dev/null "$BASE_URL/streaming" 2>/dev/null)
 assert_contains \
-  "Streaming page is dynamic (no-store)" \
+  "Streaming page is dynamic (must-revalidate)" \
   "$STREAM_HEADERS" \
-  "no-store"
+  "must-revalidate"
 
 # ---------------------------------------------------------------------------
 # Test 3: Feedback assets reachable
