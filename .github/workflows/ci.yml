@@ -110,6 +110,8 @@ jobs:
 
       # Build Caddy locally with the veld_inject plugin from this branch
       # so that `veld setup` doesn't need the Go module to be published.
+      # The marker must match the exact URL that install_caddy() constructs,
+      # otherwise it will delete the binary and try to re-download.
       - name: Build Caddy with local veld_inject
         run: |
           go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
@@ -118,7 +120,12 @@ jobs:
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output ~/.local/lib/veld/caddy
           chmod +x ~/.local/lib/veld/caddy
-          echo "local-ci-build" > ~/.local/lib/veld/.caddy-url
+          # Extract the pinned version from setup.rs and write the exact URL
+          # that install_caddy() expects, so the marker check passes.
+          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | grep -o '"[^"]*"' | tr -d '"')
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
+          echo "https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}" > ~/.local/lib/veld/.caddy-url
 
       - name: Verify CLI basics
         run: |
@@ -417,8 +424,12 @@ jobs:
             --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
             --output ~/.local/lib/veld/caddy
           chmod +x ~/.local/lib/veld/caddy
-          # Write marker so install_caddy() sees a binary and skips download.
-          echo "local-ci-build" > ~/.local/lib/veld/.caddy-url
+          # Write the exact URL that install_caddy() expects so the marker
+          # check passes and it doesn't try to re-download.
+          INJECT_VERSION=$(grep 'VELD_INJECT_VERSION' crates/veld-core/src/setup.rs | grep -o '"[^"]*"' | tr -d '"')
+          OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+          ARCH=$(uname -m); [ "$ARCH" = "x86_64" ] && ARCH="amd64"; [ "$ARCH" = "aarch64" ] && ARCH="arm64"; [ "$ARCH" = "arm64" ] && ARCH="arm64"
+          echo "https://caddyserver.com/api/download?os=${OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${INJECT_VERSION}" > ~/.local/lib/veld/.caddy-url
 
       - name: Setup veld (unprivileged)
         run: |
