@@ -399,6 +399,69 @@ jobs:
           sleep 1
           echo "=== Auto-bootstrap PASSED ==="
 
+  # ── Release build matrix — catch build failures before merge ──────
+  release-build:
+    name: Release Build (${{ matrix.suffix }})
+    runs-on: ${{ matrix.os }}
+    needs: check
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            suffix: macos-arm64
+            goos: darwin
+            goarch: arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            suffix: macos-amd64
+            goos: darwin
+            goarch: amd64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-amd64
+            goos: linux
+            goarch: amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: linux-arm64
+            cross: true
+            goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Install cross-compilation tools
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
+          echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
+
+      - name: Build release binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build Caddy with veld_inject
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          export PATH="$(go env GOPATH)/bin:$PATH"
+          XCADDY_VERSION=$(cat .xcaddy-version)
+          go install "github.com/caddyserver/xcaddy/cmd/xcaddy@v${XCADDY_VERSION}"
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output /dev/null
+
   injection-test:
     name: Injection E2E (macOS)
     runs-on: macos-latest
