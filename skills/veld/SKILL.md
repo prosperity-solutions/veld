@@ -5,7 +5,7 @@ description: >
   start/stop/restart environments, view logs or status, configure veld.json
   (add nodes, services, dependencies, presets, health checks, URL templates),
   get human feedback on UI changes, debug environment issues, or run any veld command.
-allowed-tools: Read, Edit, Bash(veld *), Bash(cat veld.json)
+allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
   version: "3.0.0"
@@ -18,7 +18,7 @@ Veld orchestrates local dev environments. It starts services from `veld.json`, w
 ## Live State
 
 ### Configuration
-!`cat veld.json 2>&1`
+!`veld config 2>&1`
 
 ### Nodes & presets
 !`veld nodes 2>&1`

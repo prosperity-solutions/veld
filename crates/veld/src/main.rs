@@ -190,6 +190,17 @@ enum Command {
         json: bool,
     },
 
+    /// Print the project's veld.json configuration.
+    Config {
+        /// Print only the path to veld.json instead of its contents.
+        #[arg(long)]
+        path: bool,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Initialise a new veld.json in the current directory.
     Init,
 
@@ -364,6 +375,8 @@ async fn main() {
         Command::Nodes { json } => commands::nodes::run(json).await,
 
         Command::Presets { json } => commands::presets::run(json).await,
+
+        Command::Config { path, json } => commands::config::run(path, json).await,
 
         Command::Init => commands::init::run().await,
 
