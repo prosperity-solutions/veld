@@ -288,7 +288,7 @@ impl Orchestrator {
         .await;
 
         // Gather context info for URL templates.
-        let branch = detect_git_branch(&self.project_root);
+        let branch = url::detect_git_branch(&self.project_root);
         let worktree = self
             .project_root
             .file_name()
@@ -805,7 +805,7 @@ impl Orchestrator {
         );
         ctx.set_builtin(
             "branch",
-            url::slugify(&detect_git_branch(&self.project_root)),
+            url::slugify(&url::detect_git_branch(&self.project_root)),
         );
         ctx.set_builtin("username", whoami_username());
 
@@ -1617,24 +1617,6 @@ fn build_env(
     Ok(env)
 }
 
-/// Detect the current git branch, or return empty string.
-fn detect_git_branch(project_root: &Path) -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(project_root)
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_owned())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_default()
-}
 
 fn whoami_username() -> String {
     std::env::var("USER")

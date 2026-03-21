@@ -494,19 +494,7 @@ fn prompt_yes_no(msg: &str, default_yes: bool) -> bool {
 }
 
 fn slugify(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|s| !s.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
+    veld_core::url::slugify(s)
 }
 
 // ---------------------------------------------------------------------------

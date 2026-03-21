@@ -88,9 +88,10 @@ pub async fn run(
         }
     }
 
+    let project_root = veld_core::config::project_root(&config_path);
     let run_name = match name {
         Some(ref n) => n.clone(),
-        None => generate_run_name(),
+        None => generate_run_name(&project_root),
     };
     let run_name_str = run_name.as_str();
 
