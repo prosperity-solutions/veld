@@ -181,6 +181,9 @@ jobs:
 
       - name: "Cleanup after integration tests"
         run: |
+          # Preserve the xcaddy-built Caddy binary across cleanup.
+          cp "$HOME/.local/lib/veld/caddy" /tmp/caddy-veld-preserve 2>/dev/null || true
+          cp "$HOME/.local/lib/veld/.caddy-url" /tmp/caddy-url-preserve 2>/dev/null || true
           sudo "$(pwd)/target/debug/veld" uninstall 2>/dev/null || true
           curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
@@ -189,6 +192,11 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
           sleep 2
+          # Restore the Caddy binary for subsequent tests.
+          mkdir -p "$HOME/.local/lib/veld"
+          cp /tmp/caddy-veld-preserve "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
+          cp /tmp/caddy-url-preserve "$HOME/.local/lib/veld/.caddy-url" 2>/dev/null || true
+          chmod +x "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
 
       - name: "Test: unprivileged setup lifecycle"
         run: |
@@ -362,6 +370,11 @@ jobs:
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
           sleep 1
+          # Restore the Caddy binary for subsequent tests.
+          mkdir -p "$HOME/.local/lib/veld"
+          cp /tmp/caddy-veld-preserve "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
+          cp /tmp/caddy-url-preserve "$HOME/.local/lib/veld/.caddy-url" 2>/dev/null || true
+          chmod +x "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
 
       - name: "Test: auto-bootstrap (no setup)"
         run: |
