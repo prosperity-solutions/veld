@@ -218,35 +218,13 @@ $NEED_SUDO mkdir -p "$LIB_DIR"
 $NEED_SUDO cp "${TMP_DIR}/veld" "${INSTALL_DIR}/veld"
 $NEED_SUDO chmod +x "${INSTALL_DIR}/veld"
 
-# Helper and daemon go to LIB_DIR
-for bin in veld-helper veld-daemon; do
+# Helper, daemon, and Caddy go to LIB_DIR (bundled in the release tarball).
+for bin in veld-helper veld-daemon caddy; do
   if [ -f "${TMP_DIR}/${bin}" ]; then
     $NEED_SUDO cp "${TMP_DIR}/${bin}" "${LIB_DIR}/${bin}"
     $NEED_SUDO chmod +x "${LIB_DIR}/${bin}"
   fi
 done
-
-# --- Download Caddy with veld-inject plugin ---
-# Version is pinned and updated by the release workflow.
-VELD_INJECT_VERSION="v0.4.0.0"
-echo "Installing Caddy..."
-if [ ! -f "${LIB_DIR}/caddy" ]; then
-  CADDY_OS="$OS"
-  [ "$CADDY_OS" = "macos" ] && CADDY_OS="darwin"
-  CADDY_URL="https://caddyserver.com/api/download?os=${CADDY_OS}&arch=${ARCH}&p=github.com/prosperity-solutions/veld/caddy/inject@${VELD_INJECT_VERSION}"
-  curl -fSL -o "${TMP_DIR}/caddy" "$CADDY_URL"
-  $NEED_SUDO cp "${TMP_DIR}/caddy" "${LIB_DIR}/caddy"
-  $NEED_SUDO chmod +x "${LIB_DIR}/caddy"
-
-  # macOS: clear xattrs and re-sign
-  if [ "$OS" = "macos" ]; then
-    $NEED_SUDO xattr -cr "${LIB_DIR}/caddy" 2>/dev/null || true
-    $NEED_SUDO codesign --force --sign - "${LIB_DIR}/caddy" 2>/dev/null || true
-  fi
-  echo "Caddy installed."
-else
-  echo "Caddy already installed."
-fi
 
 # --- macOS: clear extended attributes and re-sign binaries ---
 #

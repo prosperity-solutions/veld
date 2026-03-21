@@ -35,65 +35,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  go-module:
-    name: Publish Go Module
-    needs: release
-    if: needs.release.outputs.new_release_published == 'true'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.release.outputs.new_release_git_tag }}
-          fetch-depth: 0
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      # Tag the Go submodule with a v0.x version derived from the veld
-      # release. We keep the Go module under v2 to avoid Go's major-version
-      # suffix requirement (v2+ needs the module path to end in /vN).
-      # Mapping: veld X.Y.Z → caddy/inject/v0.X.Y+Z (full semver to avoid
-      # duplicate tags on patch releases).
-      - name: Tag Go module
-        run: |
-          VERSION="${{ needs.release.outputs.new_release_version }}"
-          TAG="caddy/inject/v0.${VERSION}"
-          # Skip if tag already exists (e.g. re-run of the workflow).
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping"
-          else
-            git tag "$TAG" "${{ needs.release.outputs.new_release_git_tag }}"
-            git push origin "$TAG"
-          fi
-          echo "GO_MODULE_TAG=$TAG" >> "$GITHUB_ENV"
-
-      # Warm the Go module proxy so it indexes the new version before
-      # anyone tries to download Caddy with our plugin. Retry for up to
-      # 3 minutes — first-time indexing can be slow.
-      - name: Warm Go module proxy
-        run: |
-          VERSION="${{ needs.release.outputs.new_release_version }}"
-          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v0.${VERSION}"
-          for i in $(seq 1 18); do
-            if GOPROXY=https://proxy.golang.org go list -m "$MODULE" 2>/dev/null; then
-              echo "Go module indexed (attempt $i)"
-              exit 0
-            fi
-            echo "Attempt $i/18: not yet indexed, waiting 10s..."
-            sleep 10
-          done
-          echo "WARNING: Go module not indexed after 3 minutes."
-          echo "The Caddy download API may fail for early adopters."
-          echo "Module will be indexed eventually — users can retry setup."
-
   build:
     name: Build (${{ matrix.suffix }})
     permissions:
       contents: read
-    needs: [release, go-module]
+    needs: release
     if: needs.release.outputs.new_release_published == 'true'
     strategy:
       matrix:
@@ -101,16 +47,24 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             suffix: macos-arm64
+            goos: darwin
+            goarch: arm64
           - target: x86_64-apple-darwin
             os: macos-latest
             suffix: macos-amd64
+            goos: darwin
+            goarch: amd64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             suffix: linux-amd64
+            goos: linux
+            goarch: amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             suffix: linux-arm64
             cross: true
+            goos: linux
+            goarch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -120,6 +74,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
       - name: Install cross-compilation tools
         if: matrix.cross
@@ -134,19 +91,21 @@ jobs:
           VERSION="${{ needs.release.outputs.new_release_version }}"
           sed -i'' -e "s/^version = \"[^\"]*\"/version = \"${VERSION}\"/" Cargo.toml
 
-      - name: Pin veld_inject module version
-        run: |
-          VERSION="${{ needs.release.outputs.new_release_version }}"
-          GO_VERSION="v0.${VERSION}"
-          # Update pinned version in Rust source.
-          sed -i'' -e "s/VELD_INJECT_VERSION: &str = \"[^\"]*\"/VELD_INJECT_VERSION: \&str = \"${GO_VERSION}\"/" \
-            crates/veld-core/src/setup.rs
-          # Update pinned version in install.sh.
-          sed -i'' -e "s/VELD_INJECT_VERSION=\"[^\"]*\"/VELD_INJECT_VERSION=\"${GO_VERSION}\"/" \
-            install.sh
-
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
+
+      # Build Caddy with the veld_inject plugin from this repo.
+      # xcaddy builds from local source — no Go module proxy needed.
+      - name: Build Caddy with veld_inject
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output dist/caddy
+          chmod +x dist/caddy
 
       - name: Package binaries
         run: |
