@@ -65,6 +65,18 @@ jobs:
           chmod +x tests/validate-schema.sh
           ./tests/validate-schema.sh --install
 
+  go-test:
+    name: Go Module Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Test caddy/inject module
+        working-directory: caddy/inject
+        run: go test -v ./...
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
@@ -89,9 +101,25 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
       - name: Build all binaries
         run: cargo build
+
+      # Build Caddy with the veld_inject plugin from this branch.
+      # install_caddy() just checks the binary exists — no markers needed.
+      - name: Build Caddy with local veld_inject
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p "$HOME/.local/lib/veld"
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output "$HOME/.local/lib/veld/caddy"
+          chmod +x "$HOME/.local/lib/veld/caddy"
+          # Stash a copy so we can restore after cleanup steps.
+          cp "$HOME/.local/lib/veld/caddy" /tmp/caddy-preserve
 
       - name: Verify CLI basics
         run: |
@@ -145,6 +173,10 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
           sleep 2
+          # Restore the Caddy binary for subsequent tests.
+          mkdir -p "$HOME/.local/lib/veld"
+          cp /tmp/caddy-preserve "$HOME/.local/lib/veld/caddy"
+          chmod +x "$HOME/.local/lib/veld/caddy"
 
       - name: "Test: unprivileged setup lifecycle"
         run: |
@@ -233,8 +265,12 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
           rm -rf "$HOME/.veld" 2>/dev/null || true
-          # Keep ~/.local/lib/veld/caddy so the next test doesn't need to re-download
           rm -f "$HOME/.local/lib/veld/caddy-data" 2>/dev/null || true
+          # Privileged setup runs as root. sudo on macOS may resolve
+          # lib_dir() to /usr/local/lib/veld. Ensure Caddy is there too.
+          sudo mkdir -p /usr/local/lib/veld
+          sudo cp /tmp/caddy-preserve /usr/local/lib/veld/caddy
+          sudo chmod +x /usr/local/lib/veld/caddy
           sleep 1
 
       - name: "Test: privileged setup lifecycle"
@@ -318,6 +354,10 @@ jobs:
           sudo rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" /usr/local/lib/veld 2>/dev/null || true
           sudo chown -R "$(whoami)" "$HOME/.local" 2>/dev/null || true
           sleep 1
+          # Restore the Caddy binary for subsequent tests.
+          mkdir -p "$HOME/.local/lib/veld"
+          cp /tmp/caddy-preserve "$HOME/.local/lib/veld/caddy"
+          chmod +x "$HOME/.local/lib/veld/caddy"
 
       - name: "Test: auto-bootstrap (no setup)"
         run: |
@@ -356,3 +396,64 @@ jobs:
           rm -rf "$HOME/.veld"
           sleep 1
           echo "=== Auto-bootstrap PASSED ==="
+
+  injection-test:
+    name: Injection E2E (macOS)
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build veld
+        run: cargo build
+
+      - name: Install Next.js deps
+        working-directory: testproject-nextjs
+        run: npm install
+
+      - name: Build Caddy with local veld_inject
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p "$HOME/.local/lib/veld"
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output "$HOME/.local/lib/veld/caddy"
+          chmod +x "$HOME/.local/lib/veld/caddy"
+
+      - name: Setup veld (unprivileged)
+        run: |
+          ./target/debug/veld setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed)"
+
+      - name: Wait for Caddy
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:2019/id/veld-sentinel 2>/dev/null | grep -q "veld"; then
+              echo "Caddy is running"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run injection E2E tests
+        run: |
+          chmod +x tests/test-injection.sh
+          ./tests/test-injection.sh \
+            --veld-bin "$(pwd)/target/debug/veld" \
+            --project-dir "$(pwd)/testproject-nextjs"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          ./target/debug/veld uninstall 2>/dev/null || true
+          curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
+          rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true

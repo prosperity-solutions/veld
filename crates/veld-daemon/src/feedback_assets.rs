@@ -1,8 +1,8 @@
 //! Feedback overlay assets served by the feedback HTTP server.
 //!
-//! The overlay `<script>` and `<link>` tags are injected into HTML responses by
-//! Caddy's `replace-response` plugin — no Service Worker or manual activation
-//! needed.
+//! The overlay scripts and stylesheets are loaded dynamically by a bootstrap
+//! `<script>` tag that Caddy's `veld_inject` handler prepends to HTML
+//! responses — no Service Worker or manual activation needed.
 
 /// Self-contained feedback overlay UI script.
 pub const OVERLAY_JS: &str = include_str!("../assets/feedback-overlay.js");

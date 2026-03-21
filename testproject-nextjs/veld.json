@@ -1,0 +1,18 @@
+{
+  "$schema": "../../schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "testproject-nextjs",
+  "url_template": "{service}.{run}.nextjs.localhost",
+  "nodes": {
+    "web": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npx next dev --turbopack --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/", "expect_status": 200, "timeout_seconds": 60 }
+        }
+      }
+    }
+  }
+}

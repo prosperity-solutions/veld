@@ -280,93 +280,24 @@ async fn is_caddy_running() -> bool {
 
 /// Install, upgrade, or verify the Caddy web server.
 ///
-/// When `force` is true the binary is always re-downloaded. Otherwise the
-/// function checks a URL marker file (`.caddy-url`) next to the binary: if
-/// the recorded URL matches the desired download URL the existing binary is
-/// kept; if it differs (e.g. new plugins were added) the old binary is
-/// replaced automatically.
-pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
+/// Verify that the Caddy binary is installed. The binary is bundled in the
+/// release tarball and copied to `lib_dir()` by the installer — no network
+/// download needed.
+pub async fn install_caddy(_force: bool) -> Result<StepResult, anyhow::Error> {
     // Migrate caddy-data from system install if needed.
     if let Err(e) = migrate_from_system_install() {
         tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
     }
 
-    let lib_dir = crate::paths::lib_dir();
-    let caddy = lib_dir.join("caddy");
-    let marker = crate::paths::caddy_url_marker();
+    let caddy = crate::paths::caddy_bin();
+    if caddy.exists() {
+        return Ok(StepResult::success("Caddy is already installed"));
+    }
 
-    let (os, arch) = platform_pair()?;
-    // Use Caddy's build API to get a custom binary with the replace-response
-    // plugin, which lets us inject the feedback overlay script into HTML responses.
-    let desired_url = format!(
-        "https://caddyserver.com/api/download?os={os}&arch={arch}&p=github.com/caddyserver/replace-response"
+    anyhow::bail!(
+        "Caddy binary not found at {}. Re-run the installer or place the caddy binary at this path.",
+        caddy.display()
     );
-
-    if caddy.exists() && !force {
-        // Check if the existing binary was built from the same URL.
-        let existing_url = std::fs::read_to_string(&marker).unwrap_or_default();
-        if existing_url.trim() == desired_url {
-            return Ok(StepResult::success(
-                "Caddy is already installed (up to date)",
-            ));
-        }
-        // URL mismatch — need to upgrade.
-        tracing::info!("Caddy URL marker mismatch, upgrading binary");
-        stop_caddy_best_effort().await;
-        let _ = std::fs::remove_file(&caddy);
-    }
-
-    std::fs::create_dir_all(&lib_dir).context(format!("failed to create {}", lib_dir.display()))?;
-
-    download_binary(&desired_url, &caddy)
-        .await
-        .context("failed to download Caddy binary from build API")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755))?;
-    }
-
-    // macOS: clear quarantine xattrs and re-sign so Gatekeeper doesn't SIGKILL.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = std::process::Command::new("xattr")
-            .args(["-cr", &caddy.to_string_lossy()])
-            .output();
-        let _ = std::process::Command::new("codesign")
-            .args(["--force", "--sign", "-", &caddy.to_string_lossy()])
-            .output();
-    }
-
-    // Write marker so subsequent runs can detect when the URL changes.
-    let _ = std::fs::write(&marker, &desired_url);
-
-    Ok(StepResult::success(
-        "Caddy installed (with replace-response plugin)",
-    ))
-}
-
-/// Best-effort stop of a running Caddy instance before replacing the binary.
-///
-/// Tries the helper RPC first (if veld-helper is running), then falls back to
-/// hitting the Caddy admin API directly.
-async fn stop_caddy_best_effort() {
-    // Try to stop via helper (try both sockets).
-    if let Ok(client) = HelperClient::connect().await {
-        if client.caddy_stop().await.is_ok() {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            return;
-        }
-    }
-
-    // Fallback: POST directly to Caddy admin API.
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-    let _ = http.post("http://localhost:2019/stop").send().await;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 }
 
 /// Trust Caddy's internal CA root certificate in the system trust store.
@@ -1057,45 +988,6 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-
-/// Return the (os, arch) pair for download URLs.
-fn platform_pair() -> Result<(&'static str, &'static str), anyhow::Error> {
-    let os = match std::env::consts::OS {
-        "macos" => "darwin",
-        "linux" => "linux",
-        other => anyhow::bail!("unsupported OS: {other}"),
-    };
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "amd64",
-        "aarch64" => "arm64",
-        other => anyhow::bail!("unsupported architecture: {other}"),
-    };
-    Ok((os, arch))
-}
-
-/// Download a binary from `url` to `dest` and make it executable.
-async fn download_binary(url: &str, dest: &Path) -> Result<(), anyhow::Error> {
-    let response = reqwest::get(url)
-        .await
-        .context("HTTP request failed")?
-        .error_for_status()
-        .context("download returned non-success status")?;
-
-    let bytes = response
-        .bytes()
-        .await
-        .context("failed to read response body")?;
-    std::fs::write(dest, &bytes).context("failed to write binary")?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
-            .context("failed to set executable permissions")?;
-    }
-
-    Ok(())
-}
 
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable,
 /// or in the veld lib directory.

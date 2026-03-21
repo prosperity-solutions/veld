@@ -30,12 +30,6 @@ pub fn caddy_data_dir() -> PathBuf {
     lib_dir().join("caddy-data")
 }
 
-/// Marker file that records the download URL used for the current Caddy binary.
-/// Used to detect when the binary needs upgrading (e.g. new plugins).
-pub fn caddy_url_marker() -> PathBuf {
-    lib_dir().join(".caddy-url")
-}
-
 pub fn dnsmasq_conf_dir() -> PathBuf {
     lib_dir().join("dnsmasq.d")
 }

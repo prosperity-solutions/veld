@@ -1,0 +1,12 @@
+{
+  "name": "testproject-nextjs",
+  "private": true,
+  "scripts": {
+    "dev": "next dev"
+  },
+  "dependencies": {
+    "next": "^16",
+    "react": "^19",
+    "react-dom": "^19"
+  }
+}

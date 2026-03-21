@@ -47,16 +47,24 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             suffix: macos-arm64
+            goos: darwin
+            goarch: arm64
           - target: x86_64-apple-darwin
             os: macos-latest
             suffix: macos-amd64
+            goos: darwin
+            goarch: amd64
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             suffix: linux-amd64
+            goos: linux
+            goarch: amd64
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             suffix: linux-arm64
             cross: true
+            goos: linux
+            goarch: arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -66,6 +74,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
 
       - name: Install cross-compilation tools
         if: matrix.cross
@@ -82,6 +93,19 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
+
+      # Build Caddy with the veld_inject plugin from this repo.
+      # xcaddy builds from local source — no Go module proxy needed.
+      - name: Build Caddy with veld_inject
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output dist/caddy
+          chmod +x dist/caddy
 
       - name: Package binaries
         run: |
