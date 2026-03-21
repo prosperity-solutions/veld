@@ -296,7 +296,7 @@ pub async fn install_caddy(force: bool) -> Result<StepResult, anyhow::Error> {
     if let Ok(path) = std::env::var("VELD_CADDY_BIN") {
         let p = std::path::PathBuf::from(&path);
         if p.exists() {
-            return Ok(StepResult::success(&format!(
+            return Ok(StepResult::success(format!(
                 "Using custom Caddy binary from VELD_CADDY_BIN ({path})"
             )));
         }
