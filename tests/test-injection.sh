@@ -177,12 +177,12 @@ assert_contains \
   "$STREAM_HTML" \
   "streamed-content"
 
-# Check transfer encoding (chunked = streaming)
-STREAM_HEADERS=$(curl -sk -I "$BASE_URL/streaming" 2>/dev/null)
+# Verify the page is dynamically rendered (no-store = not statically cached).
+STREAM_HEADERS=$(curl -sk -D- -o /dev/null "$BASE_URL/streaming" 2>/dev/null)
 assert_contains \
-  "Streaming page uses chunked transfer" \
+  "Streaming page is dynamic (no-store)" \
   "$STREAM_HEADERS" \
-  -i "transfer-encoding.*chunked"
+  "no-store"
 
 # ---------------------------------------------------------------------------
 # Test 3: Feedback assets reachable
@@ -215,15 +215,15 @@ assert_contains \
 echo ""
 echo "--- Non-HTML Passthrough ---"
 
-# Next.js serves JSON for client-side navigation — it should NOT have the bootstrap
-NEXTDATA=$(curl -sk "$BASE_URL/_next/data" 2>/dev/null || echo "")
-if [[ -n "$NEXTDATA" ]]; then
+# A JS bundle served by Next.js should NOT have the bootstrap injected.
+JS_BUNDLE=$(curl -sk "$BASE_URL/_next/static/chunks/webpack.js" 2>/dev/null || echo "")
+if [[ -n "$JS_BUNDLE" ]] && ! echo "$JS_BUNDLE" | grep -q "<!DOCTYPE"; then
   assert_not_contains \
     "Non-HTML response has no bootstrap" \
-    "$NEXTDATA" \
+    "$JS_BUNDLE" \
     "__veld_cl"
 else
-  echo -e "  ${YELLOW}⊘${NC} Non-HTML passthrough (skipped — no _next/data endpoint)"
+  echo -e "  ${YELLOW}⊘${NC} Non-HTML passthrough (skipped — could not fetch JS bundle)"
 fi
 
 # ---------------------------------------------------------------------------

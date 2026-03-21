@@ -265,8 +265,12 @@ jobs:
           launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
           launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
           rm -rf "$HOME/.veld" 2>/dev/null || true
-          # Keep ~/.local/lib/veld/caddy so the next test doesn't need to re-download
           rm -f "$HOME/.local/lib/veld/caddy-data" 2>/dev/null || true
+          # Privileged setup runs as root. sudo on macOS may resolve
+          # lib_dir() to /usr/local/lib/veld. Ensure Caddy is there too.
+          sudo mkdir -p /usr/local/lib/veld
+          sudo cp /tmp/caddy-preserve /usr/local/lib/veld/caddy
+          sudo chmod +x /usr/local/lib/veld/caddy
           sleep 1
 
       - name: "Test: privileged setup lifecycle"
