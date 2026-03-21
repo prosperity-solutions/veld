@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -10,12 +12,15 @@ env:
 permissions: {}
 
 jobs:
-  # ── Step 1: Determine next version WITHOUT creating a tag ──────────
+  # ── Plan: determine what would be released ─────────────────────────
+  # On push to main: full semantic-release dry run (version + notes).
+  # On PR: log the conventional commits that would be included.
   plan:
     name: Plan Release
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+      issues: write
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic.outputs.new_release_version }}
@@ -25,23 +30,42 @@ jobs:
           fetch-depth: 0
 
       - uses: actions/setup-node@v4
+        if: github.event_name == 'push'
         with:
           node-version: "22"
 
       - uses: cycjimmy/semantic-release-action@v4
+        if: github.event_name == 'push'
         id: semantic
         with:
           dry_run: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 2: Build ALL artifacts BEFORE tagging ─────────────────────
+      - name: Preview release commits
+        if: github.event_name == 'pull_request'
+        run: |
+          LAST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          if [ -z "$LAST_TAG" ]; then
+            echo "No previous tags — all commits on main would be included."
+            git log --oneline origin/main
+          else
+            echo "Commits since $LAST_TAG that would be in the next release:"
+            git log --oneline "$LAST_TAG"..origin/main
+            echo ""
+            echo "Plus this PR:"
+            git log --oneline origin/main..HEAD
+          fi
+
+  # ── Build ALL artifacts BEFORE tagging ─────────────────────────────
   build:
     name: Build (${{ matrix.suffix }})
     permissions:
       contents: read
     needs: plan
-    if: needs.plan.outputs.new_release_published == 'true'
+    if: >-
+      github.event_name == 'push'
+      && needs.plan.outputs.new_release_published == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -118,7 +142,7 @@ jobs:
           name: veld-${{ matrix.suffix }}
           path: veld-*.tar.gz
 
-  # ── Step 3: All builds passed → create the tag + release ───────────
+  # ── All builds passed → create the tag ─────────────────────────────
   release:
     name: Tag & Release
     needs: [plan, build]
@@ -143,7 +167,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 4: Attach pre-built artifacts to the release ──────────────
+  # ── Attach pre-built artifacts to the release ──────────────────────
   publish:
     name: Publish Artifacts
     permissions:
