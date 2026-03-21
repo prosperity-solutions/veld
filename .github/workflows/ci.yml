@@ -65,6 +65,18 @@ jobs:
           chmod +x tests/validate-schema.sh
           ./tests/validate-schema.sh --install
 
+  go-test:
+    name: Go Module Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+      - name: Test caddy/inject module
+        working-directory: caddy/inject
+        run: go test -v ./...
+
   check:
     name: Check & Lint
     runs-on: ubuntu-latest
@@ -356,3 +368,68 @@ jobs:
           rm -rf "$HOME/.veld"
           sleep 1
           echo "=== Auto-bootstrap PASSED ==="
+
+  injection-test:
+    name: Injection E2E (macOS)
+    runs-on: macos-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Build veld
+        run: cargo build
+
+      - name: Install Next.js deps
+        working-directory: testproject-nextjs
+        run: npm install
+
+      # Build Caddy locally with the veld_inject plugin from this branch.
+      # This avoids depending on the Go module proxy (which only has tagged
+      # releases) and ensures we test the exact code from the PR.
+      - name: Build Caddy with local veld_inject
+        run: |
+          go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+          mkdir -p ~/.local/lib/veld
+          xcaddy build \
+            --with github.com/prosperity-solutions/veld/caddy/inject=./caddy/inject \
+            --output ~/.local/lib/veld/caddy
+          chmod +x ~/.local/lib/veld/caddy
+          # Write marker so install_caddy() sees a binary and skips download.
+          echo "local-ci-build" > ~/.local/lib/veld/.caddy-url
+
+      - name: Setup veld (unprivileged)
+        run: ./target/debug/veld setup unprivileged || echo "WARNING: setup returned non-zero (CA trust may have failed)"
+
+      - name: Wait for Caddy
+        run: |
+          for i in $(seq 1 15); do
+            if curl -sf http://localhost:2019/id/veld-sentinel 2>/dev/null | grep -q "veld"; then
+              echo "Caddy is running"
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run injection E2E tests
+        run: |
+          chmod +x tests/test-injection.sh
+          ./tests/test-injection.sh \
+            --veld-bin "$(pwd)/target/debug/veld" \
+            --project-dir "$(pwd)/testproject-nextjs"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          ./target/debug/veld uninstall 2>/dev/null || true
+          curl -s -X POST http://localhost:2019/stop 2>/dev/null || true
+          rm -rf "$HOME/.veld" "$HOME/.local/lib/veld" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.helper" 2>/dev/null || true
+          launchctl bootout "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true

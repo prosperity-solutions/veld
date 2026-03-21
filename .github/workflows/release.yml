@@ -35,11 +35,47 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  go-module:
+    name: Publish Go Module
+    needs: release
+    if: needs.release.outputs.new_release_published == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.release.outputs.new_release_git_tag }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      # Tag the Go submodule with a path-based version so the Go module
+      # proxy can resolve it. Users downloading the Caddy binary with our
+      # plugin need this tag to exist before the build API call.
+      - name: Tag Go module
+        run: |
+          VERSION="${{ needs.release.outputs.new_release_version }}"
+          TAG="caddy/inject/v${VERSION}"
+          git tag "$TAG" "${{ needs.release.outputs.new_release_git_tag }}"
+          git push origin "$TAG"
+
+      # Warm the Go module proxy so it indexes the new version before
+      # anyone tries to download Caddy with our plugin.
+      - name: Warm Go module proxy
+        run: |
+          VERSION="${{ needs.release.outputs.new_release_version }}"
+          MODULE="github.com/prosperity-solutions/veld/caddy/inject@v${VERSION}"
+          GOPROXY=https://proxy.golang.org go list -m "$MODULE" || true
+          sleep 10
+          GOPROXY=https://proxy.golang.org go list -m "$MODULE"
+
   build:
     name: Build (${{ matrix.suffix }})
     permissions:
       contents: read
-    needs: release
+    needs: [release, go-module]
     if: needs.release.outputs.new_release_published == 'true'
     strategy:
       matrix:
