@@ -521,7 +521,10 @@ mod tests {
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 1);
         assert_eq!(subroutes[0]["handle"][0]["handler"], "reverse_proxy");
-        assert!(subroutes[0]["match"].is_null(), "catch-all route has no matcher");
+        assert!(
+            subroutes[0]["match"].is_null(),
+            "catch-all route has no matcher"
+        );
     }
 
     #[test]
@@ -823,10 +826,7 @@ mod tests {
 
         // --- WebSocket / HTTP upgrade bypass ---
         let ws_route = &subroutes[1];
-        assert_eq!(
-            ws_route["match"][0]["header"]["Connection"][0],
-            "*Upgrade*"
-        );
+        assert_eq!(ws_route["match"][0]["header"]["Connection"][0], "*Upgrade*");
         let ws_handlers = ws_route["handle"].as_array().unwrap();
         assert_eq!(ws_handlers.len(), 1);
         assert_eq!(ws_handlers[0]["handler"], "reverse_proxy");
