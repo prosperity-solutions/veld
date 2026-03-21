@@ -3,6 +3,8 @@ name: Release
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -10,12 +12,15 @@ env:
 permissions: {}
 
 jobs:
-  # ── Step 1: Determine next version WITHOUT creating a tag ──────────
+  # ── Plan: semantic-release dry run to show next version ──────────────
+  # Runs on both push and PR. On PR, checks out the merge ref and
+  # pretends it's main so semantic-release computes the real version.
   plan:
     name: Plan Release
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
+      issues: write
     outputs:
       new_release_published: ${{ steps.semantic.outputs.new_release_published }}
       new_release_version: ${{ steps.semantic.outputs.new_release_version }}
@@ -23,6 +28,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+
+      # On PR, the checkout is a detached merge ref — semantic-release
+      # needs to see branch "main" to match .releaserc.json config.
+      - name: Point local main at merge commit
+        if: github.event_name == 'pull_request'
+        run: git checkout -B main
 
       - uses: actions/setup-node@v4
         with:
@@ -35,13 +46,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 2: Build ALL artifacts BEFORE tagging ─────────────────────
+  # ── Build ALL artifacts BEFORE tagging ─────────────────────────────
   build:
     name: Build (${{ matrix.suffix }})
     permissions:
       contents: read
     needs: plan
-    if: needs.plan.outputs.new_release_published == 'true'
+    if: >-
+      github.event_name == 'push'
+      && needs.plan.outputs.new_release_published == 'true'
     strategy:
       fail-fast: true
       matrix:
@@ -118,7 +131,7 @@ jobs:
           name: veld-${{ matrix.suffix }}
           path: veld-*.tar.gz
 
-  # ── Step 3: All builds passed → create the tag + release ───────────
+  # ── All builds passed → create the tag ─────────────────────────────
   release:
     name: Tag & Release
     needs: [plan, build]
@@ -143,7 +156,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ── Step 4: Attach pre-built artifacts to the release ──────────────
+  # ── Attach pre-built artifacts to the release ──────────────────────
   publish:
     name: Publish Artifacts
     permissions:
