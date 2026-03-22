@@ -491,14 +491,9 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     }
 
     if fb.inject_feedback_overlay {
+        // CSS is bundled into the JS and injected via Shadow DOM — no <link> needed.
         js.push_str(
-            "E('link',{'rel':'stylesheet','href':'/__veld__/feedback/style.css'});\
-             var s=document.createElement('style');\
-             s.textContent=\"@font-face{font-family:'JetBrains Mono';font-style:normal;\
-             font-weight:400;font-display:swap;\
-             src:local('JetBrains Mono Regular'),local('JetBrainsMono-Regular');}\";\
-             (document.head||document.documentElement).appendChild(s);\
-             E('script',{'src':'/__veld__/feedback/script.js'});",
+            "E('script',{'src':'/__veld__/feedback/script.js'});",
         );
     }
 
@@ -614,12 +609,12 @@ mod tests {
             prefix.contains("__veld_early_logs"),
             "should buffer early logs"
         );
-        assert!(prefix.contains("style.css"), "should load overlay CSS");
+        assert!(prefix.contains("feedback/script.js"), "should load overlay JS (CSS bundled in)");
         assert!(
             prefix.contains("feedback/script.js"),
             "should load overlay JS"
         );
-        assert!(prefix.contains("@font-face"), "should include font-face");
+        // font-face is now bundled in Shadow DOM CSS, not in bootstrap
     }
 
     #[test]
@@ -640,7 +635,7 @@ mod tests {
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 2);
         let prefix = subroutes[1]["handle"][0]["prefix"].as_str().unwrap();
-        assert!(prefix.contains("style.css"), "should load overlay CSS");
+        assert!(prefix.contains("feedback/script.js"), "should load overlay JS (CSS bundled in)");
         assert!(
             prefix.contains("feedback/script.js"),
             "should load overlay JS"
@@ -678,7 +673,7 @@ mod tests {
             prefix.contains("__veld_early_logs"),
             "should intercept console"
         );
-        assert!(!prefix.contains("style.css"), "should NOT load overlay CSS");
+        assert!(!prefix.contains("feedback/script.js"), "should NOT load overlay JS");
         assert!(
             !prefix.contains("feedback/script.js"),
             "should NOT load overlay JS"
@@ -813,17 +808,15 @@ mod tests {
         assert!(script.contains("__veld_cl"));
         // Dynamic asset loading.
         assert!(script.contains("client-log.js"));
-        assert!(script.contains("style.css"));
         assert!(script.contains("feedback/script.js"));
-        assert!(script.contains("@font-face"));
+        // CSS is now bundled inside the JS (Shadow DOM), no separate style.css
+        assert!(!script.contains("style.css"));
     }
 
     #[test]
     fn test_bootstrap_script_overlay_only() {
         let script = build_bootstrap_script(&make_fb(true, false, "log,warn,error"));
-        assert!(script.contains("style.css"));
         assert!(script.contains("feedback/script.js"));
-        assert!(script.contains("@font-face"));
         assert!(!script.contains("client-log.js"));
         assert!(!script.contains("__veld_early_logs"));
     }
@@ -833,7 +826,6 @@ mod tests {
         let script = build_bootstrap_script(&make_fb(false, true, "warn,error"));
         assert!(script.contains("client-log.js"));
         assert!(script.contains("__veld_early_logs"));
-        assert!(!script.contains("style.css"));
         assert!(!script.contains("feedback/script.js"));
     }
 
