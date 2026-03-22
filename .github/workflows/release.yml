@@ -43,9 +43,6 @@ jobs:
         id: semantic
         with:
           dry_run: true
-          extra_plugins: |
-            @semantic-release/exec
-            @semantic-release/git
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -163,10 +160,6 @@ jobs:
 
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic
-        with:
-          extra_plugins: |
-            @semantic-release/exec
-            @semantic-release/git
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
