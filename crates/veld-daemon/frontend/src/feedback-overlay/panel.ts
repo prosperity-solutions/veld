@@ -3,6 +3,7 @@ import { getState, dispatch } from "./store";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
+import { parseControls, renderControls } from "./controls-renderer";
 import { toast } from "./toast";
 import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
@@ -50,7 +51,13 @@ export function updateMarkReadBtn(): void {
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
+// Track control cleanups to prevent memory leaks on re-render
+let controlCleanups: (() => void)[] = [];
+
 export function renderPanel(): void {
+  // Clean up previous control listeners before re-rendering
+  controlCleanups.forEach((fn) => fn());
+  controlCleanups = [];
   refs.panelBody.innerHTML = "";
 
   const expandedId = getState().expandedThreadId;
@@ -148,7 +155,9 @@ function renderThreadDetail(thread: Thread): void {
       icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
       msgEl.appendChild(icon);
       const body = mkEl("div", "message-body");
-      body.appendChild(mkEl("div", "message-text", msg.body));
+      const marker = "<!--veld-controls-->";
+      const mIdx = msg.body.indexOf(marker);
+      body.appendChild(mkEl("div", "message-text", mIdx >= 0 ? msg.body.substring(0, mIdx).trim() : msg.body));
       const authorLabel = msg.author === "agent" ? "Agent" : "You";
       body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
       msgEl.appendChild(body);
@@ -255,7 +264,21 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
     msgEl.appendChild(icon);
     const body = mkEl("div", "message-body");
-    body.appendChild(mkEl("div", "message-text", msg.body));
+    // Strip controls marker from visible text
+    const marker = "<!--veld-controls-->";
+    const markerIdx = msg.body.indexOf(marker);
+    const visibleBody = markerIdx >= 0 ? msg.body.substring(0, markerIdx).trim() : msg.body;
+    body.appendChild(mkEl("div", "message-text", visibleBody));
+
+    // Render interactive controls if present
+    const controls = parseControls({ body: msg.body });
+    if (controls && window.__veld_controls) {
+      const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id);
+      body.appendChild(element);
+      // Store cleanup so we can call it when panel re-renders
+      controlCleanups.push(cleanup);
+    }
+
     const authorLabel = msg.author === "agent" ? "Agent" : "You";
     body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
     msgEl.appendChild(body);

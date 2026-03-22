@@ -963,3 +963,80 @@
 .veld-feedback-annotate-btn svg {
   width: 12px; height: 12px;
 }
+
+/* ---- Agent controls ---- */
+.veld-feedback-controls {
+  margin-top: 8px;
+  padding: 8px 0;
+  border-top: 1px solid var(--vf-border);
+  display: flex; flex-direction: column; gap: 8px;
+}
+.veld-feedback-control-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.veld-feedback-control-label {
+  font: 500 11px/1 var(--vf-font);
+  color: var(--vf-text-muted);
+  min-width: 60px; flex-shrink: 0;
+}
+.veld-feedback-control-value {
+  font: 500 11px/1 var(--vf-font);
+  color: var(--vf-text);
+  min-width: 40px; text-align: right;
+}
+.veld-feedback-control-slider {
+  flex: 1; min-width: 80px;
+  accent-color: var(--vf-accent);
+}
+.veld-feedback-control-number {
+  width: 70px; padding: 3px 6px;
+  background: var(--vf-bg-card); color: var(--vf-text);
+  border: 1px solid var(--vf-border); border-radius: 4px;
+  font: 12px/1.4 var(--vf-font);
+  outline: none;
+}
+.veld-feedback-control-number:focus {
+  border-color: var(--vf-accent);
+}
+.veld-feedback-control-select {
+  flex: 1; padding: 3px 6px;
+  background: var(--vf-bg-card); color: var(--vf-text);
+  border: 1px solid var(--vf-border); border-radius: 4px;
+  font: 12px/1.4 var(--vf-font);
+  outline: none;
+}
+.veld-feedback-control-color {
+  width: 32px; height: 24px; border-radius: 4px;
+  border: 1px solid var(--vf-border);
+  padding: 0; cursor: pointer;
+}
+.veld-feedback-control-text {
+  flex: 1; padding: 3px 6px;
+  background: var(--vf-bg-card); color: var(--vf-text);
+  border: 1px solid var(--vf-border); border-radius: 4px;
+  font: 12px/1.4 var(--vf-font);
+  outline: none;
+}
+.veld-feedback-control-toggle-label {
+  font: 12px/1.4 var(--vf-font);
+  color: var(--vf-text);
+  display: flex; align-items: center; gap: 6px;
+  cursor: pointer;
+}
+.veld-feedback-control-toggle {
+  accent-color: var(--vf-accent);
+}
+.veld-feedback-control-button {
+  padding: 4px 12px; border-radius: 6px;
+  border: 1px solid var(--vf-border);
+  background: var(--vf-bg-card); color: var(--vf-text);
+  font: 500 12px/1.4 var(--vf-font);
+  cursor: pointer; transition: background .15s;
+}
+.veld-feedback-control-button:hover {
+  background: var(--vf-border);
+}
+.veld-feedback-control-apply-row {
+  justify-content: flex-end;
+  padding-top: 4px;
+}

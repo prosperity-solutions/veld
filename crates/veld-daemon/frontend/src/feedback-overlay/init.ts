@@ -1,6 +1,7 @@
 // Initialization — wires all module dependencies and starts the overlay.
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
+import { createControlsRegistry } from "../shared/controls";
 import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
@@ -49,6 +50,11 @@ export function init(): void {
       dispatch({ type: "SET_HIDDEN", hidden: true });
     }
   } catch (_) { /* ignore */ }
+
+  // Inject controls registry into window for framework hooks
+  if (!window.__veld_controls) {
+    window.__veld_controls = createControlsRegistry();
+  }
 
   wireDeps();
   buildDOM();
