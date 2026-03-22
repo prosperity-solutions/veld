@@ -99,6 +99,7 @@ function activate(
   const dispatch = store.dispatch;
 
   let draggingPinIndex: number | null = null;
+  let aimingPinIndex: number | null = null; // after dropping a pin, aiming the arrow
 
   function redraw(): void {
     ctx.save();
@@ -344,7 +345,15 @@ function activate(
 
   function onPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
-    if (e.target !== canvas) return; // don't capture clicks on toolbar elements
+    if (e.target !== canvas) return;
+
+    // Lock arrow direction if aiming a pin
+    if (aimingPinIndex !== null) {
+      aimingPinIndex = null;
+      scheduleRedraw();
+      return;
+    }
+
     dispatch({ type: "SET_DRAWING", drawing: true });
     canvas.setPointerCapture(e.pointerId);
     const pos = getPos(e);
@@ -399,6 +408,17 @@ function activate(
   }
 
   function onPointerMove(e: PointerEvent): void {
+    // Arrow aiming after pin drop
+    if (aimingPinIndex !== null) {
+      const pos = getPos(e);
+      const pin = getState().strokes[aimingPinIndex] as PinEntry;
+      if (pin && (pin as PinEntry).type === "pin") {
+        const angle = Math.atan2(pos.y - pin.y, pos.x - pin.x);
+        dispatch({ type: "SET_PIN_ANGLE", index: aimingPinIndex, angle });
+        scheduleRedraw();
+      }
+      return;
+    }
     if (draggingPinIndex !== null) {
       const pos = getPos(e);
       dispatch({ type: "MOVE_PIN", index: draggingPinIndex, x: pos.x, y: pos.y });
@@ -422,7 +442,13 @@ function activate(
   }
 
   function onPointerUp(): void {
-    if (draggingPinIndex !== null) { draggingPinIndex = null; return; }
+    if (draggingPinIndex !== null) {
+      // After dropping pin, enter arrow-aiming mode
+      aimingPinIndex = draggingPinIndex;
+      draggingPinIndex = null;
+      scheduleRedraw();
+      return;
+    }
     if (!getState().drawing) return;
     dispatch({ type: "SET_DRAWING", drawing: false });
     const s = getState();
@@ -525,7 +551,16 @@ function activate(
 
     const k = e.key.toLowerCase();
     // Colors: 1-4 or first letter
-    if (k >= "1" && k <= String(COLORS.length)) { dispatch({ type: "SET_COLOR", idx: parseInt(k) - 1 }); updateToolbarState(); return; }
+    if (k >= "1" && k <= String(COLORS.length)) {
+      if (getState().selectedStrokeIndex !== null) {
+        dispatch({ type: "RECOLOR_SELECTED", color: COLORS[parseInt(k) - 1].style });
+        scheduleRedraw();
+      } else {
+        dispatch({ type: "SET_COLOR", idx: parseInt(k) - 1 });
+      }
+      updateToolbarState();
+      return;
+    }
     // Tool modes
     if (k === "d" || k === "p") { dispatch({ type: "SET_TOOL", tool: "draw" }); updateToolbarState(); return; } // draw/pen
     if (k === "e") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); updateToolbarState(); return; }
@@ -610,7 +645,16 @@ function activate(
     btn.style.background = c.style;
     if (c.id === "white") btn.style.borderColor = "#aaa";
     if (c.id === "black") btn.style.borderColor = "#555";
-    btn.addEventListener("click", function () { dispatch({ type: "SET_COLOR", idx: i }); updateToolbarState(); });
+    btn.addEventListener("click", function () {
+      if (getState().selectedStrokeIndex !== null) {
+        // Recolor the selected stroke
+        dispatch({ type: "RECOLOR_SELECTED", color: c.style });
+        scheduleRedraw();
+      } else {
+        dispatch({ type: "SET_COLOR", idx: i });
+      }
+      updateToolbarState();
+    });
     tip(btn, c.label + "  " + (i + 1));
     colorBtns.push(btn);
     toolsWrap.appendChild(btn);

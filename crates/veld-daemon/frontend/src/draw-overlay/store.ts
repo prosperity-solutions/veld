@@ -54,6 +54,8 @@ export type DrawAction =
   | { type: "SELECT_STROKE"; index: number | null }
   | { type: "DELETE_SELECTED" }
   | { type: "MOVE_PIN"; index: number; x: number; y: number }
+  | { type: "RECOLOR_SELECTED"; color: string }
+  | { type: "SET_PIN_ANGLE"; index: number; angle: number }
   ;
 
 export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawState {
@@ -187,6 +189,22 @@ export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawSta
       if ((entry as PinEntry).type !== "pin") return { ...s };
       const pin = entry as PinEntry;
       const updated: PinEntry = { ...pin, x: action.x, y: action.y };
+      const strokes = s.strokes.map((stroke, i) => i === action.index ? updated : stroke);
+      return { ...s, strokes };
+    }
+    case "RECOLOR_SELECTED": {
+      if (s.selectedStrokeIndex === null || s.selectedStrokeIndex >= s.strokes.length) return { ...s };
+      const entry = s.strokes[s.selectedStrokeIndex];
+      const recolored = { ...entry, color: action.color };
+      const strokes = s.strokes.map((stroke, i) => i === s.selectedStrokeIndex ? recolored : stroke);
+      return { ...s, strokes };
+    }
+    case "SET_PIN_ANGLE": {
+      if (action.index >= s.strokes.length) return { ...s };
+      const entry = s.strokes[action.index];
+      if ((entry as PinEntry).type !== "pin") return { ...s };
+      const pin = entry as PinEntry;
+      const updated: PinEntry = { ...pin, angle: action.angle };
       const strokes = s.strokes.map((stroke, i) => i === action.index ? updated : stroke);
       return { ...s, strokes };
     }

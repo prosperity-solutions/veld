@@ -361,4 +361,48 @@ describe("draw store — misc actions", () => {
     const s = getState().strokes[0] as StrokeDraw;
     expect(s.points[0].x).toBe(0); // original position
   });
+
+  // --- Recolor selected ---
+
+  it("RECOLOR_SELECTED changes color of selected freehand stroke", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    dispatch({ type: "RECOLOR_SELECTED", color: "#C4F56A" });
+    expect((getState().strokes[0] as StrokeDraw).color).toBe("#C4F56A");
+  });
+
+  it("RECOLOR_SELECTED changes color of selected pin", () => {
+    const { getState, dispatch } = createDrawStore();
+    const pin: PinEntry = { type: "pin", x: 50, y: 50, number: 1, color: "#ef4444", angle: 0 };
+    dispatch({ type: "ADD_STROKE", stroke: pin });
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    dispatch({ type: "RECOLOR_SELECTED", color: "#000000" });
+    expect((getState().strokes[0] as PinEntry).color).toBe("#000000");
+  });
+
+  it("RECOLOR_SELECTED with no selection is a no-op", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "RECOLOR_SELECTED", color: "#000000" });
+    expect((getState().strokes[0] as StrokeDraw).color).toBe("#ef4444"); // unchanged
+  });
+
+  // --- Set pin angle ---
+
+  it("SET_PIN_ANGLE updates pin arrow direction", () => {
+    const { getState, dispatch } = createDrawStore();
+    const pin: PinEntry = { type: "pin", x: 100, y: 100, number: 1, color: "#ef4444", angle: 0 };
+    dispatch({ type: "ADD_STROKE", stroke: pin });
+    dispatch({ type: "SET_PIN_ANGLE", index: 0, angle: Math.PI / 2 });
+    expect((getState().strokes[0] as PinEntry).angle).toBeCloseTo(Math.PI / 2);
+  });
+
+  it("SET_PIN_ANGLE on non-pin is a no-op", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "SET_PIN_ANGLE", index: 0, angle: 1.0 });
+    // Should not crash or modify the stroke
+    expect(getState().strokes.length).toBe(1);
+  });
 });
