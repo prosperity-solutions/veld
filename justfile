@@ -106,19 +106,3 @@ test:
 
 lint:
     cargo clippy --workspace --all-targets
-
-# Build frontend TypeScript assets (requires Node.js + npm).
-build-frontend:
-    cd crates/veld-daemon/frontend && npm run build
-
-# Run frontend tests.
-test-frontend:
-    cd crates/veld-daemon/frontend && npm test
-
-# Type-check frontend without emitting.
-lint-frontend:
-    cd crates/veld-daemon/frontend && npm run typecheck
-
-# Install frontend dependencies (run once after clone).
-setup-frontend:
-    cd crates/veld-daemon/frontend && npm install
