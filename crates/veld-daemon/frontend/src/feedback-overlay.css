@@ -1108,3 +1108,136 @@
   margin-top: 2px;
   padding-top: 4px;
 }
+
+/* ---- Fuse grip (drag handle on numeric controls) ---- */
+.veld-feedback-control-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.veld-feedback-control-fuse-grip {
+  cursor: grab;
+  opacity: 0.3;
+  font-size: 12px;
+  padding: 0 4px;
+  transition: opacity 0.15s;
+  user-select: none;
+}
+
+.veld-feedback-control-fuse-grip:hover {
+  opacity: 0.8;
+}
+
+.veld-feedback-control-row.veld-feedback-control-drag-source {
+  opacity: 0.4;
+}
+
+.veld-feedback-control-row.veld-feedback-control-drop-target {
+  outline: 2px dashed var(--vf-accent);
+  outline-offset: -2px;
+  border-radius: 4px;
+}
+
+/* ---- XY Pad (2D control surface) ---- */
+.veld-feedback-xy-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 0;
+}
+
+.veld-feedback-xy-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.veld-feedback-xy-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--vf-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.veld-feedback-xy-split-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  border: 1px solid var(--vf-border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--vf-text-muted);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.veld-feedback-xy-split-btn:hover {
+  color: var(--vf-text);
+  border-color: var(--vf-text-muted);
+}
+.veld-feedback-xy-pad {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  max-height: 200px;
+  background:
+    linear-gradient(to right, rgba(255,255,255,.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255,255,255,.03) 1px, transparent 1px),
+    var(--vf-bg);
+  background-size: 20% 20%;
+  border: 1px solid var(--vf-border);
+  border-radius: 6px;
+  cursor: crosshair;
+  touch-action: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.veld-feedback-xy-dot {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--vf-accent);
+  border: 2px solid var(--vf-bg);
+  box-shadow: 0 0 0 1px var(--vf-accent), 0 1px 4px rgba(0,0,0,.3);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+  transition: left 0.05s, top 0.05s;
+  z-index: 1;
+}
+
+/* Crosshair lines extending from the dot */
+.veld-feedback-xy-pad::before,
+.veld-feedback-xy-pad::after {
+  content: "";
+  position: absolute;
+  background: var(--vf-accent);
+  opacity: 0.15;
+  pointer-events: none;
+}
+
+.veld-feedback-xy-label-x,
+.veld-feedback-xy-label-y {
+  position: absolute;
+  font-size: 10px;
+  color: var(--vf-text-muted);
+  pointer-events: none;
+  white-space: nowrap;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.veld-feedback-xy-label-x {
+  bottom: 4px;
+  right: 6px;
+}
+
+.veld-feedback-xy-label-y {
+  top: 4px;
+  left: 6px;
+}

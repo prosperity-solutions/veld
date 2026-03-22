@@ -155,9 +155,7 @@ function renderThreadDetail(thread: Thread): void {
       icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
       msgEl.appendChild(icon);
       const body = mkEl("div", "message-body");
-      const marker = "<!--veld-controls-->";
-      const mIdx = msg.body.indexOf(marker);
-      body.appendChild(mkEl("div", "message-text", mIdx >= 0 ? msg.body.substring(0, mIdx).trim() : msg.body));
+      body.appendChild(mkEl("div", "message-text", msg.body));
       const authorLabel = msg.author === "agent" ? "Agent" : "You";
       body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
       msgEl.appendChild(body);
@@ -264,14 +262,10 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
     msgEl.appendChild(icon);
     const body = mkEl("div", "message-body");
-    // Strip controls marker from visible text
-    const marker = "<!--veld-controls-->";
-    const markerIdx = msg.body.indexOf(marker);
-    const visibleBody = markerIdx >= 0 ? msg.body.substring(0, markerIdx).trim() : msg.body;
-    body.appendChild(mkEl("div", "message-text", visibleBody));
+    body.appendChild(mkEl("div", "message-text", msg.body));
 
     // Render interactive controls if present
-    const controls = parseControls({ body: msg.body });
+    const controls = parseControls(msg);
     if (controls && window.__veld_controls) {
       const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id);
       body.appendChild(element);

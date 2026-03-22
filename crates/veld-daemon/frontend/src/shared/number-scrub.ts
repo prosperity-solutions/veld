@@ -1,8 +1,8 @@
 /**
  * Bret Victor-style number scrubbing.
  *
- * Alt+drag on a number input to scrub its value.
- * Shift = 10x speed, Ctrl = 0.1x precision.
+ * Alt/Option+drag on a number input to scrub its value.
+ * Shift = 10x speed, Ctrl/Cmd = 0.1x precision.
  *
  * This module provides:
  * - `computeScrubValue` — pure math function (testable)
@@ -43,7 +43,7 @@ export function computeScrubValue(
  * Attach scrub behavior to an HTML input element.
  * Returns a cleanup function.
  *
- * When the user holds Alt and drags on the input:
+ * When the user holds Alt/Option and drags on the input:
  * - Cursor changes to col-resize
  * - Horizontal drag adjusts the value
  * - onChange is called with the new value on every frame
@@ -57,20 +57,21 @@ export function attachScrub(
   let startX = 0;
   let startValue = 0;
 
-  function onMouseDown(e: MouseEvent): void {
+  function onPointerDown(e: PointerEvent): void {
     if (!e.altKey) return;
     e.preventDefault();
+    e.stopPropagation();
     scrubbing = true;
     startX = e.clientX;
     startValue = parseFloat(input.value) || 0;
     input.style.cursor = "col-resize";
     document.body.style.cursor = "col-resize";
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    input.setPointerCapture(e.pointerId);
   }
 
-  function onMouseMove(e: MouseEvent): void {
+  function onPointerMove(e: PointerEvent): void {
     if (!scrubbing) return;
+    e.preventDefault();
     const delta = e.clientX - startX;
     const multiplier = e.shiftKey ? 10 : e.ctrlKey || e.metaKey ? 0.1 : 1;
     const newValue = computeScrubValue(startValue, delta, multiplier, opts);
@@ -78,41 +79,34 @@ export function attachScrub(
     onChange(newValue);
   }
 
-  function onMouseUp(): void {
+  function onPointerUp(e: PointerEvent): void {
+    if (!scrubbing) return;
     scrubbing = false;
     input.style.cursor = "";
     document.body.style.cursor = "";
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    input.releasePointerCapture(e.pointerId);
   }
 
-  input.addEventListener("mousedown", onMouseDown);
+  // Use pointer events on the input itself — works inside Shadow DOM
+  input.addEventListener("pointerdown", onPointerDown);
+  input.addEventListener("pointermove", onPointerMove);
+  input.addEventListener("pointerup", onPointerUp);
 
-  // Show col-resize cursor hint when Alt is held over the input
-  function onMouseEnter(e: MouseEvent): void {
-    if (e.altKey) input.style.cursor = "col-resize";
+  // Show col-resize cursor hint when Alt/Option is held over the input
+  function onKeyChange(e: KeyboardEvent): void {
+    if (e.key === "Alt" && !scrubbing) {
+      // Check if pointer is over this input
+      input.style.cursor = e.type === "keydown" ? "col-resize" : "";
+    }
   }
-  function onMouseLeave(): void {
-    if (!scrubbing) input.style.cursor = "";
-  }
-  function onKeyDown(e: KeyboardEvent): void {
-    if (e.key === "Alt") input.style.cursor = "col-resize";
-  }
-  function onKeyUp(e: KeyboardEvent): void {
-    if (e.key === "Alt" && !scrubbing) input.style.cursor = "";
-  }
-  input.addEventListener("mouseenter", onMouseEnter);
-  input.addEventListener("mouseleave", onMouseLeave);
-  document.addEventListener("keydown", onKeyDown);
-  document.addEventListener("keyup", onKeyUp);
+  input.addEventListener("keydown", onKeyChange);
+  input.addEventListener("keyup", onKeyChange);
 
   return () => {
-    input.removeEventListener("mousedown", onMouseDown);
-    input.removeEventListener("mouseenter", onMouseEnter);
-    input.removeEventListener("mouseleave", onMouseLeave);
-    document.removeEventListener("keydown", onKeyDown);
-    document.removeEventListener("keyup", onKeyUp);
-    document.removeEventListener("mousemove", onMouseMove);
-    document.removeEventListener("mouseup", onMouseUp);
+    input.removeEventListener("pointerdown", onPointerDown);
+    input.removeEventListener("pointermove", onPointerMove);
+    input.removeEventListener("pointerup", onPointerUp);
+    input.removeEventListener("keydown", onKeyChange);
+    input.removeEventListener("keyup", onKeyChange);
   };
 }

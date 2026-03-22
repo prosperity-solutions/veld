@@ -2,6 +2,13 @@
   "branches": ["main"],
   "plugins": [
     "@semantic-release/commit-analyzer",
-    "@semantic-release/release-notes-generator"
+    "@semantic-release/release-notes-generator",
+    ["@semantic-release/exec", {
+      "prepareCmd": "sed -i'' -e 's/requires veld \\*\\*v[^*]*/requires veld **v${nextRelease.version}/' skills/veld/SKILL.md && sed -i'' -e \"s/^version = \\\"[^\\\"]*\\\"/version = \\\"${nextRelease.version}\\\"/\" Cargo.toml"
+    }],
+    ["@semantic-release/git", {
+      "assets": ["skills/veld/SKILL.md", "Cargo.toml"],
+      "message": "chore(release): v${nextRelease.version} [skip ci]"
+    }]
   ]
 }

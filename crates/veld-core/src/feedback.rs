@@ -71,6 +71,9 @@ pub struct Message {
     pub body: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub screenshot: Option<String>,
+    /// Interactive controls (sliders, pickers, etc.) attached to this message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controls: Option<serde_json::Value>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -472,12 +475,18 @@ impl FeedbackStore {
 // Helper: create a new message.
 // ---------------------------------------------------------------------------
 
-pub fn new_message(author: Author, body: &str, screenshot: Option<String>) -> Message {
+pub fn new_message(
+    author: Author,
+    body: &str,
+    screenshot: Option<String>,
+    controls: Option<serde_json::Value>,
+) -> Message {
     Message {
         id: Uuid::new_v4().to_string(),
         author,
         body: body.to_owned(),
         screenshot,
+        controls,
         created_at: Utc::now(),
     }
 }
@@ -521,7 +530,7 @@ mod tests {
     }
 
     fn make_thread(body: &str) -> Thread {
-        let msg = new_message(Author::Human, body, None);
+        let msg = new_message(Author::Human, body, None, None);
         new_thread(
             ThreadScope::Element {
                 page_url: "/dashboard".into(),
@@ -585,14 +594,14 @@ mod tests {
         store.save_thread(&t).unwrap();
 
         // Agent replies.
-        let reply = new_message(Author::Agent, "Fixed — reduced to 1.5rem", None);
+        let reply = new_message(Author::Agent, "Fixed — reduced to 1.5rem", None, None);
         let updated = store.add_message(&t.id, &reply).unwrap();
         assert_eq!(updated.messages.len(), 2);
         assert_eq!(updated.messages[1].author, Author::Agent);
         assert_eq!(updated.messages[1].body, "Fixed — reduced to 1.5rem");
 
         // Human follows up.
-        let followup = new_message(Author::Human, "Looks good, thanks", None);
+        let followup = new_message(Author::Human, "Looks good, thanks", None, None);
         let updated = store.add_message(&t.id, &followup).unwrap();
         assert_eq!(updated.messages.len(), 3);
 
@@ -645,7 +654,7 @@ mod tests {
             .unwrap();
         assert_eq!(e1.seq, 1);
 
-        let msg = new_message(Author::Human, "Follow-up", None);
+        let msg = new_message(Author::Human, "Follow-up", None, None);
         let e2 = store
             .append_event(EventType::HumanMessage {
                 thread_id: t.id.clone(),

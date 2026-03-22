@@ -15,6 +15,17 @@ metadata:
 
 Veld orchestrates local dev environments. It starts services from `veld.json`, wires dependencies, and gives each service an HTTPS URL like `https://frontend.my-feature.myproject.localhost`.
 
+## Version Check
+
+This skill requires veld **v0.0.0-development**.
+
+Installed:
+!`veld -V 2>&1`
+
+If the output above shows "command not found" or "No such file", veld is not installed. Guide the user through installation — see [reference/install.md](reference/install.md). Do NOT attempt to run any `veld` commands until it is installed.
+
+If the installed version is older than the required version above, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
+
 ## Live State
 
 ### Configuration
@@ -62,9 +73,21 @@ Quick reference for the two node types:
 
 ## Feedback Loop
 
-For the full feedback workflow, events, and thread fields, see [reference/feedback.md](reference/feedback.md).
+For the full feedback workflow, events, thread fields, and interactive controls, see [reference/feedback.md](reference/feedback.md).
 
 Core pattern: listen → fix → answer → listen again with `--after <seq>` → repeat until `session_ended`.
+
+### Interactive Controls
+
+When a decision is about a **value** (how fast, what color, how much), send controls instead of asking in words. The human scrubs sliders and pickers in the browser, clicks Apply, and you get exact values back.
+
+```bash
+veld feedback ask --name dev \
+  --controls '[{"type":"slider","name":"duration","value":200,"min":50,"max":2000,"step":10,"unit":"ms"}]' \
+  "How fast should this animate?"
+```
+
+To enable XY pad fusion (human drags two controls into a 2D surface), always set `min` and `max` on numeric controls and group related parameters adjacently. See [reference/feedback.md](reference/feedback.md) for all control types and the binding templates.
 
 ## Gotchas
 

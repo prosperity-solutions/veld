@@ -38,6 +38,46 @@ export type ControlDef =
   | { type: "button"; name: string; label: string }
   ;
 
+/**
+ * Numeric control — the subset of ControlDef that can be fused into an XY pad.
+ * A control is "numeric" if it's a number or slider type with min/max bounds.
+ */
+export type NumericControlDef = Extract<ControlDef, { type: "number" | "slider" }>;
+
+/** A numeric control with guaranteed min/max — the output of isNumericControl. */
+export type BoundedNumericControlDef = NumericControlDef & { min: number; max: number };
+
+/** Axis definition for a fused XY pad (derived from a BoundedNumericControlDef at runtime). */
+export interface AxisDef {
+  name: string;
+  value: number;
+  min: number;
+  max: number;
+  step?: number;
+  unit?: string;
+  label?: string;
+}
+
+/** Returns true if the control can participate in an XY pad fusion (has min < max). */
+export function isNumericControl(ctrl: ControlDef): ctrl is BoundedNumericControlDef {
+  return (ctrl.type === "number" || ctrl.type === "slider")
+    && ctrl.min !== undefined && ctrl.max !== undefined
+    && ctrl.min < ctrl.max;
+}
+
+/** Convert a bounded numeric control def to an axis def for the XY pad. */
+export function controlToAxis(ctrl: BoundedNumericControlDef): AxisDef {
+  return {
+    name: ctrl.name,
+    value: ctrl.value,
+    min: ctrl.min,
+    max: ctrl.max,
+    step: ctrl.step,
+    unit: ctrl.unit,
+    label: ctrl.label || ctrl.name,
+  };
+}
+
 export function createControlsRegistry(): VeldControls {
   const store = new Map<string, unknown>();
   const listeners = new Map<string, Set<(value: unknown) => void>>();

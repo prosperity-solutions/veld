@@ -8,16 +8,8 @@ import {
   hasUnread,
 } from "./helpers";
 import { PREFIX, ICONS } from "./constants";
+import { deps } from "../shared/registry";
 import type { Thread } from "./types";
-
-/** Late-bound callback — set by the orchestrator once panel module is available. */
-let _openThreadInPanel: ((threadId: string) => void) | null = null;
-
-export function setOpenThreadInPanel(
-  fn: (threadId: string) => void,
-): void {
-  _openThreadInPanel = fn;
-}
 
 export function addPin(thread: Thread): void {
   if (thread.status === "resolved") return;
@@ -54,7 +46,7 @@ export function addPin(thread: Thread): void {
 
   pin.addEventListener("click", function (e: MouseEvent) {
     e.stopPropagation();
-    if (_openThreadInPanel) _openThreadInPanel(thread.id);
+    deps().openThreadInPanel(thread.id);
   });
 
   document.body.appendChild(pin);

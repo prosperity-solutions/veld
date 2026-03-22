@@ -4,39 +4,36 @@
  * When an agent sends a message with a `controls` field, this module
  * renders sliders, number inputs, dropdowns, color pickers, toggles,
  * and buttons — all wired to window.__veld_controls.
+ *
+ * Numeric controls (number/slider) can be fused into an XY pad by the
+ * user — drag one numeric control's grip onto another. The agent never
+ * needs to know about this; it just sends flat controls.
  */
 
-import type { ControlDef, VeldControls } from "../shared/controls";
+import type { ControlDef, VeldControls, BoundedNumericControlDef } from "../shared/controls";
+import { isNumericControl, controlToAxis } from "../shared/controls";
 import { attachScrub } from "../shared/number-scrub";
+import { createXYPad } from "./xy-pad";
 import { PREFIX } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 
 /**
- * Parse controls from a message body.
- * Controls are embedded as a JSON block after <!--veld-controls--> marker,
- * or as a `controls` property on the message object.
+ * Parse controls from a message's `controls` field.
+ * Returns null if the message has no controls.
  */
-export function parseControls(message: { body: string; controls?: ControlDef[] }): ControlDef[] | null {
-  if (message.controls && Array.isArray(message.controls)) {
-    return message.controls;
-  }
-  // Try parsing from body marker
-  const marker = "<!--veld-controls-->";
-  const idx = message.body.indexOf(marker);
-  if (idx >= 0) {
-    try {
-      const json = message.body.substring(idx + marker.length).trim();
-      const parsed = JSON.parse(json);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-      if (parsed.controls && Array.isArray(parsed.controls)) {
-        return parsed.controls;
-      }
-    } catch { /* ignore parse errors */ }
+export function parseControls(message: { body: string; controls?: unknown[] }): ControlDef[] | null {
+  if (message.controls && Array.isArray(message.controls) && message.controls.length > 0) {
+    return message.controls as ControlDef[];
   }
   return null;
+}
+
+/** Per-row state for numeric controls that can be fused. */
+interface NumericRowState {
+  ctrl: BoundedNumericControlDef;
+  row: HTMLElement;
+  index: number;
 }
 
 /**
@@ -52,18 +49,69 @@ export function renderControls(
   const container = document.createElement("div");
   container.className = PREFIX + "controls";
 
-  for (const ctrl of controls) {
+  if (!Array.isArray(controls) || controls.length === 0) {
+    return { element: container, cleanup: () => {} };
+  }
+
+  // Track numeric rows for fusion
+  const numericRows: NumericRowState[] = [];
+  // Track fused pairs so we can split them
+  const fusedPairs: Map<string, { xIdx: number; yIdx: number; padEl: HTMLElement; padCleanup: () => void }> = new Map();
+
+  for (let i = 0; i < controls.length; i++) {
+    const ctrl = controls[i];
+
+    // Validate required fields per control type
+    if (ctrl.type === "select" && !Array.isArray(ctrl.options)) {
+      console.warn(`[veld] Invalid select control "${ctrl.name}": missing options array`);
+      continue;
+    }
+
     const row = document.createElement("div");
     row.className = PREFIX + "control-row";
+    row.dataset.controlIndex = String(i);
 
     switch (ctrl.type) {
       case "number":
       case "slider": {
-        // Label
+        // Label row with fuse grip
+        const labelRow = document.createElement("div");
+        labelRow.className = PREFIX + "control-label-row";
+
         const label = document.createElement("label");
         label.className = PREFIX + "control-label";
         label.textContent = ctrl.label || ctrl.name;
-        row.appendChild(label);
+        labelRow.appendChild(label);
+
+        // Fuse grip — visible only on numeric controls with min/max
+        if (isNumericControl(ctrl)) {
+          const grip = document.createElement("span");
+          grip.className = PREFIX + "control-fuse-grip";
+          grip.title = "Drag onto another numeric control to create XY pad";
+          grip.textContent = "\u2725"; // ✥ four-pointed star
+          grip.draggable = true;
+
+          const onDragStart = (e: DragEvent): void => {
+            e.dataTransfer?.setData("application/x-veld-control", String(i));
+            e.dataTransfer?.setData("text/plain", String(i));
+            row.classList.add(PREFIX + "control-drag-source");
+          };
+          const onDragEnd = (): void => {
+            row.classList.remove(PREFIX + "control-drag-source");
+          };
+          grip.addEventListener("dragstart", onDragStart);
+          grip.addEventListener("dragend", onDragEnd);
+          cleanups.push(() => {
+            grip.removeEventListener("dragstart", onDragStart);
+            grip.removeEventListener("dragend", onDragEnd);
+          });
+
+          labelRow.appendChild(grip);
+
+          numericRows.push({ ctrl, row, index: i });
+        }
+
+        row.appendChild(labelRow);
 
         // Value display
         const valueDisplay = document.createElement("span");
@@ -71,7 +119,6 @@ export function renderControls(
         valueDisplay.textContent = String(ctrl.value) + (ctrl.unit ? " " + ctrl.unit : "");
 
         if (ctrl.type === "slider") {
-          // Range slider
           const input = document.createElement("input");
           input.type = "range";
           input.className = PREFIX + "control-slider";
@@ -93,7 +140,6 @@ export function renderControls(
           inputRow.appendChild(valueDisplay);
           row.appendChild(inputRow);
         } else {
-          // Number input with Bret Victor scrubbing
           const input = document.createElement("input");
           input.type = "number";
           input.className = PREFIX + "control-number";
@@ -112,7 +158,6 @@ export function renderControls(
             }
           });
 
-          // Attach Bret Victor scrubbing
           const scrubCleanup = attachScrub(
             input,
             { min: ctrl.min, max: ctrl.max, step: ctrl.step || 1 },
@@ -128,6 +173,33 @@ export function renderControls(
           numRow.appendChild(input);
           numRow.appendChild(valueDisplay);
           row.appendChild(numRow);
+        }
+
+        // Drop target for fusion
+        if (isNumericControl(ctrl)) {
+          const onDragOver = (e: DragEvent): void => {
+            if (!e.dataTransfer?.types.includes("application/x-veld-control")) return;
+            e.preventDefault();
+            row.classList.add(PREFIX + "control-drop-target");
+          };
+          const onDragLeave = (): void => {
+            row.classList.remove(PREFIX + "control-drop-target");
+          };
+          const onDrop = (e: DragEvent): void => {
+            e.preventDefault();
+            row.classList.remove(PREFIX + "control-drop-target");
+            const sourceIdx = parseInt(e.dataTransfer?.getData("text/plain") || "", 10);
+            if (isNaN(sourceIdx) || sourceIdx === i) return;
+            fuseControls(sourceIdx, i);
+          };
+          row.addEventListener("dragover", onDragOver);
+          row.addEventListener("dragleave", onDragLeave);
+          row.addEventListener("drop", onDrop);
+          cleanups.push(() => {
+            row.removeEventListener("dragover", onDragOver);
+            row.removeEventListener("dragleave", onDragLeave);
+            row.removeEventListener("drop", onDrop);
+          });
         }
         break;
       }
@@ -228,6 +300,63 @@ export function renderControls(
     }
 
     container.appendChild(row);
+  }
+
+  /** Fuse two numeric controls into an XY pad. */
+  function fuseControls(xIdx: number, yIdx: number): void {
+    const xCtrl = controls[xIdx];
+    const yCtrl = controls[yIdx];
+    if (!isNumericControl(xCtrl) || !isNumericControl(yCtrl)) return;
+
+    // Normalize key so 0:1 and 1:0 are the same pair (#4)
+    const key = Math.min(xIdx, yIdx) + ":" + Math.max(xIdx, yIdx);
+    if (fusedPairs.has(key)) return;
+
+    // Hide the original rows
+    const xRow = container.querySelector(`[data-control-index="${xIdx}"]`) as HTMLElement | null;
+    const yRow = container.querySelector(`[data-control-index="${yIdx}"]`) as HTMLElement | null;
+    if (xRow) xRow.style.display = "none";
+    if (yRow) yRow.style.display = "none";
+
+    const { element, cleanup } = createXYPad(
+      controlToAxis(xCtrl),
+      controlToAxis(yCtrl),
+      registry,
+      () => splitControls(key),
+    );
+
+    // Insert the pad where the first control was
+    const insertBefore = xRow?.nextSibling || yRow;
+    if (insertBefore) {
+      container.insertBefore(element, insertBefore);
+    } else {
+      // Insert before the Apply row
+      const applyRow = container.querySelector("." + PREFIX + "control-apply-row");
+      container.insertBefore(element, applyRow);
+    }
+
+    fusedPairs.set(key, { xIdx, yIdx, padEl: element, padCleanup: cleanup });
+    cleanups.push(cleanup);
+  }
+
+  /** Split a fused XY pad back into individual controls. */
+  function splitControls(key: string): void {
+    const pair = fusedPairs.get(key);
+    if (!pair) return;
+
+    pair.padCleanup();
+    pair.padEl.remove();
+    fusedPairs.delete(key);
+
+    // Remove from cleanups array to prevent double-cleanup (#1)
+    const idx = cleanups.indexOf(pair.padCleanup);
+    if (idx >= 0) cleanups.splice(idx, 1);
+
+    // Show the original rows again
+    const xRow = container.querySelector(`[data-control-index="${pair.xIdx}"]`) as HTMLElement | null;
+    const yRow = container.querySelector(`[data-control-index="${pair.yIdx}"]`) as HTMLElement | null;
+    if (xRow) xRow.style.display = "";
+    if (yRow) yRow.style.display = "";
   }
 
   // Apply button — sends all values back to the agent

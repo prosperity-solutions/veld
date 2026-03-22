@@ -150,3 +150,35 @@ describe("popover wiring", () => {
     expect(cleanup).toHaveBeenCalled();
   });
 });
+
+describe("pin click wiring (regression)", () => {
+  beforeEach(setupState);
+
+  it("clicking a pin calls deps().openThreadInPanel with thread id", async () => {
+    const fakeDeps = makeFakeDeps();
+    registerDeps(fakeDeps);
+
+    const { addPin } = await import("../src/feedback-overlay/pins");
+
+    const thread = {
+      id: "test-thread-123",
+      scope: { type: "element" as const, page_url: "/", selector: "div", position: { x: 100, y: 100, width: 200, height: 50 } },
+      origin: "human" as const,
+      status: "open" as const,
+      messages: [{ id: "m1", author: "human" as const, body: "hi", created_at: new Date().toISOString() }],
+      viewport_width: 1024,
+      viewport_height: 768,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    addPin(thread);
+
+    // Find the pin that was added to document.body
+    const pin = document.querySelector(".veld-feedback-pin") as HTMLElement;
+    expect(pin).not.toBeNull();
+
+    pin.click();
+    expect(fakeDeps.openThreadInPanel).toHaveBeenCalledWith("test-thread-123");
+  });
+});

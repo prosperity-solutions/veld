@@ -285,14 +285,9 @@ async fn run_answer(
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
-    // If controls provided, embed them in the message body
-    let full_body = if let Some(ctrl_json) = controls {
-        format!("{body}\n<!--veld-controls-->{ctrl_json}")
-    } else {
-        body.to_owned()
-    };
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
 
-    let msg = new_message(Author::Agent, &full_body, None);
+    let msg = new_message(Author::Agent, body, None, controls_value);
 
     if let Err(e) = store.add_message(thread_id, &msg) {
         output::print_error(&format!("Failed to add message: {e}"), false);
@@ -338,12 +333,8 @@ async fn run_ask(
         None => ThreadScope::Global,
     };
 
-    let full_body = if let Some(ctrl_json) = controls {
-        format!("{body}\n<!--veld-controls-->{ctrl_json}")
-    } else {
-        body.to_owned()
-    };
-    let msg = new_message(Author::Agent, &full_body, None);
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let msg = new_message(Author::Agent, body, None, controls_value);
     let thread = new_thread(scope, ThreadOrigin::Agent, None, None, None, msg);
 
     if let Err(e) = store.save_thread(&thread) {

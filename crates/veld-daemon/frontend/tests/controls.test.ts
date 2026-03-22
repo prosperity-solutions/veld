@@ -1,5 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
-import { createControlsRegistry } from "../src/shared/controls";
+import { createControlsRegistry, isNumericControl } from "../src/shared/controls";
+import type { ControlDef } from "../src/shared/controls";
 
 describe("VeldControls registry", () => {
   it("get returns undefined for unset values", () => {
@@ -131,5 +132,37 @@ describe("VeldControls registry", () => {
     expect(cb).toHaveBeenCalledTimes(2);
     expect(cb).toHaveBeenNthCalledWith(1, 1);
     expect(cb).toHaveBeenNthCalledWith(2, 2);
+  });
+});
+
+describe("isNumericControl", () => {
+  it("returns true for slider with min < max", () => {
+    const ctrl: ControlDef = { type: "slider", name: "x", value: 50, min: 0, max: 100 };
+    expect(isNumericControl(ctrl)).toBe(true);
+  });
+
+  it("returns true for number with min < max", () => {
+    const ctrl: ControlDef = { type: "number", name: "x", value: 50, min: 0, max: 100 };
+    expect(isNumericControl(ctrl)).toBe(true);
+  });
+
+  it("returns false for number without min/max", () => {
+    const ctrl: ControlDef = { type: "number", name: "x", value: 50 };
+    expect(isNumericControl(ctrl)).toBe(false);
+  });
+
+  it("returns false when min === max (zero range)", () => {
+    const ctrl: ControlDef = { type: "slider", name: "x", value: 50, min: 50, max: 50 };
+    expect(isNumericControl(ctrl)).toBe(false);
+  });
+
+  it("returns false when min > max (inverted)", () => {
+    const ctrl: ControlDef = { type: "number", name: "x", value: 50, min: 100, max: 0 };
+    expect(isNumericControl(ctrl)).toBe(false);
+  });
+
+  it("returns false for non-numeric types", () => {
+    const ctrl: ControlDef = { type: "text", name: "x", value: "hi" };
+    expect(isNumericControl(ctrl)).toBe(false);
   });
 });

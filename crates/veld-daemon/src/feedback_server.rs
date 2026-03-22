@@ -474,7 +474,7 @@ async fn create_thread(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    let msg = new_message(Author::Human, &body.message, body.screenshot);
+    let msg = new_message(Author::Human, &body.message, body.screenshot, None);
     let thread = new_thread(
         body.scope,
         ThreadOrigin::Human,
@@ -531,7 +531,7 @@ async fn add_thread_message(
         .ok_or(StatusCode::BAD_REQUEST)?;
     let store = resolve_store(Some(run_name), None, &headers)?;
 
-    let msg = new_message(Author::Human, &body.body, body.screenshot);
+    let msg = new_message(Author::Human, &body.body, body.screenshot, None);
 
     store
         .add_message(&id, &msg)
