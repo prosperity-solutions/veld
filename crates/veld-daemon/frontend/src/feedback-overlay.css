@@ -935,10 +935,17 @@
   background: var(--vf-accent-hover);
 }
 
-/* Draw toolbar when inside a container (annotation mode) */
+/* Draw toolbar when inside screenshot annotation — render in flow below image */
 .veld-feedback-screenshot-preview .veld-feedback-draw-toolbar {
-  position: absolute; top: auto; bottom: -44px; left: 50%;
-  transform: translateX(-50%);
+  position: relative; top: auto; bottom: auto; left: auto;
+  transform: none;
+  margin: 8px auto 0;
+  opacity: 1;
+}
+@media (hover: hover) {
+  .veld-feedback-screenshot-preview .veld-feedback-draw-toolbar {
+    opacity: 1;
+  }
 }
 
 /* Annotate button in screenshot preview */
