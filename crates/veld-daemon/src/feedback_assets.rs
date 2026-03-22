@@ -1,17 +1,17 @@
 //! Feedback overlay assets served by the feedback HTTP server.
 //!
-//! Built assets (JS/CSS) are produced by the frontend build pipeline
-//! (TypeScript → esbuild) and placed in OUT_DIR by build.rs.
-//! Static assets (SVGs, HTML) are included directly from the assets/ directory.
+//! The overlay scripts and stylesheets are loaded dynamically by a bootstrap
+//! `<script>` tag that Caddy's `veld_inject` handler prepends to HTML
+//! responses — no Service Worker or manual activation needed.
 
-/// Self-contained feedback overlay UI script (CSS is bundled in via Shadow DOM).
-pub const OVERLAY_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/feedback-overlay.js"));
+/// Self-contained feedback overlay UI script.
+pub const OVERLAY_JS: &str = include_str!("../assets/feedback-overlay.js");
 
-/// Canvas drawing / annotation engine (lazy-loaded by feedback overlay).
-pub const DRAW_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/draw-overlay.js"));
-
-/// Client-side log collector script (injected into HTML `<head>` by Caddy).
-pub const CLIENT_LOG_JS: &str = include_str!(concat!(env!("OUT_DIR"), "/client-log.js"));
+/// Feedback overlay CSS stylesheet.
+pub const OVERLAY_CSS: &str = include_str!("../assets/feedback-overlay.css");
 
 /// Veld logo SVG mark.
 pub const LOGO_SVG: &str = include_str!("../assets/logo.svg");
+
+/// Client-side log collector script (injected into HTML `<head>` by Caddy).
+pub const CLIENT_LOG_JS: &str = include_str!("../assets/client-log.js");

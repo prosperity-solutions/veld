@@ -9,7 +9,7 @@
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npx --yes serve website --listen ${veld.port} --no-clipboard",
+          "command": "npx --yes live-server website --port=${veld.port} --no-browser",
           "health_check": { "type": "http", "path": "/index.html", "timeout_seconds": 10 }
         }
       }

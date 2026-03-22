@@ -87,13 +87,6 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: 'npm'
-          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
-      - name: Install frontend dependencies
-        run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'

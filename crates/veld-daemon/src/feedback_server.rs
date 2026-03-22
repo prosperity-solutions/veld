@@ -55,7 +55,7 @@ pub async fn run_feedback_server() {
         )
         // Overlay assets (loaded dynamically by the veld_inject bootstrap script).
         .route("/feedback/script.js", get(overlay_script))
-        .route("/feedback/draw.js", get(draw_script))
+        .route("/feedback/style.css", get(overlay_css))
         .route("/feedback/logo.svg", get(logo_svg))
         // Thread API.
         .route("/feedback/api/threads", get(list_threads))
@@ -175,20 +175,20 @@ async fn overlay_script() -> Response {
     (
         [
             (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         feedback_assets::OVERLAY_JS,
     )
         .into_response()
 }
 
-async fn draw_script() -> Response {
+async fn overlay_css() -> Response {
     (
         [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CONTENT_TYPE, "text/css"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
-        feedback_assets::DRAW_JS,
+        feedback_assets::OVERLAY_CSS,
     )
         .into_response()
 }
@@ -197,7 +197,7 @@ async fn logo_svg() -> Response {
     (
         [
             (header::CONTENT_TYPE, "image/svg+xml"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         feedback_assets::LOGO_SVG,
     )
@@ -212,7 +212,7 @@ async fn client_log_script() -> Response {
     (
         [
             (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         feedback_assets::CLIENT_LOG_JS,
     )
@@ -719,7 +719,7 @@ async fn get_screenshot(
     Ok((
         [
             (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "no-cache"),
+            (header::CACHE_CONTROL, "public, max-age=3600"),
         ],
         data,
     )
