@@ -285,7 +285,7 @@ async fn run_answer(
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
-    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
     let msg = new_message(Author::Agent, body, None, controls_value);
 
@@ -333,7 +333,7 @@ async fn run_ask(
         None => ThreadScope::Global,
     };
 
-    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
     let msg = new_message(Author::Agent, body, None, controls_value);
     let thread = new_thread(scope, ThreadOrigin::Agent, None, None, None, msg);
 
