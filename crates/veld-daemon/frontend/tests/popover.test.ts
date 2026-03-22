@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from "vitest";
 import { positionPopover, closeActivePopover } from "../src/feedback-overlay/popover";
-import { initState, S } from "../src/feedback-overlay/state";
+import { initState } from "../src/feedback-overlay/state";
+import { refs } from "../src/feedback-overlay/refs";
+import { store, dispatch } from "../src/feedback-overlay/store";
 import { setPopoverDeps } from "../src/feedback-overlay/popover";
 import { vi } from "vitest";
 
@@ -48,21 +50,21 @@ describe("closeActivePopover", () => {
     const host = document.createElement("veld-feedback");
     const shadow = host.attachShadow({ mode: "open" });
     initState(shadow, host);
-    S.hoverOutline = document.createElement("div");
-    S.componentTraceEl = document.createElement("div");
-    S.toolBtnPageComment = document.createElement("div");
-    S.toolBtnScreenshot = document.createElement("div");
+    refs.hoverOutline = document.createElement("div");
+    refs.componentTraceEl = document.createElement("div");
+    refs.toolBtnPageComment = document.createElement("div");
+    refs.toolBtnScreenshot = document.createElement("div");
     setPopoverDeps({ addPin: vi.fn(), updateBadge: vi.fn(), renderPanel: vi.fn() });
   });
 
   it("removes popover element and nulls reference", () => {
     const pop = document.createElement("div");
-    S.shadow.appendChild(pop);
-    S.activePopover = pop;
+    refs.shadow.appendChild(pop);
+    dispatch({ type: "SET_POPOVER", popover: pop });
 
     closeActivePopover();
 
-    expect(S.activePopover).toBeNull();
+    expect(store.activePopover).toBeNull();
     expect(pop.parentNode).toBeNull();
   });
 
@@ -70,8 +72,8 @@ describe("closeActivePopover", () => {
     const cleanup = vi.fn();
     const pop = document.createElement("div");
     (pop as any)._veldCleanup = cleanup;
-    S.shadow.appendChild(pop);
-    S.activePopover = pop;
+    refs.shadow.appendChild(pop);
+    dispatch({ type: "SET_POPOVER", popover: pop });
 
     closeActivePopover();
 
@@ -80,22 +82,22 @@ describe("closeActivePopover", () => {
 
   it("clears locked element and hides outlines", () => {
     const pop = document.createElement("div");
-    S.shadow.appendChild(pop);
-    S.activePopover = pop;
-    S.lockedEl = document.createElement("div");
-    S.hoverOutline.style.display = "block";
+    refs.shadow.appendChild(pop);
+    dispatch({ type: "SET_POPOVER", popover: pop });
+    dispatch({ type: "SET_LOCKED", el: document.createElement("div") });
+    refs.hoverOutline.style.display = "block";
 
     closeActivePopover();
 
-    expect(S.lockedEl).toBeNull();
-    expect(S.hoverOutline.style.display).toBe("none");
+    expect(store.lockedEl).toBeNull();
+    expect(refs.hoverOutline.style.display).toBe("none");
   });
 
   it("does nothing when no active popover", () => {
-    S.activePopover = null;
-    S.lockedEl = null;
+    dispatch({ type: "SET_POPOVER", popover: null });
+    dispatch({ type: "SET_LOCKED", el: null });
     // Should not throw
     closeActivePopover();
-    expect(S.activePopover).toBeNull();
+    expect(store.activePopover).toBeNull();
   });
 });

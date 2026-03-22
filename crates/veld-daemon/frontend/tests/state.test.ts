@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
-import { initState, S } from "../src/feedback-overlay/state";
+import { initState } from "../src/feedback-overlay/state";
+import { refs } from "../src/feedback-overlay/refs";
+import { store, dispatch } from "../src/feedback-overlay/store";
 
 describe("initState", () => {
   it("initializes all state fields", () => {
@@ -8,44 +10,44 @@ describe("initState", () => {
     const hostEl = document.createElement("veld-feedback");
     initState(shadow, hostEl);
 
-    expect(S).toBeDefined();
-    expect(S.shadow).toBe(shadow);
-    expect(S.hostEl).toBe(hostEl);
-    expect(S.threads).toEqual([]);
-    expect(S.lastEventSeq).toBe(0);
-    expect(S.lastSeenAt).toEqual({});
-    expect(S.agentListening).toBe(false);
-    expect(S.panelOpen).toBe(false);
-    expect(S.activeMode).toBeNull();
-    expect(S.toolbarOpen).toBe(false);
-    expect(S.hidden).toBe(false);
-    expect(S.shortcutsDisabled).toBe(false);
-    expect(S.theme).toBe("auto");
-    expect(S.pins).toEqual({});
-    expect(S.captureStream).toBeNull();
-    expect(S.drawLoaded).toBe(false);
+    expect(refs).toBeDefined();
+    expect(refs.shadow).toBe(shadow);
+    expect(refs.hostEl).toBe(hostEl);
+    expect(store.threads).toEqual([]);
+    expect(store.lastEventSeq).toBe(0);
+    expect(store.lastSeenAt).toEqual({});
+    expect(store.agentListening).toBe(false);
+    expect(store.panelOpen).toBe(false);
+    expect(store.activeMode).toBeNull();
+    expect(store.toolbarOpen).toBe(false);
+    expect(store.hidden).toBe(false);
+    expect(store.shortcutsDisabled).toBe(false);
+    expect(store.theme).toBe("auto");
+    expect(store.pins).toEqual({});
+    expect(store.captureStream).toBeNull();
+    expect(store.drawLoaded).toBe(false);
   });
 
   it("state is mutable singleton", () => {
     const shadow = document.createElement("div").attachShadow({ mode: "open" });
     initState(shadow, document.createElement("div"));
 
-    S.threads.push({ id: "t1" } as any);
-    expect(S.threads.length).toBe(1);
+    dispatch({ type: "ADD_THREAD", thread: { id: "t1" } as any });
+    expect(store.threads.length).toBe(1);
 
-    S.panelOpen = true;
-    expect(S.panelOpen).toBe(true);
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    expect(store.panelOpen).toBe(true);
   });
 
   it("reinitializing resets state", () => {
     const shadow = document.createElement("div").attachShadow({ mode: "open" });
     initState(shadow, document.createElement("div"));
-    S.threads.push({ id: "t1" } as any);
+    dispatch({ type: "ADD_THREAD", thread: { id: "t1" } as any });
 
     // Reinitialize
     const shadow2 = document.createElement("div").attachShadow({ mode: "open" });
     initState(shadow2, document.createElement("div"));
-    expect(S.threads).toEqual([]);
-    expect(S.shadow).toBe(shadow2);
+    expect(store.threads).toEqual([]);
+    expect(refs.shadow).toBe(shadow2);
   });
 });

@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import type { UIMode, Thread, VeldPopoverElement } from "./types";
 import { mkEl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, API, SUBMIT_HINT } from "./constants";
@@ -19,10 +20,10 @@ export function setScreenshotDeps(deps: {
 
 /**
  * Acquire a screen capture stream, showing a disclaimer modal the first time.
- * Resolves when the stream is available in `S.captureStream`.
+ * Resolves when the stream is available in `store.captureStream`.
  */
 export function acquireCaptureStream(): Promise<void> {
-  if (S.captureStream) return Promise.resolve();
+  if (store.captureStream) return Promise.resolve();
 
   // Show a friendly heads-up before the browser's scary permission dialog.
   const seenKey = "veld-screenshot-disclaimer-seen";
@@ -78,7 +79,7 @@ export function acquireCaptureStream(): Promise<void> {
         modal.appendChild(actions);
 
         backdrop.appendChild(modal);
-        S.shadow.appendChild(backdrop);
+        refs.shadow.appendChild(backdrop);
         requestAnimationFrame(() => {
           backdrop.classList.add(PREFIX + "confirm-backdrop-visible");
         });
@@ -91,11 +92,11 @@ export function acquireCaptureStream(): Promise<void> {
       preferCurrentTab: true,
     };
     return navigator.mediaDevices.getDisplayMedia(opts).then((stream) => {
-      S.captureStream = stream;
+      dispatch({ type: "SET_CAPTURE_STREAM", stream });
       // If the user stops sharing via browser UI, clean up.
       stream.getVideoTracks()[0].addEventListener("ended", () => {
-        S.captureStream = null;
-        if (S.activeMode === "screenshot") {
+        dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
+        if (store.activeMode === "screenshot") {
           // Late-bind to avoid circular import with modes.ts
           import("./modes").then((m) => m.setMode(null));
         }
@@ -106,11 +107,11 @@ export function acquireCaptureStream(): Promise<void> {
 
 /** Stop the active capture stream and release all tracks. */
 export function stopCaptureStream(): void {
-  if (S.captureStream) {
-    S.captureStream.getTracks().forEach((t) => {
+  if (store.captureStream) {
+    store.captureStream.getTracks().forEach((t) => {
       t.stop();
     });
-    S.captureStream = null;
+    dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
   }
 }
 
@@ -128,9 +129,9 @@ export function captureScreenshot(
   const _sel =
     "[class^='" + PREFIX + "'], [class*=' " + PREFIX + "']";
   const veldEls = Array.from(document.querySelectorAll(_sel)).concat(
-    Array.from(S.shadow.querySelectorAll(_sel)),
+    Array.from(refs.shadow.querySelectorAll(_sel)),
   );
-  S.hostEl.style.visibility = "hidden";
+  refs.hostEl.style.visibility = "hidden";
   const hiddenEls: { el: HTMLElement; prev: string }[] = [];
   veldEls.forEach((el) => {
     if ((el as HTMLElement).style.display !== "none") {
@@ -143,10 +144,10 @@ export function captureScreenshot(
   });
 
   // Exit screenshot mode (removes backdrop) but keep the stream alive.
-  const stream = S.captureStream;
-  S.captureStream = null; // prevent setMode(null) from stopping it
+  const stream = store.captureStream;
+  dispatch({ type: "SET_CAPTURE_STREAM", stream: null }); // prevent setMode(null) from stopping it
   setModeFn(null);
-  S.captureStream = stream; // restore for reuse
+  dispatch({ type: "SET_CAPTURE_STREAM", stream }); // restore for reuse
 
   if (!stream) {
     restoreVeldUI(hiddenEls);
@@ -187,7 +188,7 @@ export function restoreVeldUI(
   hiddenEls.forEach((item) => {
     item.el.style.visibility = item.prev;
   });
-  S.hostEl.style.visibility = "";
+  refs.hostEl.style.visibility = "";
 }
 
 /** Crop the captured bitmap to the selected region and show the editor. */
@@ -442,7 +443,7 @@ export function showScreenshotThreadEditor(
     api("POST", "/threads", payload)
       .then((raw) => {
         const thread = raw as Thread;
-        S.threads.push(thread);
+        dispatch({ type: "ADD_THREAD", thread });
         closeActivePopover();
         // addPin and updateBadge are called from the monolith via event flow
         toast("Thread created");
@@ -459,10 +460,10 @@ export function showScreenshotThreadEditor(
   pop.appendChild(body);
 
   // Highlight screenshot toolbar button while editor is open.
-  S.toolBtnScreenshot.classList.add(PREFIX + "tool-active");
+  refs.toolBtnScreenshot.classList.add(PREFIX + "tool-active");
 
-  S.shadow.appendChild(pop);
-  S.activePopover = pop;
+  refs.shadow.appendChild(pop);
+  dispatch({ type: "SET_POPOVER", popover: pop });
 
   // Position in center of viewport.
   const centerRect = {

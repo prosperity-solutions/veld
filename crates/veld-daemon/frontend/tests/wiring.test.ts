@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { initState, S } from "../src/feedback-overlay/state";
+import { initState } from "../src/feedback-overlay/state";
+import { refs } from "../src/feedback-overlay/refs";
+import { store, dispatch } from "../src/feedback-overlay/store";
 import { setToolbarDeps } from "../src/feedback-overlay/toolbar";
 import { setKeyboardDeps, onKeyDown } from "../src/feedback-overlay/keyboard";
 import { setVisibilityDeps, hideOverlay, showOverlay } from "../src/feedback-overlay/visibility";
@@ -17,20 +19,20 @@ function setupState() {
   const shadow = host.attachShadow({ mode: "open" });
   initState(shadow, host);
   // Create minimal DOM refs that modules expect
-  S.toolbarContainer = document.createElement("div");
-  S.toolbar = document.createElement("div");
-  S.overlay = document.createElement("div");
-  S.hoverOutline = document.createElement("div");
-  S.componentTraceEl = document.createElement("div");
-  S.panel = document.createElement("div");
-  S.fab = document.createElement("div");
-  S.toolBtnSelect = document.createElement("div");
-  S.toolBtnScreenshot = document.createElement("div");
-  S.toolBtnDraw = document.createElement("div");
-  S.toolBtnPageComment = document.createElement("div");
-  S.toolBtnComments = document.createElement("div");
-  S.toolBtnHide = document.createElement("div");
-  S.screenshotRect = document.createElement("div");
+  refs.toolbarContainer = document.createElement("div");
+  refs.toolbar = document.createElement("div");
+  refs.overlay = document.createElement("div");
+  refs.hoverOutline = document.createElement("div");
+  refs.componentTraceEl = document.createElement("div");
+  refs.panel = document.createElement("div");
+  refs.fab = document.createElement("div");
+  refs.toolBtnSelect = document.createElement("div");
+  refs.toolBtnScreenshot = document.createElement("div");
+  refs.toolBtnDraw = document.createElement("div");
+  refs.toolBtnPageComment = document.createElement("div");
+  refs.toolBtnComments = document.createElement("div");
+  refs.toolBtnHide = document.createElement("div");
+  refs.screenshotRect = document.createElement("div");
 }
 
 describe("toolbar wiring", () => {
@@ -65,7 +67,7 @@ describe("keyboard wiring", () => {
       closeActivePopover: vi.fn(),
     });
 
-    S.activeMode = "draw";
+    dispatch({ type: "SET_MODE", mode: "draw" });
     const event = new KeyboardEvent("keydown", { key: "Escape" });
     onKeyDown(event);
     expect(mockSetMode).toHaveBeenCalledWith(null);
@@ -84,8 +86,8 @@ describe("keyboard wiring", () => {
       closeActivePopover: vi.fn(),
     });
 
-    S.shortcutsDisabled = true;
-    S.activeMode = null;
+    dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: true });
+    dispatch({ type: "SET_MODE", mode: null });
 
     // Cmd+Shift+V should be blocked
     const event = new KeyboardEvent("keydown", {
@@ -105,9 +107,9 @@ describe("visibility wiring", () => {
       togglePanel: vi.fn(),
     });
 
-    S.hidden = false;
+    dispatch({ type: "SET_HIDDEN", hidden: false });
     hideOverlay();
-    expect(S.hidden).toBe(true);
+    expect(store.hidden).toBe(true);
   });
 
   it("showOverlay clears hidden state", () => {
@@ -116,9 +118,9 @@ describe("visibility wiring", () => {
       togglePanel: vi.fn(),
     });
 
-    S.hidden = true;
+    dispatch({ type: "SET_HIDDEN", hidden: true });
     showOverlay();
-    expect(S.hidden).toBe(false);
+    expect(store.hidden).toBe(false);
   });
 });
 
@@ -133,11 +135,11 @@ describe("popover wiring", () => {
     });
 
     const pop = document.createElement("div");
-    S.shadow.appendChild(pop);
-    S.activePopover = pop;
+    refs.shadow.appendChild(pop);
+    dispatch({ type: "SET_POPOVER", popover: pop });
 
     closeActivePopover();
-    expect(S.activePopover).toBeNull();
+    expect(store.activePopover).toBeNull();
   });
 
   it("closeActivePopover runs cleanup callback", () => {
@@ -150,8 +152,8 @@ describe("popover wiring", () => {
     const cleanup = vi.fn();
     const pop = document.createElement("div");
     (pop as any)._veldCleanup = cleanup;
-    S.shadow.appendChild(pop);
-    S.activePopover = pop;
+    refs.shadow.appendChild(pop);
+    dispatch({ type: "SET_POPOVER", popover: pop });
 
     closeActivePopover();
     expect(cleanup).toHaveBeenCalled();

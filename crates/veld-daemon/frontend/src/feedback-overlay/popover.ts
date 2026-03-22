@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import type { Thread } from "./types";
 import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
 import { PREFIX, SUBMIT_HINT } from "./constants";
@@ -48,20 +49,20 @@ export function positionPopover(
 }
 
 export function closeActivePopover(): void {
-  if (S.activePopover) {
-    if (typeof S.activePopover._veldCleanup === "function") {
-      S.activePopover._veldCleanup();
+  if (store.activePopover) {
+    if (typeof store.activePopover._veldCleanup === "function") {
+      store.activePopover._veldCleanup();
     }
-    S.activePopover.remove();
-    S.activePopover = null;
+    store.activePopover.remove();
+    dispatch({ type: "SET_POPOVER", popover: null });
   }
-  if (S.lockedEl) {
-    S.lockedEl = null;
-    S.hoverOutline.style.display = "none";
-    S.componentTraceEl.style.display = "none";
+  if (store.lockedEl) {
+    dispatch({ type: "SET_LOCKED", el: null });
+    refs.hoverOutline.style.display = "none";
+    refs.componentTraceEl.style.display = "none";
   }
-  if (S.toolBtnPageComment) S.toolBtnPageComment.classList.remove(PREFIX + "tool-active");
-  if (S.toolBtnScreenshot) S.toolBtnScreenshot.classList.remove(PREFIX + "tool-active");
+  if (refs.toolBtnPageComment) refs.toolBtnPageComment.classList.remove(PREFIX + "tool-active");
+  if (refs.toolBtnScreenshot) refs.toolBtnScreenshot.classList.remove(PREFIX + "tool-active");
 }
 
 export function showCreatePopover(
@@ -72,7 +73,7 @@ export function showCreatePopover(
   trace: string[] | null,
 ): void {
   closeActivePopover();
-  S.lockedEl = targetEl;
+  dispatch({ type: "SET_LOCKED", el: targetEl });
 
   const popover = mkEl("div", "popover");
 
@@ -108,11 +109,11 @@ export function showCreatePopover(
       viewport_width: window.innerWidth, viewport_height: window.innerHeight,
     }).then((raw) => {
       const thread = raw as Thread;
-      S.threads.push(thread);
+      dispatch({ type: "ADD_THREAD", thread });
       closeActivePopover();
       if (addPinFn) addPinFn(thread);
       if (updateBadgeFn) updateBadgeFn();
-      if (S.panelOpen && renderPanelFn) renderPanelFn();
+      if (store.panelOpen && renderPanelFn) renderPanelFn();
       toast("Thread created");
     }).catch(() => {
       sendBtn.disabled = false;
@@ -124,17 +125,17 @@ export function showCreatePopover(
   popoverBody.appendChild(actions);
   popover.appendChild(popoverBody);
 
-  S.shadow.appendChild(popover);
-  S.activePopover = popover;
+  refs.shadow.appendChild(popover);
+  dispatch({ type: "SET_POPOVER", popover });
   positionPopover(popover, rect);
   textarea.focus();
 }
 
 export function togglePageComment(): void {
-  if (S.activePopover) { closeActivePopover(); return; }
+  if (store.activePopover) { closeActivePopover(); return; }
   showCreatePopover(
     { x: window.innerWidth / 2 - 180 + window.scrollX, y: 120 + window.scrollY, width: 0, height: 0 },
     null, null, null, null,
   );
-  S.toolBtnPageComment.classList.add(PREFIX + "tool-active");
+  refs.toolBtnPageComment.classList.add(PREFIX + "tool-active");
 }

@@ -1,13 +1,14 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store } from "./store";
 import { hasUnread } from "./helpers";
 import { PREFIX } from "./constants";
 
 /** Update the FAB badge to show the count of unread open threads. */
 export function updateBadge(): void {
-  const count = S.threads.filter((t) => {
-    return t.status === "open" && hasUnread(t, S.lastSeenAt);
+  const count = store.threads.filter((t) => {
+    return t.status === "open" && hasUnread(t, store.lastSeenAt);
   }).length;
-  S.fabBadge.textContent = count ? String(count) : "";
-  S.fabBadge.className =
+  refs.fabBadge.textContent = count ? String(count) : "";
+  refs.fabBadge.className =
     PREFIX + "badge" + (count ? "" : " " + PREFIX + "badge-hidden");
 }

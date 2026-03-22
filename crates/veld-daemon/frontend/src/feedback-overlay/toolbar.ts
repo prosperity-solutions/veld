@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import type { UIMode } from "./types";
 import { mkEl } from "./helpers";
 import { PREFIX } from "./constants";
@@ -36,11 +37,11 @@ export function makeToolBtn(action: string, iconSvg: string, title: string): HTM
 
 function handleToolAction(action: string): void {
   if (action === "select-element") {
-    setModeFn(S.activeMode === "select-element" ? null : "select-element");
+    setModeFn(store.activeMode === "select-element" ? null : "select-element");
   } else if (action === "screenshot") {
-    setModeFn(S.activeMode === "screenshot" ? null : "screenshot");
+    setModeFn(store.activeMode === "screenshot" ? null : "screenshot");
   } else if (action === "draw") {
-    setModeFn(S.activeMode === "draw" ? null : "draw");
+    setModeFn(store.activeMode === "draw" ? null : "draw");
   } else if (action === "page-comment") {
     togglePageCommentFn();
   } else if (action === "show-comments") {
@@ -51,9 +52,9 @@ function handleToolAction(action: string): void {
 }
 
 export function toggleToolbar(): void {
-  S.toolbarOpen = !S.toolbarOpen;
-  S.toolbar.classList.toggle(PREFIX + "toolbar-open", S.toolbarOpen);
-  if (!S.toolbarOpen && setModeFn) {
+  dispatch({ type: "SET_TOOLBAR_OPEN", open: !store.toolbarOpen });
+  refs.toolbar.classList.toggle(PREFIX + "toolbar-open", store.toolbarOpen);
+  if (!store.toolbarOpen && setModeFn) {
     setModeFn(null);
   }
 }

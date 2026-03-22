@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import type { UIMode } from "./types";
 import { PREFIX } from "./constants";
 
@@ -15,24 +16,24 @@ export function setVisibilityDeps(deps: {
 }
 
 export function hideOverlay(): void {
-  S.hidden = true;
+  dispatch({ type: "SET_HIDDEN", hidden: true });
   try { sessionStorage.setItem("veld-feedback-hidden", "1"); } catch (_) {}
-  S.toolbarContainer.classList.add(PREFIX + "hidden");
-  Object.keys(S.pins).forEach((id) => {
-    S.pins[id].classList.add(PREFIX + "hidden");
+  refs.toolbarContainer.classList.add(PREFIX + "hidden");
+  Object.keys(store.pins).forEach((id) => {
+    store.pins[id].classList.add(PREFIX + "hidden");
   });
-  S.overlay.classList.remove(PREFIX + "overlay-active");
-  S.hoverOutline.style.display = "none";
-  S.componentTraceEl.style.display = "none";
+  refs.overlay.classList.remove(PREFIX + "overlay-active");
+  refs.hoverOutline.style.display = "none";
+  refs.componentTraceEl.style.display = "none";
   if (setModeFn) setModeFn(null);
-  if (S.panelOpen && togglePanelFn) togglePanelFn();
+  if (store.panelOpen && togglePanelFn) togglePanelFn();
 }
 
 export function showOverlay(): void {
-  S.hidden = false;
+  dispatch({ type: "SET_HIDDEN", hidden: false });
   try { sessionStorage.removeItem("veld-feedback-hidden"); } catch (_) {}
-  S.toolbarContainer.classList.remove(PREFIX + "hidden");
-  Object.keys(S.pins).forEach((id) => {
-    S.pins[id].classList.remove(PREFIX + "hidden");
+  refs.toolbarContainer.classList.remove(PREFIX + "hidden");
+  Object.keys(store.pins).forEach((id) => {
+    store.pins[id].classList.remove(PREFIX + "hidden");
   });
 }

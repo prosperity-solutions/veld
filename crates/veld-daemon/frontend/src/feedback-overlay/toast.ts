@@ -1,11 +1,11 @@
-import { S } from "./state";
+import { refs } from "./refs";
 import { mkEl } from "./helpers";
 import { PREFIX } from "./constants";
 
 export function toast(msg: string, isError?: boolean): void {
   const t = mkEl("div", "toast", msg);
   if (isError) t.style.background = "#dc2626";
-  S.shadow.appendChild(t);
+  refs.shadow.appendChild(t);
   requestAnimationFrame(function () {
     t.classList.add(PREFIX + "toast-show");
   });

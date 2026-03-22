@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import { PREFIX, FAB_MARGIN } from "./constants";
 
 export function initDrag(): void {
@@ -9,14 +10,14 @@ export function initDrag(): void {
   let dragging = false;
   let moved = false;
 
-  S.fab.addEventListener("mousedown", function (e: MouseEvent) {
+  refs.fab.addEventListener("mousedown", function (e: MouseEvent) {
     if (e.button !== 0) return;
     dragging = true;
     moved = false;
     startX = e.clientX;
     startY = e.clientY;
-    origX = S.fabCX;
-    origY = S.fabCY;
+    origX = store.fabCX;
+    origY = store.fabCY;
     e.preventDefault();
   });
 
@@ -43,32 +44,31 @@ export function initDrag(): void {
     if (!dragging) return;
     dragging = false;
     if (moved) {
-      S.fabWasDragged = true;
+      dispatch({ type: "SET_FAB_DRAGGED", dragged: true });
       setTimeout(function () {
-        S.fabWasDragged = false;
+        dispatch({ type: "SET_FAB_DRAGGED", dragged: false });
       }, 300);
-      saveFabPos(S.fabCX, S.fabCY);
+      saveFabPos(store.fabCX, store.fabCY);
     }
   });
 }
 
 export function positionFab(cx: number, cy: number, animate: boolean): void {
-  S.fabCX = cx;
-  S.fabCY = cy;
+  dispatch({ type: "SET_FAB_POS", cx, cy });
   const onRight = cx > window.innerWidth / 2;
-  S.toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
-  S.toolbarContainer.style.top = cy - 20 + "px";
+  refs.toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
+  refs.toolbarContainer.style.top = cy - 20 + "px";
 
   if (onRight) {
-    S.toolbarContainer.style.left = "auto";
-    S.toolbarContainer.style.right = window.innerWidth - cx - 20 + "px";
+    refs.toolbarContainer.style.left = "auto";
+    refs.toolbarContainer.style.right = window.innerWidth - cx - 20 + "px";
   } else {
-    S.toolbarContainer.style.right = "auto";
-    S.toolbarContainer.style.left = cx - 20 + "px";
+    refs.toolbarContainer.style.right = "auto";
+    refs.toolbarContainer.style.left = cx - 20 + "px";
   }
 
-  S.toolbarContainer.classList.toggle(PREFIX + "toolbar-right", onRight);
-  S.toolbarContainer.classList.toggle(PREFIX + "toolbar-left", !onRight);
+  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-right", onRight);
+  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-left", !onRight);
 }
 
 export function saveFabPos(x: number, y: number): void {
@@ -94,8 +94,8 @@ export function restoreFabPos(): void {
 }
 
 export function clampFabToViewport(): void {
-  let cx = S.fabCX;
-  let cy = S.fabCY;
+  let cx = store.fabCX;
+  let cy = store.fabCY;
   let clamped = false;
   const maxX = window.innerWidth - 20 - FAB_MARGIN;
   const maxY = window.innerHeight - 20 - FAB_MARGIN;

@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { docRect, selectorFor, formatTrace } from "./helpers";
 import { getComponentTrace } from "./component-trace";
@@ -19,11 +20,11 @@ export function setBackdropDeps(deps: {
 }
 
 export function elementBelowBackdrop(x: number, y: number): Element | null {
-  S.overlay.style.display = "none";
-  S.hoverOutline.style.display = "none";
-  S.componentTraceEl.style.display = "none";
+  refs.overlay.style.display = "none";
+  refs.hoverOutline.style.display = "none";
+  refs.componentTraceEl.style.display = "none";
   let el = document.elementFromPoint(x, y);
-  S.overlay.style.display = "";
+  refs.overlay.style.display = "";
   if (el && isOwnElement(el)) el = null;
   return el;
 }
@@ -39,77 +40,77 @@ export function isOwnElement(el: Element | null): boolean {
 export function initBackdropEvents(): void {
   let ssStartX: number, ssStartY: number, ssDragging = false;
 
-  S.overlay.addEventListener("mousemove", function (e: MouseEvent) {
-    if (S.activeMode === "select-element") {
-      if (S.lockedEl) return;
+  refs.overlay.addEventListener("mousemove", function (e: MouseEvent) {
+    if (store.activeMode === "select-element") {
+      if (store.lockedEl) return;
       const target = elementBelowBackdrop(e.clientX, e.clientY);
       if (!target) {
-        S.hoverOutline.style.display = "none";
-        S.componentTraceEl.style.display = "none";
-        S.hoveredEl = null;
+        refs.hoverOutline.style.display = "none";
+        refs.componentTraceEl.style.display = "none";
+        dispatch({ type: "SET_HOVERED", el: null });
         return;
       }
-      S.hoveredEl = target;
+      dispatch({ type: "SET_HOVERED", el: target });
       const r = target.getBoundingClientRect();
-      S.hoverOutline.style.display = "block";
-      S.hoverOutline.style.top = (r.top + window.scrollY) + "px";
-      S.hoverOutline.style.left = (r.left + window.scrollX) + "px";
-      S.hoverOutline.style.width = r.width + "px";
-      S.hoverOutline.style.height = r.height + "px";
+      refs.hoverOutline.style.display = "block";
+      refs.hoverOutline.style.top = (r.top + window.scrollY) + "px";
+      refs.hoverOutline.style.left = (r.left + window.scrollX) + "px";
+      refs.hoverOutline.style.width = r.width + "px";
+      refs.hoverOutline.style.height = r.height + "px";
 
       const trace = getComponentTrace(target);
       if (trace && trace.length) {
-        S.componentTraceEl.textContent = formatTrace(trace) ?? "";
-        S.componentTraceEl.style.display = "block";
-        positionTooltipFn(S.componentTraceEl, r);
+        refs.componentTraceEl.textContent = formatTrace(trace) ?? "";
+        refs.componentTraceEl.style.display = "block";
+        positionTooltipFn(refs.componentTraceEl, r);
       } else {
-        S.componentTraceEl.style.display = "none";
+        refs.componentTraceEl.style.display = "none";
       }
-    } else if (S.activeMode === "screenshot" && ssDragging) {
+    } else if (store.activeMode === "screenshot" && ssDragging) {
       const x = Math.min(ssStartX, e.clientX);
       const y = Math.min(ssStartY, e.clientY);
       const w = Math.abs(e.clientX - ssStartX);
       const h = Math.abs(e.clientY - ssStartY);
-      S.screenshotRect.style.display = "block";
-      S.screenshotRect.style.left = (x + window.scrollX) + "px";
-      S.screenshotRect.style.top = (y + window.scrollY) + "px";
-      S.screenshotRect.style.width = w + "px";
-      S.screenshotRect.style.height = h + "px";
+      refs.screenshotRect.style.display = "block";
+      refs.screenshotRect.style.left = (x + window.scrollX) + "px";
+      refs.screenshotRect.style.top = (y + window.scrollY) + "px";
+      refs.screenshotRect.style.width = w + "px";
+      refs.screenshotRect.style.height = h + "px";
     }
   });
 
-  S.overlay.addEventListener("mousedown", function (e: MouseEvent) {
+  refs.overlay.addEventListener("mousedown", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (S.activeMode === "screenshot") {
+    if (store.activeMode === "screenshot") {
       ssDragging = true;
       ssStartX = e.clientX;
       ssStartY = e.clientY;
-      S.screenshotRect.style.display = "none";
+      refs.screenshotRect.style.display = "none";
     }
   });
 
-  S.overlay.addEventListener("mouseup", function (e: MouseEvent) {
+  refs.overlay.addEventListener("mouseup", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (S.activeMode === "screenshot" && ssDragging) {
+    if (store.activeMode === "screenshot" && ssDragging) {
       ssDragging = false;
       const x = Math.min(ssStartX, e.clientX);
       const y = Math.min(ssStartY, e.clientY);
       const w = Math.abs(e.clientX - ssStartX);
       const h = Math.abs(e.clientY - ssStartY);
-      S.screenshotRect.style.display = "none";
+      refs.screenshotRect.style.display = "none";
       if (w > 10 && h > 10) {
         captureScreenshotFn(x, y, w, h);
       }
     }
   });
 
-  S.overlay.addEventListener("click", function (e: MouseEvent) {
+  refs.overlay.addEventListener("click", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (S.activeMode === "select-element") {
-      const target = S.hoveredEl || elementBelowBackdrop(e.clientX, e.clientY);
+    if (store.activeMode === "select-element") {
+      const target = store.hoveredEl || elementBelowBackdrop(e.clientX, e.clientY);
       if (!target) return;
       const rect = docRect(target);
       const selector = selectorFor(target);

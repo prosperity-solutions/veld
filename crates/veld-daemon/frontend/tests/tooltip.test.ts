@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { tipHtml, initTooltip, showTooltip, hideTooltip, attachTooltip } from "../src/feedback-overlay/tooltip";
-import { S, initState } from "../src/feedback-overlay/state";
+import { initState } from "../src/feedback-overlay/state";
+import { refs } from "../src/feedback-overlay/refs";
 
 describe("tipHtml", () => {
   it("returns label only when no keys", () => {
@@ -9,11 +10,11 @@ describe("tipHtml", () => {
   });
 
   it("builds kbd elements for each key", () => {
-    const result = tipHtml("Screenshot", ["⌘", "⇧", "S"]);
+    const result = tipHtml("Screenshot", ["\u2318", "\u21E7", "S"]);
     expect(result).toContain("Screenshot");
     expect((result.match(/<kbd/g) || []).length).toBe(3);
-    expect(result).toContain("⌘");
-    expect(result).toContain("⇧");
+    expect(result).toContain("\u2318");
+    expect(result).toContain("\u21E7");
     expect(result).toContain("S");
   });
 
@@ -36,33 +37,31 @@ describe("tooltip lifecycle", () => {
   });
 
   it("initTooltip creates a tooltip element in shadow DOM", () => {
-    expect(S.tooltip).toBeTruthy();
-    expect(S.tooltip.tagName).toBe("DIV");
+    expect(refs.tooltip).toBeTruthy();
+    expect(refs.tooltip.tagName).toBe("DIV");
   });
 
   it("showTooltip makes it visible", () => {
     const anchor = document.createElement("button");
     document.body.appendChild(anchor);
     showTooltip(anchor, "Hello tooltip");
-    expect(S.tooltip.style.display).toBe("block");
-    expect(S.tooltip.innerHTML).toBe("Hello tooltip");
+    expect(refs.tooltip.style.display).toBe("block");
+    expect(refs.tooltip.innerHTML).toBe("Hello tooltip");
     document.body.removeChild(anchor);
   });
 
   it("hideTooltip hides it", () => {
     showTooltip(document.createElement("div"), "test");
     hideTooltip();
-    expect(S.tooltip.style.display).toBe("none");
+    expect(refs.tooltip.style.display).toBe("none");
   });
 
   it("attachTooltip wires mouseenter/mouseleave", () => {
     const btn = document.createElement("button");
     attachTooltip(btn, "Hover me");
     btn.dispatchEvent(new MouseEvent("mouseenter"));
-    expect(S.tooltip.style.display).toBe("block");
+    expect(refs.tooltip.style.display).toBe("block");
     btn.dispatchEvent(new MouseEvent("mouseleave"));
-    expect(S.tooltip.style.display).toBe("none");
+    expect(refs.tooltip.style.display).toBe("none");
   });
 });
-
-import { beforeEach } from "vitest";

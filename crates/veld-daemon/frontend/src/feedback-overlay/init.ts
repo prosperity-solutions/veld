@@ -1,5 +1,6 @@
 // Initialization — wires all module dependencies and starts the overlay.
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
@@ -88,7 +89,7 @@ function wireDeps(): void {
 export function init(): void {
   try {
     if (sessionStorage.getItem("veld-hidden") === "1") {
-      S.hidden = true;
+      dispatch({ type: "SET_HIDDEN", hidden: true });
     }
   } catch (_) { /* ignore */ }
 
@@ -97,8 +98,8 @@ export function init(): void {
   restoreFabPos();
   clampFabToViewport();
 
-  if (S.hidden) {
-    S.toolbarContainer.classList.add(PREFIX + "hidden");
+  if (store.hidden) {
+    refs.toolbarContainer.classList.add(PREFIX + "hidden");
   }
 
   document.addEventListener("keydown", onKeyDown, true);

@@ -1,6 +1,7 @@
 // DOM scaffolding — builds all the UI elements and attaches them to shadow/light DOM.
-import { S } from "./state";
-import type { ThemeMode } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
+import type { ThemeMode } from "./store";
 import { mkEl } from "./helpers";
 import { PREFIX, ICONS, KEY_MOD, KEY_SHIFT } from "./constants";
 import { initTooltip, attachTooltip, tipHtml } from "./tooltip";
@@ -15,46 +16,46 @@ export function buildDOM(): void {
   initTooltip();
 
   // Light DOM elements
-  S.overlay = mkEl("div", "overlay");
-  document.body.appendChild(S.overlay);
+  refs.overlay = mkEl("div", "overlay");
+  document.body.appendChild(refs.overlay);
   initBackdropEvents();
 
-  S.hoverOutline = mkEl("div", "hover-outline");
-  document.body.appendChild(S.hoverOutline);
+  refs.hoverOutline = mkEl("div", "hover-outline");
+  document.body.appendChild(refs.hoverOutline);
 
-  S.componentTraceEl = mkEl("div", "component-trace");
-  document.body.appendChild(S.componentTraceEl);
+  refs.componentTraceEl = mkEl("div", "component-trace");
+  document.body.appendChild(refs.componentTraceEl);
 
   // Toolbar container (shadow DOM)
-  S.toolbarContainer = mkEl("div", "toolbar-container");
-  S.toolbar = mkEl("div", "toolbar");
+  refs.toolbarContainer = mkEl("div", "toolbar-container");
+  refs.toolbar = mkEl("div", "toolbar");
 
-  S.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair, tipHtml("Select element", [KEY_MOD, KEY_SHIFT, "F"]));
-  S.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot, tipHtml("Screenshot", [KEY_MOD, KEY_SHIFT, "S"]));
-  S.toolBtnDraw = makeToolBtn("draw", ICONS.draw, tipHtml("Draw", [KEY_MOD, KEY_SHIFT, "D"]));
-  S.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment, tipHtml("Page comment", [KEY_MOD, KEY_SHIFT, "P"]));
-  S.toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Threads", [KEY_MOD, KEY_SHIFT, "C"]));
+  refs.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair, tipHtml("Select element", [KEY_MOD, KEY_SHIFT, "F"]));
+  refs.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot, tipHtml("Screenshot", [KEY_MOD, KEY_SHIFT, "S"]));
+  refs.toolBtnDraw = makeToolBtn("draw", ICONS.draw, tipHtml("Draw", [KEY_MOD, KEY_SHIFT, "D"]));
+  refs.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment, tipHtml("Page comment", [KEY_MOD, KEY_SHIFT, "P"]));
+  refs.toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Threads", [KEY_MOD, KEY_SHIFT, "C"]));
 
-  S.toolbar.appendChild(S.toolBtnSelect);
-  S.toolbar.appendChild(S.toolBtnScreenshot);
-  S.toolbar.appendChild(S.toolBtnDraw);
-  S.toolbar.appendChild(S.toolBtnPageComment);
-  S.toolbar.appendChild(S.toolBtnComments);
+  refs.toolbar.appendChild(refs.toolBtnSelect);
+  refs.toolbar.appendChild(refs.toolBtnScreenshot);
+  refs.toolbar.appendChild(refs.toolBtnDraw);
+  refs.toolbar.appendChild(refs.toolBtnPageComment);
+  refs.toolbar.appendChild(refs.toolBtnComments);
 
   // Listening section
-  S.listeningModule = mkEl("div", "listening");
+  refs.listeningModule = mkEl("div", "listening");
   const listenSep = mkEl("div", "separator");
-  S.listeningModule.appendChild(listenSep);
+  refs.listeningModule.appendChild(listenSep);
   const listenDot = mkEl("span", "listening-dot");
   attachTooltip(listenDot, "Agent is listening");
-  S.listeningModule.appendChild(listenDot);
+  refs.listeningModule.appendChild(listenDot);
   const allGoodBtn = mkEl("button", "listening-allgood", "All Good");
   allGoodBtn.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
-  S.listeningModule.appendChild(allGoodBtn);
-  S.toolbar.appendChild(S.listeningModule);
+  refs.listeningModule.appendChild(allGoodBtn);
+  refs.toolbar.appendChild(refs.listeningModule);
 
   // Separator
-  S.toolbar.appendChild(mkEl("div", "separator"));
+  refs.toolbar.appendChild(mkEl("div", "separator"));
 
   // Shortcuts toggle
   const toolBtnShortcuts = mkEl("button", "tool-btn");
@@ -62,11 +63,11 @@ export function buildDOM(): void {
   attachTooltip(toolBtnShortcuts, tipHtml("Disable shortcuts", []));
   toolBtnShortcuts.addEventListener("click", function (e) {
     e.stopPropagation();
-    S.shortcutsDisabled = !S.shortcutsDisabled;
-    toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", S.shortcutsDisabled);
-    toast(S.shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
+    dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: !store.shortcutsDisabled });
+    toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", store.shortcutsDisabled);
+    toast(store.shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
   });
-  S.toolbar.appendChild(toolBtnShortcuts);
+  refs.toolbar.appendChild(toolBtnShortcuts);
 
   // Theme toggle
   const THEME_ICONS: Record<ThemeMode, string> = {
@@ -77,18 +78,18 @@ export function buildDOM(): void {
   const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
   const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
   const toolBtnTheme = mkEl("button", "tool-btn");
-  toolBtnTheme.innerHTML = THEME_ICONS[S.theme];
-  attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[S.theme], []));
+  toolBtnTheme.innerHTML = THEME_ICONS[store.theme];
+  attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[store.theme], []));
   toolBtnTheme.addEventListener("click", function (e) {
     e.stopPropagation();
-    const idx = (THEME_ORDER.indexOf(S.theme) + 1) % THEME_ORDER.length;
-    S.theme = THEME_ORDER[idx];
-    toolBtnTheme.innerHTML = THEME_ICONS[S.theme];
-    S.hostEl.setAttribute("data-theme", S.theme);
-    document.documentElement.setAttribute("data-veld-theme", S.theme === "auto" ? "" : S.theme);
-    toast("Theme: " + THEME_LABELS[S.theme]);
+    const idx = (THEME_ORDER.indexOf(store.theme) + 1) % THEME_ORDER.length;
+    dispatch({ type: "SET_THEME", theme: THEME_ORDER[idx] });
+    toolBtnTheme.innerHTML = THEME_ICONS[store.theme];
+    refs.hostEl.setAttribute("data-theme", store.theme);
+    document.documentElement.setAttribute("data-veld-theme", store.theme === "auto" ? "" : store.theme);
+    toast("Theme: " + THEME_LABELS[store.theme]);
   });
-  S.toolbar.appendChild(toolBtnTheme);
+  refs.toolbar.appendChild(toolBtnTheme);
 
   // Dashboard link
   const toolBtnDashboard = mkEl("button", "tool-btn");
@@ -98,69 +99,69 @@ export function buildDOM(): void {
     e.stopPropagation();
     window.open("https://veld.localhost:" + window.location.port, "_blank");
   });
-  S.toolbar.appendChild(toolBtnDashboard);
+  refs.toolbar.appendChild(toolBtnDashboard);
 
   // Hide
-  S.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
-  S.toolbar.appendChild(S.toolBtnHide);
+  refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
+  refs.toolbar.appendChild(refs.toolBtnHide);
 
   // Screenshot rect (light DOM)
-  S.screenshotRect = mkEl("div", "screenshot-rect");
-  document.body.appendChild(S.screenshotRect);
+  refs.screenshotRect = mkEl("div", "screenshot-rect");
+  document.body.appendChild(refs.screenshotRect);
 
-  S.toolbarContainer.appendChild(S.toolbar);
+  refs.toolbarContainer.appendChild(refs.toolbar);
 
   // FAB
-  S.fab = mkEl("button", "fab");
-  attachTooltip(S.fab, tipHtml("Veld Feedback", [KEY_MOD, KEY_SHIFT, "V"]));
-  S.fab.innerHTML = ICONS.logo;
-  S.fabBadge = mkEl("span", "badge badge-hidden");
-  S.fab.appendChild(S.fabBadge);
-  S.fab.addEventListener("click", function () {
-    if (S.fabWasDragged) { S.fabWasDragged = false; return; }
+  refs.fab = mkEl("button", "fab");
+  attachTooltip(refs.fab, tipHtml("Veld Feedback", [KEY_MOD, KEY_SHIFT, "V"]));
+  refs.fab.innerHTML = ICONS.logo;
+  refs.fabBadge = mkEl("span", "badge badge-hidden");
+  refs.fab.appendChild(refs.fabBadge);
+  refs.fab.addEventListener("click", function () {
+    if (store.fabWasDragged) { dispatch({ type: "SET_FAB_DRAGGED", dragged: false }); return; }
     toggleToolbar();
   });
-  S.toolbarContainer.appendChild(S.fab);
+  refs.toolbarContainer.appendChild(refs.fab);
 
-  S.shadow.appendChild(S.toolbarContainer);
+  refs.shadow.appendChild(refs.toolbarContainer);
   initDrag();
 
   // Panel (shadow DOM)
-  S.panel = mkEl("div", "panel");
+  refs.panel = mkEl("div", "panel");
   const panelHead = mkEl("div", "panel-head");
-  S.panelBackBtn = mkEl("button", "panel-back-btn");
-  S.panelBackBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>';
-  S.panelBackBtn.style.display = "none";
-  S.panelBackBtn.addEventListener("click", function (e) { e.stopPropagation(); showThreadList(); });
-  panelHead.appendChild(S.panelBackBtn);
+  refs.panelBackBtn = mkEl("button", "panel-back-btn");
+  refs.panelBackBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"/></svg>';
+  refs.panelBackBtn.style.display = "none";
+  refs.panelBackBtn.addEventListener("click", function (e) { e.stopPropagation(); showThreadList(); });
+  panelHead.appendChild(refs.panelBackBtn);
 
-  S.panelHeadTitle = mkEl("span", "panel-head-title", "Threads");
-  panelHead.appendChild(S.panelHeadTitle);
+  refs.panelHeadTitle = mkEl("span", "panel-head-title", "Threads");
+  panelHead.appendChild(refs.panelHeadTitle);
 
   const segControl = mkEl("div", "segmented");
-  S.segBtnActive = mkEl("button", "segmented-btn segmented-btn-active", "Active");
-  S.segBtnActive.addEventListener("click", function () { S.panelTab = "active"; renderPanel(); });
-  S.segBtnResolved = mkEl("button", "segmented-btn", "Resolved");
-  S.segBtnResolved.addEventListener("click", function () { S.panelTab = "resolved"; renderPanel(); });
-  segControl.appendChild(S.segBtnActive);
-  segControl.appendChild(S.segBtnResolved);
+  refs.segBtnActive = mkEl("button", "segmented-btn segmented-btn-active", "Active");
+  refs.segBtnActive.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "active" }); renderPanel(); });
+  refs.segBtnResolved = mkEl("button", "segmented-btn", "Resolved");
+  refs.segBtnResolved.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "resolved" }); renderPanel(); });
+  segControl.appendChild(refs.segBtnActive);
+  segControl.appendChild(refs.segBtnResolved);
   panelHead.appendChild(segControl);
 
-  S.markReadBtn = mkEl("button", "panel-mark-read");
-  S.markReadBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17"/></svg>';
-  S.markReadBtn.title = "Mark all as read";
-  S.markReadBtn.style.display = "none";
-  S.markReadBtn.addEventListener("click", function (e) { e.stopPropagation(); markAllRead(); });
-  panelHead.appendChild(S.markReadBtn);
+  refs.markReadBtn = mkEl("button", "panel-mark-read");
+  refs.markReadBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17"/></svg>';
+  refs.markReadBtn.title = "Mark all as read";
+  refs.markReadBtn.style.display = "none";
+  refs.markReadBtn.addEventListener("click", function (e) { e.stopPropagation(); markAllRead(); });
+  panelHead.appendChild(refs.markReadBtn);
 
   const closeBtn = mkEl("button", "panel-close");
   closeBtn.innerHTML = "&times;";
   closeBtn.addEventListener("click", togglePanel);
   panelHead.appendChild(closeBtn);
-  S.panel.appendChild(panelHead);
+  refs.panel.appendChild(panelHead);
 
-  S.panelBody = mkEl("div", "panel-body");
-  S.panel.appendChild(S.panelBody);
+  refs.panelBody = mkEl("div", "panel-body");
+  refs.panel.appendChild(refs.panelBody);
 
-  S.shadow.appendChild(S.panel);
+  refs.shadow.appendChild(refs.panel);
 }

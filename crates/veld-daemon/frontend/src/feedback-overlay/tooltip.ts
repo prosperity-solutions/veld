@@ -1,20 +1,20 @@
-import { S } from "./state";
+import { refs } from "./refs";
 import { mkEl } from "./helpers";
 import { PREFIX } from "./constants";
 
 /** Create and attach the tooltip element to the shadow DOM. */
 export function initTooltip(): void {
-  S.tooltip = mkEl("div", "tooltip");
-  S.shadow.appendChild(S.tooltip);
+  refs.tooltip = mkEl("div", "tooltip");
+  refs.shadow.appendChild(refs.tooltip);
 }
 
 /** Show the tooltip above (or below) the given anchor element. */
 export function showTooltip(anchor: Element, html: string): void {
-  S.tooltip.innerHTML = html;
-  S.tooltip.style.display = "block";
+  refs.tooltip.innerHTML = html;
+  refs.tooltip.style.display = "block";
   const r = anchor.getBoundingClientRect();
-  const tw = S.tooltip.offsetWidth;
-  const th = S.tooltip.offsetHeight;
+  const tw = refs.tooltip.offsetWidth;
+  const th = refs.tooltip.offsetHeight;
   const gap = 8;
   // Prefer above
   let top = r.top + window.scrollY - th - gap;
@@ -26,13 +26,13 @@ export function showTooltip(anchor: Element, html: string): void {
     window.scrollX + 4,
     Math.min(window.scrollX + window.innerWidth - tw - 4, left),
   );
-  S.tooltip.style.top = top + "px";
-  S.tooltip.style.left = left + "px";
+  refs.tooltip.style.top = top + "px";
+  refs.tooltip.style.left = left + "px";
 }
 
 /** Hide the tooltip. */
 export function hideTooltip(): void {
-  S.tooltip.style.display = "none";
+  refs.tooltip.style.display = "none";
 }
 
 /** Build tooltip HTML. `keys` is an array of individual key labels, e.g. [KEY_MOD, KEY_SHIFT, "F"]. */

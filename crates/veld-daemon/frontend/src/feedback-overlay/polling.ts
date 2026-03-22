@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
 import { PREFIX } from "./constants";
@@ -36,12 +37,12 @@ export function setPollingDeps(deps: {
 }
 
 export function pollEvents(): void {
-  api("GET", "/events?after=" + S.lastEventSeq).then(function (raw) {
+  api("GET", "/events?after=" + store.lastEventSeq).then(function (raw) {
     const events = raw as FeedbackEvent[];
     if (!events || !events.length) return;
     events.forEach(function (event: FeedbackEvent) {
       handleEvent(event);
-      if (event.seq > S.lastEventSeq) S.lastEventSeq = event.seq;
+      if (event.seq > store.lastEventSeq) dispatch({ type: "SET_LAST_EVENT_SEQ", seq: event.seq });
     });
   }).catch(function () {});
 }
@@ -49,9 +50,9 @@ export function pollEvents(): void {
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
-    const wasListening = S.agentListening;
-    S.agentListening = !!(data && data.listening);
-    if (S.agentListening !== wasListening) updateListeningModule();
+    const wasListening = store.agentListening;
+    dispatch({ type: "SET_LISTENING", listening: !!(data && data.listening) });
+    if (store.agentListening !== wasListening) updateListeningModule();
   }).catch(function () {});
 }
 
@@ -70,35 +71,35 @@ function handleEvent(event: FeedbackEvent): void {
       handleThreadReopened(event);
       break;
     case "agent_listening":
-      S.agentListening = true;
+      dispatch({ type: "SET_LISTENING", listening: true });
       updateListeningModule();
       break;
     case "agent_stopped":
-      S.agentListening = false;
+      dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
       toast("Agent stopped listening");
       break;
     case "session_ended":
-      S.agentListening = false;
+      dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
       break;
     case "thread_created":
-      if (event.thread && !findThread(S.threads, event.thread.id)) {
-        S.threads.push(event.thread);
+      if (event.thread && !findThread(store.threads, event.thread.id)) {
+        dispatch({ type: "ADD_THREAD", thread: event.thread });
         addPinFn(event.thread);
         updateBadge();
-        if (S.panelOpen) renderPanelFn();
+        if (store.panelOpen) renderPanelFn();
       }
       break;
     case "human_message":
       if (event.thread_id && event.message) {
-        const hmThread = findThread(S.threads, event.thread_id);
+        const hmThread = findThread(store.threads, event.thread_id);
         if (hmThread) {
           const exists = hmThread.messages.some(function (m: Message) { return m.id === event.message!.id; });
           if (!exists) {
             hmThread.messages.push(event.message);
             hmThread.updated_at = event.message.created_at || new Date().toISOString();
-            if (S.panelOpen) renderPanelFn();
+            if (store.panelOpen) renderPanelFn();
           }
         }
       }
@@ -107,15 +108,15 @@ function handleEvent(event: FeedbackEvent): void {
 }
 
 function handleAgentMessage(event: FeedbackEvent): void {
-  const thread = findThread(S.threads, event.thread_id!);
+  const thread = findThread(store.threads, event.thread_id!);
   if (!thread) {
     api("GET", "/threads/" + event.thread_id).then(function (raw) {
       const t = raw as Thread;
       if (t) {
-        S.threads.push(t);
+        dispatch({ type: "ADD_THREAD", thread: t });
         addPinFn(t);
         updateBadge();
-        if (S.panelOpen) renderPanelFn();
+        if (store.panelOpen) renderPanelFn();
         showAgentReplyToast(t.id, event.message!.body);
       }
     }).catch(function () {});
@@ -135,7 +136,7 @@ function handleAgentMessage(event: FeedbackEvent): void {
 
   addPinFn(thread);
   updateBadge();
-  if (S.panelOpen) renderPanelFn();
+  if (store.panelOpen) renderPanelFn();
 
   const preview = event.message ? event.message.body : "New reply";
   showAgentReplyToast(event.thread_id!, preview);
@@ -147,12 +148,12 @@ function handleAgentMessage(event: FeedbackEvent): void {
 
 function handleAgentThreadCreated(event: FeedbackEvent): void {
   if (event.thread) {
-    const existing = findThread(S.threads, event.thread.id);
+    const existing = findThread(store.threads, event.thread.id);
     if (!existing) {
-      S.threads.push(event.thread);
+      dispatch({ type: "ADD_THREAD", thread: event.thread });
       addPinFn(event.thread);
       updateBadge();
-      if (S.panelOpen) renderPanelFn();
+      if (store.panelOpen) renderPanelFn();
 
       const preview = event.thread.messages && event.thread.messages[0] ? event.thread.messages[0].body : "New thread";
       showAgentReplyToast(event.thread.id, preview);
@@ -167,22 +168,24 @@ function handleAgentThreadCreated(event: FeedbackEvent): void {
 }
 
 function handleThreadResolved(event: FeedbackEvent): void {
-  const thread = findThread(S.threads, event.thread_id!);
+  const thread = findThread(store.threads, event.thread_id!);
   if (thread) {
     thread.status = "resolved";
+    dispatch({ type: "SET_THREADS", threads: [...store.threads] });
     removePinFn(thread.id);
     updateBadge();
-    if (S.panelOpen) renderPanelFn();
+    if (store.panelOpen) renderPanelFn();
   }
 }
 
 function handleThreadReopened(event: FeedbackEvent): void {
-  const thread = findThread(S.threads, event.thread_id!);
+  const thread = findThread(store.threads, event.thread_id!);
   if (thread) {
     thread.status = "open";
+    dispatch({ type: "SET_THREADS", threads: [...store.threads] });
     addPinFn(thread);
     updateBadge();
-    if (S.panelOpen) renderPanelFn();
+    if (store.panelOpen) renderPanelFn();
   }
 }
 
@@ -199,7 +202,7 @@ export function showAgentReplyToast(threadId: string, preview: string): void {
     scrollToThreadFn(threadId);
   });
   t.appendChild(link);
-  S.shadow.appendChild(t);
+  refs.shadow.appendChild(t);
   requestAnimationFrame(function () { t.classList.add(PREFIX + "agent-toast-show"); });
   setTimeout(function () {
     t.classList.remove(PREFIX + "agent-toast-show");
@@ -224,10 +227,10 @@ export function sendBrowserNotification(title: string, body: string, threadId: s
 
 export function loadThreads(): void {
   api("GET", "/threads").then(function (raw) {
-    S.threads = (raw as Thread[]) || [];
+    dispatch({ type: "SET_THREADS", threads: (raw as Thread[]) || [] });
     renderAllPinsFn();
     updateBadge();
     checkPendingScrollFn();
-    if (S.panelOpen) renderPanelFn();
+    if (store.panelOpen) renderPanelFn();
   }).catch(function () {});
 }

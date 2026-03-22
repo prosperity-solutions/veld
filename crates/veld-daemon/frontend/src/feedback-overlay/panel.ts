@@ -1,4 +1,5 @@
-import { S } from "./state";
+import { refs } from "./refs";
+import { store, dispatch } from "./store";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
@@ -25,73 +26,73 @@ export function setPanelDeps(deps: {
 }
 
 export function togglePanel(): void {
-  S.panelOpen = !S.panelOpen;
-  if (S.panelOpen) S.expandedThreadId = null;
-  S.panel.classList.toggle(PREFIX + "panel-open", S.panelOpen);
-  if (S.panelOpen) renderPanel();
+  dispatch({ type: "SET_PANEL_OPEN", open: !store.panelOpen });
+  if (store.panelOpen) dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
+  refs.panel.classList.toggle(PREFIX + "panel-open", store.panelOpen);
+  if (store.panelOpen) renderPanel();
 }
 
 export function showThreadDetail(threadId: string): void {
-  S.expandedThreadId = threadId;
+  dispatch({ type: "SET_EXPANDED_THREAD", threadId });
   renderPanel();
 }
 
 export function showThreadList(): void {
-  S.expandedThreadId = null;
+  dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   renderPanel();
 }
 
 export function openThreadInPanel(threadId: string): void {
-  S.panelOpen = true;
-  S.panelTab = "active";
-  S.expandedThreadId = threadId;
-  S.panel.classList.add(PREFIX + "panel-open");
+  dispatch({ type: "SET_PANEL_OPEN", open: true });
+  dispatch({ type: "SET_PANEL_TAB", tab: "active" });
+  dispatch({ type: "SET_EXPANDED_THREAD", threadId });
+  refs.panel.classList.add(PREFIX + "panel-open");
   renderPanel();
 }
 
 function updateSegmentedControl(): void {
-  if (S.segBtnActive && S.segBtnResolved) {
-    const activeCount = S.threads.filter(function (t: Thread) { return t.status === "open"; }).length;
-    const resolvedCount = S.threads.filter(function (t: Thread) { return t.status === "resolved"; }).length;
-    S.segBtnActive.textContent = "Active" + (activeCount ? " (" + activeCount + ")" : "");
-    S.segBtnResolved.textContent = "Resolved" + (resolvedCount ? " (" + resolvedCount + ")" : "");
-    S.segBtnActive.className = PREFIX + "segmented-btn" + (S.panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
-    S.segBtnResolved.className = PREFIX + "segmented-btn" + (S.panelTab === "resolved" ? " " + PREFIX + "segmented-btn-active" : "");
+  if (refs.segBtnActive && refs.segBtnResolved) {
+    const activeCount = store.threads.filter(function (t: Thread) { return t.status === "open"; }).length;
+    const resolvedCount = store.threads.filter(function (t: Thread) { return t.status === "resolved"; }).length;
+    refs.segBtnActive.textContent = "Active" + (activeCount ? " (" + activeCount + ")" : "");
+    refs.segBtnResolved.textContent = "Resolved" + (resolvedCount ? " (" + resolvedCount + ")" : "");
+    refs.segBtnActive.className = PREFIX + "segmented-btn" + (store.panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
+    refs.segBtnResolved.className = PREFIX + "segmented-btn" + (store.panelTab === "resolved" ? " " + PREFIX + "segmented-btn-active" : "");
   }
 }
 
 export function updateMarkReadBtn(): void {
-  if (!S.markReadBtn) return;
-  const anyUnread = S.threads.some(function (t: Thread) { return hasUnread(t, S.lastSeenAt); });
-  S.markReadBtn.style.display = anyUnread ? "" : "none";
+  if (!refs.markReadBtn) return;
+  const anyUnread = store.threads.some(function (t: Thread) { return hasUnread(t, store.lastSeenAt); });
+  refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
 export function renderPanel(): void {
-  S.panelBody.innerHTML = "";
+  refs.panelBody.innerHTML = "";
 
-  if (S.expandedThreadId) {
-    const thread = findThread(S.threads, S.expandedThreadId);
+  if (store.expandedThreadId) {
+    const thread = findThread(store.threads, store.expandedThreadId);
     if (thread) {
-      S.panelBackBtn.style.display = "";
+      refs.panelBackBtn.style.display = "";
       // Hide segmented control in detail view
-      const segControl = S.panelBackBtn.parentElement?.querySelector("." + PREFIX + "segmented") as HTMLElement | null;
+      const segControl = refs.panelBackBtn.parentElement?.querySelector("." + PREFIX + "segmented") as HTMLElement | null;
       if (segControl) segControl.style.display = "none";
-      if (S.markReadBtn) S.markReadBtn.style.display = "none";
-      S.panelHeadTitle.textContent = "Thread";
+      if (refs.markReadBtn) refs.markReadBtn.style.display = "none";
+      refs.panelHeadTitle.textContent = "Thread";
       renderThreadDetail(thread);
       return;
     }
-    S.expandedThreadId = null;
+    dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   }
 
-  S.panelBackBtn.style.display = "none";
-  const segControl = S.panelBackBtn.parentElement?.querySelector("." + PREFIX + "segmented") as HTMLElement | null;
+  refs.panelBackBtn.style.display = "none";
+  const segControl = refs.panelBackBtn.parentElement?.querySelector("." + PREFIX + "segmented") as HTMLElement | null;
   if (segControl) segControl.style.display = "";
-  S.panelHeadTitle.textContent = "Threads";
+  refs.panelHeadTitle.textContent = "Threads";
   updateSegmentedControl();
   updateMarkReadBtn();
 
-  if (S.panelTab === "active") {
+  if (store.panelTab === "active") {
     renderActiveThreads();
   } else {
     renderResolvedThreads();
@@ -153,7 +154,7 @@ function renderThreadDetail(thread: Thread): void {
     header.appendChild(makeCopyRow("", thread.scope.selector, "panel-detail-selector"));
   }
 
-  S.panelBody.appendChild(header);
+  refs.panelBody.appendChild(header);
 
   if (thread.status === "resolved") {
     const msgList = mkEl("div", "thread-messages-list");
@@ -169,29 +170,30 @@ function renderThreadDetail(thread: Thread): void {
       msgEl.appendChild(body);
       msgList.appendChild(msgEl);
     });
-    S.panelBody.appendChild(msgList);
+    refs.panelBody.appendChild(msgList);
 
     const reopenRow = mkEl("div", "thread-input-actions");
     const reopenBtn = mkEl("button", "btn btn-primary btn-sm", "Reopen Thread");
     reopenBtn.addEventListener("click", function () {
       api("POST", "/threads/" + thread.id + "/reopen").then(function () {
         thread.status = "open";
+        dispatch({ type: "SET_THREADS", threads: [...store.threads] });
         showThreadList();
         renderAllPinsFn();
         toast("Thread reopened");
       });
     });
     reopenRow.appendChild(reopenBtn);
-    S.panelBody.appendChild(reopenRow);
+    refs.panelBody.appendChild(reopenRow);
   } else {
-    S.panelBody.appendChild(renderThreadMessages(thread));
+    refs.panelBody.appendChild(renderThreadMessages(thread));
   }
 }
 
 function renderActiveThreads(): void {
-  const active = S.threads.filter(function (t: Thread) { return t.status === "open"; });
+  const active = store.threads.filter(function (t: Thread) { return t.status === "open"; });
   if (!active.length) {
-    S.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
+    refs.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
     return;
   }
   const byPage: Record<string, Thread[]> = {};
@@ -215,15 +217,15 @@ function renderActiveThreads(): void {
 }
 
 function renderResolvedThreads(): void {
-  const resolved = S.threads.filter(function (t: Thread) { return t.status === "resolved"; });
+  const resolved = store.threads.filter(function (t: Thread) { return t.status === "resolved"; });
   if (!resolved.length) {
-    S.panelBody.appendChild(mkEl("div", "panel-empty", "No resolved threads."));
+    refs.panelBody.appendChild(mkEl("div", "panel-empty", "No resolved threads."));
     return;
   }
   resolved.sort(function (a: Thread, b: Thread) {
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   });
-  resolved.forEach(function (t: Thread) { S.panelBody.appendChild(makeThreadCard(t, true)); });
+  resolved.forEach(function (t: Thread) { refs.panelBody.appendChild(makeThreadCard(t, true)); });
 }
 
 function renderThreadGroup(label: string, threads: Thread[]): void {
@@ -233,12 +235,12 @@ function renderThreadGroup(label: string, threads: Thread[]): void {
   const section = mkEl("div", "panel-section");
   section.appendChild(mkEl("div", "panel-section-heading", label));
   threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
-  S.panelBody.appendChild(section);
+  refs.panelBody.appendChild(section);
 }
 
 function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   const card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
-  if (hasUnread(thread, S.lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
+  if (hasUnread(thread, store.lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
   (card as HTMLElement).dataset.threadId = thread.id;
 
   const row1 = mkEl("div", "thread-card-row");
@@ -293,6 +295,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const doResolve = function () {
       api("POST", "/threads/" + thread.id + "/resolve").then(function () {
         thread.status = "resolved";
+        dispatch({ type: "SET_THREADS", threads: [...store.threads] });
         closeActivePopoverFn();
         showThreadList();
         renderAllPinsFn();
@@ -321,7 +324,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
       thread.updated_at = new Date().toISOString();
       textarea.value = "";
       sendBtn.disabled = false;
-      if (S.panelOpen) renderPanel();
+      if (store.panelOpen) renderPanel();
       renderAllPinsFn();
     }).catch(function () {
       sendBtn.disabled = false;
@@ -337,24 +340,24 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 }
 
 export function markThreadSeen(threadId: string): void {
-  S.lastSeenAt[threadId] = Date.now();
+  dispatch({ type: "MARK_SEEN", threadId });
   api("PUT", "/threads/" + threadId + "/seen").catch(function () {});
-  const thread = findThread(S.threads, threadId);
+  const thread = findThread(store.threads, threadId);
   if (thread) addPinFn(thread);
   updateBadge();
   updateMarkReadBtn();
 }
 
 export function markAllRead(): void {
-  S.threads.forEach(function (t: Thread) {
-    if (hasUnread(t, S.lastSeenAt)) {
-      S.lastSeenAt[t.id] = Date.now();
+  store.threads.forEach(function (t: Thread) {
+    if (hasUnread(t, store.lastSeenAt)) {
+      dispatch({ type: "MARK_SEEN", threadId: t.id });
       api("PUT", "/threads/" + t.id + "/seen").catch(function () {});
     }
   });
   renderAllPinsFn();
   updateBadge();
   updateMarkReadBtn();
-  if (S.panelOpen) renderPanel();
+  if (store.panelOpen) renderPanel();
   toast("All marked as read");
 }

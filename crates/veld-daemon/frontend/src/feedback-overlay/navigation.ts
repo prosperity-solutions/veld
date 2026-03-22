@@ -1,4 +1,4 @@
-import { S } from "./state";
+import { store, dispatch } from "./store";
 import { findThread, isCurrentPage, getThreadPageUrl } from "./helpers";
 import { PREFIX } from "./constants";
 
@@ -17,7 +17,7 @@ export function setNavigationDeps(deps: {
 }
 
 export function scrollToThread(threadId: string): void {
-  const thread = findThread(S.threads, threadId);
+  const thread = findThread(store.threads, threadId);
   if (!thread) return;
 
   const pageUrl = getThreadPageUrl(thread);
@@ -31,12 +31,12 @@ export function scrollToThread(threadId: string): void {
   if (thread.scope && thread.scope.type === "element" && thread.scope.selector) {
     try { target = document.querySelector(thread.scope.selector); } catch (_) {}
   }
-  if (!target) target = S.pins[threadId] || document.getElementById(PREFIX + "pin-" + threadId);
+  if (!target) target = store.pins[threadId] || document.getElementById(PREFIX + "pin-" + threadId);
   if (!target) return;
 
   target.scrollIntoView({ behavior: "smooth", block: "center" });
 
-  const pin = S.pins[threadId];
+  const pin = store.pins[threadId];
   if (pin) {
     setTimeout(() => {
       pin.classList.remove(PREFIX + "pin-highlight");
@@ -59,10 +59,10 @@ export function checkPendingScroll(): void {
 
 export function onNavigate(): void {
   const newPath = window.location.pathname;
-  if (newPath !== S.lastPathname) {
-    S.lastPathname = newPath;
+  if (newPath !== store.lastPathname) {
+    dispatch({ type: "SET_LAST_PATHNAME", path: newPath });
     if (renderAllPinsFn) renderAllPinsFn();
-    if (S.panelOpen && renderPanelFn) renderPanelFn();
+    if (store.panelOpen && renderPanelFn) renderPanelFn();
     checkPendingScroll();
   }
 }
