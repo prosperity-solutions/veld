@@ -87,8 +87,11 @@ export function renderControls(
             valueDisplay.textContent = String(v) + (ctrl.unit ? " " + ctrl.unit : "");
           });
 
-          row.appendChild(input);
-          row.appendChild(valueDisplay);
+          const inputRow = document.createElement("div");
+          inputRow.style.cssText = "display:flex;align-items:center;gap:8px";
+          inputRow.appendChild(input);
+          inputRow.appendChild(valueDisplay);
+          row.appendChild(inputRow);
         } else {
           // Number input with Bret Victor scrubbing
           const input = document.createElement("input");
@@ -98,6 +101,7 @@ export function renderControls(
           if (ctrl.max !== undefined) input.max = String(ctrl.max);
           if (ctrl.step !== undefined) input.step = String(ctrl.step);
           input.value = String(ctrl.value);
+          input.placeholder = "Alt+drag to scrub";
           registry.set(ctrl.name, ctrl.value);
 
           input.addEventListener("input", () => {
@@ -119,8 +123,11 @@ export function renderControls(
           );
           cleanups.push(scrubCleanup);
 
-          row.appendChild(input);
-          row.appendChild(valueDisplay);
+          const numRow = document.createElement("div");
+          numRow.style.cssText = "display:flex;align-items:center;gap:8px";
+          numRow.appendChild(input);
+          numRow.appendChild(valueDisplay);
+          row.appendChild(numRow);
         }
         break;
       }
