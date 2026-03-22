@@ -436,11 +436,10 @@ fn build_route_json(
 /// Build the inline bootstrap `<script>` tag that is injected into HTML
 /// responses by the `veld_inject` Caddy handler.
 ///
-/// The script is inserted after `<!DOCTYPE html>` (or after `<head>`) to
-/// avoid triggering quirks mode. It runs before any app code, immediately
-/// intercepts console methods to capture early logs, then dynamically loads
-/// the full client-log collector and/or feedback overlay assets once the DOM
-/// is ready.
+/// The script is prepended to the response body (after any `<!DOCTYPE>`
+/// declaration). It runs before any app code, immediately intercepts
+/// console methods to capture early logs, then dynamically loads the full
+/// client-log collector and/or feedback overlay assets once the DOM is ready.
 fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     if !fb.inject_client_logs && !fb.inject_feedback_overlay {
         return String::new();
