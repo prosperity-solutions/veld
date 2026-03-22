@@ -15,7 +15,7 @@ export function setDrawModeDeps(deps: { setMode: (mode: UIMode) => void }): void
 
 /** Load the draw.js script if not already loaded. */
 export function ensureDrawScript(): Promise<void> {
-  if (S.drawLoaded && (window as any).__veld_draw) return Promise.resolve();
+  if (S.drawLoaded && window.__veld_draw) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = "/__veld__/feedback/draw.js";
@@ -45,7 +45,7 @@ export function setupGlobalDrawCanvas(): void {
   // The capture stream was acquired before this function is called.
   const track =
     S.captureStream && S.captureStream.getVideoTracks()[0];
-  const ic: any =
+  const ic =
     track && typeof ImageCapture !== "undefined"
       ? new ImageCapture(track)
       : null;
@@ -55,7 +55,7 @@ export function setupGlobalDrawCanvas(): void {
 
   snapshotPromise.then((snapshot) => {
     if (!S.drawCanvas) return; // torn down while waiting
-    S.drawCleanup = (window as any).__veld_draw.activate(S.drawCanvas, {
+    S.drawCleanup = window.__veld_draw!.activate(S.drawCanvas, {
       pageSnapshot: snapshot,
       mountTarget: S.shadow,
       onDone: (hasStrokes: boolean) => {
@@ -106,7 +106,7 @@ export function setupGlobalDrawCanvas(): void {
             requestAnimationFrame(() => {
               requestAnimationFrame(() => {
                 setTimeout(() => {
-                  const grabber = new ImageCapture(captureTrack) as any;
+                  const grabber = new ImageCapture(captureTrack);
                   grabber
                     .grabFrame()
                     .then((bitmap: ImageBitmap) => {

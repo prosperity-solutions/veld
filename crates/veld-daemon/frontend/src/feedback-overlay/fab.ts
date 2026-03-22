@@ -43,9 +43,9 @@ export function initDrag(): void {
     if (!dragging) return;
     dragging = false;
     if (moved) {
-      (S.fab as any)._wasDragged = true;
+      S.fabWasDragged = true;
       setTimeout(function () {
-        (S.fab as any)._wasDragged = false;
+        S.fabWasDragged = false;
       }, 300);
       saveFabPos(S.fabCX, S.fabCY);
     }

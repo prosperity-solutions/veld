@@ -1,16 +1,17 @@
 import { S } from "./state";
+import type { Thread } from "./types";
 import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
 import { PREFIX, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 
 // Late-bound deps
-let addPinFn: (thread: any) => void;
+let addPinFn: (thread: Thread) => void;
 let updateBadgeFn: () => void;
 let renderPanelFn: () => void;
 
 export function setPopoverDeps(deps: {
-  addPin: (thread: any) => void;
+  addPin: (thread: Thread) => void;
   updateBadge: () => void;
   renderPanel: () => void;
 }): void {
@@ -48,8 +49,8 @@ export function positionPopover(
 
 export function closeActivePopover(): void {
   if (S.activePopover) {
-    if (typeof (S.activePopover as any)._veldCleanup === "function") {
-      (S.activePopover as any)._veldCleanup();
+    if (typeof S.activePopover._veldCleanup === "function") {
+      S.activePopover._veldCleanup();
     }
     S.activePopover.remove();
     S.activePopover = null;
@@ -105,7 +106,8 @@ export function showCreatePopover(
     api("POST", "/threads", {
       scope, message: text, component_trace: trace || null,
       viewport_width: window.innerWidth, viewport_height: window.innerHeight,
-    }).then((thread: any) => {
+    }).then((raw) => {
+      const thread = raw as Thread;
       S.threads.push(thread);
       closeActivePopover();
       if (addPinFn) addPinFn(thread);

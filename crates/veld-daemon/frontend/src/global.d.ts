@@ -2,7 +2,7 @@ interface DrawActivateOptions {
   inline?: boolean;
   pageSnapshot?: ImageBitmap | HTMLCanvasElement | HTMLImageElement | null;
   baseImage?: HTMLImageElement | HTMLCanvasElement | null;
-  mountTarget?: HTMLElement;
+  mountTarget?: HTMLElement | ShadowRoot;
   onDone?: (hasStrokes: boolean) => void;
 }
 
@@ -12,6 +12,30 @@ interface VeldDraw {
 }
 
 declare global {
+  /**
+   * Chromium-only extension: `preferCurrentTab` on getDisplayMedia options.
+   * Standard `DisplayMediaStreamOptions` doesn't include it yet.
+   */
+  interface VeldDisplayMediaStreamOptions extends DisplayMediaStreamOptions {
+    preferCurrentTab?: boolean;
+    video?: MediaTrackConstraints & { displaySurface?: string };
+  }
+
+  /**
+   * ImageCapture API — available in Chromium-based browsers.
+   * Not yet in the TypeScript DOM lib, so we declare it here.
+   */
+  // eslint-disable-next-line no-var
+  var ImageCapture: {
+    prototype: ImageCapture;
+    new (track: MediaStreamTrack): ImageCapture;
+  };
+
+  interface ImageCapture {
+    grabFrame(): Promise<ImageBitmap>;
+    takePhoto(): Promise<Blob>;
+  }
+
   interface Window {
     __veld_feedback_initialised?: boolean;
     __veld_draw?: VeldDraw;

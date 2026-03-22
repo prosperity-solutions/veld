@@ -1,4 +1,4 @@
-import type { Thread, UIMode } from "./types";
+import type { Thread, UIMode, VeldPopoverElement } from "./types";
 
 export type ThemeMode = "auto" | "dark" | "light";
 
@@ -12,7 +12,7 @@ export interface FeedbackState {
   // UI state
   panelOpen: boolean;
   panelTab: "active" | "resolved";
-  activePopover: HTMLElement | null;
+  activePopover: VeldPopoverElement | null;
   activeMode: UIMode;
   hoveredEl: Element | null;
   lockedEl: Element | null;
@@ -68,6 +68,7 @@ export interface FeedbackState {
   // FAB positioning
   fabCX: number;
   fabCY: number;
+  fabWasDragged: boolean;
 
   // Reposition throttle
   rafPending: boolean;
@@ -131,6 +132,7 @@ export function initState(shadow: ShadowRoot, hostEl: HTMLElement): void {
     tooltip: null!,
     fabCX: 0,
     fabCY: 0,
+    fabWasDragged: false,
     rafPending: false,
     lastPathname: window.location.pathname,
   };

@@ -1,15 +1,15 @@
-// @ts-nocheck
 import { S } from "./state";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { updateBadge } from "./badge";
+import type { Thread, Message } from "./types";
 
 // Late-bound deps
 export let closeActivePopoverFn: () => void;
 export let renderAllPinsFn: () => void;
-export let addPinFn: (thread: any) => void;
+export let addPinFn: (thread: Thread) => void;
 export let scrollToThreadFn: (threadId: string) => void;
 
 export function setPanelDeps(deps: {
@@ -51,8 +51,8 @@ export function openThreadInPanel(threadId: string): void {
 
 function updateSegmentedControl(): void {
   if (S.segBtnActive && S.segBtnResolved) {
-    const activeCount = S.threads.filter(function (t: any) { return t.status === "open"; }).length;
-    const resolvedCount = S.threads.filter(function (t: any) { return t.status === "resolved"; }).length;
+    const activeCount = S.threads.filter(function (t: Thread) { return t.status === "open"; }).length;
+    const resolvedCount = S.threads.filter(function (t: Thread) { return t.status === "resolved"; }).length;
     S.segBtnActive.textContent = "Active" + (activeCount ? " (" + activeCount + ")" : "");
     S.segBtnResolved.textContent = "Resolved" + (resolvedCount ? " (" + resolvedCount + ")" : "");
     S.segBtnActive.className = PREFIX + "segmented-btn" + (S.panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
@@ -62,8 +62,8 @@ function updateSegmentedControl(): void {
 
 export function updateMarkReadBtn(): void {
   if (!S.markReadBtn) return;
-  const anyUnread = S.threads.some(function (t: any) { return hasUnread(t, S.lastSeenAt); });
-  (S.markReadBtn as any).style.display = anyUnread ? "" : "none";
+  const anyUnread = S.threads.some(function (t: Thread) { return hasUnread(t, S.lastSeenAt); });
+  S.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
 export function renderPanel(): void {
@@ -116,7 +116,7 @@ function makeCopyRow(label: string, value: string, cls: string): HTMLElement {
   return row;
 }
 
-function renderThreadDetail(thread: any): void {
+function renderThreadDetail(thread: Thread): void {
   const header = mkEl("div", "panel-detail-header");
   header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id"));
 
@@ -137,8 +137,8 @@ function renderThreadDetail(thread: any): void {
   const hasScrollTarget = thread.scope.type === "element";
   if (hasScrollTarget || onDifferentPage) {
     const goLabel = onDifferentPage ? "Go to page \u2192" : "Go to comment \u2192";
-    const goLink = mkEl("a", "panel-detail-page-link", goLabel);
-    (goLink as HTMLAnchorElement).href = pageUrl || "#";
+    const goLink = mkEl("a", "panel-detail-page-link", goLabel) as HTMLAnchorElement;
+    goLink.href = pageUrl || "#";
     goLink.addEventListener("click", function (e) {
       e.preventDefault();
       scrollToThreadFn(thread.id);
@@ -157,7 +157,7 @@ function renderThreadDetail(thread: any): void {
 
   if (thread.status === "resolved") {
     const msgList = mkEl("div", "thread-messages-list");
-    thread.messages.forEach(function (msg: any) {
+    thread.messages.forEach(function (msg: Message) {
       const msgEl = mkEl("div", "message message-" + msg.author);
       const icon = mkEl("span", "message-author-icon");
       icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -189,14 +189,14 @@ function renderThreadDetail(thread: any): void {
 }
 
 function renderActiveThreads(): void {
-  const active = S.threads.filter(function (t: any) { return t.status === "open"; });
+  const active = S.threads.filter(function (t: Thread) { return t.status === "open"; });
   if (!active.length) {
     S.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
     return;
   }
-  const byPage: Record<string, any[]> = {};
+  const byPage: Record<string, Thread[]> = {};
   const pageOrder: string[] = [];
-  active.forEach(function (t: any) {
+  active.forEach(function (t: Thread) {
     const url = getThreadPageUrl(t);
     const path = (url || "/").split("?")[0];
     if (!byPage[path]) { byPage[path] = []; pageOrder.push(path); }
@@ -215,31 +215,31 @@ function renderActiveThreads(): void {
 }
 
 function renderResolvedThreads(): void {
-  const resolved = S.threads.filter(function (t: any) { return t.status === "resolved"; });
+  const resolved = S.threads.filter(function (t: Thread) { return t.status === "resolved"; });
   if (!resolved.length) {
     S.panelBody.appendChild(mkEl("div", "panel-empty", "No resolved threads."));
     return;
   }
-  resolved.sort(function (a: any, b: any) {
+  resolved.sort(function (a: Thread, b: Thread) {
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   });
-  resolved.forEach(function (t: any) { S.panelBody.appendChild(makeThreadCard(t, true)); });
+  resolved.forEach(function (t: Thread) { S.panelBody.appendChild(makeThreadCard(t, true)); });
 }
 
-function renderThreadGroup(label: string, threads: any[]): void {
-  threads.sort(function (a: any, b: any) {
+function renderThreadGroup(label: string, threads: Thread[]): void {
+  threads.sort(function (a: Thread, b: Thread) {
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   });
   const section = mkEl("div", "panel-section");
   section.appendChild(mkEl("div", "panel-section-heading", label));
-  threads.forEach(function (t: any) { section.appendChild(makeThreadCard(t, false)); });
+  threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
   S.panelBody.appendChild(section);
 }
 
-function makeThreadCard(thread: any, isResolved: boolean): HTMLElement {
+function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   const card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
   if (hasUnread(thread, S.lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
-  (card as any).dataset.threadId = thread.id;
+  (card as HTMLElement).dataset.threadId = thread.id;
 
   const row1 = mkEl("div", "thread-card-row");
   let preview = (thread.messages && thread.messages[0]) ? thread.messages[0].body : "";
@@ -260,10 +260,10 @@ function makeThreadCard(thread: any, isResolved: boolean): HTMLElement {
   return card;
 }
 
-function renderThreadMessages(thread: any): HTMLElement {
+function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
-  thread.messages.forEach(function (msg: any) {
+  thread.messages.forEach(function (msg: Message) {
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -289,7 +289,7 @@ function renderThreadMessages(thread: any): HTMLElement {
   const inputActions = mkEl("div", "thread-input-actions");
   const resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
   resolveBtn.addEventListener("click", function () {
-    const text = (textarea as HTMLTextAreaElement).value.trim();
+    const text = textarea.value.trim();
     const doResolve = function () {
       api("POST", "/threads/" + thread.id + "/resolve").then(function () {
         thread.status = "resolved";
@@ -300,8 +300,8 @@ function renderThreadMessages(thread: any): HTMLElement {
       });
     };
     if (text) {
-      api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (msg: any) {
-        thread.messages.push(msg);
+      api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (raw) {
+        thread.messages.push(raw as Message);
         doResolve();
       });
     } else {
@@ -312,14 +312,14 @@ function renderThreadMessages(thread: any): HTMLElement {
 
   const sendBtn = mkEl("button", "btn btn-primary btn-sm", "Send" + SUBMIT_HINT) as HTMLButtonElement;
   sendBtn.addEventListener("click", function () {
-    const text = (textarea as HTMLTextAreaElement).value.trim();
+    const text = textarea.value.trim();
     if (!text) return;
     if (sendBtn.disabled) return;
     sendBtn.disabled = true;
-    api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (msg: any) {
-      thread.messages.push(msg);
+    api("POST", "/threads/" + thread.id + "/messages", { body: text }).then(function (raw) {
+      thread.messages.push(raw as Message);
       thread.updated_at = new Date().toISOString();
-      (textarea as HTMLTextAreaElement).value = "";
+      textarea.value = "";
       sendBtn.disabled = false;
       if (S.panelOpen) renderPanel();
       renderAllPinsFn();
@@ -346,7 +346,7 @@ export function markThreadSeen(threadId: string): void {
 }
 
 export function markAllRead(): void {
-  S.threads.forEach(function (t: any) {
+  S.threads.forEach(function (t: Thread) {
     if (hasUnread(t, S.lastSeenAt)) {
       S.lastSeenAt[t.id] = Date.now();
       api("PUT", "/threads/" + t.id + "/seen").catch(function () {});

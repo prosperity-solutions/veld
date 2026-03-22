@@ -2,7 +2,7 @@ export type ThreadStatus = "open" | "resolved";
 export type UIMode = null | "select-element" | "screenshot" | "draw";
 
 export interface ThreadScope {
-  type: "page" | "element";
+  type: "page" | "element" | "global";
   page_url: string;
   selector?: string;
   label?: string;
@@ -32,7 +32,15 @@ export interface Thread {
 
 export interface FeedbackEvent {
   seq: number;
-  type: string;
+  event: string;
   thread_id?: string;
+  thread?: Thread;
+  message?: Message;
   data?: unknown;
+}
+
+/** An HTMLElement with optional veld-specific cleanup/type metadata. */
+export interface VeldPopoverElement extends HTMLElement {
+  _veldType?: string;
+  _veldCleanup?: () => void;
 }

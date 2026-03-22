@@ -1,6 +1,6 @@
-// @ts-nocheck
 // DOM scaffolding — builds all the UI elements and attaches them to shadow/light DOM.
 import { S } from "./state";
+import type { ThemeMode } from "./state";
 import { mkEl } from "./helpers";
 import { PREFIX, ICONS, KEY_MOD, KEY_SHIFT } from "./constants";
 import { initTooltip, attachTooltip, tipHtml } from "./tooltip";
@@ -69,20 +69,20 @@ export function buildDOM(): void {
   S.toolbar.appendChild(toolBtnShortcuts);
 
   // Theme toggle
-  const THEME_ICONS: Record<string, string> = {
+  const THEME_ICONS: Record<ThemeMode, string> = {
     auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
     dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>',
     light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
   };
-  const THEME_LABELS: Record<string, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
-  const THEME_ORDER = ["auto", "dark", "light"];
+  const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
+  const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
   const toolBtnTheme = mkEl("button", "tool-btn");
   toolBtnTheme.innerHTML = THEME_ICONS[S.theme];
   attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[S.theme], []));
   toolBtnTheme.addEventListener("click", function (e) {
     e.stopPropagation();
     const idx = (THEME_ORDER.indexOf(S.theme) + 1) % THEME_ORDER.length;
-    S.theme = THEME_ORDER[idx] as any;
+    S.theme = THEME_ORDER[idx];
     toolBtnTheme.innerHTML = THEME_ICONS[S.theme];
     S.hostEl.setAttribute("data-theme", S.theme);
     document.documentElement.setAttribute("data-veld-theme", S.theme === "auto" ? "" : S.theme);
@@ -117,7 +117,7 @@ export function buildDOM(): void {
   S.fabBadge = mkEl("span", "badge badge-hidden");
   S.fab.appendChild(S.fabBadge);
   S.fab.addEventListener("click", function () {
-    if ((S.fab as any)._wasDragged) { (S.fab as any)._wasDragged = false; return; }
+    if (S.fabWasDragged) { S.fabWasDragged = false; return; }
     toggleToolbar();
   });
   S.toolbarContainer.appendChild(S.fab);

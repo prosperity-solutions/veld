@@ -1,5 +1,5 @@
 import { S } from "./state";
-import type { UIMode } from "./types";
+import type { UIMode, Thread, VeldPopoverElement } from "./types";
 import { mkEl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, API, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
@@ -85,10 +85,11 @@ export function acquireCaptureStream(): Promise<void> {
       });
 
   return disclaimerDone.then(() => {
-    const opts: DisplayMediaStreamOptions = {
-      video: { displaySurface: "browser" } as any,
+    // preferCurrentTab and displaySurface are Chromium-only extensions
+    const opts: VeldDisplayMediaStreamOptions = {
+      video: { displaySurface: "browser" },
       preferCurrentTab: true,
-    } as any;
+    };
     return navigator.mediaDevices.getDisplayMedia(opts).then((stream) => {
       S.captureStream = stream;
       // If the user stops sharing via browser UI, clean up.
@@ -156,7 +157,7 @@ export function captureScreenshot(
   const track = stream.getVideoTracks()[0];
 
   function grabCleanFrame(): void {
-    const grabber = new ImageCapture(track) as any;
+    const grabber = new ImageCapture(track);
     grabber
       .grabFrame()
       .then((bitmap: ImageBitmap) => {
@@ -274,8 +275,8 @@ export function showScreenshotThreadEditor(
 ): void {
   closeActivePopover();
 
-  const pop = mkEl("div", "popover popover-screenshot");
-  (pop as any)._veldType = "screenshot";
+  const pop = mkEl("div", "popover popover-screenshot") as VeldPopoverElement;
+  pop._veldType = "screenshot";
 
   // Screenshot preview (if available)
   let previewUrl: string | null = null;
@@ -323,7 +324,7 @@ export function showScreenshotThreadEditor(
             doneAnnotateBtn.type = "button";
             previewContainer.appendChild(doneAnnotateBtn);
 
-            annotateDrawCleanup = (window as any).__veld_draw.activate(
+            annotateDrawCleanup = window.__veld_draw!.activate(
               drawCanvas,
               {
                 inline: true,
@@ -334,8 +335,8 @@ export function showScreenshotThreadEditor(
             );
 
             function finishAnnotation(): void {
-              (window as any).__veld_draw
-                .compositeOnto(pngBlob, drawCanvas)
+              window.__veld_draw!
+                .compositeOnto(pngBlob!, drawCanvas)
                 .then((newBlob: Blob) => {
                   // Update the preview with composited image
                   pngBlob = newBlob;
@@ -385,7 +386,7 @@ export function showScreenshotThreadEditor(
   }
 
   // Ensure the Object URL is revoked when the popover is closed by any means
-  (pop as any)._veldCleanup = (): void => {
+  pop._veldCleanup = (): void => {
     if (annotateDrawCleanup) {
       annotateDrawCleanup();
       annotateDrawCleanup = null;
@@ -439,7 +440,8 @@ export function showScreenshotThreadEditor(
       viewport_height: window.innerHeight,
     };
     api("POST", "/threads", payload)
-      .then((thread: any) => {
+      .then((raw) => {
+        const thread = raw as Thread;
         S.threads.push(thread);
         closeActivePopover();
         // addPin and updateBadge are called from the monolith via event flow

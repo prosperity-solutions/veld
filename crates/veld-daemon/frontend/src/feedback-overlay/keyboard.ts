@@ -1,6 +1,6 @@
-// @ts-nocheck
 import { S } from "./state";
 import { modKey } from "./helpers";
+import type { UIMode } from "./types";
 
 // Late-bound deps to avoid circular imports
 export let setModeFn: (mode: UIMode) => void;

@@ -8,8 +8,8 @@ import { SHADOW_CSS, LIGHT_CSS } from "./styles";
 import { initState } from "./state";
 import { init } from "./init";
 
-if (!(window as any).__veld_feedback_initialised) {
-  (window as any).__veld_feedback_initialised = true;
+if (!window.__veld_feedback_initialised) {
+  window.__veld_feedback_initialised = true;
 
   // Create host element with shadow DOM
   const hostEl = document.createElement("veld-feedback");

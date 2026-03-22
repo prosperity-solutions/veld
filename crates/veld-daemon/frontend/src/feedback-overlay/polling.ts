@@ -1,5 +1,5 @@
-// @ts-nocheck
 import { S } from "./state";
+import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
 import { PREFIX } from "./constants";
 import { api } from "./api";
@@ -9,7 +9,7 @@ import { updateBadge } from "./badge";
 import { updateListeningModule } from "./listening";
 
 // Late-bound deps
-export let addPinFn: (thread: any) => void;
+export let addPinFn: (thread: Thread) => void;
 export let removePinFn: (threadId: string) => void;
 export let renderAllPinsFn: () => void;
 export let renderPanelFn: () => void;
@@ -36,9 +36,10 @@ export function setPollingDeps(deps: {
 }
 
 export function pollEvents(): void {
-  api("GET", "/events?after=" + S.lastEventSeq).then(function (events: any) {
+  api("GET", "/events?after=" + S.lastEventSeq).then(function (raw) {
+    const events = raw as FeedbackEvent[];
     if (!events || !events.length) return;
-    events.forEach(function (event: any) {
+    events.forEach(function (event: FeedbackEvent) {
       handleEvent(event);
       if (event.seq > S.lastEventSeq) S.lastEventSeq = event.seq;
     });
@@ -46,14 +47,15 @@ export function pollEvents(): void {
 }
 
 export function pollListenStatus(): void {
-  api("GET", "/session").then(function (data: any) {
+  api("GET", "/session").then(function (raw) {
+    const data = raw as { listening?: boolean } | null;
     const wasListening = S.agentListening;
-    S.agentListening = data && data.listening;
+    S.agentListening = !!(data && data.listening);
     if (S.agentListening !== wasListening) updateListeningModule();
   }).catch(function () {});
 }
 
-function handleEvent(event: any): void {
+function handleEvent(event: FeedbackEvent): void {
   switch (event.event) {
     case "agent_message":
       handleAgentMessage(event);
@@ -92,7 +94,7 @@ function handleEvent(event: any): void {
       if (event.thread_id && event.message) {
         const hmThread = findThread(S.threads, event.thread_id);
         if (hmThread) {
-          const exists = hmThread.messages.some(function (m: any) { return m.id === event.message.id; });
+          const exists = hmThread.messages.some(function (m: Message) { return m.id === event.message!.id; });
           if (!exists) {
             hmThread.messages.push(event.message);
             hmThread.updated_at = event.message.created_at || new Date().toISOString();
@@ -104,16 +106,17 @@ function handleEvent(event: any): void {
   }
 }
 
-function handleAgentMessage(event: any): void {
-  const thread = findThread(S.threads, event.thread_id);
+function handleAgentMessage(event: FeedbackEvent): void {
+  const thread = findThread(S.threads, event.thread_id!);
   if (!thread) {
-    api("GET", "/threads/" + event.thread_id).then(function (t: any) {
+    api("GET", "/threads/" + event.thread_id).then(function (raw) {
+      const t = raw as Thread;
       if (t) {
         S.threads.push(t);
         addPinFn(t);
         updateBadge();
         if (S.panelOpen) renderPanelFn();
-        showAgentReplyToast(t.id, event.message.body);
+        showAgentReplyToast(t.id, event.message!.body);
       }
     }).catch(function () {});
     return;
@@ -135,14 +138,14 @@ function handleAgentMessage(event: any): void {
   if (S.panelOpen) renderPanelFn();
 
   const preview = event.message ? event.message.body : "New reply";
-  showAgentReplyToast(event.thread_id, preview);
+  showAgentReplyToast(event.thread_id!, preview);
 
   if (!document.hasFocus()) {
-    sendBrowserNotification("Agent replied", preview, event.thread_id);
+    sendBrowserNotification("Agent replied", preview, event.thread_id!);
   }
 }
 
-function handleAgentThreadCreated(event: any): void {
+function handleAgentThreadCreated(event: FeedbackEvent): void {
   if (event.thread) {
     const existing = findThread(S.threads, event.thread.id);
     if (!existing) {
@@ -163,8 +166,8 @@ function handleAgentThreadCreated(event: any): void {
   }
 }
 
-function handleThreadResolved(event: any): void {
-  const thread = findThread(S.threads, event.thread_id);
+function handleThreadResolved(event: FeedbackEvent): void {
+  const thread = findThread(S.threads, event.thread_id!);
   if (thread) {
     thread.status = "resolved";
     removePinFn(thread.id);
@@ -173,8 +176,8 @@ function handleThreadResolved(event: any): void {
   }
 }
 
-function handleThreadReopened(event: any): void {
-  const thread = findThread(S.threads, event.thread_id);
+function handleThreadReopened(event: FeedbackEvent): void {
+  const thread = findThread(S.threads, event.thread_id!);
   if (thread) {
     thread.status = "open";
     addPinFn(thread);
@@ -220,8 +223,8 @@ export function sendBrowserNotification(title: string, body: string, threadId: s
 }
 
 export function loadThreads(): void {
-  api("GET", "/threads").then(function (threads: any) {
-    S.threads = threads || [];
+  api("GET", "/threads").then(function (raw) {
+    S.threads = (raw as Thread[]) || [];
     renderAllPinsFn();
     updateBadge();
     checkPendingScrollFn();
