@@ -1,30 +1,101 @@
 // @vitest-environment jsdom
-import { describe, it, expect } from "vitest";
-import { positionPopover } from "../src/feedback-overlay/popover";
+import { describe, it, expect, beforeEach } from "vitest";
+import { positionPopover, closeActivePopover } from "../src/feedback-overlay/popover";
+import { initState, S } from "../src/feedback-overlay/state";
+import { setPopoverDeps } from "../src/feedback-overlay/popover";
+import { vi } from "vitest";
 
-// Mock an HTMLElement with style
 function mockEl(): HTMLElement {
-  return { style: {} } as any as HTMLElement;
+  return document.createElement("div");
 }
 
 describe("positionPopover", () => {
-  it("positions below anchor by default", () => {
+  it("positions below anchor with gap", () => {
     const pop = mockEl();
-    positionPopover(pop, { x: 100, y: 50, width: 200, height: 30 });
-    expect(parseFloat(pop.style.top!)).toBeGreaterThan(50); // below anchor
+    positionPopover(pop, { x: 200, y: 100, width: 150, height: 40 });
+    const top = parseFloat(pop.style.top!);
+    // Should be below: y + height + gap (10)
+    expect(top).toBeGreaterThanOrEqual(150); // 100 + 40 + 10
   });
 
-  it("clamps left to viewport margin", () => {
+  it("centers horizontally on anchor", () => {
     const pop = mockEl();
+    positionPopover(pop, { x: 400, y: 100, width: 200, height: 40 });
+    const left = parseFloat(pop.style.left!);
+    // Centered: x + width/2 - popWidth/2 = 400 + 100 - 180 = 320
+    expect(left).toBeGreaterThan(200);
+    expect(left).toBeLessThan(500);
+  });
+
+  it("clamps left position to minimum margin", () => {
+    const pop = mockEl();
+    // Anchor at far left — popover should not go negative
     positionPopover(pop, { x: 0, y: 100, width: 10, height: 10 });
     const left = parseFloat(pop.style.left!);
-    expect(left).toBeGreaterThanOrEqual(0); // not negative
+    expect(left).toBeGreaterThanOrEqual(0);
   });
 
-  it("sets top and left as pixel values", () => {
+  it("outputs pixel values", () => {
     const pop = mockEl();
     positionPopover(pop, { x: 500, y: 200, width: 100, height: 50 });
-    expect(pop.style.top).toMatch(/\d+px/);
-    expect(pop.style.left).toMatch(/\d+px/);
+    expect(pop.style.top).toMatch(/^\d+(\.\d+)?px$/);
+    expect(pop.style.left).toMatch(/^\d+(\.\d+)?px$/);
+  });
+});
+
+describe("closeActivePopover", () => {
+  beforeEach(() => {
+    const host = document.createElement("veld-feedback");
+    const shadow = host.attachShadow({ mode: "open" });
+    initState(shadow, host);
+    S.hoverOutline = document.createElement("div");
+    S.componentTraceEl = document.createElement("div");
+    S.toolBtnPageComment = document.createElement("div");
+    S.toolBtnScreenshot = document.createElement("div");
+    setPopoverDeps({ addPin: vi.fn(), updateBadge: vi.fn(), renderPanel: vi.fn() });
+  });
+
+  it("removes popover element and nulls reference", () => {
+    const pop = document.createElement("div");
+    S.shadow.appendChild(pop);
+    S.activePopover = pop;
+
+    closeActivePopover();
+
+    expect(S.activePopover).toBeNull();
+    expect(pop.parentNode).toBeNull();
+  });
+
+  it("calls _veldCleanup if present", () => {
+    const cleanup = vi.fn();
+    const pop = document.createElement("div");
+    (pop as any)._veldCleanup = cleanup;
+    S.shadow.appendChild(pop);
+    S.activePopover = pop;
+
+    closeActivePopover();
+
+    expect(cleanup).toHaveBeenCalledOnce();
+  });
+
+  it("clears locked element and hides outlines", () => {
+    const pop = document.createElement("div");
+    S.shadow.appendChild(pop);
+    S.activePopover = pop;
+    S.lockedEl = document.createElement("div");
+    S.hoverOutline.style.display = "block";
+
+    closeActivePopover();
+
+    expect(S.lockedEl).toBeNull();
+    expect(S.hoverOutline.style.display).toBe("none");
+  });
+
+  it("does nothing when no active popover", () => {
+    S.activePopover = null;
+    S.lockedEl = null;
+    // Should not throw
+    closeActivePopover();
+    expect(S.activePopover).toBeNull();
   });
 });

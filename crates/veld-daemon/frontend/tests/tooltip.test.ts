@@ -1,15 +1,17 @@
+// @vitest-environment jsdom
 import { describe, it, expect } from "vitest";
-import { tipHtml } from "../src/feedback-overlay/tooltip";
+import { tipHtml, initTooltip, showTooltip, hideTooltip, attachTooltip } from "../src/feedback-overlay/tooltip";
+import { S, initState } from "../src/feedback-overlay/state";
 
 describe("tipHtml", () => {
   it("returns label only when no keys", () => {
     expect(tipHtml("Hello", [])).toBe("Hello");
   });
 
-  it("returns label with kbd elements for keys", () => {
+  it("builds kbd elements for each key", () => {
     const result = tipHtml("Screenshot", ["⌘", "⇧", "S"]);
     expect(result).toContain("Screenshot");
-    expect(result).toContain("<kbd");
+    expect((result.match(/<kbd/g) || []).length).toBe(3);
     expect(result).toContain("⌘");
     expect(result).toContain("⇧");
     expect(result).toContain("S");
@@ -18,12 +20,49 @@ describe("tipHtml", () => {
   it("wraps keys in kbd-group span", () => {
     const result = tipHtml("Test", ["A"]);
     expect(result).toContain("kbd-group");
-    expect(result).toContain("<kbd");
   });
 
-  it("handles single key", () => {
-    const result = tipHtml("Undo", ["Z"]);
-    expect(result).toContain("Z");
-    expect(result.match(/<kbd/g)?.length).toBe(1);
+  it("handles null keys", () => {
+    const result = tipHtml("Label", null as any);
+    expect(result).toBe("Label");
   });
 });
+
+describe("tooltip lifecycle", () => {
+  beforeEach(() => {
+    const shadow = document.createElement("div").attachShadow({ mode: "open" });
+    initState(shadow, document.createElement("div"));
+    initTooltip();
+  });
+
+  it("initTooltip creates a tooltip element in shadow DOM", () => {
+    expect(S.tooltip).toBeTruthy();
+    expect(S.tooltip.tagName).toBe("DIV");
+  });
+
+  it("showTooltip makes it visible", () => {
+    const anchor = document.createElement("button");
+    document.body.appendChild(anchor);
+    showTooltip(anchor, "Hello tooltip");
+    expect(S.tooltip.style.display).toBe("block");
+    expect(S.tooltip.innerHTML).toBe("Hello tooltip");
+    document.body.removeChild(anchor);
+  });
+
+  it("hideTooltip hides it", () => {
+    showTooltip(document.createElement("div"), "test");
+    hideTooltip();
+    expect(S.tooltip.style.display).toBe("none");
+  });
+
+  it("attachTooltip wires mouseenter/mouseleave", () => {
+    const btn = document.createElement("button");
+    attachTooltip(btn, "Hover me");
+    btn.dispatchEvent(new MouseEvent("mouseenter"));
+    expect(S.tooltip.style.display).toBe("block");
+    btn.dispatchEvent(new MouseEvent("mouseleave"));
+    expect(S.tooltip.style.display).toBe("none");
+  });
+});
+
+import { beforeEach } from "vitest";
