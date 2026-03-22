@@ -625,6 +625,12 @@ async fn check_caddy_status() -> String {
 }
 
 /// Check CA trust status.
+///
+/// In privileged mode, Caddy runs as root and its `caddy-data/pki/` directory
+/// is root-owned with mode 700. This means `path.exists()` and `metadata()`
+/// both return false/Err when run as the normal user. To handle this, we check
+/// the macOS keychain directly (which doesn't need file access) before falling
+/// back to the cert file on disk.
 fn check_ca_status() -> String {
     let ca_cert = veld_core::paths::caddy_data_dir()
         .join("pki")
@@ -632,35 +638,86 @@ fn check_ca_status() -> String {
         .join("local")
         .join("root.crt");
 
+    if cfg!(target_os = "macos") {
+        // Try verify-cert if the file is readable.
+        if ca_cert.exists() {
+            if let Ok(out) = Command::new("security")
+                .args(["verify-cert", "-c"])
+                .arg(&ca_cert)
+                .output()
+            {
+                if out.status.success() {
+                    return "trusted (login keychain)".to_string();
+                }
+            }
+        }
+
+        // Check the keychain directly by certificate name. This works even when
+        // the cert file on disk is unreadable (root-owned in privileged mode).
+        // The CA may be named "Veld Local CA" (custom) or "Caddy Local Authority"
+        // (Caddy default).
+        for name in ["Veld Local CA", "Caddy Local Authority"] {
+            if let Ok(out) = Command::new("security")
+                .args(["find-certificate", "-c", name, "-a"])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                if out.status.success() && !stdout.is_empty() {
+                    // Found in keychain — verify trust by extracting and checking.
+                    if is_ca_trusted_in_keychain(name) {
+                        return "trusted (login keychain)".to_string();
+                    }
+                    return "installed (may not be trusted)".to_string();
+                }
+            }
+        }
+
+        if ca_cert.exists() {
+            return "not trusted (cert exists but not in keychain)".to_string();
+        }
+
+        return "not found".to_string();
+    }
+
     if !ca_cert.exists() {
         return "not found".to_string();
     }
 
-    // On macOS, try security verify-cert
-    if cfg!(target_os = "macos") {
-        if let Ok(out) = Command::new("security")
-            .args(["verify-cert", "-c"])
-            .arg(&ca_cert)
-            .output()
-        {
-            if out.status.success() {
-                return "trusted (login keychain)".to_string();
+    // Fallback for non-macOS: cert file exists
+    "present (trust status unknown)".to_string()
+}
+
+/// Check whether a CA certificate is actually trusted (not just present) in
+/// the macOS keychain by running `security verify-cert` against a temp copy
+/// extracted from the keychain.
+fn is_ca_trusted_in_keychain(name: &str) -> bool {
+    // Export the cert from the keychain to a temp file, then verify it.
+    let tmp = std::env::temp_dir().join("veld-doctor-ca-check.pem");
+    let export_ok = Command::new("security")
+        .args(["find-certificate", "-c", name, "-p"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() && !out.stdout.is_empty() {
+                std::fs::write(&tmp, &out.stdout).ok()
+            } else {
+                None
             }
-        }
-        // Check if it's at least in the keychain
-        if let Ok(out) = Command::new("security")
-            .args(["find-certificate", "-c", "Caddy Local Authority", "-a"])
-            .output()
-        {
-            if out.status.success() && !String::from_utf8_lossy(&out.stdout).is_empty() {
-                return "installed (may not be trusted)".to_string();
-            }
-        }
-        return "not trusted (cert exists but not in keychain)".to_string();
+        });
+
+    if export_ok.is_none() {
+        let _ = std::fs::remove_file(&tmp);
+        return false;
     }
 
-    // Fallback: cert file exists
-    "present (trust status unknown)".to_string()
+    let trusted = Command::new("security")
+        .args(["verify-cert", "-c"])
+        .arg(&tmp)
+        .output()
+        .is_ok_and(|out| out.status.success());
+
+    let _ = std::fs::remove_file(&tmp);
+    trusted
 }
 
 /// Try an HTTP GET and return true if status is success.

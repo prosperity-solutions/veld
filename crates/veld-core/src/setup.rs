@@ -440,6 +440,18 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
         }
     }
 
+    // Make the PKI directory world-readable so tools running as the normal
+    // user (e.g. `veld doctor`) can inspect the CA cert on disk. In privileged
+    // mode Caddy runs as root and creates these dirs with mode 700.
+    let pki_dir = crate::paths::caddy_data_dir().join("pki");
+    if pki_dir.exists() {
+        let _ = Command::new("chmod")
+            .args(["-R", "a+rX"])
+            .arg(&pki_dir)
+            .status()
+            .await;
+    }
+
     Ok(StepResult::success(
         "Caddy CA trusted in system store (browsers will accept HTTPS)",
     ))
