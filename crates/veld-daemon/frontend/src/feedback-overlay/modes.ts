@@ -52,11 +52,13 @@ export function setMode(mode: UIMode): void {
   }
   if (mode === "draw") {
     if (getState().toolbarOpen) toggleToolbar();
-    acquireCaptureStream().then(() => ensureDrawScript()).then(() => {
+    // No acquireCaptureStream — draw starts instantly without screen share dialog.
+    // Capture is deferred to Done (for compositing) or blur tool (for pixelation).
+    ensureDrawScript().then(() => {
       setupGlobalDrawCanvas();
       window.focus();
     }).catch(() => {
-      toast("Screen capture denied", true);
+      toast("Failed to load draw module", true);
       dispatch({ type: "SET_MODE", mode: null });
       refs.toolBtnDraw.classList.remove(PREFIX + "tool-active");
     });

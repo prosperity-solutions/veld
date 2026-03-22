@@ -393,16 +393,41 @@ function activate(
     if (s.toolMode === "blur") {
       const bbox = computeBBox(finalStroke.points);
       if (bbox.w > 5 && bbox.h > 5) {
-        let snapBbox: BBox = bbox;
-        if (!options.inline && snapCanvas) {
-          const dW = canvas.width / dpr, dH = canvas.height / dpr;
-          snapBbox = { x: bbox.x * (snapCanvas.width / dW), y: bbox.y * (snapCanvas.height / dH),
-                       w: bbox.w * (snapCanvas.width / dW), h: bbox.h * (snapCanvas.height / dH) };
+        // Lazy snapshot: acquire on first blur, cache for subsequent
+        const doBlur = (sc: HTMLCanvasElement | null) => {
+          let snapBbox: BBox = bbox;
+          if (!options.inline && sc) {
+            const dW = canvas.width / dpr, dH = canvas.height / dpr;
+            snapBbox = { x: bbox.x * (sc.width / dW), y: bbox.y * (sc.height / dH),
+                         w: bbox.w * (sc.width / dW), h: bbox.h * (sc.height / dH) };
+          }
+          const pixelCanvas = createPixelatedRegion(sc, snapBbox);
+          if (pixelCanvas) dispatch({ type: "ADD_STROKE", stroke: { type: "blur", bbox, pixelCanvas } });
+          dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState();
+        };
+
+        if (snapCanvas) {
+          doBlur(snapCanvas);
+        } else if (options.acquireSnapshot) {
+          // Show the stroke as preview while waiting for snapshot
+          dispatch({ type: "SET_CURRENT_STROKE", stroke: null });
+          scheduleRedraw();
+          options.acquireSnapshot().then((bitmap: ImageBitmap | null) => {
+            if (bitmap) {
+              snapCanvas = buildSnapshotCanvas(bitmap,
+                options.inline ? canvas.width : Math.round(displayWidth),
+                options.inline ? canvas.height : Math.round(displayHeight));
+            }
+            doBlur(snapCanvas);
+          });
+        } else {
+          // No snapshot available and no way to acquire — just skip blur
+          dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState();
         }
-        const pixelCanvas = createPixelatedRegion(snapCanvas, snapBbox);
-        if (pixelCanvas) dispatch({ type: "ADD_STROKE", stroke: { type: "blur", bbox, pixelCanvas } });
+      } else {
+        dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState();
       }
-      dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState(); return;
+      return;
     }
 
     if (s.toolMode === "spotlight") {

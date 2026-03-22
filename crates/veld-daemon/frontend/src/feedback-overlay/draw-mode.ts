@@ -2,6 +2,7 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import {
+  acquireCaptureStream,
   stopCaptureStream,
   uploadAndShowEditor,
   restoreVeldUI,
@@ -36,24 +37,31 @@ export function setupGlobalDrawCanvas(): void {
   dispatch({ type: "SET_PREV_OVERFLOW", overflow: document.body.style.overflow });
   document.body.style.overflow = "hidden";
 
-  // Grab a snapshot for blur/redact, then activate.
-  // The capture stream was acquired before this function is called.
-  const captureStream = getState().captureStream;
-  const track =
-    captureStream && captureStream.getVideoTracks()[0];
-  const ic =
-    track && typeof ImageCapture !== "undefined"
-      ? new ImageCapture(track)
-      : null;
-  const snapshotPromise: Promise<ImageBitmap | null> = ic
-    ? (ic.grabFrame() as Promise<ImageBitmap>).catch(() => null)
-    : Promise.resolve(null);
-
-  snapshotPromise.then((snapshot) => {
+  // Activate immediately — no snapshot needed upfront.
+  // Blur tool will acquire a snapshot lazily via acquireSnapshot callback.
+  {
     const canvas = getState().drawCanvas;
-    if (!canvas) return; // torn down while waiting
+    if (!canvas) return;
+
+    // Lazy snapshot acquisition for blur tool
+    const acquireSnapshot = async (): Promise<ImageBitmap | null> => {
+      try {
+        await acquireCaptureStream();
+        const stream = getState().captureStream;
+        const track = stream && stream.getVideoTracks()[0];
+        if (!track || typeof ImageCapture === "undefined") return null;
+        const ic = new ImageCapture(track);
+        const bitmap = await ic.grabFrame();
+        stopCaptureStream();
+        return bitmap;
+      } catch {
+        return null;
+      }
+    };
+
     const cleanup = window.__veld_draw!.activate(canvas, {
-      pageSnapshot: snapshot,
+      pageSnapshot: null,
+      acquireSnapshot,
       mountTarget: refs.shadow,
       onDone: (hasStrokes: boolean) => {
         if (hasStrokes) {
@@ -96,10 +104,10 @@ export function setupGlobalDrawCanvas(): void {
             }
           });
 
-          // 4. Wait for repaint, grab clean frame, restore UI, composite
-          const stream = getState().captureStream;
-          const captureTrack =
-            stream && stream.getVideoTracks()[0];
+          // 4. Acquire capture stream (if not already present), grab clean frame, composite
+          const doCapture = (): void => {
+            const stream = getState().captureStream;
+            const captureTrack = stream && stream.getVideoTracks()[0];
           if (captureTrack && typeof ImageCapture !== "undefined") {
             requestAnimationFrame(() => {
               requestAnimationFrame(() => {
@@ -155,18 +163,29 @@ export function setupGlobalDrawCanvas(): void {
               });
             });
           } else {
-            restoreVeldUI(hiddenEls);
-            stopCaptureStream();
-            drawCanvas.toBlob((blob) => {
-              if (blob)
-                uploadAndShowEditor(
-                  blob,
-                  0,
-                  0,
-                  window.innerWidth,
-                  window.innerHeight,
-                );
-            }, "image/png");
+              restoreVeldUI(hiddenEls);
+              stopCaptureStream();
+              drawCanvas.toBlob((blob) => {
+                if (blob)
+                  uploadAndShowEditor(blob, 0, 0, window.innerWidth, window.innerHeight);
+              }, "image/png");
+            }
+          }; // end doCapture
+
+          // Acquire stream if needed, then capture
+          if (getState().captureStream) {
+            doCapture();
+          } else {
+            acquireCaptureStream().then(() => {
+              // Wait for repaint after dialog closes
+              requestAnimationFrame(() => doCapture());
+            }).catch(() => {
+              // User denied — just send the drawing without page background
+              restoreVeldUI(hiddenEls);
+              drawCanvas.toBlob((blob) => {
+                if (blob) uploadAndShowEditor(blob, 0, 0, window.innerWidth, window.innerHeight);
+              }, "image/png");
+            });
           }
         } else {
           deps().setMode(null);
@@ -174,7 +193,7 @@ export function setupGlobalDrawCanvas(): void {
       },
     });
     dispatch({ type: "SET_DRAW_CLEANUP", cleanup });
-  }); // end snapshotPromise.then
+  } // end activate block
 }
 
 /** Tear down the draw canvas and restore page scroll. */

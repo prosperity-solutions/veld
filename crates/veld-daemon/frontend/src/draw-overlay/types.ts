@@ -58,6 +58,8 @@ export interface DrawActivateOptions {
   inline?: boolean;
   pageSnapshot?: ImageBitmap | HTMLCanvasElement | HTMLImageElement | null;
   baseImage?: HTMLImageElement | HTMLCanvasElement | null;
-  mountTarget?: HTMLElement;
+  mountTarget?: HTMLElement | ShadowRoot;
   onDone?: (hasStrokes: boolean) => void;
+  /** Lazy snapshot acquisition — called by blur tool when it needs page pixels. */
+  acquireSnapshot?: () => Promise<ImageBitmap | null>;
 }
