@@ -1174,14 +1174,16 @@ async fn execute_start_server_isolated(
         variant_cfg.features.as_ref(),
     );
 
-    // Include feedback/injection config so Caddy routes /__veld__/* to the
-    // daemon and selectively injects scripts into HTML responses.
+    // Include feedback config so Caddy routes /__veld__/* to the daemon.
+    // The proxy routes are created whenever a feature is enabled, even if
+    // inject is false (manual injection mode — user adds script tags themselves).
     if features.feedback_overlay || features.client_logs {
         route["feedback_upstream"] = serde_json::json!("localhost:19899");
         route["run_name"] = serde_json::json!(&ctx.run_name);
         route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
     }
 
+    route["inject"] = serde_json::json!(features.inject);
     route["inject_feedback_overlay"] = serde_json::json!(features.feedback_overlay);
     route["inject_client_logs"] = serde_json::json!(features.client_logs);
 

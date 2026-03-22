@@ -232,6 +232,11 @@
           "type": "boolean",
           "description": "Inject the client-side log collector into HTML responses. Default: true.",
           "default": true
+        },
+        "inject": {
+          "type": "boolean",
+          "description": "Automatically inject bootstrap scripts into HTML responses. When false, the /__veld__/* proxy routes are still created so you can manually add <script> tags. Default: true.",
+          "default": true
         }
       }
     },
