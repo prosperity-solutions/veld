@@ -874,17 +874,19 @@
   position: fixed;
   display: none;
   flex-direction: column;
-  gap: 4px;
+  gap: 6px;
   background: var(--vf-bg);
   border: 1px solid var(--vf-border);
-  border-radius: 12px;
-  padding: 8px;
+  border-radius: 14px;
+  padding: 10px 12px;
   box-shadow: var(--vf-shadow);
   z-index: calc(var(--vf-z) + 2);
+  min-width: 0;
 }
 .veld-feedback-draw-more-menu-open { display: flex; }
 .veld-feedback-draw-more-row {
-  display: flex; align-items: center; gap: 4px;
+  display: flex; align-items: center; gap: 6px;
+  justify-content: center;
 }
 
 /* ESC confirm bar */

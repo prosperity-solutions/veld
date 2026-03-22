@@ -731,28 +731,30 @@ function activate(
     widthBtns.forEach(btn => { btn.style.display = "none"; });
   }
 
-  moreMenu.appendChild(mkEl("span", "draw-sep"));
+  // Overflow tool buttons in a row
+  const toolRow = mkEl("div", "draw-more-row");
 
-  // Overflow tool buttons
   const spotlightBtn = mkBtn("draw-tool-btn", ICON_SPOTLIGHT);
   spotlightBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); closeMoreMenu(); updateToolbarState(); });
   tip(spotlightBtn, "Spotlight  S");
-  moreMenu.appendChild(spotlightBtn);
+  toolRow.appendChild(spotlightBtn);
 
   const blurBtn = mkBtn("draw-tool-btn", ICON_BLUR);
   blurBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); closeMoreMenu(); updateToolbarState(); });
   tip(blurBtn, "Blur / Redact  X");
-  moreMenu.appendChild(blurBtn);
+  toolRow.appendChild(blurBtn);
 
   const eraserBtn = mkBtn("draw-tool-btn", ICON_ERASER);
   eraserBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); closeMoreMenu(); updateToolbarState(); });
   tip(eraserBtn, "Eraser  E");
-  moreMenu.appendChild(eraserBtn);
+  toolRow.appendChild(eraserBtn);
 
   const shapeBtn = mkBtn("draw-tool-btn", ICON_SHAPES);
   shapeBtn.addEventListener("click", () => { dispatch({ type: "TOGGLE_SHAPE_SNAP" }); updateToolbarState(); });
   tip(shapeBtn, "Shape snap  O");
-  moreMenu.appendChild(shapeBtn);
+  toolRow.appendChild(shapeBtn);
+
+  moreMenu.appendChild(toolRow);
 
   // Position and toggle the more menu
   function openMoreMenu(): void {
