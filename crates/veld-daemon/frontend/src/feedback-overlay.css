@@ -869,6 +869,70 @@
   background: var(--vf-accent-hover);
 }
 
+/* More menu dropdown */
+.veld-feedback-draw-more-menu {
+  position: fixed;
+  display: none;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--vf-bg);
+  border: 1px solid var(--vf-border);
+  border-radius: 12px;
+  padding: 8px;
+  box-shadow: var(--vf-shadow);
+  z-index: calc(var(--vf-z) + 2);
+}
+.veld-feedback-draw-more-menu-open { display: flex; }
+.veld-feedback-draw-more-row {
+  display: flex; align-items: center; gap: 4px;
+}
+
+/* ESC confirm bar */
+.veld-feedback-draw-confirm-bar {
+  position: fixed;
+  display: none;
+  align-items: center; gap: 6px;
+  background: var(--vf-bg);
+  border: 1px solid var(--vf-border);
+  border-radius: 14px;
+  padding: 4px 6px;
+  box-shadow: var(--vf-shadow);
+  z-index: calc(var(--vf-z) + 2);
+  font: 12px var(--vf-font);
+  color: var(--vf-text);
+  user-select: none;
+}
+.veld-feedback-draw-confirm-btn {
+  height: 26px; border-radius: 12px;
+  border: 1px solid var(--vf-border);
+  cursor: pointer;
+  background: transparent;
+  color: var(--vf-text-muted);
+  font: 12px/1 var(--vf-font);
+  padding: 0 10px;
+  outline: none;
+  transition: background .15s, color .15s;
+}
+.veld-feedback-draw-confirm-btn:hover {
+  background: var(--vf-bg-card);
+  color: var(--vf-text);
+}
+.veld-feedback-draw-confirm-btn-primary {
+  height: 26px; border-radius: 12px;
+  border: none;
+  cursor: pointer;
+  background: var(--vf-accent);
+  color: var(--vf-bg);
+  font: 12px/1 var(--vf-font);
+  font-weight: 600;
+  padding: 0 12px;
+  outline: none;
+  transition: background .15s;
+}
+.veld-feedback-draw-confirm-btn-primary:hover {
+  background: var(--vf-accent-hover);
+}
+
 /* Draw toolbar when inside a container (annotation mode) */
 .veld-feedback-screenshot-preview .veld-feedback-draw-toolbar {
   position: absolute; top: auto; bottom: -44px; left: 50%;
@@ -879,20 +943,19 @@
 .veld-feedback-annotate-btn {
   position: absolute; top: 16px; right: 16px;
   height: 26px; border-radius: 13px;
-  border: 1px solid rgba(255,255,255,0.15);
+  border: 1px solid var(--vf-border);
   cursor: pointer;
-  background: rgba(10,10,10,0.75);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: var(--vf-bg);
   color: var(--vf-text);
   font: 11px/1 var(--vf-font);
   padding: 0 10px;
   display: flex; align-items: center; gap: 4px;
   outline: none;
   transition: background .15s, border-color .15s;
+  opacity: 0.9;
 }
 .veld-feedback-annotate-btn:hover {
-  background: rgba(10,10,10,0.9);
+  opacity: 1;
   border-color: var(--vf-accent);
 }
 .veld-feedback-annotate-btn svg {

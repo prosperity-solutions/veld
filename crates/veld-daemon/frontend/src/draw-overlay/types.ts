@@ -60,6 +60,8 @@ export interface DrawActivateOptions {
   baseImage?: HTMLImageElement | HTMLCanvasElement | null;
   mountTarget?: HTMLElement | ShadowRoot;
   onDone?: (hasStrokes: boolean) => void;
+  /** Called when user presses ESC and there are strokes — host shows confirm UI. */
+  onEscapeRequest?: () => void;
   /** Lazy snapshot acquisition — called by blur tool when it needs page pixels. */
   acquireSnapshot?: () => Promise<ImageBitmap | null>;
 }

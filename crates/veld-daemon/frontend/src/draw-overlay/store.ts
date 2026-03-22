@@ -5,7 +5,7 @@
  * Uses the shared createStore for freeze-on-dispatch guarantees.
  */
 import { createStore, type Store } from "../shared/create-store";
-import type { DrawTool, StrokeEntry, StrokeDraw, PinEntry } from "./types";
+import type { DrawTool, StrokeEntry, StrokeDraw, PinEntry, BlurEntry, SpotlightEntry, RecognizedShape } from "./types";
 
 export interface DrawState {
   hasPressureDevice: boolean;
@@ -54,9 +54,23 @@ export type DrawAction =
   | { type: "SELECT_STROKE"; index: number | null }
   | { type: "DELETE_SELECTED" }
   | { type: "MOVE_PIN"; index: number; x: number; y: number }
+  | { type: "MOVE_STROKE"; index: number; dx: number; dy: number }
   | { type: "RECOLOR_SELECTED"; color: string }
   | { type: "SET_PIN_ANGLE"; index: number; angle: number }
   ;
+
+function offsetShape(shape: RecognizedShape, dx: number, dy: number): RecognizedShape {
+  switch (shape.type) {
+    case "line":
+      return { ...shape, start: { ...shape.start, x: shape.start.x + dx, y: shape.start.y + dy }, end: { ...shape.end, x: shape.end.x + dx, y: shape.end.y + dy } };
+    case "arrow":
+      return { ...shape, start: { ...shape.start, x: shape.start.x + dx, y: shape.start.y + dy }, end: { ...shape.end, x: shape.end.x + dx, y: shape.end.y + dy }, headTip: { ...shape.headTip, x: shape.headTip.x + dx, y: shape.headTip.y + dy } };
+    case "circle":
+      return { ...shape, cx: shape.cx + dx, cy: shape.cy + dy };
+    case "rect":
+      return { ...shape, x: shape.x + dx, y: shape.y + dy };
+  }
+}
 
 export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawState {
   switch (action.type) {
@@ -118,7 +132,7 @@ export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawSta
       };
     }
     case "SET_TOOL":
-      return { ...s, toolMode: action.tool };
+      return { ...s, toolMode: action.tool, selectedStrokeIndex: null };
     case "SET_COLOR":
       return { ...s, activeColorIdx: action.idx };
     case "SET_WIDTH":
@@ -190,6 +204,33 @@ export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawSta
       const pin = entry as PinEntry;
       const updated: PinEntry = { ...pin, x: action.x, y: action.y };
       const strokes = s.strokes.map((stroke, i) => i === action.index ? updated : stroke);
+      return { ...s, strokes };
+    }
+    case "MOVE_STROKE": {
+      if (action.index >= s.strokes.length) return { ...s };
+      const entry = s.strokes[action.index];
+      const { dx, dy } = action;
+      let moved: StrokeEntry;
+      if ((entry as PinEntry).type === "pin") {
+        const pin = entry as PinEntry;
+        moved = { ...pin, x: pin.x + dx, y: pin.y + dy };
+      } else if ((entry as BlurEntry).type === "blur") {
+        const blur = entry as BlurEntry;
+        moved = { ...blur, bbox: { ...blur.bbox, x: blur.bbox.x + dx, y: blur.bbox.y + dy } };
+      } else if ((entry as SpotlightEntry).type === "spotlight") {
+        const spot = entry as SpotlightEntry;
+        const movedPts = spot.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy }));
+        let movedShape: RecognizedShape | null | undefined = spot.shape;
+        if (spot.shape) movedShape = offsetShape(spot.shape, dx, dy);
+        moved = { ...spot, points: movedPts, shape: movedShape };
+      } else {
+        const stroke = entry as StrokeDraw;
+        const movedPts = stroke.points.map(p => ({ ...p, x: p.x + dx, y: p.y + dy }));
+        let movedShape: RecognizedShape | undefined = stroke.shape;
+        if (stroke.shape) movedShape = offsetShape(stroke.shape, dx, dy);
+        moved = { ...stroke, points: movedPts, shape: movedShape };
+      }
+      const strokes = s.strokes.map((stroke, i) => i === action.index ? moved : stroke);
       return { ...s, strokes };
     }
     case "RECOLOR_SELECTED": {

@@ -15,67 +15,7 @@ import { deps } from "../shared/registry";
 export function acquireCaptureStream(): Promise<void> {
   if (getState().captureStream) return Promise.resolve();
 
-  // Show a friendly heads-up before the browser's scary permission dialog.
-  const seenKey = "veld-screenshot-disclaimer-seen";
-  let seen = false;
-  try {
-    seen = sessionStorage.getItem(seenKey) === "1";
-  } catch (_) {}
-
-  const disclaimerDone: Promise<void> = seen
-    ? Promise.resolve()
-    : new Promise((resolve, reject) => {
-        const backdrop = mkEl("div", "confirm-backdrop");
-        const modal = mkEl("div", "confirm-modal");
-
-        const title = mkEl("div", "confirm-message");
-        title.style.fontWeight = "600";
-        title.style.fontSize = "14px";
-        title.style.marginBottom = "8px";
-        title.textContent = "Quick heads-up!";
-        modal.appendChild(title);
-
-        const msg = mkEl("div", "confirm-message");
-        msg.innerHTML =
-          "Your browser is about to ask you to share this tab. " +
-          "Don\u2019t worry \u2014 <strong>no one is calling you on Teams.</strong> " +
-          "Veld just needs to peek at your tab to capture pixel-perfect screenshots. " +
-          "Nothing leaves your machine, pinky promise." +
-          "<br><br>" +
-          "You\u2019ll see a \u201CSharing this tab\u201D banner \u2014 that\u2019s normal! " +
-          "It stays while screenshot mode is active and goes away when you\u2019re done.";
-        modal.appendChild(msg);
-
-        const actions = mkEl("div", "confirm-actions");
-        const cancelBtn = mkEl("button", "btn btn-secondary", "Nah, skip it");
-        cancelBtn.addEventListener("click", () => {
-          backdrop.remove();
-          reject();
-        });
-        const goBtn = mkEl(
-          "button",
-          "btn btn-primary",
-          "Got it, let\u2019s go!",
-        );
-        goBtn.addEventListener("click", () => {
-          try {
-            sessionStorage.setItem(seenKey, "1");
-          } catch (_) {}
-          backdrop.remove();
-          resolve();
-        });
-        actions.appendChild(cancelBtn);
-        actions.appendChild(goBtn);
-        modal.appendChild(actions);
-
-        backdrop.appendChild(modal);
-        refs.shadow.appendChild(backdrop);
-        requestAnimationFrame(() => {
-          backdrop.classList.add(PREFIX + "confirm-backdrop-visible");
-        });
-      });
-
-  return disclaimerDone.then(() => {
+  return Promise.resolve().then(() => {
     // preferCurrentTab and displaySurface are Chromium-only extensions
     const opts: VeldDisplayMediaStreamOptions = {
       video: { displaySurface: "browser" },

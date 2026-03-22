@@ -75,14 +75,16 @@ describe("toolbar wiring", () => {
 describe("keyboard wiring", () => {
   beforeEach(setupState);
 
-  it("ESC in draw mode calls setMode(null)", () => {
+  it("ESC in draw mode is passed through to draw overlay", () => {
     const fakeDeps = makeFakeDeps();
     registerDeps(fakeDeps);
 
     dispatch({ type: "SET_MODE", mode: "draw" });
     const event = new KeyboardEvent("keydown", { key: "Escape" });
     onKeyDown(event);
-    expect(fakeDeps.setMode).toHaveBeenCalledWith(null);
+    // ESC in draw mode is now handled by the draw overlay (confirm bar),
+    // so keyboard.ts should NOT call setMode.
+    expect(fakeDeps.setMode).not.toHaveBeenCalled();
   });
 
   it("shortcuts disabled blocks all except ESC in draw mode", () => {

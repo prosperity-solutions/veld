@@ -3,11 +3,9 @@ import { modKey } from "./helpers";
 import { deps } from "../shared/registry";
 
 export function onKeyDown(e: KeyboardEvent): void {
-  // ESC exits draw mode (always, even with shortcuts disabled)
+  // ESC in draw mode is handled by the draw overlay itself (shows confirm bar)
   if (e.key === "Escape" && getState().activeMode === "draw") {
-    e.preventDefault();
-    deps().setMode(null);
-    return;
+    return; // let draw overlay's keydown handler deal with it
   }
 
   if (getState().shortcutsDisabled) return;

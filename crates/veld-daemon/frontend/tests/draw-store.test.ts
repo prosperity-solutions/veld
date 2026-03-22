@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { createDrawStore, drawReducer, type DrawState, type DrawAction } from "../src/draw-overlay/store";
-import type { PinEntry, StrokeDraw } from "../src/draw-overlay/types";
+import type { PinEntry, StrokeDraw, BlurEntry, SpotlightEntry } from "../src/draw-overlay/types";
 
 function makeStroke(overrides?: Partial<StrokeDraw>): StrokeDraw {
   return {
@@ -404,5 +404,152 @@ describe("draw store — misc actions", () => {
     dispatch({ type: "SET_PIN_ANGLE", index: 0, angle: 1.0 });
     // Should not crash or modify the stroke
     expect(getState().strokes.length).toBe(1);
+  });
+
+  it("SET_TOOL clears selectedStrokeIndex", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    expect(getState().selectedStrokeIndex).toBe(0);
+    dispatch({ type: "SET_TOOL", tool: "eraser" });
+    expect(getState().selectedStrokeIndex).toBeNull();
+  });
+});
+
+describe("draw store — MOVE_STROKE", () => {
+  it("offsets a freehand stroke's points by dx/dy", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 5, dy: -3 });
+    const moved = getState().strokes[0] as StrokeDraw;
+    expect(moved.points[0].x).toBe(5);
+    expect(moved.points[0].y).toBe(-3);
+    expect(moved.points[1].x).toBe(15);
+    expect(moved.points[1].y).toBe(7);
+  });
+
+  it("offsets a freehand stroke's shape if present", () => {
+    const { getState, dispatch } = createDrawStore();
+    const stroke = makeStroke({
+      shape: { type: "rect", x: 10, y: 20, w: 50, h: 30 },
+    });
+    dispatch({ type: "ADD_STROKE", stroke });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 7, dy: 11 });
+    const moved = getState().strokes[0] as StrokeDraw;
+    expect(moved.shape).toBeDefined();
+    if (moved.shape && moved.shape.type === "rect") {
+      expect(moved.shape.x).toBe(17);
+      expect(moved.shape.y).toBe(31);
+    }
+  });
+
+  it("offsets a pin's x/y by dx/dy", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makePin(1) });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 10, dy: -20 });
+    const moved = getState().strokes[0] as PinEntry;
+    expect(moved.x).toBe(110);
+    expect(moved.y).toBe(80);
+    expect(moved.angle).toBe(0); // preserved
+  });
+
+  it("offsets a blur entry's bbox by dx/dy", () => {
+    const { getState, dispatch } = createDrawStore();
+    // BlurEntry needs a pixelCanvas — use a minimal stub
+    const fakeCanvas = { width: 10, height: 10 } as unknown as HTMLCanvasElement;
+    const blur: BlurEntry = { type: "blur", bbox: { x: 50, y: 60, w: 100, h: 80 }, pixelCanvas: fakeCanvas };
+    dispatch({ type: "ADD_STROKE", stroke: blur });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: -5, dy: 15 });
+    const moved = getState().strokes[0] as BlurEntry;
+    expect(moved.bbox.x).toBe(45);
+    expect(moved.bbox.y).toBe(75);
+    expect(moved.bbox.w).toBe(100); // unchanged
+    expect(moved.bbox.h).toBe(80);  // unchanged
+  });
+
+  it("offsets a spotlight entry's points by dx/dy", () => {
+    const { getState, dispatch } = createDrawStore();
+    const spot: SpotlightEntry = {
+      type: "spotlight",
+      points: [
+        { x: 10, y: 20, pressure: 0.5 },
+        { x: 30, y: 40, pressure: 0.5 },
+      ],
+    };
+    dispatch({ type: "ADD_STROKE", stroke: spot });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 3, dy: 7 });
+    const moved = getState().strokes[0] as SpotlightEntry;
+    expect(moved.points[0].x).toBe(13);
+    expect(moved.points[0].y).toBe(27);
+    expect(moved.points[1].x).toBe(33);
+    expect(moved.points[1].y).toBe(47);
+  });
+
+  it("offsets a spotlight with circle shape", () => {
+    const { getState, dispatch } = createDrawStore();
+    const spot: SpotlightEntry = {
+      type: "spotlight",
+      points: [{ x: 0, y: 0, pressure: 0.5 }],
+      shape: { type: "circle", cx: 50, cy: 60, radius: 20 },
+    };
+    dispatch({ type: "ADD_STROKE", stroke: spot });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 10, dy: -5 });
+    const moved = getState().strokes[0] as SpotlightEntry;
+    if (moved.shape && moved.shape.type === "circle") {
+      expect(moved.shape.cx).toBe(60);
+      expect(moved.shape.cy).toBe(55);
+      expect(moved.shape.radius).toBe(20);
+    }
+  });
+
+  it("out-of-range index is a no-op", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "MOVE_STROKE", index: 5, dx: 10, dy: 10 });
+    // Should not crash
+    expect(getState().strokes.length).toBe(1);
+  });
+
+  it("offsets a stroke with line shape", () => {
+    const { getState, dispatch } = createDrawStore();
+    const stroke = makeStroke({
+      shape: {
+        type: "line",
+        start: { x: 0, y: 0, pressure: 0.5 },
+        end: { x: 100, y: 100, pressure: 0.5 },
+      },
+    });
+    dispatch({ type: "ADD_STROKE", stroke });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: 5, dy: 10 });
+    const moved = getState().strokes[0] as StrokeDraw;
+    if (moved.shape && moved.shape.type === "line") {
+      expect(moved.shape.start.x).toBe(5);
+      expect(moved.shape.start.y).toBe(10);
+      expect(moved.shape.end.x).toBe(105);
+      expect(moved.shape.end.y).toBe(110);
+    }
+  });
+
+  it("offsets a stroke with arrow shape", () => {
+    const { getState, dispatch } = createDrawStore();
+    const stroke = makeStroke({
+      shape: {
+        type: "arrow",
+        start: { x: 10, y: 10, pressure: 0.5 },
+        end: { x: 50, y: 50, pressure: 0.5 },
+        headTip: { x: 55, y: 45, pressure: 0.5 },
+      },
+    });
+    dispatch({ type: "ADD_STROKE", stroke });
+    dispatch({ type: "MOVE_STROKE", index: 0, dx: -3, dy: 7 });
+    const moved = getState().strokes[0] as StrokeDraw;
+    if (moved.shape && moved.shape.type === "arrow") {
+      expect(moved.shape.start.x).toBe(7);
+      expect(moved.shape.start.y).toBe(17);
+      expect(moved.shape.end.x).toBe(47);
+      expect(moved.shape.end.y).toBe(57);
+      expect(moved.shape.headTip.x).toBe(52);
+      expect(moved.shape.headTip.y).toBe(52);
+    }
   });
 });

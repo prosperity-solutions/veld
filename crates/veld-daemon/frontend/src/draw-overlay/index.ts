@@ -98,7 +98,8 @@ function activate(
   const getState = store.getState;
   const dispatch = store.dispatch;
 
-  let draggingPinIndex: number | null = null;
+  let draggingIndex: number | null = null;
+  let dragLastPos: { x: number; y: number } | null = null;
   let aimingPinIndex: number | null = null; // after dropping a pin, aiming the arrow
 
   function redraw(): void {
@@ -362,12 +363,19 @@ function activate(
     if (getState().toolMode === "select") {
       const hitIdx = hitTest(getState().strokes, pos, 10);
       dispatch({ type: "SELECT_STROKE", index: hitIdx });
-      if (hitIdx !== null && (getState().strokes[hitIdx] as PinEntry).type === "pin") {
-        draggingPinIndex = hitIdx;
+      if (hitIdx !== null) {
+        draggingIndex = hitIdx;
+        dragLastPos = { x: pos.x, y: pos.y };
       }
       dispatch({ type: "SET_DRAWING", drawing: false });
       scheduleRedraw();
       return;
+    }
+
+    // Clear selection when starting any non-select interaction
+    if (getState().selectedStrokeIndex !== null) {
+      dispatch({ type: "SELECT_STROKE", index: null });
+      scheduleRedraw();
     }
 
     // Number mode: first click places pin, second click locks arrow direction
@@ -419,9 +427,12 @@ function activate(
       }
       return;
     }
-    if (draggingPinIndex !== null) {
+    if (draggingIndex !== null && dragLastPos !== null) {
       const pos = getPos(e);
-      dispatch({ type: "MOVE_PIN", index: draggingPinIndex, x: pos.x, y: pos.y });
+      const dx = pos.x - dragLastPos.x;
+      const dy = pos.y - dragLastPos.y;
+      dispatch({ type: "MOVE_STROKE", index: draggingIndex, dx, dy });
+      dragLastPos = { x: pos.x, y: pos.y };
       scheduleRedraw();
       return;
     }
@@ -442,10 +453,14 @@ function activate(
   }
 
   function onPointerUp(): void {
-    if (draggingPinIndex !== null) {
-      // After dropping pin, enter arrow-aiming mode
-      aimingPinIndex = draggingPinIndex;
-      draggingPinIndex = null;
+    if (draggingIndex !== null) {
+      // After dropping a pin, enter arrow-aiming mode; otherwise just stop.
+      const draggedEntry = getState().strokes[draggingIndex];
+      if (draggedEntry && (draggedEntry as PinEntry).type === "pin") {
+        aimingPinIndex = draggingIndex;
+      }
+      draggingIndex = null;
+      dragLastPos = null;
       scheduleRedraw();
       return;
     }
@@ -576,8 +591,21 @@ function activate(
     if (e.key === "Delete" || e.key === "Backspace") {
       if (getState().selectedStrokeIndex !== null) { e.preventDefault(); dispatch({ type: "DELETE_SELECTED" }); scheduleRedraw(); updateToolbarState(); return; }
     }
-    // Escape: deselect
-    if (e.key === "Escape") { dispatch({ type: "SELECT_STROKE", index: null }); scheduleRedraw(); return; }
+    // Escape: close more menu, deselect, or show confirm bar / exit
+    if (e.key === "Escape") {
+      e.preventDefault();
+      if (moreMenuOpen) { closeMoreMenu(); return; }
+      if (confirmBar.style.display === "flex") { hideConfirmBar(); return; }
+      if (getState().selectedStrokeIndex !== null) {
+        dispatch({ type: "SELECT_STROKE", index: null }); scheduleRedraw(); return;
+      }
+      if (getState().strokes.length > 0) {
+        showConfirmBar();
+      } else {
+        if (options.onDone) options.onDone(false);
+      }
+      return;
+    }
     // Collapse: Tab
     if (e.key === "Tab") { e.preventDefault(); collapseBtn.click(); return; }
   }
@@ -628,17 +656,41 @@ function activate(
   // Collapsible tools container
   const toolsWrap = mkEl("div", "draw-tools-wrap");
 
-  // Select tool button
+  // --- Primary tools: Select, Pen, Pin ---
+
   const selectBtn = mkBtn("draw-tool-btn", ICON_SELECT);
   selectBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "select" ? "draw" : "select" }); updateToolbarState(); });
   tip(selectBtn, "Select  V");
   toolsWrap.appendChild(selectBtn);
-  toolsWrap.appendChild(mkEl("span", "draw-sep"));
 
+  // Pen (draw) — always visible
+  const ICON_PEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+  const penBtn = mkBtn("draw-tool-btn", ICON_PEN);
+  penBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: "draw" }); updateToolbarState(); });
+  tip(penBtn, "Pen  D");
+  toolsWrap.appendChild(penBtn);
+
+  const numberBtn = mkBtn("draw-tool-btn", ICON_NUMBER);
+  numberBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "number" ? "draw" : "number" }); updateToolbarState(); });
+  tip(numberBtn, "Numbered pins  N");
+  toolsWrap.appendChild(numberBtn);
+
+  // --- More menu button ---
+  const ICON_MORE = '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>';
+  const overflowTools: DrawTool[] = ["spotlight", "blur", "eraser"];
+  let moreMenuOpen = false;
+  let activeOverflowTool: DrawTool | null = null;
+
+  const moreBtn = mkBtn("draw-tool-btn", ICON_MORE);
+  tip(moreBtn, "More tools");
+  toolsWrap.appendChild(moreBtn);
+
+  // Build the more menu
+  const moreMenu = mkEl("div", "draw-more-menu");
+
+  // Color buttons inside more menu
   const colorBtns: HTMLElement[] = [];
-  const widthBtns: HTMLElement[] = [];
-
-  // Color buttons
+  const colorRow = mkEl("div", "draw-more-row");
   COLORS.forEach(function (c, i) {
     const btn = mkEl("button", "draw-color") as HTMLButtonElement;
     btn.type = "button";
@@ -647,7 +699,6 @@ function activate(
     if (c.id === "black") btn.style.borderColor = "#555";
     btn.addEventListener("click", function () {
       if (getState().selectedStrokeIndex !== null) {
-        // Recolor the selected stroke
         dispatch({ type: "RECOLOR_SELECTED", color: c.style });
         scheduleRedraw();
       } else {
@@ -657,11 +708,13 @@ function activate(
     });
     tip(btn, c.label + "  " + (i + 1));
     colorBtns.push(btn);
-    toolsWrap.appendChild(btn);
+    colorRow.appendChild(btn);
   });
+  moreMenu.appendChild(colorRow);
 
-  toolsWrap.appendChild(mkEl("span", "draw-sep"));
-
+  // Thickness buttons inside more menu
+  const widthBtns: HTMLElement[] = [];
+  const widthRow = mkEl("div", "draw-more-row");
   WIDTHS.forEach(function (w, i) {
     const btn = mkEl("button", "draw-thick") as HTMLButtonElement;
     btn.title = w.id.charAt(0).toUpperCase() + w.id.slice(1); btn.type = "button";
@@ -670,41 +723,61 @@ function activate(
     btn.appendChild(dot);
     btn.addEventListener("click", function () { dispatch({ type: "SET_WIDTH", idx: i }); updateToolbarState(); });
     tip(btn, w.id.charAt(0).toUpperCase() + w.id.slice(1));
-    widthBtns.push(btn); toolsWrap.appendChild(btn);
+    widthBtns.push(btn); widthRow.appendChild(btn);
   });
-  const thickSep = mkEl("span", "draw-sep");
-  toolsWrap.appendChild(thickSep);
+  moreMenu.appendChild(widthRow);
 
   function hideThicknessButtons(): void {
     widthBtns.forEach(btn => { btn.style.display = "none"; });
-    if (thickSep) thickSep.style.display = "none";
   }
 
-  // Shape snap toggle
+  moreMenu.appendChild(mkEl("span", "draw-sep"));
+
+  // Overflow tool buttons
+  const spotlightBtn = mkBtn("draw-tool-btn", ICON_SPOTLIGHT);
+  spotlightBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); closeMoreMenu(); updateToolbarState(); });
+  tip(spotlightBtn, "Spotlight  S");
+  moreMenu.appendChild(spotlightBtn);
+
+  const blurBtn = mkBtn("draw-tool-btn", ICON_BLUR);
+  blurBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); closeMoreMenu(); updateToolbarState(); });
+  tip(blurBtn, "Blur / Redact  X");
+  moreMenu.appendChild(blurBtn);
+
+  const eraserBtn = mkBtn("draw-tool-btn", ICON_ERASER);
+  eraserBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); closeMoreMenu(); updateToolbarState(); });
+  tip(eraserBtn, "Eraser  E");
+  moreMenu.appendChild(eraserBtn);
+
   const shapeBtn = mkBtn("draw-tool-btn", ICON_SHAPES);
   shapeBtn.addEventListener("click", () => { dispatch({ type: "TOGGLE_SHAPE_SNAP" }); updateToolbarState(); });
   tip(shapeBtn, "Shape snap  O");
-  toolsWrap.appendChild(shapeBtn);
+  moreMenu.appendChild(shapeBtn);
 
-  const spotlightBtn = mkBtn("draw-tool-btn", ICON_SPOTLIGHT);
-  spotlightBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); updateToolbarState(); });
-  tip(spotlightBtn, "Spotlight  S");
-  toolsWrap.appendChild(spotlightBtn);
+  // Position and toggle the more menu
+  function openMoreMenu(): void {
+    moreMenuOpen = true;
+    moreMenu.classList.add(PREFIX + "draw-more-menu-open");
+    // Position below the more button
+    const r = moreBtn.getBoundingClientRect();
+    moreMenu.style.top = (r.bottom + 6) + "px";
+    moreMenu.style.left = r.left + "px";
+  }
+  function closeMoreMenu(): void {
+    moreMenuOpen = false;
+    moreMenu.classList.remove(PREFIX + "draw-more-menu-open");
+  }
+  moreBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (moreMenuOpen) closeMoreMenu(); else openMoreMenu();
+  });
+  // Close menu when clicking outside
+  const onDocClick = (): void => { if (moreMenuOpen) closeMoreMenu(); };
+  document.addEventListener("click", onDocClick, true);
+  moreMenu.addEventListener("click", (e) => { e.stopPropagation(); });
 
-  const blurBtn = mkBtn("draw-tool-btn", ICON_BLUR);
-  blurBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); updateToolbarState(); });
-  tip(blurBtn, "Blur / Redact  X");
-  toolsWrap.appendChild(blurBtn);
-
-  const eraserBtn = mkBtn("draw-tool-btn", ICON_ERASER);
-  eraserBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); updateToolbarState(); });
-  tip(eraserBtn, "Eraser  E");
-  toolsWrap.appendChild(eraserBtn);
-
-  const numberBtn = mkBtn("draw-tool-btn", ICON_NUMBER);
-  numberBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "number" ? "draw" : "number" }); updateToolbarState(); });
-  tip(numberBtn, "Numbered pins  N");
-  toolsWrap.appendChild(numberBtn);
+  const tooltipRoot2 = options.mountTarget || document.body;
+  tooltipRoot2.appendChild(moreMenu);
 
   toolsWrap.appendChild(mkEl("span", "draw-sep"));
 
@@ -728,6 +801,35 @@ function activate(
   tip(doneBtn, "Finish drawing");
   toolbar.appendChild(doneBtn);
 
+  // --- ESC confirm bar ---
+  const confirmBar = mkEl("div", "draw-confirm-bar");
+  const discardBtn = mkBtn("draw-confirm-btn", "Discard");
+  const keepBtn = mkBtn("draw-confirm-btn", "Keep drawing");
+  const saveBtn = mkBtn("draw-confirm-btn-primary", "Save");
+  discardBtn.addEventListener("click", () => {
+    hideConfirmBar();
+    if (options.onDone) options.onDone(false);
+  });
+  keepBtn.addEventListener("click", () => { hideConfirmBar(); });
+  saveBtn.addEventListener("click", () => {
+    hideConfirmBar();
+    if (options.onDone) options.onDone(true);
+  });
+  confirmBar.appendChild(discardBtn);
+  confirmBar.appendChild(keepBtn);
+  confirmBar.appendChild(saveBtn);
+  const confirmRoot = options.mountTarget || document.body;
+  confirmRoot.appendChild(confirmBar);
+
+  function showConfirmBar(): void {
+    const r = toolbar.getBoundingClientRect();
+    confirmBar.style.top = (r.bottom + 6) + "px";
+    confirmBar.style.left = (r.left + r.width / 2) + "px";
+    confirmBar.style.transform = "translateX(-50%)";
+    confirmBar.style.display = "flex";
+  }
+  function hideConfirmBar(): void { confirmBar.style.display = "none"; }
+
   // Collapse toggle
   collapseBtn.addEventListener("click", () => {
     dispatch({ type: "TOGGLE_COLLAPSE" });
@@ -746,10 +848,19 @@ function activate(
     eraserBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "eraser");
     numberBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "number");
     selectBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "select");
+    penBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "draw");
     canvas.style.cursor = s.toolMode === "select" ? "default" : (s.toolMode === "number" ? "pointer" : "crosshair");
     if (s.toolMode !== "number") { dispatch({ type: "SET_CURSOR_POS", pos: null }); scheduleRedraw(); }
     (undoBtn as HTMLButtonElement).disabled = s.strokes.length === 0;
     (redoBtn as HTMLButtonElement).disabled = s.undoneStrokes.length === 0;
+    // Update more button icon if an overflow tool is active
+    const isOverflow = overflowTools.includes(s.toolMode);
+    activeOverflowTool = isOverflow ? s.toolMode : null;
+    if (activeOverflowTool === "spotlight") moreBtn.innerHTML = ICON_SPOTLIGHT;
+    else if (activeOverflowTool === "blur") moreBtn.innerHTML = ICON_BLUR;
+    else if (activeOverflowTool === "eraser") moreBtn.innerHTML = ICON_ERASER;
+    else moreBtn.innerHTML = ICON_MORE;
+    moreBtn.classList.toggle(PREFIX + "draw-tool-btn-active", isOverflow);
   }
 
   if (options.mountTarget) options.mountTarget.appendChild(toolbar);
@@ -764,8 +875,11 @@ function activate(
     canvas.removeEventListener("contextmenu", onCtx);
     canvas.removeEventListener("wheel", onWhl);
     document.removeEventListener("keydown", onKeyDown, true);
+    document.removeEventListener("click", onDocClick, true);
     if (toolbar.parentNode) toolbar.parentNode.removeChild(toolbar);
     if (tooltipEl.parentNode) tooltipEl.parentNode.removeChild(tooltipEl);
+    if (moreMenu.parentNode) moreMenu.parentNode.removeChild(moreMenu);
+    if (confirmBar.parentNode) confirmBar.parentNode.removeChild(confirmBar);
   };
 }
 
