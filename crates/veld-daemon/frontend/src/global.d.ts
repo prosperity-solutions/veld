@@ -41,6 +41,7 @@ declare global {
   interface Window {
     __veld_feedback_initialised?: boolean;
     __veld_draw?: VeldDraw;
+    __veld_controls?: import("./shared/controls").VeldControls;
     __veld_cl?: number;
     __veld_early_logs?: Array<{
       l: string;

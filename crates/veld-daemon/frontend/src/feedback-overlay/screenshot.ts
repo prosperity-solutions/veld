@@ -73,11 +73,12 @@ export function captureScreenshot(
     }
   });
 
-  // Exit screenshot mode (removes backdrop) but keep the stream alive.
+  // Exit screenshot mode (removes backdrop). Null the stream ref temporarily
+  // so setMode(null) doesn't stop it — we still need it for the grab.
   const stream = getState().captureStream;
-  dispatch({ type: "SET_CAPTURE_STREAM", stream: null }); // prevent setMode(null) from stopping it
+  dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
   deps().setMode(null);
-  dispatch({ type: "SET_CAPTURE_STREAM", stream }); // restore for reuse
+  dispatch({ type: "SET_CAPTURE_STREAM", stream });
 
   if (!stream) {
     restoreVeldUI(hiddenEls);
@@ -92,10 +93,12 @@ export function captureScreenshot(
     grabber
       .grabFrame()
       .then((bitmap: ImageBitmap) => {
+        stopCaptureStream();
         restoreVeldUI(hiddenEls);
         cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
       })
       .catch(() => {
+        stopCaptureStream();
         restoreVeldUI(hiddenEls);
         showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
       });

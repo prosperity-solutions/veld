@@ -15,6 +15,17 @@ metadata:
 
 Veld orchestrates local dev environments. It starts services from `veld.json`, wires dependencies, and gives each service an HTTPS URL like `https://frontend.my-feature.myproject.localhost`.
 
+## Version Check
+
+This skill requires veld **v0.0.0-development**.
+
+Installed:
+!`veld -V 2>&1`
+
+If the output above shows "command not found" or "No such file", veld is not installed. Guide the user through installation — see [reference/install.md](reference/install.md). Do NOT attempt to run any `veld` commands until it is installed.
+
+If the installed version is older than the required version above, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
+
 ## Live State
 
 ### Configuration
@@ -62,7 +73,7 @@ Quick reference for the two node types:
 
 ## Feedback Loop
 
-For the full feedback workflow, events, and thread fields, see [reference/feedback.md](reference/feedback.md).
+For the full feedback workflow, events, thread fields, interactive controls, and framework binding templates, see [reference/feedback.md](reference/feedback.md).
 
 Core pattern: listen → fix → answer → listen again with `--after <seq>` → repeat until `session_ended`.
 

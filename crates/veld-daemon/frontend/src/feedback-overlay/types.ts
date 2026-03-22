@@ -15,6 +15,7 @@ export interface Message {
   author: "human" | "agent";
   created_at: string;
   screenshot?: string | null;
+  controls?: unknown[];
 }
 
 export interface Thread {

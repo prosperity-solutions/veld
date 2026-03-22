@@ -57,6 +57,10 @@ pub enum FeedbackCommand {
 
         /// Message body.
         message: String,
+
+        /// JSON array of interactive control definitions (sliders, buttons, etc.)
+        #[arg(long)]
+        controls: Option<String>,
     },
 
     /// Open a new thread with a question (agent-facing).
@@ -71,6 +75,10 @@ pub enum FeedbackCommand {
 
         /// Message body.
         message: String,
+
+        /// JSON array of interactive control definitions (sliders, buttons, etc.)
+        #[arg(long)]
+        controls: Option<String>,
     },
 
     /// List feedback threads.
@@ -120,12 +128,14 @@ pub async fn run(command: FeedbackCommand) -> i32 {
             name,
             thread,
             message,
-        } => run_answer(name, &thread, &message).await,
+            controls,
+        } => run_answer(name, &thread, &message, controls.as_deref()).await,
         FeedbackCommand::Ask {
             name,
             page,
             message,
-        } => run_ask(name, page.as_deref(), &message).await,
+            controls,
+        } => run_ask(name, page.as_deref(), &message, controls.as_deref()).await,
         FeedbackCommand::Threads {
             name,
             json,
@@ -262,7 +272,12 @@ async fn run_listen(name: Option<String>, after: Option<u64>, timeout: u64, json
 // answer
 // ---------------------------------------------------------------------------
 
-async fn run_answer(name: Option<String>, thread_id: &str, body: &str) -> i32 {
+async fn run_answer(
+    name: Option<String>,
+    thread_id: &str,
+    body: &str,
+    controls: Option<&str>,
+) -> i32 {
     let (project_root, run_name) = match resolve(name, false) {
         Some(pair) => pair,
         None => return 1,
@@ -270,7 +285,9 @@ async fn run_answer(name: Option<String>, thread_id: &str, body: &str) -> i32 {
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
-    let msg = new_message(Author::Agent, body, None);
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+
+    let msg = new_message(Author::Agent, body, None, controls_value);
 
     if let Err(e) = store.add_message(thread_id, &msg) {
         output::print_error(&format!("Failed to add message: {e}"), false);
@@ -296,7 +313,12 @@ async fn run_answer(name: Option<String>, thread_id: &str, body: &str) -> i32 {
 // ask
 // ---------------------------------------------------------------------------
 
-async fn run_ask(name: Option<String>, page: Option<&str>, body: &str) -> i32 {
+async fn run_ask(
+    name: Option<String>,
+    page: Option<&str>,
+    body: &str,
+    controls: Option<&str>,
+) -> i32 {
     let (project_root, run_name) = match resolve(name, false) {
         Some(pair) => pair,
         None => return 1,
@@ -311,7 +333,8 @@ async fn run_ask(name: Option<String>, page: Option<&str>, body: &str) -> i32 {
         None => ThreadScope::Global,
     };
 
-    let msg = new_message(Author::Agent, body, None);
+    let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
+    let msg = new_message(Author::Agent, body, None, controls_value);
     let thread = new_thread(scope, ThreadOrigin::Agent, None, None, None, msg);
 
     if let Err(e) = store.save_thread(&thread) {
