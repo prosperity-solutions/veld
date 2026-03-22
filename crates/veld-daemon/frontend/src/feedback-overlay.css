@@ -5,19 +5,71 @@
   box-sizing: border-box;
 }
 
-:root {
+/* Reverse dark mode: veld UI contrasts with the page.
+   Dark OS = light page = dark veld UI.
+   Light OS = dark page = light veld UI. */
+
+/* Default (dark UI — for light pages) */
+:host {
   --vf-bg: #0a0a0a;
   --vf-bg-card: #1e1e24;
   --vf-accent: #C4F56A;
   --vf-accent-hover: #a8d94f;
+  --vf-accent-text: #0a0a0a;
   --vf-danger: #ef4444;
+  --vf-danger-text: #fff;
   --vf-text: #f1f5f9;
   --vf-text-muted: #94a3b8;
-  --vf-border: #1e1e24;
-  --vf-shadow: 0 8px 30px rgba(0,0,0,.5);
+  --vf-border: #2a2a30;
+  --vf-shadow: 0 4px 20px rgba(0,0,0,.4);
   --vf-radius: 10px;
   --vf-z: 999999;
-  --vf-font: 'JetBrains Mono', monospace;
+  --vf-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+/* Dark OS → dark pages → light veld UI */
+@media (prefers-color-scheme: dark) {
+  :host {
+    --vf-bg: #f8f8fa;
+    --vf-bg-card: #eeeef2;
+    --vf-accent: #16a34a;
+    --vf-accent-hover: #15803d;
+    --vf-accent-text: #fff;
+    --vf-danger: #dc2626;
+    --vf-danger-text: #fff;
+    --vf-text: #1a1a2e;
+    --vf-text-muted: #64748b;
+    --vf-border: #d4d4d8;
+    --vf-shadow: 0 4px 20px rgba(0,0,0,.1);
+  }
+}
+
+/* Manual theme overrides (data-theme attribute on host element) */
+:host([data-theme="dark"]) {
+  --vf-bg: #0a0a0a;
+  --vf-bg-card: #1e1e24;
+  --vf-accent: #C4F56A;
+  --vf-accent-hover: #a8d94f;
+  --vf-accent-text: #0a0a0a;
+  --vf-danger: #ef4444;
+  --vf-danger-text: #fff;
+  --vf-text: #f1f5f9;
+  --vf-text-muted: #94a3b8;
+  --vf-border: #2a2a30;
+  --vf-shadow: 0 4px 20px rgba(0,0,0,.4);
+}
+:host([data-theme="light"]) {
+  --vf-bg: #f8f8fa;
+  --vf-bg-card: #eeeef2;
+  --vf-accent: #16a34a;
+  --vf-accent-hover: #15803d;
+  --vf-accent-text: #fff;
+  --vf-danger: #dc2626;
+  --vf-danger-text: #fff;
+  --vf-text: #1a1a2e;
+  --vf-text-muted: #64748b;
+  --vf-border: #d4d4d8;
+  --vf-shadow: 0 4px 20px rgba(0,0,0,.1);
 }
 
 /* Hide/show transition */
@@ -35,7 +87,7 @@
 .veld-feedback-toast {
   position: fixed; bottom: 100px; left: 50%;
   transform: translateX(-50%) translateY(20px);
-  background: var(--vf-accent); color: #0a0a0a;
+  background: var(--vf-accent); color: var(--vf-accent-text);
   padding: 10px 22px; border-radius: 8px;
   font: 500 13px/1.4 var(--vf-font);
   z-index: calc(var(--vf-z) + 10);
@@ -66,7 +118,7 @@
   width: 40px; height: 40px; border-radius: 50%;
   border: 1px solid var(--vf-border);
   cursor: pointer; background: var(--vf-bg);
-  color: #fff; display: flex;
+  color: var(--vf-text); display: flex;
   align-items: center; justify-content: center;
   box-shadow: var(--vf-shadow); transition: background .2s, transform .15s;
   position: relative; z-index: 2;
@@ -90,7 +142,7 @@
 .veld-feedback-badge {
   position: absolute; top: -4px; right: -4px;
   min-width: 16px; height: 16px; border-radius: 8px;
-  background: var(--vf-danger); color: #fff;
+  background: var(--vf-danger); color: var(--vf-danger-text);
   font: 700 10px/1 var(--vf-font);
   display: flex; align-items: center; justify-content: center;
   padding: 0 4px; pointer-events: none;
@@ -108,7 +160,7 @@
   transition: max-width .2s ease, opacity .2s ease, padding .2s ease;
 }
 .veld-feedback-toolbar-open {
-  max-width: 500px; opacity: 1; padding: 4px 6px;
+  max-width: 550px; opacity: 1; padding: 4px 6px;
 }
 
 /* Gap between toolbar and FAB */
@@ -132,7 +184,7 @@
   background: var(--vf-bg-card); color: var(--vf-text);
 }
 .veld-feedback-tool-btn.veld-feedback-tool-active {
-  background: var(--vf-accent); color: #0a0a0a;
+  background: var(--vf-accent); color: var(--vf-accent-text);
 }
 .veld-feedback-tool-btn svg {
   width: 15px; height: 15px;
@@ -226,7 +278,7 @@
 .veld-feedback-textarea {
   width: 100%; min-height: 80px; resize: vertical;
   background: var(--vf-bg-card); color: var(--vf-text);
-  border: 1px solid #3a3a44; border-radius: 6px;
+  border: 1px solid var(--vf-border); border-radius: 6px;
   padding: 8px 10px; font: inherit; outline: none;
   box-sizing: border-box;
 }
@@ -243,12 +295,12 @@
   padding: 6px 14px; border-radius: 6px; border: none; cursor: pointer;
   font: 500 12px/1.4 var(--vf-font); transition: background .15s;
 }
-.veld-feedback-btn-primary { background: var(--vf-accent); color: #0a0a0a; }
+.veld-feedback-btn-primary { background: var(--vf-accent); color: var(--vf-accent-text); }
 .veld-feedback-btn-primary:hover { background: var(--vf-accent-hover); }
 .veld-feedback-btn-secondary { background: var(--vf-border); color: var(--vf-text); }
-.veld-feedback-btn-secondary:hover { background: #2a2a30; }
-.veld-feedback-btn-danger { background: var(--vf-danger); color: #fff; }
-.veld-feedback-btn-danger:hover { background: #dc2626; }
+.veld-feedback-btn-secondary:hover { background: var(--vf-border); }
+.veld-feedback-btn-danger { background: var(--vf-danger); color: var(--vf-danger-text); }
+.veld-feedback-btn-danger:hover { opacity: 0.85; }
 .veld-feedback-btn-sm { padding: 4px 10px; font-size: 11px; }
 
 /* --- Pins (thread-aware) --- */
@@ -401,7 +453,7 @@
   background: rgba(255,255,255,.05);
 }
 .veld-feedback-segmented-btn-active {
-  background: var(--vf-accent); color: #0a0a0a;
+  background: var(--vf-accent); color: var(--vf-accent-text);
 }
 
 /* --- Panel section (page group) --- */
@@ -459,7 +511,7 @@
   width: 12px; height: 12px;
 }
 .veld-feedback-message-human .veld-feedback-message-author-icon {
-  background: var(--vf-accent); color: #0a0a0a;
+  background: var(--vf-accent); color: var(--vf-accent-text);
 }
 .veld-feedback-message-agent .veld-feedback-message-author-icon {
   background: var(--vf-bg-card); color: var(--vf-text-muted);
@@ -502,7 +554,7 @@
 }
 .veld-feedback-listening-allgood {
   padding: 3px 8px; border-radius: 6px; border: none;
-  background: var(--vf-accent); color: #0a0a0a;
+  background: var(--vf-accent); color: var(--vf-accent-text);
   font: 500 10px/1.4 var(--vf-font); cursor: pointer;
   transition: background .15s; flex-shrink: 0;
 }
@@ -556,16 +608,34 @@
   cursor: crosshair;
 }
 
+/* Screenshot popover — clamped to viewport, centered */
+.veld-feedback-popover-screenshot {
+  position: fixed !important;
+  top: 20px !important; left: 50% !important;
+  transform: translateX(-50%) !important;
+  width: auto;
+  max-width: calc(100vw - 60px);
+  max-height: calc(100vh - 40px);
+  display: flex; flex-direction: column;
+  overflow-y: auto;
+}
+
 /* Screenshot preview in popover */
 .veld-feedback-screenshot-preview {
+  position: relative;
   padding: 10px;
   background: var(--vf-bg-card);
   border-bottom: 1px solid var(--vf-border);
+  overflow: hidden;
+  flex-shrink: 1;
+  min-height: 0;
 }
 .veld-feedback-screenshot-img {
-  width: 100%;
-  border-radius: 4px;
   display: block;
+  border-radius: 4px;
+  max-width: 100%;
+  max-height: calc(100vh - 300px);
+  object-fit: contain;
 }
 
 /* Tooltip */
@@ -636,4 +706,260 @@
 }
 .veld-feedback-confirm-actions {
   display: flex; gap: 8px; justify-content: flex-end;
+}
+
+/* ---- Draw mode ---- */
+
+/* Full-viewport draw canvas (global mode) */
+.veld-feedback-draw-canvas {
+  position: fixed; inset: 0;
+  width: 100%; height: 100%;
+  z-index: calc(var(--vf-z) - 2);
+  cursor: crosshair;
+  touch-action: none;
+  background: transparent;
+}
+
+/* Inline draw canvas (screenshot annotation) */
+.veld-feedback-draw-canvas-inline {
+  position: absolute; top: 0; left: 0;
+  width: 100%; height: 100%;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Draw toolbar */
+.veld-feedback-draw-toolbar {
+  position: fixed; top: 16px; left: 50%;
+  transform: translateX(-50%);
+  display: flex; align-items: center; gap: 4px;
+  background: var(--vf-bg);
+  border: 1px solid var(--vf-border);
+  border-radius: 24px; padding: 5px 8px;
+  box-shadow: var(--vf-shadow);
+  z-index: calc(var(--vf-z) + 1);
+  font: 12px var(--vf-font);
+  color: var(--vf-text);
+  user-select: none;
+  transition: padding .2s ease, opacity .2s ease;
+}
+/* Semi-transparent when idle on desktop, full on hover */
+@media (hover: hover) {
+  .veld-feedback-draw-toolbar { opacity: 0.25; }
+  .veld-feedback-draw-toolbar:hover { opacity: 1; }
+}
+
+/* Collapse button */
+.veld-feedback-draw-collapse-btn {
+  width: 24px; height: 24px; border-radius: 6px;
+  border: none; cursor: pointer;
+  background: transparent;
+  color: var(--vf-text-muted);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; outline: none; flex-shrink: 0;
+  transition: transform .2s ease, color .15s;
+}
+.veld-feedback-draw-collapse-btn svg { width: 14px; height: 14px; }
+.veld-feedback-draw-collapse-btn:hover { color: var(--vf-text); }
+.veld-feedback-draw-collapse-collapsed { transform: rotate(180deg); }
+
+/* Collapsible tools container — scrollable on narrow viewports */
+.veld-feedback-draw-tools-wrap {
+  display: flex; align-items: center; gap: 4px;
+  overflow-x: auto; overflow-y: hidden;
+  max-width: calc(100vw - 160px);
+  scrollbar-width: none;
+}
+.veld-feedback-draw-tools-wrap::-webkit-scrollbar { display: none; }
+
+/* Color swatch buttons */
+.veld-feedback-draw-color {
+  width: 22px; height: 22px; border-radius: 50%;
+  border: 2px solid var(--vf-border);
+  margin: 0 1px;
+  cursor: pointer; flex-shrink: 0;
+  transition: border-color .15s, transform .1s, box-shadow .15s;
+  padding: 0; outline: none;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.08);
+}
+.veld-feedback-draw-color:hover {
+  transform: scale(1.15);
+  border-color: var(--vf-text-muted);
+}
+.veld-feedback-draw-color-active {
+  border-color: var(--vf-accent) !important;
+  box-shadow: inset 0 0 0 2px var(--vf-bg), 0 0 0 0 transparent;
+}
+
+/* Separator */
+.veld-feedback-draw-sep {
+  width: 1px; height: 18px;
+  background: var(--vf-border);
+  margin: 0 6px; flex-shrink: 0;
+}
+
+/* Thickness buttons */
+.veld-feedback-draw-thick {
+  width: 26px; height: 26px; border-radius: 50%;
+  border: none; cursor: pointer;
+  background: transparent;
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; outline: none;
+  transition: background .15s;
+}
+.veld-feedback-draw-thick:hover {
+  background: rgba(255,255,255,0.06);
+}
+.veld-feedback-draw-thick-active {
+  background: var(--vf-bg-card);
+}
+.veld-feedback-draw-thick-dot {
+  border-radius: 50%;
+  background: var(--vf-text);
+  display: block;
+}
+
+/* Tool buttons (eraser, undo, redo) */
+.veld-feedback-draw-tool-btn {
+  width: 30px; height: 30px; border-radius: 8px;
+  border: 1px solid transparent; cursor: pointer;
+  background: transparent;
+  color: var(--vf-text-muted);
+  display: flex; align-items: center; justify-content: center;
+  padding: 0; outline: none;
+  transition: background .15s, color .15s;
+}
+.veld-feedback-draw-tool-btn svg {
+  width: 16px; height: 16px;
+}
+.veld-feedback-draw-tool-btn:hover {
+  background: var(--vf-bg-card);
+  border-color: var(--vf-border);
+  color: var(--vf-text);
+}
+.veld-feedback-draw-tool-btn-active {
+  background: var(--vf-bg-card);
+  color: var(--vf-accent);
+}
+.veld-feedback-draw-tool-btn:disabled {
+  opacity: 0.3; cursor: default;
+}
+.veld-feedback-draw-tool-btn:disabled:hover {
+  background: transparent;
+  color: var(--vf-text-muted);
+}
+
+/* Done button */
+.veld-feedback-draw-done-btn {
+  height: 28px; border-radius: 14px;
+  border: none; cursor: pointer;
+  background: var(--vf-accent);
+  color: var(--vf-bg);
+  font: 12px/1 var(--vf-font);
+  font-weight: 600;
+  display: flex; align-items: center; gap: 4px;
+  padding: 0 12px 0 8px;
+  outline: none;
+  transition: background .15s;
+}
+.veld-feedback-draw-done-btn svg {
+  width: 14px; height: 14px;
+}
+.veld-feedback-draw-done-btn:hover {
+  background: var(--vf-accent-hover);
+}
+
+/* More menu dropdown */
+.veld-feedback-draw-more-menu {
+  position: fixed;
+  display: none;
+  flex-direction: column;
+  gap: 6px;
+  background: var(--vf-bg);
+  border: 1px solid var(--vf-border);
+  border-radius: 14px;
+  padding: 10px 12px;
+  box-shadow: var(--vf-shadow);
+  z-index: calc(var(--vf-z) + 2);
+  min-width: 0;
+}
+.veld-feedback-draw-more-menu-open { display: flex; }
+.veld-feedback-draw-more-row {
+  display: flex; align-items: center; gap: 6px;
+  justify-content: center;
+}
+
+/* ESC confirm bar */
+.veld-feedback-draw-confirm-bar {
+  position: fixed;
+  display: none;
+  align-items: center; gap: 6px;
+  background: var(--vf-bg);
+  border: 1px solid var(--vf-border);
+  border-radius: 14px;
+  padding: 4px 6px;
+  box-shadow: var(--vf-shadow);
+  z-index: calc(var(--vf-z) + 2);
+  font: 12px var(--vf-font);
+  color: var(--vf-text);
+  user-select: none;
+}
+.veld-feedback-draw-confirm-btn {
+  height: 26px; border-radius: 12px;
+  border: 1px solid var(--vf-border);
+  cursor: pointer;
+  background: transparent;
+  color: var(--vf-text-muted);
+  font: 12px/1 var(--vf-font);
+  padding: 0 10px;
+  outline: none;
+  transition: background .15s, color .15s;
+}
+.veld-feedback-draw-confirm-btn:hover {
+  background: var(--vf-bg-card);
+  color: var(--vf-text);
+}
+.veld-feedback-draw-confirm-btn-primary {
+  height: 26px; border-radius: 12px;
+  border: none;
+  cursor: pointer;
+  background: var(--vf-accent);
+  color: var(--vf-bg);
+  font: 12px/1 var(--vf-font);
+  font-weight: 600;
+  padding: 0 12px;
+  outline: none;
+  transition: background .15s;
+}
+.veld-feedback-draw-confirm-btn-primary:hover {
+  background: var(--vf-accent-hover);
+}
+
+/* Draw toolbar when inside a container (annotation mode) */
+.veld-feedback-screenshot-preview .veld-feedback-draw-toolbar {
+  position: absolute; top: auto; bottom: -44px; left: 50%;
+  transform: translateX(-50%);
+}
+
+/* Annotate button in screenshot preview */
+.veld-feedback-annotate-btn {
+  position: absolute; top: 16px; right: 16px;
+  height: 26px; border-radius: 13px;
+  border: 1px solid var(--vf-border);
+  cursor: pointer;
+  background: var(--vf-bg);
+  color: var(--vf-text);
+  font: 11px/1 var(--vf-font);
+  padding: 0 10px;
+  display: flex; align-items: center; gap: 4px;
+  outline: none;
+  transition: background .15s, border-color .15s;
+  opacity: 0.9;
+}
+.veld-feedback-annotate-btn:hover {
+  opacity: 1;
+  border-color: var(--vf-accent);
+}
+.veld-feedback-annotate-btn svg {
+  width: 12px; height: 12px;
 }
