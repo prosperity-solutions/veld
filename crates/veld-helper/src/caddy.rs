@@ -492,9 +492,7 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
 
     if fb.inject_feedback_overlay {
         // CSS is bundled into the JS and injected via Shadow DOM — no <link> needed.
-        js.push_str(
-            "E('script',{'src':'/__veld__/feedback/script.js'});",
-        );
+        js.push_str("E('script',{'src':'/__veld__/feedback/script.js'});");
     }
 
     js.push_str("});})();");
@@ -609,7 +607,10 @@ mod tests {
             prefix.contains("__veld_early_logs"),
             "should buffer early logs"
         );
-        assert!(prefix.contains("feedback/script.js"), "should load overlay JS (CSS bundled in)");
+        assert!(
+            prefix.contains("feedback/script.js"),
+            "should load overlay JS (CSS bundled in)"
+        );
         assert!(
             prefix.contains("feedback/script.js"),
             "should load overlay JS"
@@ -635,7 +636,10 @@ mod tests {
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 2);
         let prefix = subroutes[1]["handle"][0]["prefix"].as_str().unwrap();
-        assert!(prefix.contains("feedback/script.js"), "should load overlay JS (CSS bundled in)");
+        assert!(
+            prefix.contains("feedback/script.js"),
+            "should load overlay JS (CSS bundled in)"
+        );
         assert!(
             prefix.contains("feedback/script.js"),
             "should load overlay JS"
@@ -673,7 +677,10 @@ mod tests {
             prefix.contains("__veld_early_logs"),
             "should intercept console"
         );
-        assert!(!prefix.contains("feedback/script.js"), "should NOT load overlay JS");
+        assert!(
+            !prefix.contains("feedback/script.js"),
+            "should NOT load overlay JS"
+        );
         assert!(
             !prefix.contains("feedback/script.js"),
             "should NOT load overlay JS"
