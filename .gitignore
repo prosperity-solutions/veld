@@ -18,6 +18,9 @@
 # macOS
 .DS_Store
 
+# Frontend build
+node_modules/
+
 # Environment / secrets
 .env
 .env.local
