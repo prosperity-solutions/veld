@@ -42,18 +42,19 @@ func fakeMultiChunkHandler(contentType string, chunks []string) caddyhttp.Handle
 	})
 }
 
-func TestHTMLPrefixInjected(t *testing.T) {
+func TestHTMLPrefixInjectedAfterDoctype(t *testing.T) {
 	vi := VeldInject{Prefix: "<script>bootstrap()</script>"}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
 
-	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html; charset=utf-8", "<html><body>Hello</body></html>"))
+	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html; charset=utf-8",
+		"<!DOCTYPE html><html><body>Hello</body></html>"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	body := rec.Body.String()
-	expected := "<script>bootstrap()</script><html><body>Hello</body></html>"
+	expected := "<!DOCTYPE html><script>bootstrap()</script><html><body>Hello</body></html>"
 	if body != expected {
 		t.Errorf("body = %q, want %q", body, expected)
 	}
@@ -61,6 +62,40 @@ func TestHTMLPrefixInjected(t *testing.T) {
 	// Content-Length should have been removed (response is now chunked).
 	if cl := rec.Header().Get("Content-Length"); cl != "" {
 		t.Errorf("Content-Length should be removed, got %q", cl)
+	}
+}
+
+func TestHTMLPrefixInjectedAfterHead(t *testing.T) {
+	vi := VeldInject{Prefix: "<script>boot()</script>"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+
+	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html",
+		"<html><head><title>Test</title></head><body>Hi</body></html>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := rec.Body.String()
+	expected := "<html><head><script>boot()</script><title>Test</title></head><body>Hi</body></html>"
+	if body != expected {
+		t.Errorf("body = %q, want %q", body, expected)
+	}
+}
+
+func TestHTMLPrefixNoMarker(t *testing.T) {
+	// When there's no DOCTYPE or <head>, prefix is appended after the chunk.
+	vi := VeldInject{Prefix: "PREFIX"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+
+	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html", "BODY"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := rec.Body.String(); got != "BODYPREFIX" {
+		t.Errorf("body = %q, want %q", got, "BODYPREFIX")
 	}
 }
 
@@ -76,12 +111,12 @@ func TestHTMLCharsetVariants(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/", nil)
 
-			err := vi.ServeHTTP(rec, req, fakeHandler(200, ct, "BODY"))
+			err := vi.ServeHTTP(rec, req, fakeHandler(200, ct, "<!DOCTYPE html>BODY"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := rec.Body.String(); got != "PREFIXBODY" {
-				t.Errorf("body = %q, want %q", got, "PREFIXBODY")
+			if got := rec.Body.String(); got != "<!DOCTYPE html>PREFIXBODY" {
+				t.Errorf("body = %q, want %q", got, "<!DOCTYPE html>PREFIXBODY")
 			}
 		})
 	}
@@ -134,7 +169,8 @@ func TestPrefixOnlyOnFirstWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := "PRE<!DOCTYPE html><html><body>streaming</body></html>"
+	// Prefix injected after <!DOCTYPE html> in the first chunk, not repeated.
+	expected := "<!DOCTYPE html>PRE<html><body>streaming</body></html>"
 	if got := rec.Body.String(); got != expected {
 		t.Errorf("body = %q, want %q", got, expected)
 	}
@@ -193,12 +229,13 @@ func TestErrorPageInjected(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/", nil)
 
-			err := vi.ServeHTTP(rec, req, fakeHandler(code, "text/html", "<html>Error</html>"))
+			// Error pages with a DOCTYPE get prefix after it.
+			err := vi.ServeHTTP(rec, req, fakeHandler(code, "text/html", "<!DOCTYPE html><html>Error</html>"))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			expected := "PRE<html>Error</html>"
+			expected := "<!DOCTYPE html>PRE<html>Error</html>"
 			if got := rec.Body.String(); got != expected {
 				t.Errorf("status %d: body = %q, want %q", code, got, expected)
 			}
@@ -266,7 +303,7 @@ func TestFlushDelegated(t *testing.T) {
 	handler := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(200)
-		w.Write([]byte("<html>"))
+		w.Write([]byte("<!DOCTYPE html><html>"))
 		if f, ok := w.(http.Flusher); ok {
 			f.Flush()
 		}
@@ -283,7 +320,7 @@ func TestFlushDelegated(t *testing.T) {
 		t.Error("Flush was not delegated to the underlying writer")
 	}
 
-	expected := "PRE<html></html>"
+	expected := "<!DOCTYPE html>PRE<html></html>"
 	if got := rec.Body.String(); got != expected {
 		t.Errorf("body = %q, want %q", got, expected)
 	}
@@ -425,7 +462,7 @@ func TestCaddyModuleInfo(t *testing.T) {
 
 func TestLargePrefixAndBody(t *testing.T) {
 	prefix := strings.Repeat("<script>x</script>", 100)
-	body := strings.Repeat("<p>paragraph</p>", 1000)
+	body := "<!DOCTYPE html>" + strings.Repeat("<p>paragraph</p>", 1000)
 
 	vi := VeldInject{Prefix: prefix}
 	rec := httptest.NewRecorder()
@@ -437,14 +474,40 @@ func TestLargePrefixAndBody(t *testing.T) {
 	}
 
 	got := rec.Body.String()
-	if !strings.HasPrefix(got, prefix) {
-		t.Error("response should start with prefix")
-	}
-	if !strings.HasSuffix(got, body) {
-		t.Error("response should end with original body")
+	// Prefix should appear after <!DOCTYPE html>.
+	expectedStart := "<!DOCTYPE html>" + prefix
+	if !strings.HasPrefix(got, expectedStart) {
+		t.Error("response should start with DOCTYPE then prefix")
 	}
 	if len(got) != len(prefix)+len(body) {
 		t.Errorf("total length = %d, want %d", len(got), len(prefix)+len(body))
+	}
+}
+
+// --- findInjectionPoint unit tests ---
+
+func TestFindInjectionPoint(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"doctype html", "<!DOCTYPE html><html>", 15},
+		{"doctype case insensitive", "<!doctype HTML><html>", 15},
+		{"doctype with attributes", "<!DOCTYPE html SYSTEM \"about:legacy-compat\"><html>", 44},
+		{"head tag", "<html><head><title>T</title>", 12},
+		{"head with attrs", "<html><head lang=\"en\"><title>T</title>", 22},
+		{"no marker", "<div>Hello</div>", -1},
+		{"empty", "", -1},
+		{"doctype takes priority over head", "<!DOCTYPE html><head>", 15},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := findInjectionPoint([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("findInjectionPoint(%q) = %d, want %d", tc.body, got, tc.want)
+			}
+		})
 	}
 }
 

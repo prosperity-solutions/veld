@@ -372,6 +372,7 @@ fn build_route_json(
             subroutes.push(serde_json::json!({
                 "handle": [{
                     "handler": "reverse_proxy",
+                    "flush_interval": -1,
                     "upstreams": [{ "dial": upstream }]
                 }]
             }));
@@ -379,6 +380,8 @@ fn build_route_json(
             // veld_inject prepends the bootstrap script to text/html responses
             // without buffering. Accept-Encoding: identity ensures the upstream
             // sends uncompressed HTML (can't prepend to gzipped bytes).
+            // flush_interval: -1 disables response buffering so that React
+            // streaming hydration (chunked transfer-encoding) works correctly.
             subroutes.push(serde_json::json!({
                 "handle": [
                     {
@@ -387,6 +390,7 @@ fn build_route_json(
                     },
                     {
                         "handler": "reverse_proxy",
+                        "flush_interval": -1,
                         "headers": {
                             "request": {
                                 "set": {
@@ -401,9 +405,12 @@ fn build_route_json(
         }
     } else {
         // No feedback — plain reverse proxy.
+        // flush_interval: -1 passes through chunked/streamed responses
+        // immediately (required for React streaming hydration, SSE, etc.).
         subroutes.push(serde_json::json!({
             "handle": [{
                 "handler": "reverse_proxy",
+                "flush_interval": -1,
                 "upstreams": [{
                     "dial": upstream
                 }]
@@ -426,13 +433,14 @@ fn build_route_json(
     })
 }
 
-/// Build the inline bootstrap `<script>` tag that is prepended to HTML
+/// Build the inline bootstrap `<script>` tag that is injected into HTML
 /// responses by the `veld_inject` Caddy handler.
 ///
-/// The script runs before any app code (it is prepended before `<!DOCTYPE>`).
-/// It immediately intercepts console methods to capture early logs, then
-/// dynamically loads the full client-log collector and/or feedback overlay
-/// assets once the DOM is ready.
+/// The script is inserted after `<!DOCTYPE html>` (or after `<head>`) to
+/// avoid triggering quirks mode. It runs before any app code, immediately
+/// intercepts console methods to capture early logs, then dynamically loads
+/// the full client-log collector and/or feedback overlay assets once the DOM
+/// is ready.
 fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     if !fb.inject_client_logs && !fb.inject_feedback_overlay {
         return String::new();
