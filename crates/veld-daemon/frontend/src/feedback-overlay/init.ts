@@ -14,7 +14,7 @@ import { setVisibilityDeps, hideOverlay, showOverlay } from "./visibility";
 import { addPin, removePin, renderAllPins, scheduleReposition } from "./pins";
 import { setNavigationDeps, scrollToThread, checkPendingScroll, onNavigate } from "./navigation";
 import { captureScreenshot, setScreenshotDeps } from "./screenshot";
-import { setDrawModeDeps } from "./draw-mode";
+import { setDrawModeDeps, ensureDrawScript } from "./draw-mode";
 import { positionTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 
@@ -76,6 +76,7 @@ function wireDeps(): void {
 
   setScreenshotDeps({
     setMode,
+    ensureDrawScript,
   });
 
   setNavigationDeps({

@@ -6,10 +6,15 @@ import { api } from "./api";
 import { toast } from "./toast";
 import { closeActivePopover, positionPopover } from "./popover";
 
-// Late-bound to avoid circular import with modes.ts
+// Late-bound to avoid circular imports
 let setModeFn: (mode: UIMode) => void;
-export function setScreenshotDeps(deps: { setMode: (mode: UIMode) => void }): void {
+let ensureDrawScriptFn: () => Promise<void>;
+export function setScreenshotDeps(deps: {
+  setMode: (mode: UIMode) => void;
+  ensureDrawScript: () => Promise<void>;
+}): void {
   setModeFn = deps.setMode;
+  ensureDrawScriptFn = deps.ensureDrawScript;
 }
 
 /**
@@ -289,9 +294,7 @@ export function showScreenshotThreadEditor(
     annotateBtn.innerHTML = ICONS.draw + " Annotate";
     annotateBtn.type = "button";
     annotateBtn.addEventListener("click", () => {
-      import("./draw-mode").then(({ ensureDrawScript }) => {
-        ensureDrawScript()
-          .then(() => {
+      ensureDrawScriptFn().then(() => {
             // Create canvas sized to image natural dimensions over the preview
             const drawCanvas = document.createElement("canvas");
             drawCanvas.className = PREFIX + "draw-canvas-inline";
@@ -371,10 +374,9 @@ export function showScreenshotThreadEditor(
             }
 
             doneAnnotateBtn.addEventListener("click", finishAnnotation);
-          })
-          .catch(() => {
-            toast("Failed to load draw module", true);
-          });
+      })
+      .catch(() => {
+        toast("Failed to load draw module", true);
       });
     });
     previewContainer.appendChild(annotateBtn);
