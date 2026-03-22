@@ -191,8 +191,8 @@ echo ""
 echo "--- Feedback Assets ---"
 
 assert_http_ok \
-  "Feedback CSS reachable" \
-  "$BASE_URL/__veld__/feedback/style.css"
+  "Draw overlay JS reachable" \
+  "$BASE_URL/__veld__/feedback/draw.js"
 
 assert_http_ok \
   "Feedback JS reachable" \
