@@ -73,21 +73,9 @@ Quick reference for the two node types:
 
 ## Feedback Loop
 
-For the full feedback workflow, events, thread fields, and interactive controls, see [reference/feedback.md](reference/feedback.md).
+For the full feedback workflow, events, thread fields, interactive controls, and framework binding templates, see [reference/feedback.md](reference/feedback.md).
 
 Core pattern: listen → fix → answer → listen again with `--after <seq>` → repeat until `session_ended`.
-
-### Interactive Controls
-
-When a decision is about a **value** (how fast, what color, how much), send controls instead of asking in words. The human scrubs sliders and pickers in the browser, clicks Apply, and you get exact values back.
-
-```bash
-veld feedback ask --name dev \
-  --controls '[{"type":"slider","name":"duration","value":200,"min":50,"max":2000,"step":10,"unit":"ms"}]' \
-  "How fast should this animate?"
-```
-
-To enable XY pad fusion (human drags two controls into a 2D surface), always set `min` and `max` on numeric controls and group related parameters adjacently. See [reference/feedback.md](reference/feedback.md) for all control types and the binding templates.
 
 ## Gotchas
 
