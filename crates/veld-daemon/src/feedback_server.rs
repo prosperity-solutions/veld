@@ -182,7 +182,6 @@ async fn overlay_script() -> Response {
         .into_response()
 }
 
-
 async fn draw_script() -> Response {
     (
         [
