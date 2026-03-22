@@ -449,11 +449,31 @@ pub async fn trust_caddy_ca() -> Result<StepResult, anyhow::Error> {
         .join("local");
     if ca_dir.exists() {
         // Open up the directory chain so the user can traverse to root.crt.
-        let _ = Command::new("chmod").args(["a+x"]).arg(crate::paths::caddy_data_dir().join("pki")).status().await;
-        let _ = Command::new("chmod").args(["a+x"]).arg(crate::paths::caddy_data_dir().join("pki").join("authorities")).status().await;
-        let _ = Command::new("chmod").args(["a+x"]).arg(&ca_dir).status().await;
+        let _ = Command::new("chmod")
+            .args(["a+x"])
+            .arg(crate::paths::caddy_data_dir().join("pki"))
+            .status()
+            .await;
+        let _ = Command::new("chmod")
+            .args(["a+x"])
+            .arg(
+                crate::paths::caddy_data_dir()
+                    .join("pki")
+                    .join("authorities"),
+            )
+            .status()
+            .await;
+        let _ = Command::new("chmod")
+            .args(["a+x"])
+            .arg(&ca_dir)
+            .status()
+            .await;
         // Only the public cert — the private key stays root-only.
-        let _ = Command::new("chmod").args(["a+r"]).arg(ca_dir.join("root.crt")).status().await;
+        let _ = Command::new("chmod")
+            .args(["a+r"])
+            .arg(ca_dir.join("root.crt"))
+            .status()
+            .await;
     }
 
     Ok(StepResult::success(
