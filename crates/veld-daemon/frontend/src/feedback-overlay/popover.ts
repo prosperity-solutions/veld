@@ -5,21 +5,7 @@ import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
 import { PREFIX, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
-
-// Late-bound deps
-let addPinFn: (thread: Thread) => void;
-let updateBadgeFn: () => void;
-let renderPanelFn: () => void;
-
-export function setPopoverDeps(deps: {
-  addPin: (thread: Thread) => void;
-  updateBadge: () => void;
-  renderPanel: () => void;
-}): void {
-  addPinFn = deps.addPin;
-  updateBadgeFn = deps.updateBadge;
-  renderPanelFn = deps.renderPanel;
-}
+import { deps } from "../shared/registry";
 
 export function positionPopover(
   pop: HTMLElement,
@@ -112,9 +98,9 @@ export function showCreatePopover(
       const thread = raw as Thread;
       dispatch({ type: "ADD_THREAD", thread });
       closeActivePopover();
-      if (addPinFn) addPinFn(thread);
-      if (updateBadgeFn) updateBadgeFn();
-      if (getState().panelOpen && renderPanelFn) renderPanelFn();
+      deps().addPin(thread);
+      deps().updateBadge();
+      if (getState().panelOpen) deps().renderPanel();
       toast("Thread created");
     }).catch(() => {
       sendBtn.disabled = false;

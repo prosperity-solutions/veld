@@ -3,21 +3,7 @@ import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { docRect, selectorFor, formatTrace } from "./helpers";
 import { getComponentTrace } from "./component-trace";
-
-// These are set by init to avoid circular imports
-export let captureScreenshotFn: (x: number, y: number, w: number, h: number) => void;
-export let showCreatePopoverFn: (rect: { x: number; y: number; width: number; height: number }, selector: string, tagInfo: string, targetEl: Element, trace: string[] | null) => void;
-export let positionTooltipFn: (el: HTMLElement, viewportRect: DOMRect) => void;
-
-export function setBackdropDeps(deps: {
-  captureScreenshot: typeof captureScreenshotFn;
-  showCreatePopover: typeof showCreatePopoverFn;
-  positionTooltip: typeof positionTooltipFn;
-}) {
-  captureScreenshotFn = deps.captureScreenshot;
-  showCreatePopoverFn = deps.showCreatePopover;
-  positionTooltipFn = deps.positionTooltip;
-}
+import { deps } from "../shared/registry";
 
 export function elementBelowBackdrop(x: number, y: number): Element | null {
   refs.overlay.style.display = "none";
@@ -62,7 +48,7 @@ export function initBackdropEvents(): void {
       if (trace && trace.length) {
         refs.componentTraceEl.textContent = formatTrace(trace) ?? "";
         refs.componentTraceEl.style.display = "block";
-        positionTooltipFn(refs.componentTraceEl, r);
+        deps().positionTooltip(refs.componentTraceEl, r);
       } else {
         refs.componentTraceEl.style.display = "none";
       }
@@ -101,7 +87,7 @@ export function initBackdropEvents(): void {
       const h = Math.abs(e.clientY - ssStartY);
       refs.screenshotRect.style.display = "none";
       if (w > 10 && h > 10) {
-        captureScreenshotFn(x, y, w, h);
+        deps().captureScreenshot(x, y, w, h);
       }
     }
   });
@@ -120,7 +106,7 @@ export function initBackdropEvents(): void {
         if (cls.length) tagInfo += "." + cls.slice(0, 3).join(".");
       }
       const trace = getComponentTrace(target);
-      showCreatePopoverFn(rect, selector, tagInfo, target, trace);
+      deps().showCreatePopover(rect, selector, tagInfo, target, trace);
     }
   });
 }

@@ -1,18 +1,12 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import type { UIMode } from "./types";
 import { PREFIX } from "./constants";
 import {
   stopCaptureStream,
   uploadAndShowEditor,
   restoreVeldUI,
 } from "./screenshot";
-
-// Late-bound to avoid circular import with modes.ts
-let setModeFn: (mode: UIMode) => void;
-export function setDrawModeDeps(deps: { setMode: (mode: UIMode) => void }): void {
-  setModeFn = deps.setMode;
-}
+import { deps } from "../shared/registry";
 
 /** Load the draw.js script if not already loaded. */
 export function ensureDrawScript(): Promise<void> {
@@ -31,7 +25,6 @@ export function ensureDrawScript(): Promise<void> {
 
 /**
  * Set up the full-page draw canvas and activate the draw module.
- * Accepts a `setModeFn` callback to break circular dependency with modes.ts.
  */
 export function setupGlobalDrawCanvas(): void {
   const canvas = document.createElement("canvas");
@@ -176,7 +169,7 @@ export function setupGlobalDrawCanvas(): void {
             }, "image/png");
           }
         } else {
-          setModeFn(null);
+          deps().setMode(null);
         }
       },
     });

@@ -6,17 +6,7 @@ import { PREFIX, ICONS, API, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { closeActivePopover, positionPopover } from "./popover";
-
-// Late-bound to avoid circular imports
-let setModeFn: (mode: UIMode) => void;
-let ensureDrawScriptFn: () => Promise<void>;
-export function setScreenshotDeps(deps: {
-  setMode: (mode: UIMode) => void;
-  ensureDrawScript: () => Promise<void>;
-}): void {
-  setModeFn = deps.setMode;
-  ensureDrawScriptFn = deps.ensureDrawScript;
-}
+import { deps } from "../shared/registry";
 
 /**
  * Acquire a screen capture stream, showing a disclaimer modal the first time.
@@ -118,7 +108,6 @@ export function stopCaptureStream(): void {
 
 /**
  * Capture a screenshot of the selected viewport region.
- * Accepts a `setModeFn` callback to break circular dependency with modes.ts.
  */
 export function captureScreenshot(
   viewX: number,
@@ -147,7 +136,7 @@ export function captureScreenshot(
   // Exit screenshot mode (removes backdrop) but keep the stream alive.
   const stream = getState().captureStream;
   dispatch({ type: "SET_CAPTURE_STREAM", stream: null }); // prevent setMode(null) from stopping it
-  setModeFn(null);
+  deps().setMode(null);
   dispatch({ type: "SET_CAPTURE_STREAM", stream }); // restore for reuse
 
   if (!stream) {
@@ -297,7 +286,7 @@ export function showScreenshotThreadEditor(
     annotateBtn.innerHTML = ICONS.draw + " Annotate";
     annotateBtn.type = "button";
     annotateBtn.addEventListener("click", () => {
-      ensureDrawScriptFn().then(() => {
+      deps().ensureDrawScript().then(() => {
             // Create canvas sized to image natural dimensions over the preview
             const drawCanvas = document.createElement("canvas");
             drawCanvas.className = PREFIX + "draw-canvas-inline";

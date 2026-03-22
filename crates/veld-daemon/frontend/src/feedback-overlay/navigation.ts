@@ -1,20 +1,9 @@
 import { getState, dispatch } from "./store";
 import { findThread, isCurrentPage, getThreadPageUrl } from "./helpers";
 import { PREFIX } from "./constants";
+import { deps } from "../shared/registry";
 
 const SCROLL_TO_KEY = "veld-feedback-scroll-to-thread";
-
-// Late-bound deps
-let renderAllPinsFn: () => void;
-let renderPanelFn: () => void;
-
-export function setNavigationDeps(deps: {
-  renderAllPins: () => void;
-  renderPanel: () => void;
-}): void {
-  renderAllPinsFn = deps.renderAllPins;
-  renderPanelFn = deps.renderPanel;
-}
 
 export function scrollToThread(threadId: string): void {
   const thread = findThread(getState().threads, threadId);
@@ -61,8 +50,8 @@ export function onNavigate(): void {
   const newPath = window.location.pathname;
   if (newPath !== getState().lastPathname) {
     dispatch({ type: "SET_LAST_PATHNAME", path: newPath });
-    if (renderAllPinsFn) renderAllPinsFn();
-    if (getState().panelOpen && renderPanelFn) renderPanelFn();
+    deps().renderAllPins();
+    if (getState().panelOpen) deps().renderPanel();
     checkPendingScroll();
   }
 }

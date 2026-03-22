@@ -8,33 +8,7 @@ import { toast } from "./toast";
 import { mkEl } from "./helpers";
 import { updateBadge } from "./badge";
 import { updateListeningModule } from "./listening";
-
-// Late-bound deps
-export let addPinFn: (thread: Thread) => void;
-export let removePinFn: (threadId: string) => void;
-export let renderAllPinsFn: () => void;
-export let renderPanelFn: () => void;
-export let openThreadInPanelFn: (threadId: string) => void;
-export let scrollToThreadFn: (threadId: string) => void;
-export let checkPendingScrollFn: () => void;
-
-export function setPollingDeps(deps: {
-  addPin: typeof addPinFn;
-  removePin: typeof removePinFn;
-  renderAllPins: typeof renderAllPinsFn;
-  renderPanel: typeof renderPanelFn;
-  openThreadInPanel: typeof openThreadInPanelFn;
-  scrollToThread: typeof scrollToThreadFn;
-  checkPendingScroll: typeof checkPendingScrollFn;
-}) {
-  addPinFn = deps.addPin;
-  removePinFn = deps.removePin;
-  renderAllPinsFn = deps.renderAllPins;
-  renderPanelFn = deps.renderPanel;
-  openThreadInPanelFn = deps.openThreadInPanel;
-  scrollToThreadFn = deps.scrollToThread;
-  checkPendingScrollFn = deps.checkPendingScroll;
-}
+import { deps } from "../shared/registry";
 
 export function pollEvents(): void {
   api("GET", "/events?after=" + getState().lastEventSeq).then(function (raw) {
@@ -86,9 +60,9 @@ function handleEvent(event: FeedbackEvent): void {
     case "thread_created":
       if (event.thread && !findThread(getState().threads, event.thread.id)) {
         dispatch({ type: "ADD_THREAD", thread: event.thread });
-        addPinFn(event.thread);
+        deps().addPin(event.thread);
         updateBadge();
-        if (getState().panelOpen) renderPanelFn();
+        if (getState().panelOpen) deps().renderPanel();
       }
       break;
     case "human_message":
@@ -99,7 +73,7 @@ function handleEvent(event: FeedbackEvent): void {
           if (!exists) {
             hmThread.messages.push(event.message);
             hmThread.updated_at = event.message.created_at || new Date().toISOString();
-            if (getState().panelOpen) renderPanelFn();
+            if (getState().panelOpen) deps().renderPanel();
           }
         }
       }
@@ -114,9 +88,9 @@ function handleAgentMessage(event: FeedbackEvent): void {
       const t = raw as Thread;
       if (t) {
         dispatch({ type: "ADD_THREAD", thread: t });
-        addPinFn(t);
+        deps().addPin(t);
         updateBadge();
-        if (getState().panelOpen) renderPanelFn();
+        if (getState().panelOpen) deps().renderPanel();
         showAgentReplyToast(t.id, event.message!.body);
       }
     }).catch(function () {});
@@ -134,9 +108,9 @@ function handleAgentMessage(event: FeedbackEvent): void {
     }
   }
 
-  addPinFn(thread);
+  deps().addPin(thread);
   updateBadge();
-  if (getState().panelOpen) renderPanelFn();
+  if (getState().panelOpen) deps().renderPanel();
 
   const preview = event.message ? event.message.body : "New reply";
   showAgentReplyToast(event.thread_id!, preview);
@@ -151,9 +125,9 @@ function handleAgentThreadCreated(event: FeedbackEvent): void {
     const existing = findThread(getState().threads, event.thread.id);
     if (!existing) {
       dispatch({ type: "ADD_THREAD", thread: event.thread });
-      addPinFn(event.thread);
+      deps().addPin(event.thread);
       updateBadge();
-      if (getState().panelOpen) renderPanelFn();
+      if (getState().panelOpen) deps().renderPanel();
 
       const preview = event.thread.messages && event.thread.messages[0] ? event.thread.messages[0].body : "New thread";
       showAgentReplyToast(event.thread.id, preview);
@@ -172,9 +146,9 @@ function handleThreadResolved(event: FeedbackEvent): void {
   if (thread) {
     thread.status = "resolved";
     dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-    removePinFn(thread.id);
+    deps().removePin(thread.id);
     updateBadge();
-    if (getState().panelOpen) renderPanelFn();
+    if (getState().panelOpen) deps().renderPanel();
   }
 }
 
@@ -183,9 +157,9 @@ function handleThreadReopened(event: FeedbackEvent): void {
   if (thread) {
     thread.status = "open";
     dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-    addPinFn(thread);
+    deps().addPin(thread);
     updateBadge();
-    if (getState().panelOpen) renderPanelFn();
+    if (getState().panelOpen) deps().renderPanel();
   }
 }
 
@@ -198,8 +172,8 @@ export function showAgentReplyToast(threadId: string, preview: string): void {
   const link = mkEl("button", "agent-toast-link", "Go to thread \u2192");
   link.addEventListener("click", function () {
     t.remove();
-    openThreadInPanelFn(threadId);
-    scrollToThreadFn(threadId);
+    deps().openThreadInPanel(threadId);
+    deps().scrollToThread(threadId);
   });
   t.appendChild(link);
   refs.shadow.appendChild(t);
@@ -219,8 +193,8 @@ export function sendBrowserNotification(title: string, body: string, threadId: s
   });
   n.addEventListener("click", function () {
     window.focus();
-    openThreadInPanelFn(threadId);
-    scrollToThreadFn(threadId);
+    deps().openThreadInPanel(threadId);
+    deps().scrollToThread(threadId);
     n.close();
   });
 }
@@ -228,9 +202,9 @@ export function sendBrowserNotification(title: string, body: string, threadId: s
 export function loadThreads(): void {
   api("GET", "/threads").then(function (raw) {
     dispatch({ type: "SET_THREADS", threads: (raw as Thread[]) || [] });
-    renderAllPinsFn();
+    deps().renderAllPins();
     updateBadge();
-    checkPendingScrollFn();
-    if (getState().panelOpen) renderPanelFn();
+    deps().checkPendingScroll();
+    if (getState().panelOpen) deps().renderPanel();
   }).catch(function () {});
 }

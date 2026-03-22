@@ -4,57 +4,30 @@ import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
-import { onKeyDown, setKeyboardDeps } from "./keyboard";
-import { setBackdropDeps } from "./backdrop";
-import { setPollingDeps, pollEvents, pollListenStatus, loadThreads } from "./polling";
-import { setPanelDeps, togglePanel, renderPanel, openThreadInPanel } from "./panel";
+import { onKeyDown } from "./keyboard";
+import { pollEvents, pollListenStatus, loadThreads } from "./polling";
+import { togglePanel, renderPanel, openThreadInPanel } from "./panel";
 import { setMode } from "./modes";
-import { setToolbarDeps, toggleToolbar } from "./toolbar";
-import { setPopoverDeps, togglePageComment, closeActivePopover, showCreatePopover } from "./popover";
-import { setVisibilityDeps, hideOverlay, showOverlay } from "./visibility";
+import { toggleToolbar } from "./toolbar";
+import { togglePageComment, closeActivePopover, showCreatePopover } from "./popover";
+import { hideOverlay, showOverlay } from "./visibility";
 import { addPin, removePin, renderAllPins, scheduleReposition } from "./pins";
-import { setNavigationDeps, scrollToThread, checkPendingScroll, onNavigate } from "./navigation";
-import { captureScreenshot, setScreenshotDeps } from "./screenshot";
-import { setDrawModeDeps, ensureDrawScript } from "./draw-mode";
+import { scrollToThread, checkPendingScroll, onNavigate } from "./navigation";
+import { captureScreenshot } from "./screenshot";
+import { ensureDrawScript } from "./draw-mode";
 import { positionTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
+import { registerDeps } from "../shared/registry";
 
 function wireDeps(): void {
-  setToolbarDeps({
-    setMode,
-    togglePageComment,
-    togglePanel,
-    hideOverlay,
-  });
-
-  setVisibilityDeps({
-    setMode,
-    togglePanel,
-  });
-
-  setKeyboardDeps({
+  registerDeps({
     setMode,
     toggleToolbar,
-    togglePageComment,
     togglePanel,
+    togglePageComment,
     hideOverlay,
     showOverlay,
     closeActivePopover,
-  });
-
-  setBackdropDeps({
-    captureScreenshot,
-    showCreatePopover,
-    positionTooltip,
-  });
-
-  setPopoverDeps({
-    addPin,
-    updateBadge,
-    renderPanel,
-  });
-
-  setPollingDeps({
     addPin,
     removePin,
     renderAllPins,
@@ -62,27 +35,11 @@ function wireDeps(): void {
     openThreadInPanel,
     scrollToThread,
     checkPendingScroll,
-  });
-
-  setPanelDeps({
-    closeActivePopover,
-    renderAllPins,
-    addPin,
-    scrollToThread,
-  });
-
-  setDrawModeDeps({
-    setMode,
-  });
-
-  setScreenshotDeps({
-    setMode,
+    updateBadge,
+    captureScreenshot,
+    showCreatePopover,
+    positionTooltip,
     ensureDrawScript,
-  });
-
-  setNavigationDeps({
-    renderAllPins,
-    renderPanel,
   });
 }
 

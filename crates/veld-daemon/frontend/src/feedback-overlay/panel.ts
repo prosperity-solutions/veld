@@ -6,24 +6,7 @@ import { api } from "./api";
 import { toast } from "./toast";
 import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
-
-// Late-bound deps
-export let closeActivePopoverFn: () => void;
-export let renderAllPinsFn: () => void;
-export let addPinFn: (thread: Thread) => void;
-export let scrollToThreadFn: (threadId: string) => void;
-
-export function setPanelDeps(deps: {
-  closeActivePopover: typeof closeActivePopoverFn;
-  renderAllPins: typeof renderAllPinsFn;
-  addPin: typeof addPinFn;
-  scrollToThread: typeof scrollToThreadFn;
-}) {
-  closeActivePopoverFn = deps.closeActivePopover;
-  renderAllPinsFn = deps.renderAllPins;
-  addPinFn = deps.addPin;
-  scrollToThreadFn = deps.scrollToThread;
-}
+import { deps } from "../shared/registry";
 
 export function togglePanel(): void {
   dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
@@ -143,7 +126,7 @@ function renderThreadDetail(thread: Thread): void {
     goLink.href = pageUrl || "#";
     goLink.addEventListener("click", function (e) {
       e.preventDefault();
-      scrollToThreadFn(thread.id);
+      deps().scrollToThread(thread.id);
     });
     header.appendChild(goLink);
   }
@@ -180,7 +163,7 @@ function renderThreadDetail(thread: Thread): void {
         thread.status = "open";
         dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
         showThreadList();
-        renderAllPinsFn();
+        deps().renderAllPins();
         toast("Thread reopened");
       });
     });
@@ -297,9 +280,9 @@ function renderThreadMessages(thread: Thread): HTMLElement {
       api("POST", "/threads/" + thread.id + "/resolve").then(function () {
         thread.status = "resolved";
         dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        closeActivePopoverFn();
+        deps().closeActivePopover();
         showThreadList();
-        renderAllPinsFn();
+        deps().renderAllPins();
         toast("Thread resolved");
       });
     };
@@ -326,7 +309,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
       textarea.value = "";
       sendBtn.disabled = false;
       if (getState().panelOpen) renderPanel();
-      renderAllPinsFn();
+      deps().renderAllPins();
     }).catch(function () {
       sendBtn.disabled = false;
       toast("Failed to send reply", true);
@@ -344,7 +327,7 @@ export function markThreadSeen(threadId: string): void {
   dispatch({ type: "MARK_SEEN", threadId });
   api("PUT", "/threads/" + threadId + "/seen").catch(function () {});
   const thread = findThread(getState().threads, threadId);
-  if (thread) addPinFn(thread);
+  if (thread) deps().addPin(thread);
   updateBadge();
   updateMarkReadBtn();
 }
@@ -356,7 +339,7 @@ export function markAllRead(): void {
       api("PUT", "/threads/" + t.id + "/seen").catch(function () {});
     }
   });
-  renderAllPinsFn();
+  deps().renderAllPins();
   updateBadge();
   updateMarkReadBtn();
   if (getState().panelOpen) renderPanel();

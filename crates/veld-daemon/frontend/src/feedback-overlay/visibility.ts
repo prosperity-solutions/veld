@@ -1,19 +1,7 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import type { UIMode } from "./types";
 import { PREFIX } from "./constants";
-
-// Late-bound deps
-let setModeFn: (mode: UIMode) => void;
-let togglePanelFn: () => void;
-
-export function setVisibilityDeps(deps: {
-  setMode: (mode: UIMode) => void;
-  togglePanel: () => void;
-}): void {
-  setModeFn = deps.setMode;
-  togglePanelFn = deps.togglePanel;
-}
+import { deps } from "../shared/registry";
 
 export function hideOverlay(): void {
   dispatch({ type: "SET_HIDDEN", hidden: true });
@@ -25,8 +13,8 @@ export function hideOverlay(): void {
   refs.overlay.classList.remove(PREFIX + "overlay-active");
   refs.hoverOutline.style.display = "none";
   refs.componentTraceEl.style.display = "none";
-  if (setModeFn) setModeFn(null);
-  if (getState().panelOpen && togglePanelFn) togglePanelFn();
+  deps().setMode(null);
+  if (getState().panelOpen) deps().togglePanel();
 }
 
 export function showOverlay(): void {

@@ -21,6 +21,8 @@ import { buildSnapshotCanvas } from "./color";
 import { recognizeShape } from "./shapes";
 import { createPixelatedRegion } from "./blur";
 import { compositeOnto } from "./composite";
+import { createDrawStore, type DrawState, type DrawAction } from "./store";
+import type { Store } from "../shared/create-store";
 
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 const ERASER_OP = "destination-out";
@@ -88,21 +90,10 @@ function activate(
     snapCanvas = buildSnapshotCanvas(options.baseImage);
   }
 
-  let hasPressureDevice = false;
-  let activeWidthIdx = 1;
-  let activeColorIdx = 0; // red
-
-  const strokes: StrokeEntry[] = [];
-  let undoneStrokes: StrokeEntry[] = [];
-  let currentStroke: StrokeDraw | null = null;
-  let baseWidth = BASE_WIDTH;
-  let toolMode: DrawTool = "draw";
-  let shapeSnap = false; // shape recognition toggle
-  let pinCounter = 0;
-  let pendingPin: PinEntry | null = null; // placed but arrow not locked
-  let pendingPinAngle = 0;
-  let drawing = false;
-  let rafPending = false;
+  // Create per-session store
+  const store: Store<DrawState, DrawAction> = createDrawStore();
+  const getState = store.getState;
+  const dispatch = store.dispatch;
 
   function redraw(): void {
     ctx.save();
@@ -110,10 +101,11 @@ function activate(
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.restore();
 
+    const s = getState();
     const spotlights: SpotlightEntry[] = [];
-    const allStrokes: StrokeEntry[] = currentStroke
-      ? (strokes as StrokeEntry[]).concat([currentStroke])
-      : strokes;
+    const allStrokes: StrokeEntry[] = s.currentStroke
+      ? (s.strokes as StrokeEntry[]).concat([s.currentStroke])
+      : s.strokes;
     for (let i = 0; i < allStrokes.length; i++) {
       if ((allStrokes[i] as SpotlightEntry).type === "spotlight") {
         spotlights.push(allStrokes[i] as SpotlightEntry);
@@ -124,22 +116,22 @@ function activate(
     if (spotlights.length > 0) renderSpotlights(ctx, spotlights);
 
     // Pin previews in number mode
-    if (toolMode === "number") {
-      if (pendingPin) {
+    if (s.toolMode === "number") {
+      if (s.pendingPin) {
         // Pending pin: semi-transparent, arrow follows cursor
         ctx.save();
         ctx.globalAlpha = 0.45;
-        renderPin(ctx, { ...pendingPin, angle: pendingPinAngle });
+        renderPin(ctx, { ...s.pendingPin, angle: s.pendingPinAngle });
         ctx.restore();
-      } else if (cursorPos && !drawing) {
+      } else if (s.cursorPos && !s.drawing) {
         // Ghost preview: show next pin number under cursor
         ctx.save();
         ctx.globalAlpha = 0.35;
         renderPin(ctx, {
           type: "pin",
-          x: cursorPos.x, y: cursorPos.y,
-          number: pinCounter + 1,
-          color: COLORS[activeColorIdx].style,
+          x: s.cursorPos.x, y: s.cursorPos.y,
+          number: s.pinCounter + 1,
+          color: COLORS[s.activeColorIdx].style,
           angle: 0,
         });
         ctx.restore();
@@ -299,9 +291,9 @@ function activate(
   }
 
   function scheduleRedraw(): void {
-    if (rafPending) return;
-    rafPending = true;
-    requestAnimationFrame(function () { rafPending = false; redraw(); });
+    if (getState().rafPending) return;
+    dispatch({ type: "SET_RAF_PENDING", pending: true });
+    requestAnimationFrame(function () { dispatch({ type: "SET_RAF_PENDING", pending: false }); redraw(); });
   }
 
   // ---- Pointer events -------------------------------------------------------
@@ -320,80 +312,86 @@ function activate(
   function onPointerDown(e: PointerEvent): void {
     if (e.button !== 0) return;
     if (e.target !== canvas) return; // don't capture clicks on toolbar elements
-    drawing = true;
+    dispatch({ type: "SET_DRAWING", drawing: true });
     canvas.setPointerCapture(e.pointerId);
     const pos = getPos(e);
 
     // Number mode: first click places pin, second click locks arrow direction
-    if (toolMode === "number") {
-      if (pendingPin) {
+    if (getState().toolMode === "number") {
+      if (getState().pendingPin) {
         // Second click — lock the angle and commit
-        pendingPin.angle = pendingPinAngle;
-        strokes.push(pendingPin);
-        pendingPin = null;
-        undoneStrokes = [];
+        dispatch({ type: "LOCK_PIN" });
         scheduleRedraw();
         updateToolbarState();
       } else {
         // First click — create pending pin
-        pinCounter++;
-        pendingPin = {
+        dispatch({ type: "INCREMENT_PIN_COUNTER" });
+        dispatch({ type: "SET_PENDING_PIN", pin: {
           type: "pin", x: pos.x, y: pos.y,
-          number: pinCounter,
-          color: COLORS[activeColorIdx].style,
+          number: getState().pinCounter,
+          color: COLORS[getState().activeColorIdx].style,
           angle: 0,
-        };
-        pendingPinAngle = 0;
+        }});
+        dispatch({ type: "SET_PENDING_PIN_ANGLE", angle: 0 });
         scheduleRedraw();
       }
-      drawing = false;
+      dispatch({ type: "SET_DRAWING", drawing: false });
       return;
     }
 
     const isPressure = e.pointerType !== "mouse" && e.pressure > 0 && e.pressure < 1;
-    if (isPressure && !hasPressureDevice) { hasPressureDevice = true; hideThicknessButtons(); }
-    const color = toolMode === "eraser" ? "#000000" : COLORS[activeColorIdx].style;
-    const strokeWidth = hasPressureDevice ? baseWidth : WIDTHS[activeWidthIdx].size;
-    currentStroke = {
+    if (isPressure && !getState().hasPressureDevice) { dispatch({ type: "SET_HAS_PRESSURE", has: true }); hideThicknessButtons(); }
+    const s = getState();
+    const color = s.toolMode === "eraser" ? "#000000" : COLORS[s.activeColorIdx].style;
+    const strokeWidth = s.hasPressureDevice ? s.baseWidth : WIDTHS[s.activeWidthIdx].size;
+    dispatch({ type: "SET_CURRENT_STROKE", stroke: {
       points: [pos], color,
-      baseWidth: toolMode === "eraser" ? strokeWidth * 3 : strokeWidth,
-      compositeOp: toolMode === "eraser" ? ERASER_OP : "source-over",
-      hasPressure: hasPressureDevice, toolMode,
-    };
+      baseWidth: s.toolMode === "eraser" ? strokeWidth * 3 : strokeWidth,
+      compositeOp: s.toolMode === "eraser" ? ERASER_OP : "source-over",
+      hasPressure: s.hasPressureDevice, toolMode: s.toolMode,
+    }});
     scheduleRedraw();
   }
 
-  // Track cursor for pin preview ghost
-  let cursorPos: Point | null = null;
-
   function onPointerMove(e: PointerEvent): void {
-    if (toolMode === "number") {
-      cursorPos = getPos(e);
+    if (getState().toolMode === "number") {
+      const pos = getPos(e);
+      dispatch({ type: "SET_CURSOR_POS", pos });
       // Track arrow angle for pending pin
-      if (pendingPin) {
-        pendingPinAngle = Math.atan2(cursorPos.y - pendingPin.y, cursorPos.x - pendingPin.x);
+      const s = getState();
+      if (s.pendingPin) {
+        dispatch({ type: "SET_PENDING_PIN_ANGLE", angle: Math.atan2(pos.y - s.pendingPin.y, pos.x - s.pendingPin.x) });
       }
       scheduleRedraw();
       return;
     }
-    if (!drawing || !currentStroke) return;
-    currentStroke.points.push(getPos(e));
+    if (!getState().drawing || !getState().currentStroke) return;
+    dispatch({ type: "APPEND_POINT", point: getPos(e) });
     scheduleRedraw();
   }
 
   function onPointerUp(): void {
-    if (!drawing) return;
-    drawing = false;
-    if (!currentStroke) return;
-    const pts = currentStroke.points;
+    if (!getState().drawing) return;
+    dispatch({ type: "SET_DRAWING", drawing: false });
+    const s = getState();
+    if (!s.currentStroke) return;
+    const pts = s.currentStroke.points;
     const totalPathLen = pathLength(pts);
 
     // Number mode is handled in onPointerDown, shouldn't reach here
-    if (toolMode === "number") { currentStroke = null; return; }
-    if (pts.length === 1) pts.push({ x: pts[0].x + 0.5, y: pts[0].y + 0.5, pressure: pts[0].pressure });
+    if (s.toolMode === "number") { dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); return; }
 
-    if (toolMode === "blur") {
-      const bbox = computeBBox(pts);
+    // Single-point stroke: add a tiny offset so it renders as a dot
+    let finalStroke = s.currentStroke;
+    if (pts.length === 1) {
+      finalStroke = {
+        ...finalStroke,
+        points: [...pts, { x: pts[0].x + 0.5, y: pts[0].y + 0.5, pressure: pts[0].pressure }],
+      };
+    }
+
+    if (s.toolMode === "blur") {
+      const bbox = computeBBox(finalStroke.points);
       if (bbox.w > 5 && bbox.h > 5) {
         let snapBbox: BBox = bbox;
         if (!options.inline && snapCanvas) {
@@ -402,22 +400,22 @@ function activate(
                        w: bbox.w * (snapCanvas.width / dW), h: bbox.h * (snapCanvas.height / dH) };
         }
         const pixelCanvas = createPixelatedRegion(snapCanvas, snapBbox);
-        if (pixelCanvas) strokes.push({ type: "blur", bbox, pixelCanvas });
+        if (pixelCanvas) dispatch({ type: "ADD_STROKE", stroke: { type: "blur", bbox, pixelCanvas } });
       }
-      currentStroke = null; undoneStrokes = []; scheduleRedraw(); updateToolbarState(); return;
+      dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState(); return;
     }
 
-    if (toolMode === "spotlight") {
-      strokes.push({ type: "spotlight", points: pts, shape: shapeSnap ? recognizeShape(pts) : null });
-      currentStroke = null; undoneStrokes = []; scheduleRedraw(); updateToolbarState(); return;
+    if (s.toolMode === "spotlight") {
+      dispatch({ type: "ADD_STROKE", stroke: { type: "spotlight", points: finalStroke.points, shape: s.shapeSnap ? recognizeShape(finalStroke.points) : null } });
+      dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState(); return;
     }
 
-    if (shapeSnap && toolMode === "draw" && totalPathLen > 20) {
-      const shape = recognizeShape(pts);
-      if (shape) currentStroke.shape = shape;
+    if (s.shapeSnap && s.toolMode === "draw" && totalPathLen > 20) {
+      const shape = recognizeShape(finalStroke.points);
+      if (shape) finalStroke = { ...finalStroke, shape };
     }
-    strokes.push(currentStroke);
-    currentStroke = null; undoneStrokes = []; scheduleRedraw(); updateToolbarState();
+    dispatch({ type: "ADD_STROKE", stroke: finalStroke });
+    dispatch({ type: "SET_CURRENT_STROKE", stroke: null }); scheduleRedraw(); updateToolbarState();
   }
 
   canvas.addEventListener("pointerdown", onPointerDown);
@@ -426,36 +424,23 @@ function activate(
   canvas.addEventListener("pointercancel", onPointerUp);
   const onCtx = (e: Event) => e.preventDefault();
   canvas.addEventListener("contextmenu", onCtx);
-  const onWhl = (e: WheelEvent) => { e.preventDefault(); baseWidth = Math.max(1, Math.min(30, baseWidth + (e.deltaY > 0 ? -1 : 1))); };
+  const onWhl = (e: WheelEvent) => { e.preventDefault(); dispatch({ type: "SET_BASE_WIDTH", width: Math.max(1, Math.min(30, getState().baseWidth + (e.deltaY > 0 ? -1 : 1))) }); };
   canvas.addEventListener("wheel", onWhl, { passive: false });
 
   // ---- Undo / Redo ----------------------------------------------------------
 
   function undo(): void {
-    // Cancel pending pin placement if active
-    if (pendingPin) {
-      pinCounter = Math.max(0, pinCounter - 1);
-      pendingPin = null;
-      scheduleRedraw(); updateToolbarState();
-      return;
-    }
-    if (!strokes.length) return;
-    const removed = strokes.pop()!;
-    undoneStrokes.push(removed);
-    if ((removed as PinEntry).type === "pin") pinCounter = Math.max(0, pinCounter - 1);
+    dispatch({ type: "UNDO" });
     scheduleRedraw(); updateToolbarState();
   }
 
   function redo(): void {
-    if (!undoneStrokes.length) return;
-    const restored = undoneStrokes.pop()!;
-    strokes.push(restored);
-    if ((restored as PinEntry).type === "pin") pinCounter = (restored as PinEntry).number;
+    dispatch({ type: "REDO" });
     scheduleRedraw(); updateToolbarState();
   }
 
   function onKeyDown(e: KeyboardEvent): void {
-    if (drawing) return; // don't trigger shortcuts while dragging
+    if (getState().drawing) return; // don't trigger shortcuts while dragging
     const mod = IS_MAC ? e.metaKey : e.ctrlKey;
     if (mod && e.key === "z" && !e.shiftKey) { e.preventDefault(); undo(); return; }
     if (mod && e.key === "z" && e.shiftKey) { e.preventDefault(); redo(); return; }
@@ -463,17 +448,17 @@ function activate(
 
     const k = e.key.toLowerCase();
     // Colors: 1-4 or first letter
-    if (k >= "1" && k <= String(COLORS.length)) { activeColorIdx = parseInt(k) - 1; updateToolbarState(); return; }
+    if (k >= "1" && k <= String(COLORS.length)) { dispatch({ type: "SET_COLOR", idx: parseInt(k) - 1 }); updateToolbarState(); return; }
     // Tool modes
-    if (k === "d" || k === "p") { toolMode = "draw"; updateToolbarState(); return; } // draw/pen
-    if (k === "e") { toolMode = toolMode === "eraser" ? "draw" : "eraser"; updateToolbarState(); return; }
-    if (k === "s") { toolMode = toolMode === "spotlight" ? "draw" : "spotlight"; updateToolbarState(); return; }
-    if (k === "x") { toolMode = toolMode === "blur" ? "draw" : "blur"; updateToolbarState(); return; }
-    if (k === "n") { toolMode = toolMode === "number" ? "draw" : "number"; updateToolbarState(); return; }
-    if (k === "o") { shapeSnap = !shapeSnap; updateToolbarState(); return; }
+    if (k === "d" || k === "p") { dispatch({ type: "SET_TOOL", tool: "draw" }); updateToolbarState(); return; } // draw/pen
+    if (k === "e") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); updateToolbarState(); return; }
+    if (k === "s") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); updateToolbarState(); return; }
+    if (k === "x") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); updateToolbarState(); return; }
+    if (k === "n") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "number" ? "draw" : "number" }); updateToolbarState(); return; }
+    if (k === "o") { dispatch({ type: "TOGGLE_SHAPE_SNAP" }); updateToolbarState(); return; }
     // Thickness: [ and ]
-    if (k === "[") { activeWidthIdx = Math.max(0, activeWidthIdx - 1); updateToolbarState(); return; }
-    if (k === "]") { activeWidthIdx = Math.min(WIDTHS.length - 1, activeWidthIdx + 1); updateToolbarState(); return; }
+    if (k === "[") { dispatch({ type: "SET_WIDTH", idx: Math.max(0, getState().activeWidthIdx - 1) }); updateToolbarState(); return; }
+    if (k === "]") { dispatch({ type: "SET_WIDTH", idx: Math.min(WIDTHS.length - 1, getState().activeWidthIdx + 1) }); updateToolbarState(); return; }
     // Collapse: Tab
     if (e.key === "Tab") { e.preventDefault(); collapseBtn.click(); return; }
   }
@@ -512,7 +497,6 @@ function activate(
   // ---- Toolbar --------------------------------------------------------------
 
   const toolbar = mkEl("div", "draw-toolbar");
-  let toolbarCollapsed = false;
 
   // Collapse/expand handle — small grip bar
   const collapseBtn = mkEl("button", "draw-collapse-btn") as HTMLButtonElement;
@@ -535,7 +519,7 @@ function activate(
     btn.style.background = c.style;
     if (c.id === "white") btn.style.borderColor = "#aaa";
     if (c.id === "black") btn.style.borderColor = "#555";
-    btn.addEventListener("click", function () { activeColorIdx = i; updateToolbarState(); });
+    btn.addEventListener("click", function () { dispatch({ type: "SET_COLOR", idx: i }); updateToolbarState(); });
     tip(btn, c.label + "  " + (i + 1));
     colorBtns.push(btn);
     toolsWrap.appendChild(btn);
@@ -549,7 +533,7 @@ function activate(
     const dot = mkEl("span", "draw-thick-dot");
     dot.style.width = w.dotSize + "px"; dot.style.height = w.dotSize + "px";
     btn.appendChild(dot);
-    btn.addEventListener("click", function () { activeWidthIdx = i; updateToolbarState(); });
+    btn.addEventListener("click", function () { dispatch({ type: "SET_WIDTH", idx: i }); updateToolbarState(); });
     tip(btn, w.id.charAt(0).toUpperCase() + w.id.slice(1));
     widthBtns.push(btn); toolsWrap.appendChild(btn);
   });
@@ -563,27 +547,27 @@ function activate(
 
   // Shape snap toggle
   const shapeBtn = mkBtn("draw-tool-btn", ICON_SHAPES);
-  shapeBtn.addEventListener("click", () => { shapeSnap = !shapeSnap; updateToolbarState(); });
+  shapeBtn.addEventListener("click", () => { dispatch({ type: "TOGGLE_SHAPE_SNAP" }); updateToolbarState(); });
   tip(shapeBtn, "Shape snap  O");
   toolsWrap.appendChild(shapeBtn);
 
   const spotlightBtn = mkBtn("draw-tool-btn", ICON_SPOTLIGHT);
-  spotlightBtn.addEventListener("click", () => { toolMode = toolMode === "spotlight" ? "draw" : "spotlight"; updateToolbarState(); });
+  spotlightBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); updateToolbarState(); });
   tip(spotlightBtn, "Spotlight  S");
   toolsWrap.appendChild(spotlightBtn);
 
   const blurBtn = mkBtn("draw-tool-btn", ICON_BLUR);
-  blurBtn.addEventListener("click", () => { toolMode = toolMode === "blur" ? "draw" : "blur"; updateToolbarState(); });
+  blurBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); updateToolbarState(); });
   tip(blurBtn, "Blur / Redact  X");
   toolsWrap.appendChild(blurBtn);
 
   const eraserBtn = mkBtn("draw-tool-btn", ICON_ERASER);
-  eraserBtn.addEventListener("click", () => { toolMode = toolMode === "eraser" ? "draw" : "eraser"; updateToolbarState(); });
+  eraserBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "eraser" ? "draw" : "eraser" }); updateToolbarState(); });
   tip(eraserBtn, "Eraser  E");
   toolsWrap.appendChild(eraserBtn);
 
   const numberBtn = mkBtn("draw-tool-btn", ICON_NUMBER);
-  numberBtn.addEventListener("click", () => { toolMode = toolMode === "number" ? "draw" : "number"; updateToolbarState(); });
+  numberBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "number" ? "draw" : "number" }); updateToolbarState(); });
   tip(numberBtn, "Numbered pins  N");
   toolsWrap.appendChild(numberBtn);
 
@@ -605,29 +589,31 @@ function activate(
   toolbar.appendChild(toolsWrap);
 
   const doneBtn = mkBtn("draw-done-btn", ICON_CHECK + " Done");
-  doneBtn.addEventListener("click", () => { if (options.onDone) options.onDone(strokes.length > 0); });
+  doneBtn.addEventListener("click", () => { if (options.onDone) options.onDone(getState().strokes.length > 0); });
   tip(doneBtn, "Finish drawing");
   toolbar.appendChild(doneBtn);
 
   // Collapse toggle
   collapseBtn.addEventListener("click", () => {
-    toolbarCollapsed = !toolbarCollapsed;
-    toolsWrap.style.display = toolbarCollapsed ? "none" : "";
-    collapseBtn.classList.toggle(PREFIX + "draw-collapse-collapsed", toolbarCollapsed);
+    dispatch({ type: "TOGGLE_COLLAPSE" });
+    const s = getState();
+    toolsWrap.style.display = s.toolbarCollapsed ? "none" : "";
+    collapseBtn.classList.toggle(PREFIX + "draw-collapse-collapsed", s.toolbarCollapsed);
   });
 
   function updateToolbarState(): void {
-    colorBtns.forEach((btn, i) => { btn.classList.toggle(PREFIX + "draw-color-active", i === activeColorIdx); });
-    widthBtns.forEach((btn, i) => { btn.classList.toggle(PREFIX + "draw-thick-active", i === activeWidthIdx); });
-    shapeBtn.classList.toggle(PREFIX + "draw-tool-btn-active", shapeSnap);
-    spotlightBtn.classList.toggle(PREFIX + "draw-tool-btn-active", toolMode === "spotlight");
-    blurBtn.classList.toggle(PREFIX + "draw-tool-btn-active", toolMode === "blur");
-    eraserBtn.classList.toggle(PREFIX + "draw-tool-btn-active", toolMode === "eraser");
-    numberBtn.classList.toggle(PREFIX + "draw-tool-btn-active", toolMode === "number");
-    canvas.style.cursor = toolMode === "number" ? "pointer" : "crosshair";
-    if (toolMode !== "number") { cursorPos = null; scheduleRedraw(); }
-    (undoBtn as HTMLButtonElement).disabled = strokes.length === 0;
-    (redoBtn as HTMLButtonElement).disabled = undoneStrokes.length === 0;
+    const s = getState();
+    colorBtns.forEach((btn, i) => { btn.classList.toggle(PREFIX + "draw-color-active", i === s.activeColorIdx); });
+    widthBtns.forEach((btn, i) => { btn.classList.toggle(PREFIX + "draw-thick-active", i === s.activeWidthIdx); });
+    shapeBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.shapeSnap);
+    spotlightBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "spotlight");
+    blurBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "blur");
+    eraserBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "eraser");
+    numberBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "number");
+    canvas.style.cursor = s.toolMode === "number" ? "pointer" : "crosshair";
+    if (s.toolMode !== "number") { dispatch({ type: "SET_CURSOR_POS", pos: null }); scheduleRedraw(); }
+    (undoBtn as HTMLButtonElement).disabled = s.strokes.length === 0;
+    (redoBtn as HTMLButtonElement).disabled = s.undoneStrokes.length === 0;
   }
 
   if (options.mountTarget) options.mountTarget.appendChild(toolbar);

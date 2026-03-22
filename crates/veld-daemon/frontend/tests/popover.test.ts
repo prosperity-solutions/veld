@@ -4,11 +4,35 @@ import { positionPopover, closeActivePopover } from "../src/feedback-overlay/pop
 import { initState } from "../src/feedback-overlay/state";
 import { refs } from "../src/feedback-overlay/refs";
 import { getState, dispatch } from "../src/feedback-overlay/store";
-import { setPopoverDeps } from "../src/feedback-overlay/popover";
+import { registerDeps } from "../src/shared/registry";
 import { vi } from "vitest";
 
 function mockEl(): HTMLElement {
   return document.createElement("div");
+}
+
+function makeFakeDeps() {
+  return {
+    setMode: vi.fn(),
+    toggleToolbar: vi.fn(),
+    togglePanel: vi.fn(),
+    togglePageComment: vi.fn(),
+    hideOverlay: vi.fn(),
+    showOverlay: vi.fn(),
+    closeActivePopover: vi.fn(),
+    addPin: vi.fn(),
+    removePin: vi.fn(),
+    renderAllPins: vi.fn(),
+    renderPanel: vi.fn(),
+    openThreadInPanel: vi.fn(),
+    scrollToThread: vi.fn(),
+    checkPendingScroll: vi.fn(),
+    updateBadge: vi.fn(),
+    captureScreenshot: vi.fn(),
+    showCreatePopover: vi.fn(),
+    positionTooltip: vi.fn(),
+    ensureDrawScript: vi.fn().mockResolvedValue(undefined),
+  };
 }
 
 describe("positionPopover", () => {
@@ -54,7 +78,7 @@ describe("closeActivePopover", () => {
     refs.componentTraceEl = document.createElement("div");
     refs.toolBtnPageComment = document.createElement("div");
     refs.toolBtnScreenshot = document.createElement("div");
-    setPopoverDeps({ addPin: vi.fn(), updateBadge: vi.fn(), renderPanel: vi.fn() });
+    registerDeps(makeFakeDeps());
   });
 
   it("removes popover element and nulls reference", () => {
