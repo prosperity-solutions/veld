@@ -54,7 +54,7 @@ describe("hasUnread", () => {
         {
           id: "m1",
           body: "hello",
-          author: { type: "human" },
+          author: "human",
           created_at: new Date().toISOString(),
         },
       ],
@@ -68,7 +68,7 @@ describe("hasUnread", () => {
         {
           id: "m1",
           body: "reply",
-          author: { type: "agent" },
+          author: "agent",
           created_at: new Date().toISOString(),
         },
       ],
@@ -83,7 +83,7 @@ describe("hasUnread", () => {
         {
           id: "m1",
           body: "reply",
-          author: { type: "agent" },
+          author: "agent",
           created_at: msgTime,
         },
       ],
