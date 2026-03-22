@@ -24,6 +24,7 @@ export interface DrawState {
   rafPending: boolean;
   cursorPos: { x: number; y: number } | null;
   toolbarCollapsed: boolean;
+  selectedStrokeIndex: number | null;
 }
 
 export type DrawAction =
@@ -50,6 +51,9 @@ export type DrawAction =
   | { type: "SET_CURSOR_POS"; pos: { x: number; y: number } | null }
   | { type: "SET_HAS_PRESSURE"; has: boolean }
   | { type: "CLEAR_UNDONE" }
+  | { type: "SELECT_STROKE"; index: number | null }
+  | { type: "DELETE_SELECTED" }
+  | { type: "MOVE_PIN"; index: number; x: number; y: number }
   ;
 
 export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawState {
@@ -164,6 +168,28 @@ export function drawReducer(s: Readonly<DrawState>, action: DrawAction): DrawSta
       return { ...s, hasPressureDevice: action.has };
     case "CLEAR_UNDONE":
       return { ...s, undoneStrokes: [] };
+    case "SELECT_STROKE":
+      return { ...s, selectedStrokeIndex: action.index };
+    case "DELETE_SELECTED": {
+      if (s.selectedStrokeIndex === null || s.selectedStrokeIndex >= s.strokes.length) {
+        return { ...s, selectedStrokeIndex: null };
+      }
+      const deleted = s.strokes[s.selectedStrokeIndex];
+      const newStrokes = s.strokes.filter((_, i) => i !== s.selectedStrokeIndex);
+      const newPinCounter = (deleted as PinEntry).type === "pin"
+        ? Math.max(0, s.pinCounter - 1)
+        : s.pinCounter;
+      return { ...s, strokes: newStrokes, selectedStrokeIndex: null, pinCounter: newPinCounter };
+    }
+    case "MOVE_PIN": {
+      if (action.index >= s.strokes.length) return { ...s };
+      const entry = s.strokes[action.index];
+      if ((entry as PinEntry).type !== "pin") return { ...s };
+      const pin = entry as PinEntry;
+      const updated: PinEntry = { ...pin, x: action.x, y: action.y };
+      const strokes = s.strokes.map((stroke, i) => i === action.index ? updated : stroke);
+      return { ...s, strokes };
+    }
     default:
       return { ...s };
   }
@@ -189,5 +215,6 @@ export function createDrawStore(): Store<DrawState, DrawAction> {
     rafPending: false,
     cursorPos: null,
     toolbarCollapsed: false,
+    selectedStrokeIndex: null,
   });
 }

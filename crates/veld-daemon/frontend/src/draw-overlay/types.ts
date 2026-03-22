@@ -10,7 +10,7 @@ export type RecognizedShape =
   | { type: "circle"; cx: number; cy: number; radius: number }
   | { type: "rect"; x: number; y: number; w: number; h: number };
 
-export type DrawTool = "draw" | "eraser" | "spotlight" | "blur" | "number";
+export type DrawTool = "draw" | "eraser" | "spotlight" | "blur" | "number" | "select";
 
 export interface BBox {
   x: number;

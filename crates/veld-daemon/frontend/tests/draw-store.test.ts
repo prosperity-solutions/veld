@@ -294,4 +294,71 @@ describe("draw store — misc actions", () => {
     dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
     expect(Object.isFrozen(getState())).toBe(true);
   });
+
+  // --- Select tool ---
+
+  it("SELECT_STROKE sets selectedStrokeIndex", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    expect(getState().selectedStrokeIndex).toBe(0);
+  });
+
+  it("SELECT_STROKE null deselects", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    dispatch({ type: "SELECT_STROKE", index: null });
+    expect(getState().selectedStrokeIndex).toBeNull();
+  });
+
+  it("DELETE_SELECTED removes the selected stroke", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    expect(getState().strokes.length).toBe(2);
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    dispatch({ type: "DELETE_SELECTED" });
+    expect(getState().strokes.length).toBe(1);
+    expect(getState().selectedStrokeIndex).toBeNull();
+  });
+
+  it("DELETE_SELECTED adjusts pinCounter when deleting a pin", () => {
+    const { getState, dispatch } = createDrawStore();
+    const pin: PinEntry = { type: "pin", x: 100, y: 100, number: 1, color: "#ef4444", angle: 0 };
+    dispatch({ type: "ADD_STROKE", stroke: pin });
+    dispatch({ type: "INCREMENT_PIN_COUNTER" });
+    expect(getState().pinCounter).toBe(1);
+    dispatch({ type: "SELECT_STROKE", index: 0 });
+    dispatch({ type: "DELETE_SELECTED" });
+    expect(getState().pinCounter).toBe(0);
+    expect(getState().strokes.length).toBe(0);
+  });
+
+  it("DELETE_SELECTED with no selection is a no-op", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "DELETE_SELECTED" });
+    expect(getState().strokes.length).toBe(1); // unchanged
+  });
+
+  it("MOVE_PIN updates pin position preserving angle", () => {
+    const { getState, dispatch } = createDrawStore();
+    const pin: PinEntry = { type: "pin", x: 100, y: 100, number: 1, color: "#ef4444", angle: 1.5 };
+    dispatch({ type: "ADD_STROKE", stroke: pin });
+    dispatch({ type: "MOVE_PIN", index: 0, x: 200, y: 300 });
+    const moved = getState().strokes[0] as PinEntry;
+    expect(moved.x).toBe(200);
+    expect(moved.y).toBe(300);
+    expect(moved.angle).toBe(1.5); // preserved
+  });
+
+  it("MOVE_PIN on non-pin stroke is a no-op", () => {
+    const { getState, dispatch } = createDrawStore();
+    dispatch({ type: "ADD_STROKE", stroke: makeStroke() });
+    dispatch({ type: "MOVE_PIN", index: 0, x: 200, y: 300 });
+    // Stroke should be unchanged (it's not a pin)
+    const s = getState().strokes[0] as StrokeDraw;
+    expect(s.points[0].x).toBe(0); // original position
+  });
 });

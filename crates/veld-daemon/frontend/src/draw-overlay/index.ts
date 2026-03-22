@@ -21,6 +21,7 @@ import { buildSnapshotCanvas } from "./color";
 import { recognizeShape } from "./shapes";
 import { createPixelatedRegion } from "./blur";
 import { compositeOnto } from "./composite";
+import { hitTest } from "./hit-test";
 import { createDrawStore, type DrawState, type DrawAction } from "./store";
 import type { Store } from "../shared/create-store";
 
@@ -56,6 +57,8 @@ const ICON_BLUR =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>';
 const ICON_NUMBER =
   '<svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/><text x="12" y="16.5" text-anchor="middle" fill="currentColor" font-size="14" font-weight="bold" font-family="sans-serif">1</text></svg>';
+const ICON_SELECT =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3l7.07 16.97 2.51-7.39 7.39-2.51L3 3z"/><path d="M13 13l6 6"/></svg>';
 
 function activate(
   canvas: HTMLCanvasElement,
@@ -95,6 +98,8 @@ function activate(
   const getState = store.getState;
   const dispatch = store.dispatch;
 
+  let draggingPinIndex: number | null = null;
+
   function redraw(): void {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -114,6 +119,34 @@ function activate(
       }
     }
     if (spotlights.length > 0) renderSpotlights(ctx, spotlights);
+
+    // Selection highlight
+    if (s.selectedStrokeIndex !== null && s.selectedStrokeIndex < s.strokes.length) {
+      const sel = s.strokes[s.selectedStrokeIndex];
+      let bbox: BBox | null = null;
+      if ((sel as PinEntry).type === "pin") {
+        const pin = sel as PinEntry;
+        bbox = { x: pin.x - 20, y: pin.y - 20, w: 40, h: 40 };
+      } else if ((sel as BlurEntry).type === "blur") {
+        bbox = (sel as BlurEntry).bbox;
+      } else if ((sel as SpotlightEntry).type === "spotlight") {
+        const sp = sel as SpotlightEntry;
+        if (sp.points && sp.points.length >= 2) bbox = computeBBox(sp.points);
+      } else {
+        const stroke = sel as StrokeDraw;
+        if (stroke.points && stroke.points.length >= 1) bbox = computeBBox(stroke.points);
+      }
+      if (bbox) {
+        const pad = 6;
+        ctx.save();
+        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "#3b82f6";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(bbox.x - pad, bbox.y - pad, bbox.w + pad * 2, bbox.h + pad * 2);
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+    }
 
     // Pin previews in number mode
     if (s.toolMode === "number") {
@@ -316,6 +349,18 @@ function activate(
     canvas.setPointerCapture(e.pointerId);
     const pos = getPos(e);
 
+    // Select mode: hit-test strokes
+    if (getState().toolMode === "select") {
+      const hitIdx = hitTest(getState().strokes, pos, 10);
+      dispatch({ type: "SELECT_STROKE", index: hitIdx });
+      if (hitIdx !== null && (getState().strokes[hitIdx] as PinEntry).type === "pin") {
+        draggingPinIndex = hitIdx;
+      }
+      dispatch({ type: "SET_DRAWING", drawing: false });
+      scheduleRedraw();
+      return;
+    }
+
     // Number mode: first click places pin, second click locks arrow direction
     if (getState().toolMode === "number") {
       if (getState().pendingPin) {
@@ -354,6 +399,12 @@ function activate(
   }
 
   function onPointerMove(e: PointerEvent): void {
+    if (draggingPinIndex !== null) {
+      const pos = getPos(e);
+      dispatch({ type: "MOVE_PIN", index: draggingPinIndex, x: pos.x, y: pos.y });
+      scheduleRedraw();
+      return;
+    }
     if (getState().toolMode === "number") {
       const pos = getPos(e);
       dispatch({ type: "SET_CURSOR_POS", pos });
@@ -371,6 +422,7 @@ function activate(
   }
 
   function onPointerUp(): void {
+    if (draggingPinIndex !== null) { draggingPinIndex = null; return; }
     if (!getState().drawing) return;
     dispatch({ type: "SET_DRAWING", drawing: false });
     const s = getState();
@@ -480,10 +532,17 @@ function activate(
     if (k === "s") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "spotlight" ? "draw" : "spotlight" }); updateToolbarState(); return; }
     if (k === "x") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "blur" ? "draw" : "blur" }); updateToolbarState(); return; }
     if (k === "n") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "number" ? "draw" : "number" }); updateToolbarState(); return; }
+    if (k === "v") { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "select" ? "draw" : "select" }); updateToolbarState(); return; }
     if (k === "o") { dispatch({ type: "TOGGLE_SHAPE_SNAP" }); updateToolbarState(); return; }
     // Thickness: [ and ]
     if (k === "[") { dispatch({ type: "SET_WIDTH", idx: Math.max(0, getState().activeWidthIdx - 1) }); updateToolbarState(); return; }
     if (k === "]") { dispatch({ type: "SET_WIDTH", idx: Math.min(WIDTHS.length - 1, getState().activeWidthIdx + 1) }); updateToolbarState(); return; }
+    // Delete selected stroke
+    if (e.key === "Delete" || e.key === "Backspace") {
+      if (getState().selectedStrokeIndex !== null) { e.preventDefault(); dispatch({ type: "DELETE_SELECTED" }); scheduleRedraw(); updateToolbarState(); return; }
+    }
+    // Escape: deselect
+    if (e.key === "Escape") { dispatch({ type: "SELECT_STROKE", index: null }); scheduleRedraw(); return; }
     // Collapse: Tab
     if (e.key === "Tab") { e.preventDefault(); collapseBtn.click(); return; }
   }
@@ -533,6 +592,13 @@ function activate(
 
   // Collapsible tools container
   const toolsWrap = mkEl("div", "draw-tools-wrap");
+
+  // Select tool button
+  const selectBtn = mkBtn("draw-tool-btn", ICON_SELECT);
+  selectBtn.addEventListener("click", () => { dispatch({ type: "SET_TOOL", tool: getState().toolMode === "select" ? "draw" : "select" }); updateToolbarState(); });
+  tip(selectBtn, "Select  V");
+  toolsWrap.appendChild(selectBtn);
+  toolsWrap.appendChild(mkEl("span", "draw-sep"));
 
   const colorBtns: HTMLElement[] = [];
   const widthBtns: HTMLElement[] = [];
@@ -635,7 +701,8 @@ function activate(
     blurBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "blur");
     eraserBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "eraser");
     numberBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "number");
-    canvas.style.cursor = s.toolMode === "number" ? "pointer" : "crosshair";
+    selectBtn.classList.toggle(PREFIX + "draw-tool-btn-active", s.toolMode === "select");
+    canvas.style.cursor = s.toolMode === "select" ? "default" : (s.toolMode === "number" ? "pointer" : "crosshair");
     if (s.toolMode !== "number") { dispatch({ type: "SET_CURSOR_POS", pos: null }); scheduleRedraw(); }
     (undoBtn as HTMLButtonElement).disabled = s.strokes.length === 0;
     (redoBtn as HTMLButtonElement).disabled = s.undoneStrokes.length === 0;
