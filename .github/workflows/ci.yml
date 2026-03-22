@@ -86,12 +86,38 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: cd crates/veld-daemon/frontend && npm ci
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
       - name: cargo clippy
         run: cargo clippy --workspace -- -D warnings
       - name: cargo test
         run: cargo test --workspace
+
+  frontend:
+    name: Frontend (TypeScript)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/veld-daemon/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
+      - run: npm ci
+      - name: Type-check
+        run: npm run typecheck
+      - name: Test
+        run: npm test
 
   integration:
     name: Integration Tests (macOS)
@@ -101,6 +127,13 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
@@ -471,6 +504,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: crates/veld-daemon/frontend/package-lock.json
+      - name: Install frontend dependencies
+        run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
           go-version: '1.22'
