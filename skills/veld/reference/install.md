@@ -23,8 +23,7 @@ veld setup privileged
 ## Verify Installation
 
 ```bash
-veld -V          # Should print the version
-veld --help      # Show available commands
+veld doctor
 ```
 
 ## Updating
