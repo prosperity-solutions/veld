@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
@@ -26,10 +26,10 @@ export function setPanelDeps(deps: {
 }
 
 export function togglePanel(): void {
-  dispatch({ type: "SET_PANEL_OPEN", open: !store.panelOpen });
-  if (store.panelOpen) dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
-  refs.panel.classList.toggle(PREFIX + "panel-open", store.panelOpen);
-  if (store.panelOpen) renderPanel();
+  dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
+  if (getState().panelOpen) dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
+  refs.panel.classList.toggle(PREFIX + "panel-open", getState().panelOpen);
+  if (getState().panelOpen) renderPanel();
 }
 
 export function showThreadDetail(threadId: string): void {
@@ -52,26 +52,27 @@ export function openThreadInPanel(threadId: string): void {
 
 function updateSegmentedControl(): void {
   if (refs.segBtnActive && refs.segBtnResolved) {
-    const activeCount = store.threads.filter(function (t: Thread) { return t.status === "open"; }).length;
-    const resolvedCount = store.threads.filter(function (t: Thread) { return t.status === "resolved"; }).length;
+    const activeCount = getState().threads.filter(function (t: Thread) { return t.status === "open"; }).length;
+    const resolvedCount = getState().threads.filter(function (t: Thread) { return t.status === "resolved"; }).length;
     refs.segBtnActive.textContent = "Active" + (activeCount ? " (" + activeCount + ")" : "");
     refs.segBtnResolved.textContent = "Resolved" + (resolvedCount ? " (" + resolvedCount + ")" : "");
-    refs.segBtnActive.className = PREFIX + "segmented-btn" + (store.panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
-    refs.segBtnResolved.className = PREFIX + "segmented-btn" + (store.panelTab === "resolved" ? " " + PREFIX + "segmented-btn-active" : "");
+    refs.segBtnActive.className = PREFIX + "segmented-btn" + (getState().panelTab === "active" ? " " + PREFIX + "segmented-btn-active" : "");
+    refs.segBtnResolved.className = PREFIX + "segmented-btn" + (getState().panelTab === "resolved" ? " " + PREFIX + "segmented-btn-active" : "");
   }
 }
 
 export function updateMarkReadBtn(): void {
   if (!refs.markReadBtn) return;
-  const anyUnread = store.threads.some(function (t: Thread) { return hasUnread(t, store.lastSeenAt); });
+  const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t, getState().lastSeenAt); });
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
 export function renderPanel(): void {
   refs.panelBody.innerHTML = "";
 
-  if (store.expandedThreadId) {
-    const thread = findThread(store.threads, store.expandedThreadId);
+  const expandedId = getState().expandedThreadId;
+  if (expandedId) {
+    const thread = findThread(getState().threads, expandedId);
     if (thread) {
       refs.panelBackBtn.style.display = "";
       // Hide segmented control in detail view
@@ -92,7 +93,7 @@ export function renderPanel(): void {
   updateSegmentedControl();
   updateMarkReadBtn();
 
-  if (store.panelTab === "active") {
+  if (getState().panelTab === "active") {
     renderActiveThreads();
   } else {
     renderResolvedThreads();
@@ -177,7 +178,7 @@ function renderThreadDetail(thread: Thread): void {
     reopenBtn.addEventListener("click", function () {
       api("POST", "/threads/" + thread.id + "/reopen").then(function () {
         thread.status = "open";
-        dispatch({ type: "SET_THREADS", threads: [...store.threads] });
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
         showThreadList();
         renderAllPinsFn();
         toast("Thread reopened");
@@ -191,7 +192,7 @@ function renderThreadDetail(thread: Thread): void {
 }
 
 function renderActiveThreads(): void {
-  const active = store.threads.filter(function (t: Thread) { return t.status === "open"; });
+  const active = getState().threads.filter(function (t: Thread) { return t.status === "open"; });
   if (!active.length) {
     refs.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
     return;
@@ -217,7 +218,7 @@ function renderActiveThreads(): void {
 }
 
 function renderResolvedThreads(): void {
-  const resolved = store.threads.filter(function (t: Thread) { return t.status === "resolved"; });
+  const resolved = getState().threads.filter(function (t: Thread) { return t.status === "resolved"; });
   if (!resolved.length) {
     refs.panelBody.appendChild(mkEl("div", "panel-empty", "No resolved threads."));
     return;
@@ -240,7 +241,7 @@ function renderThreadGroup(label: string, threads: Thread[]): void {
 
 function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   const card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
-  if (hasUnread(thread, store.lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
+  if (hasUnread(thread, getState().lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
   (card as HTMLElement).dataset.threadId = thread.id;
 
   const row1 = mkEl("div", "thread-card-row");
@@ -295,7 +296,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const doResolve = function () {
       api("POST", "/threads/" + thread.id + "/resolve").then(function () {
         thread.status = "resolved";
-        dispatch({ type: "SET_THREADS", threads: [...store.threads] });
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
         closeActivePopoverFn();
         showThreadList();
         renderAllPinsFn();
@@ -324,7 +325,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
       thread.updated_at = new Date().toISOString();
       textarea.value = "";
       sendBtn.disabled = false;
-      if (store.panelOpen) renderPanel();
+      if (getState().panelOpen) renderPanel();
       renderAllPinsFn();
     }).catch(function () {
       sendBtn.disabled = false;
@@ -342,15 +343,15 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 export function markThreadSeen(threadId: string): void {
   dispatch({ type: "MARK_SEEN", threadId });
   api("PUT", "/threads/" + threadId + "/seen").catch(function () {});
-  const thread = findThread(store.threads, threadId);
+  const thread = findThread(getState().threads, threadId);
   if (thread) addPinFn(thread);
   updateBadge();
   updateMarkReadBtn();
 }
 
 export function markAllRead(): void {
-  store.threads.forEach(function (t: Thread) {
-    if (hasUnread(t, store.lastSeenAt)) {
+  getState().threads.forEach(function (t: Thread) {
+    if (hasUnread(t, getState().lastSeenAt)) {
       dispatch({ type: "MARK_SEEN", threadId: t.id });
       api("PUT", "/threads/" + t.id + "/seen").catch(function () {});
     }
@@ -358,6 +359,6 @@ export function markAllRead(): void {
   renderAllPinsFn();
   updateBadge();
   updateMarkReadBtn();
-  if (store.panelOpen) renderPanel();
+  if (getState().panelOpen) renderPanel();
   toast("All marked as read");
 }

@@ -1,6 +1,6 @@
 // DOM scaffolding — builds all the UI elements and attaches them to shadow/light DOM.
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { ThemeMode } from "./store";
 import { mkEl } from "./helpers";
 import { PREFIX, ICONS, KEY_MOD, KEY_SHIFT } from "./constants";
@@ -63,9 +63,9 @@ export function buildDOM(): void {
   attachTooltip(toolBtnShortcuts, tipHtml("Disable shortcuts", []));
   toolBtnShortcuts.addEventListener("click", function (e) {
     e.stopPropagation();
-    dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: !store.shortcutsDisabled });
-    toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", store.shortcutsDisabled);
-    toast(store.shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
+    dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: !getState().shortcutsDisabled });
+    toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", getState().shortcutsDisabled);
+    toast(getState().shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
   });
   refs.toolbar.appendChild(toolBtnShortcuts);
 
@@ -78,16 +78,16 @@ export function buildDOM(): void {
   const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
   const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
   const toolBtnTheme = mkEl("button", "tool-btn");
-  toolBtnTheme.innerHTML = THEME_ICONS[store.theme];
-  attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[store.theme], []));
+  toolBtnTheme.innerHTML = THEME_ICONS[getState().theme];
+  attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[getState().theme], []));
   toolBtnTheme.addEventListener("click", function (e) {
     e.stopPropagation();
-    const idx = (THEME_ORDER.indexOf(store.theme) + 1) % THEME_ORDER.length;
+    const idx = (THEME_ORDER.indexOf(getState().theme) + 1) % THEME_ORDER.length;
     dispatch({ type: "SET_THEME", theme: THEME_ORDER[idx] });
-    toolBtnTheme.innerHTML = THEME_ICONS[store.theme];
-    refs.hostEl.setAttribute("data-theme", store.theme);
-    document.documentElement.setAttribute("data-veld-theme", store.theme === "auto" ? "" : store.theme);
-    toast("Theme: " + THEME_LABELS[store.theme]);
+    toolBtnTheme.innerHTML = THEME_ICONS[getState().theme];
+    refs.hostEl.setAttribute("data-theme", getState().theme);
+    document.documentElement.setAttribute("data-veld-theme", getState().theme === "auto" ? "" : getState().theme);
+    toast("Theme: " + THEME_LABELS[getState().theme]);
   });
   refs.toolbar.appendChild(toolBtnTheme);
 
@@ -118,7 +118,7 @@ export function buildDOM(): void {
   refs.fabBadge = mkEl("span", "badge badge-hidden");
   refs.fab.appendChild(refs.fabBadge);
   refs.fab.addEventListener("click", function () {
-    if (store.fabWasDragged) { dispatch({ type: "SET_FAB_DRAGGED", dragged: false }); return; }
+    if (getState().fabWasDragged) { dispatch({ type: "SET_FAB_DRAGGED", dragged: false }); return; }
     toggleToolbar();
   });
   refs.toolbarContainer.appendChild(refs.fab);

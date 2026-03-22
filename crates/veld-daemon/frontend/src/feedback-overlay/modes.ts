@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { UIMode } from "./types";
 import { PREFIX } from "./constants";
 import { toast } from "./toast";
@@ -10,20 +10,20 @@ import { toggleToolbar } from "./toolbar";
 
 export function setMode(mode: UIMode): void {
   // Tear down previous mode
-  if (store.activeMode === "select-element") {
+  if (getState().activeMode === "select-element") {
     refs.overlay.classList.remove(PREFIX + "overlay-active");
     refs.hoverOutline.style.display = "none";
     refs.componentTraceEl.style.display = "none";
     dispatch({ type: "SET_HOVERED", el: null });
     dispatch({ type: "SET_LOCKED", el: null });
   }
-  if (store.activeMode === "screenshot") {
+  if (getState().activeMode === "screenshot") {
     refs.overlay.classList.remove(PREFIX + "overlay-active");
     refs.overlay.classList.remove(PREFIX + "overlay-crosshair");
     refs.screenshotRect.style.display = "none";
     stopCaptureStream();
   }
-  if (store.activeMode === "draw") {
+  if (getState().activeMode === "draw") {
     teardownGlobalDrawCanvas();
     stopCaptureStream();
   }
@@ -51,7 +51,7 @@ export function setMode(mode: UIMode): void {
     });
   }
   if (mode === "draw") {
-    if (store.toolbarOpen) toggleToolbar();
+    if (getState().toolbarOpen) toggleToolbar();
     acquireCaptureStream().then(() => ensureDrawScript()).then(() => {
       setupGlobalDrawCanvas();
       window.focus();

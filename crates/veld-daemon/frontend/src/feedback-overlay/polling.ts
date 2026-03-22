@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
 import { PREFIX } from "./constants";
@@ -37,12 +37,12 @@ export function setPollingDeps(deps: {
 }
 
 export function pollEvents(): void {
-  api("GET", "/events?after=" + store.lastEventSeq).then(function (raw) {
+  api("GET", "/events?after=" + getState().lastEventSeq).then(function (raw) {
     const events = raw as FeedbackEvent[];
     if (!events || !events.length) return;
     events.forEach(function (event: FeedbackEvent) {
       handleEvent(event);
-      if (event.seq > store.lastEventSeq) dispatch({ type: "SET_LAST_EVENT_SEQ", seq: event.seq });
+      if (event.seq > getState().lastEventSeq) dispatch({ type: "SET_LAST_EVENT_SEQ", seq: event.seq });
     });
   }).catch(function () {});
 }
@@ -50,9 +50,9 @@ export function pollEvents(): void {
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
-    const wasListening = store.agentListening;
+    const wasListening = getState().agentListening;
     dispatch({ type: "SET_LISTENING", listening: !!(data && data.listening) });
-    if (store.agentListening !== wasListening) updateListeningModule();
+    if (getState().agentListening !== wasListening) updateListeningModule();
   }).catch(function () {});
 }
 
@@ -84,22 +84,22 @@ function handleEvent(event: FeedbackEvent): void {
       updateListeningModule();
       break;
     case "thread_created":
-      if (event.thread && !findThread(store.threads, event.thread.id)) {
+      if (event.thread && !findThread(getState().threads, event.thread.id)) {
         dispatch({ type: "ADD_THREAD", thread: event.thread });
         addPinFn(event.thread);
         updateBadge();
-        if (store.panelOpen) renderPanelFn();
+        if (getState().panelOpen) renderPanelFn();
       }
       break;
     case "human_message":
       if (event.thread_id && event.message) {
-        const hmThread = findThread(store.threads, event.thread_id);
+        const hmThread = findThread(getState().threads, event.thread_id);
         if (hmThread) {
           const exists = hmThread.messages.some(function (m: Message) { return m.id === event.message!.id; });
           if (!exists) {
             hmThread.messages.push(event.message);
             hmThread.updated_at = event.message.created_at || new Date().toISOString();
-            if (store.panelOpen) renderPanelFn();
+            if (getState().panelOpen) renderPanelFn();
           }
         }
       }
@@ -108,7 +108,7 @@ function handleEvent(event: FeedbackEvent): void {
 }
 
 function handleAgentMessage(event: FeedbackEvent): void {
-  const thread = findThread(store.threads, event.thread_id!);
+  const thread = findThread(getState().threads, event.thread_id!);
   if (!thread) {
     api("GET", "/threads/" + event.thread_id).then(function (raw) {
       const t = raw as Thread;
@@ -116,7 +116,7 @@ function handleAgentMessage(event: FeedbackEvent): void {
         dispatch({ type: "ADD_THREAD", thread: t });
         addPinFn(t);
         updateBadge();
-        if (store.panelOpen) renderPanelFn();
+        if (getState().panelOpen) renderPanelFn();
         showAgentReplyToast(t.id, event.message!.body);
       }
     }).catch(function () {});
@@ -136,7 +136,7 @@ function handleAgentMessage(event: FeedbackEvent): void {
 
   addPinFn(thread);
   updateBadge();
-  if (store.panelOpen) renderPanelFn();
+  if (getState().panelOpen) renderPanelFn();
 
   const preview = event.message ? event.message.body : "New reply";
   showAgentReplyToast(event.thread_id!, preview);
@@ -148,12 +148,12 @@ function handleAgentMessage(event: FeedbackEvent): void {
 
 function handleAgentThreadCreated(event: FeedbackEvent): void {
   if (event.thread) {
-    const existing = findThread(store.threads, event.thread.id);
+    const existing = findThread(getState().threads, event.thread.id);
     if (!existing) {
       dispatch({ type: "ADD_THREAD", thread: event.thread });
       addPinFn(event.thread);
       updateBadge();
-      if (store.panelOpen) renderPanelFn();
+      if (getState().panelOpen) renderPanelFn();
 
       const preview = event.thread.messages && event.thread.messages[0] ? event.thread.messages[0].body : "New thread";
       showAgentReplyToast(event.thread.id, preview);
@@ -168,24 +168,24 @@ function handleAgentThreadCreated(event: FeedbackEvent): void {
 }
 
 function handleThreadResolved(event: FeedbackEvent): void {
-  const thread = findThread(store.threads, event.thread_id!);
+  const thread = findThread(getState().threads, event.thread_id!);
   if (thread) {
     thread.status = "resolved";
-    dispatch({ type: "SET_THREADS", threads: [...store.threads] });
+    dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
     removePinFn(thread.id);
     updateBadge();
-    if (store.panelOpen) renderPanelFn();
+    if (getState().panelOpen) renderPanelFn();
   }
 }
 
 function handleThreadReopened(event: FeedbackEvent): void {
-  const thread = findThread(store.threads, event.thread_id!);
+  const thread = findThread(getState().threads, event.thread_id!);
   if (thread) {
     thread.status = "open";
-    dispatch({ type: "SET_THREADS", threads: [...store.threads] });
+    dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
     addPinFn(thread);
     updateBadge();
-    if (store.panelOpen) renderPanelFn();
+    if (getState().panelOpen) renderPanelFn();
   }
 }
 
@@ -231,6 +231,6 @@ export function loadThreads(): void {
     renderAllPinsFn();
     updateBadge();
     checkPendingScrollFn();
-    if (store.panelOpen) renderPanelFn();
+    if (getState().panelOpen) renderPanelFn();
   }).catch(function () {});
 }

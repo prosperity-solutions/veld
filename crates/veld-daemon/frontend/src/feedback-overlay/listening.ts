@@ -1,15 +1,15 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 
 export function updateListeningModule(): void {
   if (refs.listeningModule) {
-    refs.listeningModule.style.display = store.agentListening ? "flex" : "none";
+    refs.listeningModule.style.display = getState().agentListening ? "flex" : "none";
   }
   if (refs.fab) {
-    refs.fab.classList.toggle(PREFIX + "fab-pulse", store.agentListening);
+    refs.fab.classList.toggle(PREFIX + "fab-pulse", getState().agentListening);
   }
 }
 

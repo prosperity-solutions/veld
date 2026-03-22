@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { UIMode } from "./types";
 import { PREFIX } from "./constants";
 import {
@@ -16,7 +16,7 @@ export function setDrawModeDeps(deps: { setMode: (mode: UIMode) => void }): void
 
 /** Load the draw.js script if not already loaded. */
 export function ensureDrawScript(): Promise<void> {
-  if (store.drawLoaded && window.__veld_draw) return Promise.resolve();
+  if (getState().drawLoaded && window.__veld_draw) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const s = document.createElement("script");
     s.src = "/__veld__/feedback/draw.js";
@@ -45,8 +45,9 @@ export function setupGlobalDrawCanvas(): void {
 
   // Grab a snapshot for blur/redact, then activate.
   // The capture stream was acquired before this function is called.
+  const captureStream = getState().captureStream;
   const track =
-    store.captureStream && store.captureStream.getVideoTracks()[0];
+    captureStream && captureStream.getVideoTracks()[0];
   const ic =
     track && typeof ImageCapture !== "undefined"
       ? new ImageCapture(track)
@@ -56,16 +57,17 @@ export function setupGlobalDrawCanvas(): void {
     : Promise.resolve(null);
 
   snapshotPromise.then((snapshot) => {
-    if (!store.drawCanvas) return; // torn down while waiting
-    const cleanup = window.__veld_draw!.activate(store.drawCanvas, {
+    const canvas = getState().drawCanvas;
+    if (!canvas) return; // torn down while waiting
+    const cleanup = window.__veld_draw!.activate(canvas, {
       pageSnapshot: snapshot,
       mountTarget: refs.shadow,
       onDone: (hasStrokes: boolean) => {
         if (hasStrokes) {
-          const drawCanvas = store.drawCanvas!;
+          const drawCanvas = getState().drawCanvas!;
 
           // 1. Teardown draw toolbar (but keep canvas for compositing later)
-          const drawCleanup = store.drawCleanup;
+          const drawCleanup = getState().drawCleanup;
           dispatch({ type: "SET_DRAW_CLEANUP", cleanup: null });
           if (drawCleanup) drawCleanup();
 
@@ -74,8 +76,9 @@ export function setupGlobalDrawCanvas(): void {
             drawCanvas.parentNode.removeChild(drawCanvas);
           }
           dispatch({ type: "SET_DRAW_CANVAS", canvas: null });
-          if (store.prevOverflow !== null) {
-            document.body.style.overflow = store.prevOverflow;
+          const savedOverflow = getState().prevOverflow;
+          if (savedOverflow !== null) {
+            document.body.style.overflow = savedOverflow;
             dispatch({ type: "SET_PREV_OVERFLOW", overflow: null });
           }
           dispatch({ type: "SET_MODE", mode: null });
@@ -101,7 +104,7 @@ export function setupGlobalDrawCanvas(): void {
           });
 
           // 4. Wait for repaint, grab clean frame, restore UI, composite
-          const stream = store.captureStream;
+          const stream = getState().captureStream;
           const captureTrack =
             stream && stream.getVideoTracks()[0];
           if (captureTrack && typeof ImageCapture !== "undefined") {
@@ -183,16 +186,19 @@ export function setupGlobalDrawCanvas(): void {
 
 /** Tear down the draw canvas and restore page scroll. */
 export function teardownGlobalDrawCanvas(): void {
-  if (store.drawCleanup) {
-    store.drawCleanup();
+  const cleanup = getState().drawCleanup;
+  if (cleanup) {
+    cleanup();
     dispatch({ type: "SET_DRAW_CLEANUP", cleanup: null });
   }
-  if (store.drawCanvas && store.drawCanvas.parentNode) {
-    store.drawCanvas.parentNode.removeChild(store.drawCanvas);
+  const drawCanvas = getState().drawCanvas;
+  if (drawCanvas && drawCanvas.parentNode) {
+    drawCanvas.parentNode.removeChild(drawCanvas);
   }
   dispatch({ type: "SET_DRAW_CANVAS", canvas: null });
-  if (store.prevOverflow !== null) {
-    document.body.style.overflow = store.prevOverflow;
+  const prevOverflow = getState().prevOverflow;
+  if (prevOverflow !== null) {
+    document.body.style.overflow = prevOverflow;
     dispatch({ type: "SET_PREV_OVERFLOW", overflow: null });
   }
 }

@@ -138,11 +138,12 @@ function reduce(s: Store, action: Action): Store {
   }
 }
 
-// eslint-disable-next-line prefer-const
-export let store: Store;
+import { createStore, type Store as StoreInterface } from "../shared/create-store";
 
-export function initStore(): void {
-  store = {
+let instance: StoreInterface<Store, Action>;
+
+function createInitial(): Store {
+  return {
     threads: [],
     lastEventSeq: 0,
     lastSeenAt: {},
@@ -172,6 +173,14 @@ export function initStore(): void {
   };
 }
 
+export function initStore(): void {
+  instance = createStore<Store, Action>(reduce, createInitial());
+}
+
+export function getState(): Readonly<Store> {
+  return instance.getState();
+}
+
 export function dispatch(action: Action): void {
-  store = reduce(store, action);
+  instance.dispatch(action);
 }

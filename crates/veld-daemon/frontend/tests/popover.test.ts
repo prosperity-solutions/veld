@@ -3,7 +3,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { positionPopover, closeActivePopover } from "../src/feedback-overlay/popover";
 import { initState } from "../src/feedback-overlay/state";
 import { refs } from "../src/feedback-overlay/refs";
-import { store, dispatch } from "../src/feedback-overlay/store";
+import { getState, dispatch } from "../src/feedback-overlay/store";
 import { setPopoverDeps } from "../src/feedback-overlay/popover";
 import { vi } from "vitest";
 
@@ -64,7 +64,7 @@ describe("closeActivePopover", () => {
 
     closeActivePopover();
 
-    expect(store.activePopover).toBeNull();
+    expect(getState().activePopover).toBeNull();
     expect(pop.parentNode).toBeNull();
   });
 
@@ -89,7 +89,7 @@ describe("closeActivePopover", () => {
 
     closeActivePopover();
 
-    expect(store.lockedEl).toBeNull();
+    expect(getState().lockedEl).toBeNull();
     expect(refs.hoverOutline.style.display).toBe("none");
   });
 
@@ -98,6 +98,6 @@ describe("closeActivePopover", () => {
     dispatch({ type: "SET_LOCKED", el: null });
     // Should not throw
     closeActivePopover();
-    expect(store.activePopover).toBeNull();
+    expect(getState().activePopover).toBeNull();
   });
 });

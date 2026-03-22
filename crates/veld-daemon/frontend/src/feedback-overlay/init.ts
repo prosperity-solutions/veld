@@ -1,6 +1,6 @@
 // Initialization — wires all module dependencies and starts the overlay.
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
@@ -98,7 +98,7 @@ export function init(): void {
   restoreFabPos();
   clampFabToViewport();
 
-  if (store.hidden) {
+  if (getState().hidden) {
     refs.toolbarContainer.classList.add(PREFIX + "hidden");
   }
 

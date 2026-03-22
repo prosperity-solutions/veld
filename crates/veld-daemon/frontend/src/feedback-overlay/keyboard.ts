@@ -1,4 +1,4 @@
-import { store } from "./store";
+import { getState } from "./store";
 import { modKey } from "./helpers";
 import type { UIMode } from "./types";
 
@@ -31,20 +31,20 @@ export function setKeyboardDeps(deps: {
 
 export function onKeyDown(e: KeyboardEvent): void {
   // ESC exits draw mode (always, even with shortcuts disabled)
-  if (e.key === "Escape" && store.activeMode === "draw") {
+  if (e.key === "Escape" && getState().activeMode === "draw") {
     e.preventDefault();
     setModeFn(null);
     return;
   }
 
-  if (store.shortcutsDisabled) return;
+  if (getState().shortcutsDisabled) return;
 
   const mod = modKey(e) && e.shiftKey;
 
   // Mod+Shift+V: toggle toolbar (or bring back from hidden)
   if (mod && e.code === "KeyV") {
     e.preventDefault();
-    if (store.hidden) { showOverlayFn(); return; }
+    if (getState().hidden) { showOverlayFn(); return; }
     toggleToolbarFn();
     return;
   }
@@ -52,40 +52,40 @@ export function onKeyDown(e: KeyboardEvent): void {
   // Mod+Shift+.: toggle overlay visibility
   if (mod && e.code === "Period") {
     e.preventDefault();
-    if (store.hidden) { showOverlayFn(); } else { hideOverlayFn(); }
+    if (getState().hidden) { showOverlayFn(); } else { hideOverlayFn(); }
     return;
   }
 
-  if (store.hidden) return;
+  if (getState().hidden) return;
 
   // Mod+Shift+F: select element mode
   if (mod && e.code === "KeyF") {
     e.preventDefault();
-    if (!store.toolbarOpen) toggleToolbarFn();
-    setModeFn(store.activeMode === "select-element" ? null : "select-element");
+    if (!getState().toolbarOpen) toggleToolbarFn();
+    setModeFn(getState().activeMode === "select-element" ? null : "select-element");
     return;
   }
 
   // Mod+Shift+S: screenshot mode
   if (mod && e.code === "KeyS") {
     e.preventDefault();
-    if (!store.toolbarOpen) toggleToolbarFn();
-    setModeFn(store.activeMode === "screenshot" ? null : "screenshot");
+    if (!getState().toolbarOpen) toggleToolbarFn();
+    setModeFn(getState().activeMode === "screenshot" ? null : "screenshot");
     return;
   }
 
   // Mod+Shift+D: draw mode
   if (mod && e.code === "KeyD") {
     e.preventDefault();
-    if (!store.toolbarOpen) toggleToolbarFn();
-    setModeFn(store.activeMode === "draw" ? null : "draw");
+    if (!getState().toolbarOpen) toggleToolbarFn();
+    setModeFn(getState().activeMode === "draw" ? null : "draw");
     return;
   }
 
   // Mod+Shift+P: page comment
   if (mod && e.code === "KeyP") {
     e.preventDefault();
-    if (!store.toolbarOpen) toggleToolbarFn();
+    if (!getState().toolbarOpen) toggleToolbarFn();
     togglePageCommentFn();
     return;
   }
@@ -99,11 +99,11 @@ export function onKeyDown(e: KeyboardEvent): void {
 
   // Escape: cascading dismiss
   if (e.key === "Escape") {
-    if (store.activePopover) {
+    if (getState().activePopover) {
       closeActivePopoverFn();
-    } else if (store.activeMode) {
+    } else if (getState().activeMode) {
       setModeFn(null);
-    } else if (store.toolbarOpen) {
+    } else if (getState().toolbarOpen) {
       toggleToolbarFn();
     }
   }

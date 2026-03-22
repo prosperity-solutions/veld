@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { UIMode, Thread, VeldPopoverElement } from "./types";
 import { mkEl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, API, SUBMIT_HINT } from "./constants";
@@ -20,10 +20,10 @@ export function setScreenshotDeps(deps: {
 
 /**
  * Acquire a screen capture stream, showing a disclaimer modal the first time.
- * Resolves when the stream is available in `store.captureStream`.
+ * Resolves when the stream is available in `getState().captureStream`.
  */
 export function acquireCaptureStream(): Promise<void> {
-  if (store.captureStream) return Promise.resolve();
+  if (getState().captureStream) return Promise.resolve();
 
   // Show a friendly heads-up before the browser's scary permission dialog.
   const seenKey = "veld-screenshot-disclaimer-seen";
@@ -96,7 +96,7 @@ export function acquireCaptureStream(): Promise<void> {
       // If the user stops sharing via browser UI, clean up.
       stream.getVideoTracks()[0].addEventListener("ended", () => {
         dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
-        if (store.activeMode === "screenshot") {
+        if (getState().activeMode === "screenshot") {
           // Late-bind to avoid circular import with modes.ts
           import("./modes").then((m) => m.setMode(null));
         }
@@ -107,8 +107,9 @@ export function acquireCaptureStream(): Promise<void> {
 
 /** Stop the active capture stream and release all tracks. */
 export function stopCaptureStream(): void {
-  if (store.captureStream) {
-    store.captureStream.getTracks().forEach((t) => {
+  const stream = getState().captureStream;
+  if (stream) {
+    stream.getTracks().forEach((t) => {
       t.stop();
     });
     dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
@@ -144,7 +145,7 @@ export function captureScreenshot(
   });
 
   // Exit screenshot mode (removes backdrop) but keep the stream alive.
-  const stream = store.captureStream;
+  const stream = getState().captureStream;
   dispatch({ type: "SET_CAPTURE_STREAM", stream: null }); // prevent setMode(null) from stopping it
   setModeFn(null);
   dispatch({ type: "SET_CAPTURE_STREAM", stream }); // restore for reuse

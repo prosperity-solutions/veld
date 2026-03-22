@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { docRect, selectorFor, formatTrace } from "./helpers";
 import { getComponentTrace } from "./component-trace";
@@ -41,8 +41,8 @@ export function initBackdropEvents(): void {
   let ssStartX: number, ssStartY: number, ssDragging = false;
 
   refs.overlay.addEventListener("mousemove", function (e: MouseEvent) {
-    if (store.activeMode === "select-element") {
-      if (store.lockedEl) return;
+    if (getState().activeMode === "select-element") {
+      if (getState().lockedEl) return;
       const target = elementBelowBackdrop(e.clientX, e.clientY);
       if (!target) {
         refs.hoverOutline.style.display = "none";
@@ -66,7 +66,7 @@ export function initBackdropEvents(): void {
       } else {
         refs.componentTraceEl.style.display = "none";
       }
-    } else if (store.activeMode === "screenshot" && ssDragging) {
+    } else if (getState().activeMode === "screenshot" && ssDragging) {
       const x = Math.min(ssStartX, e.clientX);
       const y = Math.min(ssStartY, e.clientY);
       const w = Math.abs(e.clientX - ssStartX);
@@ -82,7 +82,7 @@ export function initBackdropEvents(): void {
   refs.overlay.addEventListener("mousedown", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (store.activeMode === "screenshot") {
+    if (getState().activeMode === "screenshot") {
       ssDragging = true;
       ssStartX = e.clientX;
       ssStartY = e.clientY;
@@ -93,7 +93,7 @@ export function initBackdropEvents(): void {
   refs.overlay.addEventListener("mouseup", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (store.activeMode === "screenshot" && ssDragging) {
+    if (getState().activeMode === "screenshot" && ssDragging) {
       ssDragging = false;
       const x = Math.min(ssStartX, e.clientX);
       const y = Math.min(ssStartY, e.clientY);
@@ -109,8 +109,8 @@ export function initBackdropEvents(): void {
   refs.overlay.addEventListener("click", function (e: MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
-    if (store.activeMode === "select-element") {
-      const target = store.hoveredEl || elementBelowBackdrop(e.clientX, e.clientY);
+    if (getState().activeMode === "select-element") {
+      const target = getState().hoveredEl || elementBelowBackdrop(e.clientX, e.clientY);
       if (!target) return;
       const rect = docRect(target);
       const selector = selectorFor(target);

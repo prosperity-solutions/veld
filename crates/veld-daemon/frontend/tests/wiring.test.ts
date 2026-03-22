@@ -2,7 +2,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { initState } from "../src/feedback-overlay/state";
 import { refs } from "../src/feedback-overlay/refs";
-import { store, dispatch } from "../src/feedback-overlay/store";
+import { getState, dispatch } from "../src/feedback-overlay/store";
 import { setToolbarDeps } from "../src/feedback-overlay/toolbar";
 import { setKeyboardDeps, onKeyDown } from "../src/feedback-overlay/keyboard";
 import { setVisibilityDeps, hideOverlay, showOverlay } from "../src/feedback-overlay/visibility";
@@ -109,7 +109,7 @@ describe("visibility wiring", () => {
 
     dispatch({ type: "SET_HIDDEN", hidden: false });
     hideOverlay();
-    expect(store.hidden).toBe(true);
+    expect(getState().hidden).toBe(true);
   });
 
   it("showOverlay clears hidden state", () => {
@@ -120,7 +120,7 @@ describe("visibility wiring", () => {
 
     dispatch({ type: "SET_HIDDEN", hidden: true });
     showOverlay();
-    expect(store.hidden).toBe(false);
+    expect(getState().hidden).toBe(false);
   });
 });
 
@@ -139,7 +139,7 @@ describe("popover wiring", () => {
     dispatch({ type: "SET_POPOVER", popover: pop });
 
     closeActivePopover();
-    expect(store.activePopover).toBeNull();
+    expect(getState().activePopover).toBeNull();
   });
 
   it("closeActivePopover runs cleanup callback", () => {

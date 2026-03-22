@@ -1,4 +1,4 @@
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import {
   mkEl,
   docRect,
@@ -42,7 +42,7 @@ export function addPin(thread: Thread): void {
     pin.appendChild(count);
   }
 
-  if (hasUnread(thread, store.lastSeenAt)) {
+  if (hasUnread(thread, getState().lastSeenAt)) {
     const dot = mkEl("span", "pin-unread-dot");
     pin.appendChild(dot);
   }
@@ -62,22 +62,22 @@ export function addPin(thread: Thread): void {
 }
 
 export function removePin(threadId: string): void {
-  if (store.pins[threadId]) {
-    store.pins[threadId].remove();
+  if (getState().pins[threadId]) {
+    getState().pins[threadId].remove();
     dispatch({ type: "REMOVE_PIN", threadId });
   }
 }
 
 export function renderAllPins(): void {
-  Object.keys(store.pins).forEach(removePin);
-  store.threads.forEach(function (t: Thread) {
+  Object.keys(getState().pins).forEach(removePin);
+  getState().threads.forEach(function (t: Thread) {
     if (t.status === "open") addPin(t);
   });
 }
 
 export function repositionPins(): void {
-  store.threads.forEach(function (t: Thread) {
-    const pin = store.pins[t.id];
+  getState().threads.forEach(function (t: Thread) {
+    const pin = getState().pins[t.id];
     if (!pin) return;
     if (!t.scope || t.scope.type !== "element" || !t.scope.selector) return;
     try {
@@ -98,7 +98,7 @@ export function repositionPins(): void {
 }
 
 export function scheduleReposition(): void {
-  if (store.rafPending) return;
+  if (getState().rafPending) return;
   dispatch({ type: "SET_RAF_PENDING", pending: true });
   requestAnimationFrame(function () {
     dispatch({ type: "SET_RAF_PENDING", pending: false });

@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import type { Thread } from "./types";
 import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
 import { PREFIX, SUBMIT_HINT } from "./constants";
@@ -49,14 +49,15 @@ export function positionPopover(
 }
 
 export function closeActivePopover(): void {
-  if (store.activePopover) {
-    if (typeof store.activePopover._veldCleanup === "function") {
-      store.activePopover._veldCleanup();
+  const popover = getState().activePopover;
+  if (popover) {
+    if (typeof popover._veldCleanup === "function") {
+      popover._veldCleanup();
     }
-    store.activePopover.remove();
+    popover.remove();
     dispatch({ type: "SET_POPOVER", popover: null });
   }
-  if (store.lockedEl) {
+  if (getState().lockedEl) {
     dispatch({ type: "SET_LOCKED", el: null });
     refs.hoverOutline.style.display = "none";
     refs.componentTraceEl.style.display = "none";
@@ -113,7 +114,7 @@ export function showCreatePopover(
       closeActivePopover();
       if (addPinFn) addPinFn(thread);
       if (updateBadgeFn) updateBadgeFn();
-      if (store.panelOpen && renderPanelFn) renderPanelFn();
+      if (getState().panelOpen && renderPanelFn) renderPanelFn();
       toast("Thread created");
     }).catch(() => {
       sendBtn.disabled = false;
@@ -132,7 +133,7 @@ export function showCreatePopover(
 }
 
 export function togglePageComment(): void {
-  if (store.activePopover) { closeActivePopover(); return; }
+  if (getState().activePopover) { closeActivePopover(); return; }
   showCreatePopover(
     { x: window.innerWidth / 2 - 180 + window.scrollX, y: 120 + window.scrollY, width: 0, height: 0 },
     null, null, null, null,

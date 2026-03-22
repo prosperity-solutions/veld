@@ -1,5 +1,5 @@
 import { refs } from "./refs";
-import { store, dispatch } from "./store";
+import { getState, dispatch } from "./store";
 import { PREFIX, FAB_MARGIN } from "./constants";
 
 export function initDrag(): void {
@@ -16,8 +16,8 @@ export function initDrag(): void {
     moved = false;
     startX = e.clientX;
     startY = e.clientY;
-    origX = store.fabCX;
-    origY = store.fabCY;
+    origX = getState().fabCX;
+    origY = getState().fabCY;
     e.preventDefault();
   });
 
@@ -48,7 +48,7 @@ export function initDrag(): void {
       setTimeout(function () {
         dispatch({ type: "SET_FAB_DRAGGED", dragged: false });
       }, 300);
-      saveFabPos(store.fabCX, store.fabCY);
+      saveFabPos(getState().fabCX, getState().fabCY);
     }
   });
 }
@@ -94,8 +94,8 @@ export function restoreFabPos(): void {
 }
 
 export function clampFabToViewport(): void {
-  let cx = store.fabCX;
-  let cy = store.fabCY;
+  let cx = getState().fabCX;
+  let cy = getState().fabCY;
   let clamped = false;
   const maxX = window.innerWidth - 20 - FAB_MARGIN;
   const maxY = window.innerHeight - 20 - FAB_MARGIN;
