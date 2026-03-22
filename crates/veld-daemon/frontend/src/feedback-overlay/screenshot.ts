@@ -48,6 +48,9 @@ export function stopCaptureStream(): void {
 
 /**
  * Capture a screenshot of the selected viewport region.
+ * Acquires the capture stream on demand (after region selection) so the
+ * browser permission dialog doesn't appear until the user has drawn the
+ * selection rectangle.
  */
 export function captureScreenshot(
   viewX: number,
@@ -73,45 +76,51 @@ export function captureScreenshot(
     }
   });
 
-  // Exit screenshot mode (removes backdrop). Null the stream ref temporarily
-  // so setMode(null) doesn't stop it — we still need it for the grab.
-  const stream = getState().captureStream;
-  dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
+  // Exit screenshot mode (removes backdrop).
   deps().setMode(null);
-  dispatch({ type: "SET_CAPTURE_STREAM", stream });
 
-  if (!stream) {
-    restoreVeldUI(hiddenEls);
-    showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
-    return;
-  }
-
-  const track = stream.getVideoTracks()[0];
-
-  function grabCleanFrame(): void {
-    const grabber = new ImageCapture(track);
-    grabber
-      .grabFrame()
-      .then((bitmap: ImageBitmap) => {
-        stopCaptureStream();
-        restoreVeldUI(hiddenEls);
-        cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
-      })
-      .catch(() => {
-        stopCaptureStream();
+  // Acquire the capture stream now (after region selection).
+  acquireCaptureStream()
+    .then(() => {
+      const stream = getState().captureStream;
+      if (!stream) {
         restoreVeldUI(hiddenEls);
         showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
-      });
-  }
+        return;
+      }
 
-  // Wait for the UI to fully repaint before capturing: two rAF cycles
-  // to flush styles + composite, plus a small timeout as safety margin
-  // for slower compositors.
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      setTimeout(grabCleanFrame, 50);
+      const track = stream.getVideoTracks()[0];
+
+      function grabCleanFrame(): void {
+        const grabber = new ImageCapture(track);
+        grabber
+          .grabFrame()
+          .then((bitmap: ImageBitmap) => {
+            stopCaptureStream();
+            restoreVeldUI(hiddenEls);
+            cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
+          })
+          .catch(() => {
+            stopCaptureStream();
+            restoreVeldUI(hiddenEls);
+            showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+          });
+      }
+
+      // Wait for the UI to fully repaint before capturing: two rAF cycles
+      // to flush styles + composite, plus a small timeout as safety margin
+      // for slower compositors.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          setTimeout(grabCleanFrame, 50);
+        });
+      });
+    })
+    .catch(() => {
+      restoreVeldUI(hiddenEls);
+      toast("Screen capture denied", true);
+      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
     });
-  });
 }
 
 /** Restore visibility of veld UI elements hidden for a clean screenshot. */
