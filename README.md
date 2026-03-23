@@ -198,7 +198,7 @@ Control which Veld capabilities are injected into `start_server` nodes' HTML res
 }
 ```
 
-Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector). All default to `true`.
+Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector), `inject` (auto-inject bootstrap scripts). All default to `true`.
 
 ### Environment variables
 

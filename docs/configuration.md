@@ -119,6 +119,7 @@ Controls which Veld capabilities are injected into `start_server` nodes' HTML re
 |---------------------|---------|---------|-------------|
 | `feedback_overlay`  | boolean | `true`  | Inject the feedback overlay toolbar (FAB, screenshot, comments) |
 | `client_logs`       | boolean | `true`  | Inject the client-side log collector |
+| `inject`            | boolean | `true`  | Auto-inject bootstrap scripts into HTML responses. When `false`, `/__veld__/*` routes are still available for manual `<script>` tags. |
 
 ```json
 {
