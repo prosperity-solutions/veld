@@ -243,6 +243,9 @@ pub struct FeedbackConfig<'a> {
     pub project_root: &'a str,
     /// Comma-separated client log levels (e.g. "log,warn,error").
     pub client_log_levels: &'a str,
+    /// Whether to automatically inject bootstrap scripts into HTML responses.
+    /// When `false`, the `/__veld__/*` routes are still created for manual injection.
+    pub inject: bool,
     /// Whether to inject the feedback overlay toolbar.
     pub inject_feedback_overlay: bool,
     /// Whether to inject the client-side log collector.
@@ -365,13 +368,20 @@ fn build_route_json(
             ]
         }));
 
-        let bootstrap = build_bootstrap_script(&fb);
+        let bootstrap = if fb.inject {
+            build_bootstrap_script(&fb)
+        } else {
+            String::new()
+        };
 
         if bootstrap.is_empty() {
-            // Both features disabled — plain reverse proxy for the main app.
+            // No injection (either inject:false or both features disabled).
+            // Plain reverse proxy, but /__veld__/* routes above are still active
+            // for manual script tag usage.
             subroutes.push(serde_json::json!({
                 "handle": [{
                     "handler": "reverse_proxy",
+                    "flush_interval": -1,
                     "upstreams": [{ "dial": upstream }]
                 }]
             }));
@@ -379,6 +389,8 @@ fn build_route_json(
             // veld_inject prepends the bootstrap script to text/html responses
             // without buffering. Accept-Encoding: identity ensures the upstream
             // sends uncompressed HTML (can't prepend to gzipped bytes).
+            // flush_interval: -1 disables response buffering so that React
+            // streaming hydration (chunked transfer-encoding) works correctly.
             subroutes.push(serde_json::json!({
                 "handle": [
                     {
@@ -387,6 +399,7 @@ fn build_route_json(
                     },
                     {
                         "handler": "reverse_proxy",
+                        "flush_interval": -1,
                         "headers": {
                             "request": {
                                 "set": {
@@ -401,9 +414,12 @@ fn build_route_json(
         }
     } else {
         // No feedback — plain reverse proxy.
+        // flush_interval: -1 passes through chunked/streamed responses
+        // immediately (required for React streaming hydration, SSE, etc.).
         subroutes.push(serde_json::json!({
             "handle": [{
                 "handler": "reverse_proxy",
+                "flush_interval": -1,
                 "upstreams": [{
                     "dial": upstream
                 }]
@@ -426,13 +442,13 @@ fn build_route_json(
     })
 }
 
-/// Build the inline bootstrap `<script>` tag that is prepended to HTML
+/// Build the inline bootstrap `<script>` tag that is injected into HTML
 /// responses by the `veld_inject` Caddy handler.
 ///
-/// The script runs before any app code (it is prepended before `<!DOCTYPE>`).
-/// It immediately intercepts console methods to capture early logs, then
-/// dynamically loads the full client-log collector and/or feedback overlay
-/// assets once the DOM is ready.
+/// The script is prepended to the response body (after any `<!DOCTYPE>`
+/// declaration). It runs before any app code, immediately intercepts
+/// console methods to capture early logs, then dynamically loads the full
+/// client-log collector and/or feedback overlay assets once the DOM is ready.
 fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     if !fb.inject_client_logs && !fb.inject_feedback_overlay {
         return String::new();
@@ -568,6 +584,7 @@ mod tests {
                 run_name: "my-run",
                 project_root: "/tmp/project",
                 client_log_levels: "log,warn,error",
+                inject: true,
                 inject_feedback_overlay: true,
                 inject_client_logs: true,
             }),
@@ -629,6 +646,7 @@ mod tests {
                 run_name: "my-run",
                 project_root: "/tmp/project",
                 client_log_levels: "log,warn,error",
+                inject: true,
                 inject_feedback_overlay: true,
                 inject_client_logs: false,
             }),
@@ -665,6 +683,7 @@ mod tests {
                 run_name: "my-run",
                 project_root: "/tmp/project",
                 client_log_levels: "warn,error",
+                inject: true,
                 inject_feedback_overlay: false,
                 inject_client_logs: true,
             }),
@@ -698,6 +717,7 @@ mod tests {
                 run_name: "my-run",
                 project_root: "/tmp/project",
                 client_log_levels: "log,warn,error",
+                inject: true,
                 inject_feedback_overlay: false,
                 inject_client_logs: false,
             }),
@@ -715,6 +735,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_build_route_json_inject_false_keeps_veld_routes() {
+        // inject: false should disable the veld_inject handler but keep
+        // the /__veld__/* proxy routes for manual script tag usage.
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            Some(FeedbackConfig {
+                upstream: "localhost:19899",
+                run_name: "my-run",
+                project_root: "/tmp/project",
+                client_log_levels: "log,warn,error",
+                inject: false,
+                inject_feedback_overlay: true,
+                inject_client_logs: true,
+            }),
+        );
+        let subroutes = route["handle"][0]["routes"].as_array().unwrap();
+        // /__veld__/* route still present + plain proxy (no veld_inject).
+        assert_eq!(subroutes.len(), 2);
+        assert_eq!(subroutes[0]["match"][0]["path"][0], "/__veld__/*");
+        // Second subroute: plain reverse proxy, no veld_inject.
+        let handlers = subroutes[1]["handle"].as_array().unwrap();
+        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers[0]["handler"], "reverse_proxy");
+    }
+
     /// Verify the veld_inject route is structurally correct: it uses
     /// veld_inject + reverse_proxy (no bypass routes), proxies to the app
     /// upstream, and sets Accept-Encoding: identity.
@@ -729,6 +777,7 @@ mod tests {
                 run_name: "run",
                 project_root: "/tmp",
                 client_log_levels: "log",
+                inject: true,
                 inject_feedback_overlay: true,
                 inject_client_logs: true,
             }),
@@ -800,6 +849,7 @@ mod tests {
             run_name: "run",
             project_root: "/tmp",
             client_log_levels: levels,
+            inject: true,
             inject_feedback_overlay: overlay,
             inject_client_logs: logs,
         }

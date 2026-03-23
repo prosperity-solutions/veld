@@ -150,9 +150,15 @@ assert_contains \
   "<script>.*__veld_cl"
 
 assert_contains \
-  "Bootstrap appears before <!DOCTYPE" \
+  "Bootstrap appears after <!DOCTYPE" \
   "$HOME_HTML" \
-  "^<script>"
+  "<!DOCTYPE html><script>"
+
+# Verify nothing precedes <!DOCTYPE (quirks mode regression guard).
+assert_contains \
+  "No content before <!DOCTYPE" \
+  "$HOME_HTML" \
+  "^<!DOCTYPE"
 
 assert_contains \
   "Page content still renders" \

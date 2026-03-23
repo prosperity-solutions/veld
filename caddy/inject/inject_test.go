@@ -42,25 +42,41 @@ func fakeMultiChunkHandler(contentType string, chunks []string) caddyhttp.Handle
 	})
 }
 
-func TestHTMLPrefixInjected(t *testing.T) {
-	vi := VeldInject{Prefix: "<script>bootstrap()</script>"}
+func TestHTMLWithDoctype(t *testing.T) {
+	vi := VeldInject{Prefix: "<script>boot()</script>"}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/", nil)
 
-	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html; charset=utf-8", "<html><body>Hello</body></html>"))
+	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html; charset=utf-8",
+		"<!DOCTYPE html><html><body>Hello</body></html>"))
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	body := rec.Body.String()
-	expected := "<script>bootstrap()</script><html><body>Hello</body></html>"
-	if body != expected {
-		t.Errorf("body = %q, want %q", body, expected)
+	expected := "<!DOCTYPE html><script>boot()</script><html><body>Hello</body></html>"
+	if got := rec.Body.String(); got != expected {
+		t.Errorf("body = %q, want %q", got, expected)
 	}
-
-	// Content-Length should have been removed (response is now chunked).
 	if cl := rec.Header().Get("Content-Length"); cl != "" {
 		t.Errorf("Content-Length should be removed, got %q", cl)
+	}
+}
+
+func TestHTMLWithoutDoctype(t *testing.T) {
+	vi := VeldInject{Prefix: "<script>boot()</script>"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+
+	err := vi.ServeHTTP(rec, req, fakeHandler(200, "text/html",
+		"<html><body>Hello</body></html>"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// No DOCTYPE — prefix goes before everything.
+	expected := "<script>boot()</script><html><body>Hello</body></html>"
+	if got := rec.Body.String(); got != expected {
+		t.Errorf("body = %q, want %q", got, expected)
 	}
 }
 
@@ -76,12 +92,12 @@ func TestHTMLCharsetVariants(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/", nil)
 
-			err := vi.ServeHTTP(rec, req, fakeHandler(200, ct, "BODY"))
+			err := vi.ServeHTTP(rec, req, fakeHandler(200, ct, "<!DOCTYPE html>BODY"))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := rec.Body.String(); got != "PREFIXBODY" {
-				t.Errorf("body = %q, want %q", got, "PREFIXBODY")
+			if got := rec.Body.String(); got != "<!DOCTYPE html>PREFIXBODY" {
+				t.Errorf("body = %q, want %q", got, "<!DOCTYPE html>PREFIXBODY")
 			}
 		})
 	}
@@ -101,8 +117,6 @@ func TestNonHTMLPassthrough(t *testing.T) {
 	if got := rec.Body.String(); got != body {
 		t.Errorf("body = %q, want %q", got, body)
 	}
-
-	// Content-Length should be preserved for non-HTML.
 	if cl := rec.Header().Get("Content-Length"); cl != fmt.Sprintf("%d", len(body)) {
 		t.Errorf("Content-Length = %q, want %q", cl, fmt.Sprintf("%d", len(body)))
 	}
@@ -134,7 +148,8 @@ func TestPrefixOnlyOnFirstWrite(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := "PRE<!DOCTYPE html><html><body>streaming</body></html>"
+	// Prefix goes after DOCTYPE in first chunk, not repeated in subsequent chunks.
+	expected := "<!DOCTYPE html>PRE<html><body>streaming</body></html>"
 	if got := rec.Body.String(); got != expected {
 		t.Errorf("body = %q, want %q", got, expected)
 	}
@@ -193,12 +208,12 @@ func TestErrorPageInjected(t *testing.T) {
 			rec := httptest.NewRecorder()
 			req := httptest.NewRequest("GET", "/", nil)
 
-			err := vi.ServeHTTP(rec, req, fakeHandler(code, "text/html", "<html>Error</html>"))
+			err := vi.ServeHTTP(rec, req, fakeHandler(code, "text/html", "<!DOCTYPE html><html>Error</html>"))
 			if err != nil {
 				t.Fatal(err)
 			}
 
-			expected := "PRE<html>Error</html>"
+			expected := "<!DOCTYPE html>PRE<html>Error</html>"
 			if got := rec.Body.String(); got != expected {
 				t.Errorf("status %d: body = %q, want %q", code, got, expected)
 			}
@@ -207,7 +222,6 @@ func TestErrorPageInjected(t *testing.T) {
 }
 
 func Test1xxNoInjection(t *testing.T) {
-	// shouldInject should return false for informational status codes.
 	if shouldInject(100, "text/html") {
 		t.Error("shouldInject(100, text/html) should be false")
 	}
@@ -283,6 +297,7 @@ func TestFlushDelegated(t *testing.T) {
 		t.Error("Flush was not delegated to the underlying writer")
 	}
 
+	// No DOCTYPE — prefix before everything.
 	expected := "PRE<html></html>"
 	if got := rec.Body.String(); got != expected {
 		t.Errorf("body = %q, want %q", got, expected)
@@ -298,7 +313,6 @@ type hijackRecorder struct {
 
 func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	h.hijacked = true
-	// Return a pipe as a fake connection.
 	server, _ := net.Pipe()
 	return server, bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server)), nil
 }
@@ -330,7 +344,6 @@ func TestHijackDelegated(t *testing.T) {
 }
 
 func TestHijackFailsWithoutSupport(t *testing.T) {
-	// Plain httptest.ResponseRecorder does not implement Hijacker.
 	vi := VeldInject{Prefix: "PRE"}
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/ws", nil)
@@ -404,6 +417,36 @@ func TestShouldInject(t *testing.T) {
 	}
 }
 
+// --- doctypeEnd unit tests ---
+
+func TestDoctypeEnd(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want int
+	}{
+		{"standard", "<!DOCTYPE html><html>", 15},
+		{"lowercase", "<!doctype html><html>", 15},
+		{"mixed case", "<!DoCtYpE HtMl><html>", 15},
+		{"with system id", "<!DOCTYPE html SYSTEM \"about:legacy-compat\"><html>", 44},
+		{"leading whitespace", "  <!DOCTYPE html><html>", 17},
+		{"leading newline", "\n<!DOCTYPE html><html>", 16},
+		{"no doctype", "<html><head>", -1},
+		{"empty", "", -1},
+		{"just html", "<html>", -1},
+		{"partial doctype", "<!doctyp", -1},
+		{"doctype not at start", "<html><!DOCTYPE html>", -1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := doctypeEnd([]byte(tc.body))
+			if got != tc.want {
+				t.Errorf("doctypeEnd(%q) = %d, want %d", tc.body, got, tc.want)
+			}
+		})
+	}
+}
+
 // --- CaddyModule registration ---
 
 func TestCaddyModuleInfo(t *testing.T) {
@@ -425,7 +468,7 @@ func TestCaddyModuleInfo(t *testing.T) {
 
 func TestLargePrefixAndBody(t *testing.T) {
 	prefix := strings.Repeat("<script>x</script>", 100)
-	body := strings.Repeat("<p>paragraph</p>", 1000)
+	body := "<!DOCTYPE html>" + strings.Repeat("<p>paragraph</p>", 1000)
 
 	vi := VeldInject{Prefix: prefix}
 	rec := httptest.NewRecorder()
@@ -437,11 +480,9 @@ func TestLargePrefixAndBody(t *testing.T) {
 	}
 
 	got := rec.Body.String()
-	if !strings.HasPrefix(got, prefix) {
-		t.Error("response should start with prefix")
-	}
-	if !strings.HasSuffix(got, body) {
-		t.Error("response should end with original body")
+	expectedStart := "<!DOCTYPE html>" + prefix
+	if !strings.HasPrefix(got, expectedStart) {
+		t.Error("response should start with DOCTYPE then prefix")
 	}
 	if len(got) != len(prefix)+len(body) {
 		t.Errorf("total length = %d, want %d", len(got), len(prefix)+len(body))

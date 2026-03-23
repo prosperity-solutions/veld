@@ -102,6 +102,7 @@ impl State {
             .get("client_log_levels")
             .and_then(Value::as_str)
             .unwrap_or("log,warn,error");
+        let inject = args.get("inject").and_then(Value::as_bool).unwrap_or(true);
         let inject_feedback_overlay = args
             .get("inject_feedback_overlay")
             .and_then(Value::as_bool)
@@ -121,6 +122,7 @@ impl State {
                     run_name,
                     project_root,
                     client_log_levels,
+                    inject,
                     inject_feedback_overlay,
                     inject_client_logs,
                 })

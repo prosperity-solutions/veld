@@ -248,6 +248,12 @@ pub struct FeaturesConfig {
     /// Inject the client-side log collector into HTML responses.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_logs: Option<bool>,
+
+    /// Automatically inject bootstrap scripts into HTML responses. When `false`,
+    /// the `/__veld__/*` proxy routes are still created so you can manually add
+    /// `<script src="/__veld__/...">` tags in your app. Default: `true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inject: Option<bool>,
 }
 
 /// Resolved (concrete) feature flags — no more `Option`s.
@@ -255,6 +261,7 @@ pub struct FeaturesConfig {
 pub struct ResolvedFeatures {
     pub feedback_overlay: bool,
     pub client_logs: bool,
+    pub inject: bool,
 }
 
 impl Default for ResolvedFeatures {
@@ -262,6 +269,7 @@ impl Default for ResolvedFeatures {
         Self {
             feedback_overlay: true,
             client_logs: true,
+            inject: true,
         }
     }
 }
@@ -287,6 +295,11 @@ pub fn resolve_features(
             .filter_map(|l| l.and_then(|f| f.client_logs))
             .next()
             .unwrap_or(defaults.client_logs),
+        inject: layers
+            .iter()
+            .filter_map(|l| l.and_then(|f| f.inject))
+            .next()
+            .unwrap_or(defaults.inject),
     }
 }
 
@@ -522,6 +535,7 @@ mod tests {
         let result = resolve_features(None, None, None);
         assert!(result.feedback_overlay);
         assert!(result.client_logs);
+        assert!(result.inject);
     }
 
     #[test]
@@ -529,10 +543,12 @@ mod tests {
         let project = FeaturesConfig {
             feedback_overlay: Some(false),
             client_logs: None,
+            inject: None,
         };
         let result = resolve_features(Some(&project), None, None);
         assert!(!result.feedback_overlay);
         assert!(result.client_logs);
+        assert!(result.inject);
     }
 
     #[test]
@@ -540,10 +556,12 @@ mod tests {
         let project = FeaturesConfig {
             feedback_overlay: Some(false),
             client_logs: Some(false),
+            inject: None,
         };
         let node = FeaturesConfig {
             feedback_overlay: Some(true),
             client_logs: None,
+            inject: None,
         };
         let result = resolve_features(Some(&project), Some(&node), None);
         assert!(result.feedback_overlay); // node wins
@@ -555,18 +573,51 @@ mod tests {
         let project = FeaturesConfig {
             feedback_overlay: Some(true),
             client_logs: Some(true),
+            inject: Some(true),
         };
         let node = FeaturesConfig {
             feedback_overlay: Some(true),
             client_logs: Some(true),
+            inject: Some(true),
         };
         let variant = FeaturesConfig {
             feedback_overlay: Some(false),
             client_logs: Some(false),
+            inject: Some(false),
         };
         let result = resolve_features(Some(&project), Some(&node), Some(&variant));
         assert!(!result.feedback_overlay);
         assert!(!result.client_logs);
+        assert!(!result.inject);
+    }
+
+    #[test]
+    fn test_resolve_features_inject_false_keeps_features() {
+        let project = FeaturesConfig {
+            feedback_overlay: None,
+            client_logs: None,
+            inject: Some(false),
+        };
+        let result = resolve_features(Some(&project), None, None);
+        assert!(result.feedback_overlay); // still true
+        assert!(result.client_logs); // still true
+        assert!(!result.inject); // injection disabled
+    }
+
+    #[test]
+    fn test_resolve_features_inject_variant_overrides_project() {
+        let project = FeaturesConfig {
+            feedback_overlay: None,
+            client_logs: None,
+            inject: Some(false),
+        };
+        let variant = FeaturesConfig {
+            feedback_overlay: None,
+            client_logs: None,
+            inject: Some(true),
+        };
+        let result = resolve_features(Some(&project), None, Some(&variant));
+        assert!(result.inject); // variant wins
     }
 
     // -- cwd resolution tests -------------------------------------------------

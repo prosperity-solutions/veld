@@ -1,15 +1,18 @@
-// Package inject provides a Caddy HTTP handler that prepends a configurable
-// prefix to HTML responses without buffering. This enables streaming SSR while
-// still injecting bootstrap scripts (e.g. feedback overlay, client-log collector).
+// Package inject provides a Caddy HTTP handler that injects a configurable
+// prefix into HTML responses without buffering. This enables streaming SSR
+// while still injecting bootstrap scripts (e.g. feedback overlay, client-log
+// collector).
 //
-// Unlike replace-response, this handler never buffers the response body — it
-// writes the prefix before the first body chunk and then streams the rest.
-// It properly delegates Flusher (SSE), Hijacker (WebSocket), and Unwrap
-// so that all HTTP protocols work transparently.
+// The handler prepends the prefix to the first body chunk. If the chunk
+// starts with a DOCTYPE declaration, the prefix is inserted immediately
+// after it to avoid triggering quirks mode. It properly delegates Flusher
+// (SSE), Hijacker (WebSocket), and Unwrap so that all HTTP protocols work
+// transparently.
 package inject
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,9 +27,9 @@ func init() {
 	caddy.RegisterModule(VeldInject{})
 }
 
-// VeldInject is a Caddy HTTP handler that prepends a prefix string to
-// text/html responses. The prefix is written before the first body chunk,
-// enabling zero-buffering streaming injection.
+// VeldInject is a Caddy HTTP handler that injects a prefix string into
+// text/html responses. The prefix is prepended to the first body chunk
+// (after any DOCTYPE declaration) with zero buffering.
 type VeldInject struct {
 	// Prefix is the HTML content to prepend (e.g. a <script> tag).
 	Prefix string `json:"prefix,omitempty"`
@@ -79,10 +82,26 @@ func (ri *responseInterceptor) WriteHeader(code int) {
 	ri.ResponseWriter.WriteHeader(code)
 }
 
-// Write prepends the prefix before the first body chunk for matched responses.
+// Write prepends the prefix to the first body chunk for matched responses.
+// If the chunk begins with a DOCTYPE declaration, the prefix is inserted
+// immediately after it to avoid triggering quirks mode.
 func (ri *responseInterceptor) Write(b []byte) (int, error) {
 	if ri.matched && !ri.wroteOnce {
 		ri.wroteOnce = true
+
+		// If the first chunk starts with <!DOCTYPE, skip past it.
+		if pos := doctypeEnd(b); pos > 0 {
+			if _, err := ri.ResponseWriter.Write(b[:pos]); err != nil {
+				return 0, err
+			}
+			if _, err := ri.ResponseWriter.Write(ri.prefix); err != nil {
+				return 0, err
+			}
+			_, err := ri.ResponseWriter.Write(b[pos:])
+			return len(b), err
+		}
+
+		// No DOCTYPE at start — prepend before everything.
 		if _, err := ri.ResponseWriter.Write(ri.prefix); err != nil {
 			return 0, err
 		}
@@ -111,6 +130,25 @@ func (ri *responseInterceptor) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 // this to find the original writer for interface checks.
 func (ri *responseInterceptor) Unwrap() http.ResponseWriter {
 	return ri.ResponseWriter
+}
+
+// doctypeEnd returns the byte offset immediately after the closing '>' of a
+// leading DOCTYPE declaration, or -1 if the chunk does not start with one.
+// The check is case-insensitive and skips leading whitespace.
+func doctypeEnd(b []byte) int {
+	trimmed := bytes.TrimLeft(b, " \t\r\n")
+	skip := len(b) - len(trimmed)
+	if len(trimmed) < 9 { // len("<!doctype") == 9
+		return -1
+	}
+	if !strings.EqualFold(string(trimmed[:9]), "<!doctype") {
+		return -1
+	}
+	// Find the closing '>'.
+	if end := bytes.IndexByte(trimmed, '>'); end >= 0 {
+		return skip + end + 1
+	}
+	return -1
 }
 
 // shouldInject returns true if the response should receive the prefix.
