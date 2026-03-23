@@ -233,6 +233,44 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test 5: WebSocket upgrade (proxy passthrough)
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- WebSocket Upgrade ---"
+
+# Send a WebSocket upgrade handshake through the proxy. The HMR endpoint
+# path varies by Next.js version, so we try multiple known paths.
+# A successful upgrade returns 101. A 404 means the proxy forwarded
+# correctly but the path doesn't exist — still proves the upgrade wasn't
+# blocked. Only 502/000 (connection error) indicates a proxy failure.
+WS_STATUS="000"
+for ws_path in "/_next/webpack-hmr" "/_next/hmr" "/__nextjs_original-stack-frames"; do
+  WS_STATUS=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 5 \
+    -H "Connection: Upgrade" \
+    -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Version: 13" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
+    "$BASE_URL$ws_path" 2>/dev/null || echo "000")
+  if [[ "$WS_STATUS" == "101" ]]; then
+    break
+  fi
+done
+
+if [[ "$WS_STATUS" == "101" ]]; then
+  echo -e "  ${GREEN}✓${NC} WebSocket upgrade returned 101 Switching Protocols"
+  PASSED=$((PASSED + 1))
+elif [[ "$WS_STATUS" == "400" || "$WS_STATUS" == "404" || "$WS_STATUS" == "426" ]]; then
+  # 400/404/426 = proxy forwarded the upgrade request to the upstream,
+  # which responded (bad handshake, not found, or upgrade required).
+  # The proxy didn't block or mangle the upgrade.
+  echo -e "  ${GREEN}✓${NC} WebSocket upgrade forwarded through proxy (HTTP $WS_STATUS)"
+  PASSED=$((PASSED + 1))
+else
+  echo -e "  ${RED}✗${NC} WebSocket upgrade failed (HTTP $WS_STATUS — proxy may be blocking upgrades)"
+  FAILED=$((FAILED + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

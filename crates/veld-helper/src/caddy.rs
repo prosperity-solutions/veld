@@ -78,6 +78,12 @@ impl CaddyManager {
 
         let child = tokio::process::Command::new(&caddy_bin)
             .arg("run")
+            // Enable HTTP/2 Extended CONNECT (RFC 8441) so Caddy can translate
+            // HTTP/2 WebSocket upgrades to HTTP/1.1 for the upstream. Without
+            // this, Go's HTTP/2 server doesn't advertise the capability and
+            // browsers get 404 on WebSocket connections (kills HMR, live reload).
+            // See: golang/go#71128, caddyserver/caddy#7309
+            .env("GODEBUG", "http2xconnect=1")
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
@@ -374,6 +380,18 @@ fn build_route_json(
             String::new()
         };
 
+        // Strip the Origin header from requests to the upstream. Dev servers
+        // (Next.js, Vite, etc.) reject WebSocket upgrades when Origin doesn't
+        // match localhost. Since veld IS the trusted proxy, the Origin check
+        // provides no security value — strip it so WebSocket HMR works.
+        let proxy_headers = serde_json::json!({
+            "request": {
+                "delete": ["Origin"]
+            }
+        });
+        // Accept-Encoding: identity is set by the veld_inject handler itself
+        // (not the proxy config) so non-HTML requests get normal compression.
+
         if bootstrap.is_empty() {
             // No injection (either inject:false or both features disabled).
             // Plain reverse proxy, but /__veld__/* routes above are still active
@@ -382,6 +400,7 @@ fn build_route_json(
                 "handle": [{
                     "handler": "reverse_proxy",
                     "flush_interval": -1,
+                    "headers": proxy_headers,
                     "upstreams": [{ "dial": upstream }]
                 }]
             }));
@@ -400,13 +419,7 @@ fn build_route_json(
                     {
                         "handler": "reverse_proxy",
                         "flush_interval": -1,
-                        "headers": {
-                            "request": {
-                                "set": {
-                                    "Accept-Encoding": ["identity"]
-                                }
-                            }
-                        },
+                        "headers": proxy_headers,
                         "upstreams": [{ "dial": upstream }]
                     }
                 ]
@@ -420,6 +433,11 @@ fn build_route_json(
             "handle": [{
                 "handler": "reverse_proxy",
                 "flush_interval": -1,
+                "headers": {
+                    "request": {
+                        "delete": ["Origin"]
+                    }
+                },
                 "upstreams": [{
                     "dial": upstream
                 }]
@@ -490,12 +508,18 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     }
 
     // --- Dynamic asset loading ---
+    // Assets are loaded after React hydration completes. DOMContentLoaded fires
+    // before hydration, so loading then causes React to remove our elements.
+    // requestIdleCallback fires when the main thread is idle (after hydration).
+    // Fallback to setTimeout(fn, 0) for browsers without requestIdleCallback.
     js.push_str(
         "function E(t,a){var e=document.createElement(t);\
          for(var k in a)e.setAttribute(k,a[k]);\
          (document.head||document.documentElement).appendChild(e);return e;}\
          function R(fn){document.readyState==='loading'?\
-         document.addEventListener('DOMContentLoaded',fn):fn();}R(function(){",
+         document.addEventListener('DOMContentLoaded',function(){W(fn)}):W(fn);}\
+         function W(fn){typeof requestIdleCallback!=='undefined'?\
+         requestIdleCallback(fn):setTimeout(fn,0);}R(function(){",
     );
 
     if fb.inject_client_logs {
@@ -611,10 +635,8 @@ mod tests {
         assert_eq!(handlers[0]["handler"], "veld_inject");
         assert!(handlers[0]["prefix"].as_str().unwrap().contains("<script>"));
         assert_eq!(handlers[1]["handler"], "reverse_proxy");
-        assert_eq!(
-            handlers[1]["headers"]["request"]["set"]["Accept-Encoding"][0],
-            "identity"
-        );
+        // Accept-Encoding: identity is now set by veld_inject handler, not proxy config.
+        assert!(handlers[1]["headers"]["request"]["set"]["Accept-Encoding"].is_null());
         assert_eq!(handlers[1]["upstreams"][0]["dial"], "localhost:3000");
 
         // Verify bootstrap script contains both features.
@@ -795,10 +817,8 @@ mod tests {
         assert!(!handlers[0]["prefix"].as_str().unwrap().is_empty());
         assert_eq!(handlers[1]["handler"], "reverse_proxy");
         assert_eq!(handlers[1]["upstreams"][0]["dial"], "localhost:5555");
-        assert_eq!(
-            handlers[1]["headers"]["request"]["set"]["Accept-Encoding"][0],
-            "identity"
-        );
+        // Accept-Encoding: identity is now set by veld_inject handler, not proxy config.
+        assert!(handlers[1]["headers"]["request"]["set"]["Accept-Encoding"].is_null());
 
         // No matcher on the catch-all route.
         assert!(
