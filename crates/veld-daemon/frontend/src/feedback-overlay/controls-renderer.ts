@@ -44,10 +44,12 @@ export function renderControls(
   controls: ControlDef[],
   registry: VeldControls,
   threadId: string,
+  options?: { inactive?: boolean },
 ): { element: HTMLElement; cleanup: () => void } {
+  const inactive = options?.inactive ?? false;
   const cleanups: (() => void)[] = [];
   const container = document.createElement("div");
-  container.className = PREFIX + "controls";
+  container.className = PREFIX + "controls" + (inactive ? " " + PREFIX + "controls-inactive" : "");
 
   if (!Array.isArray(controls) || controls.length === 0) {
     return { element: container, cleanup: () => {} };

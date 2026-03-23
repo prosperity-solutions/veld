@@ -68,8 +68,10 @@ export function onKeyDown(e: KeyboardEvent): void {
     return;
   }
 
-  // Escape: cascading dismiss
+  // Escape: cascading dismiss.
+  // Draw mode handles its own ESC (confirm bar) — don't interfere.
   if (e.key === "Escape") {
+    if (getState().activeMode === "draw") return;
     if (getState().activePopover) {
       deps().closeActivePopover();
     } else if (getState().activeMode) {

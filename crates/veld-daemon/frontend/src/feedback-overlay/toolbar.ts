@@ -3,6 +3,7 @@ import { getState, dispatch } from "./store";
 import { mkEl } from "./helpers";
 import { PREFIX } from "./constants";
 import { attachTooltip } from "./tooltip";
+import { updateBadge } from "./badge";
 import { deps } from "../shared/registry";
 
 export function makeToolBtn(action: string, iconSvg: string, title: string): HTMLElement {
@@ -39,4 +40,5 @@ export function toggleToolbar(): void {
   if (!getState().toolbarOpen) {
     deps().setMode(null);
   }
+  updateBadge();
 }

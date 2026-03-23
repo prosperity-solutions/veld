@@ -7,14 +7,18 @@
 import { SHADOW_CSS, LIGHT_CSS } from "./styles";
 import { initState } from "./state";
 import { init } from "./init";
+import { appendGuarded } from "./helpers";
 
 if (!window.__veld_feedback_initialised) {
   window.__veld_feedback_initialised = true;
 
-  // Create host element with shadow DOM
+  // Create host element with shadow DOM.
+  // React hydration and HMR may remove unexpected elements from <body>.
+  // appendGuarded re-inserts if removed (same technique Next.js uses for
+  // its own dev overlay — see nextjs-portal MutationObserver in next-devtools).
   const hostEl = document.createElement("veld-feedback");
   hostEl.style.cssText = "display:contents";
-  document.body.appendChild(hostEl);
+  appendGuarded(document.body, hostEl);
 
   const shadow = hostEl.attachShadow({ mode: "open" });
 

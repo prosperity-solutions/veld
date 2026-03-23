@@ -2,7 +2,7 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import type { ThemeMode } from "./store";
-import { mkEl } from "./helpers";
+import { mkEl, appendGuarded } from "./helpers";
 import { PREFIX, ICONS, KEY_MOD, KEY_SHIFT } from "./constants";
 import { initTooltip, attachTooltip, tipHtml } from "./tooltip";
 import { toast } from "./toast";
@@ -17,14 +17,14 @@ export function buildDOM(): void {
 
   // Light DOM elements
   refs.overlay = mkEl("div", "overlay");
-  document.body.appendChild(refs.overlay);
+  appendGuarded(document.body, refs.overlay);
   initBackdropEvents();
 
   refs.hoverOutline = mkEl("div", "hover-outline");
-  document.body.appendChild(refs.hoverOutline);
+  appendGuarded(document.body, refs.hoverOutline);
 
   refs.componentTraceEl = mkEl("div", "component-trace");
-  document.body.appendChild(refs.componentTraceEl);
+  appendGuarded(document.body, refs.componentTraceEl);
 
   // Toolbar container (shadow DOM)
   refs.toolbarContainer = mkEl("div", "toolbar-container");
@@ -107,7 +107,7 @@ export function buildDOM(): void {
 
   // Screenshot rect (light DOM)
   refs.screenshotRect = mkEl("div", "screenshot-rect");
-  document.body.appendChild(refs.screenshotRect);
+  appendGuarded(document.body, refs.screenshotRect);
 
   refs.toolbarContainer.appendChild(refs.toolbar);
 

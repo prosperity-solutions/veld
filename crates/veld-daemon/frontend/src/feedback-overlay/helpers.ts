@@ -141,6 +141,26 @@ export function findThread(
 }
 
 /** Deduplicate and truncate a component trace. */
+/**
+ * Append an element to a parent and guard it with a MutationObserver that
+ * re-inserts it if removed (e.g. by React hydration or HMR). Same technique
+ * Next.js uses for its own dev overlay (nextjs-portal).
+ */
+export function appendGuarded(parent: Node, el: Node): void {
+  parent.appendChild(el);
+  new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      if (m.type !== "childList") continue;
+      for (const node of m.removedNodes) {
+        if (node === el) {
+          parent.appendChild(el);
+          return;
+        }
+      }
+    }
+  }).observe(parent, { childList: true });
+}
+
 export function formatTrace(trace: string[] | null): string | null {
   if (!trace || !trace.length) return null;
   let deduped = [trace[0]];

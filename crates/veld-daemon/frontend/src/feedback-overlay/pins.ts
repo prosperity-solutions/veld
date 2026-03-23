@@ -1,6 +1,7 @@
 import { getState, dispatch } from "./store";
 import {
   mkEl,
+  appendGuarded,
   docRect,
   isCurrentPage,
   getThreadPageUrl,
@@ -49,7 +50,7 @@ export function addPin(thread: Thread): void {
     deps().openThreadInPanel(thread.id);
   });
 
-  document.body.appendChild(pin);
+  appendGuarded(document.body, pin);
   dispatch({ type: "SET_PIN", threadId: thread.id, el: pin });
 }
 

@@ -256,7 +256,8 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
 function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
-  thread.messages.forEach(function (msg: Message) {
+  const msgCount = thread.messages.length;
+  thread.messages.forEach(function (msg: Message, msgIndex: number) {
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -264,12 +265,15 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const body = mkEl("div", "message-body");
     body.appendChild(mkEl("div", "message-text", msg.body));
 
-    // Render interactive controls if present
+    // Render interactive controls if present.
+    // Controls are inactive if a later message exists (values were applied).
     const controls = parseControls(msg);
     if (controls && window.__veld_controls) {
-      const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id);
+      const isLastMessage = msgIndex === msgCount - 1;
+      const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id, {
+        inactive: !isLastMessage,
+      });
       body.appendChild(element);
-      // Store cleanup so we can call it when panel re-renders
       controlCleanups.push(cleanup);
     }
 
@@ -342,8 +346,9 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 
 export function markThreadSeen(threadId: string): void {
   dispatch({ type: "MARK_SEEN", threadId });
-  api("PUT", "/threads/" + threadId + "/seen").catch(function () {});
   const thread = findThread(getState().threads, threadId);
+  const lastSeq = thread && thread.messages.length > 0 ? thread.messages.length : 0;
+  api("PUT", "/threads/" + threadId + "/seen", { seq: lastSeq }).catch(function () {});
   if (thread) deps().addPin(thread);
   updateBadge();
   updateMarkReadBtn();
@@ -353,7 +358,8 @@ export function markAllRead(): void {
   getState().threads.forEach(function (t: Thread) {
     if (hasUnread(t, getState().lastSeenAt)) {
       dispatch({ type: "MARK_SEEN", threadId: t.id });
-      api("PUT", "/threads/" + t.id + "/seen").catch(function () {});
+      const seenSeq = t.messages.length > 0 ? t.messages.length : 0;
+      api("PUT", "/threads/" + t.id + "/seen", { seq: seenSeq }).catch(function () {});
     }
   });
   deps().renderAllPins();

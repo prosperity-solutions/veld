@@ -189,6 +189,21 @@
 .veld-feedback-tool-btn svg {
   width: 15px; height: 15px;
 }
+.veld-feedback-tool-btn {
+  position: relative;
+}
+.veld-feedback-tool-badge {
+  position: absolute;
+  top: -2px; right: -2px;
+  min-width: 14px; height: 14px;
+  border-radius: 7px;
+  background: var(--vf-danger);
+  color: var(--vf-danger-text);
+  font: 700 9px/14px var(--vf-font);
+  text-align: center;
+  padding: 0 3px;
+  pointer-events: none;
+}
 
 /* Separator in toolbar */
 .veld-feedback-separator {
@@ -1114,6 +1129,21 @@
   border-top: 1px solid var(--vf-border);
   margin-top: 2px;
   padding-top: 4px;
+}
+
+/* Inactive controls — values applied, no longer interactive */
+.veld-feedback-controls-inactive {
+  opacity: 0.5;
+  pointer-events: none;
+  user-select: none;
+}
+
+.veld-feedback-controls-inactive .veld-feedback-control-apply-row {
+  display: none;
+}
+
+.veld-feedback-controls-inactive .veld-feedback-control-fuse-grip {
+  display: none;
 }
 
 /* ---- Fuse grip (drag handle on numeric controls) ---- */
