@@ -16,6 +16,17 @@ export function togglePanel(): void {
   if (getState().panelOpen) renderPanel();
 }
 
+export function togglePanelSide(): void {
+  const newSide = getState().panelSide === "right" ? "left" : "right";
+  dispatch({ type: "SET_PANEL_SIDE", side: newSide });
+  syncPanelSideClass();
+  try { localStorage.setItem("veld-panel-side", newSide); } catch (_) {}
+}
+
+export function syncPanelSideClass(): void {
+  refs.panel.classList.toggle(PREFIX + "panel-left", getState().panelSide === "left");
+}
+
 export function showThreadDetail(threadId: string): void {
   dispatch({ type: "SET_EXPANDED_THREAD", threadId });
   renderPanel();
@@ -70,12 +81,14 @@ export function renderPanel(): void {
       if (segControl) segControl.style.display = "none";
       if (refs.markReadBtn) refs.markReadBtn.style.display = "none";
       refs.panelHeadTitle.textContent = "Thread";
+      refs.panelBody.classList.toggle(PREFIX + "panel-body-thread", thread.status === "open");
       renderThreadDetail(thread);
       return;
     }
     dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   }
 
+  refs.panelBody.classList.remove(PREFIX + "panel-body-thread");
   refs.panelBackBtn.style.display = "none";
   const segControl = refs.panelBackBtn.parentElement?.querySelector("." + PREFIX + "segmented") as HTMLElement | null;
   if (segControl) segControl.style.display = "";

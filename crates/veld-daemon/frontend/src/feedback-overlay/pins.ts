@@ -2,7 +2,6 @@ import { getState, dispatch } from "./store";
 import {
   mkEl,
   appendGuarded,
-  docRect,
   isCurrentPage,
   getThreadPageUrl,
   getThreadPosition,
@@ -76,15 +75,23 @@ export function repositionPins(): void {
     try {
       const el = document.querySelector(t.scope.selector);
       if (el) {
-        const r = docRect(el);
-        t.scope.position = {
-          x: r.x,
-          y: r.y,
-          width: r.width,
-          height: r.height,
+        const vr = el.getBoundingClientRect();
+        if (vr.width === 0 && vr.height === 0) {
+          pin.style.display = "none";
+          return;
+        }
+        pin.style.display = "";
+        const r = {
+          x: vr.left + window.scrollX,
+          y: vr.top + window.scrollY,
+          width: vr.width,
+          height: vr.height,
         };
+        t.scope.position = r;
         pin.style.top = r.y - 12 + "px";
         pin.style.left = r.x + r.width - 12 + "px";
+      } else {
+        pin.style.display = "none";
       }
     } catch (_) {}
   });

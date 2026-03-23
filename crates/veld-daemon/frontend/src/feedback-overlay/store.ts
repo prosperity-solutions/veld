@@ -11,6 +11,7 @@ export interface Store {
 
   // UI state
   panelOpen: boolean;
+  panelSide: "left" | "right";
   panelTab: "active" | "resolved";
   activePopover: VeldPopoverElement | null;
   activeMode: UIMode;
@@ -44,6 +45,7 @@ export type Action =
   | { type: "SET_MODE"; mode: UIMode }
   | { type: "SET_TOOLBAR_OPEN"; open: boolean }
   | { type: "SET_PANEL_OPEN"; open: boolean }
+  | { type: "SET_PANEL_SIDE"; side: "left" | "right" }
   | { type: "SET_PANEL_TAB"; tab: "active" | "resolved" }
   | { type: "SET_EXPANDED_THREAD"; threadId: string | null }
   | { type: "SET_HIDDEN"; hidden: boolean }
@@ -79,6 +81,8 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, toolbarOpen: action.open };
     case "SET_PANEL_OPEN":
       return { ...s, panelOpen: action.open };
+    case "SET_PANEL_SIDE":
+      return { ...s, panelSide: action.side };
     case "SET_PANEL_TAB":
       return { ...s, panelTab: action.tab };
     case "SET_EXPANDED_THREAD":
@@ -149,6 +153,7 @@ function createInitial(): Store {
     lastSeenAt: {},
     agentListening: false,
     panelOpen: false,
+    panelSide: (typeof localStorage !== "undefined" && localStorage.getItem("veld-panel-side")) === "left" ? "left" : "right",
     panelTab: "active",
     activePopover: null,
     activeMode: null,

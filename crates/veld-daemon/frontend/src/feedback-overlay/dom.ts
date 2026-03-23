@@ -9,7 +9,7 @@ import { toast } from "./toast";
 import { initBackdropEvents } from "./backdrop";
 import { initDrag } from "./fab";
 import { toggleToolbar, makeToolBtn } from "./toolbar";
-import { togglePanel, showThreadList, renderPanel, markAllRead } from "./panel";
+import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead } from "./panel";
 import { sendAllGood } from "./listening";
 
 export function buildDOM(): void {
@@ -47,11 +47,10 @@ export function buildDOM(): void {
   const listenSep = mkEl("div", "separator");
   refs.listeningModule.appendChild(listenSep);
   const listenDot = mkEl("span", "listening-dot");
-  attachTooltip(listenDot, "Agent is listening");
+  listenDot.style.cursor = "pointer";
+  attachTooltip(listenDot, "All Good");
+  listenDot.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
   refs.listeningModule.appendChild(listenDot);
-  const allGoodBtn = mkEl("button", "listening-allgood", "All Good");
-  allGoodBtn.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
-  refs.listeningModule.appendChild(allGoodBtn);
   refs.toolbar.appendChild(refs.listeningModule);
 
   // Separator
@@ -153,6 +152,12 @@ export function buildDOM(): void {
   refs.markReadBtn.style.display = "none";
   refs.markReadBtn.addEventListener("click", function (e) { e.stopPropagation(); markAllRead(); });
   panelHead.appendChild(refs.markReadBtn);
+
+  const sideBtn = mkEl("button", "panel-side-toggle");
+  sideBtn.innerHTML = ICONS.panelSide;
+  attachTooltip(sideBtn, "Switch panel side");
+  sideBtn.addEventListener("click", function (e) { e.stopPropagation(); togglePanelSide(); });
+  panelHead.appendChild(sideBtn);
 
   const closeBtn = mkEl("button", "panel-close");
   closeBtn.innerHTML = "&times;";
