@@ -1028,19 +1028,22 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 /// Locate a sibling binary (e.g. veld-helper) next to the current executable,
 /// or in the veld lib directory.
 pub fn which_self(name: &str) -> Result<PathBuf, anyhow::Error> {
+    // Prefer the canonical lib directory (where install.sh and veld update put
+    // helper/daemon binaries). This avoids picking up stale copies that may
+    // exist next to the CLI binary (e.g. ~/.local/bin/veld-daemon left over
+    // from manual testing or a previous install layout).
+    let lib_candidate = crate::paths::lib_dir().join(name);
+    if lib_candidate.exists() {
+        return Ok(lib_candidate);
+    }
+    // Fall back to next to the current binary (e.g. target/debug/ during dev).
     let current = std::env::current_exe().context("cannot determine current executable path")?;
     let dir = current
         .parent()
         .context("executable has no parent directory")?;
-    // Check next to the current binary (e.g. target/debug/).
     let candidate = dir.join(name);
     if candidate.exists() {
         return Ok(candidate);
-    }
-    // Check in the veld lib directory (install.sh puts helper/daemon there).
-    let lib_candidate = crate::paths::lib_dir().join(name);
-    if lib_candidate.exists() {
-        return Ok(lib_candidate);
     }
     // Fall back to PATH lookup.
     Ok(PathBuf::from(name))

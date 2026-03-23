@@ -164,3 +164,58 @@ Templates are in `skills/veld/templates/`. Copy the one matching the project's s
 - **Always set `min` and `max`** on numeric controls — without bounds, the control cannot be fused into an XY pad and Alt+drag scrubbing has no limits, making it harder to use
 - **Group related controls** — put parameters that affect the same visual outcome adjacent to each other (e.g. duration next to easing strength) so the human can fuse them into a 2D exploration surface
 - **Prefer `slider` for bounded ranges** and `number` for open-ended values with optional bounds
+
+## Troubleshooting
+
+Common issues when integrating veld with web applications:
+
+### WebSocket / HMR not working (page not interactive)
+
+**Symptom**: Page loads but buttons don't work, console shows "WebSocket connection failed" for `/_next/webpack-hmr` or similar HMR endpoints.
+
+**Cause**: Dev servers (Next.js, Vite) reject WebSocket upgrades when the `Origin` header doesn't match `localhost`. The browser sends `Origin: https://your-app.run.project.localhost` but the dev server only accepts `Origin: http://localhost:<port>`.
+
+**Fix (veld side)**: veld 6.2+ strips the `Origin` header from upstream requests automatically. If you're on an older version, run `veld update`.
+
+**Fix (app side)**: If using Next.js, add your veld domain pattern to `allowedDevOrigins` in `next.config.js`:
+```js
+allowedDevOrigins: ["*.localhost", "*.preview.life.li"]
+```
+Note: this only fixes the dev overlay CORS check, not the WebSocket origin check (which is a separate Next.js issue). The veld-side fix is more reliable.
+
+### Content Security Policy (CSP) blocking connections
+
+**Symptom**: Page loads but fetch/XHR/WebSocket calls fail. Console shows "Refused to connect" CSP violations.
+
+**Cause**: The app's CSP `connect-src` directive only allows `'self'` and `localhost:<port>`. When served through veld's proxy on a different hostname, connections to `'self'` work but any hardcoded `localhost` references in the CSP won't match the proxy origin.
+
+**Fix**: Update the app's CSP to include the veld proxy domain:
+```
+connect-src 'self' wss://*.localhost ws://*.localhost https://*.localhost
+```
+Or for non-localhost domains:
+```
+connect-src 'self' wss://*.dev.preview.life.li https://*.dev.preview.life.li
+```
+
+### Veld overlay disappears after page load (React hydration)
+
+**Symptom**: Veld toolbar flashes briefly then disappears. React hydration warning in console about mismatched content.
+
+**Cause**: On veld versions before 6.2, the overlay was mounted on `<body>`. React hydrates `<body>` and removes elements it didn't render on the server.
+
+**Fix**: Update veld — version 6.2+ mounts the overlay on `<html>` (outside React's hydration scope).
+
+### Port conflicts
+
+**Symptom**: `veld start` fails with "port already in use" or the health check times out.
+
+**Cause**: Veld allocates ports in the 19000–29999 range. Another process may be using the allocated port.
+
+**Fix**: Check what's using the port: `lsof -i :<port>`. Kill the process or let veld pick a different port (restart the run).
+
+### HTTPS certificate warnings
+
+**Symptom**: Browser shows "Your connection is not private" or certificate errors.
+
+**Fix**: Run `veld setup privileged` (or `veld setup unprivileged`) to generate and trust the local CA certificate. If already set up, run `veld doctor` to check CA trust status.

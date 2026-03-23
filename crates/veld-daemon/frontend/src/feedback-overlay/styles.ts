@@ -61,8 +61,7 @@ export const LIGHT_CSS = `
 .veld-feedback-overlay-crosshair { cursor: crosshair; }
 .veld-feedback-hover-outline {
   position: absolute;
-  border: 2px dashed var(--vfl-accent);
-  outline: 2px dashed rgba(0,0,0,0.4);
+  outline: 2px dashed var(--vfl-accent);
   outline-offset: 2px;
   pointer-events: none;
   z-index: 999998;
@@ -82,8 +81,7 @@ export const LIGHT_CSS = `
 }
 .veld-feedback-screenshot-rect {
   position: absolute;
-  border: 2px dashed var(--vfl-accent);
-  outline: 2px dashed rgba(0,0,0,0.4);
+  outline: 2px dashed var(--vfl-accent);
   outline-offset: 2px;
   background: rgba(100,100,100,.06);
   pointer-events: none;

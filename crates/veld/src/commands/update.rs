@@ -14,6 +14,7 @@ pub async fn run() -> i32 {
             match veld_core::setup::perform_update(&new_version).await {
                 Ok(()) => {
                     output::print_success(&format!("Updated to {new_version}."));
+                    cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
                     restart_services().await;
                     refresh_hammerspoon().await;
@@ -60,6 +61,29 @@ async fn refresh_hammerspoon() {
                 ),
                 false,
             );
+        }
+    }
+}
+
+/// Remove stale daemon/helper copies next to the CLI binary.
+///
+/// If a dev previously ran `just dev-install` or manually copied binaries into
+/// `~/.local/bin/`, those copies persist after `veld update` and can shadow the
+/// real binaries in `~/.local/lib/veld/`. This cleans them up.
+fn cleanup_stale_binaries() {
+    let cli_dir = match std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_owned()))
+    {
+        Some(d) => d,
+        None => return,
+    };
+    let lib = veld_core::paths::lib_dir();
+    for name in ["veld-daemon", "veld-helper"] {
+        let stale = cli_dir.join(name);
+        let canonical = lib.join(name);
+        if stale.exists() && stale != canonical && std::fs::remove_file(&stale).is_ok() {
+            output::print_info(&format!("Removed stale {}", stale.display()));
         }
     }
 }

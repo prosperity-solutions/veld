@@ -491,6 +491,68 @@ func TestLargePrefixAndBody(t *testing.T) {
 
 // --- Interface compliance at runtime ---
 
+func TestWebSocketUpgradeBypassesWrapper(t *testing.T) {
+	vi := VeldInject{Prefix: "SHOULD NOT APPEAR"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/ws", nil)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+
+	var writerType string
+	handler := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		if _, ok := w.(*responseInterceptor); ok {
+			writerType = "responseInterceptor"
+		} else {
+			writerType = "raw"
+		}
+		w.Header().Set("Content-Type", "text/html")
+		w.WriteHeader(200)
+		w.Write([]byte("<html>test</html>"))
+		return nil
+	})
+
+	err := vi.ServeHTTP(rec, req, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if writerType != "raw" {
+		t.Errorf("WebSocket upgrade should bypass wrapper, got writer type %q", writerType)
+	}
+	if got := rec.Body.String(); strings.Contains(got, "SHOULD NOT APPEAR") {
+		t.Error("WebSocket request should not have prefix injected")
+	}
+}
+
+func TestSSERequestBypassesWrapper(t *testing.T) {
+	vi := VeldInject{Prefix: "SHOULD NOT APPEAR"}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/events", nil)
+	req.Header.Set("Accept", "text/event-stream")
+
+	var writerType string
+	handler := caddyhttp.HandlerFunc(func(w http.ResponseWriter, r *http.Request) error {
+		if _, ok := w.(*responseInterceptor); ok {
+			writerType = "responseInterceptor"
+		} else {
+			writerType = "raw"
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		w.Write([]byte("data: hello\n\n"))
+		return nil
+	})
+
+	err := vi.ServeHTTP(rec, req, handler)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if writerType != "raw" {
+		t.Errorf("SSE request should bypass wrapper, got writer type %q", writerType)
+	}
+}
+
 func TestResponseInterceptorImplementsInterfaces(t *testing.T) {
 	ri := &responseInterceptor{
 		ResponseWriter: httptest.NewRecorder(),

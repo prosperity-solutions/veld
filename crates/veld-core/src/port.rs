@@ -223,11 +223,20 @@ mod tests {
         let reservation = allocator.allocate().unwrap();
         let port = reservation.port;
 
-        // While the reservation is held, the port should NOT be available.
-        assert!(!is_port_available(port));
+        // While the reservation is held, binding the same wildcard address should fail.
+        let wildcard: SocketAddr = ([0, 0, 0, 0], port).into();
+        let bind_result = TcpListener::bind(wildcard);
+        assert!(
+            bind_result.is_err(),
+            "port {port} should be held by reservation"
+        );
 
-        // After releasing, it should be available again.
+        // After releasing, binding should succeed.
         reservation.release();
-        assert!(is_port_available(port));
+        let bind_result = TcpListener::bind(wildcard);
+        assert!(
+            bind_result.is_ok(),
+            "port {port} should be free after release"
+        );
     }
 }

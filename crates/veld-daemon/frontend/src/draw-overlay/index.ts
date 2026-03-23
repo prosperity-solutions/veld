@@ -507,9 +507,10 @@ function activate(
           scheduleRedraw();
           options.acquireSnapshot().then((bitmap: ImageBitmap | null) => {
             if (bitmap) {
-              snapCanvas = buildSnapshotCanvas(bitmap,
-                options.inline ? canvas.width : Math.round(displayWidth),
-                options.inline ? canvas.height : Math.round(displayHeight));
+              // Use native resolution for the snapshot so blur sampling
+              // matches the screen. The bitmap from grabFrame() is at DPR
+              // resolution; don't downscale it to CSS pixels.
+              snapCanvas = buildSnapshotCanvas(bitmap);
             }
             doBlur(snapCanvas);
           });
@@ -829,8 +830,15 @@ function activate(
     confirmBar.style.left = (r.left + r.width / 2) + "px";
     confirmBar.style.transform = "translateX(-50%)";
     confirmBar.style.display = "flex";
+    // Disable canvas pointer events so clicks reach the confirm bar
+    // (canvas is in light DOM, confirm bar is in Shadow DOM — canvas
+    // stacking context would otherwise eat the clicks).
+    canvas.style.pointerEvents = "none";
   }
-  function hideConfirmBar(): void { confirmBar.style.display = "none"; }
+  function hideConfirmBar(): void {
+    confirmBar.style.display = "none";
+    canvas.style.pointerEvents = "";
+  }
 
   // Collapse toggle
   collapseBtn.addEventListener("click", () => {

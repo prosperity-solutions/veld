@@ -45,11 +45,41 @@ func (VeldInject) CaddyModule() caddy.ModuleInfo {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (vi VeldInject) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// Only wrap requests that might return HTML. All others pass through
+	// untouched — no wrapper, no Accept-Encoding override, no interference
+	// with compression, WebSocket, SSE, or any other protocol.
+	if !mightAcceptHTML(r) || isUpgradeRequest(r) || isSSERequest(r) {
+		return next.ServeHTTP(w, r)
+	}
+	// Force uncompressed HTML so we can prepend the bootstrap script.
+	r.Header.Set("Accept-Encoding", "identity")
 	ri := &responseInterceptor{
 		ResponseWriter: w,
 		prefix:         []byte(vi.Prefix),
 	}
 	return next.ServeHTTP(ri, r)
+}
+
+// isUpgradeRequest returns true if the request is a WebSocket (or other protocol) upgrade.
+func isUpgradeRequest(r *http.Request) bool {
+	return strings.EqualFold(r.Header.Get("Connection"), "upgrade") ||
+		strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
+}
+
+// isSSERequest returns true if the client is requesting Server-Sent Events.
+func isSSERequest(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+}
+
+// mightAcceptHTML returns true if the request's Accept header includes text/html
+// or is empty/wildcard (browser navigation). API calls typically send
+// Accept: application/json which doesn't match.
+func mightAcceptHTML(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
+	if accept == "" || accept == "*/*" {
+		return true
+	}
+	return strings.Contains(accept, "text/html")
 }
 
 // UnmarshalCaddyfile implements caddyfile.Unmarshaler (optional Caddyfile support).

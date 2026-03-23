@@ -88,3 +88,7 @@ Core pattern: listen → fix → answer → listen again with `--after <seq>` �
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results
+
+## Troubleshooting
+
+If something isn't working (WebSocket failures, CSP errors, overlay disappearing, port conflicts, cert warnings), see [reference/troubleshooting.md](reference/troubleshooting.md).

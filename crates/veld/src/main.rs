@@ -297,7 +297,7 @@ async fn main() {
             | Command::Logs { .. }
     );
 
-    if needs_version_check {
+    if needs_version_check && std::env::var("VELD_LIB_DIR").is_err() {
         if let Err(msg) = commands::version::check_version_mismatch() {
             output::print_error(&msg, false);
             std::process::exit(1);

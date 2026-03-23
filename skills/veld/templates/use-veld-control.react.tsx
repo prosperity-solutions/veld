@@ -3,6 +3,7 @@
  *
  * Drop this into your component file or create a shared hook module.
  * No npm package needed — reads from window.__veld_controls injected by veld.
+ * SSR-safe: returns defaultValue during server rendering.
  *
  * Usage:
  *   const duration = useVeldControl("duration", 200);
@@ -29,21 +30,24 @@ declare global {
 
 import { useState, useEffect, useCallback } from "react";
 
+const isBrowser = typeof window !== "undefined";
+
 /**
  * Bind a React component to a veld control value.
  * Updates in real-time as the user scrubs sliders/inputs.
+ * Returns defaultValue during SSR — no window access on the server.
  *
  * @param name — control name (must match the agent's control definition)
- * @param defaultValue — fallback when veld is not running
+ * @param defaultValue — fallback when veld is not running or during SSR
  */
 export function useVeldControl<T>(name: string, defaultValue: T): T {
-  const [value, setValue] = useState<T>(
-    () => (window.__veld_controls?.get(name) as T) ?? defaultValue,
-  );
+  const [value, setValue] = useState<T>(() => {
+    if (!isBrowser) return defaultValue;
+    return (window.__veld_controls?.get(name) as T) ?? defaultValue;
+  });
 
   useEffect(() => {
     if (!window.__veld_controls) return;
-    // Pick up current value in case it was set before mount
     const current = window.__veld_controls.get(name);
     if (current !== undefined) setValue(current as T);
     const unsub = window.__veld_controls.on(name, (v) => setValue(v as T));
@@ -55,6 +59,7 @@ export function useVeldControl<T>(name: string, defaultValue: T): T {
 
 /**
  * Bind a callback to a veld action button (retry, start, stop, etc.)
+ * No-op during SSR.
  *
  * @param name — action name (must match the agent's button definition)
  * @param callback — fires when the user clicks the button in veld
