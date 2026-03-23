@@ -19,6 +19,7 @@
  */
 
 (function($) {
+  if (typeof window === "undefined") return;
   /**
    * Bind a callback to a veld control value.
    * Fires immediately with current value, then on every change.

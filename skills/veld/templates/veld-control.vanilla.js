@@ -3,6 +3,7 @@
  *
  * Drop this into your page script. No framework, no dependencies.
  * Reads from window.__veld_controls injected by veld.
+ * SSR-safe: guards all window/document access.
  *
  * Usage:
  *   // Bind a value to a DOM element
@@ -33,6 +34,7 @@
  * @returns {function} unsubscribe — call to stop listening
  */
 function veldControl(name, defaultValue, callback) {
+  if (typeof window === "undefined") { callback(defaultValue); return function() {}; }
   var controls = window.__veld_controls;
   if (!controls) {
     callback(defaultValue);
@@ -51,6 +53,7 @@ function veldControl(name, defaultValue, callback) {
  * @returns {function} unsubscribe
  */
 function veldAction(name, callback) {
+  if (typeof window === "undefined") return function() {};
   var controls = window.__veld_controls;
   if (!controls) return function() {};
   return controls.onAction(name, callback);
@@ -68,6 +71,8 @@ function veldAction(name, callback) {
  */
 function veldCSSVar(name, cssVar, defaultValue, unit) {
   return veldControl(name, defaultValue, function(val) {
-    document.documentElement.style.setProperty(cssVar, val + (unit || ""));
+    if (typeof document !== "undefined") {
+      document.documentElement.style.setProperty(cssVar, val + (unit || ""));
+    }
   });
 }
