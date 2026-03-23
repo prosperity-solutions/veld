@@ -829,8 +829,14 @@ impl Orchestrator {
             }
         };
 
-        // Build env from the variant config.
-        let env = match build_env(variant_cfg.env.as_ref(), &ctx) {
+        // Build env (variant > node > project).
+        let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
+        let merged_env = config::resolve_env(
+            self.config.env.as_ref(),
+            node_cfg_opt.and_then(|n| n.env.as_ref()),
+            variant_cfg.env.as_ref(),
+        );
+        let env = match build_env(merged_env.as_ref(), &ctx) {
             Ok(env) => env,
             Err(e) => {
                 tracing::warn!(
@@ -843,7 +849,6 @@ impl Orchestrator {
         };
 
         // Resolve working directory (variant > node > project root).
-        let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
         let working_dir = resolve_working_dir(
             variant_cfg.cwd.as_deref(),
             node_cfg_opt.and_then(|n| n.cwd.as_deref()),
@@ -1221,8 +1226,13 @@ async fn execute_start_server_isolated(
     )
     .await;
 
-    // Build env.
-    let mut env = build_env(variant_cfg.env.as_ref(), var_ctx)?;
+    // Build env (variant > node > project).
+    let merged_env = config::resolve_env(
+        ctx.config.env.as_ref(),
+        node_cfg.env.as_ref(),
+        variant_cfg.env.as_ref(),
+    );
+    let mut env = build_env(merged_env.as_ref(), var_ctx)?;
     env.insert("VELD_PORT".to_owned(), port.to_string());
     env.insert("VELD_URL".to_owned(), https_url.clone());
 
@@ -1489,7 +1499,13 @@ async fn execute_command_isolated(
     };
     let resolved_cmd = crate::variables::interpolate(&raw_cmd, var_ctx)?;
 
-    let env = build_env(variant_cfg.env.as_ref(), var_ctx)?;
+    // Build env (variant > node > project).
+    let merged_env = config::resolve_env(
+        ctx.config.env.as_ref(),
+        node_cfg.env.as_ref(),
+        variant_cfg.env.as_ref(),
+    );
+    let env = build_env(merged_env.as_ref(), var_ctx)?;
 
     // Verify step (idempotency).
     if let Some(ref verify_cmd) = variant_cfg.verify {

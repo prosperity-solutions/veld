@@ -50,6 +50,10 @@
       "$ref": "#/$defs/FeaturesConfig",
       "description": "Feature toggles (project-level defaults). Overridable at node and variant level."
     },
+    "env": {
+      "$ref": "#/$defs/EnvMap",
+      "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
+    },
     "nodes": {
       "type": "object",
       "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
@@ -86,6 +90,10 @@
         "features": {
           "$ref": "#/$defs/FeaturesConfig",
           "description": "Feature toggles override for all variants of this node."
+        },
+        "env": {
+          "$ref": "#/$defs/EnvMap",
+          "description": "Extra environment variables inherited by all variants of this node. Overrides project-level env. Overridable at variant level."
         },
         "cwd": {
           "type": "string",
@@ -132,11 +140,8 @@
           }
         },
         "env": {
-          "type": "object",
-          "description": "Extra environment variables injected into the process.",
-          "additionalProperties": {
-            "type": "string"
-          }
+          "$ref": "#/$defs/EnvMap",
+          "description": "Extra environment variables injected into the process. Overrides node-level and project-level env."
         },
         "outputs": {
           "description": "Output declarations. For command steps: an array of output names captured from $VELD_OUTPUT_FILE (preferred) or VELD_OUTPUT stdout lines (legacy). For start_server steps: an object mapping output names to template strings.",
@@ -249,6 +254,13 @@
       },
       "default": ["log", "warn", "error"],
       "uniqueItems": true
+    },
+    "EnvMap": {
+      "type": "object",
+      "description": "A map of environment variable names to values. Values support Veld variable substitution (e.g. ${veld.port}, ${nodes.backend.url}).",
+      "additionalProperties": {
+        "type": "string"
+      }
     },
     "HealthCheck": {
       "type": "object",

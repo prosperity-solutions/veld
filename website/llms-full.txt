@@ -212,7 +212,7 @@ Control which Veld capabilities are injected into `start_server` nodes' HTML res
 "features": { "feedback_overlay": false, "client_logs": true }
 ```
 
-Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector). All default to `true`.
+Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector), `inject` (auto-inject bootstrap scripts). All default to `true`.
 
 ---
 
@@ -228,7 +228,8 @@ Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (bro
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
 | `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
-| `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs` (all default `true`, cascade: variant > node > project) |
+| `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs`, `inject` (all default `true`, cascade: variant > node > project) |
+| `env` | object | No | Global environment variables inherited by all nodes (cascade: variant > node > project, per-key merge) |
 | `nodes` | object | Yes | The dependency graph nodes |
 
 ### Step Types
@@ -293,13 +294,25 @@ Dependencies are explicit `node:variant` pairs. Resolved before start. Started i
 
 ### Environment Variables
 
-Values support variable interpolation including upstream node outputs:
+Declare `env` at the project, node, or variant level. Variables cascade: variant > node > project (per-key merge, most specific wins). Values support variable interpolation including upstream node outputs:
 
 ```json
-"env": {
-  "DATABASE_URL": "${nodes.database.DATABASE_URL}",
-  "PORT": "${veld.port}",
-  "NEXT_PUBLIC_API_URL": "${nodes.backend.url}"
+{
+  "env": { "SHARED_FLAG": "1" },
+  "nodes": {
+    "api": {
+      "env": { "LOG_LEVEL": "debug" },
+      "variants": {
+        "local": {
+          "env": {
+            "DATABASE_URL": "${nodes.database.DATABASE_URL}",
+            "PORT": "${veld.port}",
+            "NEXT_PUBLIC_API_URL": "${nodes.backend.url}"
+          }
+        }
+      }
+    }
+  }
 }
 ```
 

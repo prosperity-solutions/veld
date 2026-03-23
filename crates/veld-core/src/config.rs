@@ -64,6 +64,11 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
 
+    /// Global environment variables inherited by all node variants.
+    /// Overridable at node and variant level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
+
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
 }
@@ -97,6 +102,11 @@ pub struct NodeConfig {
     /// Feature toggles override for all variants of this node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
+
+    /// Extra environment variables inherited by all variants of this node.
+    /// Overrides project-level env. Overridable at variant level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<HashMap<String, String>>,
 
     /// Working directory for all variants of this node. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overridable at variant level. Supports variable substitution.
@@ -301,6 +311,29 @@ pub fn resolve_features(
             .next()
             .unwrap_or(defaults.inject),
     }
+}
+
+/// Merge environment variable maps using the most specific override:
+/// variant > node > project. For each key, the most specific layer wins.
+pub fn resolve_env(
+    project: Option<&HashMap<String, String>>,
+    node: Option<&HashMap<String, String>>,
+    variant: Option<&HashMap<String, String>>,
+) -> Option<HashMap<String, String>> {
+    let layers: &[Option<&HashMap<String, String>>] = &[project, node, variant];
+    let has_any = layers.iter().any(|l| l.is_some());
+    if !has_any {
+        return None;
+    }
+
+    let mut merged = HashMap::new();
+    // Apply from least specific to most specific so later layers override.
+    for map in layers.iter().flatten() {
+        for (k, v) in *map {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Some(merged)
 }
 
 // ---------------------------------------------------------------------------
@@ -648,6 +681,64 @@ mod tests {
         let root = PathBuf::from("/projects/myapp");
         let result = resolve_cwd(&root, None, Some("/opt/services/api"));
         assert_eq!(result, PathBuf::from("/opt/services/api"));
+    }
+
+    // -- Env resolution tests --------------------------------------------------
+
+    #[test]
+    fn test_resolve_env_none() {
+        assert_eq!(resolve_env(None, None, None), None);
+    }
+
+    #[test]
+    fn test_resolve_env_project_only() {
+        let project = HashMap::from([("A".into(), "1".into())]);
+        let result = resolve_env(Some(&project), None, None).unwrap();
+        assert_eq!(result.get("A").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_resolve_env_node_overrides_project() {
+        let project = HashMap::from([("A".into(), "1".into()), ("B".into(), "2".into())]);
+        let node = HashMap::from([("A".into(), "override".into())]);
+        let result = resolve_env(Some(&project), Some(&node), None).unwrap();
+        assert_eq!(result.get("A").unwrap(), "override");
+        assert_eq!(result.get("B").unwrap(), "2");
+    }
+
+    #[test]
+    fn test_resolve_env_variant_overrides_all() {
+        let project = HashMap::from([("A".into(), "1".into())]);
+        let node = HashMap::from([("A".into(), "2".into()), ("B".into(), "3".into())]);
+        let variant = HashMap::from([("A".into(), "final".into()), ("C".into(), "4".into())]);
+        let result = resolve_env(Some(&project), Some(&node), Some(&variant)).unwrap();
+        assert_eq!(result.get("A").unwrap(), "final");
+        assert_eq!(result.get("B").unwrap(), "3");
+        assert_eq!(result.get("C").unwrap(), "4");
+    }
+
+    #[test]
+    fn test_resolve_env_empty_map_with_values() {
+        let empty = HashMap::new();
+        let variant = HashMap::from([("X".into(), "1".into())]);
+        let result = resolve_env(Some(&empty), None, Some(&variant)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("X").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_resolve_env_all_empty_maps() {
+        let empty = HashMap::new();
+        let result = resolve_env(Some(&empty), Some(&empty), Some(&empty)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_resolve_env_variant_only() {
+        let variant = HashMap::from([("X".into(), "val".into())]);
+        let result = resolve_env(None, None, Some(&variant)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("X").unwrap(), "val");
     }
 
     #[test]
