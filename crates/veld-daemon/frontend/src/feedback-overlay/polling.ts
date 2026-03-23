@@ -164,6 +164,7 @@ function handleThreadReopened(event: FeedbackEvent): void {
 }
 
 export function showAgentReplyToast(threadId: string, preview: string): void {
+  if (getState().panelOpen) return;
   const t = mkEl("div", "agent-toast");
   t.appendChild(mkEl("div", "agent-toast-header", "Agent replied"));
   const body = mkEl("div", "agent-toast-body");

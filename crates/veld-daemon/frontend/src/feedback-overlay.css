@@ -367,6 +367,13 @@
   border-left: 1px solid var(--vf-border);
 }
 .veld-feedback-panel-open { transform: translateX(0); }
+.veld-feedback-panel-left {
+  right: auto; left: 0;
+  transform: translateX(-100%);
+  border-left: none; border-right: 1px solid var(--vf-border);
+  box-shadow: 4px 0 30px rgba(0,0,0,.5);
+}
+.veld-feedback-panel-left.veld-feedback-panel-open { transform: translateX(0); }
 
 .veld-feedback-panel-head {
   padding: 14px 18px; font-size: 14px; font-weight: 600;
@@ -395,16 +402,28 @@
   background: var(--vf-bg-card); color: var(--vf-accent);
 }
 .veld-feedback-panel-mark-read svg { width: 16px; height: 16px; }
+.veld-feedback-panel-side-toggle {
+  width: 28px; height: 28px; border-radius: 6px; border: none;
+  background: transparent; color: var(--vf-text-muted);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: background .15s, color .15s;
+  margin-left: auto;
+}
+.veld-feedback-panel-side-toggle:hover {
+  background: var(--vf-bg-card); color: var(--vf-text);
+}
+.veld-feedback-panel-side-toggle svg { width: 14px; height: 14px; }
 .veld-feedback-panel-close {
   background: none; border: none; color: var(--vf-text-muted);
   cursor: pointer; font-size: 20px; line-height: 1; padding: 0 2px;
-  margin-left: auto;
 }
 .veld-feedback-panel-close:hover { color: var(--vf-text); }
 
 .veld-feedback-panel-body {
   flex: 1; overflow-y: auto; padding: 12px 18px;
+  display: flex; flex-direction: column; min-height: 0;
 }
+.veld-feedback-panel-body-thread { overflow-y: hidden; }
 
 .veld-feedback-panel-empty {
   text-align: center; color: var(--vf-text-muted);
@@ -510,9 +529,10 @@
 /* --- Thread messages --- */
 .veld-feedback-thread-messages {
   padding: 8px 0;
+  display: flex; flex-direction: column; flex: 1; min-height: 0;
 }
 .veld-feedback-thread-messages-list {
-  max-height: 300px; overflow-y: auto;
+  flex: 1; overflow-y: auto; min-height: 0;
 }
 .veld-feedback-message {
   display: flex; gap: 8px; margin-bottom: 10px; align-items: flex-start;

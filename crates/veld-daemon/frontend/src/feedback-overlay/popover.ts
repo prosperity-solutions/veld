@@ -98,6 +98,7 @@ export function showCreatePopover(
       const thread = raw as Thread;
       dispatch({ type: "ADD_THREAD", thread });
       closeActivePopover();
+      deps().setMode(null);
       deps().addPin(thread);
       deps().updateBadge();
       if (getState().panelOpen) deps().renderPanel();
