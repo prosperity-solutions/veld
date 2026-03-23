@@ -118,9 +118,10 @@ Named shortcuts for common selections:
 
 | Field | Level | Description |
 |-------|-------|-------------|
+| `env` | project, node, variant | Environment variables. Cascades: variant > node > project (per-key merge). Supports `${...}` substitution. |
 | `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld nodes` output |
 | `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
-| `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool}`. All default `true`. |
+| `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. |
 | `on_stop` | variant | Teardown command that runs on `veld stop`. |
 | `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |

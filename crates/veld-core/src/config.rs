@@ -720,6 +720,22 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_env_empty_map_with_values() {
+        let empty = HashMap::new();
+        let variant = HashMap::from([("X".into(), "1".into())]);
+        let result = resolve_env(Some(&empty), None, Some(&variant)).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("X").unwrap(), "1");
+    }
+
+    #[test]
+    fn test_resolve_env_all_empty_maps() {
+        let empty = HashMap::new();
+        let result = resolve_env(Some(&empty), Some(&empty), Some(&empty)).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
     fn test_resolve_env_variant_only() {
         let variant = HashMap::from([("X".into(), "val".into())]);
         let result = resolve_env(None, None, Some(&variant)).unwrap();

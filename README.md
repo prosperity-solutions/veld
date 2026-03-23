@@ -200,6 +200,26 @@ Control which Veld capabilities are injected into `start_server` nodes' HTML res
 
 Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector). All default to `true`.
 
+### Environment variables
+
+Declare `env` at the project, node, or variant level. Variables cascade: variant > node > project (per-key merge, most specific wins). Values support `${...}` variable substitution.
+
+```json
+{
+  "env": { "FEATURE_FLAG": "1" },
+  "nodes": {
+    "api": {
+      "env": { "LOG_LEVEL": "debug" },
+      "variants": {
+        "local": {
+          "env": { "PORT": "${veld.port}" }
+        }
+      }
+    }
+  }
+}
+```
+
 ### Variable interpolation
 
 Commands, env values, and output templates support `${veld.port}`, `${veld.url}`, `${veld.run}`, `${veld.root}`, `${nodes.backend.url}`, `${nodes.backend.port}`, etc.

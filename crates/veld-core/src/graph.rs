@@ -309,13 +309,26 @@ fn validate_variable_references(
             .push(&sel.variant);
     }
 
-    // For each node, scan its env and command strings for unqualified refs.
+    // Scan project-level env for unqualified refs.
+    if let Some(env_map) = &config.env {
+        for v in env_map.values() {
+            check_string_for_ambiguous_refs(v, &active_variants)?;
+        }
+    }
+
+    // For each node, scan its env, variant env, and command strings for unqualified refs.
     for sel in all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
+        let node_cfg = &config.nodes[&sel.node];
+        let variant_cfg = &node_cfg.variants[&sel.variant];
 
         let mut strings_to_check: Vec<&str> = Vec::new();
         if let Some(cmd) = &variant_cfg.command {
             strings_to_check.push(cmd);
+        }
+        if let Some(env_map) = &node_cfg.env {
+            for v in env_map.values() {
+                strings_to_check.push(v);
+            }
         }
         if let Some(env_map) = &variant_cfg.env {
             for v in env_map.values() {
