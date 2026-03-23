@@ -328,11 +328,9 @@ pub fn resolve_env(
 
     let mut merged = HashMap::new();
     // Apply from least specific to most specific so later layers override.
-    for layer in layers {
-        if let Some(map) = layer {
-            for (k, v) in *map {
-                merged.insert(k.clone(), v.clone());
-            }
+    for map in layers.iter().flatten() {
+        for (k, v) in *map {
+            merged.insert(k.clone(), v.clone());
         }
     }
     Some(merged)
