@@ -320,6 +320,40 @@ impl Diagnostics {
                 "No stale system install".into()
             },
         });
+
+        // 8. No stale binaries next to CLI (e.g. ~/.local/bin/veld-daemon
+        //    left over from manual testing while lib dir has the real copy)
+        if let Ok(cli_path) = std::env::current_exe() {
+            if let Some(cli_dir) = cli_path.parent() {
+                for name in ["veld-daemon", "veld-helper"] {
+                    let sibling = cli_dir.join(name);
+                    let canonical = lib.join(name);
+                    // Only flag if both exist and they're different files
+                    if sibling.exists() && canonical.exists() && sibling != canonical {
+                        let sib_ver =
+                            query_binary_version(&sibling).unwrap_or_else(|| "unknown".into());
+                        let lib_ver =
+                            query_binary_version(&canonical).unwrap_or_else(|| "unknown".into());
+                        let stale = sib_ver != lib_ver;
+                        self.checks.push(Check {
+                            pass: !stale,
+                            label: if stale {
+                                format!(
+                                    "Stale {} at {} ({}) — lib has {}. Remove with: rm {}",
+                                    name,
+                                    tilde_path(&sibling),
+                                    sib_ver,
+                                    lib_ver,
+                                    tilde_path(&sibling),
+                                )
+                            } else {
+                                format!("No stale {} next to CLI", name)
+                            },
+                        });
+                    }
+                }
+            }
+        }
     }
 
     // -- Tip -----------------------------------------------------------------

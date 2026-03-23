@@ -26,3 +26,5 @@ node_modules/
 .env.local
 *.pem
 *.key
+.claude/settings.local.json
+/package-lock.json

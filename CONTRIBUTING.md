@@ -21,8 +21,9 @@ Why? Because that's how this project was built, and it's how we believe modern s
 ```sh
 git clone https://github.com/prosperity-solutions/veld.git
 cd veld
-cargo build
-cargo test
+just setup-frontend   # install Node.js dependencies (once)
+just build            # build Rust + frontend
+just test             # run all tests
 ```
 
 The workspace has four crates:
@@ -32,7 +33,75 @@ The workspace has four crates:
 | `veld` | CLI binary |
 | `veld-core` | Shared library (config, orchestrator, state, health checks) |
 | `veld-helper` | Privileged daemon for DNS/Caddy management |
-| `veld-daemon` | User-space daemon for health monitoring and GC |
+| `veld-daemon` | User-space daemon for health monitoring, feedback overlay, and GC |
+
+## Local development
+
+Veld has three tiers of binaries with different lifecycles:
+
+| Tier | Binary | Runs as | How to test changes |
+|------|--------|---------|---------------------|
+| CLI | `veld` | Your user, exits immediately | `just dev <args>` — no install needed |
+| Daemon | `veld-daemon` | User-level launchd service | `just dev-install-daemon` |
+| Helper + Caddy | `veld-helper` | System launchd service (root) | `just dev-install-helper` (sudo) |
+
+### Tier 1: CLI changes (most common)
+
+Use `just dev` or `veld-dev` for read-only CLI commands:
+
+```sh
+just dev feedback listen --name myrun --json
+just dev status
+veld-dev doctor
+```
+
+**Do not use `veld-dev` for `start`/`restart`** — it overrides the lib directory which breaks Caddy path resolution. Use the installed `veld` for starting environments:
+
+```sh
+veld start --name myrun website:local    # uses installed veld
+veld-dev feedback listen --name myrun    # uses source build for CLI
+```
+
+For cross-project CLI use:
+
+```sh
+just dev-link    # one-time: creates ~/.local/bin/veld-dev
+cd ~/other-project
+veld-dev feedback listen --name myrun
+```
+
+### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)
+
+```sh
+just dev-install-daemon    # builds, installs to ~/.local/lib/veld/, restarts service
+```
+
+### Tier 3: Helper changes (Caddy config, route building, TLS, GODEBUG)
+
+```sh
+just dev-install-helper    # builds, installs, sudo restarts Caddy
+```
+
+### Going back to the released version
+
+```sh
+just dev-restore    # runs veld update
+```
+
+### All commands
+
+| Command | What it does | Sudo? |
+|---------|-------------|-------|
+| `just dev <args>` | Run CLI from source (safe, no install) | No |
+| `just dev-link` | Create `veld-dev` wrapper for cross-project use | No |
+| `just dev-install-daemon` | Install daemon + restart service | No |
+| `just dev-install-helper` | Install helper + restart Caddy | Yes |
+| `just dev-install` | CLI + daemon | No |
+| `just dev-install-all` | CLI + daemon + helper | Yes |
+| `just dev-restore` | Restore to released version | No |
+| `just build` | Build Rust + frontend | No |
+| `just test` | Run all tests | No |
+| `just lint` | Clippy + TypeScript type check | No |
 
 ## Guidelines
 

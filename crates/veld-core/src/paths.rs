@@ -1,11 +1,15 @@
 use std::path::PathBuf;
 
-/// Resolve the veld lib directory. Prefers `~/.local/lib/veld` (user-level);
-/// falls back to `/usr/local/lib/veld` for existing system installs.
+/// Resolve the veld lib directory.
 ///
-/// Never attempts to create the system directory — the user-local path is
-/// always the default for new installations.
+/// Resolution order:
+/// 1. `VELD_LIB_DIR` env var (for local dev — points at `target/debug/`)
+/// 2. `~/.local/lib/veld` (user-level, default for new installs)
+/// 3. `/usr/local/lib/veld` (legacy system installs)
 pub fn lib_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("VELD_LIB_DIR") {
+        return PathBuf::from(dir);
+    }
     // Prefer user-local directory (new default).
     let user_dir = dirs::home_dir().map(|h| h.join(".local").join("lib").join("veld"));
     if let Some(ref ud) = user_dir {
