@@ -40,6 +40,7 @@ All relative paths in the configuration resolve relative to the directory contai
 | `presets`           | object | No       | Named shortcuts for node:variant selections       |
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
+| `env`               | object | No       | Global environment variables inherited by all nodes |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
 
 [Client-Side Log Levels]: #client-side-log-levels
@@ -138,6 +139,35 @@ Controls which Veld capabilities are injected into `start_server` nodes' HTML re
 ```
 
 In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
+
+### `env`
+
+Global environment variables inherited by all node variants. Values support Veld variable substitution. The same override hierarchy applies: variant > node > project. For each key, the most specific layer wins; keys from parent layers that are not overridden are preserved.
+
+```json
+{
+  "env": {
+    "FEATURE_FLAG_X": "1",
+    "SHARED_CONFIG": "value"
+  },
+  "nodes": {
+    "api": {
+      "env": {
+        "SHARED_CONFIG": "api-override"
+      },
+      "variants": {
+        "local": {
+          "env": {
+            "PORT": "${veld.port}"
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+In this example, `api:local` inherits `FEATURE_FLAG_X=1` from the project, gets `SHARED_CONFIG=api-override` from the node (overriding the project value), and adds `PORT` at the variant level.
 
 ---
 
@@ -391,7 +421,9 @@ Extra environment variables injected into the process. Values support Veld varia
 }
 ```
 
-**Precedence:** The `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
+**Layering:** Environment variables cascade from project to node to variant. For each key, the most specific layer wins. Keys from parent layers that are not overridden are preserved. See the project-level [`env`](#env) section for a full example.
+
+**Precedence:** The merged `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
 
 ### `outputs`
 
