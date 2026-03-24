@@ -783,10 +783,18 @@
   user-select: none;
   transition: padding .2s ease, opacity .2s ease;
 }
-/* Semi-transparent when idle on desktop, full on hover */
+/* Start fully visible, fade to idle opacity so user notices the toolbar */
 @media (hover: hover) {
-  .veld-feedback-draw-toolbar { opacity: 0.25; }
-  .veld-feedback-draw-toolbar:hover { opacity: 1; }
+  .veld-feedback-draw-toolbar {
+    opacity: 0.25;
+    animation: veld-feedback-draw-toolbar-intro 2s ease-out;
+  }
+  .veld-feedback-draw-toolbar:hover { opacity: 1; animation: none; }
+}
+@keyframes veld-feedback-draw-toolbar-intro {
+  0% { opacity: 1; }
+  50% { opacity: 1; }
+  100% { opacity: 0.25; }
 }
 
 /* Collapse button */
