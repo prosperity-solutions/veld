@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>veld UI Preview</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f0f14;
+      color: #e2e8f0;
+      line-height: 1.6;
+    }
+
+    /* Sample page content */
+    .page-content {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 48px 24px 200px;
+    }
+    .page-content h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 16px;
+      color: #f1f5f9;
+    }
+    .page-content h2 {
+      font-size: 1.5rem;
+      font-weight: 600;
+      margin: 48px 0 16px;
+      color: #e2e8f0;
+    }
+    .page-content p {
+      color: #94a3b8;
+      margin-bottom: 16px;
+      max-width: 65ch;
+    }
+    .page-content a {
+      color: #60a5fa;
+      text-decoration: none;
+    }
+    .page-content a:hover { text-decoration: underline; }
+
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+      gap: 16px;
+      margin: 24px 0;
+    }
+    .card {
+      background: #1e1e24;
+      border: 1px solid #2d2d44;
+      border-radius: 12px;
+      padding: 20px;
+    }
+    .card h3 {
+      font-size: 1rem;
+      font-weight: 600;
+      margin-bottom: 8px;
+      color: #f1f5f9;
+    }
+    .card p {
+      font-size: 0.875rem;
+      color: #94a3b8;
+      margin: 0;
+    }
+
+    .sample-btn {
+      display: inline-block;
+      background: #C4F56A;
+      color: #0a0a0a;
+      border: none;
+      border-radius: 8px;
+      padding: 10px 24px;
+      font-size: 0.875rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin: 8px 8px 8px 0;
+    }
+    .sample-btn.secondary {
+      background: #2d2d44;
+      color: #e2e8f0;
+    }
+
+    .sample-input {
+      display: block;
+      width: 100%;
+      max-width: 400px;
+      background: #1e1e24;
+      border: 1px solid #2d2d44;
+      border-radius: 8px;
+      padding: 10px 14px;
+      color: #e2e8f0;
+      font-size: 0.875rem;
+      margin: 8px 0 16px;
+    }
+
+    .sample-nav {
+      display: flex;
+      gap: 24px;
+      padding: 16px 0;
+      border-bottom: 1px solid #2d2d44;
+      margin-bottom: 32px;
+    }
+    .sample-nav a { color: #94a3b8; font-size: 0.875rem; }
+    .sample-nav a.active { color: #C4F56A; }
+
+    .badge {
+      display: inline-block;
+      background: #ef4444;
+      color: white;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      margin-left: 8px;
+    }
+  </style>
+
+  <!-- Mock the feedback API before loading the overlay -->
+  <script>
+    var MOCK_THREADS = [
+      {
+        id: "thread-1",
+        scope: {
+          type: "element",
+          page_url: location.href,
+          selector: "#hero-heading",
+          label: "h1",
+          position: { x: 0, y: 0, width: 400, height: 60 }
+        },
+        status: "open",
+        messages: [
+          { id: "msg-1a", body: "This heading needs more contrast against the dark background.", author: "human", created_at: "2026-03-24T10:00:00Z" },
+          { id: "msg-1b", body: "I've increased the font-weight to 700 and added a subtle text-shadow for better legibility. The contrast ratio is now 7.2:1, meeting WCAG AAA.", author: "agent", created_at: "2026-03-24T10:01:30Z" }
+        ],
+        created_at: "2026-03-24T10:00:00Z",
+        updated_at: "2026-03-24T10:01:30Z",
+        component_trace: ["App", "Hero", "Heading"]
+      },
+      {
+        id: "thread-2",
+        scope: {
+          type: "element",
+          page_url: location.href,
+          selector: "#card-auth",
+          label: "div.card",
+          position: { x: 0, y: 0, width: 250, height: 120 }
+        },
+        status: "open",
+        messages: [
+          { id: "msg-2a", body: "Can we add OAuth support here?", author: "human", created_at: "2026-03-24T09:30:00Z" },
+          { id: "msg-2b", body: "Working on it \u2014 adding Google and GitHub providers via next-auth.", author: "agent", created_at: "2026-03-24T09:31:00Z" },
+          { id: "msg-2c", body: "Also consider adding Apple Sign-In for iOS users.", author: "human", created_at: "2026-03-24T09:35:00Z" }
+        ],
+        created_at: "2026-03-24T09:30:00Z",
+        updated_at: "2026-03-24T09:35:00Z",
+        claimed_by: "agent-claude-1",
+        claimed_at: "2026-03-24T09:31:00Z"
+      },
+      {
+        id: "thread-3",
+        scope: { type: "page", page_url: location.href },
+        status: "open",
+        messages: [
+          { id: "msg-3a", body: "The overall page load is too slow \u2014 we need to lazy-load the card grid below the fold.", author: "human", created_at: "2026-03-24T08:00:00Z" }
+        ],
+        created_at: "2026-03-24T08:00:00Z",
+        updated_at: "2026-03-24T08:00:00Z"
+      },
+      {
+        id: "thread-4",
+        scope: {
+          type: "element",
+          page_url: location.href,
+          selector: "#cta-primary",
+          label: "button.sample-btn",
+          position: { x: 0, y: 0, width: 160, height: 42 }
+        },
+        status: "resolved",
+        messages: [
+          { id: "msg-4a", body: "Button color doesn't match the brand guidelines.", author: "human", created_at: "2026-03-23T14:00:00Z" },
+          { id: "msg-4b", body: "Updated to use the correct brand green (#C4F56A). Verified against the Figma tokens.", author: "agent", created_at: "2026-03-23T14:02:00Z" }
+        ],
+        created_at: "2026-03-23T14:00:00Z",
+        updated_at: "2026-03-23T14:02:00Z"
+      },
+      {
+        id: "thread-5",
+        scope: {
+          type: "element",
+          page_url: location.href,
+          selector: "#sample-input",
+          label: "input.sample-input",
+          position: { x: 0, y: 0, width: 400, height: 42 }
+        },
+        status: "open",
+        messages: [
+          { id: "msg-5a", body: "This input needs a placeholder and proper aria-label for accessibility.", author: "human", created_at: "2026-03-24T11:00:00Z" }
+        ],
+        created_at: "2026-03-24T11:00:00Z",
+        updated_at: "2026-03-24T11:00:00Z"
+      }
+    ];
+
+    // Intercept fetch calls to the feedback API and return mock data.
+    var _origFetch = window.fetch;
+    window.fetch = function(url, opts) {
+      var path = typeof url === "string" ? url : url.toString();
+
+      if (path.startsWith("/__veld__/feedback/api") || path.startsWith("/__veld__/api")) {
+        // GET /threads (list)
+        if (/\/threads\/?(\?|$)/.test(path) && (!opts || opts.method === "GET" || !opts.method)) {
+          return _mockJson(MOCK_THREADS);
+        }
+        // GET /threads/:id (single)
+        if (/\/threads\/[\w-]+$/.test(path) && (!opts || opts.method === "GET" || !opts.method)) {
+          var id = path.split("/").pop();
+          var found = MOCK_THREADS.find(function(t) { return t.id === id; });
+          return found ? _mockJson(found) : _mockJson(null, 404);
+        }
+        // POST /threads/:id/messages
+        if (/\/messages\/?$/.test(path) && opts && opts.method === "POST") {
+          var body = opts.body ? JSON.parse(opts.body) : {};
+          return _mockJson({
+            id: "msg-" + Date.now(),
+            body: body.body || "",
+            author: "human",
+            created_at: new Date().toISOString()
+          });
+        }
+        // POST /threads (create)
+        if (/\/threads\/?$/.test(path) && opts && opts.method === "POST") {
+          var newBody = opts.body ? JSON.parse(opts.body) : {};
+          var newThread = {
+            id: "thread-" + Date.now(),
+            scope: newBody.scope || { type: "page", page_url: location.href },
+            status: "open",
+            messages: [{ id: "msg-" + Date.now(), body: newBody.body || "", author: "human", created_at: new Date().toISOString() }],
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString()
+          };
+          MOCK_THREADS.push(newThread);
+          return _mockJson(newThread);
+        }
+        // POST resolve/reopen
+        if (/\/(resolve|reopen)\/?$/.test(path)) {
+          return _mockJson(null, 204);
+        }
+        // PUT seen
+        if (/\/seen\/?$/.test(path)) {
+          return _mockJson(null, 204);
+        }
+        // POST release
+        if (/\/release\/?$/.test(path)) {
+          return _mockJson(null, 204);
+        }
+        // GET /events
+        if (/\/events/.test(path)) {
+          return _mockJson([]);
+        }
+        // GET /session (listen status)
+        if (/\/session/.test(path)) {
+          return _mockJson({ listening: true });
+        }
+        // POST /client-logs
+        if (/\/client-logs/.test(path)) {
+          return _mockJson(null, 204);
+        }
+        // Fallback
+        return _mockJson(null, 204);
+      }
+
+      return _origFetch.apply(this, arguments);
+    };
+
+    function _mockJson(data, status) {
+      status = status || 200;
+      if (status === 204) {
+        return Promise.resolve(new Response(null, { status: 204 }));
+      }
+      return Promise.resolve(new Response(JSON.stringify(data), {
+        status: status,
+        headers: { "Content-Type": "application/json" }
+      }));
+    }
+  </script>
+</head>
+<body>
+
+  <!-- Sample page content for element selection and pins -->
+  <div class="page-content">
+    <nav class="sample-nav">
+      <a href="#" class="active">Dashboard</a>
+      <a href="#">Projects</a>
+      <a href="#">Settings</a>
+      <a href="#">Docs</a>
+    </nav>
+
+    <h1 id="hero-heading">Welcome to the Project</h1>
+    <p>This is a sample page for previewing all veld UI components. The overlay renders on top of this content &mdash; try selecting elements, creating threads, and using the drawing tools.</p>
+
+    <div style="margin: 24px 0;">
+      <button class="sample-btn" id="cta-primary">Get Started</button>
+      <button class="sample-btn secondary">Learn More</button>
+    </div>
+
+    <h2>Form Elements</h2>
+    <p>Interactive elements for testing element selection and pin placement.</p>
+    <input class="sample-input" id="sample-input" type="text" placeholder="Type something here...">
+    <input class="sample-input" type="email" placeholder="email@example.com">
+
+    <h2>Feature Cards</h2>
+    <p>A grid of cards to test pin positioning and element-scoped threads.</p>
+    <div class="card-grid">
+      <div class="card" id="card-auth">
+        <h3>Authentication <span class="badge">WIP</span></h3>
+        <p>OAuth integration with Google, GitHub, and Apple Sign-In for seamless login.</p>
+      </div>
+      <div class="card" id="card-db">
+        <h3>Database</h3>
+        <p>PostgreSQL with automatic migrations, connection pooling, and backup schedules.</p>
+      </div>
+      <div class="card" id="card-api">
+        <h3>API Layer</h3>
+        <p>RESTful endpoints with OpenAPI docs, rate limiting, and versioned routes.</p>
+      </div>
+      <div class="card" id="card-deploy">
+        <h3>Deployment</h3>
+        <p>One-click deploys to staging and production with rollback support.</p>
+      </div>
+      <div class="card" id="card-monitor">
+        <h3>Monitoring</h3>
+        <p>Real-time error tracking, performance metrics, and alerting via PagerDuty.</p>
+      </div>
+      <div class="card" id="card-search">
+        <h3>Search</h3>
+        <p>Full-text search powered by Meilisearch with typo tolerance and faceted filters.</p>
+      </div>
+    </div>
+
+    <h2>Long Content Section</h2>
+    <p>This section adds scroll depth so you can test pin repositioning on scroll and the scroll-to-thread navigation.</p>
+    <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.</p>
+    <p>Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.</p>
+    <p>Sed ut perspiciatis unde omnis iste natus error sit voluptatem accusantium doloremque laudantium, totam rem aperiam, eaque ipsa quae ab illo inventore veritatis et quasi architecto beatae vitae dicta sunt explicabo.</p>
+
+    <h2>Another Section</h2>
+    <p>Nemo enim ipsam voluptatem quia voluptas sit aspernatur aut odit aut fugit, sed quia consequuntur magni dolores eos qui ratione voluptatem sequi nesciunt.</p>
+    <p>Neque porro quisquam est, qui dolorem ipsum quia dolor sit amet, consectetur, adipisci velit, sed quia non numquam eius modi tempora incidunt ut labore et dolore magnam aliquam quaerat voluptatem.</p>
+  </div>
+
+  <!-- Load the built overlay bundle -->
+  <script src="../../assets/feedback-overlay.js"></script>
+
+  <!-- Mark draw overlay as already loaded so ensureDrawScript() short-circuits -->
+  <script>
+    (function waitForStore() {
+      var host = document.querySelector("veld-feedback");
+      if (host && window.__veld_draw) {
+        // The store exposes dispatch via the module's internal wiring.
+        // Poke drawLoaded into the state by re-dispatching after a tick.
+        // Since we can't access dispatch directly, intercept ensureDrawScript
+        // by ensuring __veld_draw exists before it's called — the function
+        // checks `getState().drawLoaded && window.__veld_draw` but we only
+        // need the second condition to pass on the *retry* after the script
+        // "loads". Instead, just make the script tag load succeed by pointing
+        // it at the real file.
+      }
+    })();
+
+    // Intercept script element creation to redirect /__veld__/ paths to local assets.
+    var _origCreateElement = document.createElement.bind(document);
+    document.createElement = function(tag) {
+      var el = _origCreateElement(tag);
+      if (tag.toLowerCase() === "script") {
+        var _origSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, "src");
+        var _realSet = _origSrcDesc && _origSrcDesc.set;
+        if (_realSet) {
+          Object.defineProperty(el, "src", {
+            set: function(val) {
+              if (typeof val === "string" && val.includes("/__veld__/feedback/draw.js")) {
+                val = "../../assets/draw-overlay.js";
+              }
+              _realSet.call(this, val);
+            },
+            get: function() {
+              return _origSrcDesc.get.call(this);
+            },
+            configurable: true
+          });
+        }
+      }
+      return el;
+    };
+  </script>
+
+
+</body>
+</html>

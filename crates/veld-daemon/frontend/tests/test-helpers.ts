@@ -86,6 +86,7 @@ export function setupMockRefs() {
   refs.toolBtnPageComment = document.createElement("button");
   refs.toolBtnComments = document.createElement("button");
   refs.toolBtnHide = document.createElement("button");
+  refs.toolbarOverflow = document.createElement("div");
   refs.listeningModule = document.createElement("div");
 
   // Set up light DOM refs

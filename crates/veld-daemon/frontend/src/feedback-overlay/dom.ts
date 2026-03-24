@@ -8,7 +8,7 @@ import { initTooltip, attachTooltip, tipHtml } from "./tooltip";
 import { toast } from "./toast";
 import { initBackdropEvents } from "./backdrop";
 import { initDrag } from "./fab";
-import { toggleToolbar, makeToolBtn } from "./toolbar";
+import { toggleToolbar, makeToolBtn, toggleOverflow } from "./toolbar";
 import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead } from "./panel";
 import { sendAllGood } from "./listening";
 
@@ -26,37 +26,48 @@ export function buildDOM(): void {
   refs.componentTraceEl = mkEl("div", "component-trace");
   appendGuarded(document.body, refs.componentTraceEl);
 
-  // Toolbar container (shadow DOM)
+  // Toolbar container (shadow DOM) — anchor for radial buttons
   refs.toolbarContainer = mkEl("div", "toolbar-container");
-  refs.toolbar = mkEl("div", "toolbar");
+  refs.toolbar = refs.toolbarContainer; // alias for compatibility
 
+  // --- Primary radial buttons ---
   refs.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair, tipHtml("Select element", [KEY_MOD, KEY_SHIFT, "F"]));
   refs.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot, tipHtml("Screenshot", [KEY_MOD, KEY_SHIFT, "S"]));
   refs.toolBtnDraw = makeToolBtn("draw", ICONS.draw, tipHtml("Draw", [KEY_MOD, KEY_SHIFT, "D"]));
   refs.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment, tipHtml("Page comment", [KEY_MOD, KEY_SHIFT, "P"]));
   refs.toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Threads", [KEY_MOD, KEY_SHIFT, "C"]));
 
-  refs.toolbar.appendChild(refs.toolBtnSelect);
-  refs.toolbar.appendChild(refs.toolBtnScreenshot);
-  refs.toolbar.appendChild(refs.toolBtnDraw);
-  refs.toolbar.appendChild(refs.toolBtnPageComment);
-  refs.toolbar.appendChild(refs.toolBtnComments);
+  // Listening dot — also a radial button, conditionally visible
+  refs.listeningModule = mkEl("button", "tool-btn listening-dot");
+  attachTooltip(refs.listeningModule, "All Good");
+  refs.listeningModule.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
 
-  // Listening section
-  refs.listeningModule = mkEl("div", "listening");
-  const listenSep = mkEl("div", "separator");
-  refs.listeningModule.appendChild(listenSep);
-  const listenDot = mkEl("span", "listening-dot");
-  listenDot.style.cursor = "pointer";
-  attachTooltip(listenDot, "All Good");
-  listenDot.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
-  refs.listeningModule.appendChild(listenDot);
-  refs.toolbar.appendChild(refs.listeningModule);
+  // Three-dot overflow toggle
+  refs.moreBtn = mkEl("button", "tool-btn");
+  refs.moreBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg>';
+  attachTooltip(refs.moreBtn, tipHtml("More options", []));
+  refs.moreBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    toggleOverflow();
+  });
 
-  // Separator
-  refs.toolbar.appendChild(mkEl("div", "separator"));
+  // Register primary buttons in display order
+  refs.radialButtons = [
+    refs.toolBtnSelect,
+    refs.toolBtnScreenshot,
+    refs.toolBtnDraw,
+    refs.toolBtnPageComment,
+    refs.toolBtnComments,
+    refs.listeningModule,
+    refs.moreBtn,
+  ];
 
-  // Shortcuts toggle
+  // Append all primary buttons to the container
+  refs.radialButtons.forEach(function (btn) {
+    refs.toolbarContainer.appendChild(btn);
+  });
+
+  // --- Overflow (secondary) radial buttons ---
   const toolBtnShortcuts = mkEl("button", "tool-btn");
   toolBtnShortcuts.innerHTML = ICONS.keyboard;
   attachTooltip(toolBtnShortcuts, tipHtml("Disable shortcuts", []));
@@ -66,9 +77,7 @@ export function buildDOM(): void {
     toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", getState().shortcutsDisabled);
     toast(getState().shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
   });
-  refs.toolbar.appendChild(toolBtnShortcuts);
 
-  // Theme toggle
   const THEME_ICONS: Record<ThemeMode, string> = {
     auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
     dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>',
@@ -88,9 +97,7 @@ export function buildDOM(): void {
     document.documentElement.setAttribute("data-veld-theme", getState().theme === "auto" ? "" : getState().theme);
     toast("Theme: " + THEME_LABELS[getState().theme]);
   });
-  refs.toolbar.appendChild(toolBtnTheme);
 
-  // Dashboard link
   const toolBtnDashboard = mkEl("button", "tool-btn");
   toolBtnDashboard.innerHTML = ICONS.dashboard;
   attachTooltip(toolBtnDashboard, tipHtml("Management UI", []));
@@ -98,17 +105,20 @@ export function buildDOM(): void {
     e.stopPropagation();
     window.open("https://veld.localhost:" + window.location.port, "_blank");
   });
-  refs.toolbar.appendChild(toolBtnDashboard);
 
-  // Hide
   refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
-  refs.toolbar.appendChild(refs.toolBtnHide);
+
+  refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, refs.toolBtnHide];
+  refs.overflowButtons.forEach(function (btn) {
+    refs.toolbarContainer.appendChild(btn);
+  });
+
+  // Keep toolbarOverflow ref for test compat (points to container, overflow state tracked in store)
+  refs.toolbarOverflow = refs.toolbarContainer;
 
   // Screenshot rect (light DOM)
   refs.screenshotRect = mkEl("div", "screenshot-rect");
   appendGuarded(document.body, refs.screenshotRect);
-
-  refs.toolbarContainer.appendChild(refs.toolbar);
 
   // FAB
   refs.fab = mkEl("button", "fab");
@@ -148,7 +158,7 @@ export function buildDOM(): void {
 
   refs.markReadBtn = mkEl("button", "panel-mark-read");
   refs.markReadBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17"/></svg>';
-  refs.markReadBtn.title = "Mark all as read";
+  attachTooltip(refs.markReadBtn, "Mark all as read");
   refs.markReadBtn.style.display = "none";
   refs.markReadBtn.addEventListener("click", function (e) { e.stopPropagation(); markAllRead(); });
   panelHead.appendChild(refs.markReadBtn);

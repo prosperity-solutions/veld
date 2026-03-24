@@ -58,6 +58,11 @@ function updateSegmentedControl(): void {
 
 export function updateMarkReadBtn(): void {
   if (!refs.markReadBtn) return;
+  // Hide in thread detail view — only show in list view
+  if (getState().expandedThreadId) {
+    refs.markReadBtn.style.display = "none";
+    return;
+  }
   const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t, getState().lastSeenAt); });
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
@@ -105,15 +110,16 @@ export function renderPanel(): void {
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
 
-function makeCopyRow(label: string, value: string, cls: string): HTMLElement {
+function makeCopyRow(label: string, displayValue: string, cls: string, copyValue?: string): HTMLElement {
   const row = mkEl("div", cls);
-  row.appendChild(document.createTextNode(label + value));
+  row.appendChild(document.createTextNode(label + displayValue));
   const icon = mkEl("span", "panel-detail-copy-icon");
   icon.innerHTML = COPY_SVG;
   row.appendChild(icon);
+  const valueToCopy = copyValue !== undefined ? copyValue : displayValue;
   row.addEventListener("click", function (e) {
     e.stopPropagation();
-    navigator.clipboard.writeText(value).then(function () {
+    navigator.clipboard.writeText(valueToCopy).then(function () {
       icon.innerHTML = ICONS.check;
       setTimeout(function () { icon.innerHTML = COPY_SVG; }, 1500);
     });
@@ -123,7 +129,7 @@ function makeCopyRow(label: string, value: string, cls: string): HTMLElement {
 
 function renderThreadDetail(thread: Thread): void {
   const header = mkEl("div", "panel-detail-header");
-  header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id"));
+  header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id", thread.id));
 
   const pageUrl = getThreadPageUrl(thread);
   let titleText: string;
@@ -159,23 +165,6 @@ function renderThreadDetail(thread: Thread): void {
   }
 
   refs.panelBody.appendChild(header);
-
-  if (thread.claimed_by) {
-    const claimRow = mkEl("div", "thread-detail-claim");
-    claimRow.appendChild(mkEl("span", "thread-detail-claim-text", "\u2699 Being worked on by " + thread.claimed_by));
-    const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
-    releaseBtn.addEventListener("click", function () {
-      api("POST", "/threads/" + thread.id + "/release").then(function () {
-        thread.claimed_by = null;
-        thread.claimed_at = null;
-        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        renderPanel();
-        toast("Thread released");
-      });
-    });
-    claimRow.appendChild(releaseBtn);
-    refs.panelBody.appendChild(claimRow);
-  }
 
   if (thread.status === "resolved") {
     const msgList = mkEl("div", "thread-messages-list");
@@ -280,7 +269,14 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   }
 
   if (thread.claimed_by) {
-    const claimBadge = mkEl("div", "thread-card-claim-badge", "\u2699 " + thread.claimed_by);
+    const claimBadge = mkEl("div", "thread-card-claim-badge");
+    const badgeIcon = mkEl("span", "thread-card-claim-icon");
+    badgeIcon.innerHTML = ICONS.robot;
+    claimBadge.appendChild(badgeIcon);
+    claimBadge.appendChild(document.createTextNode(thread.claimed_by));
+    if (thread.claimed_at) {
+      claimBadge.appendChild(mkEl("span", "thread-card-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
+    }
     card.appendChild(claimBadge);
     card.classList.add(PREFIX + "thread-card-claimed");
   }
@@ -289,11 +285,37 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   return card;
 }
 
+function makeClaimRow(thread: Thread): HTMLElement {
+  const claimRow = mkEl("div", "message message-claim");
+  const claimIcon = mkEl("span", "message-author-icon");
+  claimIcon.innerHTML = ICONS.robot;
+  claimRow.appendChild(claimIcon);
+  const claimBody = mkEl("div", "message-body");
+  const claimText = mkEl("div", "message-claim-text", "Being worked on by " + thread.claimed_by);
+  claimBody.appendChild(claimText);
+  if (thread.claimed_at) {
+    claimBody.appendChild(mkEl("div", "message-meta", timeAgo(thread.claimed_at)));
+  }
+  claimRow.appendChild(claimBody);
+  return claimRow;
+}
+
 function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
   const msgCount = thread.messages.length;
+
+  // If claimed, find where the claim event fits chronologically.
+  const claimTime = thread.claimed_by && thread.claimed_at ? new Date(thread.claimed_at).getTime() : null;
+  let claimInserted = false;
+
   thread.messages.forEach(function (msg: Message, msgIndex: number) {
+    // Insert claim row before the first message that came after the claim.
+    if (claimTime && !claimInserted && new Date(msg.created_at).getTime() > claimTime) {
+      msgList.appendChild(makeClaimRow(thread));
+      claimInserted = true;
+    }
+
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -318,6 +340,12 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     msgEl.appendChild(body);
     msgList.appendChild(msgEl);
   });
+
+  // If claim happened after all messages, append at the end.
+  if (claimTime && !claimInserted && thread.claimed_by) {
+    msgList.appendChild(makeClaimRow(thread));
+  }
+
   container.appendChild(msgList);
 
   markThreadSeen(thread.id);
@@ -330,6 +358,22 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");
+
+  if (thread.claimed_by) {
+    const releaseBtn = mkEl("button", "btn btn-sm btn-release");
+    releaseBtn.innerHTML = "Release " + ICONS.robot;
+    releaseBtn.addEventListener("click", function () {
+      api("POST", "/threads/" + thread.id + "/release").then(function () {
+        thread.claimed_by = null;
+        thread.claimed_at = null;
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+        renderPanel();
+        toast("Thread released");
+      });
+    });
+    inputActions.appendChild(releaseBtn);
+  }
+
   const resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
   resolveBtn.addEventListener("click", function () {
     const text = textarea.value.trim();

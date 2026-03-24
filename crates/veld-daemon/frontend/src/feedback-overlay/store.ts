@@ -18,6 +18,7 @@ export interface Store {
   hoveredEl: Element | null;
   lockedEl: Element | null;
   toolbarOpen: boolean;
+  overflowOpen: boolean;
   hidden: boolean;
   shortcutsDisabled: boolean;
   theme: ThemeMode;
@@ -44,6 +45,7 @@ export interface Store {
 export type Action =
   | { type: "SET_MODE"; mode: UIMode }
   | { type: "SET_TOOLBAR_OPEN"; open: boolean }
+  | { type: "SET_OVERFLOW_OPEN"; open: boolean }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SET_PANEL_SIDE"; side: "left" | "right" }
   | { type: "SET_PANEL_TAB"; tab: "active" | "resolved" }
@@ -79,6 +81,8 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, activeMode: action.mode };
     case "SET_TOOLBAR_OPEN":
       return { ...s, toolbarOpen: action.open };
+    case "SET_OVERFLOW_OPEN":
+      return { ...s, overflowOpen: action.open };
     case "SET_PANEL_OPEN":
       return { ...s, panelOpen: action.open };
     case "SET_PANEL_SIDE":
@@ -160,6 +164,7 @@ function createInitial(): Store {
     hoveredEl: null,
     lockedEl: null,
     toolbarOpen: false,
+    overflowOpen: false,
     hidden: false,
     shortcutsDisabled: false,
     theme: "auto",

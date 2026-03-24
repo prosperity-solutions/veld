@@ -1,7 +1,8 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import { PREFIX, FAB_MARGIN } from "./constants";
-import { hideTooltip } from "./tooltip";
+import { PREFIX, FAB_MARGIN, FAB_TOOLBAR_MARGIN } from "./constants";
+import { suppressTooltip } from "./tooltip";
+import { positionRadialButtons } from "./toolbar";
 
 export function initDrag(): void {
   let startX = 0;
@@ -27,7 +28,7 @@ export function initDrag(): void {
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
     if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
-    if (!moved) hideTooltip();
+    if (!moved) suppressTooltip(true);
     moved = true;
     let nx = origX + dx;
     let ny = origY + dy;
@@ -40,6 +41,7 @@ export function initDrag(): void {
       Math.min(window.innerHeight - 20 - FAB_MARGIN, ny),
     );
     positionFab(nx, ny, false);
+    positionRadialButtons();
   });
 
   document.addEventListener("mouseup", function () {
@@ -49,6 +51,7 @@ export function initDrag(): void {
       dispatch({ type: "SET_FAB_DRAGGED", dragged: true });
       setTimeout(function () {
         dispatch({ type: "SET_FAB_DRAGGED", dragged: false });
+        suppressTooltip(false);
       }, 300);
       saveFabPos(getState().fabCX, getState().fabCY);
     }
@@ -57,20 +60,9 @@ export function initDrag(): void {
 
 export function positionFab(cx: number, cy: number, animate: boolean): void {
   dispatch({ type: "SET_FAB_POS", cx, cy });
-  const onRight = cx > window.innerWidth / 2;
   refs.toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
   refs.toolbarContainer.style.top = cy - 20 + "px";
-
-  if (onRight) {
-    refs.toolbarContainer.style.left = "auto";
-    refs.toolbarContainer.style.right = window.innerWidth - cx - 20 + "px";
-  } else {
-    refs.toolbarContainer.style.right = "auto";
-    refs.toolbarContainer.style.left = cx - 20 + "px";
-  }
-
-  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-right", onRight);
-  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-left", !onRight);
+  refs.toolbarContainer.style.left = cx - 20 + "px";
 }
 
 export function saveFabPos(x: number, y: number): void {
@@ -120,6 +112,27 @@ export function clampFabToViewport(): void {
   }
   if (clamped) {
     positionFab(cx, cy, false);
+    saveFabPos(cx, cy);
+  }
+}
+
+/**
+ * If the FAB is too close to an edge for the toolbar arc,
+ * smoothly animate it inward to the toolbar-safe margin.
+ */
+export function nudgeFabForToolbar(): void {
+  let cx = getState().fabCX;
+  let cy = getState().fabCY;
+  let nudged = false;
+  const maxX = window.innerWidth - 20 - FAB_TOOLBAR_MARGIN;
+  const maxY = window.innerHeight - 20 - FAB_TOOLBAR_MARGIN;
+  const minXY = 20 + FAB_TOOLBAR_MARGIN;
+  if (cx > maxX) { cx = maxX; nudged = true; }
+  if (cx < minXY) { cx = minXY; nudged = true; }
+  if (cy > maxY) { cy = maxY; nudged = true; }
+  if (cy < minXY) { cy = minXY; nudged = true; }
+  if (nudged) {
+    positionFab(cx, cy, true); // animate: true
     saveFabPos(cx, cy);
   }
 }
