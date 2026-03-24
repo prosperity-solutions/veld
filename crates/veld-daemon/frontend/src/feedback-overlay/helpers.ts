@@ -146,9 +146,9 @@ export function findThread(
  * re-inserts it if removed (e.g. by React hydration or HMR). Same technique
  * Next.js uses for its own dev overlay (nextjs-portal).
  */
-export function appendGuarded(parent: Node, el: Node): void {
+export function appendGuarded(parent: Node, el: Node): () => void {
   parent.appendChild(el);
-  new MutationObserver((mutations) => {
+  const obs = new MutationObserver((mutations) => {
     for (const m of mutations) {
       if (m.type !== "childList") continue;
       for (const node of m.removedNodes) {
@@ -158,7 +158,9 @@ export function appendGuarded(parent: Node, el: Node): void {
         }
       }
     }
-  }).observe(parent, { childList: true });
+  });
+  obs.observe(parent, { childList: true });
+  return () => obs.disconnect();
 }
 
 export function formatTrace(trace: string[] | null): string | null {

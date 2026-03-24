@@ -1,10 +1,27 @@
 ---
 name: veld
 description: >
-  Veld local development environment orchestrator. Use when the user asks to
-  start/stop/restart environments, view logs or status, configure veld.json
-  (add nodes, services, dependencies, presets, health checks, URL templates),
-  get human feedback on UI changes, debug environment issues, or run any veld command.
+  Orchestrate local dev environments with veld. Use this skill when the user wants to
+  start, stop, or restart services; check run status or logs; configure veld.json
+  (nodes, services, dependencies, presets, health checks, ports, URL templates); or
+  debug environment issues like port conflicts or health-check failures. Also use when
+  the user wants to show their UI to a human for review, get visual feedback on
+  changes, listen for comments, run a feedback loop, or coordinate multiple agents
+  working on feedback threads — even if they say "let me check," "show the user,"
+  "wait for feedback," or "let them review it." Covers any `veld` CLI command.
+triggers:
+  - veld
+  - veld.json
+  - start the environment
+  - show the user
+  - get feedback
+  - listen for comments
+  - wait for feedback
+  - let them review
+  - preview the UI
+  - feedback loop
+  - "*.localhost"
+compatibility: Requires veld v6.3.0+
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
@@ -17,14 +34,12 @@ Veld orchestrates local dev environments. It starts services from `veld.json`, w
 
 ## Version Check
 
-This skill requires veld **v6.3.0**.
-
 Installed:
 !`veld -V 2>&1`
 
 If the output above shows "command not found" or "No such file", veld is not installed. Guide the user through installation — see [reference/install.md](reference/install.md). Do NOT attempt to run any `veld` commands until it is installed.
 
-If the installed version is older than the required version above, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
+If the installed version is older than what `compatibility` requires, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
 
 ## Live State
 
@@ -75,7 +90,7 @@ Quick reference for the two node types:
 
 For the full feedback workflow, events, thread fields, interactive controls, and framework binding templates, see [reference/feedback.md](reference/feedback.md).
 
-Core pattern: listen → fix → answer → listen again with `--after <seq>` → repeat until `session_ended`.
+Core pattern: listen (returns all pending feedback at once) → fix → release with status comment → listen again with `--after <last_seq>` → repeat until `session_ended`. Threads are auto-claimed so multiple agents can work in parallel without conflicts.
 
 ## Gotchas
 

@@ -11,6 +11,8 @@ import { PREFIX, ICONS } from "./constants";
 import { deps } from "../shared/registry";
 import type { Thread } from "./types";
 
+const guards = new Map<string, () => void>();
+
 export function addPin(thread: Thread): void {
   if (thread.status === "resolved") return;
   const pageUrl = getThreadPageUrl(thread);
@@ -49,12 +51,15 @@ export function addPin(thread: Thread): void {
     deps().openThreadInPanel(thread.id);
   });
 
-  appendGuarded(document.body, pin);
+  const disconnect = appendGuarded(document.body, pin);
+  guards.set(thread.id, disconnect);
   dispatch({ type: "SET_PIN", threadId: thread.id, el: pin });
 }
 
 export function removePin(threadId: string): void {
   if (getState().pins[threadId]) {
+    const disconnect = guards.get(threadId);
+    if (disconnect) { disconnect(); guards.delete(threadId); }
     getState().pins[threadId].remove();
     dispatch({ type: "REMOVE_PIN", threadId });
   }

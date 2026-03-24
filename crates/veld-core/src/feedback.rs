@@ -90,6 +90,12 @@ pub struct Thread {
     /// The seq of the last message the human has viewed in this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_human_seen_seq: Option<u64>,
+    /// Which agent has claimed this thread (agent name/id), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_by: Option<String>,
+    /// When the claim was created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claimed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -127,6 +133,8 @@ pub enum EventType {
     AgentThreadCreated { thread: Thread },
     AgentListening,
     AgentStopped,
+    ThreadClaimed { thread_id: String, agent_id: String },
+    ThreadReleased { thread_id: String, agent_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -302,6 +310,72 @@ impl FeedbackStore {
             thread.last_human_seen_seq = Some(seq);
         })?;
         Ok(())
+    }
+
+    /// Claim a thread atomically. Succeeds if unclaimed or already claimed by the same agent.
+    /// Returns Err if already claimed by a different agent.
+    pub fn claim_thread(&self, thread_id: &str, agent_id: &str) -> anyhow::Result<Thread> {
+        let aid = agent_id.to_owned();
+        self.modify_thread(thread_id, move |thread| {
+            if let Some(ref existing) = thread.claimed_by {
+                if existing != &aid {
+                    // Will be caught after modify_thread returns — see below.
+                    return;
+                }
+            }
+            thread.claimed_by = Some(aid);
+            thread.claimed_at = Some(Utc::now());
+        })
+        .and_then(|thread| {
+            // Check if the claim actually took effect.
+            if thread.claimed_by.as_deref() == Some(agent_id) {
+                Ok(thread)
+            } else {
+                anyhow::bail!(
+                    "thread {} already claimed by {}",
+                    thread_id,
+                    thread.claimed_by.as_deref().unwrap_or("unknown")
+                )
+            }
+        })
+    }
+
+    /// Release a claim. If `agent_id` is Some, only releases if it matches the claimer.
+    /// If `agent_id` is None, force-releases (for UI button use).
+    pub fn release_thread(
+        &self,
+        thread_id: &str,
+        agent_id: Option<&str>,
+    ) -> anyhow::Result<Thread> {
+        let aid = agent_id.map(|s| s.to_owned());
+        self.modify_thread(thread_id, move |thread| {
+            if let Some(ref required) = aid {
+                if thread.claimed_by.as_deref() != Some(required.as_str()) {
+                    return; // Don't release — wrong agent.
+                }
+            }
+            thread.claimed_by = None;
+            thread.claimed_at = None;
+        })
+        .and_then(|thread| {
+            if let Some(required) = agent_id {
+                // If the caller specified an agent_id, verify the release happened.
+                if thread.claimed_by.is_some() {
+                    anyhow::bail!(
+                        "thread {} is claimed by {}, not {}",
+                        thread_id,
+                        thread.claimed_by.as_deref().unwrap_or("unknown"),
+                        required
+                    );
+                }
+            }
+            Ok(thread)
+        })
+    }
+
+    /// Check if a thread is currently claimed.
+    pub fn is_claimed(thread: &Thread) -> bool {
+        thread.claimed_by.is_some()
     }
 
     // -- Event log ------------------------------------------------------------
@@ -509,6 +583,8 @@ pub fn new_thread(
         status: ThreadStatus::Open,
         messages: vec![initial_message],
         last_human_seen_seq: None,
+        claimed_by: None,
+        claimed_at: None,
         viewport_width,
         viewport_height,
         created_at: now,
@@ -888,5 +964,139 @@ mod tests {
         // Should be 1..=100 with no gaps.
         assert_eq!(all_seqs[0], 1);
         assert_eq!(*all_seqs.last().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_claim_thread() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Needs fixing");
+        store.save_thread(&t).unwrap();
+
+        let claimed = store.claim_thread(&t.id, "agent-1").unwrap();
+        assert_eq!(claimed.claimed_by.as_deref(), Some("agent-1"));
+        assert!(claimed.claimed_at.is_some());
+
+        // Same agent can re-claim (idempotent).
+        let reclaimed = store.claim_thread(&t.id, "agent-1").unwrap();
+        assert_eq!(reclaimed.claimed_by.as_deref(), Some("agent-1"));
+    }
+
+    #[test]
+    fn test_claim_already_claimed() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Contested");
+        store.save_thread(&t).unwrap();
+
+        store.claim_thread(&t.id, "agent-1").unwrap();
+
+        // Different agent cannot claim.
+        let err = store.claim_thread(&t.id, "agent-2").unwrap_err();
+        assert!(err.to_string().contains("already claimed by agent-1"));
+    }
+
+    #[test]
+    fn test_claim_no_expiry() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Long task");
+        store.save_thread(&t).unwrap();
+
+        store.claim_thread(&t.id, "agent-1").unwrap();
+
+        // Claim persists — another agent still cannot claim.
+        let err = store.claim_thread(&t.id, "agent-2").unwrap_err();
+        assert!(err.to_string().contains("already claimed"));
+    }
+
+    #[test]
+    fn test_release_thread() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Will release");
+        store.save_thread(&t).unwrap();
+
+        store.claim_thread(&t.id, "agent-1").unwrap();
+
+        let released = store.release_thread(&t.id, Some("agent-1")).unwrap();
+        assert!(released.claimed_by.is_none());
+        assert!(released.claimed_at.is_none());
+
+        // Now another agent can claim.
+        let claimed = store.claim_thread(&t.id, "agent-2").unwrap();
+        assert_eq!(claimed.claimed_by.as_deref(), Some("agent-2"));
+    }
+
+    #[test]
+    fn test_release_wrong_agent() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Guarded");
+        store.save_thread(&t).unwrap();
+
+        store.claim_thread(&t.id, "agent-1").unwrap();
+
+        let err = store.release_thread(&t.id, Some("agent-2")).unwrap_err();
+        assert!(err.to_string().contains("claimed by agent-1"));
+    }
+
+    #[test]
+    fn test_force_release() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Force release");
+        store.save_thread(&t).unwrap();
+
+        store.claim_thread(&t.id, "agent-1").unwrap();
+
+        // Force release (no agent_id check) — for UI button.
+        let released = store.release_thread(&t.id, None).unwrap();
+        assert!(released.claimed_by.is_none());
+    }
+
+    #[test]
+    fn test_is_claimed() {
+        let t = make_thread("Check claimed");
+        assert!(!FeedbackStore::is_claimed(&t));
+
+        let mut t2 = t;
+        t2.claimed_by = Some("agent-1".into());
+        t2.claimed_at = Some(Utc::now());
+        assert!(FeedbackStore::is_claimed(&t2));
+    }
+
+    #[test]
+    fn test_claim_event_types_serde() {
+        let event = Event {
+            seq: 1,
+            event_type: EventType::ThreadClaimed {
+                thread_id: "t_abc".into(),
+                agent_id: "agent-1".into(),
+            },
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"thread_claimed"#));
+        assert!(json.contains(r#""agent_id":"agent-1"#));
+        let _: Event = serde_json::from_str(&json).unwrap();
+
+        let event = Event {
+            seq: 2,
+            event_type: EventType::ThreadReleased {
+                thread_id: "t_abc".into(),
+                agent_id: "agent-1".into(),
+            },
+            timestamp: Utc::now(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""event":"thread_released"#));
+        let _: Event = serde_json::from_str(&json).unwrap();
     }
 }

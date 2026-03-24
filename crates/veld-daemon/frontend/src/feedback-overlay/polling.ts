@@ -57,6 +57,28 @@ function handleEvent(event: FeedbackEvent): void {
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
       break;
+    case "thread_claimed":
+      if (event.thread_id) {
+        const clThread = findThread(getState().threads, event.thread_id);
+        if (clThread) {
+          clThread.claimed_by = event.agent_id || null;
+          clThread.claimed_at = new Date().toISOString();
+          dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+          if (getState().panelOpen) deps().renderPanel();
+        }
+      }
+      break;
+    case "thread_released":
+      if (event.thread_id) {
+        const rlThread = findThread(getState().threads, event.thread_id);
+        if (rlThread) {
+          rlThread.claimed_by = null;
+          rlThread.claimed_at = null;
+          dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+          if (getState().panelOpen) deps().renderPanel();
+        }
+      }
+      break;
     case "thread_created":
       if (event.thread && !findThread(getState().threads, event.thread.id)) {
         dispatch({ type: "ADD_THREAD", thread: event.thread });

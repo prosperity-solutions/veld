@@ -29,6 +29,8 @@ export interface Thread {
   component_trace?: string[] | null;
   viewport_width?: number;
   viewport_height?: number;
+  claimed_by?: string | null;
+  claimed_at?: string | null;
 }
 
 export interface FeedbackEvent {
@@ -37,6 +39,7 @@ export interface FeedbackEvent {
   thread_id?: string;
   thread?: Thread;
   message?: Message;
+  agent_id?: string;
   data?: unknown;
 }
 

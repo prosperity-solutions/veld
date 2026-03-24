@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dist, pathLength, computeBBox } from "../src/draw-overlay/geometry";
+import { dist, pathLength, computeBBox, constrainToAxis } from "../src/draw-overlay/geometry";
 
 const p = (x: number, y: number) => ({ x, y, pressure: 0.5 });
 
@@ -52,5 +52,50 @@ describe("computeBBox", () => {
     expect(bbox.y).toBe(10);
     expect(bbox.w).toBe(0);
     expect(bbox.h).toBe(0);
+  });
+});
+
+describe("constrainToAxis", () => {
+  it("snaps to horizontal when dx > dy", () => {
+    const result = constrainToAxis(p(100, 100), p(250, 110));
+    expect(result.x).toBe(250);
+    expect(result.y).toBe(100);
+  });
+
+  it("snaps to vertical when dy > dx", () => {
+    const result = constrainToAxis(p(100, 100), p(110, 250));
+    expect(result.x).toBe(100);
+    expect(result.y).toBe(250);
+  });
+
+  it("snaps to horizontal when dx == dy (tie goes horizontal)", () => {
+    const result = constrainToAxis(p(0, 0), p(50, 50));
+    expect(result.x).toBe(50);
+    expect(result.y).toBe(0);
+  });
+
+  it("works with negative directions (left)", () => {
+    const result = constrainToAxis(p(200, 100), p(50, 110));
+    expect(result.x).toBe(50);
+    expect(result.y).toBe(100);
+  });
+
+  it("works with negative directions (up)", () => {
+    const result = constrainToAxis(p(100, 200), p(110, 50));
+    expect(result.x).toBe(100);
+    expect(result.y).toBe(50);
+  });
+
+  it("preserves pressure from cursor", () => {
+    const anchor = { x: 0, y: 0, pressure: 0.5 };
+    const cursor = { x: 100, y: 10, pressure: 0.8 };
+    const result = constrainToAxis(anchor, cursor);
+    expect(result.pressure).toBe(0.8);
+  });
+
+  it("returns anchor position when cursor is at same point", () => {
+    const result = constrainToAxis(p(100, 100), p(100, 100));
+    expect(result.x).toBe(100);
+    expect(result.y).toBe(100);
   });
 });

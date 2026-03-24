@@ -16,7 +16,7 @@ import type {
   DrawActivateOptions,
 } from "./types";
 import { mkEl, mkBtn, PREFIX } from "../shared/dom";
-import { dist, pathLength, computeBBox } from "./geometry";
+import { dist, pathLength, computeBBox, constrainToAxis } from "./geometry";
 import { buildSnapshotCanvas } from "./color";
 import { recognizeShape } from "./shapes";
 import { createPixelatedRegion } from "./blur";
@@ -448,7 +448,17 @@ function activate(
       return;
     }
     if (!getState().drawing || !getState().currentStroke) return;
-    dispatch({ type: "APPEND_POINT", point: getPos(e) });
+    const pos = getPos(e);
+    if (e.shiftKey) {
+      // Shift held: constrain to a straight horizontal or vertical line from stroke origin.
+      const stroke = getState().currentStroke!;
+      const anchor = stroke.points[0];
+      const constrained = constrainToAxis(anchor, pos);
+      // Replace stroke with clean 2-point line (anchor → constrained endpoint).
+      dispatch({ type: "SET_CURRENT_STROKE", stroke: { ...stroke, points: [anchor, constrained] } });
+    } else {
+      dispatch({ type: "APPEND_POINT", point: pos });
+    }
     scheduleRedraw();
   }
 
