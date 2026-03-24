@@ -2,6 +2,7 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { PREFIX, FAB_MARGIN } from "./constants";
 import { suppressTooltip } from "./tooltip";
+import { positionRadialButtons } from "./toolbar";
 
 export function initDrag(): void {
   let startX = 0;
@@ -40,6 +41,7 @@ export function initDrag(): void {
       Math.min(window.innerHeight - 20 - FAB_MARGIN, ny),
     );
     positionFab(nx, ny, false);
+    positionRadialButtons();
   });
 
   document.addEventListener("mouseup", function () {
@@ -58,20 +60,9 @@ export function initDrag(): void {
 
 export function positionFab(cx: number, cy: number, animate: boolean): void {
   dispatch({ type: "SET_FAB_POS", cx, cy });
-  const onRight = cx > window.innerWidth / 2;
   refs.toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
   refs.toolbarContainer.style.top = cy - 20 + "px";
-
-  if (onRight) {
-    refs.toolbarContainer.style.left = "auto";
-    refs.toolbarContainer.style.right = window.innerWidth - cx - 20 + "px";
-  } else {
-    refs.toolbarContainer.style.right = "auto";
-    refs.toolbarContainer.style.left = cx - 20 + "px";
-  }
-
-  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-right", onRight);
-  refs.toolbarContainer.classList.toggle(PREFIX + "toolbar-left", !onRight);
+  refs.toolbarContainer.style.left = cx - 20 + "px";
 }
 
 export function saveFabPos(x: number, y: number): void {

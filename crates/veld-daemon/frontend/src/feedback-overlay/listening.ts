@@ -3,14 +3,14 @@ import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
+import { positionRadialButtons } from "./toolbar";
 
 export function updateListeningModule(): void {
-  if (refs.listeningModule) {
-    refs.listeningModule.style.display = getState().agentListening ? "flex" : "none";
-  }
   if (refs.fab) {
     refs.fab.classList.toggle(PREFIX + "fab-pulse", getState().agentListening);
   }
+  // Recompute radial layout since listening dot visibility changed
+  positionRadialButtons();
 }
 
 export function sendAllGood(): void {

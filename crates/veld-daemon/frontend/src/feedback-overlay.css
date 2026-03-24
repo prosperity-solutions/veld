@@ -102,19 +102,13 @@
   opacity: 1; transform: translateX(-50%) translateY(0);
 }
 
-/* Toolbar container — fixed, draggable */
+/* Toolbar container — fixed, draggable, anchor for radial buttons */
 .veld-feedback-toolbar-container {
   position: fixed;
-  display: flex; align-items: center;
   z-index: var(--vf-z);
   user-select: none;
-}
-
-.veld-feedback-toolbar-container.veld-feedback-toolbar-right {
-  flex-direction: row;
-}
-.veld-feedback-toolbar-container.veld-feedback-toolbar-left {
-  flex-direction: row-reverse;
+  /* FAB is centered at (20px, 20px) within this 40×40 container */
+  width: 40px; height: 40px;
 }
 
 /* FAB */
@@ -153,36 +147,22 @@
 }
 .veld-feedback-badge-hidden { display: none; }
 
-/* Toolbar pill */
-.veld-feedback-toolbar {
-  display: flex; align-items: center; gap: 2px;
-  background: var(--vf-bg); border: 1px solid var(--vf-border);
-  border-radius: 24px; padding: 4px;
-  box-shadow: var(--vf-shadow);
-  overflow: hidden;
-  max-width: 0; opacity: 0;
-  transition: max-width .2s ease, opacity .2s ease, padding .2s ease;
-}
-.veld-feedback-toolbar-open {
-  max-width: 700px; opacity: 1; padding: 4px 6px;
-}
-
-/* Gap between toolbar and FAB */
-.veld-feedback-toolbar-right .veld-feedback-toolbar {
-  margin-right: 8px;
-}
-.veld-feedback-toolbar-left .veld-feedback-toolbar {
-  margin-left: 8px;
-}
-
-/* Toolbar button */
+/* Radial toolbar button — positioned absolutely around FAB */
 .veld-feedback-tool-btn {
-  width: 30px; height: 30px; border-radius: 50%; border: none;
-  cursor: pointer; background: transparent;
+  position: absolute;
+  width: 30px; height: 30px; border-radius: 50%;
+  border: 1px solid var(--vf-border);
+  cursor: pointer; background: var(--vf-bg);
   color: var(--vf-text-muted); display: flex;
   align-items: center; justify-content: center;
-  transition: background .15s, color .15s;
-  flex-shrink: 0;
+  box-shadow: var(--vf-shadow);
+  /* Centered on FAB: top/left 50% minus half button size */
+  top: 5px; left: 5px; /* (40 - 30) / 2 = 5 */
+  /* Start collapsed at FAB center */
+  transform: translate(0, 0) scale(0);
+  opacity: 0; pointer-events: none;
+  transition: transform .2s ease, opacity .15s ease, background .15s, color .15s;
+  z-index: 1;
 }
 .veld-feedback-tool-btn:hover {
   background: var(--vf-bg-card); color: var(--vf-text);
@@ -193,8 +173,9 @@
 .veld-feedback-tool-btn svg {
   width: 15px; height: 15px;
 }
-.veld-feedback-tool-btn {
-  position: relative;
+.veld-feedback-tool-btn.veld-feedback-radial-open {
+  opacity: 1; pointer-events: auto;
+  /* transform (translate) set by JS */
 }
 .veld-feedback-tool-badge {
   position: absolute;
@@ -207,21 +188,6 @@
   text-align: center;
   padding: 0 3px;
   pointer-events: none;
-}
-
-/* Toolbar overflow group — collapsed by default */
-.veld-feedback-toolbar-overflow {
-  display: none; align-items: center; gap: 2px;
-}
-.veld-feedback-toolbar-overflow-open {
-  display: flex;
-}
-
-/* Separator in toolbar */
-.veld-feedback-separator {
-  width: 1px; height: 20px;
-  background: var(--vf-border); margin: 0 4px;
-  flex-shrink: 0;
 }
 
 /* Feedback mode backdrop */
@@ -611,16 +577,9 @@
   display: flex; gap: 6px; justify-content: flex-end; margin-top: 6px;
 }
 
-/* --- Listening module (in toolbar) --- */
-.veld-feedback-listening {
-  display: none; /* toggled to flex via JS */
-  align-items: center; gap: 2px;
-}
+/* --- Listening dot (radial button) --- */
 .veld-feedback-listening-dot {
-  display: flex; align-items: center; justify-content: center;
-  width: 30px; height: 30px; border-radius: 50%;
-  background: transparent; flex-shrink: 0;
-  cursor: pointer;
+  /* Inherits radial positioning from .tool-btn via JS */
 }
 .veld-feedback-listening-dot::after {
   content: ""; display: block;

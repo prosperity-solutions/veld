@@ -16,6 +16,12 @@ export interface DOMRefs {
   toolBtnHide: HTMLElement;
   toolbarOverflow: HTMLElement;
   listeningModule: HTMLElement;
+  /** Primary radial buttons in display order. */
+  radialButtons: HTMLElement[];
+  /** Secondary (overflow) radial buttons in display order. */
+  overflowButtons: HTMLElement[];
+  /** The three-dot overflow toggle button. */
+  moreBtn: HTMLElement;
 
   // Light DOM
   overlay: HTMLElement;
@@ -55,6 +61,9 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     toolBtnHide: null!,
     toolbarOverflow: null!,
     listeningModule: null!,
+    radialButtons: [],
+    overflowButtons: [],
+    moreBtn: null!,
     overlay: null!,
     hoverOutline: null!,
     componentTraceEl: null!,
