@@ -15,22 +15,32 @@ Veld injects a feedback overlay into every page it serves. Humans create threads
 1. Make your changes
 2. veld feedback listen --name <run> --json
    → Browser shows "Agent is listening"
+   → Returns ALL pending events at once (batch mode)
+   → Threads are auto-claimed for this agent
 3. Human creates threads, leaves comments
-4. You receive events, fix issues
-5. veld feedback answer --name <run> --thread <id> "Fixed — increased contrast"
-6. veld feedback listen --name <run> --json --after <seq>
+4. You receive events, fix issues (in parallel if needed)
+5. veld feedback release --name <run> --thread <id> "Fixed — increased contrast"
+   → Posts comment + releases claim atomically
+6. veld feedback listen --name <run> --json --after <last_seq>
 7. Repeat until session_ended event
 ```
 
 ## Commands
 
 ```bash
-# Listen (blocks until event arrives)
+# Listen (blocks until events arrive — returns ALL pending events as a batch)
 veld feedback listen --name dev --json
 veld feedback listen --name dev --json --after 3
+veld feedback listen --name dev --json --agent my-agent   # explicit agent name
+veld feedback listen --name dev --json --no-batch          # legacy: single event only
 
 # Reply
 veld feedback answer --name dev --thread <id> "Done — bumped font to 2rem"
+
+# Release a claimed thread with a status comment (atomic: comment + release)
+veld feedback release --name dev --thread <id> "Fixed — bumped font to 2rem"
+veld feedback release --name dev --thread <id> --agent my-agent "Increased contrast ratio"
+veld feedback release --name dev --thread <id>   # release without comment
 
 # Ask (creates a new thread visible to the human)
 veld feedback ask --name dev "Should the sidebar collapse on mobile too?"
@@ -51,6 +61,8 @@ veld feedback threads --name dev --json --resolved
 | `resolved` | Human is satisfied | Move on |
 | `reopened` | Human reopened a thread | Re-examine |
 | `session_ended` | Human clicked "All Good" | Exit loop |
+| `thread_claimed` | Thread claimed by an agent | (browser-only, not returned to agents) |
+| `thread_released` | Thread released by agent/UI | (browser-only, not returned to agents) |
 
 ## Key Fields in Events
 
@@ -62,21 +74,44 @@ veld feedback threads --name dev --json --resolved
 | `scope.page_url` | Which route |
 | `viewport_width/height` | Check for responsive issues |
 | `scope.type` | `element`, `page`, or `global` |
+| `claimed_by` | Agent ID that claimed this thread |
+| `claimed_at` | When the claim was created |
 
 ## Listen Loop Pattern
 
 ```
 last_seq = 0
 loop:
-  event = veld feedback listen --name <run> --json --after last_seq
-  last_seq = event.seq
-  match event.event:
-    thread_created → read, fix code, answer
-    human_message  → read follow-up, adjust, answer
-    resolved       → note, continue
-    reopened       → re-examine
-    session_ended  → exit
+  batch = veld feedback listen --name <run> --json --after last_seq
+  last_seq = batch.last_seq
+  for each event in batch.events:
+    match event.event:
+      thread_created → read, fix code, release "Fixed X"
+      human_message  → read follow-up, adjust, release "Adjusted Y"
+      resolved       → note, continue
+      reopened       → re-examine, release "Re-examined Z"
+      session_ended  → exit
 ```
+
+Threads are auto-claimed when returned by `listen`. Release them with `veld feedback release` after you're done.
+
+## Multi-Agent Workflow
+
+Multiple agents can listen on the same run. Each agent gets a unique ID (default: `agent-<pid>`, or set with `--agent`).
+
+```
+Agent-1: veld feedback listen --json --agent css-fixer
+Agent-2: veld feedback listen --json --agent layout-agent
+```
+
+When `listen` returns events, it auto-claims the referenced threads for that agent. Other agents calling `listen` will skip already-claimed threads. This prevents duplicate work.
+
+After finishing work on a thread, release it with a status comment:
+```
+veld feedback release --thread <id> --agent css-fixer "Fixed contrast ratio to 4.5:1"
+```
+
+Humans can also release stale claims via the "Release" button in the browser overlay.
 
 ## Interactive Controls
 
@@ -157,7 +192,8 @@ Templates are in `skills/veld/templates/`. Copy the one matching the project's s
 
 ## Best Practices
 
-- **Always pass `--after`** with the last seq to avoid reprocessing
+- **Always pass `--after`** with `batch.last_seq` to avoid reprocessing
+- **Release threads** after finishing work — don't hold claims indefinitely
 - **Reply to threads** so the human knows you saw their feedback
 - **Keep replies concise** — the human is reviewing in flow
 - **Use `component_trace`** — the deepest component is usually the file to edit
