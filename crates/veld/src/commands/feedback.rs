@@ -355,7 +355,7 @@ fn process_batch(
     agent_id: &str,
     no_batch: bool,
 ) -> BatchResult {
-    let human_events: Vec<Event> = events.into_iter().filter(|e| is_human_event(e)).collect();
+    let human_events: Vec<Event> = events.into_iter().filter(is_human_event).collect();
 
     let mut outputs: Vec<ListenOutput> = Vec::new();
     let mut last_seq = after_seq;
