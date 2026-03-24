@@ -6,8 +6,8 @@ import { attachTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 import { deps } from "../shared/registry";
 
-const RADIUS = 55;          // primary ring: center-to-center distance
-const OVERFLOW_RADIUS = 105; // secondary ring
+const RADIUS = 75;          // primary ring: center-to-center distance
+const OVERFLOW_RADIUS = 130; // secondary ring
 const ARC_SPAN = Math.PI;   // 180° arc for primary buttons
 const OVERFLOW_ARC = Math.PI / 2; // 90° arc for overflow buttons
 
