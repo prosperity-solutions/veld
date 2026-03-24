@@ -257,9 +257,7 @@ impl FeedbackStore {
                 let data = std::fs::read_to_string(&matches[0])?;
                 Ok(Some(serde_json::from_str(&data)?))
             }
-            n => anyhow::bail!(
-                "ambiguous thread prefix '{prefix}' matches {n} threads"
-            ),
+            n => anyhow::bail!("ambiguous thread prefix '{prefix}' matches {n} threads"),
         }
     }
 
@@ -287,9 +285,7 @@ impl FeedbackStore {
         match matches.len() {
             0 => anyhow::bail!("thread {id} not found"),
             1 => Ok(matches.into_iter().next().unwrap()),
-            n => anyhow::bail!(
-                "ambiguous thread prefix '{id}' matches {n} threads"
-            ),
+            n => anyhow::bail!("ambiguous thread prefix '{id}' matches {n} threads"),
         }
     }
 

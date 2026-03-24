@@ -518,10 +518,7 @@ async fn run_release(
                     })
                 );
             } else {
-                output::print_info(&format!(
-                    "Released thread {}",
-                    thread_id
-                ));
+                output::print_info(&format!("Released thread {}", thread_id));
             }
             0
         }
@@ -573,10 +570,7 @@ async fn run_ask(
         return 1;
     }
 
-    output::print_info(&format!(
-        "Created thread {} — question posted.",
-        &thread.id
-    ));
+    output::print_info(&format!("Created thread {} — question posted.", &thread.id));
     0
 }
 
@@ -714,11 +708,7 @@ fn print_event(
 ) {
     match &event.event_type {
         EventType::ThreadCreated { thread: t } => {
-            println!(
-                "{} Thread created ({})",
-                output::bold("Event"),
-                &t.id,
-            );
+            println!("{} Thread created ({})", output::bold("Event"), &t.id,);
             print_thread_context(t, store);
         }
         EventType::HumanMessage { thread_id, message } => {
@@ -738,18 +728,10 @@ fn print_event(
             }
         }
         EventType::Resolved { thread_id } => {
-            println!(
-                "{} Thread {} resolved",
-                output::bold("Event"),
-                thread_id,
-            );
+            println!("{} Thread {} resolved", output::bold("Event"), thread_id,);
         }
         EventType::Reopened { thread_id } => {
-            println!(
-                "{} Thread {} reopened",
-                output::bold("Event"),
-                thread_id,
-            );
+            println!("{} Thread {} reopened", output::bold("Event"), thread_id,);
             if let Some(t) = thread {
                 println!();
                 print_thread_context(t, store);
