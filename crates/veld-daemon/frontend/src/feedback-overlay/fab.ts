@@ -1,6 +1,7 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { PREFIX, FAB_MARGIN } from "./constants";
+import { hideTooltip } from "./tooltip";
 
 export function initDrag(): void {
   let startX = 0;
@@ -26,6 +27,7 @@ export function initDrag(): void {
     const dx = e.clientX - startX;
     const dy = e.clientY - startY;
     if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
+    if (!moved) hideTooltip();
     moved = true;
     let nx = origX + dx;
     let ny = origY + dy;
