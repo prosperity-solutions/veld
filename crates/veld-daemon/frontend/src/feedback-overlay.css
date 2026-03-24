@@ -605,14 +605,19 @@
 /* --- Listening module (in toolbar) --- */
 .veld-feedback-listening {
   display: none; /* toggled to flex via JS */
-  align-items: center; gap: 8px;
+  align-items: center; gap: 2px;
 }
 .veld-feedback-listening-dot {
-  display: block;
+  display: flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; border-radius: 50%;
+  background: transparent; flex-shrink: 0;
+  cursor: pointer;
+}
+.veld-feedback-listening-dot::after {
+  content: ""; display: block;
   width: 10px; height: 10px; border-radius: 50%;
-  background: var(--vf-accent); flex-shrink: 0;
+  background: var(--vf-accent);
   animation: veld-feedback-pulse-dot 2s ease-in-out infinite;
-  cursor: default;
 }
 @keyframes veld-feedback-pulse-dot {
   0%, 100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.6); }
