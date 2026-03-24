@@ -1,10 +1,14 @@
 ---
 name: veld
 description: >
-  Veld local development environment orchestrator. Use when the user asks to
-  start/stop/restart environments, view logs or status, configure veld.json
-  (add nodes, services, dependencies, presets, health checks, URL templates),
-  get human feedback on UI changes, debug environment issues, or run any veld command.
+  Orchestrate local dev environments with veld. Use this skill when the user wants to
+  start, stop, or restart services; check run status or logs; configure veld.json
+  (nodes, services, dependencies, presets, health checks, ports, URL templates); or
+  debug environment issues like port conflicts or health-check failures. Also use when
+  the user wants to show their UI to a human for review, get visual feedback on
+  changes, listen for comments, run a feedback loop, or coordinate multiple agents
+  working on feedback threads — even if they say "let me check," "show the user,"
+  "wait for feedback," or "let them review it." Covers any `veld` CLI command.
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
@@ -75,7 +79,7 @@ Quick reference for the two node types:
 
 For the full feedback workflow, events, thread fields, interactive controls, and framework binding templates, see [reference/feedback.md](reference/feedback.md).
 
-Core pattern: listen → fix → answer → listen again with `--after <seq>` → repeat until `session_ended`.
+Core pattern: listen (returns all pending feedback at once) → fix → release with status comment → listen again with `--after <last_seq>` → repeat until `session_ended`. Threads are auto-claimed so multiple agents can work in parallel without conflicts.
 
 ## Gotchas
 
