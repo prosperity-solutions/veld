@@ -158,20 +158,6 @@ function renderThreadDetail(thread: Thread): void {
     header.appendChild(makeCopyRow("", thread.scope.selector, "panel-detail-selector"));
   }
 
-  if (thread.claimed_by) {
-    const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
-    releaseBtn.addEventListener("click", function () {
-      api("POST", "/threads/" + thread.id + "/release").then(function () {
-        thread.claimed_by = null;
-        thread.claimed_at = null;
-        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        renderPanel();
-        toast("Thread released");
-      });
-    });
-    header.appendChild(releaseBtn);
-  }
-
   refs.panelBody.appendChild(header);
 
   if (thread.status === "resolved") {
@@ -366,6 +352,21 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");
+
+  if (thread.claimed_by) {
+    const releaseBtn = mkEl("button", "btn btn-primary btn-sm btn-release", "Release");
+    releaseBtn.addEventListener("click", function () {
+      api("POST", "/threads/" + thread.id + "/release").then(function () {
+        thread.claimed_by = null;
+        thread.claimed_at = null;
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+        renderPanel();
+        toast("Thread released");
+      });
+    });
+    inputActions.appendChild(releaseBtn);
+  }
+
   const resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
   resolveBtn.addEventListener("click", function () {
     const text = textarea.value.trim();

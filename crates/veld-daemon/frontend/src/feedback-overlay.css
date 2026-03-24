@@ -288,6 +288,8 @@
 }
 .veld-feedback-btn-primary { background: var(--vf-accent); color: var(--vf-accent-text); }
 .veld-feedback-btn-primary:hover { background: var(--vf-accent-hover); }
+.veld-feedback-btn-release { background: var(--vf-primary); color: #fff; }
+.veld-feedback-btn-release:hover { background: color-mix(in srgb, var(--vf-primary) 85%, #000); }
 .veld-feedback-btn-secondary { background: var(--vf-border); color: var(--vf-text); }
 .veld-feedback-btn-secondary:hover { background: var(--vf-border); }
 .veld-feedback-btn-danger { background: var(--vf-danger); color: var(--vf-danger-text); }
