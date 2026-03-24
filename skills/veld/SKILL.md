@@ -17,7 +17,7 @@ Veld orchestrates local dev environments. It starts services from `veld.json`, w
 
 ## Version Check
 
-This skill requires veld **v6.2.2**.
+This skill requires veld **v6.3.0**.
 
 Installed:
 !`veld -V 2>&1`
