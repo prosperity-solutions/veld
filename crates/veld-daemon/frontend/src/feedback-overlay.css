@@ -495,6 +495,7 @@
   background: transparent; color: var(--vf-text-muted);
   font: 500 11px/1.4 var(--vf-font); cursor: pointer;
   transition: background .15s, color .15s;
+  white-space: nowrap;
 }
 .veld-feedback-segmented-btn:not(.veld-feedback-segmented-btn-active):hover {
   background: rgba(255,255,255,.05);
