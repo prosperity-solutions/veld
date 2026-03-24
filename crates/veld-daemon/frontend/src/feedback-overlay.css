@@ -164,7 +164,7 @@
   transition: max-width .2s ease, opacity .2s ease, padding .2s ease;
 }
 .veld-feedback-toolbar-open {
-  max-width: 550px; opacity: 1; padding: 4px 6px;
+  max-width: 700px; opacity: 1; padding: 4px 6px;
 }
 
 /* Gap between toolbar and FAB */
@@ -207,6 +207,14 @@
   text-align: center;
   padding: 0 3px;
   pointer-events: none;
+}
+
+/* Toolbar overflow group — collapsed by default */
+.veld-feedback-toolbar-overflow {
+  display: none; align-items: center; gap: 2px;
+}
+.veld-feedback-toolbar-overflow-open {
+  display: flex;
 }
 
 /* Separator in toolbar */

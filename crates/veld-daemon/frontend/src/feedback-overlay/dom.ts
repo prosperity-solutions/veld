@@ -53,8 +53,17 @@ export function buildDOM(): void {
   refs.listeningModule.appendChild(listenDot);
   refs.toolbar.appendChild(refs.listeningModule);
 
-  // Separator
+  // Separator before overflow toggle
   refs.toolbar.appendChild(mkEl("div", "separator"));
+
+  // Three-dot overflow toggle
+  const moreBtn = mkEl("button", "tool-btn");
+  moreBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg>';
+  attachTooltip(moreBtn, tipHtml("More options", []));
+  refs.toolbar.appendChild(moreBtn);
+
+  // Overflow group — hidden by default, toggled by three-dot button
+  refs.toolbarOverflow = mkEl("div", "toolbar-overflow");
 
   // Shortcuts toggle
   const toolBtnShortcuts = mkEl("button", "tool-btn");
@@ -66,7 +75,7 @@ export function buildDOM(): void {
     toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", getState().shortcutsDisabled);
     toast(getState().shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
   });
-  refs.toolbar.appendChild(toolBtnShortcuts);
+  refs.toolbarOverflow.appendChild(toolBtnShortcuts);
 
   // Theme toggle
   const THEME_ICONS: Record<ThemeMode, string> = {
@@ -88,7 +97,7 @@ export function buildDOM(): void {
     document.documentElement.setAttribute("data-veld-theme", getState().theme === "auto" ? "" : getState().theme);
     toast("Theme: " + THEME_LABELS[getState().theme]);
   });
-  refs.toolbar.appendChild(toolBtnTheme);
+  refs.toolbarOverflow.appendChild(toolBtnTheme);
 
   // Dashboard link
   const toolBtnDashboard = mkEl("button", "tool-btn");
@@ -98,11 +107,18 @@ export function buildDOM(): void {
     e.stopPropagation();
     window.open("https://veld.localhost:" + window.location.port, "_blank");
   });
-  refs.toolbar.appendChild(toolBtnDashboard);
+  refs.toolbarOverflow.appendChild(toolBtnDashboard);
 
   // Hide
   refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
-  refs.toolbar.appendChild(refs.toolBtnHide);
+  refs.toolbarOverflow.appendChild(refs.toolBtnHide);
+
+  refs.toolbar.appendChild(refs.toolbarOverflow);
+
+  moreBtn.addEventListener("click", function (e) {
+    e.stopPropagation();
+    refs.toolbarOverflow.classList.toggle(PREFIX + "toolbar-overflow-open");
+  });
 
   // Screenshot rect (light DOM)
   refs.screenshotRect = mkEl("div", "screenshot-rect");

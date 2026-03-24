@@ -14,6 +14,7 @@ export interface DOMRefs {
   toolBtnPageComment: HTMLElement;
   toolBtnComments: HTMLElement;
   toolBtnHide: HTMLElement;
+  toolbarOverflow: HTMLElement;
   listeningModule: HTMLElement;
 
   // Light DOM
@@ -52,6 +53,7 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     toolBtnPageComment: null!,
     toolBtnComments: null!,
     toolBtnHide: null!,
+    toolbarOverflow: null!,
     listeningModule: null!,
     overlay: null!,
     hoverOutline: null!,

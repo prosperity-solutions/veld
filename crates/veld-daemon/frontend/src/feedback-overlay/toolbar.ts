@@ -39,6 +39,10 @@ export function toggleToolbar(): void {
   refs.toolbar.classList.toggle(PREFIX + "toolbar-open", getState().toolbarOpen);
   if (!getState().toolbarOpen) {
     deps().setMode(null);
+    // Collapse the overflow menu when closing the toolbar.
+    if (refs.toolbarOverflow) {
+      refs.toolbarOverflow.classList.remove(PREFIX + "toolbar-overflow-open");
+    }
   }
   updateBadge();
 }
