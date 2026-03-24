@@ -9,6 +9,18 @@ description: >
   changes, listen for comments, run a feedback loop, or coordinate multiple agents
   working on feedback threads — even if they say "let me check," "show the user,"
   "wait for feedback," or "let them review it." Covers any `veld` CLI command.
+triggers:
+  - veld
+  - veld.json
+  - start the environment
+  - show the user
+  - get feedback
+  - listen for comments
+  - wait for feedback
+  - let them review
+  - preview the UI
+  - feedback loop
+  - "*.localhost"
 compatibility: Requires veld v6.3.0+
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
