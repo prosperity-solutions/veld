@@ -162,7 +162,15 @@ function renderThreadDetail(thread: Thread): void {
 
   if (thread.claimed_by) {
     const claimRow = mkEl("div", "thread-detail-claim");
-    claimRow.appendChild(mkEl("span", "thread-detail-claim-text", "\u2699 Being worked on by " + thread.claimed_by));
+    const claimIcon = mkEl("span", "thread-detail-claim-icon");
+    claimIcon.innerHTML = ICONS.robot;
+    claimRow.appendChild(claimIcon);
+    const claimBody = mkEl("div", "thread-detail-claim-body");
+    claimBody.appendChild(mkEl("span", "thread-detail-claim-text", "Being worked on by " + thread.claimed_by));
+    if (thread.claimed_at) {
+      claimBody.appendChild(mkEl("span", "thread-detail-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
+    }
+    claimRow.appendChild(claimBody);
     const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
     releaseBtn.addEventListener("click", function () {
       api("POST", "/threads/" + thread.id + "/release").then(function () {
@@ -280,7 +288,14 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   }
 
   if (thread.claimed_by) {
-    const claimBadge = mkEl("div", "thread-card-claim-badge", "\u2699 " + thread.claimed_by);
+    const claimBadge = mkEl("div", "thread-card-claim-badge");
+    const badgeIcon = mkEl("span", "thread-card-claim-icon");
+    badgeIcon.innerHTML = ICONS.robot;
+    claimBadge.appendChild(badgeIcon);
+    claimBadge.appendChild(document.createTextNode(thread.claimed_by));
+    if (thread.claimed_at) {
+      claimBadge.appendChild(mkEl("span", "thread-card-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
+    }
     card.appendChild(claimBadge);
     card.classList.add(PREFIX + "thread-card-claimed");
   }
