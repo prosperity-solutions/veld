@@ -70,14 +70,12 @@ function arcPath(
 ): string {
   const rOuter = radius + thickness / 2;
   const rInner = radius - thickness / 2;
-  // Extend the arc slightly beyond the first/last button for padding
-  const pad = thickness / (2 * radius); // angular padding in radians
+  const capR = (rOuter - rInner) / 2;
+  // Extend just enough for the rounded endcap to clear the button center
+  const pad = capR / radius;
   const a1 = startAngle - pad;
   const a2 = endAngle + pad;
   const largeArc = Math.abs(a2 - a1) > Math.PI ? 1 : 0;
-
-  const capR = (rOuter - rInner) / 2; // radius of the rounded endcaps
-  const rMid = (rOuter + rInner) / 2; // midpoint radius for cap centers
 
   const ox1 = centerX + Math.cos(a1) * rOuter;
   const oy1 = centerY + Math.sin(a1) * rOuter;
@@ -184,16 +182,15 @@ function positionOverflowButtons(baseAngle: number, visiblePrimary: HTMLElement[
   const moreAngle = primaryStart + primaryStep * moreIndex;
   const cx = 20, cy = 20;
 
-  // Determine which direction the ⋯ is relative to the arc midpoint.
-  // Extend overflow in the same direction (away from the arc center)
-  // so it stays on the same side as the ⋯ button.
+  // Extend overflow in the same angular direction as the primary arc
+  // (toward the arc center), so it stays within the same screen region.
   const arcMidAngle = baseAngle;
   const moreOnPositiveSide = moreAngle >= arcMidAngle;
 
   const overflowCount = refs.overflowButtons.length;
   const overflowStep = overflowCount > 1 ? OVERFLOW_ARC / (overflowCount - 1) : 0;
-  // Start from moreAngle and extend outward (same direction from center)
-  const overflowStart = moreOnPositiveSide ? moreAngle : moreAngle - OVERFLOW_ARC;
+  // Start from moreAngle and extend inward (toward the arc center)
+  const overflowStart = moreOnPositiveSide ? moreAngle - OVERFLOW_ARC : moreAngle;
 
   for (let i = 0; i < overflowCount; i++) {
     const angle = overflowStart + overflowStep * i;
