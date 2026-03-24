@@ -5,6 +5,7 @@ import { PREFIX } from "./constants";
 import { attachTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 import { deps } from "../shared/registry";
+import { nudgeFabForToolbar } from "./fab";
 
 const RADIUS = 48;           // center-to-center distance from FAB
 const ARC_SPAN = Math.PI;    // 180° arc
@@ -174,6 +175,7 @@ export function toggleToolbar(): void {
   dispatch({ type: "SET_TOOLBAR_OPEN", open: !getState().toolbarOpen });
 
   if (getState().toolbarOpen) {
+    nudgeFabForToolbar();
     positionRadialButtons();
     if (arcSvg) arcSvg.style.opacity = "1";
     const active = getActiveButtons();

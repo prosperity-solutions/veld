@@ -1,6 +1,6 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import { PREFIX, FAB_MARGIN } from "./constants";
+import { PREFIX, FAB_MARGIN, FAB_TOOLBAR_MARGIN } from "./constants";
 import { suppressTooltip } from "./tooltip";
 import { positionRadialButtons } from "./toolbar";
 
@@ -112,6 +112,27 @@ export function clampFabToViewport(): void {
   }
   if (clamped) {
     positionFab(cx, cy, false);
+    saveFabPos(cx, cy);
+  }
+}
+
+/**
+ * If the FAB is too close to an edge for the toolbar arc,
+ * smoothly animate it inward to the toolbar-safe margin.
+ */
+export function nudgeFabForToolbar(): void {
+  let cx = getState().fabCX;
+  let cy = getState().fabCY;
+  let nudged = false;
+  const maxX = window.innerWidth - 20 - FAB_TOOLBAR_MARGIN;
+  const maxY = window.innerHeight - 20 - FAB_TOOLBAR_MARGIN;
+  const minXY = 20 + FAB_TOOLBAR_MARGIN;
+  if (cx > maxX) { cx = maxX; nudged = true; }
+  if (cx < minXY) { cx = minXY; nudged = true; }
+  if (cy > maxY) { cy = maxY; nudged = true; }
+  if (cy < minXY) { cy = minXY; nudged = true; }
+  if (nudged) {
+    positionFab(cx, cy, true); // animate: true
     saveFabPos(cx, cy);
   }
 }

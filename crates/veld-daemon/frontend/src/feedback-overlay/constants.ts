@@ -4,7 +4,8 @@ export const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
 export const KEY_MOD = IS_MAC ? "\u2318" : "Ctrl";
 export const KEY_SHIFT = IS_MAC ? "\u21E7" : "Shift";
 export const SUBMIT_HINT = " " + KEY_MOD + "\u21B5";
-export const FAB_MARGIN = 50;
+export const FAB_MARGIN = 16;          // drag clamping — allow FAB near edges
+export const FAB_TOOLBAR_MARGIN = 50;  // when toolbar is open — enough for arc
 
 export const ICONS = {
   logo: '<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13.2 28L4 4H8.4L15.7 23.8H15.8L23.1 4H27.5L18.3 28H13.2Z" fill="currentColor"/><path d="M24.5 29C25.88 29 27 27.88 27 26.5C27 25.12 25.88 24 24.5 24C23.12 24 22 25.12 22 26.5C22 27.88 23.12 29 24.5 29Z" fill="#C4F56A"/></svg>',
