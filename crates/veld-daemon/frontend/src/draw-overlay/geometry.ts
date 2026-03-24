@@ -14,6 +14,15 @@ export function pathLength(points: Point[]): number {
   return len;
 }
 
+/** Constrain a point to the nearest axis (horizontal or vertical) relative to an anchor. */
+export function constrainToAxis(anchor: Point, cursor: Point): Point {
+  const dx = Math.abs(cursor.x - anchor.x);
+  const dy = Math.abs(cursor.y - anchor.y);
+  return dx >= dy
+    ? { x: cursor.x, y: anchor.y, pressure: cursor.pressure }
+    : { x: anchor.x, y: cursor.y, pressure: cursor.pressure };
+}
+
 export function computeBBox(points: Point[]): BBox {
   let minX = Infinity,
     minY = Infinity,
