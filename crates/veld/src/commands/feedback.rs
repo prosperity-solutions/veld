@@ -278,18 +278,11 @@ async fn run_listen(
                                 agent_id: agent_id.clone(),
                                 events: batch.outputs,
                             };
-                            println!(
-                                "{}",
-                                serde_json::to_string_pretty(&output).unwrap()
-                            );
+                            println!("{}", serde_json::to_string_pretty(&output).unwrap());
                         }
                     } else {
                         for out in &batch.outputs {
-                            print_event(
-                                &out.event,
-                                out.thread_context.as_ref(),
-                                &store,
-                            );
+                            print_event(&out.event, out.thread_context.as_ref(), &store);
                         }
                     }
                     let _ = store.heartbeat();
@@ -366,8 +359,7 @@ fn process_batch(
 
     let mut outputs: Vec<ListenOutput> = Vec::new();
     let mut last_seq = after_seq;
-    let mut claimed_threads: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut claimed_threads: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for event in human_events {
         let thread_id = event_thread_id(&event.event_type);

@@ -67,7 +67,10 @@ pub async fn run_feedback_server() {
         )
         .route("/feedback/api/threads/{id}/resolve", post(resolve_thread))
         .route("/feedback/api/threads/{id}/reopen", post(reopen_thread))
-        .route("/feedback/api/threads/{id}/release", post(release_thread_claim))
+        .route(
+            "/feedback/api/threads/{id}/release",
+            post(release_thread_claim),
+        )
         .route("/feedback/api/threads/{id}/seen", put(mark_thread_seen))
         // Event API.
         .route("/feedback/api/events", get(get_events))
