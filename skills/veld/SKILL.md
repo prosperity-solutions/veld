@@ -9,6 +9,7 @@ description: >
   changes, listen for comments, run a feedback loop, or coordinate multiple agents
   working on feedback threads — even if they say "let me check," "show the user,"
   "wait for feedback," or "let them review it." Covers any `veld` CLI command.
+compatibility: Requires veld v6.3.0+
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
@@ -21,14 +22,12 @@ Veld orchestrates local dev environments. It starts services from `veld.json`, w
 
 ## Version Check
 
-This skill requires veld **v6.3.0**.
-
 Installed:
 !`veld -V 2>&1`
 
 If the output above shows "command not found" or "No such file", veld is not installed. Guide the user through installation — see [reference/install.md](reference/install.md). Do NOT attempt to run any `veld` commands until it is installed.
 
-If the installed version is older than the required version above, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
+If the installed version is older than what `compatibility` requires, tell the user: "This project requires a newer veld. Run `veld update` to upgrade."
 
 ## Live State
 
