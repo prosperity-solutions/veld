@@ -424,7 +424,8 @@ async fn run_answer(
 
     let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
-    let msg = new_message(Author::Agent, body, None, controls_value);
+    let clean_body = strip_shell_escapes(body);
+    let msg = new_message(Author::Agent, &clean_body, None, controls_value);
 
     if let Err(e) = store.add_message(thread_id, &msg) {
         output::print_error(&format!("Failed to add message: {e}"), false);
@@ -466,7 +467,8 @@ async fn run_release(
 
     // Post the status comment before releasing (atomic: comment + release).
     if let Some(body) = message {
-        let msg = new_message(Author::Agent, body, None, None);
+        let clean_body = strip_shell_escapes(body);
+        let msg = new_message(Author::Agent, &clean_body, None, None);
         if let Err(e) = store.add_message(thread_id, &msg) {
             output::print_error(&format!("Failed to add message: {e}"), json);
             return 1;
@@ -540,7 +542,8 @@ async fn run_ask(
     };
 
     let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
-    let msg = new_message(Author::Agent, body, None, controls_value);
+    let clean_body = strip_shell_escapes(body);
+    let msg = new_message(Author::Agent, &clean_body, None, controls_value);
     let thread = new_thread(scope, ThreadOrigin::Agent, None, None, None, msg);
 
     if let Err(e) = store.save_thread(&thread) {
@@ -659,6 +662,30 @@ fn event_label(et: &EventType) -> &'static str {
         EventType::ThreadClaimed { .. } => "thread_claimed",
         EventType::ThreadReleased { .. } => "thread_released",
     }
+}
+
+/// Strip common shell escape artifacts from message bodies.
+///
+/// Agents calling `veld feedback answer` from bash often pass the message in
+/// double-quotes, which causes `\!` (and sometimes `\?`) to leak through
+/// literally because bash preserves the backslash before history-expansion
+/// characters. We strip these so the end user sees clean text.
+fn strip_shell_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some('!') | Some('?') => {
+                    out.push(chars.next().unwrap());
+                }
+                _ => out.push(c),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 // ---------------------------------------------------------------------------
