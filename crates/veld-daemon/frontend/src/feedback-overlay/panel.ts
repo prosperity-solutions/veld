@@ -160,31 +160,6 @@ function renderThreadDetail(thread: Thread): void {
 
   refs.panelBody.appendChild(header);
 
-  if (thread.claimed_by) {
-    const claimRow = mkEl("div", "thread-detail-claim");
-    const claimIcon = mkEl("span", "thread-detail-claim-icon");
-    claimIcon.innerHTML = ICONS.robot;
-    claimRow.appendChild(claimIcon);
-    const claimBody = mkEl("div", "thread-detail-claim-body");
-    claimBody.appendChild(mkEl("span", "thread-detail-claim-text", "Being worked on by " + thread.claimed_by));
-    if (thread.claimed_at) {
-      claimBody.appendChild(mkEl("span", "thread-detail-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
-    }
-    claimRow.appendChild(claimBody);
-    const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
-    releaseBtn.addEventListener("click", function () {
-      api("POST", "/threads/" + thread.id + "/release").then(function () {
-        thread.claimed_by = null;
-        thread.claimed_at = null;
-        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        renderPanel();
-        toast("Thread released");
-      });
-    });
-    claimRow.appendChild(releaseBtn);
-    refs.panelBody.appendChild(claimRow);
-  }
-
   if (thread.status === "resolved") {
     const msgList = mkEl("div", "thread-messages-list");
     thread.messages.forEach(function (msg: Message) {
@@ -304,11 +279,50 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   return card;
 }
 
+function makeClaimRow(thread: Thread): HTMLElement {
+  const claimRow = mkEl("div", "message message-claim");
+  const claimIcon = mkEl("span", "message-author-icon");
+  claimIcon.innerHTML = ICONS.robot;
+  claimRow.appendChild(claimIcon);
+  const claimBody = mkEl("div", "message-body");
+  const claimText = mkEl("div", "message-claim-text", "Being worked on by " + thread.claimed_by);
+  claimBody.appendChild(claimText);
+  const claimMeta = mkEl("div", "message-meta");
+  const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
+  releaseBtn.addEventListener("click", function () {
+    api("POST", "/threads/" + thread.id + "/release").then(function () {
+      thread.claimed_by = null;
+      thread.claimed_at = null;
+      dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+      renderPanel();
+      toast("Thread released");
+    });
+  });
+  if (thread.claimed_at) {
+    claimMeta.appendChild(document.createTextNode(timeAgo(thread.claimed_at) + " "));
+  }
+  claimMeta.appendChild(releaseBtn);
+  claimBody.appendChild(claimMeta);
+  claimRow.appendChild(claimBody);
+  return claimRow;
+}
+
 function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
   const msgCount = thread.messages.length;
+
+  // If claimed, find where the claim event fits chronologically.
+  const claimTime = thread.claimed_by && thread.claimed_at ? new Date(thread.claimed_at).getTime() : null;
+  let claimInserted = false;
+
   thread.messages.forEach(function (msg: Message, msgIndex: number) {
+    // Insert claim row before the first message that came after the claim.
+    if (claimTime && !claimInserted && new Date(msg.created_at).getTime() > claimTime) {
+      msgList.appendChild(makeClaimRow(thread));
+      claimInserted = true;
+    }
+
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -333,6 +347,12 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     msgEl.appendChild(body);
     msgList.appendChild(msgEl);
   });
+
+  // If claim happened after all messages, append at the end.
+  if (claimTime && !claimInserted && thread.claimed_by) {
+    msgList.appendChild(makeClaimRow(thread));
+  }
+
   container.appendChild(msgList);
 
   markThreadSeen(thread.id);

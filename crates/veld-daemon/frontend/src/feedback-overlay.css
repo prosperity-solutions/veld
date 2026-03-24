@@ -548,29 +548,12 @@
   border-left: 3px solid var(--vf-primary);
   padding-left: 9px;
 }
-.veld-feedback-thread-detail-claim {
-  display: flex; align-items: center; gap: 8px;
-  padding: 8px 10px; margin-bottom: 8px;
-  background: color-mix(in srgb, var(--vf-primary) 10%, transparent);
-  border-radius: 6px; font-size: 11px;
-}
-.veld-feedback-thread-detail-claim-icon {
-  width: 20px; height: 20px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  flex-shrink: 0;
+/* Claim row — rendered inline with messages using the same layout */
+.veld-feedback-message-claim .veld-feedback-message-author-icon {
   background: var(--vf-primary); color: #fff;
 }
-.veld-feedback-thread-detail-claim-icon svg {
-  width: 11px; height: 11px;
-}
-.veld-feedback-thread-detail-claim-body {
-  flex: 1; min-width: 0;
-}
-.veld-feedback-thread-detail-claim-text {
-  color: var(--vf-primary); font-weight: 500;
-}
-.veld-feedback-thread-detail-claim-time {
-  color: var(--vf-text-muted); font-weight: 400;
+.veld-feedback-message-claim-text {
+  font-size: 12px; line-height: 1.5; color: var(--vf-primary); font-weight: 500;
 }
 
 /* --- Thread messages --- */
