@@ -10,7 +10,7 @@ const RADIUS = 48;           // primary ring: center-to-center distance
 const OVERFLOW_RADIUS = 85;  // secondary ring
 const ARC_SPAN = Math.PI;    // 180° arc for primary buttons
 // Overflow arc span computed dynamically from button size and radius
-const ARC_THICKNESS = 36;    // thickness of the arc backdrop (slightly > button 30px)
+const ARC_THICKNESS = 32;    // thickness of the arc backdrop (just > button 30px)
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Arc backdrop SVG elements (created lazily)
@@ -71,8 +71,7 @@ function arcPath(
   const rOuter = radius + thickness / 2;
   const rInner = radius - thickness / 2;
   const capR = (rOuter - rInner) / 2;
-  // Minimal padding — just the endcap radius expressed as an angle
-  const pad = (capR * 0.6) / radius;
+  const pad = capR * 0.35 / radius;
   const a1 = startAngle - pad;
   const a2 = endAngle + pad;
   const largeArc = Math.abs(a2 - a1) > Math.PI ? 1 : 0;
