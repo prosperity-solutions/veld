@@ -361,7 +361,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 
   if (thread.claimed_by) {
     const releaseBtn = mkEl("button", "btn btn-sm btn-release");
-    releaseBtn.innerHTML = ICONS.robot + " Release";
+    releaseBtn.innerHTML = "Release " + ICONS.robot;
     releaseBtn.addEventListener("click", function () {
       api("POST", "/threads/" + thread.id + "/release").then(function () {
         thread.claimed_by = null;
