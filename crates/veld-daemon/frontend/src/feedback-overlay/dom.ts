@@ -148,7 +148,7 @@ export function buildDOM(): void {
 
   refs.markReadBtn = mkEl("button", "panel-mark-read");
   refs.markReadBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 7 9.5 17 6 13"/><polyline points="22 7 13.5 17"/></svg>';
-  refs.markReadBtn.title = "Mark all as read";
+  attachTooltip(refs.markReadBtn, "Mark all as read");
   refs.markReadBtn.style.display = "none";
   refs.markReadBtn.addEventListener("click", function (e) { e.stopPropagation(); markAllRead(); });
   panelHead.appendChild(refs.markReadBtn);

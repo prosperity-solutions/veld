@@ -450,6 +450,7 @@
 .veld-feedback-panel-detail-title {
   font-size: 13px; font-weight: 600; color: var(--vf-text);
   margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .veld-feedback-panel-detail-page-link {
   display: inline-block;
