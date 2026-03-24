@@ -9,7 +9,7 @@ import { deps } from "../shared/registry";
 const RADIUS = 48;           // primary ring: center-to-center distance
 const OVERFLOW_RADIUS = 85;  // secondary ring
 const ARC_SPAN = Math.PI;    // 180° arc for primary buttons
-const OVERFLOW_ARC = Math.PI / 2; // 90° arc for overflow buttons
+// Overflow arc span computed dynamically from button size and radius
 const ARC_THICKNESS = 36;    // thickness of the arc backdrop (slightly > button 30px)
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -71,8 +71,8 @@ function arcPath(
   const rOuter = radius + thickness / 2;
   const rInner = radius - thickness / 2;
   const capR = (rOuter - rInner) / 2;
-  // Extend just enough for the rounded endcap to clear the button center
-  const pad = capR / radius;
+  // Minimal padding — just the endcap radius expressed as an angle
+  const pad = (capR * 0.6) / radius;
   const a1 = startAngle - pad;
   const a2 = endAngle + pad;
   const largeArc = Math.abs(a2 - a1) > Math.PI ? 1 : 0;
@@ -188,9 +188,11 @@ function positionOverflowButtons(baseAngle: number, visiblePrimary: HTMLElement[
   const moreOnPositiveSide = moreAngle >= arcMidAngle;
 
   const overflowCount = refs.overflowButtons.length;
-  const overflowStep = overflowCount > 1 ? OVERFLOW_ARC / (overflowCount - 1) : 0;
+  // Step size: ~32px between button centers at the overflow radius
+  const overflowStep = 32 / OVERFLOW_RADIUS;
+  const overflowArc = overflowStep * (overflowCount - 1);
   // Start from moreAngle and extend inward (toward the arc center)
-  const overflowStart = moreOnPositiveSide ? moreAngle - OVERFLOW_ARC : moreAngle;
+  const overflowStart = moreOnPositiveSide ? moreAngle - overflowArc : moreAngle;
 
   for (let i = 0; i < overflowCount; i++) {
     const angle = overflowStart + overflowStep * i;
@@ -202,7 +204,7 @@ function positionOverflowButtons(baseAngle: number, visiblePrimary: HTMLElement[
 
   // Update overflow arc backdrop
   const { svg, path } = ensureOverflowArc();
-  const overflowEnd = overflowStart + overflowStep * (overflowCount - 1);
+  const overflowEnd = overflowStart + overflowArc;
   path.setAttribute("d", arcPath(cx, cy, OVERFLOW_RADIUS, ARC_THICKNESS, overflowStart, overflowEnd));
   svg.style.opacity = "1";
 }
