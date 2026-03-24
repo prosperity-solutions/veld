@@ -160,6 +160,23 @@ function renderThreadDetail(thread: Thread): void {
 
   refs.panelBody.appendChild(header);
 
+  if (thread.claimed_by) {
+    const claimRow = mkEl("div", "thread-detail-claim");
+    claimRow.appendChild(mkEl("span", "thread-detail-claim-text", "\u2699 Being worked on by " + thread.claimed_by));
+    const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
+    releaseBtn.addEventListener("click", function () {
+      api("POST", "/threads/" + thread.id + "/release").then(function () {
+        thread.claimed_by = null;
+        thread.claimed_at = null;
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+        renderPanel();
+        toast("Thread released");
+      });
+    });
+    claimRow.appendChild(releaseBtn);
+    refs.panelBody.appendChild(claimRow);
+  }
+
   if (thread.status === "resolved") {
     const msgList = mkEl("div", "thread-messages-list");
     thread.messages.forEach(function (msg: Message) {
@@ -260,6 +277,12 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
 
   if (thread.scope && thread.scope.type === "element" && thread.scope.selector) {
     card.appendChild(mkEl("div", "thread-card-selector", thread.scope.selector));
+  }
+
+  if (thread.claimed_by) {
+    const claimBadge = mkEl("div", "thread-card-claim-badge", "\u2699 " + thread.claimed_by);
+    card.appendChild(claimBadge);
+    card.classList.add(PREFIX + "thread-card-claimed");
   }
 
   card.addEventListener("click", function () { showThreadDetail(thread.id); });

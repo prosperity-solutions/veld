@@ -67,6 +67,7 @@ pub async fn run_feedback_server() {
         )
         .route("/feedback/api/threads/{id}/resolve", post(resolve_thread))
         .route("/feedback/api/threads/{id}/reopen", post(reopen_thread))
+        .route("/feedback/api/threads/{id}/release", post(release_thread_claim))
         .route("/feedback/api/threads/{id}/seen", put(mark_thread_seen))
         // Event API.
         .route("/feedback/api/events", get(get_events))
@@ -588,6 +589,32 @@ async fn reopen_thread(
 
     store
         .append_event(EventType::Reopened { thread_id: id })
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    state.event_notify.notify_waiters();
+    Ok(Json(thread))
+}
+
+async fn release_thread_claim(
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    state: State<Arc<AppState>>,
+) -> Result<Json<Thread>, StatusCode> {
+    let run_name = headers
+        .get("x-veld-run")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let store = resolve_store(Some(run_name), None, &headers)?;
+
+    let thread = store
+        .release_thread(&id, None) // Force release (no agent check) — for UI use.
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    store
+        .append_event(EventType::ThreadReleased {
+            thread_id: id,
+            agent_id: "ui".to_owned(),
+        })
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     state.event_notify.notify_waiters();
