@@ -76,6 +76,9 @@ function arcPath(
   const a2 = endAngle + pad;
   const largeArc = Math.abs(a2 - a1) > Math.PI ? 1 : 0;
 
+  const capR = (rOuter - rInner) / 2; // radius of the rounded endcaps
+  const rMid = (rOuter + rInner) / 2; // midpoint radius for cap centers
+
   const ox1 = centerX + Math.cos(a1) * rOuter;
   const oy1 = centerY + Math.sin(a1) * rOuter;
   const ox2 = centerX + Math.cos(a2) * rOuter;
@@ -88,8 +91,11 @@ function arcPath(
   return [
     "M", ox1, oy1,
     "A", rOuter, rOuter, 0, largeArc, 1, ox2, oy2,
-    "L", ix2, iy2,
+    // Rounded endcap at end (outer → inner)
+    "A", capR, capR, 0, 0, 1, ix2, iy2,
     "A", rInner, rInner, 0, largeArc, 0, ix1, iy1,
+    // Rounded endcap at start (inner → outer)
+    "A", capR, capR, 0, 0, 1, ox1, oy1,
     "Z"
   ].join(" ");
 }
@@ -168,19 +174,26 @@ export function positionRadialButtons(): void {
   }
 }
 
-/** Position the second-ring overflow buttons around the ⋯ button's angle. */
+/** Position the second-ring overflow buttons, aligned to start from the ⋯ button's angle. */
 function positionOverflowButtons(baseAngle: number, visiblePrimary: HTMLElement[]): void {
   const moreIndex = visiblePrimary.indexOf(refs.moreBtn);
   if (moreIndex === -1) return;
   const count = visiblePrimary.length;
-  const startAngle = baseAngle - ARC_SPAN / 2;
-  const step = count > 1 ? ARC_SPAN / (count - 1) : 0;
-  const moreAngle = startAngle + step * moreIndex;
+  const primaryStart = baseAngle - ARC_SPAN / 2;
+  const primaryStep = count > 1 ? ARC_SPAN / (count - 1) : 0;
+  const moreAngle = primaryStart + primaryStep * moreIndex;
   const cx = 20, cy = 20;
 
+  // Determine which direction the ⋯ is relative to the arc midpoint.
+  // Extend overflow in the same direction (away from the arc center)
+  // so it stays on the same side as the ⋯ button.
+  const arcMidAngle = baseAngle;
+  const moreOnPositiveSide = moreAngle >= arcMidAngle;
+
   const overflowCount = refs.overflowButtons.length;
-  const overflowStart = moreAngle - OVERFLOW_ARC / 2;
   const overflowStep = overflowCount > 1 ? OVERFLOW_ARC / (overflowCount - 1) : 0;
+  // Start from moreAngle and extend outward (same direction from center)
+  const overflowStart = moreOnPositiveSide ? moreAngle : moreAngle - OVERFLOW_ARC;
 
   for (let i = 0; i < overflowCount; i++) {
     const angle = overflowStart + overflowStep * i;
