@@ -189,8 +189,7 @@ pub async fn run(
                     ..
                 } = e
                 {
-                    let log_path =
-                        logging::log_file(&project_root, run_name_str, node, variant);
+                    let log_path = logging::log_file(&project_root, run_name_str, node, variant);
                     if let Ok(raw_lines) = logging::tail_lines(&log_path, 40).await {
                         let merged = logging::merge_continuation_lines(raw_lines);
                         let start = merged.len().saturating_sub(20);
@@ -203,10 +202,8 @@ pub async fn run(
                             );
                             eprintln!();
                             for line in tail {
-                                let content = line
-                                    .find("] ")
-                                    .map(|i| &line[i + 2..])
-                                    .unwrap_or(line);
+                                let content =
+                                    line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line);
                                 eprintln!("    {}", output::dim(content));
                             }
                             eprintln!();
