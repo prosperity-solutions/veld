@@ -181,6 +181,44 @@ pub async fn run(
             } else {
                 output::print_error(&format!("Startup failed: {e}"), false);
             }
+            // Dump the tail of the service log so the user can see what went wrong.
+            if tty {
+                if let veld_core::orchestrator::OrchestratorError::NodeFailed {
+                    ref node,
+                    ref variant,
+                    ..
+                } = e
+                {
+                    let log_path =
+                        logging::log_file(&project_root, run_name_str, node, variant);
+                    if let Ok(raw_lines) = logging::tail_lines(&log_path, 40).await {
+                        let merged = logging::merge_continuation_lines(raw_lines);
+                        let start = merged.len().saturating_sub(20);
+                        let tail = &merged[start..];
+                        if !tail.is_empty() {
+                            eprintln!();
+                            eprintln!(
+                                "  {}",
+                                output::dim(&format!("Last log lines from {node}:{variant}:"))
+                            );
+                            eprintln!();
+                            for line in tail {
+                                let content = line
+                                    .find("] ")
+                                    .map(|i| &line[i + 2..])
+                                    .unwrap_or(line);
+                                eprintln!("    {}", output::dim(content));
+                            }
+                            eprintln!();
+                            eprintln!(
+                                "  {}",
+                                output::dim(&format!("Full log: {}", log_path.display()))
+                            );
+                        }
+                    }
+                }
+            }
+
             // Best-effort teardown.
             let _stop_result = orchestrator.stop(run_name_str).await;
             1
@@ -470,6 +508,20 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             let key = format!("{node}:{variant}");
             if let Some(state) = ctx.bars.get(&key) {
                 state.redraw(ctx.total, "running...");
+            }
+        }
+        ProgressEvent::NodeLogLines {
+            node,
+            variant,
+            lines,
+        } => {
+            let label = output::dim(&format!("{node}:{variant}"));
+            for line in lines {
+                // Strip timestamp prefix for readability.
+                let content = line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line);
+                let _ = ctx
+                    .multi
+                    .println(format!("  {label} {}", output::dim(content)));
             }
         }
         ProgressEvent::SetupStepStarting { name, index, total } => {

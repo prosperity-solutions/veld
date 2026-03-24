@@ -91,6 +91,16 @@ pub enum ProgressEvent {
 
     /// A teardown step completed.
     TeardownStepCompleted { name: String },
+
+    /// Service log lines streamed during slow health checks.
+    ///
+    /// Emitted after a delay when health checks are taking longer than
+    /// expected, giving the user visibility into what the service is doing.
+    NodeLogLines {
+        node: String,
+        variant: String,
+        lines: Vec<String>,
+    },
 }
 
 #[cfg(test)]
@@ -230,5 +240,23 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"teardown_step_completed\""));
+    }
+
+    #[test]
+    fn test_node_log_lines_serialization() {
+        let event = ProgressEvent::NodeLogLines {
+            node: "api".into(),
+            variant: "local".into(),
+            lines: vec![
+                "[2026-03-24T10:00:00Z] Error: EADDRINUSE".into(),
+                "[2026-03-24T10:00:01Z] Server crashed".into(),
+            ],
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"node_log_lines\""));
+        assert!(json.contains("\"node\":\"api\""));
+        assert!(json.contains("\"variant\":\"local\""));
+        assert!(json.contains("EADDRINUSE"));
+        assert!(json.contains("Server crashed"));
     }
 }

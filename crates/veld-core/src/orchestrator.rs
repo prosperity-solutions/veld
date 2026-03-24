@@ -1153,6 +1153,15 @@ fn make_attempt_notifier(
     })
 }
 
+/// Guard that aborts a spawned task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 /// Resolve working directory from variant > node > project root.
 fn resolve_working_dir(
     variant_cwd: Option<&str>,
@@ -1470,6 +1479,54 @@ async fn execute_start_server_isolated(
             last_error: None,
             passed_at: None,
         });
+
+        // Spawn a background log watcher that streams service output to the
+        // progress channel after a delay.  This gives the user visibility
+        // into what the service is doing when health checks are slow.
+        // The `_log_watcher` guard aborts the task when it goes out of scope
+        // (i.e. when the health check completes, whether success or failure).
+        let _log_watcher = {
+            let tx = ctx.progress_tx.clone();
+            let path = log_path.clone();
+            let node = sel.node.clone();
+            let variant = sel.variant.clone();
+            AbortOnDrop(tokio::spawn(async move {
+                // Give the service time to start normally before showing logs.
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+                let mut last_pos: u64 = 0;
+                loop {
+                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
+                        let len = metadata.len();
+                        if len > last_pos {
+                            if let Ok(mut file) = tokio::fs::File::open(&path).await {
+                                use tokio::io::{AsyncReadExt, AsyncSeekExt};
+                                let _ = file.seek(std::io::SeekFrom::Start(last_pos)).await;
+                                let mut buf = String::new();
+                                if file.read_to_string(&mut buf).await.is_ok() {
+                                    let lines: Vec<String> = buf
+                                        .lines()
+                                        .filter(|l| !l.is_empty())
+                                        .map(|l| l.to_owned())
+                                        .collect();
+                                    if !lines.is_empty() {
+                                        if let Some(ref tx) = tx {
+                                            let _ = tx.send(ProgressEvent::NodeLogLines {
+                                                node: node.clone(),
+                                                variant: variant.clone(),
+                                                lines,
+                                            });
+                                        }
+                                    }
+                                }
+                                last_pos = len;
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                }
+            }))
+        };
 
         // Build attempt notifiers for health check phases.
         let phase1_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
