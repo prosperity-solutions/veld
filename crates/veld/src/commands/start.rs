@@ -173,15 +173,11 @@ pub async fn run(
             let _ = progress_handle.await;
             // Surface failureMessage for setup step failures.
             if let veld_core::orchestrator::OrchestratorError::SetupFailed {
-                ref failure_message,
+                failure_message: Some(ref msg),
                 ..
             } = e
             {
-                if let Some(msg) = failure_message {
-                    output::print_error(&format!("Startup failed: {msg}"), false);
-                } else {
-                    output::print_error(&format!("Startup failed: {e}"), false);
-                }
+                output::print_error(&format!("Startup failed: {msg}"), false);
             } else {
                 output::print_error(&format!("Startup failed: {e}"), false);
             }
