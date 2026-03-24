@@ -448,7 +448,21 @@ function activate(
       return;
     }
     if (!getState().drawing || !getState().currentStroke) return;
-    dispatch({ type: "APPEND_POINT", point: getPos(e) });
+    const pos = getPos(e);
+    if (e.shiftKey) {
+      // Shift held: constrain to a straight horizontal or vertical line from stroke origin.
+      const stroke = getState().currentStroke!;
+      const anchor = stroke.points[0];
+      const dx = Math.abs(pos.x - anchor.x);
+      const dy = Math.abs(pos.y - anchor.y);
+      const constrained: Point = dx >= dy
+        ? { x: pos.x, y: anchor.y, pressure: pos.pressure }
+        : { x: anchor.x, y: pos.y, pressure: pos.pressure };
+      // Replace stroke with clean 2-point line (anchor → constrained endpoint).
+      dispatch({ type: "SET_CURRENT_STROKE", stroke: { ...stroke, points: [anchor, constrained] } });
+    } else {
+      dispatch({ type: "APPEND_POINT", point: pos });
+    }
     scheduleRedraw();
   }
 
