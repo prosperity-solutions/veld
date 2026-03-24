@@ -6,18 +6,14 @@ import { attachTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 import { deps } from "../shared/registry";
 
-const RADIUS = 48;           // primary ring: center-to-center distance
-const OVERFLOW_RADIUS = 85;  // secondary ring
-const ARC_SPAN = Math.PI;    // 180° arc for primary buttons
-// Overflow arc span computed dynamically from button size and radius
-const ARC_THICKNESS = 32;    // thickness of the arc backdrop (just > button 30px)
+const RADIUS = 48;           // center-to-center distance from FAB
+const ARC_SPAN = Math.PI;    // 180° arc
+const ARC_THICKNESS = 32;    // arc backdrop thickness
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // Arc backdrop SVG elements (created lazily)
-let primaryArcSvg: SVGSVGElement | null = null;
-let primaryArcPath: SVGPathElement | null = null;
-let overflowArcSvg: SVGSVGElement | null = null;
-let overflowArcPath: SVGPathElement | null = null;
+let arcSvg: SVGSVGElement | null = null;
+let arcPathEl: SVGPathElement | null = null;
 
 export function makeToolBtn(action: string, iconSvg: string, title: string): HTMLElement {
   const btn = mkEl("button", "tool-btn");
@@ -54,15 +50,24 @@ function computeBaseAngle(): number {
   return Math.atan2(0.5 - cy, 0.5 - cx);
 }
 
-/** Get visible primary buttons (filters out hidden listening dot). */
-function getVisiblePrimary(): HTMLElement[] {
+/**
+ * Get the currently active button set.
+ * When overflow is open, show overflow buttons + the ⋯ toggle.
+ * Otherwise, show primary buttons (filtering hidden listening dot).
+ */
+function getActiveButtons(): HTMLElement[] {
+  if (getState().overflowOpen) {
+    // Overflow page: overflow buttons + the ⋯ toggle (to switch back)
+    return [...refs.overflowButtons, refs.moreBtn];
+  }
+  // Primary page: primary tools, conditional listening, ⋯ toggle
   return refs.radialButtons.filter(function (btn) {
     if (btn === refs.listeningModule && !getState().agentListening) return false;
     return true;
   });
 }
 
-/** Build an SVG arc (ring segment) path string. */
+/** Build an SVG arc (ring segment) path string with rounded endcaps. */
 function arcPath(
   centerX: number, centerY: number,
   radius: number, thickness: number,
@@ -88,152 +93,81 @@ function arcPath(
   return [
     "M", ox1, oy1,
     "A", rOuter, rOuter, 0, largeArc, 1, ox2, oy2,
-    // Rounded endcap at end (outer → inner)
     "A", capR, capR, 0, 0, 1, ix2, iy2,
     "A", rInner, rInner, 0, largeArc, 0, ix1, iy1,
-    // Rounded endcap at start (inner → outer)
     "A", capR, capR, 0, 0, 1, ox1, oy1,
     "Z"
   ].join(" ");
 }
 
-/** Ensure the primary arc SVG exists, create lazily. */
-function ensurePrimaryArc(): { svg: SVGSVGElement; path: SVGPathElement } {
-  if (!primaryArcSvg) {
-    primaryArcSvg = document.createElementNS(SVG_NS, "svg");
-    primaryArcSvg.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;overflow:visible;width:40px;height:40px;z-index:0;";
-    primaryArcPath = document.createElementNS(SVG_NS, "path");
-    primaryArcPath.setAttribute("fill", "var(--vf-bg)");
-    primaryArcPath.setAttribute("stroke", "var(--vf-border)");
-    primaryArcPath.setAttribute("stroke-width", "1");
-    primaryArcPath.style.filter = "drop-shadow(0 2px 8px rgba(0,0,0,.25))";
-    primaryArcPath.style.transition = "d .2s ease";
-    primaryArcSvg.appendChild(primaryArcPath);
-    refs.toolbarContainer.insertBefore(primaryArcSvg, refs.toolbarContainer.firstChild);
+/** Ensure the arc SVG exists, create lazily. */
+function ensureArc(): { svg: SVGSVGElement; path: SVGPathElement } {
+  if (!arcSvg) {
+    arcSvg = document.createElementNS(SVG_NS, "svg");
+    arcSvg.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;overflow:visible;width:40px;height:40px;z-index:0;";
+    arcPathEl = document.createElementNS(SVG_NS, "path");
+    arcPathEl.setAttribute("fill", "var(--vf-bg)");
+    arcPathEl.setAttribute("stroke", "var(--vf-border)");
+    arcPathEl.setAttribute("stroke-width", "1");
+    arcPathEl.style.filter = "drop-shadow(0 2px 8px rgba(0,0,0,.25))";
+    arcPathEl.style.transition = "d .2s ease";
+    arcSvg.appendChild(arcPathEl);
+    refs.toolbarContainer.insertBefore(arcSvg, refs.toolbarContainer.firstChild);
   }
-  return { svg: primaryArcSvg, path: primaryArcPath! };
+  return { svg: arcSvg, path: arcPathEl! };
 }
 
-function ensureOverflowArc(): { svg: SVGSVGElement; path: SVGPathElement } {
-  if (!overflowArcSvg) {
-    overflowArcSvg = document.createElementNS(SVG_NS, "svg");
-    overflowArcSvg.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;overflow:visible;width:40px;height:40px;z-index:0;opacity:0;transition:opacity .15s;";
-    overflowArcPath = document.createElementNS(SVG_NS, "path");
-    overflowArcPath.setAttribute("fill", "var(--vf-bg)");
-    overflowArcPath.setAttribute("stroke", "var(--vf-border)");
-    overflowArcPath.setAttribute("stroke-width", "1");
-    overflowArcPath.style.filter = "drop-shadow(0 2px 8px rgba(0,0,0,.25))";
-    overflowArcSvg.appendChild(overflowArcPath);
-    refs.toolbarContainer.insertBefore(overflowArcSvg, refs.toolbarContainer.firstChild);
-  }
-  return { svg: overflowArcSvg, path: overflowArcPath! };
+/** Hide all buttons (both primary and overflow). */
+function hideAllButtons(): void {
+  const all = [...refs.radialButtons, ...refs.overflowButtons];
+  all.forEach(function (btn) {
+    btn.classList.remove(PREFIX + "radial-open");
+    btn.style.transform = "translate(0, 0) scale(0)";
+  });
 }
 
 /**
- * Position radial buttons around the FAB.
- * Called on open, during drag, and on window resize.
+ * Position the active button set around the FAB.
+ * Called on open, during drag, on overflow toggle, and on window resize.
  */
 export function positionRadialButtons(): void {
   if (!getState().toolbarOpen) return;
   const baseAngle = computeBaseAngle();
-  const visible = getVisiblePrimary();
-  const count = visible.length;
+  const active = getActiveButtons();
+  const count = active.length;
   if (count === 0) return;
 
   const startAngle = baseAngle - ARC_SPAN / 2;
   const step = count > 1 ? ARC_SPAN / (count - 1) : 0;
-  // Center of the FAB within the container (20, 20)
   const cx = 20, cy = 20;
 
   for (let i = 0; i < count; i++) {
     const angle = startAngle + step * i;
     const x = Math.cos(angle) * RADIUS;
     const y = Math.sin(angle) * RADIUS;
-    visible[i].style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px) scale(1)";
+    active[i].style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px) scale(1)";
   }
 
-  // Hide buttons that are not visible
-  refs.radialButtons.forEach(function (btn) {
-    if (visible.indexOf(btn) === -1) {
-      btn.classList.remove(PREFIX + "radial-open");
-      btn.style.transform = "translate(0, 0) scale(0)";
-    }
-  });
-
-  // Update primary arc backdrop
-  const { path } = ensurePrimaryArc();
+  // Update arc backdrop
+  const { path } = ensureArc();
   const endAngle = startAngle + step * (count - 1);
   path.setAttribute("d", arcPath(cx, cy, RADIUS, ARC_THICKNESS, startAngle, endAngle));
-
-  // Position overflow buttons if open
-  if (getState().overflowOpen) {
-    positionOverflowButtons(baseAngle, visible);
-  }
 }
 
-/** Position the second-ring overflow buttons, aligned to start from the ⋯ button's angle. */
-function positionOverflowButtons(baseAngle: number, visiblePrimary: HTMLElement[]): void {
-  const moreIndex = visiblePrimary.indexOf(refs.moreBtn);
-  if (moreIndex === -1) return;
-  const count = visiblePrimary.length;
-  const primaryStart = baseAngle - ARC_SPAN / 2;
-  const primaryStep = count > 1 ? ARC_SPAN / (count - 1) : 0;
-  const moreAngle = primaryStart + primaryStep * moreIndex;
-  const cx = 20, cy = 20;
-
-  // Extend overflow in the same angular direction as the primary arc
-  // (toward the arc center), so it stays within the same screen region.
-  const arcMidAngle = baseAngle;
-  const moreOnPositiveSide = moreAngle >= arcMidAngle;
-
-  const overflowCount = refs.overflowButtons.length;
-  // Step size: ~32px between button centers at the overflow radius
-  const overflowStep = 32 / OVERFLOW_RADIUS;
-  const overflowArc = overflowStep * (overflowCount - 1);
-  // Start from moreAngle and extend inward (toward the arc center)
-  const overflowStart = moreOnPositiveSide ? moreAngle - overflowArc : moreAngle;
-
-  for (let i = 0; i < overflowCount; i++) {
-    const angle = overflowStart + overflowStep * i;
-    const x = Math.cos(angle) * OVERFLOW_RADIUS;
-    const y = Math.sin(angle) * OVERFLOW_RADIUS;
-    refs.overflowButtons[i].style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px) scale(1)";
-    refs.overflowButtons[i].classList.add(PREFIX + "radial-open");
-  }
-
-  // Update overflow arc backdrop
-  const { svg, path } = ensureOverflowArc();
-  const overflowEnd = overflowStart + overflowArc;
-  path.setAttribute("d", arcPath(cx, cy, OVERFLOW_RADIUS, ARC_THICKNESS, overflowStart, overflowEnd));
-  svg.style.opacity = "1";
-}
-
-/** Collapse overflow buttons back to center. */
-function collapseOverflowButtons(): void {
-  refs.overflowButtons.forEach(function (btn) {
-    btn.classList.remove(PREFIX + "radial-open");
-    btn.style.transform = "translate(0, 0) scale(0)";
-  });
-  if (overflowArcSvg) overflowArcSvg.style.opacity = "0";
-}
-
-/** Show/hide the primary arc backdrop. */
-function showPrimaryArc(): void {
-  const { svg } = ensurePrimaryArc();
-  svg.style.opacity = "1";
-}
-function hidePrimaryArc(): void {
-  if (primaryArcSvg) primaryArcSvg.style.opacity = "0";
-}
-
+/** Toggle between primary and overflow button sets in the same arc. */
 export function toggleOverflow(): void {
   const nowOpen = !getState().overflowOpen;
   dispatch({ type: "SET_OVERFLOW_OPEN", open: nowOpen });
-  if (nowOpen) {
-    positionRadialButtons();
-  } else {
-    collapseOverflowButtons();
-  }
+
+  // Hide the old set, show the new set
+  hideAllButtons();
+  positionRadialButtons();
+  const active = getActiveButtons();
+  active.forEach(function (btn, i) {
+    setTimeout(function () {
+      btn.classList.add(PREFIX + "radial-open");
+    }, i * 30);
+  });
 }
 
 export function toggleToolbar(): void {
@@ -241,9 +175,9 @@ export function toggleToolbar(): void {
 
   if (getState().toolbarOpen) {
     positionRadialButtons();
-    showPrimaryArc();
-    const visible = getVisiblePrimary();
-    visible.forEach(function (btn, i) {
+    if (arcSvg) arcSvg.style.opacity = "1";
+    const active = getActiveButtons();
+    active.forEach(function (btn, i) {
       setTimeout(function () {
         btn.classList.add(PREFIX + "radial-open");
       }, i * 30);
@@ -251,16 +185,19 @@ export function toggleToolbar(): void {
   } else {
     deps().setMode(null);
     dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
-    const visible = getVisiblePrimary();
-    const total = visible.length;
-    visible.forEach(function (btn, i) {
+    const active = getActiveButtons();
+    const total = active.length;
+    active.forEach(function (btn, i) {
       setTimeout(function () {
         btn.classList.remove(PREFIX + "radial-open");
         btn.style.transform = "translate(0, 0) scale(0)";
       }, (total - 1 - i) * 30);
     });
-    collapseOverflowButtons();
-    setTimeout(hidePrimaryArc, total * 30);
+    // Also hide any buttons from the other set
+    hideAllButtons();
+    setTimeout(function () {
+      if (arcSvg) arcSvg.style.opacity = "0";
+    }, total * 30);
   }
 
   updateBadge();
