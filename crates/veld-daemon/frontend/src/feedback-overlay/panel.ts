@@ -58,6 +58,11 @@ function updateSegmentedControl(): void {
 
 export function updateMarkReadBtn(): void {
   if (!refs.markReadBtn) return;
+  // Hide in thread detail view — only show in list view
+  if (getState().expandedThreadId) {
+    refs.markReadBtn.style.display = "none";
+    return;
+  }
   const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t, getState().lastSeenAt); });
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
@@ -105,15 +110,16 @@ export function renderPanel(): void {
 
 const COPY_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>';
 
-function makeCopyRow(label: string, value: string, cls: string): HTMLElement {
+function makeCopyRow(label: string, displayValue: string, cls: string, copyValue?: string): HTMLElement {
   const row = mkEl("div", cls);
-  row.appendChild(document.createTextNode(label + value));
+  row.appendChild(document.createTextNode(label + displayValue));
   const icon = mkEl("span", "panel-detail-copy-icon");
   icon.innerHTML = COPY_SVG;
   row.appendChild(icon);
+  const valueToCopy = copyValue !== undefined ? copyValue : displayValue;
   row.addEventListener("click", function (e) {
     e.stopPropagation();
-    navigator.clipboard.writeText(value).then(function () {
+    navigator.clipboard.writeText(valueToCopy).then(function () {
       icon.innerHTML = ICONS.check;
       setTimeout(function () { icon.innerHTML = COPY_SVG; }, 1500);
     });
@@ -123,7 +129,7 @@ function makeCopyRow(label: string, value: string, cls: string): HTMLElement {
 
 function renderThreadDetail(thread: Thread): void {
   const header = mkEl("div", "panel-detail-header");
-  header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id"));
+  header.appendChild(makeCopyRow("ID: ", thread.id.substring(0, 20) + "\u2026", "panel-detail-id", thread.id));
 
   const pageUrl = getThreadPageUrl(thread);
   let titleText: string;
