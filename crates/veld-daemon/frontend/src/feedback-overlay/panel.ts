@@ -158,6 +158,20 @@ function renderThreadDetail(thread: Thread): void {
     header.appendChild(makeCopyRow("", thread.scope.selector, "panel-detail-selector"));
   }
 
+  if (thread.claimed_by) {
+    const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
+    releaseBtn.addEventListener("click", function () {
+      api("POST", "/threads/" + thread.id + "/release").then(function () {
+        thread.claimed_by = null;
+        thread.claimed_at = null;
+        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
+        renderPanel();
+        toast("Thread released");
+      });
+    });
+    header.appendChild(releaseBtn);
+  }
+
   refs.panelBody.appendChild(header);
 
   if (thread.status === "resolved") {
@@ -287,22 +301,9 @@ function makeClaimRow(thread: Thread): HTMLElement {
   const claimBody = mkEl("div", "message-body");
   const claimText = mkEl("div", "message-claim-text", "Being worked on by " + thread.claimed_by);
   claimBody.appendChild(claimText);
-  const claimMeta = mkEl("div", "message-meta");
-  const releaseBtn = mkEl("button", "btn btn-secondary btn-sm", "Release");
-  releaseBtn.addEventListener("click", function () {
-    api("POST", "/threads/" + thread.id + "/release").then(function () {
-      thread.claimed_by = null;
-      thread.claimed_at = null;
-      dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-      renderPanel();
-      toast("Thread released");
-    });
-  });
   if (thread.claimed_at) {
-    claimMeta.appendChild(document.createTextNode(timeAgo(thread.claimed_at) + " "));
+    claimBody.appendChild(mkEl("div", "message-meta", timeAgo(thread.claimed_at)));
   }
-  claimMeta.appendChild(releaseBtn);
-  claimBody.appendChild(claimMeta);
   claimRow.appendChild(claimBody);
   return claimRow;
 }
