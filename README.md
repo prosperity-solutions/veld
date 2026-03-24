@@ -20,6 +20,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Health checks** — two-phase checks (TCP port + HTTP endpoint) before marking services healthy
 - **Multiple variants** — same node, different behaviors (local server, Docker, remote URL)
 - **Named runs** — multiple environments coexist; re-running by name is idempotent
+- **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
 - **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`)
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
 - **Structured output** — all commands support `--json` for scripting and CI
@@ -152,6 +153,24 @@ veld stop --name dev
 
 - **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
 - **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `verify` command for idempotency.
+
+### Setup & teardown
+
+Project-level lifecycle steps that run outside the dependency graph. Setup steps run sequentially before any node starts; teardown steps run after all nodes stop.
+
+```json
+{
+  "setup": [
+    { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
+    { "name": "veld-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+  ],
+  "teardown": [
+    { "name": "veld-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+  ]
+}
+```
+
+Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if provided. Teardown is best-effort — failures are logged but don't block stop. Commands support shell env vars and project-level Veld variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`.
 
 ### Health checks
 

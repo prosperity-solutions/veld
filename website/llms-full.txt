@@ -230,7 +230,29 @@ Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (bro
 | `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
 | `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs`, `inject` (all default `true`, cascade: variant > node > project) |
 | `env` | object | No | Global environment variables inherited by all nodes (cascade: variant > node > project, per-key merge) |
+| `setup` | array | No | Lifecycle steps before graph execution (see Setup & Teardown) |
+| `teardown` | array | No | Lifecycle steps after all nodes stop (see Setup & Teardown) |
 | `nodes` | object | Yes | The dependency graph nodes |
+
+### Setup & Teardown
+
+Project-level lifecycle steps that run outside the dependency graph. Not nodes — no variants, no health checks, no outputs.
+
+**Setup** runs sequentially before any node. Non-zero exit aborts startup. **Teardown** runs after all nodes stop (after per-node `on_stop` hooks). Best-effort.
+
+```json
+"setup": [
+  { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
+  { "name": "network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+],
+"teardown": [
+  { "name": "network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+]
+```
+
+Step fields: `name` (required), `command` (required), `failureMessage` (optional — shown on failure).
+
+Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars.
 
 ### Step Types
 

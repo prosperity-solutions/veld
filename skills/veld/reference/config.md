@@ -8,10 +8,33 @@
   "schemaVersion": "1",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
+  "setup": [],
+  "teardown": [],
   "presets": { },
   "nodes": { }
 }
 ```
+
+## Setup & Teardown
+
+Project-level lifecycle steps. Not nodes — no variants, no health checks, no dependency graph.
+
+**Setup** runs sequentially before any node. Non-zero exit aborts startup.
+**Teardown** runs sequentially after all nodes stop. Best-effort (failures logged, not fatal).
+
+```json
+"setup": [
+  { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
+  { "name": "network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+],
+"teardown": [
+  { "name": "network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+]
+```
+
+Step fields: `name` (required), `command` (required), `failureMessage` (optional).
+
+Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars (`${veld.port}`, `${nodes.*}`).
 
 ## Node Types
 
@@ -118,10 +141,12 @@ Named shortcuts for common selections:
 
 | Field | Level | Description |
 |-------|-------|-------------|
+| `setup` | project | Lifecycle steps before graph execution. Array of `{name, command, failureMessage?}`. |
+| `teardown` | project | Lifecycle steps after all nodes stop. Array of `{name, command, failureMessage?}`. Best-effort. |
 | `env` | project, node, variant | Environment variables. Cascades: variant > node > project (per-key merge). Supports `${...}` substitution. |
 | `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld nodes` output |
 | `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
 | `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. |
-| `on_stop` | variant | Teardown command that runs on `veld stop`. |
+| `on_stop` | variant | Per-node teardown command that runs on `veld stop`. |
 | `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |

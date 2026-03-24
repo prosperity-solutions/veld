@@ -69,8 +69,43 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 
+    /// Setup steps that run sequentially before the dependency graph.
+    /// If any step exits non-zero, startup is aborted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup: Option<Vec<SetupStep>>,
+
+    /// Teardown steps that run sequentially after all nodes stop.
+    /// Best-effort: failures are logged but do not block the stop operation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub teardown: Option<Vec<SetupStep>>,
+
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Setup / Teardown steps
+// ---------------------------------------------------------------------------
+
+/// A lightweight step that runs before the dependency graph (setup) or after
+/// all nodes stop (teardown). Not a node — no variants, no health checks,
+/// no dependency graph participation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetupStep {
+    /// Human-readable name for progress reporting.
+    pub name: String,
+
+    /// Shell command to execute.
+    pub command: String,
+
+    /// Optional message shown when the command fails (non-zero exit).
+    /// Primarily useful for setup steps that validate prerequisites.
+    #[serde(
+        rename = "failureMessage",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub failure_message: Option<String>,
 }
 
 fn default_url_template() -> String {
@@ -746,5 +781,85 @@ mod tests {
         let root = PathBuf::from("/projects/myapp");
         let result = resolve_cwd(&root, Some("subdir"), None);
         assert_eq!(result, PathBuf::from("/projects/myapp/subdir"));
+    }
+
+    // -- Setup / Teardown deserialization tests --------------------------------
+
+    #[test]
+    fn test_setup_step_deserialization() {
+        let json = r#"{"name": "docker", "command": "docker info", "failureMessage": "Docker must be running"}"#;
+        let step: SetupStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.name, "docker");
+        assert_eq!(step.command, "docker info");
+        assert_eq!(
+            step.failure_message.as_deref(),
+            Some("Docker must be running")
+        );
+    }
+
+    #[test]
+    fn test_setup_step_without_failure_message() {
+        let json = r#"{"name": "network", "command": "docker network create veld"}"#;
+        let step: SetupStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.name, "network");
+        assert_eq!(step.command, "docker network create veld");
+        assert!(step.failure_message.is_none());
+    }
+
+    #[test]
+    fn test_config_with_setup_and_teardown() {
+        let json = r#"{
+            "schemaVersion": "1",
+            "name": "test-project",
+            "setup": [
+                {"name": "check", "command": "echo ok", "failureMessage": "Check failed"},
+                {"name": "init", "command": "mkdir -p /tmp/test"}
+            ],
+            "teardown": [
+                {"name": "cleanup", "command": "rm -rf /tmp/test"}
+            ],
+            "nodes": {
+                "app": {
+                    "variants": {
+                        "local": {
+                            "type": "start_server",
+                            "command": "echo start"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let config: VeldConfig = serde_json::from_str(json).unwrap();
+        let setup = config.setup.as_ref().unwrap();
+        assert_eq!(setup.len(), 2);
+        assert_eq!(setup[0].name, "check");
+        assert_eq!(setup[0].failure_message.as_deref(), Some("Check failed"));
+        assert_eq!(setup[1].name, "init");
+        assert!(setup[1].failure_message.is_none());
+
+        let teardown = config.teardown.as_ref().unwrap();
+        assert_eq!(teardown.len(), 1);
+        assert_eq!(teardown[0].name, "cleanup");
+    }
+
+    #[test]
+    fn test_config_without_setup_teardown() {
+        let json = r#"{
+            "schemaVersion": "1",
+            "name": "test-project",
+            "nodes": {
+                "app": {
+                    "variants": {
+                        "local": {
+                            "type": "start_server",
+                            "command": "echo start"
+                        }
+                    }
+                }
+            }
+        }"#;
+        let config: VeldConfig = serde_json::from_str(json).unwrap();
+        assert!(config.setup.is_none());
+        assert!(config.teardown.is_none());
     }
 }

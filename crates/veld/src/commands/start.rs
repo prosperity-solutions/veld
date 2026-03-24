@@ -171,7 +171,16 @@ pub async fn run(
         Err(e) => {
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
-            output::print_error(&format!("Startup failed: {e}"), false);
+            // Surface failureMessage for setup step failures.
+            if let veld_core::orchestrator::OrchestratorError::SetupFailed {
+                failure_message: Some(ref msg),
+                ..
+            } = e
+            {
+                output::print_error(&format!("Startup failed: {msg}"), false);
+            } else {
+                output::print_error(&format!("Startup failed: {e}"), false);
+            }
             // Best-effort teardown.
             let _stop_result = orchestrator.stop(run_name_str).await;
             1
@@ -462,6 +471,62 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             if let Some(state) = ctx.bars.get(&key) {
                 state.redraw(ctx.total, "running...");
             }
+        }
+        ProgressEvent::SetupStepStarting { name, index, total } => {
+            let bar = ctx.multi.add(indicatif::ProgressBar::new_spinner());
+            bar.enable_steady_tick(std::time::Duration::from_millis(200));
+            bar.set_message(format!(
+                "  {} {}",
+                output::dim(&format!("setup ({index}/{total}):")),
+                name,
+            ));
+            ctx.bars.insert(
+                format!("setup:{name}"),
+                NodeBarState {
+                    bar,
+                    index: *index,
+                    label: name.clone(),
+                    port: None,
+                    phase: 0,
+                    phase_desc: String::new(),
+                },
+            );
+        }
+        ProgressEvent::SetupStepCompleted { name, elapsed_ms } => {
+            let key = format!("setup:{name}");
+            let finish_msg = format!(
+                "  {} {} {}",
+                output::checkmark(),
+                output::pad_right(name, 30),
+                output::dim(&format!("({elapsed_ms}ms)")),
+            );
+            if let Some(state) = ctx.bars.remove(&key) {
+                state.bar.finish_with_message(finish_msg);
+            }
+        }
+        ProgressEvent::SetupStepFailed { name, error } => {
+            let key = format!("setup:{name}");
+            let finish_msg = format!(
+                "  {} {} {}",
+                output::cross(),
+                output::pad_right(name, 30),
+                output::red(error),
+            );
+            if let Some(state) = ctx.bars.remove(&key) {
+                state.bar.finish_with_message(finish_msg);
+            }
+        }
+        ProgressEvent::TeardownStepRunning { name, index, total } => {
+            let _ = ctx.multi.println(format!(
+                "  {} {}",
+                output::dim(&format!("teardown ({index}/{total}):")),
+                name,
+            ));
+        }
+        ProgressEvent::TeardownStepCompleted { name } => {
+            let _ = ctx
+                .multi
+                .println(format!("  {} {}", output::checkmark(), name,));
         }
     }
 }
