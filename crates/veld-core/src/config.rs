@@ -100,7 +100,11 @@ pub struct SetupStep {
 
     /// Optional message shown when the command fails (non-zero exit).
     /// Primarily useful for setup steps that validate prerequisites.
-    #[serde(rename = "failureMessage", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "failureMessage",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub failure_message: Option<String>,
 }
 
@@ -787,7 +791,10 @@ mod tests {
         let step: SetupStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.name, "docker");
         assert_eq!(step.command, "docker info");
-        assert_eq!(step.failure_message.as_deref(), Some("Docker must be running"));
+        assert_eq!(
+            step.failure_message.as_deref(),
+            Some("Docker must be running")
+        );
     }
 
     #[test]

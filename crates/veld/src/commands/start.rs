@@ -484,14 +484,17 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 output::dim(&format!("setup ({index}/{total}):")),
                 name,
             ));
-            ctx.bars.insert(format!("setup:{name}"), NodeBarState {
-                bar,
-                index: *index,
-                label: name.clone(),
-                port: None,
-                phase: 0,
-                phase_desc: String::new(),
-            });
+            ctx.bars.insert(
+                format!("setup:{name}"),
+                NodeBarState {
+                    bar,
+                    index: *index,
+                    label: name.clone(),
+                    port: None,
+                    phase: 0,
+                    phase_desc: String::new(),
+                },
+            );
         }
         ProgressEvent::SetupStepCompleted { name, elapsed_ms } => {
             let key = format!("setup:{name}");
@@ -525,11 +528,9 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
             ));
         }
         ProgressEvent::TeardownStepCompleted { name } => {
-            let _ = ctx.multi.println(format!(
-                "  {} {}",
-                output::checkmark(),
-                name,
-            ));
+            let _ = ctx
+                .multi
+                .println(format!("  {} {}", output::checkmark(), name,));
         }
     }
 }

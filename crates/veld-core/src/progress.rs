@@ -77,16 +77,10 @@ pub enum ProgressEvent {
     },
 
     /// A setup step completed successfully.
-    SetupStepCompleted {
-        name: String,
-        elapsed_ms: u64,
-    },
+    SetupStepCompleted { name: String, elapsed_ms: u64 },
 
     /// A setup step failed.
-    SetupStepFailed {
-        name: String,
-        error: String,
-    },
+    SetupStepFailed { name: String, error: String },
 
     /// A teardown step is running.
     TeardownStepRunning {
@@ -96,9 +90,7 @@ pub enum ProgressEvent {
     },
 
     /// A teardown step completed.
-    TeardownStepCompleted {
-        name: String,
-    },
+    TeardownStepCompleted { name: String },
 }
 
 #[cfg(test)]
