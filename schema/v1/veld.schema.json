@@ -54,6 +54,20 @@
       "$ref": "#/$defs/EnvMap",
       "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
     },
+    "setup": {
+      "type": "array",
+      "description": "Steps that run sequentially before the dependency graph executes. If any step exits non-zero, startup is aborted. Not nodes — no variants, no health checks, no dependency graph participation.",
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      }
+    },
+    "teardown": {
+      "type": "array",
+      "description": "Steps that run sequentially after all nodes stop (after per-node on_stop hooks). Best-effort: failures are logged but do not block the stop operation. Commands should be idempotent.",
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      }
+    },
     "nodes": {
       "type": "object",
       "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
@@ -64,6 +78,26 @@
     }
   },
   "$defs": {
+    "SetupStep": {
+      "type": "object",
+      "description": "A lightweight step that runs before the dependency graph (setup) or after all nodes stop (teardown). Supports shell environment variables and project-level Veld variables: ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}.",
+      "required": ["name", "command"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable name for progress reporting and error messages."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute. Supports ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}, and shell environment variables."
+        },
+        "failureMessage": {
+          "type": "string",
+          "description": "Optional human-friendly message shown when the command fails (non-zero exit). Useful for prerequisite checks like 'Docker must be running'."
+        }
+      }
+    },
     "NodeConfig": {
       "type": "object",
       "description": "Configuration for a single node in the dependency graph.",

@@ -41,11 +41,15 @@ All relative paths in the configuration resolve relative to the directory contai
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
+| `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
+| `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
 
 [Client-Side Log Levels]: #client-side-log-levels
 
 [URL Templates]: #url-templates
+
+[Setup & Teardown]: #setup--teardown
 
 ---
 
@@ -169,6 +173,59 @@ Global environment variables inherited by all node variants. Values support Veld
 ```
 
 In this example, `api:local` inherits `FEATURE_FLAG_X=1` from the project, gets `SHARED_CONFIG=api-override` from the node (overriding the project value), and adds `PORT` at the variant level.
+
+### Setup & Teardown
+
+Setup and teardown are project-level lifecycle steps that run outside the dependency graph. They are not nodes — they have no variants, no health checks, no outputs, and do not participate in the dependency graph.
+
+**Setup** steps run sequentially (top to bottom) before any node starts. If any step exits non-zero, startup is aborted immediately. Use setup for prerequisite checks (is Docker running? is Node >= 20?) and environment preparation (create Docker networks, generate `.env` files, seed directories).
+
+**Teardown** steps run sequentially after all nodes stop (after all per-node `on_stop` hooks complete). Teardown is best-effort — failures are logged but never block the stop operation. Commands should be written idempotently (e.g. `|| true` suffixes).
+
+```json
+{
+  "setup": [
+    { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
+    { "name": "node-version", "command": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Need Node >= 20" },
+    { "name": "veld-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+  ],
+  "teardown": [
+    { "name": "veld-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+  ]
+}
+```
+
+#### Step fields
+
+| Field            | Type   | Required | Description |
+|------------------|--------|----------|-------------|
+| `name`           | string | Yes      | Human-readable name for progress reporting and error messages |
+| `command`        | string | Yes      | Shell command to execute |
+| `failureMessage` | string | No       | Message shown when the command fails (non-zero exit) |
+
+#### Variable availability
+
+Setup and teardown steps have access to a limited set of variables — only project-level Veld variables and shell environment variables. Node-scoped variables like `${veld.port}`, `${veld.url}`, and `${nodes.*}` are not available because setup/teardown runs outside the node graph.
+
+| Variable | Description |
+|----------|-------------|
+| `${veld.name}` | Project name from `veld.json` |
+| `${veld.project}` | Same as `${veld.name}` |
+| `${veld.root}` | Absolute path to the directory containing `veld.json` |
+| `${veld.run}` | Run name |
+| Shell env vars | `$HOME`, `$PATH`, `$CI`, etc. — expanded by the shell |
+
+#### Execution lifecycle
+
+The full execution lifecycle with setup and teardown is:
+
+1. **Setup** — runs sequentially, gates startup
+2. **Node graph** — resolved, ports pre-computed, stages executed
+3. _(environment running)_
+4. **Per-node `on_stop`** — runs in reverse dependency order
+5. **Teardown** — runs sequentially, best-effort
+
+If setup fails, Veld runs teardown steps to clean up anything that earlier setup steps may have created.
 
 ---
 
@@ -593,6 +650,7 @@ Available to all node variants without any declaration:
 | `${veld.url.origin}`    | scheme + host (same as `${veld.url}`)                |
 | `${veld.url.scheme}`    | Protocol scheme (`https`)                            |
 | `${veld.url.port}`      | HTTPS port (note: `${veld.port}` is the backend bind port) |
+| `${veld.name}`            | Project name (alias for `${veld.project}`)           |
 | `${veld.run}`           | Run name                                             |
 | `${veld.run_id}`        | Stable run UUID                                      |
 | `${veld.root}`          | Absolute path to the directory containing `veld.json`|

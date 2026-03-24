@@ -64,6 +64,13 @@ pub enum OrchestratorError {
         variant: String,
         reason: String,
     },
+
+    #[error("setup step '{name}' failed: {reason}")]
+    SetupFailed {
+        name: String,
+        reason: String,
+        failure_message: Option<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +293,9 @@ impl Orchestrator {
             plan.len()
         ))
         .await;
+
+        // Run project-level setup steps before the graph executes.
+        self.run_setup_steps(run_name).await?;
 
         // Gather context info for URL templates.
         let branch = url::detect_git_branch(&self.project_root);
@@ -583,13 +593,28 @@ impl Orchestrator {
             self.helper_client = client;
         }
 
-        let mut project_state = ProjectState::load(&self.project_root)?;
-        let run = project_state
-            .get_run_mut(run_name)
-            .ok_or_else(|| crate::state::StateError::RunNotFound(run_name.to_owned()))?;
+        let mut project_state = match ProjectState::load(&self.project_root) {
+            Ok(s) => s,
+            Err(_) => {
+                // State not loadable — still run teardown steps.
+                self.run_teardown_steps(run_name).await;
+                return Ok(StopResult::AlreadyStopped);
+            }
+        };
+
+        let run = match project_state.get_run_mut(run_name) {
+            Some(r) => r,
+            None => {
+                // Run not found in state (e.g., setup failed before state was saved).
+                // Still run teardown steps to clean up anything setup may have created.
+                self.run_teardown_steps(run_name).await;
+                return Ok(StopResult::AlreadyStopped);
+            }
+        };
 
         if run.status == RunStatus::Stopped {
-            // Already stopped — clean up state and return.
+            // Already stopped — clean up state, run teardown, and return.
+            self.run_teardown_steps(run_name).await;
             project_state.runs.remove(run_name);
             project_state.save(&self.project_root)?;
             self.remove_from_registry(run_name);
@@ -642,6 +667,9 @@ impl Orchestrator {
             // Remove child handle.
             self.children.remove(key);
         }
+
+        // Run project-level teardown steps after all per-node on_stop hooks.
+        self.run_teardown_steps(run_name).await;
 
         // Remove the run from project state entirely (no lingering stopped state).
         project_state.runs.remove(run_name);
@@ -794,6 +822,7 @@ impl Orchestrator {
         ctx.set_builtin("run", run_name.to_owned());
         ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
         ctx.set_builtin("project", self.config.name.clone());
+        ctx.set_builtin("name", self.config.name.clone());
         ctx.set_builtin(
             "worktree",
             url::slugify(
@@ -880,6 +909,148 @@ impl Orchestrator {
                     error = %e,
                     "on_stop hook failed to execute"
                 );
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Setup / Teardown lifecycle steps
+    // -----------------------------------------------------------------------
+
+    /// Run project-level setup steps sequentially. Returns an error if any
+    /// step exits non-zero, aborting startup.
+    async fn run_setup_steps(&self, run_name: &str) -> Result<(), OrchestratorError> {
+        let steps = match self.config.setup.as_ref() {
+            Some(steps) if !steps.is_empty() => steps,
+            _ => return Ok(()),
+        };
+
+        let total = steps.len();
+        let mut ctx = VariableContext::new();
+        ctx.set_builtin("run", run_name.to_owned());
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        ctx.set_builtin("project", self.config.name.clone());
+        ctx.set_builtin("name", self.config.name.clone());
+
+        for (i, step) in steps.iter().enumerate() {
+            self.emit(ProgressEvent::SetupStepStarting {
+                name: step.name.clone(),
+                index: i + 1,
+                total,
+            });
+
+            let started = std::time::Instant::now();
+            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+                Ok(cmd) => cmd,
+                Err(e) => {
+                    let reason = format!("variable resolution failed: {e}");
+                    self.emit(ProgressEvent::SetupStepFailed {
+                        name: step.name.clone(),
+                        error: reason.clone(),
+                    });
+                    return Err(OrchestratorError::SetupFailed {
+                        name: step.name.clone(),
+                        reason,
+                        failure_message: step.failure_message.clone(),
+                    });
+                }
+            };
+
+            let env = HashMap::new();
+            match process::run_command(&resolved_cmd, &self.project_root, &env, None).await {
+                Ok(result) => {
+                    if result.exit_code != 0 {
+                        let reason = format!("exited with code {}", result.exit_code);
+                        self.emit(ProgressEvent::SetupStepFailed {
+                            name: step.name.clone(),
+                            error: reason.clone(),
+                        });
+                        return Err(OrchestratorError::SetupFailed {
+                            name: step.name.clone(),
+                            reason,
+                            failure_message: step.failure_message.clone(),
+                        });
+                    }
+                    let elapsed = started.elapsed().as_millis() as u64;
+                    self.emit(ProgressEvent::SetupStepCompleted {
+                        name: step.name.clone(),
+                        elapsed_ms: elapsed,
+                    });
+                }
+                Err(e) => {
+                    let reason = format!("execution failed: {e}");
+                    self.emit(ProgressEvent::SetupStepFailed {
+                        name: step.name.clone(),
+                        error: reason.clone(),
+                    });
+                    return Err(OrchestratorError::SetupFailed {
+                        name: step.name.clone(),
+                        reason,
+                        failure_message: step.failure_message.clone(),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Run project-level teardown steps sequentially. Best-effort: failures
+    /// are logged but never propagated.
+    async fn run_teardown_steps(&self, run_name: &str) {
+        let steps = match self.config.teardown.as_ref() {
+            Some(steps) if !steps.is_empty() => steps,
+            _ => return,
+        };
+
+        let total = steps.len();
+        let mut ctx = VariableContext::new();
+        ctx.set_builtin("run", run_name.to_owned());
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        ctx.set_builtin("project", self.config.name.clone());
+        ctx.set_builtin("name", self.config.name.clone());
+
+        for (i, step) in steps.iter().enumerate() {
+            self.emit(ProgressEvent::TeardownStepRunning {
+                name: step.name.clone(),
+                index: i + 1,
+                total,
+            });
+
+            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+                Ok(cmd) => cmd,
+                Err(e) => {
+                    tracing::warn!(
+                        step = step.name,
+                        error = %e,
+                        "teardown step variable resolution failed"
+                    );
+                    continue;
+                }
+            };
+
+            let env = HashMap::new();
+            match process::run_command(&resolved_cmd, &self.project_root, &env, None).await {
+                Ok(result) => {
+                    if result.exit_code != 0 {
+                        tracing::warn!(
+                            step = step.name,
+                            exit_code = result.exit_code,
+                            "teardown step exited with non-zero code"
+                        );
+                    } else {
+                        self.emit(ProgressEvent::TeardownStepCompleted {
+                            name: step.name.clone(),
+                        });
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        step = step.name,
+                        error = %e,
+                        "teardown step failed to execute"
+                    );
+                }
             }
         }
     }
@@ -1037,6 +1208,7 @@ async fn execute_node_isolated(
     var_ctx.set_builtin("run_id", ctx.run_id.to_string());
     var_ctx.set_builtin("root", ctx.project_root.to_string_lossy().into_owned());
     var_ctx.set_builtin("project", ctx.config.name.clone());
+    var_ctx.set_builtin("name", ctx.config.name.clone());
     var_ctx.set_builtin("worktree", url::slugify(&ctx.worktree));
     var_ctx.set_builtin("branch", url::slugify(&ctx.branch));
     var_ctx.set_builtin("username", ctx.username.clone());

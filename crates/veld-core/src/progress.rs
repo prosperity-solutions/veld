@@ -68,6 +68,37 @@ pub enum ProgressEvent {
 
     /// Command step running.
     CommandRunning { node: String, variant: String },
+
+    /// A setup step is starting.
+    SetupStepStarting {
+        name: String,
+        index: usize,
+        total: usize,
+    },
+
+    /// A setup step completed successfully.
+    SetupStepCompleted {
+        name: String,
+        elapsed_ms: u64,
+    },
+
+    /// A setup step failed.
+    SetupStepFailed {
+        name: String,
+        error: String,
+    },
+
+    /// A teardown step is running.
+    TeardownStepRunning {
+        name: String,
+        index: usize,
+        total: usize,
+    },
+
+    /// A teardown step completed.
+    TeardownStepCompleted {
+        name: String,
+    },
 }
 
 #[cfg(test)]
@@ -150,5 +181,62 @@ mod tests {
         assert!(json.contains("\"type\":\"health_check_attempt\""));
         assert!(json.contains("\"phase\":1"));
         assert!(json.contains("\"attempt\":5"));
+    }
+
+    #[test]
+    fn test_setup_step_starting_serialization() {
+        let event = ProgressEvent::SetupStepStarting {
+            name: "docker".into(),
+            index: 1,
+            total: 3,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"setup_step_starting\""));
+        assert!(json.contains("\"name\":\"docker\""));
+        assert!(json.contains("\"index\":1"));
+        assert!(json.contains("\"total\":3"));
+    }
+
+    #[test]
+    fn test_setup_step_completed_serialization() {
+        let event = ProgressEvent::SetupStepCompleted {
+            name: "docker".into(),
+            elapsed_ms: 42,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"setup_step_completed\""));
+        assert!(json.contains("\"elapsed_ms\":42"));
+    }
+
+    #[test]
+    fn test_setup_step_failed_serialization() {
+        let event = ProgressEvent::SetupStepFailed {
+            name: "docker".into(),
+            error: "exited with code 1".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"setup_step_failed\""));
+        assert!(json.contains("\"error\":\"exited with code 1\""));
+    }
+
+    #[test]
+    fn test_teardown_step_running_serialization() {
+        let event = ProgressEvent::TeardownStepRunning {
+            name: "cleanup".into(),
+            index: 1,
+            total: 2,
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"teardown_step_running\""));
+        assert!(json.contains("\"name\":\"cleanup\""));
+    }
+
+    #[test]
+    fn test_teardown_step_completed_serialization() {
+        let event = ProgressEvent::TeardownStepCompleted {
+            name: "cleanup".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("\"type\":\"teardown_step_completed\""));
     }
 }

@@ -25,6 +25,7 @@ For the full field reference, see [configuration.md](./configuration.md).
 15. [Worker Processes Alongside API Servers](#15-worker-processes-alongside-api-servers)
 16. [Polyglot Monorepo (Mixed Languages)](#16-polyglot-monorepo-mixed-languages)
 17. [End-to-End Test Runner](#17-end-to-end-test-runner)
+18. [Prerequisite Checks with Setup & Teardown](#18-prerequisite-checks-with-setup--teardown)
 
 ---
 
@@ -1502,3 +1503,65 @@ All three application nodes are `start_server` with health check endpoints, so V
 The `e2e` node is a `command` type, so it runs to completion and Veld reports its exit code. The `strict_outputs: false` flag means it will not fail if the test runner does not emit a `TEST_RESULTS_PATH` output.
 
 With `--preset dev`, only the frontend and its dependencies start (no test runner), giving you the same stack for manual development.
+
+---
+
+## 18. Prerequisite Checks with Setup & Teardown
+
+**When to use:** Your project requires Docker, specific CLI tools, or shared infrastructure (Docker networks, temp directories) that must exist before any node starts — and should be cleaned up after.
+
+```json
+{
+  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "schemaVersion": "1",
+  "name": "platform",
+  "url_template": "{service}.{branch ?? run}.platform.localhost",
+
+  "setup": [
+    { "name": "docker", "command": "docker info > /dev/null 2>&1", "failureMessage": "Docker must be running — start Docker Desktop and try again" },
+    { "name": "node-version", "command": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Node >= 20 is required — run `nvm use 20`" },
+    { "name": "platform-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" },
+    { "name": "cache-dir", "command": "mkdir -p ${veld.root}/.cache/veld" }
+  ],
+
+  "teardown": [
+    { "name": "platform-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+  ],
+
+  "nodes": {
+    "postgres": {
+      "variants": {
+        "docker": {
+          "type": "start_server",
+          "command": "docker run --rm --name veld-pg-${veld.run} --network ${veld.project}-net -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "on_stop": "docker stop veld-pg-${veld.run}",
+          "health_check": { "type": "port", "timeout_seconds": 30 },
+          "outputs": {
+            "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app"
+          }
+        }
+      }
+    },
+    "backend": {
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "pnpm --filter backend dev --port ${veld.port}",
+          "health_check": { "type": "http", "path": "/health" },
+          "depends_on": { "postgres": "docker" },
+          "env": { "DATABASE_URL": "${nodes.postgres.DATABASE_URL}" }
+        }
+      }
+    }
+  }
+}
+```
+
+**What happens:**
+
+1. Veld runs setup steps sequentially: checks that Docker is running, verifies Node version, creates the shared Docker network, ensures the cache directory exists.
+2. If Docker is not running, startup aborts with: `"Docker must be running — start Docker Desktop and try again"`.
+3. If all checks pass, the node graph executes normally — Postgres on the shared network, then backend.
+4. On `veld stop`, after per-node `on_stop` hooks (which stop the Postgres container), the project-level teardown removes the shared Docker network.
+
+Setup steps are not nodes — they have no variants, no health checks, and no outputs. They are a gate that runs before the graph and a cleanup bracket that runs after.

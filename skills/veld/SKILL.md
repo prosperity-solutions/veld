@@ -84,6 +84,7 @@ Core pattern: listen → fix → answer → listen again with `--after <seq>` �
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
 - **`outputs` shape differs by type** — object (`{"KEY": "template"}`) for `start_server`, array (`["KEY"]`) for `command`
 - **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port
+- **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Only project-level variables (`${veld.name}`, `${veld.root}`, `${veld.run}`) are available, not `${veld.port}` or `${nodes.*}`
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
