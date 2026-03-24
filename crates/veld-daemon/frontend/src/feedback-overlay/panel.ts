@@ -360,7 +360,8 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   const inputActions = mkEl("div", "thread-input-actions");
 
   if (thread.claimed_by) {
-    const releaseBtn = mkEl("button", "btn btn-sm btn-release", "Release");
+    const releaseBtn = mkEl("button", "btn btn-sm btn-release");
+    releaseBtn.innerHTML = ICONS.robot + " Release";
     releaseBtn.addEventListener("click", function () {
       api("POST", "/threads/" + thread.id + "/release").then(function () {
         thread.claimed_by = null;

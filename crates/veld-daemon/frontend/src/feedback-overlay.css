@@ -294,7 +294,8 @@
 .veld-feedback-btn-secondary:hover { background: var(--vf-border); }
 .veld-feedback-btn-danger { background: var(--vf-danger); color: var(--vf-danger-text); }
 .veld-feedback-btn-danger:hover { opacity: 0.85; }
-.veld-feedback-btn-sm { padding: 4px 10px; font-size: 11px; }
+.veld-feedback-btn-sm { padding: 4px 10px; font-size: 11px; display: inline-flex; align-items: center; gap: 4px; }
+.veld-feedback-btn-sm svg { width: 12px; height: 12px; flex-shrink: 0; }
 
 /* --- Pins (thread-aware) --- */
 .veld-feedback-pin {
