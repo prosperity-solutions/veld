@@ -2,6 +2,14 @@ import { refs } from "./refs";
 import { mkEl } from "./helpers";
 import { PREFIX } from "./constants";
 
+let suppressed = false;
+
+/** Suppress tooltip display (e.g. during FAB drag). */
+export function suppressTooltip(suppress: boolean): void {
+  suppressed = suppress;
+  if (suppress) hideTooltip();
+}
+
 /** Create and attach the tooltip element to the shadow DOM. */
 export function initTooltip(): void {
   refs.tooltip = mkEl("div", "tooltip");
@@ -10,6 +18,7 @@ export function initTooltip(): void {
 
 /** Show the tooltip above (or below) the given anchor element. */
 export function showTooltip(anchor: Element, html: string): void {
+  if (suppressed) return;
   refs.tooltip.innerHTML = html;
   refs.tooltip.style.display = "block";
   const r = anchor.getBoundingClientRect();
