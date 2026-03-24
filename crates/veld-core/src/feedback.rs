@@ -219,13 +219,78 @@ impl FeedbackStore {
     }
 
     /// Get a single thread by ID.
+    ///
+    /// Supports prefix matching: if `id` is shorter than a full UUID and no
+    /// exact match exists, scans the threads directory for a unique prefix
+    /// match (like git's short commit hashes).
     pub fn get_thread(&self, id: &str) -> anyhow::Result<Option<Thread>> {
+        // Try exact match first (fast path).
         let path = self.threads_dir.join(format!("{id}.json"));
-        if !path.exists() {
+        if path.exists() {
+            let data = std::fs::read_to_string(&path)?;
+            return Ok(Some(serde_json::from_str(&data)?));
+        }
+
+        // Prefix match: scan directory for files starting with the prefix.
+        self.resolve_prefix(id)
+    }
+
+    /// Resolve a short thread ID prefix to a full thread.
+    /// Returns Ok(None) if no match, Ok(Some) if exactly one match,
+    /// or Err if the prefix is ambiguous (matches multiple threads).
+    fn resolve_prefix(&self, prefix: &str) -> anyhow::Result<Option<Thread>> {
+        if !self.threads_dir.exists() || prefix.is_empty() {
             return Ok(None);
         }
-        let data = std::fs::read_to_string(&path)?;
-        Ok(Some(serde_json::from_str(&data)?))
+        let mut matches: Vec<std::path::PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&self.threads_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(prefix) && name_str.ends_with(".json") {
+                matches.push(entry.path());
+            }
+        }
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let data = std::fs::read_to_string(&matches[0])?;
+                Ok(Some(serde_json::from_str(&data)?))
+            }
+            n => anyhow::bail!(
+                "ambiguous thread prefix '{prefix}' matches {n} threads"
+            ),
+        }
+    }
+
+    /// Resolve a short thread ID prefix to the full UUID.
+    /// Returns the input unchanged if it's already a full UUID or exact match.
+    pub fn resolve_thread_id(&self, id: &str) -> anyhow::Result<String> {
+        // Exact match?
+        let path = self.threads_dir.join(format!("{id}.json"));
+        if path.exists() {
+            return Ok(id.to_owned());
+        }
+        // Prefix scan.
+        if !self.threads_dir.exists() || id.is_empty() {
+            anyhow::bail!("thread {id} not found");
+        }
+        let mut matches: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&self.threads_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with(id) && name_str.ends_with(".json") {
+                matches.push(name_str.trim_end_matches(".json").to_owned());
+            }
+        }
+        match matches.len() {
+            0 => anyhow::bail!("thread {id} not found"),
+            1 => Ok(matches.into_iter().next().unwrap()),
+            n => anyhow::bail!(
+                "ambiguous thread prefix '{id}' matches {n} threads"
+            ),
+        }
     }
 
     /// List all threads, optionally filtered by status.
@@ -252,18 +317,20 @@ impl FeedbackStore {
 
     /// Read-modify-write a thread file under an exclusive file lock.
     /// Reads and writes through the locked fd to ensure atomicity.
+    /// Supports prefix matching for short thread IDs.
     fn modify_thread(
         &self,
         thread_id: &str,
         mutate: impl FnOnce(&mut Thread),
     ) -> anyhow::Result<Thread> {
         self.ensure_dirs()?;
-        let path = self.threads_dir.join(format!("{thread_id}.json"));
+        let resolved_id = self.resolve_thread_id(thread_id)?;
+        let path = self.threads_dir.join(format!("{resolved_id}.json"));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .open(&path)
-            .map_err(|_| anyhow::anyhow!("thread {thread_id} not found"))?;
+            .map_err(|_| anyhow::anyhow!("thread {resolved_id} not found"))?;
 
         let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
             .map_err(|(_file, errno)| errno)?;

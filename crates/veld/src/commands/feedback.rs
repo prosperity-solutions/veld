@@ -422,28 +422,34 @@ async fn run_answer(
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
+    // Resolve short thread ID prefix to full UUID.
+    let thread_id = match store.resolve_thread_id(thread_id) {
+        Ok(id) => id,
+        Err(e) => {
+            output::print_error(&format!("Failed to resolve thread: {e}"), false);
+            return 1;
+        }
+    };
+
     let controls_value = controls.and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok());
 
     let clean_body = strip_shell_escapes(body);
     let msg = new_message(Author::Agent, &clean_body, None, controls_value);
 
-    if let Err(e) = store.add_message(thread_id, &msg) {
+    if let Err(e) = store.add_message(&thread_id, &msg) {
         output::print_error(&format!("Failed to add message: {e}"), false);
         return 1;
     }
 
     if let Err(e) = store.append_event(EventType::AgentMessage {
-        thread_id: thread_id.to_owned(),
+        thread_id: thread_id.clone(),
         message: msg,
     }) {
         output::print_error(&format!("Failed to emit event: {e}"), false);
         return 1;
     }
 
-    output::print_info(&format!(
-        "Replied to thread {}",
-        &thread_id[..8.min(thread_id.len())]
-    ));
+    output::print_info(&format!("Replied to thread {thread_id}"));
     0
 }
 
@@ -465,16 +471,25 @@ async fn run_release(
 
     let store = FeedbackStore::new(&project_root, &run_name);
 
+    // Resolve short thread ID prefix to full UUID.
+    let thread_id = match store.resolve_thread_id(thread_id) {
+        Ok(id) => id,
+        Err(e) => {
+            output::print_error(&format!("Failed to resolve thread: {e}"), json);
+            return 1;
+        }
+    };
+
     // Post the status comment before releasing (atomic: comment + release).
     if let Some(body) = message {
         let clean_body = strip_shell_escapes(body);
         let msg = new_message(Author::Agent, &clean_body, None, None);
-        if let Err(e) = store.add_message(thread_id, &msg) {
+        if let Err(e) = store.add_message(&thread_id, &msg) {
             output::print_error(&format!("Failed to add message: {e}"), json);
             return 1;
         }
         if let Err(e) = store.append_event(EventType::AgentMessage {
-            thread_id: thread_id.to_owned(),
+            thread_id: thread_id.clone(),
             message: msg,
         }) {
             output::print_error(&format!("Failed to emit event: {e}"), json);
@@ -482,7 +497,7 @@ async fn run_release(
         }
     }
 
-    match store.release_thread(thread_id, agent_id) {
+    match store.release_thread(&thread_id, agent_id) {
         Ok(_) => {
             let releaser = agent_id.unwrap_or("force");
             if let Err(e) = store.append_event(EventType::ThreadReleased {
@@ -505,7 +520,7 @@ async fn run_release(
             } else {
                 output::print_info(&format!(
                     "Released thread {}",
-                    &thread_id[..8.min(thread_id.len())]
+                    thread_id
                 ));
             }
             0
@@ -560,7 +575,7 @@ async fn run_ask(
 
     output::print_info(&format!(
         "Created thread {} — question posted.",
-        &thread.id[..8.min(thread.id.len())]
+        &thread.id
     ));
     0
 }
@@ -702,7 +717,7 @@ fn print_event(
             println!(
                 "{} Thread created ({})",
                 output::bold("Event"),
-                &t.id[..8.min(t.id.len())],
+                &t.id,
             );
             print_thread_context(t, store);
         }
@@ -710,7 +725,7 @@ fn print_event(
             println!(
                 "{} New message on thread {}",
                 output::bold("Event"),
-                &thread_id[..8.min(thread_id.len())],
+                thread_id,
             );
             println!("  New: {}", message.body);
             if let Some(ref screenshot) = message.screenshot {
@@ -726,14 +741,14 @@ fn print_event(
             println!(
                 "{} Thread {} resolved",
                 output::bold("Event"),
-                &thread_id[..8.min(thread_id.len())],
+                thread_id,
             );
         }
         EventType::Reopened { thread_id } => {
             println!(
                 "{} Thread {} reopened",
                 output::bold("Event"),
-                &thread_id[..8.min(thread_id.len())],
+                thread_id,
             );
             if let Some(t) = thread {
                 println!();
@@ -753,7 +768,7 @@ fn print_event(
             println!(
                 "{} Thread {} claimed by {}",
                 output::bold("Event"),
-                &thread_id[..8.min(thread_id.len())],
+                thread_id,
                 agent_id,
             );
         }
@@ -764,7 +779,7 @@ fn print_event(
             println!(
                 "{} Thread {} released by {}",
                 output::bold("Event"),
-                &thread_id[..8.min(thread_id.len())],
+                thread_id,
                 agent_id,
             );
         }
@@ -787,7 +802,7 @@ fn print_thread_context(thread: &veld_core::feedback::Thread, store: &FeedbackSt
     }
     println!(
         "  Thread: {} ({} message(s), {})",
-        &thread.id[..8.min(thread.id.len())],
+        &thread.id,
         thread.messages.len(),
         if thread.status == ThreadStatus::Open {
             "open"
@@ -850,7 +865,7 @@ fn print_thread(thread: &veld_core::feedback::Thread) {
     println!(
         "{} {} [{}] (by {}, {} message(s))",
         output::bold("Thread"),
-        &thread.id[..8.min(thread.id.len())],
+        &thread.id,
         status,
         origin,
         thread.messages.len(),
