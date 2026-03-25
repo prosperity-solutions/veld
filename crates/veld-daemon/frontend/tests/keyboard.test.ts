@@ -115,4 +115,18 @@ describe("onKeyDown", () => {
     onKeyDown(makeKeyEvent("KeyF"));
     expect(deps.setMode).not.toHaveBeenCalled();
   });
+
+  it("Mod+Shift+F from draw mode switches to select-element", () => {
+    dispatch({ type: "SET_MODE", mode: "draw" });
+    dispatch({ type: "SET_TOOLBAR_OPEN", open: true });
+    onKeyDown(makeKeyEvent("KeyF"));
+    expect(deps.setMode).toHaveBeenCalledWith("select-element");
+  });
+
+  it("Mod+Shift+S from draw mode switches to screenshot", () => {
+    dispatch({ type: "SET_MODE", mode: "draw" });
+    dispatch({ type: "SET_TOOLBAR_OPEN", open: true });
+    onKeyDown(makeKeyEvent("KeyS"));
+    expect(deps.setMode).toHaveBeenCalledWith("screenshot");
+  });
 });
