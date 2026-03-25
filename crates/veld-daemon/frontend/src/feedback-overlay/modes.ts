@@ -24,7 +24,22 @@ export function setMode(mode: UIMode): void {
     stopCaptureStream();
   }
   if (getState().activeMode === "draw") {
-    teardownGlobalDrawCanvas();
+    // Inline cleanup — teardownGlobalDrawCanvas() fails silently for unknown
+    // reasons, but the same cleanup done inline (as in draw-mode.ts onDone)
+    // works reliably. Match that proven pattern here.
+    const drawCleanup = getState().drawCleanup;
+    dispatch({ type: "SET_DRAW_CLEANUP", cleanup: null });
+    if (drawCleanup) {
+      try { drawCleanup(); } catch (e) { console.error("[veld] draw cleanup:", e); }
+    }
+    const dc = getState().drawCanvas;
+    if (dc && dc.parentNode) dc.parentNode.removeChild(dc);
+    dispatch({ type: "SET_DRAW_CANVAS", canvas: null });
+    const prevOverflow = getState().prevOverflow;
+    if (prevOverflow !== null) {
+      document.body.style.overflow = prevOverflow;
+      dispatch({ type: "SET_PREV_OVERFLOW", overflow: null });
+    }
     stopCaptureStream();
   }
 
@@ -47,7 +62,13 @@ export function setMode(mode: UIMode): void {
     toast("Draw a rectangle to capture a screenshot");
   }
   if (mode === "draw") {
-    if (getState().toolbarOpen) toggleToolbar();
+    // Close the radial toolbar visually but DON'T call toggleToolbar() —
+    // it calls setMode(null) which clobbers activeMode before the async
+    // setupGlobalDrawCanvas() runs.
+    if (getState().toolbarOpen) {
+      dispatch({ type: "SET_TOOLBAR_OPEN", open: false });
+      dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
+    }
     // No acquireCaptureStream — draw starts instantly without screen share dialog.
     // Capture is deferred to Done (for compositing) or blur tool (for pixelation).
     ensureDrawScript().then(() => {

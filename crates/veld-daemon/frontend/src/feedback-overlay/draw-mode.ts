@@ -188,7 +188,28 @@ export function setupGlobalDrawCanvas(): void {
             });
           }
         } else {
-          deps().setMode(null);
+          // Inline teardown — same pattern as save path, without capture/composite.
+          // The save path (above) does this inline and works. The previous code here
+          // delegated to deps().setMode(null) which failed silently for unknown reasons.
+          const drawCleanup = getState().drawCleanup;
+          dispatch({ type: "SET_DRAW_CLEANUP", cleanup: null });
+          if (drawCleanup) drawCleanup();
+
+          const drawCanvas2 = getState().drawCanvas;
+          if (drawCanvas2 && drawCanvas2.parentNode) {
+            drawCanvas2.parentNode.removeChild(drawCanvas2);
+          }
+          dispatch({ type: "SET_DRAW_CANVAS", canvas: null });
+
+          const savedOverflow2 = getState().prevOverflow;
+          if (savedOverflow2 !== null) {
+            document.body.style.overflow = savedOverflow2;
+            dispatch({ type: "SET_PREV_OVERFLOW", overflow: null });
+          }
+
+          dispatch({ type: "SET_MODE", mode: null });
+          refs.toolBtnDraw.classList.remove(PREFIX + "tool-active");
+          stopCaptureStream();
         }
       },
     });
@@ -200,7 +221,7 @@ export function setupGlobalDrawCanvas(): void {
 export function teardownGlobalDrawCanvas(): void {
   const cleanup = getState().drawCleanup;
   if (cleanup) {
-    cleanup();
+    try { cleanup(); } catch (err) { console.error("[veld] draw cleanup failed:", err); }
     dispatch({ type: "SET_DRAW_CLEANUP", cleanup: null });
   }
   const drawCanvas = getState().drawCanvas;
