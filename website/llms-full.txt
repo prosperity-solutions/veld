@@ -59,8 +59,8 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "nodes": {
@@ -189,7 +189,8 @@ Captured logs appear alongside server logs in `veld logs` and the management UI.
 ```sh
 veld logs --source client          # Browser logs only
 veld logs --source server          # Server logs only
-veld logs --source all             # Both (default)
+veld logs --source internal        # Liveness probe & recovery logs
+veld logs --source all             # All sources (default)
 ```
 
 ### Configuration
@@ -223,7 +224,7 @@ Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (bro
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `$schema` | string | No | JSON Schema URL for editor autocompletion |
-| `schemaVersion` | string | Yes | Must be `"1"` |
+| `schemaVersion` | string | Yes | `"1"` or `"2"` (use `"2"` for new projects) |
 | `name` | string | Yes | Project name (used in URLs) |
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
@@ -282,7 +283,7 @@ Runs a shell command or script to completion. Used for setup tasks.
 - Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged)
 - Declares outputs as an array of strings
 - Built-in output: `exit_code`
-- Supports `verify` for idempotency
+- Supports `skip_if` for idempotency (alias: `verify`)
 - Does NOT get a port allocated — `${veld.port}` is not available
 
 ```json
@@ -432,7 +433,8 @@ Usage: `veld start --preset fullstack --name my-feature`
 | Field | Type | Applies To | Description |
 |-------|------|------------|-------------|
 | `on_stop` | string | All | Teardown command on `veld stop` |
-| `verify` | string | `command` only | Idempotency check (exit 0 = skip) |
+| `skip_if` | string | `command` only | Idempotency check (exit 0 = skip). Alias: `verify` |
+| `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
 | `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |
 | `features` | object | `start_server` | Feature toggles override (variant > node > project) |
@@ -445,8 +447,8 @@ Usage: `veld start --preset fullstack --name my-feature`
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "myproject",
   "url_template": "{service}.{run}.myproject.localhost",
   "presets": {

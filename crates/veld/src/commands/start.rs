@@ -420,7 +420,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 state.redraw(ctx.total, "starting...");
             }
         }
-        ProgressEvent::HealthCheckPhase {
+        ProgressEvent::ReadinessProbePhase {
             node,
             variant,
             phase,
@@ -433,7 +433,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 state.redraw(ctx.total, "");
             }
         }
-        ProgressEvent::HealthCheckAttempt {
+        ProgressEvent::ReadinessProbeAttempt {
             node,
             variant,
             phase: _,
@@ -444,7 +444,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 state.redraw(ctx.total, &format!("attempt {attempt}"));
             }
         }
-        ProgressEvent::HealthCheckPassed {
+        ProgressEvent::ReadinessProbePassed {
             node: _,
             variant: _,
             phase: _,
@@ -479,7 +479,7 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 "  {} {} {}",
                 output::dim("~"),
                 output::pad_right(&key, 30),
-                output::dim("skipped (verify passed)"),
+                output::dim("skipped (skip_if passed)"),
             );
             if let Some(state) = ctx.bars.remove(&key) {
                 state.bar.finish_with_message(finish_msg);

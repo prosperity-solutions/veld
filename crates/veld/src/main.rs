@@ -156,7 +156,7 @@ enum Command {
         #[arg(long)]
         json: bool,
 
-        /// Filter by log source: all, server, or client.
+        /// Filter by log source: all, server, client, or internal (veld daemon liveness/recovery logs).
         #[arg(long, default_value = "all")]
         source: String,
 
@@ -351,7 +351,9 @@ async fn main() {
             let source_filter =
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
                     output::print_error(
-                        &format!("Invalid --source value '{source}'. Use: all, server, client"),
+                        &format!(
+                            "Invalid --source value '{source}'. Use: all, server, client, internal"
+                        ),
                         json,
                     );
                     std::process::exit(1);

@@ -9,8 +9,8 @@ use crate::output;
 // ---------------------------------------------------------------------------
 
 const INIT_TEMPLATE: &str = r#"{
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "my-project",
   "url_template": "{service}.{run}.{project}.localhost",
   "presets": {
@@ -510,7 +510,7 @@ fn generate_veld_json(
 ) -> String {
     let mut json = String::new();
     json.push_str("{\n");
-    json.push_str("  \"$schema\": \"https://veld.oss.life.li/schema/v1/veld.schema.json\",\n");
+    json.push_str("  \"$schema\": \"https://veld.oss.life.li/schema/v2/veld.schema.json\",\n");
     json.push_str("  \"schemaVersion\": \"1\",\n");
     json.push_str(&format!("  \"name\": \"{}\",\n", escape_json(project_name)));
     json.push_str(&format!(
@@ -563,7 +563,7 @@ fn generate_veld_json(
             "          \"command\": \"{}\",\n",
             escape_json(command)
         ));
-        node.push_str("          \"health_check\": { \"type\": \"port\" }");
+        node.push_str("          \"probes\": { \"readiness\": { \"type\": \"port\" } }");
 
         // Add depends_on if any
         let service_deps: Vec<&String> = deps
@@ -853,8 +853,8 @@ pub async fn run() -> i32 {
         // No services detected/selected: write basic template with project name
         format!(
             r#"{{
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "{}",
   "url_template": "{}",
   "presets": {{

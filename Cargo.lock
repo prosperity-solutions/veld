@@ -1862,7 +1862,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "veld"
-version = "6.4.0"
+version = "6.5.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1882,7 +1882,7 @@ dependencies = [
 
 [[package]]
 name = "veld-core"
-version = "6.4.0"
+version = "6.5.1"
 dependencies = [
  "anyhow",
  "base64",
@@ -1904,13 +1904,14 @@ dependencies = [
 
 [[package]]
 name = "veld-daemon"
-version = "6.4.0"
+version = "6.5.1"
 dependencies = [
  "anyhow",
  "axum",
  "chrono",
  "dirs",
  "libc",
+ "reqwest",
  "serde",
  "serde_json",
  "thiserror",
@@ -1923,7 +1924,7 @@ dependencies = [
 
 [[package]]
 name = "veld-helper"
-version = "6.4.0"
+version = "6.5.1"
 dependencies = [
  "anyhow",
  "nix",

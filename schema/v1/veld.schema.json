@@ -46,28 +46,6 @@
       "$ref": "#/$defs/ClientLogLevels",
       "description": "Client-side log levels to capture (project-level default). Overridable at node and variant level."
     },
-    "features": {
-      "$ref": "#/$defs/FeaturesConfig",
-      "description": "Feature toggles (project-level defaults). Overridable at node and variant level."
-    },
-    "env": {
-      "$ref": "#/$defs/EnvMap",
-      "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
-    },
-    "setup": {
-      "type": "array",
-      "description": "Steps that run sequentially before the dependency graph executes. If any step exits non-zero, startup is aborted. Not nodes — no variants, no health checks, no dependency graph participation.",
-      "items": {
-        "$ref": "#/$defs/SetupStep"
-      }
-    },
-    "teardown": {
-      "type": "array",
-      "description": "Steps that run sequentially after all nodes stop (after per-node on_stop hooks). Best-effort: failures are logged but do not block the stop operation. Commands should be idempotent.",
-      "items": {
-        "$ref": "#/$defs/SetupStep"
-      }
-    },
     "nodes": {
       "type": "object",
       "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
@@ -78,26 +56,6 @@
     }
   },
   "$defs": {
-    "SetupStep": {
-      "type": "object",
-      "description": "A lightweight step that runs before the dependency graph (setup) or after all nodes stop (teardown). Supports shell environment variables and project-level Veld variables: ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}.",
-      "required": ["name", "command"],
-      "additionalProperties": false,
-      "properties": {
-        "name": {
-          "type": "string",
-          "description": "Human-readable name for progress reporting and error messages."
-        },
-        "command": {
-          "type": "string",
-          "description": "Shell command to execute. Supports ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}, and shell environment variables."
-        },
-        "failureMessage": {
-          "type": "string",
-          "description": "Optional human-friendly message shown when the command fails (non-zero exit). Useful for prerequisite checks like 'Docker must be running'."
-        }
-      }
-    },
     "NodeConfig": {
       "type": "object",
       "description": "Configuration for a single node in the dependency graph.",
@@ -120,18 +78,6 @@
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",
           "description": "Client-side log levels override for all variants of this node."
-        },
-        "features": {
-          "$ref": "#/$defs/FeaturesConfig",
-          "description": "Feature toggles override for all variants of this node."
-        },
-        "env": {
-          "$ref": "#/$defs/EnvMap",
-          "description": "Extra environment variables inherited by all variants of this node. Overrides project-level env. Overridable at variant level."
-        },
-        "cwd": {
-          "type": "string",
-          "description": "Working directory for all variants of this node. Relative paths are resolved from the project root. Overridable at variant level. Supports Veld variable substitution."
         },
         "variants": {
           "type": "object",
@@ -174,11 +120,14 @@
           }
         },
         "env": {
-          "$ref": "#/$defs/EnvMap",
-          "description": "Extra environment variables injected into the process. Overrides node-level and project-level env."
+          "type": "object",
+          "description": "Extra environment variables injected into the process.",
+          "additionalProperties": {
+            "type": "string"
+          }
         },
         "outputs": {
-          "description": "Output declarations. For command steps: an array of output names captured from $VELD_OUTPUT_FILE (preferred) or VELD_OUTPUT stdout lines (legacy). For start_server steps: an object mapping output names to template strings.",
+          "description": "Output declarations. For command steps: an array of output names captured from VELD_OUTPUT. For start_server steps: an object mapping output names to template strings.",
           "oneOf": [
             {
               "type": "array",
@@ -206,7 +155,7 @@
         "strict_outputs": {
           "type": "boolean",
           "default": true,
-          "description": "When true (default), fail if the command produces output keys (via $VELD_OUTPUT_FILE or stdout) not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
+          "description": "When true (default), fail if the command produces VELD_OUTPUT keys not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
         },
         "verify": {
           "type": "string",
@@ -223,14 +172,6 @@
         "client_log_levels": {
           "$ref": "#/$defs/ClientLogLevels",
           "description": "Client-side log levels override for this specific variant."
-        },
-        "features": {
-          "$ref": "#/$defs/FeaturesConfig",
-          "description": "Feature toggles override for this specific variant."
-        },
-        "cwd": {
-          "type": "string",
-          "description": "Working directory for this variant. Relative paths are resolved from the project root. Overrides node-level cwd. Supports Veld variable substitution."
         }
       },
       "allOf": [
@@ -257,28 +198,6 @@
         }
       ]
     },
-    "FeaturesConfig": {
-      "type": "object",
-      "description": "Feature toggles for controlling which Veld capabilities are injected into a server's HTML responses. All properties are optional — omitted values inherit from the parent level (variant inherits from node, node from project). The built-in default for all features is true (enabled).",
-      "additionalProperties": false,
-      "properties": {
-        "feedback_overlay": {
-          "type": "boolean",
-          "description": "Inject the feedback overlay toolbar (FAB, screenshot, comments) into HTML responses. Default: true.",
-          "default": true
-        },
-        "client_logs": {
-          "type": "boolean",
-          "description": "Inject the client-side log collector into HTML responses. Default: true.",
-          "default": true
-        },
-        "inject": {
-          "type": "boolean",
-          "description": "Automatically inject bootstrap scripts into HTML responses. When false, the /__veld__/* proxy routes are still created so you can manually add <script> tags. Default: true.",
-          "default": true
-        }
-      }
-    },
     "ClientLogLevels": {
       "type": "array",
       "description": "Client-side console log levels to capture. Supported values: \"log\", \"warn\", \"error\", \"info\", \"debug\". Unhandled exceptions (\"exception\") are always captured regardless of this setting.",
@@ -288,13 +207,6 @@
       },
       "default": ["log", "warn", "error"],
       "uniqueItems": true
-    },
-    "EnvMap": {
-      "type": "object",
-      "description": "A map of environment variable names to values. Values support Veld variable substitution (e.g. ${veld.port}, ${nodes.backend.url}).",
-      "additionalProperties": {
-        "type": "string"
-      }
     },
     "HealthCheck": {
       "type": "object",

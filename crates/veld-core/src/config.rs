@@ -165,9 +165,15 @@ pub struct VariantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub script: Option<String>,
 
-    /// Health check configuration (start_server only).
+    /// Legacy health check configuration (start_server only).
+    /// Deprecated: use `probes.readiness` instead.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check: Option<HealthCheck>,
+
+    /// Readiness and liveness probe configuration.
+    /// `probes.readiness` supersedes the legacy `health_check` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<ProbesConfig>,
 
     /// Dependencies: node name -> variant name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -193,9 +199,10 @@ pub struct VariantConfig {
     #[serde(default = "default_strict_outputs")]
     pub strict_outputs: bool,
 
-    /// Idempotency verify command (command steps only).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify: Option<String>,
+    /// Idempotency check — skip this command step if this command exits 0.
+    /// Previously named `verify` (still accepted for backward compatibility).
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "verify")]
+    pub skip_if: Option<String>,
 
     /// Optional URL template override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -414,6 +421,86 @@ pub struct HealthCheck {
     pub interval_ms: u64,
 }
 
+// ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Probes
+// ---------------------------------------------------------------------------
+
+/// Readiness and liveness probe configuration for a variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProbesConfig {
+    /// Readiness probe — gates the dependency graph during startup.
+    /// Same semantics as the legacy `health_check` field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub readiness: Option<HealthCheck>,
+
+    /// Liveness probe — runs continuously after the node is healthy.
+    /// Triggers recovery when `failure_threshold` consecutive checks fail.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub liveness: Option<LivenessProbe>,
+}
+
+/// Liveness probe configuration. Shares check-type fields with `HealthCheck`
+/// but adds failure thresholds and recovery limits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LivenessProbe {
+    /// One of "http", "port", "command".
+    #[serde(rename = "type")]
+    pub check_type: String,
+
+    /// HTTP path for type "http".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+
+    /// Expected HTTP status code.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_status: Option<u16>,
+
+    /// Command for type "command".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+
+    /// Milliseconds between liveness checks (default 5000).
+    #[serde(default = "default_liveness_interval")]
+    pub interval_ms: u64,
+
+    /// Consecutive failures before triggering recovery (default 3).
+    #[serde(default = "default_failure_threshold")]
+    pub failure_threshold: u32,
+
+    /// Maximum number of recovery attempts before permanent failure (default 3).
+    #[serde(default = "default_max_recoveries")]
+    pub max_recoveries: u32,
+}
+
+fn default_liveness_interval() -> u64 {
+    5000
+}
+
+fn default_failure_threshold() -> u32 {
+    3
+}
+
+fn default_max_recoveries() -> u32 {
+    3
+}
+
+impl VariantConfig {
+    /// Resolve the effective readiness probe: `probes.readiness` takes
+    /// precedence over the legacy `health_check` field.
+    pub fn readiness_probe(&self) -> Option<&HealthCheck> {
+        self.probes
+            .as_ref()
+            .and_then(|p| p.readiness.as_ref())
+            .or(self.health_check.as_ref())
+    }
+
+    /// Return the liveness probe if configured.
+    pub fn liveness_probe(&self) -> Option<&LivenessProbe> {
+        self.probes.as_ref().and_then(|p| p.liveness.as_ref())
+    }
+}
+
 fn default_strict_outputs() -> bool {
     true
 }
@@ -457,7 +544,7 @@ pub fn load_config(path: &Path) -> Result<VeldConfig, ConfigError> {
             source: e,
         })?;
 
-    if config.schema_version != "1" {
+    if config.schema_version != "1" && config.schema_version != "2" {
         return Err(ConfigError::UnsupportedSchemaVersion(
             config.schema_version.clone(),
         ));
@@ -861,5 +948,156 @@ mod tests {
         let config: VeldConfig = serde_json::from_str(json).unwrap();
         assert!(config.setup.is_none());
         assert!(config.teardown.is_none());
+    }
+
+    // -- Probes config tests ---------------------------------------------------
+
+    #[test]
+    fn test_probes_config_deserialization() {
+        let json = r#"{
+            "readiness": {
+                "type": "http",
+                "path": "/health",
+                "timeout_seconds": 30,
+                "interval_ms": 500
+            },
+            "liveness": {
+                "type": "command",
+                "command": "pg_isready",
+                "interval_ms": 5000,
+                "failure_threshold": 5,
+                "max_recoveries": 2
+            }
+        }"#;
+        let probes: ProbesConfig = serde_json::from_str(json).unwrap();
+        let readiness = probes.readiness.unwrap();
+        assert_eq!(readiness.check_type, "http");
+        assert_eq!(readiness.path.as_deref(), Some("/health"));
+        assert_eq!(readiness.timeout_seconds, 30);
+
+        let liveness = probes.liveness.unwrap();
+        assert_eq!(liveness.check_type, "command");
+        assert_eq!(liveness.command.as_deref(), Some("pg_isready"));
+        assert_eq!(liveness.interval_ms, 5000);
+        assert_eq!(liveness.failure_threshold, 5);
+        assert_eq!(liveness.max_recoveries, 2);
+    }
+
+    #[test]
+    fn test_liveness_probe_defaults() {
+        let json = r#"{"type": "command", "command": "true"}"#;
+        let liveness: LivenessProbe = serde_json::from_str(json).unwrap();
+        assert_eq!(liveness.interval_ms, 5000);
+        assert_eq!(liveness.failure_threshold, 3);
+        assert_eq!(liveness.max_recoveries, 3);
+    }
+
+    // -- skip_if / verify alias tests ------------------------------------------
+
+    #[test]
+    fn test_skip_if_field() {
+        let json = r#"{
+            "type": "command",
+            "command": "echo run",
+            "skip_if": "test -f /tmp/done"
+        }"#;
+        let v: VariantConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(v.skip_if.as_deref(), Some("test -f /tmp/done"));
+    }
+
+    #[test]
+    fn test_verify_alias_for_skip_if() {
+        let json = r#"{
+            "type": "command",
+            "command": "echo run",
+            "verify": "test -f /tmp/done"
+        }"#;
+        let v: VariantConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(v.skip_if.as_deref(), Some("test -f /tmp/done"));
+    }
+
+    // -- Schema version tests --------------------------------------------------
+
+    #[test]
+    fn test_schema_version_2_accepted() {
+        let json = r#"{
+            "schemaVersion": "2",
+            "name": "test-project",
+            "nodes": {
+                "db": {
+                    "variants": {
+                        "local": {
+                            "type": "command",
+                            "command": "echo start",
+                            "probes": {
+                                "liveness": {
+                                    "type": "command",
+                                    "command": "pg_isready"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let config: VeldConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.schema_version, "2");
+        let variant = &config.nodes["db"].variants["local"];
+        assert!(variant.probes.is_some());
+        let liveness = variant.liveness_probe().unwrap();
+        assert_eq!(liveness.check_type, "command");
+    }
+
+    // -- Readiness probe helper tests ------------------------------------------
+
+    #[test]
+    fn test_readiness_probe_from_probes() {
+        let json = r#"{
+            "type": "start_server",
+            "command": "npm start",
+            "probes": {
+                "readiness": {
+                    "type": "http",
+                    "path": "/health"
+                }
+            }
+        }"#;
+        let v: VariantConfig = serde_json::from_str(json).unwrap();
+        let probe = v.readiness_probe().unwrap();
+        assert_eq!(probe.check_type, "http");
+    }
+
+    #[test]
+    fn test_readiness_probe_fallback_to_health_check() {
+        let json = r#"{
+            "type": "start_server",
+            "command": "npm start",
+            "health_check": {
+                "type": "port"
+            }
+        }"#;
+        let v: VariantConfig = serde_json::from_str(json).unwrap();
+        let probe = v.readiness_probe().unwrap();
+        assert_eq!(probe.check_type, "port");
+    }
+
+    #[test]
+    fn test_readiness_probe_probes_overrides_health_check() {
+        let json = r#"{
+            "type": "start_server",
+            "command": "npm start",
+            "health_check": {
+                "type": "port"
+            },
+            "probes": {
+                "readiness": {
+                    "type": "http",
+                    "path": "/ready"
+                }
+            }
+        }"#;
+        let v: VariantConfig = serde_json::from_str(json).unwrap();
+        let probe = v.readiness_probe().unwrap();
+        assert_eq!(probe.check_type, "http");
     }
 }

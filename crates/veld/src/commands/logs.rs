@@ -15,6 +15,7 @@ pub enum SourceFilter {
     All,
     Server,
     Client,
+    Internal,
 }
 
 impl SourceFilter {
@@ -23,6 +24,7 @@ impl SourceFilter {
             "all" => Some(Self::All),
             "server" => Some(Self::Server),
             "client" => Some(Self::Client),
+            "internal" | "veld" => Some(Self::Internal),
             _ => None,
         }
     }
@@ -106,22 +108,31 @@ pub async fn run(opts: LogsOptions) -> i32 {
 
     // Build list of (path, node, variant, source_label) for each log file to read.
     let mut log_sources: Vec<(PathBuf, &str, &str, &str)> = Vec::new();
-    for (node_name, variant) in &targets {
-        if source != SourceFilter::Client {
-            log_sources.push((
-                logging::log_file(&project_root, run_name, node_name, variant),
-                node_name,
-                variant,
-                "server",
-            ));
-        }
-        if source != SourceFilter::Server {
-            log_sources.push((
-                logging::client_log_file(&project_root, run_name, node_name, variant),
-                node_name,
-                variant,
-                "client",
-            ));
+
+    // Internal (veld daemon) log — not per-node, shown when source is "all" or "internal".
+    if source == SourceFilter::All || source == SourceFilter::Internal {
+        let internal_path = logging::internal_log_file(&project_root, run_name);
+        log_sources.push((internal_path, "_veld", "internal", "internal"));
+    }
+
+    if source != SourceFilter::Internal {
+        for (node_name, variant) in &targets {
+            if source != SourceFilter::Client {
+                log_sources.push((
+                    logging::log_file(&project_root, run_name, node_name, variant),
+                    node_name,
+                    variant,
+                    "server",
+                ));
+            }
+            if source != SourceFilter::Server {
+                log_sources.push((
+                    logging::client_log_file(&project_root, run_name, node_name, variant),
+                    node_name,
+                    variant,
+                    "client",
+                ));
+            }
         }
     }
 
@@ -299,22 +310,35 @@ async fn follow_logs(
 
     // Build list of (path, node, variant, source_label) to follow.
     let mut follow_sources: Vec<(PathBuf, String, String, String)> = Vec::new();
-    for (node_name, variant) in targets {
-        if source != SourceFilter::Client {
-            follow_sources.push((
-                logging::log_file(project_root, run_name, node_name, variant),
-                node_name.to_string(),
-                variant.to_string(),
-                "server".to_string(),
-            ));
-        }
-        if source != SourceFilter::Server {
-            follow_sources.push((
-                logging::client_log_file(project_root, run_name, node_name, variant),
-                node_name.to_string(),
-                variant.to_string(),
-                "client".to_string(),
-            ));
+
+    // Internal log.
+    if source == SourceFilter::All || source == SourceFilter::Internal {
+        follow_sources.push((
+            logging::internal_log_file(project_root, run_name),
+            "_veld".to_string(),
+            "internal".to_string(),
+            "internal".to_string(),
+        ));
+    }
+
+    if source != SourceFilter::Internal {
+        for (node_name, variant) in targets {
+            if source != SourceFilter::Client {
+                follow_sources.push((
+                    logging::log_file(project_root, run_name, node_name, variant),
+                    node_name.to_string(),
+                    variant.to_string(),
+                    "server".to_string(),
+                ));
+            }
+            if source != SourceFilter::Server {
+                follow_sources.push((
+                    logging::client_log_file(project_root, run_name, node_name, variant),
+                    node_name.to_string(),
+                    variant.to_string(),
+                    "client".to_string(),
+                ));
+            }
         }
     }
 

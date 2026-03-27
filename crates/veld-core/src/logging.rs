@@ -59,6 +59,12 @@ pub fn debug_log_file(project_root: &Path, run_name: &str) -> PathBuf {
     log_dir(project_root, run_name).join("veld-debug.log")
 }
 
+/// Return the internal (veld daemon/orchestrator) log file for a run.
+/// Contains liveness probe outcomes, recovery decisions, health transitions.
+pub fn internal_log_file(project_root: &Path, run_name: &str) -> PathBuf {
+    log_dir(project_root, run_name).join("_veld.log")
+}
+
 /// Return a temporary output file path for a command node.
 ///
 /// Scripts write `key=value` lines to this file instead of emitting

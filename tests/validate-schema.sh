@@ -10,7 +10,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-SCHEMA="$REPO_ROOT/schema/v1/veld.schema.json"
+SCHEMA_V1="$REPO_ROOT/schema/v1/veld.schema.json"
+SCHEMA_V2="$REPO_ROOT/schema/v2/veld.schema.json"
 CHECK="python3 -m check_jsonschema"
 
 if [[ "${1:-}" == "--install" ]]; then
@@ -42,18 +43,29 @@ run_check() {
 echo "=== JSON Schema Validation ==="
 echo
 
-echo "1) Meta-schema: validating schema/v1/veld.schema.json against JSON Schema draft 2020-12"
-run_check "veld.schema.json is valid" \
-  $CHECK --check-metaschema "$SCHEMA"
+echo "1) Meta-schema: validating schema files against JSON Schema draft 2020-12"
+run_check "schema/v1/veld.schema.json is valid" \
+  $CHECK --check-metaschema "$SCHEMA_V1"
+run_check "schema/v2/veld.schema.json is valid" \
+  $CHECK --check-metaschema "$SCHEMA_V2"
 
 echo
-echo "2) Instance validation: checking project configs against the schema"
+echo "2) Instance validation: checking project configs against their schema version"
 
 # Find all veld.json files in the repo (excluding node_modules, target, etc.)
 while IFS= read -r config; do
   rel="${config#"$REPO_ROOT/"}"
-  run_check "$rel" \
-    $CHECK --schemafile "$SCHEMA" "$config"
+
+  # Pick the schema based on the file's schemaVersion field.
+  version=$(python3 -c "import json; print(json.load(open('$config')).get('schemaVersion', '1'))" 2>/dev/null || echo "1")
+  if [[ "$version" == "2" ]]; then
+    schema="$SCHEMA_V2"
+  else
+    schema="$SCHEMA_V1"
+  fi
+
+  run_check "$rel (v$version)" \
+    $CHECK --schemafile "$schema" "$config"
 done < <(find "$REPO_ROOT" -name "veld.json" \
   -not -path "*/node_modules/*" \
   -not -path "*/target/*" \

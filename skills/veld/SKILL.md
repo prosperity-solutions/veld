@@ -65,24 +65,30 @@ For the full config schema, variables, and node types, see [reference/config.md]
 
 Quick reference for the two node types:
 
-**`start_server`** — long-running process. Must bind to `${veld.port}`. Requires `health_check`.
+**`start_server`** — long-running process. Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or legacy `health_check`).
 ```json
 {
   "type": "start_server",
   "command": "npm run dev -- --port ${veld.port}",
-  "health_check": { "type": "http", "path": "/health" },
+  "probes": {
+    "readiness": { "type": "http", "path": "/health" },
+    "liveness": { "type": "http", "path": "/health", "interval_ms": 5000 }
+  },
   "depends_on": { "database": "docker" },
   "env": { "DATABASE_URL": "${nodes.database.DATABASE_URL}" }
 }
 ```
 
-**`command`** — run-to-completion. Emits outputs via `$VELD_OUTPUT_FILE`.
+**`command`** — run-to-completion. Emits outputs via `$VELD_OUTPUT_FILE`. Supports liveness probes for long-lived resources (e.g., SSH tunnels).
 ```json
 {
   "type": "command",
   "script": "./scripts/setup.sh",
   "outputs": ["DATABASE_URL"],
-  "verify": "./scripts/check.sh"
+  "skip_if": "./scripts/check.sh",
+  "probes": {
+    "liveness": { "type": "command", "command": "pg_isready", "interval_ms": 5000 }
+  }
 }
 ```
 
@@ -92,9 +98,28 @@ For the full feedback workflow, events, thread fields, interactive controls, and
 
 Core pattern: listen (returns all pending feedback at once) → fix → release with status comment → listen again with `--after <last_seq>` → repeat until `session_ended`. Threads are auto-claimed so multiple agents can work in parallel without conflicts.
 
+## Reading Outputs
+
+After starting an environment, read node outputs (database URLs, ports, credentials, etc.):
+
+```sh
+veld status --outputs --name my-feature        # human-readable
+veld status --outputs --json --name my-feature  # machine-readable
+```
+
+To debug liveness probe failures and recovery decisions:
+```sh
+veld logs --source internal --name my-feature     # shows probe stderr, recovery attempts
+veld logs --source internal -f --name my-feature  # follow mode
+```
+
+**Outputs can change after a recovery restart.** When a liveness probe triggers recovery (e.g., SSH tunnel drops and the DB clone restarts), the restarted node may produce new outputs (different port, new password, new connection string). Always re-read outputs with `veld status --outputs` after a restart rather than caching them. If you observe connection failures to a previously-working service, check whether a recovery happened and refresh your outputs.
+
 ## Gotchas
 
-- **`health_check` is required** on every `start_server` variant — veld will reject config without it
+- **Readiness probe is required** on every `start_server` variant — use `probes.readiness` (preferred) or legacy `health_check`
+- **`skip_if` replaces `verify`** — `verify` still works as an alias but `skip_if` is the canonical name
+- **Outputs are volatile** — after a recovery restart, outputs like `DATABASE_URL` may change. Never cache outputs long-term; re-read with `veld status --outputs` when needed
 - **`depends_on` needs the variant** — write `"backend": "local"`, not just `"backend"`
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
 - **`outputs` shape differs by type** — object (`{"KEY": "template"}`) for `start_server`, array (`["KEY"]`) for `command`

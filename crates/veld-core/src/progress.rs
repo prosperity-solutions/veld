@@ -25,24 +25,24 @@ pub enum ProgressEvent {
         port: u16,
     },
 
-    /// Health check phase started.
-    HealthCheckPhase {
+    /// Readiness probe phase started.
+    ReadinessProbePhase {
         node: String,
         variant: String,
         phase: u8,
         description: String,
     },
 
-    /// Health check attempt (retry) within a phase.
-    HealthCheckAttempt {
+    /// Readiness probe attempt (retry) within a phase.
+    ReadinessProbeAttempt {
         node: String,
         variant: String,
         phase: u8,
         attempt: u32,
     },
 
-    /// Health check phase passed.
-    HealthCheckPassed {
+    /// Readiness probe phase passed.
+    ReadinessProbePassed {
         node: String,
         variant: String,
         phase: u8,
@@ -56,7 +56,7 @@ pub enum ProgressEvent {
         elapsed_ms: u64,
     },
 
-    /// Node was skipped (verify command passed).
+    /// Node was skipped (skip_if command passed).
     NodeSkipped { node: String, variant: String },
 
     /// Node failed.
@@ -92,9 +92,9 @@ pub enum ProgressEvent {
     /// A teardown step completed.
     TeardownStepCompleted { name: String },
 
-    /// Service log lines streamed during slow health checks.
+    /// Service log lines streamed during slow readiness checks.
     ///
-    /// Emitted after a delay when health checks are taking longer than
+    /// Emitted after a delay when readiness checks are taking longer than
     /// expected, giving the user visibility into what the service is doing.
     NodeLogLines {
         node: String,
@@ -159,28 +159,28 @@ mod tests {
     }
 
     #[test]
-    fn test_health_check_phase_serialization() {
-        let event = ProgressEvent::HealthCheckPhase {
+    fn test_readiness_probe_phase_serialization() {
+        let event = ProgressEvent::ReadinessProbePhase {
             node: "api".into(),
             variant: "local".into(),
             phase: 1,
             description: "waiting for port 8080".into(),
         };
         let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"type\":\"health_check_phase\""));
+        assert!(json.contains("\"type\":\"readiness_probe_phase\""));
         assert!(json.contains("\"phase\":1"));
     }
 
     #[test]
-    fn test_health_check_attempt_serialization() {
-        let event = ProgressEvent::HealthCheckAttempt {
+    fn test_readiness_probe_attempt_serialization() {
+        let event = ProgressEvent::ReadinessProbeAttempt {
             node: "api".into(),
             variant: "local".into(),
             phase: 1,
             attempt: 5,
         };
         let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains("\"type\":\"health_check_attempt\""));
+        assert!(json.contains("\"type\":\"readiness_probe_attempt\""));
         assert!(json.contains("\"phase\":1"));
         assert!(json.contains("\"attempt\":5"));
     }

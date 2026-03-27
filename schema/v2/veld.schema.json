@@ -1,0 +1,478 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "title": "Veld Project Configuration",
+  "description": "Configuration file for a Veld local development environment. Place this as veld.json in your project root.",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "name",
+    "nodes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor autocompletion."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "2",
+      "description": "Schema version. Must be \"2\" for this version of Veld."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable project name. Used in URLs and registry entries.",
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+    },
+    "url_template": {
+      "type": "string",
+      "description": "URL template for services. Supports placeholders: {service}, {variant}, {run}, {project}, {branch}, {worktree}, {username}, {hostname}. Supports fallback operator: {branch ?? run}.",
+      "default": "{service}.{run}.{project}.localhost",
+      "examples": [
+        "{service}.{run}.{project}.localhost",
+        "{service}.localhost:{port}"
+      ]
+    },
+    "presets": {
+      "type": "object",
+      "description": "Named shortcuts for node:variant selections. Each preset maps to an array of \"node:variant\" strings.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string",
+          "description": "A node:variant selector, e.g. \"backend:local\" or \"frontend:docker\".",
+          "pattern": "^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$"
+        },
+        "minItems": 1
+      }
+    },
+    "client_log_levels": {
+      "$ref": "#/$defs/ClientLogLevels",
+      "description": "Client-side log levels to capture (project-level default). Overridable at node and variant level."
+    },
+    "features": {
+      "$ref": "#/$defs/FeaturesConfig",
+      "description": "Feature toggles (project-level defaults). Overridable at node and variant level."
+    },
+    "env": {
+      "$ref": "#/$defs/EnvMap",
+      "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
+    },
+    "setup": {
+      "type": "array",
+      "description": "Steps that run sequentially before the dependency graph executes. If any step exits non-zero, startup is aborted. Not nodes \u2014 no variants, no health checks, no dependency graph participation.",
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      }
+    },
+    "teardown": {
+      "type": "array",
+      "description": "Steps that run sequentially after all nodes stop (after per-node on_stop hooks). Best-effort: failures are logged but do not block the stop operation. Commands should be idempotent.",
+      "items": {
+        "$ref": "#/$defs/SetupStep"
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "description": "The dependency graph nodes. Each key is a node name, and the value defines its variants.",
+      "additionalProperties": {
+        "$ref": "#/$defs/NodeConfig"
+      },
+      "minProperties": 1
+    }
+  },
+  "$defs": {
+    "SetupStep": {
+      "type": "object",
+      "description": "A lightweight step that runs before the dependency graph (setup) or after all nodes stop (teardown). Supports shell environment variables and project-level Veld variables: ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}.",
+      "required": [
+        "name",
+        "command"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Human-readable name for progress reporting and error messages."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute. Supports ${veld.name}, ${veld.project}, ${veld.root}, ${veld.run}, and shell environment variables."
+        },
+        "failureMessage": {
+          "type": "string",
+          "description": "Optional human-friendly message shown when the command fails (non-zero exit). Useful for prerequisite checks like 'Docker must be running'."
+        }
+      }
+    },
+    "NodeConfig": {
+      "type": "object",
+      "description": "Configuration for a single node in the dependency graph.",
+      "required": [
+        "variants"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "default_variant": {
+          "type": "string",
+          "description": "The variant to use when none is specified. If omitted and the node has exactly one variant, that variant is used automatically."
+        },
+        "url_template": {
+          "type": "string",
+          "description": "URL template override for all variants of this node. Overrides the project-level url_template."
+        },
+        "hidden": {
+          "type": "boolean",
+          "description": "When true, this node is hidden from `veld nodes` output. Hidden nodes still participate in the dependency graph and run normally.",
+          "default": false
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/ClientLogLevels",
+          "description": "Client-side log levels override for all variants of this node."
+        },
+        "features": {
+          "$ref": "#/$defs/FeaturesConfig",
+          "description": "Feature toggles override for all variants of this node."
+        },
+        "env": {
+          "$ref": "#/$defs/EnvMap",
+          "description": "Extra environment variables inherited by all variants of this node. Overrides project-level env. Overridable at variant level."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for all variants of this node. Relative paths are resolved from the project root. Overridable at variant level. Supports Veld variable substitution."
+        },
+        "variants": {
+          "type": "object",
+          "description": "Available variants for this node. Each key is a variant name.",
+          "additionalProperties": {
+            "$ref": "#/$defs/VariantConfig"
+          },
+          "minProperties": 1
+        }
+      }
+    },
+    "VariantConfig": {
+      "type": "object",
+      "description": "Configuration for a single variant of a node.",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "command",
+            "start_server"
+          ],
+          "description": "Step type. \"command\" runs a command/script to completion. \"start_server\" starts a long-running process and waits for it to become healthy."
+        },
+        "command": {
+          "type": "string",
+          "description": "Inline shell command to execute. Supports Veld variable substitution (e.g. ${veld.port}, ${node.output})."
+        },
+        "script": {
+          "type": "string",
+          "description": "Path to a script file, relative to veld.json. Mutually exclusive with command."
+        },
+        "health_check": {
+          "$ref": "#/$defs/HealthCheck",
+          "description": "Legacy health check configuration. Deprecated: use probes.readiness instead."
+        },
+        "probes": {
+          "$ref": "#/$defs/ProbesConfig",
+          "description": "Readiness and liveness probe configuration. probes.readiness supersedes the legacy health_check field."
+        },
+        "depends_on": {
+          "type": "object",
+          "description": "Dependencies: maps node names to the variant that must be running before this variant starts.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "$ref": "#/$defs/EnvMap",
+          "description": "Extra environment variables injected into the process. Overrides node-level and project-level env."
+        },
+        "outputs": {
+          "description": "Output declarations. For command steps: an array of output names captured from $VELD_OUTPUT_FILE (preferred) or VELD_OUTPUT stdout lines (legacy). For start_server steps: an object mapping output names to template strings.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Declared output names for command steps."
+            },
+            {
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Synthetic output templates for start_server steps."
+            }
+          ]
+        },
+        "sensitive_outputs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Output keys whose values are sensitive. These are masked in logs and encrypted at rest."
+        },
+        "strict_outputs": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), fail if the command produces output keys (via $VELD_OUTPUT_FILE or stdout) not declared in \"outputs\". Set to false to silently ignore undeclared outputs."
+        },
+        "skip_if": {
+          "type": "string",
+          "description": "Idempotency check command. Only applies to \"command\" type variants. If this command exits 0, the step is considered already complete and is skipped. Previously named \"verify\"."
+        },
+        "verify": {
+          "type": "string",
+          "description": "Deprecated: use skip_if instead. Alias for skip_if, kept for backward compatibility."
+        },
+        "url_template": {
+          "type": "string",
+          "description": "URL template override for this specific variant. Overrides both node-level and project-level url_template."
+        },
+        "on_stop": {
+          "type": "string",
+          "description": "Teardown command to run when the environment is stopped. Executed in reverse dependency order. Supports Veld variable substitution."
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/ClientLogLevels",
+          "description": "Client-side log levels override for this specific variant."
+        },
+        "features": {
+          "$ref": "#/$defs/FeaturesConfig",
+          "description": "Feature toggles override for this specific variant."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Working directory for this variant. Relative paths are resolved from the project root. Overrides node-level cwd. Supports Veld variable substitution."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "start_server"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "required": [
+              "command"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "type": {
+                "const": "command"
+              }
+            },
+            "required": [
+              "type"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "required": [
+                  "command"
+                ]
+              },
+              {
+                "required": [
+                  "script"
+                ]
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "ProbesConfig": {
+      "type": "object",
+      "description": "Readiness and liveness probe configuration. Available for both command and start_server variants.",
+      "additionalProperties": false,
+      "properties": {
+        "readiness": {
+          "$ref": "#/$defs/HealthCheck",
+          "description": "Readiness probe \u2014 gates the dependency graph during startup. For start_server nodes: checked after process starts. For command nodes: checked after command exits 0."
+        },
+        "liveness": {
+          "$ref": "#/$defs/LivenessProbe",
+          "description": "Liveness probe \u2014 runs continuously after the node is healthy. Triggers recovery when failure_threshold consecutive checks fail."
+        }
+      }
+    },
+    "LivenessProbe": {
+      "type": "object",
+      "description": "Liveness probe configuration. Runs periodically after a node becomes healthy to detect failures (e.g., dropped SSH tunnels, crashed background processes).",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "http",
+            "port",
+            "command"
+          ],
+          "description": "Liveness check strategy. \"http\" polls an HTTP endpoint. \"port\" checks if the port is accepting connections. \"command\" runs a command and checks the exit code."
+        },
+        "path": {
+          "type": "string",
+          "description": "HTTP path to poll (type \"http\" only).",
+          "examples": [
+            "/health",
+            "/ready",
+            "/"
+          ]
+        },
+        "expect_status": {
+          "type": "integer",
+          "description": "Expected HTTP status code (type \"http\" only). Defaults to 200.",
+          "minimum": 100,
+          "maximum": 599,
+          "default": 200
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to run (type \"command\" only). Exit code 0 means healthy."
+        },
+        "interval_ms": {
+          "type": "integer",
+          "description": "Milliseconds between liveness checks.",
+          "default": 5000,
+          "minimum": 1000
+        },
+        "failure_threshold": {
+          "type": "integer",
+          "description": "Number of consecutive failures before triggering recovery.",
+          "default": 3,
+          "minimum": 1
+        },
+        "max_recoveries": {
+          "type": "integer",
+          "description": "Maximum number of recovery attempts before the node is permanently marked as failed.",
+          "default": 3,
+          "minimum": 0
+        }
+      }
+    },
+    "FeaturesConfig": {
+      "type": "object",
+      "description": "Feature toggles for controlling which Veld capabilities are injected into a server's HTML responses. All properties are optional \u2014 omitted values inherit from the parent level (variant inherits from node, node from project). The built-in default for all features is true (enabled).",
+      "additionalProperties": false,
+      "properties": {
+        "feedback_overlay": {
+          "type": "boolean",
+          "description": "Inject the feedback overlay toolbar (FAB, screenshot, comments) into HTML responses. Default: true.",
+          "default": true
+        },
+        "client_logs": {
+          "type": "boolean",
+          "description": "Inject the client-side log collector into HTML responses. Default: true.",
+          "default": true
+        },
+        "inject": {
+          "type": "boolean",
+          "description": "Automatically inject bootstrap scripts into HTML responses. When false, the /__veld__/* proxy routes are still created so you can manually add <script> tags. Default: true.",
+          "default": true
+        }
+      }
+    },
+    "ClientLogLevels": {
+      "type": "array",
+      "description": "Client-side console log levels to capture. Supported values: \"log\", \"warn\", \"error\", \"info\", \"debug\". Unhandled exceptions (\"exception\") are always captured regardless of this setting.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "log",
+          "warn",
+          "error",
+          "info",
+          "debug"
+        ]
+      },
+      "default": [
+        "log",
+        "warn",
+        "error"
+      ],
+      "uniqueItems": true
+    },
+    "EnvMap": {
+      "type": "object",
+      "description": "A map of environment variable names to values. Values support Veld variable substitution (e.g. ${veld.port}, ${nodes.backend.url}).",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "HealthCheck": {
+      "type": "object",
+      "description": "Health check / readiness probe configuration.",
+      "required": [
+        "type"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "http",
+            "port",
+            "command"
+          ],
+          "description": "Health check strategy. \"http\" polls an HTTP endpoint. \"port\" checks if the port is accepting connections. \"command\" runs a command and checks the exit code."
+        },
+        "path": {
+          "type": "string",
+          "description": "HTTP path to poll (type \"http\" only).",
+          "examples": [
+            "/health",
+            "/ready",
+            "/"
+          ]
+        },
+        "expect_status": {
+          "type": "integer",
+          "description": "Expected HTTP status code (type \"http\" only). Defaults to 200.",
+          "minimum": 100,
+          "maximum": 599,
+          "default": 200
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to run (type \"command\" only). Exit code 0 means healthy."
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "description": "Maximum seconds to wait for the service to become healthy.",
+          "default": 60,
+          "minimum": 1
+        },
+        "interval_ms": {
+          "type": "integer",
+          "description": "Milliseconds between health check attempts.",
+          "default": 1000,
+          "minimum": 100
+        }
+      }
+    }
+  }
+}

@@ -12,8 +12,8 @@ All relative paths in the configuration resolve relative to the directory contai
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "my-app",
   "nodes": {
     "backend": {
@@ -34,7 +34,7 @@ All relative paths in the configuration resolve relative to the directory contai
 | Field            | Type   | Required | Description                                      |
 |------------------|--------|----------|--------------------------------------------------|
 | `$schema`        | string | No       | JSON Schema URL for editor autocompletion         |
-| `schemaVersion`  | string | Yes      | Must be `"1"` for the current version             |
+| `schemaVersion`  | string | Yes      | `"1"` or `"2"`. Use `"2"` for new projects.       |
 | `name`           | string | Yes      | Human-readable project name                       |
 | `url_template`      | string | No       | URL template for services (see [URL Templates])   |
 | `presets`           | object | No       | Named shortcuts for node:variant selections       |
@@ -67,10 +67,10 @@ The name is available as the `{project}` variable in URL templates and as `${vel
 
 ### `schemaVersion`
 
-Must be `"1"`. Veld validates this on every command and exits with a clear error if it encounters an unknown version.
+Must be `"1"` or `"2"`. Use `"2"` for new projects — it enables `probes` and `skip_if`. Version `"1"` is still fully supported (uses legacy `health_check` and `verify` fields).
 
 ```json
-"schemaVersion": "1"
+"schemaVersion": "2"
 ```
 
 ### `url_template`
@@ -322,14 +322,15 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `type`              | string           | Yes      | All            | `"command"` or `"start_server"`                          |
 | `command`           | string           | Varies   | All            | Inline shell command to execute                       |
 | `script`            | string           | Varies   | `command` only    | Path to script file, relative to `veld.json`          |
-| `health_check`      | object           | Required for `start_server` | `start_server` | How to verify the service is healthy |
+| `health_check`      | object           | No       | `start_server` | Legacy readiness probe. Deprecated: use `probes.readiness` |
+| `probes`            | object           | No       | All            | Readiness and liveness probe configuration            |
 | `depends_on`        | object           | No       | All            | Dependencies on other nodes                           |
 | `env`               | object           | No       | All            | Extra environment variables                           |
 | `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
 | `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
-| `verify`            | string           | No       | `command` only    | Idempotency verification command                      |
+| `skip_if`           | string           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
 
@@ -343,7 +344,7 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 - Must specify either `command` or `script` (mutually exclusive)
 - Can declare outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged — exposes values in terminal/logs)
 - Built-in output: `exit_code`
-- Supports the `verify` field for idempotency
+- Supports the `skip_if` field for idempotency
 
 ```json
 {
@@ -363,7 +364,7 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 - Built-in outputs: `url` (the full HTTPS URL) and `port` (the allocated port number)
 - Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `command`, `env`, and `outputs` templates
 - Ports and URLs are **pre-computed** before any node executes, so `${nodes.X.url}` and `${nodes.X.port}` for any `start_server` node are available everywhere -- no dependency edge required
-- Supports the `health_check` field (required)
+- Requires a readiness probe: use `probes.readiness` (preferred) or the legacy `health_check` field
 - Users never see or deal with port numbers -- only clean HTTPS URLs
 
 ```json
@@ -450,6 +451,51 @@ Runs a shell command and checks the exit code. Exit code `0` means healthy.
   "interval_ms": 2000
 }
 ```
+
+### `probes`
+
+Configures readiness and liveness probes for a variant. Available for both `command` and `start_server` types. `probes.readiness` supersedes the legacy `health_check` field.
+
+```json
+"probes": {
+  "readiness": {
+    "type": "http",
+    "path": "/health",
+    "timeout_seconds": 30
+  },
+  "liveness": {
+    "type": "command",
+    "command": "pg_isready -h localhost -p 5432",
+    "interval_ms": 5000,
+    "failure_threshold": 3,
+    "max_recoveries": 3
+  }
+}
+```
+
+#### Readiness Probe
+
+Gates the dependency graph during startup. Same fields as `health_check`. For `start_server` nodes, runs after the process starts. For `command` nodes, runs after the command exits 0.
+
+#### Liveness Probe
+
+Runs continuously after the node becomes healthy. Detects failures like dropped SSH tunnels, crashed background processes, or unreachable databases. Supports the same three check types as readiness probes:
+
+- **`http`**: Polls an HTTP endpoint. Passes when the expected status code is returned.
+- **`port`**: Checks if a TCP port is accepting connections.
+- **`command`**: Runs an arbitrary shell command (via `sh -c`). Exit code `0` means healthy, non-zero means unhealthy. Pipes, redirects, and `&&` chains all work. The node's outputs are injected as environment variables, so you can reference them directly (e.g., `pg_isready -h $DB_HOST -p $DB_PORT`).
+
+| Field               | Type    | Required | Description                                                  |
+|---------------------|---------|----------|--------------------------------------------------------------|
+| `type`              | string  | Yes      | Strategy: `"http"`, `"port"`, or `"command"`                 |
+| `path`              | string  | No       | HTTP path to poll (`http` type only)                         |
+| `expect_status`     | integer | No       | Expected HTTP status code (`http` type only, default: 200)   |
+| `command`           | string  | No       | Shell command to run (`command` type only)                    |
+| `interval_ms`       | integer | No       | Milliseconds between checks (default: 5000, min: 1000)      |
+| `failure_threshold` | integer | No       | Consecutive failures before triggering recovery (default: 3) |
+| `max_recoveries`    | integer | No       | Max recovery attempts before permanent failure (default: 3)  |
+
+When `failure_threshold` consecutive liveness checks fail, Veld automatically restarts the entire environment (equivalent to `veld restart`). If the restart succeeds and the probe starts passing, the node returns to healthy. If `max_recoveries` restart attempts are exhausted, the node is marked as permanently failed and no further restarts are attempted. You can see recovery status via `veld status` and `veld logs --source internal`.
 
 ### `depends_on`
 
@@ -554,21 +600,21 @@ An array of output key names whose values are sensitive. These outputs are:
 }
 ```
 
-### `verify`
+### `skip_if`
 
-An idempotency verification command. Only applies to `command` type variants. Before running the main command/script, Veld executes the verify command:
+An idempotency check command (previously named `verify`, which is still accepted as an alias). Only applies to `command` type variants. Before running the main command/script, Veld executes the `skip_if` command:
 
 - **Exit code 0:** The step is considered already complete and is skipped.
 - **Non-zero exit code:** The step runs normally.
-- If `verify` itself errors unexpectedly, the step re-runs (safe default).
+- If `skip_if` itself errors unexpectedly, the step re-runs (safe default).
 
-The verify command receives the previous run's output variables as environment variables, so it can check whether the previous result is still valid.
+The `skip_if` command receives the previous run's output variables as environment variables, so it can check whether the previous result is still valid.
 
 ```json
 {
   "type": "command",
   "script": "./scripts/clone-db.sh",
-  "verify": "./scripts/verify-db.sh",
+  "skip_if": "./scripts/verify-db.sh",
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -851,8 +897,8 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
 
@@ -868,7 +914,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         "local": {
           "type": "command",
           "script": "./scripts/clone-db.sh",
-          "verify": "./scripts/verify-db.sh",
+          "skip_if": "./scripts/verify-db.sh",
           "on_stop": "./scripts/drop-db.sh",
           "outputs": ["DATABASE_URL"],
           "sensitive_outputs": ["DATABASE_URL"]
@@ -894,7 +940,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         "default": {
           "type": "command",
           "command": "./scripts/generate-dev-certs.sh",
-          "verify": "test -f ./certs/dev.pem"
+          "skip_if": "test -f ./certs/dev.pem"
         }
       }
     },
@@ -1055,7 +1101,7 @@ Veld provides a JSON Schema for editor autocompletion and validation. Add the `$
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
   ...
 }
 ```

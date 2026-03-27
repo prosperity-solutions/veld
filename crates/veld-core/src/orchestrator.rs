@@ -17,7 +17,7 @@ use crate::port::PortAllocator;
 use crate::process;
 use crate::progress::ProgressEvent;
 use crate::state::{
-    GlobalRegistry, HealthCheckPhase, NodeState, NodeStatus, ProjectState, RegistryEntry,
+    GlobalRegistry, NodeState, NodeStatus, ProjectState, ReadinessPhase, RegistryEntry,
     RegistryRunInfo, RunState, RunStatus,
 };
 use crate::url;
@@ -164,6 +164,8 @@ pub struct Orchestrator {
     foreground: bool,
     /// Optional channel for live progress events.
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
+    /// Internal log writer for the current run (liveness/recovery/lifecycle events).
+    internal_log: Option<LogWriter>,
 }
 
 impl Orchestrator {
@@ -183,6 +185,7 @@ impl Orchestrator {
             debug_writer: None,
             foreground: false,
             progress_tx: None,
+            internal_log: None,
         }
     }
 
@@ -217,6 +220,13 @@ impl Orchestrator {
     async fn debug_log(&self, message: &str) {
         if let Some(ref writer) = self.debug_writer {
             let _ = writer.write_line(&format!("[VELD] {message}")).await;
+        }
+    }
+
+    /// Write a line to the internal log (per-run lifecycle events).
+    async fn internal_log(&self, message: &str) {
+        if let Some(ref writer) = self.internal_log {
+            let _ = writer.write_line(message).await;
         }
     }
 
@@ -258,6 +268,12 @@ impl Orchestrator {
             Err(e) => {
                 tracing::warn!(error = %e, "could not ensure helper — using default client");
             }
+        }
+
+        // Create internal log writer for this run.
+        let log_path = logging::internal_log_file(&self.project_root, run_name);
+        if let Ok(writer) = LogWriter::new(log_path).await {
+            self.internal_log = Some(writer);
         }
 
         let resolved = graph::resolve_selections(selections, &self.config)?;
@@ -394,6 +410,13 @@ impl Orchestrator {
 
         // Count total nodes for progress reporting.
         let total_nodes: usize = plan.iter().map(|s| s.len()).sum();
+        self.internal_log(&format!(
+            "[start] starting environment '{}' — {} node(s) in {} stage(s)",
+            run_name,
+            total_nodes,
+            plan.len()
+        ))
+        .await;
         self.emit(ProgressEvent::PlanResolved {
             total_nodes,
             stages: plan.len(),
@@ -436,6 +459,10 @@ impl Orchestrator {
         }
         .await;
 
+        if let Err(ref e) = execute_result {
+            self.internal_log(&format!("[start] startup failed: {e}"))
+                .await;
+        }
         if let Err(e) = execute_result {
             // Release all remaining port reservations so the ports become
             // available to the system immediately.
@@ -450,6 +477,12 @@ impl Orchestrator {
 
         // Final state save with Running status.
         self.save_state(&run)?;
+
+        self.internal_log(&format!(
+            "[start] environment '{}' is running — all {} node(s) healthy",
+            run_name, total_nodes
+        ))
+        .await;
 
         Ok(run)
     }
@@ -588,6 +621,16 @@ impl Orchestrator {
     /// Stop a run in reverse dependency order. Returns whether the run was
     /// actually stopped or was already stopped.
     pub async fn stop(&mut self, run_name: &str) -> Result<StopResult, OrchestratorError> {
+        // Create internal log writer for this run (may already exist from start).
+        if self.internal_log.is_none() {
+            let log_path = logging::internal_log_file(&self.project_root, run_name);
+            if let Ok(writer) = LogWriter::new(log_path).await {
+                self.internal_log = Some(writer);
+            }
+        }
+        self.internal_log(&format!("[stop] stopping environment '{run_name}'"))
+            .await;
+
         // Reconnect to whichever helper is running (system or user socket)
         if let Ok(client) = crate::helper::HelperClient::connect().await {
             self.helper_client = client;
@@ -633,6 +676,12 @@ impl Orchestrator {
 
         for key in node_keys.iter().rev() {
             if let Some(node_state) = run.nodes.get_mut(key) {
+                self.internal_log(&format!(
+                    "[stop] stopping {}:{} (pid: {:?})",
+                    node_state.node_name, node_state.variant, node_state.pid
+                ))
+                .await;
+
                 // Kill process if running.
                 if let Some(pid) = node_state.pid {
                     if process::is_alive(pid) {
@@ -677,6 +726,9 @@ impl Orchestrator {
 
         // Remove from global registry.
         self.remove_from_registry(run_name);
+
+        self.internal_log(&format!("[stop] environment '{run_name}' stopped"))
+            .await;
 
         Ok(StopResult::Stopped)
     }
@@ -1131,7 +1183,7 @@ async fn debug_log_free(writer: &Option<LogWriter>, message: &str) {
     }
 }
 
-/// Build a health-check attempt notifier that sends progress events.
+/// Build a readiness probe attempt notifier that sends progress events.
 fn make_attempt_notifier(
     tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
     node: &str,
@@ -1143,7 +1195,7 @@ fn make_attempt_notifier(
     let variant = variant.to_owned();
     Box::new(move |attempt| {
         if let Some(tx) = &tx {
-            let _ = tx.send(ProgressEvent::HealthCheckAttempt {
+            let _ = tx.send(ProgressEvent::ReadinessProbeAttempt {
                 node: node.clone(),
                 variant: variant.clone(),
                 phase,
@@ -1456,24 +1508,26 @@ async fn execute_start_server_isolated(
         let _ = project_state.save(&project_root);
     }
 
-    // Health check — inlined to emit progress events between phases.
+    // Readiness probe — inlined to emit progress events between phases.
     debug_log_free(
         &ctx.debug_writer,
         &format!(
-            "{}:{} — process started (pid {}), beginning health checks",
+            "{}:{} — process started (pid {}), beginning readiness checks",
             sel.node, sel.variant, pid
         ),
     )
     .await;
-    if let Some(ref hc) = variant_cfg.health_check {
+    // Use probes.readiness if available, falling back to legacy health_check.
+    if let Some(hc) = variant_cfg.readiness_probe() {
+        let hc = hc.clone();
         node_state.status = NodeStatus::HealthChecking;
-        node_state.health_phases.push(HealthCheckPhase {
+        node_state.readiness_phases.push(ReadinessPhase {
             phase: 1,
             passed: false,
             last_error: None,
             passed_at: None,
         });
-        node_state.health_phases.push(HealthCheckPhase {
+        node_state.readiness_phases.push(ReadinessPhase {
             phase: 2,
             passed: false,
             last_error: None,
@@ -1535,7 +1589,7 @@ async fn execute_start_server_isolated(
         // Phase 1: TCP port check.
         emit_progress(
             &ctx.progress_tx,
-            ProgressEvent::HealthCheckPhase {
+            ProgressEvent::ReadinessProbePhase {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 1,
@@ -1544,7 +1598,7 @@ async fn execute_start_server_isolated(
         );
 
         let phase1_result = tokio::select! {
-            result = health::wait_for_port(port, hc, Some(&phase1_notifier)) => result,
+            result = health::wait_for_port(port, &hc, Some(&phase1_notifier)) => result,
             _ = wait_for_process_exit(pid) => {
                 Err(health::HealthError::PortCheckFailed(
                     "server process exited before binding to port".into(),
@@ -1555,11 +1609,11 @@ async fn execute_start_server_isolated(
         if let Err(e) = phase1_result {
             let msg = format!("process did not bind to port {port}: {e}");
             node_state.status = NodeStatus::Failed;
-            node_state.health_phases[0].last_error = Some(msg.clone());
+            node_state.readiness_phases[0].last_error = Some(msg.clone());
             debug_log_free(
                 &ctx.debug_writer,
                 &format!(
-                    "{}:{} — health check phase 1 FAILED: {}",
+                    "{}:{} — readiness phase 1 FAILED: {}",
                     sel.node, sel.variant, msg
                 ),
             )
@@ -1580,11 +1634,11 @@ async fn execute_start_server_isolated(
         }
 
         let now = chrono::Utc::now();
-        node_state.health_phases[0].passed = true;
-        node_state.health_phases[0].passed_at = Some(now);
+        node_state.readiness_phases[0].passed = true;
+        node_state.readiness_phases[0].passed_at = Some(now);
         emit_progress(
             &ctx.progress_tx,
-            ProgressEvent::HealthCheckPassed {
+            ProgressEvent::ReadinessProbePassed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 1,
@@ -1599,13 +1653,13 @@ async fn execute_start_server_isolated(
         // Phase 2: depends on check type.
         let phase2_desc = match hc.check_type.as_str() {
             "http" => format!("HTTP check on port {port}"),
-            "command" | "bash" => "command health check".to_owned(),
+            "command" | "bash" => "command readiness check".to_owned(),
             "port" => "port-only (no phase 2)".to_owned(),
             other => format!("unknown check type: {other}"),
         };
         emit_progress(
             &ctx.progress_tx,
-            ProgressEvent::HealthCheckPhase {
+            ProgressEvent::ReadinessProbePhase {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 2,
@@ -1617,14 +1671,14 @@ async fn execute_start_server_isolated(
             match hc.check_type.as_str() {
                 "http" => {
                     let direct_url = format!("http://127.0.0.1:{port}");
-                    health::wait_for_http(&direct_url, hc, Some(&phase2_notifier)).await
+                    health::wait_for_http(&direct_url, &hc, Some(&phase2_notifier)).await
                 }
                 "command" | "bash" => {
                     if let Some(cmd) = &hc.command {
                         health::wait_for_command_check(
                             cmd,
                             &working_dir,
-                            hc,
+                            &hc,
                             Some(&phase2_notifier),
                         )
                         .await
@@ -1640,7 +1694,7 @@ async fn execute_start_server_isolated(
             result = phase2_future => result,
             _ = wait_for_process_exit(pid) => {
                 Err(health::HealthError::PortCheckFailed(
-                    "server process exited during health check".into(),
+                    "server process exited during readiness check".into(),
                 ))
             }
         };
@@ -1648,12 +1702,12 @@ async fn execute_start_server_isolated(
         match phase2_result {
             Ok(()) => {
                 let now = chrono::Utc::now();
-                node_state.health_phases[1].passed = true;
-                node_state.health_phases[1].passed_at = Some(now);
+                node_state.readiness_phases[1].passed = true;
+                node_state.readiness_phases[1].passed_at = Some(now);
                 node_state.status = NodeStatus::Healthy;
                 emit_progress(
                     &ctx.progress_tx,
-                    ProgressEvent::HealthCheckPassed {
+                    ProgressEvent::ReadinessProbePassed {
                         node: sel.node.clone(),
                         variant: sel.variant.clone(),
                         phase: 2,
@@ -1662,7 +1716,7 @@ async fn execute_start_server_isolated(
                 debug_log_free(
                     &ctx.debug_writer,
                     &format!(
-                        "{}:{} — health check passed, node is healthy",
+                        "{}:{} — readiness check passed, node is healthy",
                         sel.node, sel.variant
                     ),
                 )
@@ -1671,11 +1725,11 @@ async fn execute_start_server_isolated(
             Err(e) => {
                 node_state.status = NodeStatus::Failed;
                 let msg = e.to_string();
-                node_state.health_phases[1].last_error = Some(msg.clone());
+                node_state.readiness_phases[1].last_error = Some(msg.clone());
                 debug_log_free(
                     &ctx.debug_writer,
                     &format!(
-                        "{}:{} — health check phase 2 FAILED: {}",
+                        "{}:{} — readiness phase 2 FAILED: {}",
                         sel.node, sel.variant, msg
                     ),
                 )
@@ -1736,16 +1790,17 @@ async fn execute_command_isolated(
     );
     let env = build_env(merged_env.as_ref(), var_ctx)?;
 
-    // Verify step (idempotency).
-    if let Some(ref verify_cmd) = variant_cfg.verify {
-        let verify_resolved = crate::variables::interpolate(verify_cmd, var_ctx)?;
-        let verify_result = process::run_command(&verify_resolved, &working_dir, &env, None).await;
-        if let Ok(ref out) = verify_result {
+    // Idempotency check (skip_if).
+    if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
+        let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, var_ctx)?;
+        let skip_if_result =
+            process::run_command(&skip_if_resolved, &working_dir, &env, None).await;
+        if let Ok(ref out) = skip_if_result {
             if out.exit_code == 0 {
                 tracing::info!(
                     node = sel.node,
                     variant = sel.variant,
-                    "verify passed — skipping command step"
+                    "skip_if passed — skipping command step"
                 );
                 node_state.status = NodeStatus::Skipped;
                 node_state
@@ -1811,7 +1866,113 @@ async fn execute_command_isolated(
     }
 
     if result.exit_code == 0 {
-        node_state.status = NodeStatus::Healthy;
+        // Run readiness probe if configured (probes.readiness on command nodes).
+        if let Some(hc) = variant_cfg.readiness_probe() {
+            let hc = hc.clone();
+            node_state.status = NodeStatus::HealthChecking;
+            emit_progress(
+                &ctx.progress_tx,
+                ProgressEvent::ReadinessProbePhase {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    phase: 1,
+                    description: "readiness probe".to_owned(),
+                },
+            );
+
+            let notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
+            let probe_result = match hc.check_type.as_str() {
+                "command" | "bash" => {
+                    if let Some(cmd) = &hc.command {
+                        health::wait_for_command_check(cmd, &working_dir, &hc, Some(&notifier))
+                            .await
+                    } else {
+                        Ok(())
+                    }
+                }
+                "port" => {
+                    // Port check — look for a port value in outputs.
+                    // Checks common key names; a future enhancement could add
+                    // an explicit `port_key` field to HealthCheck.
+                    let port_str = node_state
+                        .outputs
+                        .get("PORT")
+                        .or(node_state.outputs.get("DB_PORT"))
+                        .or(node_state.outputs.get("SERVICE_PORT"));
+                    if let Some(port_str) = port_str {
+                        if let Ok(port) = port_str.parse::<u16>() {
+                            health::wait_for_port(port, &hc, Some(&notifier)).await
+                        } else {
+                            tracing::warn!(
+                                node = sel.node,
+                                variant = sel.variant,
+                                "readiness port probe: output value is not a valid port number"
+                            );
+                            Ok(())
+                        }
+                    } else {
+                        tracing::warn!(
+                            node = sel.node,
+                            variant = sel.variant,
+                            "readiness port probe skipped: no PORT/DB_PORT/SERVICE_PORT output found"
+                        );
+                        Ok(())
+                    }
+                }
+                "http" => {
+                    // HTTP check — look for a URL value in outputs.
+                    let url = node_state
+                        .outputs
+                        .get("URL")
+                        .or(node_state.outputs.get("DATABASE_URL"))
+                        .or(node_state.outputs.get("SERVICE_URL"));
+                    if let Some(url) = url {
+                        health::wait_for_http(url, &hc, Some(&notifier)).await
+                    } else {
+                        tracing::warn!(
+                            node = sel.node,
+                            variant = sel.variant,
+                            "readiness http probe skipped: no URL/DATABASE_URL/SERVICE_URL output found"
+                        );
+                        Ok(())
+                    }
+                }
+                _ => Ok(()),
+            };
+
+            match probe_result {
+                Ok(()) => {
+                    node_state.status = NodeStatus::Healthy;
+                    emit_progress(
+                        &ctx.progress_tx,
+                        ProgressEvent::ReadinessProbePassed {
+                            node: sel.node.clone(),
+                            variant: sel.variant.clone(),
+                            phase: 1,
+                        },
+                    );
+                }
+                Err(e) => {
+                    node_state.status = NodeStatus::Failed;
+                    let reason = format!("readiness probe failed: {e}");
+                    emit_progress(
+                        &ctx.progress_tx,
+                        ProgressEvent::NodeFailed {
+                            node: sel.node.clone(),
+                            variant: sel.variant.clone(),
+                            error: reason.clone(),
+                        },
+                    );
+                    return Err(OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason,
+                    });
+                }
+            }
+        } else {
+            node_state.status = NodeStatus::Healthy;
+        }
     } else {
         node_state.status = NodeStatus::Failed;
         let reason = format!("command step exited with code {}", result.exit_code);
@@ -1838,7 +1999,7 @@ async fn execute_command_isolated(
 // ---------------------------------------------------------------------------
 
 /// Poll until a process is no longer alive. Checks every 250ms.
-/// Used to race health checks against premature process death so the
+/// Used to race readiness checks against premature process death so the
 /// orchestrator can fail fast instead of waiting for the full timeout.
 async fn wait_for_process_exit(pid: u32) {
     loop {

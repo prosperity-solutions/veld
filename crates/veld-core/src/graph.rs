@@ -374,6 +374,58 @@ fn validate_sensitive_outputs(
     Ok(())
 }
 
+/// Return all nodes that transitively depend on `target` within the given
+/// set of active nodes. The result is in topological order (direct dependents
+/// first, transitive dependents later).
+pub fn get_dependents(
+    target: &NodeSelection,
+    all_nodes: &[NodeSelection],
+    config: &VeldConfig,
+) -> Vec<NodeSelection> {
+    // Build reverse adjacency: for each node, which nodes depend on it.
+    let mut reverse_deps: HashMap<String, Vec<NodeSelection>> = HashMap::new();
+    for sel in all_nodes {
+        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
+        if let Some(dep_map) = &variant_cfg.depends_on {
+            for (dep_node, dep_variant) in dep_map {
+                let dep_key = format!("{dep_node}:{dep_variant}");
+                reverse_deps.entry(dep_key).or_default().push(sel.clone());
+            }
+        }
+    }
+
+    // BFS from target through reverse edges.
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<NodeSelection> = VecDeque::new();
+    let target_key = format!("{}:{}", target.node, target.variant);
+    visited.insert(target_key.clone());
+
+    if let Some(direct) = reverse_deps.get(&target_key) {
+        for dep in direct {
+            let key = format!("{}:{}", dep.node, dep.variant);
+            if visited.insert(key) {
+                queue.push_back(dep.clone());
+            }
+        }
+    }
+
+    let mut result = Vec::new();
+    while let Some(sel) = queue.pop_front() {
+        let key = format!("{}:{}", sel.node, sel.variant);
+        if let Some(further) = reverse_deps.get(&key) {
+            for dep in further {
+                let dep_key = format!("{}:{}", dep.node, dep.variant);
+                if visited.insert(dep_key) {
+                    queue.push_back(dep.clone());
+                }
+            }
+        }
+        result.push(sel);
+    }
+
+    result
+}
+
 fn check_string_for_ambiguous_refs(
     s: &str,
     active_variants: &HashMap<&str, Vec<&str>>,
@@ -409,4 +461,202 @@ fn check_string_for_ambiguous_refs(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{NodeConfig, StepType, VariantConfig, VeldConfig};
+    use std::collections::HashMap;
+
+    fn make_config() -> VeldConfig {
+        // db -> api -> frontend (dependency chain)
+        let db_variant = VariantConfig {
+            step_type: StepType::Command,
+            command: Some("echo db".into()),
+            script: None,
+            health_check: None,
+            probes: None,
+            depends_on: None,
+            env: None,
+            outputs: None,
+            sensitive_outputs: None,
+            strict_outputs: true,
+            skip_if: None,
+            url_template: None,
+            on_stop: None,
+            client_log_levels: None,
+            features: None,
+            cwd: None,
+        };
+        let api_variant = VariantConfig {
+            step_type: StepType::StartServer,
+            command: Some("echo api".into()),
+            script: None,
+            health_check: None,
+            probes: None,
+            depends_on: Some(HashMap::from([("db".into(), "local".into())])),
+            env: None,
+            outputs: None,
+            sensitive_outputs: None,
+            strict_outputs: true,
+            skip_if: None,
+            url_template: None,
+            on_stop: None,
+            client_log_levels: None,
+            features: None,
+            cwd: None,
+        };
+        let frontend_variant = VariantConfig {
+            step_type: StepType::StartServer,
+            command: Some("echo fe".into()),
+            script: None,
+            health_check: None,
+            probes: None,
+            depends_on: Some(HashMap::from([("api".into(), "local".into())])),
+            env: None,
+            outputs: None,
+            sensitive_outputs: None,
+            strict_outputs: true,
+            skip_if: None,
+            url_template: None,
+            on_stop: None,
+            client_log_levels: None,
+            features: None,
+            cwd: None,
+        };
+
+        VeldConfig {
+            schema: None,
+            schema_version: "2".into(),
+            name: "test".into(),
+            url_template: "{service}.{run}.{project}.localhost".into(),
+            presets: None,
+            client_log_levels: None,
+            features: None,
+            env: None,
+            setup: None,
+            teardown: None,
+            nodes: HashMap::from([
+                (
+                    "db".into(),
+                    NodeConfig {
+                        default_variant: Some("local".into()),
+                        url_template: None,
+                        hidden: None,
+                        client_log_levels: None,
+                        features: None,
+                        env: None,
+                        cwd: None,
+                        variants: HashMap::from([("local".into(), db_variant)]),
+                    },
+                ),
+                (
+                    "api".into(),
+                    NodeConfig {
+                        default_variant: Some("local".into()),
+                        url_template: None,
+                        hidden: None,
+                        client_log_levels: None,
+                        features: None,
+                        env: None,
+                        cwd: None,
+                        variants: HashMap::from([("local".into(), api_variant)]),
+                    },
+                ),
+                (
+                    "frontend".into(),
+                    NodeConfig {
+                        default_variant: Some("local".into()),
+                        url_template: None,
+                        hidden: None,
+                        client_log_levels: None,
+                        features: None,
+                        env: None,
+                        cwd: None,
+                        variants: HashMap::from([("local".into(), frontend_variant)]),
+                    },
+                ),
+            ]),
+        }
+    }
+
+    #[test]
+    fn test_get_dependents_leaf_node() {
+        let config = make_config();
+        let all_nodes = vec![
+            NodeSelection {
+                node: "db".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "api".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "frontend".into(),
+                variant: "local".into(),
+            },
+        ];
+        let target = NodeSelection {
+            node: "frontend".into(),
+            variant: "local".into(),
+        };
+        let deps = get_dependents(&target, &all_nodes, &config);
+        assert!(deps.is_empty(), "leaf node should have no dependents");
+    }
+
+    #[test]
+    fn test_get_dependents_root_node() {
+        let config = make_config();
+        let all_nodes = vec![
+            NodeSelection {
+                node: "db".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "api".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "frontend".into(),
+                variant: "local".into(),
+            },
+        ];
+        let target = NodeSelection {
+            node: "db".into(),
+            variant: "local".into(),
+        };
+        let deps = get_dependents(&target, &all_nodes, &config);
+        assert_eq!(deps.len(), 2);
+        let dep_names: Vec<String> = deps.iter().map(|d| d.node.clone()).collect();
+        assert!(dep_names.contains(&"api".to_string()));
+        assert!(dep_names.contains(&"frontend".to_string()));
+    }
+
+    #[test]
+    fn test_get_dependents_middle_node() {
+        let config = make_config();
+        let all_nodes = vec![
+            NodeSelection {
+                node: "db".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "api".into(),
+                variant: "local".into(),
+            },
+            NodeSelection {
+                node: "frontend".into(),
+                variant: "local".into(),
+            },
+        ];
+        let target = NodeSelection {
+            node: "api".into(),
+            variant: "local".into(),
+        };
+        let deps = get_dependents(&target, &all_nodes, &config);
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0].node, "frontend");
+    }
 }

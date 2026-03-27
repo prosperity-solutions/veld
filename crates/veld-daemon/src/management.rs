@@ -71,6 +71,16 @@ struct NodeInfo {
     status: NodeStatus,
     url: Option<String>,
     pid: Option<u32>,
+    #[serde(skip_serializing_if = "is_zero")]
+    recovery_count: u32,
+    #[serde(skip_serializing_if = "is_zero")]
+    consecutive_failures: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_liveness_error: Option<String>,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
 }
 
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
@@ -102,6 +112,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     status: ns.status.clone(),
                                     url: ns.url.clone(),
                                     pid: ns.pid,
+                                    recovery_count: ns.recovery_count,
+                                    consecutive_failures: ns.consecutive_failures,
+                                    last_liveness_error: ns.last_liveness_error.clone(),
                                 })
                                 .collect()
                         })
@@ -200,7 +213,29 @@ async fn get_logs(
     let lines_limit = q.lines.clamp(1, 5000);
     let include_server = q.source == "all" || q.source == "server";
     let include_client = q.source == "all" || q.source == "client";
+    let include_internal = q.source == "all" || q.source == "internal" || q.source == "veld";
     let mut nodes = Vec::new();
+
+    // Internal (veld daemon) log — not per-node, shown as _veld:internal.
+    if include_internal {
+        let log_path = logging::internal_log_file(&project_root, &run_name);
+        let lines = if log_path.exists() {
+            let raw = logging::tail_lines(&log_path, lines_limit)
+                .await
+                .unwrap_or_default();
+            logging::merge_continuation_lines(raw)
+        } else {
+            Vec::new()
+        };
+        if !lines.is_empty() {
+            nodes.push(NodeLogs {
+                node: "_veld".to_owned(),
+                variant: "internal".to_owned(),
+                source: "internal".to_owned(),
+                lines,
+            });
+        }
+    }
 
     for ns in run_state.nodes.values() {
         if let Some(ref filter) = q.node {
