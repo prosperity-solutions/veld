@@ -49,6 +49,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
 .badge.starting,.badge.stopping,.badge.health_checking,.badge.pending{background:var(--yellow-bg);color:var(--yellow)}
 .badge.failed{background:var(--red-bg);color:var(--red)}
+.badge.recovering,.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
 
 .card-sub{display:flex;align-items:center;gap:8px;padding:0 18px 12px;font-size:12px;color:var(--text2)}
@@ -72,7 +73,11 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .health-dot.healthy,.health-dot.running{background:var(--green)}
 .health-dot.starting,.health-dot.health_checking,.health-dot.pending{background:var(--yellow)}
 .health-dot.failed{background:var(--red)}
+.health-dot.unhealthy{background:var(--yellow)}
 .health-dot.stopped,.health-dot.skipped{background:var(--dim)}
+.svc-liveness{font-size:11px;color:var(--dim);padding-left:20px}
+.svc-liveness .warn{color:var(--yellow)}
+.svc-liveness .err{color:var(--red)}
 
 /* services table (merged URLs + debug) */
 .svc-table{width:100%;font-size:12px;border-collapse:collapse}
@@ -238,6 +243,15 @@ function render(data){
           h+='</td>';
           h+='<td class="svc-dim">'+esc(n.variant)+'</td>';
           h+='<td class="svc-pid">'+(n.pid||'')+'</td></tr>';
+          if(n.recovery_count||n.consecutive_failures||n.last_liveness_error){
+            h+='<tr><td colspan="5" class="svc-liveness">';
+            var parts=[];
+            if(n.consecutive_failures)parts.push('<span class="warn">failures: '+n.consecutive_failures+'</span>');
+            if(n.recovery_count)parts.push('recoveries: '+n.recovery_count);
+            if(n.last_liveness_error)parts.push('<span class="err">'+esc(n.last_liveness_error)+'</span>');
+            h+=parts.join(' &middot; ');
+            h+='</td></tr>';
+          }
         }
         h+='</tbody></table>';
       }else{h+='<div class="svc-empty">No services</div>';}
@@ -271,6 +285,7 @@ function ensureLogPanel(key){
         '<button class="active" data-action="source-filter" data-source="all">All</button>'+
         '<button data-action="source-filter" data-source="server">Server</button>'+
         '<button data-action="source-filter" data-source="client">Client</button>'+
+        '<button data-action="source-filter" data-source="internal">Internal</button>'+
       '</div>'+
       '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
       '<span class="log-match-count"></span>'+

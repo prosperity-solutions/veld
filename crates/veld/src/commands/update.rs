@@ -1,3 +1,9 @@
+use std::io::Write;
+
+use veld_core::config;
+use veld_core::orchestrator::Orchestrator;
+use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
+
 use crate::output;
 
 /// `veld update` -- update Veld to the latest version.
@@ -8,6 +14,42 @@ pub async fn run() -> i32 {
 
     match veld_core::setup::check_update().await {
         Ok(Some(new_version)) => {
+            // Check for running environments and stop them before updating.
+            let running = find_running_environments();
+            if !running.is_empty() {
+                println!();
+                output::print_info(&format!(
+                    "Found {} running environment(s) that must be stopped before updating:",
+                    running.len()
+                ));
+                for (project, run_name) in &running {
+                    println!(
+                        "  {} {}",
+                        output::cyan(run_name),
+                        output::dim(&format!("({})", project.display()))
+                    );
+                }
+                println!();
+                print!(
+                    "{}",
+                    output::yellow("Stop all environments and proceed with update? [y/N] ")
+                );
+                let _ = std::io::stdout().flush();
+
+                let mut answer = String::new();
+                if std::io::stdin().read_line(&mut answer).is_err()
+                    || !answer.trim().eq_ignore_ascii_case("y")
+                {
+                    output::print_info("Update cancelled.");
+                    return 0;
+                }
+
+                // Stop all running environments.
+                let stopped = stop_all_environments(&running).await;
+                output::print_success(&format!("Stopped {stopped} environment(s)."));
+                println!();
+            }
+
             output::print_info(&format!("New version available: {current} → {new_version}"));
             output::print_info("Installing update...");
 
@@ -34,6 +76,65 @@ pub async fn run() -> i32 {
             output::print_error(&format!("Update check failed: {e}"), false);
             1
         }
+    }
+}
+
+/// Find all running environments across all projects.
+/// Returns (project_root, run_name) pairs.
+fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
+    let registry = match GlobalRegistry::load() {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut running = Vec::new();
+    for entry in registry.projects.values() {
+        for (run_name, run_info) in &entry.runs {
+            if run_info.status == RunStatus::Running {
+                running.push((entry.project_root.clone(), run_name.clone()));
+            }
+        }
+    }
+    running
+}
+
+/// Stop all running environments. Returns number successfully stopped.
+async fn stop_all_environments(envs: &[(std::path::PathBuf, String)]) -> usize {
+    let mut stopped = 0;
+    for (project_root, run_name) in envs {
+        let config_path = project_root.join("veld.json");
+        let cfg = match config::load_config(&config_path) {
+            Ok(c) => c,
+            Err(e) => {
+                output::print_error(
+                    &format!("Failed to load config for {}: {e}", project_root.display()),
+                    false,
+                );
+                // Even if config can't load, try to clean up state.
+                cleanup_state(project_root, run_name);
+                continue;
+            }
+        };
+
+        let mut orchestrator = Orchestrator::new(config_path, cfg);
+        match orchestrator.stop(run_name).await {
+            Ok(_) => {
+                output::print_info(&format!("  Stopped '{run_name}'"));
+                stopped += 1;
+            }
+            Err(e) => {
+                output::print_error(&format!("  Failed to stop '{run_name}': {e}"), false);
+            }
+        }
+    }
+    stopped
+}
+
+/// Best-effort cleanup of state for a run when config can't be loaded.
+fn cleanup_state(project_root: &std::path::Path, run_name: &str) {
+    if let Ok(mut state) = ProjectState::load(project_root) {
+        state.runs.remove(run_name);
+        let _ = state.save(project_root);
     }
 }
 

@@ -4,8 +4,8 @@
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "setup": [],
@@ -40,13 +40,16 @@ Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plu
 
 ### `start_server` — Long-running processes
 
-Must bind to `${veld.port}`. Requires `health_check`.
+Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or legacy `health_check`).
 
 ```json
 {
   "type": "start_server",
   "command": "npm run dev -- --port ${veld.port}",
-  "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 },
+  "probes": {
+    "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 },
+    "liveness": { "type": "http", "path": "/health", "interval_ms": 5000 }
+  },
   "depends_on": { "database": "docker" },
   "env": { "DATABASE_URL": "${nodes.database.DATABASE_URL}" },
   "outputs": { "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app" },
@@ -64,13 +67,18 @@ Emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE`.
   "type": "command",
   "script": "./scripts/clone-db.sh",
   "outputs": ["DATABASE_URL", "DB_NAME"],
-  "verify": "./scripts/verify-db.sh"
+  "skip_if": "./scripts/verify-db.sh",
+  "probes": {
+    "liveness": { "type": "command", "command": "pg_isready", "interval_ms": 5000 }
+  }
 }
 ```
 
-## Health Checks
+## Probes
 
-Every `start_server` variant requires one. Three types:
+### Readiness (startup)
+
+Every `start_server` variant requires a readiness probe. Use `probes.readiness` (preferred) or legacy `health_check`. Three types:
 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
@@ -83,59 +91,29 @@ Every `start_server` variant requires one. Three types:
 - `command`: Exit 0 = healthy.
 - Defaults: `timeout_seconds`: 60, `interval_ms`: 1000 (min: 100).
 
-## Variable Interpolation
+### Liveness (ongoing)
 
-### In commands, scripts, env values: `${...}`
-
-| Variable | Description |
-|----------|-------------|
-| `${veld.port}` | Allocated port (`start_server` only) |
-| `${veld.url}` | Full HTTPS URL (`start_server` only) |
-| `${veld.url.hostname}` | DNS name only |
-| `${veld.url.host}` | hostname:port |
-| `${veld.url.origin}` | scheme + host |
-| `${veld.url.scheme}` | Protocol (`https`) |
-| `${veld.url.port}` | HTTPS port |
-| `${veld.run}` | Run name |
-| `${veld.root}` | Absolute path to veld.json directory |
-| `${veld.project}` | Project name |
-| `${veld.branch}` | Current git branch (slugified) |
-| `${veld.worktree}` | Worktree directory name (slugified) |
-| `${veld.username}` | OS username |
-| `${nodes.<node>.<output>}` | Output from another node |
-| `${nodes.<node>.url}` | HTTPS URL of a start_server node |
-| `${nodes.<node>.port}` | Allocated port of a start_server node |
-
-Qualified references when two variants run simultaneously: `${nodes.backend:local.url}`.
-
-### In URL templates: `{...}`
-
-`{service}`, `{run}`, `{project}`, `{branch}`, `{worktree}`, `{username}`, `{hostname}`
-
-Fallback operator: `{branch ?? run}` — uses first non-empty value.
-
-Cascades: variant > node > project level.
-
-## Dependencies
-
-Explicit `node → variant` mapping. Default variants are **never** silently assumed.
+Runs continuously after a node becomes healthy. Available for both `command` and `start_server` types. Same three check types as readiness: `http`, `port`, `command` (arbitrary shell command, exit 0 = healthy).
 
 ```json
-"depends_on": { "database": "docker", "backend": "local" }
-```
-
-Dependencies start before dependents. Independent branches run in parallel. Teardown is reverse order.
-
-## Presets
-
-Named shortcuts for common selections:
-
-```json
-"presets": {
-  "fullstack": ["frontend:local", "backend:local", "database:docker"],
-  "ui-only": ["frontend:local", "backend:staging"]
+"probes": {
+  "liveness": {
+    "type": "command",
+    "command": "pg_isready -h localhost -p 5432",
+    "interval_ms": 5000,
+    "failure_threshold": 3,
+    "max_recoveries": 3
+  }
 }
 ```
+
+- `type`: `"http"`, `"port"`, or `"command"` — same semantics as readiness probes
+- `command`: Shell command run via `sh -c`. Node outputs are available as env vars (e.g., `$DB_HOST`). Pipes, redirects, `&&` chains all work. 30s timeout.
+- `interval_ms`: Check interval (default: 5000, min: 1000)
+- `failure_threshold`: Consecutive failures before recovery (default: 3)
+- `max_recoveries`: Max recovery attempts before permanent failure (default: 3)
+
+Recovery = full environment restart (`veld restart`). After `max_recoveries` exhausted, node is permanently failed.
 
 ## Other Fields
 
@@ -150,3 +128,5 @@ Named shortcuts for common selections:
 | `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. |
 | `on_stop` | variant | Per-node teardown command that runs on `veld stop`. |
 | `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |
+| `skip_if` | variant (`command` only) | Idempotency check — skip step if exits 0. Alias: `verify`. |
+| `probes` | variant | `{readiness?: HealthCheck, liveness?: LivenessProbe}`. Available for both node types. |

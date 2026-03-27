@@ -73,9 +73,9 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 |------|----------------|
 | `README.md` | Features list, CLI reference table, Configuration section |
 | `docs/configuration.md` | Config field reference (top-level table, field section, variant table) |
-| `skills/veld-config/SKILL.md` | Agent-facing config reference |
-| `skills/veld-usage/SKILL.md` | Agent-facing CLI reference |
-| `schema/v1/veld.schema.json` | JSON Schema (usually updated in code, but verify) |
+| `skills/veld/SKILL.md` | Agent-facing skill (quick reference, gotchas) |
+| `skills/veld/reference/config.md` | Agent-facing config reference |
+| `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
 | `website/llms-full.txt` | LLM-facing docs (if applicable, see `website/AGENTS.md`) |
 
 If the change is purely internal (refactor, bugfix with no new surface area), this checklist does not apply.

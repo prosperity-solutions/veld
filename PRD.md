@@ -724,7 +724,7 @@ No cross-compilation until v1 is stable. No Tauri. No GTK. No npm in CI.
         "local": {
           "type": "command",
           "script": "./scripts/clone-db.sh",
-          "verify": "./scripts/verify-db.sh",
+          "skip_if": "./scripts/verify-db.sh",
           "outputs": ["DATABASE_URL"],
           "sensitive_outputs": ["DATABASE_URL"]
         },

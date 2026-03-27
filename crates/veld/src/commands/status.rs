@@ -105,6 +105,46 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
 
         output::print_table(&["NODE", "VARIANT", "STATUS", "URL"], &rows);
 
+        // Show liveness/recovery details for nodes that have them.
+        let has_liveness_info = run_state.nodes.values().any(|ns| {
+            ns.recovery_count > 0
+                || ns.consecutive_failures > 0
+                || ns.last_liveness_error.is_some()
+                || ns.status == NodeStatus::Unhealthy
+        });
+        if has_liveness_info {
+            println!();
+            println!("{}", output::bold("Liveness:"));
+            for key in &node_keys {
+                let ns = &run_state.nodes[*key];
+                if ns.recovery_count == 0
+                    && ns.consecutive_failures == 0
+                    && ns.last_liveness_error.is_none()
+                    && ns.status != NodeStatus::Unhealthy
+                {
+                    continue;
+                }
+                println!();
+                println!(
+                    "  {}",
+                    output::cyan(&format!("{}:{}", ns.node_name, ns.variant))
+                );
+                if ns.consecutive_failures > 0 {
+                    println!(
+                        "    {} consecutive failures: {}",
+                        output::yellow("!"),
+                        ns.consecutive_failures
+                    );
+                }
+                if ns.recovery_count > 0 {
+                    println!("    {} recoveries: {}", output::dim("↻"), ns.recovery_count);
+                }
+                if let Some(ref err) = ns.last_liveness_error {
+                    println!("    {} last error: {}", output::dim("→"), err);
+                }
+            }
+        }
+
         // Show outputs per node when --outputs is passed.
         if show_outputs {
             println!();
@@ -174,6 +214,7 @@ fn format_run_status(status: &RunStatus) -> String {
         RunStatus::Stopping => output::yellow("stopping"),
         RunStatus::Stopped => output::dim("stopped"),
         RunStatus::Failed => output::red("failed"),
+        RunStatus::Recovering => output::yellow("recovering"),
     }
 }
 
@@ -192,5 +233,6 @@ fn format_node_status(status: &NodeStatus) -> String {
         NodeStatus::Stopped => format!("{} {}", output::dim("-"), output::dim("stopped")),
         NodeStatus::Failed => format!("{} {}", output::cross(), output::red("failed")),
         NodeStatus::Skipped => format!("{} {}", output::dim("-"), output::dim("skipped")),
+        NodeStatus::Unhealthy => format!("{} {}", output::cross(), output::yellow("unhealthy")),
     }
 }

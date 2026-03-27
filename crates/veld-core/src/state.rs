@@ -44,6 +44,8 @@ pub enum StateError {
 pub enum RunStatus {
     Starting,
     Running,
+    /// A recovery cycle is in progress for one or more nodes.
+    Recovering,
     Stopping,
     Stopped,
     Failed,
@@ -60,17 +62,19 @@ pub enum NodeStatus {
     Starting,
     HealthChecking,
     Healthy,
+    /// Liveness probe failed but recovery has not yet been exhausted.
+    Unhealthy,
     Failed,
     Stopped,
     Skipped,
 }
 
 // ---------------------------------------------------------------------------
-// Health check phase tracking
+// Readiness phase tracking
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HealthCheckPhase {
+pub struct ReadinessPhase {
     pub phase: u8, // 1 = port, 2 = HTTPS
     pub passed: bool,
     pub last_error: Option<String>,
@@ -91,7 +95,18 @@ pub struct NodeState {
     pub port: Option<u16>,
     pub url: Option<String>,
     pub outputs: HashMap<String, String>,
-    pub health_phases: Vec<HealthCheckPhase>,
+    /// Readiness probe phase tracking (renamed from `health_phases` in v7).
+    #[serde(default, alias = "health_phases")]
+    pub readiness_phases: Vec<ReadinessPhase>,
+    /// Number of recovery attempts completed for this node.
+    #[serde(default)]
+    pub recovery_count: u32,
+    /// Current streak of consecutive liveness probe failures.
+    #[serde(default)]
+    pub consecutive_failures: u32,
+    /// Error message from the most recent liveness probe failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_liveness_error: Option<String>,
     /// Output keys whose values are sensitive (encrypted at rest, masked in display).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sensitive_keys: Vec<String>,
@@ -107,7 +122,10 @@ impl NodeState {
             port: None,
             url: None,
             outputs: HashMap::new(),
-            health_phases: Vec::new(),
+            readiness_phases: Vec::new(),
+            recovery_count: 0,
+            consecutive_failures: 0,
+            last_liveness_error: None,
             sensitive_keys: Vec::new(),
         }
     }

@@ -17,7 +17,8 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **No port numbers** — work with stable HTTPS URLs instead of `localhost:3847`
 - **Dependency graph** — resolves node dependencies, parallelizes startup, reverse-order teardown
 - **TLS by default** — Caddy's internal CA handles TLS termination, auto-trusted during setup
-- **Health checks** — two-phase checks (TCP port + HTTP endpoint) before marking services healthy
+- **Health checks** — readiness probes (two-phase: TCP port + HTTP/command) gate startup; liveness probes detect failures after startup (e.g., dropped SSH tunnels)
+- **Automatic recovery** — when liveness probes detect failure, the environment is automatically restarted (configurable failure threshold and max recovery attempts)
 - **Multiple variants** — same node, different behaviors (local server, Docker, remote URL)
 - **Named runs** — multiple environments coexist; re-running by name is idempotent
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
@@ -26,6 +27,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
+- **Internal logs** — liveness probe outcomes (with stderr), recovery decisions, health state transitions; view with `veld logs --source internal`
 
 ## Install
 
@@ -72,8 +74,8 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "nodes": {
@@ -83,7 +85,7 @@ cargo build --release
         "local": {
           "type": "start_server",
           "command": "npm run dev -- --port ${veld.port}",
-          "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
+          "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 } }
         }
       }
     },
@@ -93,7 +95,7 @@ cargo build --release
         "local": {
           "type": "start_server",
           "command": "npm run dev -- --port ${veld.port}",
-          "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
+          "probes": { "readiness": { "type": "http", "path": "/", "timeout_seconds": 30 } },
           "depends_on": { "backend": "local" },
           "env": { "NEXT_PUBLIC_API_URL": "${nodes.backend.url}" }
         }
@@ -152,7 +154,7 @@ veld stop --name dev
 ### Step types
 
 - **`start_server`** — long-running process. Veld allocates a port (`${veld.port}`), starts the process, and runs health checks.
-- **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `verify` command for idempotency.
+- **`command`** — runs a command to completion. Can emit outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged). Optional `skip_if` command for idempotency.
 
 ### Setup & teardown
 
