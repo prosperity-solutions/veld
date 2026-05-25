@@ -546,7 +546,9 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
     // execution, so removal here runs before hydration. Side effects (console
     // interception, error listeners, and the requestIdleCallback-deferred
     // asset loads) survive removal because they're attached to window/console.
-    js.push_str("var s=document.currentScript;if(s&&s.parentNode)s.parentNode.removeChild(s);})();");
+    js.push_str(
+        "var s=document.currentScript;if(s&&s.parentNode)s.parentNode.removeChild(s);})();",
+    );
 
     format!("<script>{js}</script>")
 }
