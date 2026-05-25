@@ -535,7 +535,18 @@ fn build_bootstrap_script(fb: &FeedbackConfig<'_>) -> String {
         js.push_str("E('script',{'src':'/__veld__/feedback/script.js'});");
     }
 
-    js.push_str("});})();");
+    js.push_str("});");
+
+    // Self-remove the bootstrap <script> tag from the DOM before React (or any
+    // other hydration-checking framework) walks the live DOM. The browser's
+    // HTML5 parser relocates a stray <script> between <!DOCTYPE> and <html>
+    // into <head>; Next.js app-router hydrates from the <html> root and would
+    // see an extra child not present in the React tree, causing a hydration
+    // mismatch. `document.currentScript` is set during synchronous script
+    // execution, so removal here runs before hydration. Side effects (console
+    // interception, error listeners, and the requestIdleCallback-deferred
+    // asset loads) survive removal because they're attached to window/console.
+    js.push_str("var s=document.currentScript;if(s&&s.parentNode)s.parentNode.removeChild(s);})();");
 
     format!("<script>{js}</script>")
 }
@@ -959,6 +970,29 @@ mod tests {
         // Guard prevents double execution.
         assert!(script.contains("if(window.__veld_cl)return"));
         assert!(script.contains("window.__veld_cl=1"));
+    }
+
+    /// The bootstrap script must remove its own <script> tag from the DOM
+    /// after running, to prevent React hydration mismatches in Next.js
+    /// app-router and similar frameworks that hydrate from the <html> root.
+    #[test]
+    fn test_bootstrap_script_self_removes() {
+        let configs = [
+            make_fb(true, true, "log,warn,error"), // both
+            make_fb(true, false, "log"),           // overlay only
+            make_fb(false, true, "log"),           // logs only
+        ];
+        for fb in &configs {
+            let script = build_bootstrap_script(fb);
+            assert!(
+                script.contains("document.currentScript"),
+                "script must reference document.currentScript for self-removal"
+            );
+            assert!(
+                script.contains("removeChild"),
+                "script must call removeChild to detach itself from the DOM"
+            );
+        }
     }
 
     #[test]
