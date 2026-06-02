@@ -339,20 +339,19 @@
   width: 380px; max-width: 90vw;
   background: var(--vf-bg); color: var(--vf-text);
   z-index: var(--vf-z);
-  box-shadow: -4px 0 30px rgba(0,0,0,.5);
+  box-shadow: 0 0 0 rgba(0,0,0,0);
   display: flex; flex-direction: column;
   font: 13px/1.5 var(--vf-font);
-  transform: translateX(100%); transition: transform .25s ease;
+  transform: translateX(100%); transition: transform .25s ease, box-shadow .25s ease;
   border-left: 1px solid var(--vf-border);
 }
-.veld-feedback-panel-open { transform: translateX(0); }
+.veld-feedback-panel-open { transform: translateX(0); box-shadow: -4px 0 30px rgba(0,0,0,.5); }
 .veld-feedback-panel-left {
   right: auto; left: 0;
   transform: translateX(-100%);
   border-left: none; border-right: 1px solid var(--vf-border);
-  box-shadow: 4px 0 30px rgba(0,0,0,.5);
 }
-.veld-feedback-panel-left.veld-feedback-panel-open { transform: translateX(0); }
+.veld-feedback-panel-left.veld-feedback-panel-open { transform: translateX(0); box-shadow: 4px 0 30px rgba(0,0,0,.5); }
 
 .veld-feedback-panel-head {
   padding: 14px 18px; font-size: 14px; font-weight: 600;
