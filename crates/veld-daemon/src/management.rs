@@ -27,6 +27,7 @@ pub fn routes() -> Router {
         .route("/api/open-terminal", post(open_terminal))
         .route("/api/environments/{run}/stop", post(stop_environment))
         .route("/api/environments/{run}/restart", post(restart_environment))
+        .route("/api/environments/{run}/postico", post(open_postico))
 }
 
 // ---------------------------------------------------------------------------
@@ -77,10 +78,17 @@ struct NodeInfo {
     consecutive_failures: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_liveness_error: Option<String>,
+    /// True if this node exposes a database the dashboard can open in Postico.
+    #[serde(skip_serializing_if = "is_false")]
+    database: bool,
 }
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
 }
 
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
@@ -115,6 +123,7 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     recovery_count: ns.recovery_count,
                                     consecutive_failures: ns.consecutive_failures,
                                     last_liveness_error: ns.last_liveness_error.clone(),
+                                    database: ns.exposes_database(),
                                 })
                                 .collect()
                         })
@@ -415,6 +424,19 @@ async fn restart_environment(
         return s;
     }
     run_veld_command(&run_name, "restart").await
+}
+
+/// Open the run's database in Postico by delegating to `veld postico`, which
+/// reads the connection details and shells out to the app. The credentials
+/// never reach the browser — the daemon hands off to the CLI.
+async fn open_postico(headers: axum::http::HeaderMap, Path(run_name): Path<String>) -> StatusCode {
+    if let Err(s) = check_csrf(&headers) {
+        return s;
+    }
+    if let Err(s) = validate_run_name(&run_name) {
+        return s;
+    }
+    run_veld_command(&run_name, "postico").await
 }
 
 /// Spawn `veld <action> --name <run>` in the project directory via a login

@@ -78,6 +78,10 @@ Run selection follows the usual rule (one active run → used automatically;
 several → pass `--name`). If more than one node exposes database outputs, the
 command lists them and asks for `--node`.
 
+The management dashboard (`veld ui`) also shows a **Postico** button on the
+database row of each running environment, which calls this command server-side
+(the credentials never reach the browser).
+
 ## Editing veld.json
 
 For the full config schema, variables, and node types, see [reference/config.md](reference/config.md).

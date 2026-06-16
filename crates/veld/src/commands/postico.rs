@@ -4,9 +4,6 @@ use veld_core::state::{NodeState, ProjectState, RunState};
 
 use crate::output;
 
-/// Output keys a node must expose to be considered a database connection.
-const REQUIRED_KEYS: [&str; 3] = ["DB_HOST", "DB_PORT", "DB_NAME"];
-
 /// Percent-encoding set for the userinfo (user/password) portion of the URL:
 /// everything except the RFC 3986 unreserved characters. This keeps a password
 /// containing `@`, `:`, `/`, `?`, etc. from corrupting the connection URL.
@@ -61,7 +58,7 @@ pub async fn run(name: Option<String>, node: Option<String>, print: bool, json: 
                 Some(n) => format!("Node '{n}' in run '{run_name}' exposes no database outputs."),
                 None => format!(
                     "No node in run '{run_name}' exposes database outputs ({}).",
-                    REQUIRED_KEYS.join(", ")
+                    NodeState::DATABASE_OUTPUT_KEYS.join(", ")
                 ),
             };
             output::print_error(&detail, json);
@@ -196,11 +193,6 @@ enum DbNodeError {
     Ambiguous(Vec<String>),
 }
 
-/// True if the node exposes every output key needed to build a connection URL.
-fn is_db_node(ns: &NodeState) -> bool {
-    REQUIRED_KEYS.iter().all(|k| ns.outputs.contains_key(*k))
-}
-
 /// Find the single database node in `run_state`. When `node_filter` is given,
 /// only nodes whose `node_name` matches are considered.
 fn find_db_node<'a>(
@@ -211,7 +203,7 @@ fn find_db_node<'a>(
         .nodes
         .values()
         .filter(|ns| node_filter.is_none_or(|f| ns.node_name == f))
-        .filter(|ns| is_db_node(ns))
+        .filter(|ns| ns.exposes_database())
         .collect();
     candidates.sort_by(|a, b| {
         (a.node_name.as_str(), a.variant.as_str()).cmp(&(b.node_name.as_str(), b.variant.as_str()))

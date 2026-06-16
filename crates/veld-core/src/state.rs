@@ -167,6 +167,19 @@ impl NodeState {
             })
             .collect()
     }
+
+    /// Output keys that, when all present, mark this node as a database a
+    /// client can connect to. User/password are optional and not required here.
+    pub const DATABASE_OUTPUT_KEYS: [&'static str; 3] = ["DB_HOST", "DB_PORT", "DB_NAME"];
+
+    /// True if this node exposes the outputs needed to build a database
+    /// connection URL. Shared by the `veld postico` command and the management
+    /// dashboard so both agree on what counts as a database node.
+    pub fn exposes_database(&self) -> bool {
+        Self::DATABASE_OUTPUT_KEYS
+            .iter()
+            .all(|k| self.outputs.contains_key(*k))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -363,5 +376,41 @@ impl GlobalRegistry {
         let data = serde_json::to_string_pretty(self).expect("registry serialization cannot fail");
 
         atomic_write(&path, &data)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node_with_outputs(pairs: &[(&str, &str)]) -> NodeState {
+        let mut ns = NodeState::new("database", "dblab");
+        ns.outputs = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        ns
+    }
+
+    #[test]
+    fn exposes_database_requires_all_keys() {
+        let ns = node_with_outputs(&[
+            ("DB_HOST", "localhost"),
+            ("DB_PORT", "5432"),
+            ("DB_NAME", "app"),
+        ]);
+        assert!(ns.exposes_database());
+    }
+
+    #[test]
+    fn exposes_database_false_when_a_key_is_missing() {
+        let ns = node_with_outputs(&[("DB_HOST", "localhost"), ("DB_PORT", "5432")]);
+        assert!(!ns.exposes_database());
+    }
+
+    #[test]
+    fn exposes_database_false_for_non_database_node() {
+        let ns = node_with_outputs(&[("PORT", "3000")]);
+        assert!(!ns.exposes_database());
     }
 }
