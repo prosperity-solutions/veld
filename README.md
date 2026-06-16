@@ -135,6 +135,7 @@ veld stop --name dev
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
+| `veld postico [--name <n>] [--node <n>] [--print] [--json]` | Open a run's database in Postico (macOS); `--print` emits the connection URL |
 | `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>]` | View logs (`-f` follow, `-s` search, `-C` context lines) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |

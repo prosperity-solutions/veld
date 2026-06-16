@@ -130,6 +130,25 @@ enum Command {
         json: bool,
     },
 
+    /// Open a running environment's database in Postico (macOS).
+    Postico {
+        /// Name of the run to connect to.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Node exposing the database. Defaults to the node with DB_* outputs.
+        #[arg(long)]
+        node: Option<String>,
+
+        /// Print the connection URL instead of opening Postico.
+        #[arg(long)]
+        print: bool,
+
+        /// Output connection details as JSON (does not open Postico).
+        #[arg(long)]
+        json: bool,
+    },
+
     /// View logs for a running environment.
     Logs {
         /// Name of the run.
@@ -294,6 +313,7 @@ async fn main() {
             | Command::Restart { .. }
             | Command::Status { .. }
             | Command::Urls { .. }
+            | Command::Postico { .. }
             | Command::Logs { .. }
     );
 
@@ -336,6 +356,13 @@ async fn main() {
         } => commands::status::run(name, outputs, json).await,
 
         Command::Urls { name, json } => commands::urls::run(name, json).await,
+
+        Command::Postico {
+            name,
+            node,
+            print,
+            json,
+        } => commands::postico::run(name, node, print, json).await,
 
         Command::Logs {
             name,

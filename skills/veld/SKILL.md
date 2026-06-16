@@ -59,6 +59,25 @@ If the installed version is older than what `compatibility` requires, tell the u
 
 Run `veld <subcommand> --help` for flags and options.
 
+## Open a database in Postico (macOS)
+
+`veld postico` opens a running environment's database in Postico with the
+connection pre-filled. It auto-detects the node that exposes database outputs
+(`DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASS`/`DB_NAME`) and hands Postico a
+`postgresql://` URL — no copying the rotating port or password by hand.
+
+```sh
+veld postico                      # auto-pick the run + database node
+veld postico --name dev           # target a specific run
+veld postico --node database      # disambiguate when several nodes expose DB outputs
+veld postico --print              # print the connection URL instead of opening (e.g. for psql)
+veld postico --json               # connection details as JSON (does not open)
+```
+
+Run selection follows the usual rule (one active run → used automatically;
+several → pass `--name`). If more than one node exposes database outputs, the
+command lists them and asks for `--node`.
+
 ## Editing veld.json
 
 For the full config schema, variables, and node types, see [reference/config.md](reference/config.md).
