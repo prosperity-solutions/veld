@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
       - name: Test caddy/inject module
         working-directory: caddy/inject
         run: go test -v ./...
@@ -136,7 +136,7 @@ jobs:
         run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Build all binaries
         run: cargo build
@@ -477,7 +477,7 @@ jobs:
         run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Install cross-compilation tools
         if: matrix.cross
@@ -517,7 +517,7 @@ jobs:
         run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.23'
 
       - name: Build veld
         run: cargo build
