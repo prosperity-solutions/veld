@@ -130,21 +130,33 @@ enum Command {
         json: bool,
     },
 
-    /// Open a running environment's database in Postico (macOS).
-    Postico {
-        /// Name of the run to connect to.
+    /// Run a node-defined action against a running environment.
+    Action {
+        /// Name of the action to run (see `veld actions`).
+        #[arg(value_name = "ACTION")]
+        action: String,
+
+        /// Name of the run to target.
         #[arg(long)]
         name: Option<String>,
 
-        /// Node exposing the database. Defaults to the node with DB_* outputs.
+        /// Node to run the action against. Defaults to the matching node when
+        /// only one qualifies.
         #[arg(long)]
         node: Option<String>,
 
-        /// Print the connection URL instead of opening Postico.
+        /// Print the resolved command instead of running it.
         #[arg(long)]
         print: bool,
 
-        /// Output connection details as JSON (does not open Postico).
+        /// Output the resolved command as JSON (does not run it).
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the actions defined across the project's nodes.
+    Actions {
+        /// Output as JSON.
         #[arg(long)]
         json: bool,
     },
@@ -313,7 +325,7 @@ async fn main() {
             | Command::Restart { .. }
             | Command::Status { .. }
             | Command::Urls { .. }
-            | Command::Postico { .. }
+            | Command::Action { .. }
             | Command::Logs { .. }
     );
 
@@ -357,12 +369,15 @@ async fn main() {
 
         Command::Urls { name, json } => commands::urls::run(name, json).await,
 
-        Command::Postico {
+        Command::Action {
+            action,
             name,
             node,
             print,
             json,
-        } => commands::postico::run(name, node, print, json).await,
+        } => commands::action::run(action, name, node, print, json).await,
+
+        Command::Actions { json } => commands::action::list(json).await,
 
         Command::Logs {
             name,

@@ -12,8 +12,8 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-use veld_core::logging;
-use veld_core::state::{GlobalRegistry, NodeStatus, ProjectState, RunStatus};
+use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, ProjectState, RunStatus};
+use veld_core::{config, logging};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -27,7 +27,7 @@ pub fn routes() -> Router {
         .route("/api/open-terminal", post(open_terminal))
         .route("/api/environments/{run}/stop", post(stop_environment))
         .route("/api/environments/{run}/restart", post(restart_environment))
-        .route("/api/environments/{run}/postico", post(open_postico))
+        .route("/api/environments/{run}/action", post(run_action))
 }
 
 // ---------------------------------------------------------------------------
@@ -78,17 +78,50 @@ struct NodeInfo {
     consecutive_failures: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     last_liveness_error: Option<String>,
-    /// True if this node exposes a database the dashboard can open in Postico.
-    #[serde(skip_serializing_if = "is_false")]
-    database: bool,
+    /// Node-defined actions currently available (required outputs satisfied).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    actions: Vec<ActionInfo>,
+}
+
+/// A node action exposed to the dashboard. The command itself stays
+/// server-side; the browser only ever sees the name and label.
+#[derive(Serialize)]
+struct ActionInfo {
+    name: String,
+    label: String,
 }
 
 fn is_zero(v: &u32) -> bool {
     *v == 0
 }
 
-fn is_false(v: &bool) -> bool {
-    !*v
+/// Load a project's config (veld.json) for action lookup. Returns `None` if the
+/// project has no readable config — the dashboard then simply shows no actions.
+fn load_project_config(project_root: &std::path::Path) -> Option<config::VeldConfig> {
+    config::load_config(&project_root.join("veld.json")).ok()
+}
+
+/// Compute the actions available for a running node: every action declared on
+/// the matching config node whose `requires_outputs` are satisfied by the
+/// node's live outputs.
+fn available_actions(cfg: Option<&config::VeldConfig>, ns: &NodeState) -> Vec<ActionInfo> {
+    let Some(cfg) = cfg else {
+        return Vec::new();
+    };
+    cfg.nodes
+        .get(&ns.node_name)
+        .and_then(|n| n.actions.as_ref())
+        .map(|actions| {
+            actions
+                .iter()
+                .filter(|a| a.outputs_satisfied(&ns.outputs))
+                .map(|a| ActionInfo {
+                    name: a.name.clone(),
+                    label: a.display_label().to_owned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
@@ -103,6 +136,8 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         .map(|entry| {
             // Load full project state for node-level detail.
             let project_state = ProjectState::load(&entry.project_root).ok();
+            // Load config so we know which actions each node exposes.
+            let project_config = load_project_config(&entry.project_root);
 
             let mut runs: Vec<RunInfo> = entry
                 .runs
@@ -123,7 +158,7 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     recovery_count: ns.recovery_count,
                                     consecutive_failures: ns.consecutive_failures,
                                     last_liveness_error: ns.last_liveness_error.clone(),
-                                    database: ns.exposes_database(),
+                                    actions: available_actions(project_config.as_ref(), ns),
                                 })
                                 .collect()
                         })
@@ -410,7 +445,7 @@ async fn stop_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&run_name, "stop").await
+    run_veld_command(&run_name, "stop")
 }
 
 async fn restart_environment(
@@ -423,26 +458,85 @@ async fn restart_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&run_name, "restart").await
+    run_veld_command(&run_name, "restart")
 }
 
-/// Open the run's database in Postico by delegating to `veld postico`, which
-/// reads the connection details and shells out to the app. The credentials
-/// never reach the browser — the daemon hands off to the CLI.
-async fn open_postico(headers: axum::http::HeaderMap, Path(run_name): Path<String>) -> StatusCode {
+#[derive(Deserialize)]
+struct ActionBody {
+    /// The action name (must match an action configured on a node).
+    action: String,
+    /// Optional node to disambiguate when several nodes define the action.
+    #[serde(default)]
+    node: Option<String>,
+}
+
+/// Run a node-defined action by delegating to `veld action <name>`, which
+/// reads the live outputs and shells out. Any credentials stay server-side —
+/// the daemon hands off to the CLI; the browser only ever sent a name.
+async fn run_action(
+    headers: axum::http::HeaderMap,
+    Path(run_name): Path<String>,
+    Json(body): Json<ActionBody>,
+) -> StatusCode {
     if let Err(s) = check_csrf(&headers) {
         return s;
     }
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&run_name, "postico").await
+    if !is_safe_identifier(&body.action) {
+        return StatusCode::BAD_REQUEST;
+    }
+    if let Some(ref node) = body.node {
+        if !is_safe_identifier(node) {
+            return StatusCode::BAD_REQUEST;
+        }
+    }
+
+    let registry = match GlobalRegistry::load() {
+        Ok(r) => r,
+        Err(e) => {
+            warn!("failed to load registry for action: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    let project_root = match find_project_for_run(&registry, &run_name) {
+        Some(p) => p,
+        None => return StatusCode::NOT_FOUND,
+    };
+
+    // Only spawn actions that actually exist in the project's config.
+    let cfg = load_project_config(&project_root);
+    // Confirm the action name is configured on some node (the CLI re-validates
+    // the optional --node filter and output availability when it runs).
+    let action_defined = cfg
+        .as_ref()
+        .map(|c| {
+            c.nodes
+                .values()
+                .flat_map(|n| n.actions.iter().flatten())
+                .any(|a| a.name == body.action)
+        })
+        .unwrap_or(false);
+    if !action_defined {
+        return StatusCode::NOT_FOUND;
+    }
+
+    let mut args = vec![
+        "action".to_owned(),
+        body.action.clone(),
+        "--name".to_owned(),
+        run_name.clone(),
+    ];
+    if let Some(node) = &body.node {
+        args.push("--node".to_owned());
+        args.push(node.clone());
+    }
+    spawn_veld(&project_root, &args)
 }
 
-/// Spawn `veld <action> --name <run>` in the project directory via a login
-/// shell. The project_root is looked up from the GlobalRegistry (never
-/// supplied by the client) to prevent directory traversal.
-async fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
+/// Stop / restart helper: spawn `veld <action> --name <run>`.
+fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
     let registry = match GlobalRegistry::load() {
         Ok(r) => r,
         Err(e) => {
@@ -450,18 +544,26 @@ async fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
     };
-
     let project_root = match find_project_for_run(&registry, run_name) {
         Some(p) => p,
         None => return StatusCode::NOT_FOUND,
     };
+    spawn_veld(
+        &project_root,
+        &[action.to_owned(), "--name".to_owned(), run_name.to_owned()],
+    )
+}
 
+/// Spawn `veld <args...>` in the project directory via a login shell. The
+/// project_root is looked up from the GlobalRegistry (never supplied by the
+/// client) to prevent directory traversal; every argument is shell-escaped.
+fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+    let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     let cmd = format!(
-        "cd {} && veld {} --name {}",
+        "cd {} && veld {}",
         shell_escape(&project_root.to_string_lossy()),
-        shell_escape(action),
-        shell_escape(run_name),
+        escaped_args.join(" "),
     );
 
     match std::process::Command::new(&shell)
@@ -478,10 +580,19 @@ async fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
             StatusCode::ACCEPTED
         }
         Err(e) => {
-            warn!("failed to run veld {action}: {e}");
+            warn!("failed to run veld {}: {e}", args.join(" "));
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// Allow only conservative identifier characters for action/node names that
+/// originate from the browser, as defence in depth on top of shell escaping.
+fn is_safe_identifier(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
 }
 
 /// Simple single-quote shell escaping.

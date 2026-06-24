@@ -148,7 +148,75 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
 
+    /// User-invokable actions for this node, exposed on the CLI (`veld action
+    /// <name>`) and as buttons in the management dashboard. Each action runs a
+    /// shell command with the node's live outputs available as variables and
+    /// environment variables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Vec<ActionConfig>>,
+
     pub variants: HashMap<String, VariantConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+
+/// A user-invokable action attached to a node. Actions generalise the
+/// hard-coded "open in Postico" behaviour: any node can declare commands that
+/// the CLI and dashboard expose generically (e.g. open a DB client, tail a
+/// queue, run a one-off script). The command runs in a shell with the node's
+/// live outputs injected both as `${output.KEY}` template variables and as
+/// environment variables, plus the action's static `parameters` as
+/// `${param.KEY}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActionConfig {
+    /// Stable identifier used to invoke the action: `veld action <name>`.
+    pub name: String,
+
+    /// Human-readable label for the dashboard button. Defaults to `name`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+
+    /// Optional one-line description shown in `veld actions` and as a tooltip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+
+    /// Shell command to execute. Supports `${veld.*}`, `${output.KEY}` (this
+    /// node's live outputs), `${param.KEY}` (this action's parameters), and
+    /// `${nodes.name.field}` substitution. The same values are also exported as
+    /// environment variables (`$KEY` for outputs, `$KEY` for parameters), so
+    /// shell-style references work too.
+    pub command: String,
+
+    /// Static key/value parameters baked into the action. Available to the
+    /// command as `${param.KEY}` and as `$KEY` environment variables. Values
+    /// support `${veld.*}` and `${output.KEY}` substitution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parameters: Option<HashMap<String, String>>,
+
+    /// Output keys that must all be present on the running node for this action
+    /// to be available. Gates both CLI invocation and dashboard button
+    /// visibility. When omitted, the action is always available for a running
+    /// node.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requires_outputs: Option<Vec<String>>,
+}
+
+impl ActionConfig {
+    /// The label to show in UIs, falling back to the action `name`.
+    pub fn display_label(&self) -> &str {
+        self.label.as_deref().unwrap_or(&self.name)
+    }
+
+    /// True if `outputs` contains every key listed in `requires_outputs`.
+    /// Actions without `requires_outputs` are always considered satisfied.
+    pub fn outputs_satisfied(&self, outputs: &HashMap<String, String>) -> bool {
+        match &self.requires_outputs {
+            Some(keys) => keys.iter().all(|k| outputs.contains_key(k)),
+            None => true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1046,6 +1114,64 @@ mod tests {
         assert!(variant.probes.is_some());
         let liveness = variant.liveness_probe().unwrap();
         assert_eq!(liveness.check_type, "command");
+    }
+
+    // -- Action config tests ---------------------------------------------------
+
+    #[test]
+    fn test_action_minimal_deserialization() {
+        let json = r#"{"name": "psql", "command": "psql $DB_URL"}"#;
+        let action: ActionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(action.name, "psql");
+        assert_eq!(action.command, "psql $DB_URL");
+        // label falls back to name; no params or gating by default.
+        assert_eq!(action.display_label(), "psql");
+        assert!(action.parameters.is_none());
+        assert!(action.outputs_satisfied(&HashMap::new()));
+    }
+
+    #[test]
+    fn test_action_full_deserialization() {
+        let json = r#"{
+            "name": "postico",
+            "label": "Postico",
+            "description": "Open the database in Postico",
+            "command": "open -a Postico \"postgresql://${output.DB_USER}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\"",
+            "parameters": {"app": "Postico"},
+            "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"]
+        }"#;
+        let action: ActionConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(action.name, "postico");
+        assert_eq!(action.display_label(), "Postico");
+        assert_eq!(
+            action.description.as_deref(),
+            Some("Open the database in Postico")
+        );
+        assert_eq!(
+            action.parameters.as_ref().unwrap().get("app").unwrap(),
+            "Postico"
+        );
+
+        let mut outputs = HashMap::new();
+        outputs.insert("DB_HOST".to_string(), "localhost".to_string());
+        assert!(!action.outputs_satisfied(&outputs)); // missing DB_PORT, DB_NAME
+        outputs.insert("DB_PORT".to_string(), "5432".to_string());
+        outputs.insert("DB_NAME".to_string(), "app".to_string());
+        assert!(action.outputs_satisfied(&outputs));
+    }
+
+    #[test]
+    fn test_node_config_with_actions() {
+        let json = r#"{
+            "variants": {"dblab": {"type": "start_server", "command": "ssh -L ..."}},
+            "actions": [
+                {"name": "postico", "command": "open -a Postico", "requires_outputs": ["DB_HOST"]}
+            ]
+        }"#;
+        let node: NodeConfig = serde_json::from_str(json).unwrap();
+        let actions = node.actions.unwrap();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "postico");
     }
 
     // -- Readiness probe helper tests ------------------------------------------

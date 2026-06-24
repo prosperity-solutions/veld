@@ -115,6 +115,41 @@ Runs continuously after a node becomes healthy. Available for both `command` and
 
 Recovery = full environment restart (`veld restart`). After `max_recoveries` exhausted, node is permanently failed.
 
+## Actions
+
+Node-level `actions` are named shell commands exposed via the CLI (`veld action <name>`, `veld actions`) and as buttons on the node's row in the management dashboard. They generalize integrations like "open the database in a GUI client" — define them in `veld.json` instead of relying on built-in commands.
+
+```json
+"database": {
+  "actions": [
+    {
+      "name": "postico",
+      "label": "Postico",
+      "description": "Open the database in Postico (macOS)",
+      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"],
+      "command": "open -a Postico \"postgresql://${output.DB_USER}:${output.DB_PASS}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\""
+    }
+  ],
+  "variants": { "dblab": { "type": "start_server", "command": "..." } }
+}
+```
+
+- `name`: Identifier used as `veld action <name>` (pattern `^[a-zA-Z0-9._-]+$`). Required.
+- `command`: Shell command run via `$SHELL -c` in the node's working directory. Required. Inherits the parent env.
+- `label`: Dashboard button text (defaults to `name`).
+- `description`: One-line summary shown in `veld actions` and as a button tooltip.
+- `parameters`: Static `{key: value}` map. Available as `${param.KEY}` and as `$KEY` env vars. Values support `${...}` substitution.
+- `requires_outputs`: Output keys that must all be present on the running node for the action to be available. Gates CLI invocation and dashboard button visibility. Omit to always offer the action for a running node.
+
+Substitution available inside `command` and `parameters` values:
+
+- `${output.KEY}` — the running node's live outputs (also exported as `$KEY` env vars)
+- `${param.KEY}` — this action's parameters
+- `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
+- `${nodes.name.field}` — another node's outputs
+
+Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain shell/env references inside a command — otherwise Veld tries to resolve it and errors. When an action is defined on multiple nodes, disambiguate with `veld action <name> --node <node>`.
+
 ## Other Fields
 
 | Field | Level | Description |
@@ -130,3 +165,4 @@ Recovery = full environment restart (`veld restart`). After `max_recoveries` exh
 | `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |
 | `skip_if` | variant (`command` only) | Idempotency check — skip step if exits 0. Alias: `verify`. |
 | `probes` | variant | `{readiness?: HealthCheck, liveness?: LivenessProbe}`. Available for both node types. |
+| `actions` | node | Named shell commands exposed via `veld action`/dashboard buttons. See [Actions](#actions). |

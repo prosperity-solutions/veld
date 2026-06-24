@@ -1870,7 +1870,6 @@ dependencies = [
  "dirs",
  "indicatif",
  "libc",
- "percent-encoding",
  "reqwest",
  "serde",
  "serde_json",

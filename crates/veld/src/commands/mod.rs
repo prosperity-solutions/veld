@@ -1,3 +1,4 @@
+pub mod action;
 pub mod config;
 pub mod doctor;
 pub mod feedback;
@@ -7,7 +8,6 @@ pub mod init;
 pub mod list;
 pub mod logs;
 pub mod nodes;
-pub mod postico;
 pub mod presets;
 pub mod restart;
 pub mod runs;

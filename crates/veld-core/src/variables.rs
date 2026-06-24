@@ -28,6 +28,14 @@ pub struct VariableContext {
     /// Resolved outputs from upstream nodes.
     /// Key format: `"nodes.name.field"` or `"nodes.name:variant.field"`.
     pub node_outputs: HashMap<String, String>,
+
+    /// The live outputs of the node an action runs against, referenced as
+    /// `${output.KEY}`. Only populated in action contexts.
+    pub outputs: HashMap<String, String>,
+
+    /// Static action parameters, referenced as `${param.KEY}`. Only populated
+    /// in action contexts.
+    pub params: HashMap<String, String>,
 }
 
 impl VariableContext {
@@ -44,6 +52,16 @@ impl VariableContext {
     /// `key` should be like `"nodes.backend.url"` or `"nodes.backend:local.url"`.
     pub fn set_node_output(&mut self, key: &str, value: String) {
         self.node_outputs.insert(key.to_owned(), value);
+    }
+
+    /// Set one of the running node's own outputs, referenced as `${output.KEY}`.
+    pub fn set_output(&mut self, key: &str, value: String) {
+        self.outputs.insert(key.to_owned(), value);
+    }
+
+    /// Set an action parameter, referenced as `${param.KEY}`.
+    pub fn set_param(&mut self, key: &str, value: String) {
+        self.params.insert(key.to_owned(), value);
     }
 }
 
@@ -88,6 +106,16 @@ fn resolve_reference(reference: &str, ctx: &VariableContext) -> Result<String, V
             .get(builtin_key)
             .cloned()
             .ok_or_else(|| VariableError::UnknownBuiltin(reference.to_owned()))
+    } else if let Some(output_key) = reference.strip_prefix("output.") {
+        ctx.outputs
+            .get(output_key)
+            .cloned()
+            .ok_or_else(|| VariableError::Unresolved(format!("${{{reference}}}")))
+    } else if let Some(param_key) = reference.strip_prefix("param.") {
+        ctx.params
+            .get(param_key)
+            .cloned()
+            .ok_or_else(|| VariableError::Unresolved(format!("${{{reference}}}")))
     } else if reference.starts_with("nodes.") {
         ctx.node_outputs
             .get(reference)
@@ -155,4 +183,31 @@ pub fn interpolate_url_template(
 
     result.push_str(rest);
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpolates_output_and_param_namespaces() {
+        let mut ctx = VariableContext::new();
+        ctx.set_builtin("run", "dev".to_owned());
+        ctx.set_output("DB_HOST", "localhost".to_owned());
+        ctx.set_output("DB_PORT", "5432".to_owned());
+        ctx.set_param("app", "Postico".to_owned());
+
+        let out = interpolate(
+            "open -a ${param.app} pg://${output.DB_HOST}:${output.DB_PORT}/${veld.run}",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out, "open -a Postico pg://localhost:5432/dev");
+    }
+
+    #[test]
+    fn unknown_output_reference_errors() {
+        let ctx = VariableContext::new();
+        assert!(interpolate("${output.MISSING}", &ctx).is_err());
+    }
 }

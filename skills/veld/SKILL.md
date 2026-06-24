@@ -59,28 +59,53 @@ If the installed version is older than what `compatibility` requires, tell the u
 
 Run `veld <subcommand> --help` for flags and options.
 
-## Open a database in Postico (macOS)
+## Node actions
 
-`veld postico` opens a running environment's database in Postico with the
-connection pre-filled. It auto-detects the node that exposes database outputs
-(`DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASS`/`DB_NAME`) and hands Postico a
-`postgresql://` URL — no copying the rotating port or password by hand.
+A node can declare **actions** — shell commands that the CLI and dashboard
+expose generically. This is how "open the database in Postico" works: the node
+declares the command, and Veld injects the node's live outputs so the rotating
+clone port and password never have to be copied by hand.
 
-```sh
-veld postico                      # auto-pick the run + database node
-veld postico --name dev           # target a specific run
-veld postico --node database      # disambiguate when several nodes expose DB outputs
-veld postico --print              # print the connection URL instead of opening (e.g. for psql)
-veld postico --json               # connection details as JSON (does not open)
+```jsonc
+// in veld.json, under a node:
+"database": {
+  "variants": { "dblab": { /* … */ } },
+  "actions": [
+    {
+      "name": "postico",
+      "label": "Postico",
+      "description": "Open the database in Postico (macOS)",
+      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"],
+      "command": "open -a Postico \"postgresql://${output.DB_USER}:${output.DB_PASS}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\""
+    }
+  ]
+}
 ```
 
-Run selection follows the usual rule (one active run → used automatically;
-several → pass `--name`). If more than one node exposes database outputs, the
-command lists them and asks for `--node`.
+Inside `command` you can reference:
 
-The management dashboard (`veld ui`) also shows a **Postico** button on the
-database row of each running environment, which calls this command server-side
-(the credentials never reach the browser).
+- `${output.KEY}` — the node's live outputs (also exported as `$KEY` env vars)
+- `${param.KEY}` — the action's static `parameters`
+- `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
+- `${nodes.name.field}` — another node's outputs
+
+Run actions from the CLI:
+
+```sh
+veld actions                      # list configured actions
+veld action postico               # run it against the only active run
+veld action postico --name dev    # target a specific run
+veld action postico --node database  # disambiguate when several nodes define it
+veld action postico --print       # print the resolved command instead of running it
+veld action postico --json        # resolved command as JSON (does not run)
+```
+
+`requires_outputs` gates availability: the action only runs (and only appears as
+a dashboard button) when the node is running and exposes all listed outputs.
+
+The management dashboard (`veld ui`) shows a button for each available action on
+the node's row. Clicking it runs the action server-side via the CLI, so any
+credentials never reach the browser.
 
 ## Editing veld.json
 
