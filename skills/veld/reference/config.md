@@ -123,11 +123,11 @@ Node-level `actions` are named shell commands exposed via the CLI (`veld action 
 "database": {
   "actions": [
     {
-      "name": "postico",
-      "label": "Postico",
-      "description": "Open the database in Postico (macOS)",
-      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"],
-      "command": "open -a Postico \"postgresql://${output.DB_USER}:${output.DB_PASS}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\""
+      "name": "psql",
+      "label": "psql",
+      "description": "Open a psql shell to the DB clone",
+      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"],
+      "command": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
     }
   ],
   "variants": { "dblab": { "type": "start_server", "command": "..." } }
@@ -143,10 +143,13 @@ Node-level `actions` are named shell commands exposed via the CLI (`veld action 
 
 Substitution available inside `command` and `parameters` values:
 
-- `${output.KEY}` — the running node's live outputs (also exported as `$KEY` env vars)
+- `$KEY` — the running node's live outputs, injected as environment variables and expanded by the shell at runtime
+- `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
 - `${nodes.<node>.<field>}` — any running node's outputs (e.g. an action on `app` can read `${nodes.database.DB_HOST}`). Use the `:variant`-qualified form `${nodes.<node>:<variant>.<field>}` when more than one variant of that node is running; the unqualified form is only available when it's unambiguous.
+
+**Secrets — prefer `$KEY` over `${output.KEY}`.** A secret referenced as `${output.DB_PASS}` is interpolated into the command string, so it ends up in the process list (`ps`) and any argv-based logging. `$DB_PASS` is passed as an environment variable and expanded by the shell at runtime, so it never appears in argv — as in the `psql` example above. GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) are the exception: the URL is expanded into the launcher's argv regardless, so to avoid exposure there, omit the password and let the client prompt.
 
 Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain shell/env references inside a command — otherwise Veld tries to resolve it and errors. When an action is defined on multiple nodes, disambiguate with `veld action <name> --node <node>`.
 

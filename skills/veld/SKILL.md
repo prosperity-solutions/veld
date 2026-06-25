@@ -62,9 +62,8 @@ Run `veld <subcommand> --help` for flags and options.
 ## Node actions
 
 A node can declare **actions** — shell commands that the CLI and dashboard
-expose generically. This is how "open the database in Postico" works: the node
-declares the command, and Veld injects the node's live outputs so the rotating
-clone port and password never have to be copied by hand.
+expose generically. Veld injects the node's live outputs so the rotating clone
+port and password never have to be copied by hand.
 
 ```jsonc
 // in veld.json, under a node:
@@ -72,11 +71,11 @@ clone port and password never have to be copied by hand.
   "variants": { "dblab": { /* … */ } },
   "actions": [
     {
-      "name": "postico",
-      "label": "Postico",
-      "description": "Open the database in Postico (macOS)",
-      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"],
-      "command": "open -a Postico \"postgresql://${output.DB_USER}:${output.DB_PASS}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\""
+      "name": "psql",
+      "label": "psql",
+      "description": "Open a psql shell to the DB clone",
+      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"],
+      "command": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
     }
   ]
 }
@@ -84,20 +83,31 @@ clone port and password never have to be copied by hand.
 
 Inside `command` you can reference:
 
-- `${output.KEY}` — the node's live outputs (also exported as `$KEY` env vars)
+- `$KEY` — the node's live outputs, injected as environment variables and expanded by the shell at runtime
+- `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — the action's static `parameters`
 - `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
-- `${nodes.name.field}` — another node's outputs
+- `${nodes.<node>.<field>}` — any running node's outputs
+
+> **Secrets — prefer `$KEY` over `${output.KEY}`.** `${output.DB_PASS}` is
+> interpolated into the command string, so the value is visible in the process
+> list (`ps`). `$DB_PASS` is passed as an environment variable and expanded by
+> the shell at runtime, so it never appears in argv — the `psql` example above
+> leaks nothing. GUI clients are the exception: launching e.g.
+> `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"`
+> expands the URL into `open`'s argv regardless. For local dev against ephemeral
+> clones that's usually fine; to avoid it, drop the password and let the client
+> prompt: `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
 
 Run actions from the CLI:
 
 ```sh
-veld actions                      # list configured actions
-veld action postico               # run it against the only active run
-veld action postico --name dev    # target a specific run
-veld action postico --node database  # disambiguate when several nodes define it
-veld action postico --print       # print the resolved command instead of running it
-veld action postico --json        # resolved command as JSON (does not run)
+veld actions                   # list configured actions
+veld action psql               # run it against the only active run
+veld action psql --name dev    # target a specific run
+veld action psql --node database  # disambiguate when several nodes define it
+veld action psql --print       # print the resolved command instead of running it
+veld action psql --json        # resolved command as JSON (does not run)
 ```
 
 `requires_outputs` gates availability: the action only runs (and only appears as
