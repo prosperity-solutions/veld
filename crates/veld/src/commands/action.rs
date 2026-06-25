@@ -91,7 +91,14 @@ pub async fn run(
     };
 
     // Build the interpolation context + environment from the node's live state.
-    let ctx = build_context(&cfg, &run_name, &project_root, node_state, action);
+    let ctx = build_context(
+        &cfg,
+        &run_name,
+        &project_root,
+        run_state,
+        node_state,
+        action,
+    );
 
     let resolved_command = match variables::interpolate(&action.command, &ctx) {
         Ok(c) => c,
@@ -304,13 +311,18 @@ fn configured_action_names(config: &VeldConfig) -> Vec<String> {
 // Context + environment
 // ---------------------------------------------------------------------------
 
-/// Build the variable-interpolation context for an action: veld builtins, the
-/// node's live outputs (as `${output.KEY}` and `${nodes.name.field}`), and the
-/// action's static parameters (as `${param.KEY}`).
+/// Build the variable-interpolation context for an action:
+/// - veld builtins (`${veld.run}`, `${veld.node}`, `${veld.port}`, …)
+/// - the attached node's own outputs as `${output.KEY}` sugar
+/// - every running node's outputs as `${nodes.<name>.<field>}` (and the
+///   `:variant`-qualified form), matching veld's standard cross-node syntax so
+///   an action can reference another node's outputs
+/// - the action's static parameters as `${param.KEY}`
 fn build_context(
     config: &VeldConfig,
     run_name: &str,
     project_root: &Path,
+    run_state: &RunState,
     node_state: &NodeState,
     action: &ActionConfig,
 ) -> VariableContext {
@@ -328,13 +340,29 @@ fn build_context(
         ctx.set_builtin("url", url.clone());
     }
 
+    // `${output.KEY}` always refers to the node the action is attached to.
     for (k, v) in &node_state.outputs {
         ctx.set_output(k, v.clone());
-        ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
-        ctx.set_node_output(
-            &format!("nodes.{}:{}.{k}", node_state.node_name, node_state.variant),
-            v.clone(),
-        );
+    }
+
+    // Count running variants per node so the unqualified `${nodes.<name>.*}`
+    // form is only offered when it's unambiguous; the `:variant` form is always
+    // available (mirrors veld's cross-node disambiguation rules).
+    let mut variant_counts: HashMap<&str, usize> = HashMap::new();
+    for ns in run_state.nodes.values() {
+        *variant_counts.entry(ns.node_name.as_str()).or_default() += 1;
+    }
+    for ns in run_state.nodes.values() {
+        let unambiguous = variant_counts.get(ns.node_name.as_str()) == Some(&1);
+        for (k, v) in &ns.outputs {
+            ctx.set_node_output(
+                &format!("nodes.{}:{}.{k}", ns.node_name, ns.variant),
+                v.clone(),
+            );
+            if unambiguous {
+                ctx.set_node_output(&format!("nodes.{}.{k}", ns.node_name), v.clone());
+            }
+        }
     }
 
     // Parameters may themselves reference builtins/outputs already set above.
@@ -486,10 +514,53 @@ mod tests {
             "pg://${output.DB_HOST}".to_owned(),
         )]));
         let ns = node_state("db", "local", &[("DB_HOST", "localhost")]);
-        let ctx = build_context(&cfg, "dev", Path::new("/tmp"), &ns, &a);
+        let run = run_with(vec![ns.clone()]);
+        let ctx = build_context(&cfg, "dev", Path::new("/tmp"), &run, &ns, &a);
 
         let out =
             variables::interpolate("${param.DSN} run=${veld.run} node=${veld.node}", &ctx).unwrap();
         assert_eq!(out, "pg://localhost run=dev node=db");
+    }
+
+    #[test]
+    fn context_exposes_other_nodes_outputs() {
+        // An action attached to `api` can read the `database` node's outputs
+        // via the standard `${nodes.<node>.<field>}` syntax.
+        let cfg = config_with_actions("api", vec![]);
+        let a = action("dump", &[]);
+        let api = node_state("api", "local", &[("PORT", "3000")]);
+        let db = node_state("database", "dblab", &[("DB_HOST", "localhost")]);
+        let run = run_with(vec![api.clone(), db]);
+
+        let ctx = build_context(&cfg, "dev", Path::new("/tmp"), &run, &api, &a);
+        let out = variables::interpolate(
+            "${output.PORT} ${nodes.database.DB_HOST} ${nodes.database:dblab.DB_HOST}",
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(out, "3000 localhost localhost");
+    }
+
+    #[test]
+    fn unqualified_cross_node_ref_omitted_when_ambiguous() {
+        // Two variants of `database` are running, so the unqualified
+        // `${nodes.database.*}` form is not offered — only the `:variant` form.
+        let cfg = config_with_actions("api", vec![]);
+        let a = action("dump", &[]);
+        let api = node_state("api", "local", &[("PORT", "3000")]);
+        let run = run_with(vec![
+            api.clone(),
+            node_state("database", "primary", &[("DB_HOST", "p")]),
+            node_state("database", "replica", &[("DB_HOST", "r")]),
+        ]);
+
+        let ctx = build_context(&cfg, "dev", Path::new("/tmp"), &run, &api, &a);
+        // Qualified forms resolve.
+        assert_eq!(
+            variables::interpolate("${nodes.database:primary.DB_HOST}", &ctx).unwrap(),
+            "p"
+        );
+        // Unqualified form is ambiguous → not provided → errors.
+        assert!(variables::interpolate("${nodes.database.DB_HOST}", &ctx).is_err());
     }
 }

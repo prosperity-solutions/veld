@@ -146,7 +146,7 @@ Substitution available inside `command` and `parameters` values:
 - `${output.KEY}` — the running node's live outputs (also exported as `$KEY` env vars)
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
-- `${nodes.name.field}` — another node's outputs
+- `${nodes.<node>.<field>}` — any running node's outputs (e.g. an action on `app` can read `${nodes.database.DB_HOST}`). Use the `:variant`-qualified form `${nodes.<node>:<variant>.<field>}` when more than one variant of that node is running; the unqualified form is only available when it's unambiguous.
 
 Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain shell/env references inside a command — otherwise Veld tries to resolve it and errors. When an action is defined on multiple nodes, disambiguate with `veld action <name> --node <node>`.
 
