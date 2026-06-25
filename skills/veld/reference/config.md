@@ -119,6 +119,8 @@ Recovery = full environment restart (`veld restart`). After `max_recoveries` exh
 
 Node-level `actions` are named shell commands exposed via the CLI (`veld action <name>`, `veld actions`) and as buttons on the node's row in the management dashboard. They generalize integrations like "open the database in a GUI client" — define them in `veld.json` instead of relying on built-in commands.
 
+Actions are **node-scoped**: each action belongs to the node it's declared under and can only reference that node's outputs. An action is available only while its node is running and exposes every key in `requires_outputs`; otherwise it doesn't appear in `veld actions`/`veld action`, no dashboard button renders, and it never runs. (There is no project-level / generic action and no cross-node output access.)
+
 ```json
 "database": {
   "actions": [
@@ -143,11 +145,10 @@ Node-level `actions` are named shell commands exposed via the CLI (`veld action 
 
 Substitution available inside `command` and `parameters` values:
 
-- `$KEY` — the running node's live outputs, injected as environment variables and expanded by the shell at runtime
+- `$KEY` — the node's live outputs, injected as environment variables and expanded by the shell at runtime
 - `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
-- `${nodes.<node>.<field>}` — any running node's outputs (e.g. an action on `app` can read `${nodes.database.DB_HOST}`). Use the `:variant`-qualified form `${nodes.<node>:<variant>.<field>}` when more than one variant of that node is running; the unqualified form is only available when it's unambiguous.
 
 **Secrets — prefer `$KEY` over `${output.KEY}`.** A secret referenced as `${output.DB_PASS}` is interpolated into the command string, so it ends up in the process list (`ps`) and any argv-based logging. `$DB_PASS` is passed as an environment variable and expanded by the shell at runtime, so it never appears in argv — as in the `psql` example above. GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) are the exception: the URL is expanded into the launcher's argv regardless, so to avoid exposure there, omit the password and let the client prompt.
 

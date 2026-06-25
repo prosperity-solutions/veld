@@ -333,7 +333,7 @@
         },
         "command": {
           "type": "string",
-          "description": "Shell command to execute. Supports ${veld.*}, ${output.KEY} (this node's live outputs), ${param.KEY} (this action's parameters), and ${nodes.<node>.<field>} (any running node's outputs) substitution. The same outputs are also injected as environment variables, so $KEY shell references work too. Prefer $KEY over ${output.KEY} for secrets: ${output.DB_PASS} is interpolated into the command string (visible in the process list), whereas $DB_PASS is expanded by the shell at runtime and never appears in argv.",
+          "description": "Shell command to execute. Actions are node-scoped: supports ${veld.*}, ${output.KEY} (this node's live outputs), and ${param.KEY} (this action's parameters) substitution. The node's outputs are also injected as environment variables, so $KEY shell references work too. Prefer $KEY over ${output.KEY} for secrets: ${output.DB_PASS} is interpolated into the command string (visible in the process list), whereas $DB_PASS is expanded by the shell at runtime and never appears in argv.",
           "examples": [
             "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
           ]

@@ -81,13 +81,13 @@ port and password never have to be copied by hand.
 }
 ```
 
-Inside `command` you can reference:
+Actions are **node-scoped**: a command sees only the outputs of the node it's
+attached to. Inside `command` you can reference:
 
 - `$KEY` — the node's live outputs, injected as environment variables and expanded by the shell at runtime
 - `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
 - `${param.KEY}` — the action's static `parameters`
 - `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
-- `${nodes.<node>.<field>}` — any running node's outputs
 
 > **Secrets — prefer `$KEY` over `${output.KEY}`.** `${output.DB_PASS}` is
 > interpolated into the command string, so the value is visible in the process
