@@ -130,6 +130,37 @@ enum Command {
         json: bool,
     },
 
+    /// Run a node-defined action against a running environment.
+    Action {
+        /// Name of the action to run (see `veld actions`).
+        #[arg(value_name = "ACTION")]
+        action: String,
+
+        /// Name of the run to target.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Node to run the action against. Defaults to the matching node when
+        /// only one qualifies.
+        #[arg(long)]
+        node: Option<String>,
+
+        /// Print the resolved command instead of running it.
+        #[arg(long)]
+        print: bool,
+
+        /// Output the resolved command as JSON (does not run it).
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List the actions defined across the project's nodes.
+    Actions {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// View logs for a running environment.
     Logs {
         /// Name of the run.
@@ -294,6 +325,7 @@ async fn main() {
             | Command::Restart { .. }
             | Command::Status { .. }
             | Command::Urls { .. }
+            | Command::Action { .. }
             | Command::Logs { .. }
     );
 
@@ -336,6 +368,16 @@ async fn main() {
         } => commands::status::run(name, outputs, json).await,
 
         Command::Urls { name, json } => commands::urls::run(name, json).await,
+
+        Command::Action {
+            action,
+            name,
+            node,
+            print,
+            json,
+        } => commands::action::run(action, name, node, print, json).await,
+
+        Command::Actions { json } => commands::action::list(json).await,
 
         Command::Logs {
             name,

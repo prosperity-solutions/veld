@@ -1,11 +1,19 @@
 {
-  "$schema": "../../schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "$schema": "../../schema/v2/veld.schema.json",
+  "schemaVersion": "2",
   "name": "testproject",
   "url_template": "{service}.{run}.testproject.localhost",
   "nodes": {
     "backend": {
       "default_variant": "local",
+      "actions": [
+        {
+          "name": "health",
+          "label": "Health check",
+          "description": "Curl the backend health endpoint",
+          "command": "curl -fsS ${veld.url}/health"
+        }
+      ],
       "variants": {
         "local": {
           "type": "start_server",

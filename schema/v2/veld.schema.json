@@ -143,6 +143,13 @@
           "type": "string",
           "description": "Working directory for all variants of this node. Relative paths are resolved from the project root. Overridable at variant level. Supports Veld variable substitution."
         },
+        "actions": {
+          "type": "array",
+          "description": "User-invokable actions for this node, exposed on the CLI (`veld action <name>`) and as buttons in the management dashboard.",
+          "items": {
+            "$ref": "#/$defs/ActionConfig"
+          }
+        },
         "variants": {
           "type": "object",
           "description": "Available variants for this node. Each key is a variant name.",
@@ -301,6 +308,51 @@
           }
         }
       ]
+    },
+    "ActionConfig": {
+      "type": "object",
+      "description": "A user-invokable action attached to a node. Runs a shell command with the node's live outputs available as ${output.KEY} variables and $KEY environment variables, plus the action's static parameters as ${param.KEY}.",
+      "required": [
+        "name",
+        "command"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Stable identifier used to invoke the action: `veld action <name>`.",
+          "pattern": "^[a-zA-Z0-9._-]+$"
+        },
+        "label": {
+          "type": "string",
+          "description": "Human-readable label for the dashboard button. Defaults to the action name."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional one-line description shown in `veld actions` output and as a button tooltip."
+        },
+        "command": {
+          "type": "string",
+          "description": "Shell command to execute. Actions are node-scoped: supports ${veld.*}, ${output.KEY} (this node's live outputs), and ${param.KEY} (this action's parameters) substitution. The node's outputs are also injected as environment variables, so $KEY shell references work too. Prefer $KEY over ${output.KEY} for secrets: ${output.DB_PASS} is interpolated into the command string (visible in the process list), whereas $DB_PASS is expanded by the shell at runtime and never appears in argv.",
+          "examples": [
+            "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
+          ]
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Static key/value parameters baked into the action. Available to the command as ${param.KEY} and as $KEY environment variables. Values support ${veld.*} and ${output.KEY} substitution.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "requires_outputs": {
+          "type": "array",
+          "description": "Output keys that must all be present on the running node for this action to be available. Gates both CLI invocation and dashboard button visibility. When omitted, the action is always available for a running node.",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
     },
     "ProbesConfig": {
       "type": "object",

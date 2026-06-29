@@ -135,6 +135,8 @@ veld stop --name dev
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
+| `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
+| `veld actions [--json]` | List the actions defined across the project's nodes |
 | `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>]` | View logs (`-f` follow, `-s` search, `-C` context lines) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |

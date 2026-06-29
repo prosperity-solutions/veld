@@ -59,6 +59,64 @@ If the installed version is older than what `compatibility` requires, tell the u
 
 Run `veld <subcommand> --help` for flags and options.
 
+## Node actions
+
+A node can declare **actions** — shell commands that the CLI and dashboard
+expose generically. Veld injects the node's live outputs so the rotating clone
+port and password never have to be copied by hand.
+
+```jsonc
+// in veld.json, under a node:
+"database": {
+  "variants": { "dblab": { /* … */ } },
+  "actions": [
+    {
+      "name": "psql",
+      "label": "psql",
+      "description": "Open a psql shell to the DB clone",
+      "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"],
+      "command": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
+    }
+  ]
+}
+```
+
+Actions are **node-scoped**: a command sees only the outputs of the node it's
+attached to. Inside `command` you can reference:
+
+- `$KEY` — the node's live outputs, injected as environment variables and expanded by the shell at runtime
+- `${output.KEY}` — the same outputs, interpolated by Veld into the command string before it runs
+- `${param.KEY}` — the action's static `parameters`
+- `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
+
+> **Secrets — prefer `$KEY` over `${output.KEY}`.** `${output.DB_PASS}` is
+> interpolated into the command string, so the value is visible in the process
+> list (`ps`). `$DB_PASS` is passed as an environment variable and expanded by
+> the shell at runtime, so it never appears in argv — the `psql` example above
+> leaks nothing. GUI clients are the exception: launching e.g.
+> `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"`
+> expands the URL into `open`'s argv regardless. For local dev against ephemeral
+> clones that's usually fine; to avoid it, drop the password and let the client
+> prompt: `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
+
+Run actions from the CLI:
+
+```sh
+veld actions                   # list configured actions
+veld action psql               # run it against the only active run
+veld action psql --name dev    # target a specific run
+veld action psql --node database  # disambiguate when several nodes define it
+veld action psql --print       # print the resolved command instead of running it
+veld action psql --json        # resolved command as JSON (does not run)
+```
+
+`requires_outputs` gates availability: the action only runs (and only appears as
+a dashboard button) when the node is running and exposes all listed outputs.
+
+The management dashboard (`veld ui`) shows a button for each available action on
+the node's row. Clicking it runs the action server-side via the CLI, so any
+credentials never reach the browser.
+
 ## Editing veld.json
 
 For the full config schema, variables, and node types, see [reference/config.md](reference/config.md).

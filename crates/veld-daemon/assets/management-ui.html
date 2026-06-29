@@ -240,6 +240,11 @@ function render(data){
             h+='<button data-action="copy-url" data-url="'+esc(url)+'">Copy</button>';
             h+='<button data-action="open-url" data-url="'+esc(url)+'">Open</button>';
           }
+          if(run.status==='running'&&Array.isArray(n.actions)){
+            for(const a of n.actions){
+              h+='<button data-action="run-action" data-act="'+esc(a.name)+'" data-node="'+esc(n.name)+'" title="Run the '+esc(a.label)+' action">'+esc(a.label)+'</button>';
+            }
+          }
           h+='</td>';
           h+='<td class="svc-dim">'+esc(n.variant)+'</td>';
           h+='<td class="svc-pid">'+(n.pid||'')+'</td></tr>';
@@ -475,6 +480,15 @@ document.addEventListener('click',e=>{
   if(copyUrl){navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{copyUrl.classList.add('ok');copyUrl.textContent='Copied';setTimeout(()=>{copyUrl.classList.remove('ok');copyUrl.textContent='Copy';},1500);});return;}
   const openUrl=e.target.closest('[data-action="open-url"]');
   if(openUrl){window.open(openUrl.dataset.url,'_blank','noopener');return;}
+  const runAction=e.target.closest('[data-action="run-action"]');
+  if(runAction&&card){
+    const btn=runAction,orig=btn.textContent;btn.disabled=true;btn.textContent='Running…';
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/action',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({action:btn.dataset.act,node:btn.dataset.node})})
+      .then(r=>{if(!r.ok)btn.textContent='Failed';})
+      .catch(()=>{btn.textContent='Failed';})
+      .finally(()=>{setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},1500);});
+    return;
+  }
   if(e.target.closest('[data-action="copy-path"]')&&card){const btn=e.target.closest('[data-action="copy-path"]');navigator.clipboard.writeText(card.dataset.path).then(()=>{btn.classList.add('ok');btn.textContent='Copied';setTimeout(()=>{btn.classList.remove('ok');btn.textContent='Copy path';},1500);});return;}
   if(e.target.closest('[data-action="open-terminal"]')&&card){fetch('/api/open-terminal',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({path:card.dataset.path})});return;}
   if(e.target.closest('[data-action="stop-env"]')&&card){
