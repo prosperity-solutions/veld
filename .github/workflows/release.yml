@@ -99,7 +99,7 @@ jobs:
         run: cd crates/veld-daemon/frontend && npm ci
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.24'
 
       - name: Install cross-compilation tools
         if: matrix.cross
