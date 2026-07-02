@@ -205,6 +205,19 @@ pub struct ShareInfo {
     pub urls: Vec<String>,
 }
 
+/// A join awaiting the host's approval (manual mode).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingInfo {
+    /// Request id, used to approve/deny.
+    pub id: String,
+    /// The share being joined.
+    pub share_id: String,
+    /// Untrusted self-label the joiner provided.
+    pub label: String,
+    /// The joiner's cryptographic identity (iroh node id) — the trusted one.
+    pub node_id: String,
+}
+
 /// `GET /api/shares` response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharesList {
@@ -212,6 +225,8 @@ pub struct SharesList {
     pub shares: Vec<ShareInfo>,
     /// Shares this machine has joined.
     pub joins: Vec<ShareInfo>,
+    /// Join requests awaiting this host's approval.
+    pub pending: Vec<PendingInfo>,
 }
 
 /// Errors from ticket encoding/decoding.
@@ -347,6 +362,28 @@ impl DaemonClient {
         let resp = self
             .http
             .delete(format!("{}/api/shares/joins/{id}", self.base))
+            .header("X-Veld-Request", "1")
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::expect_empty(resp).await
+    }
+
+    pub async fn approve(&self, req_id: &str) -> Result<(), DaemonError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/shares/requests/{req_id}/approve", self.base))
+            .header("X-Veld-Request", "1")
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::expect_empty(resp).await
+    }
+
+    pub async fn deny(&self, req_id: &str) -> Result<(), DaemonError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/shares/requests/{req_id}/deny", self.base))
             .header("X-Veld-Request", "1")
             .send()
             .await

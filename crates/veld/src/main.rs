@@ -288,6 +288,9 @@ enum Command {
         /// Share lifetime in seconds (default 7200).
         #[arg(long)]
         ttl: Option<i64>,
+        /// Approval mode: first | manual | auto (default: manual, or first with --json).
+        #[arg(long, value_name = "MODE")]
+        approve: Option<String>,
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -324,6 +327,24 @@ enum Command {
     /// Leave a joined share.
     Leave {
         /// Join id (from `veld shares`).
+        id: String,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Approve a pending join request (see `veld shares`).
+    Approve {
+        /// Request id (from `veld shares` or the approval prompt).
+        id: String,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Deny a pending join request.
+    Deny {
+        /// Request id (from `veld shares`).
         id: String,
         /// Output JSON.
         #[arg(long)]
@@ -497,8 +518,9 @@ async fn main() {
             run,
             node,
             ttl,
+            approve,
             json,
-        } => commands::share::share(run, node, ttl, json).await,
+        } => commands::share::share(run, node, ttl, approve, json).await,
 
         Command::Join {
             ticket,
@@ -511,6 +533,10 @@ async fn main() {
         Command::Unshare { id, json } => commands::share::unshare(id, json).await,
 
         Command::Leave { id, json } => commands::share::leave(id, json).await,
+
+        Command::Approve { id, json } => commands::share::approve(id, json).await,
+
+        Command::Deny { id, json } => commands::share::deny(id, json).await,
 
         Command::Version => {
             commands::version::print_version();

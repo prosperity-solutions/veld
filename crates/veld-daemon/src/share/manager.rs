@@ -12,18 +12,22 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::Connection;
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, EndpointAddr, EndpointId, SecretKey};
 use iroh_tickets::endpoint::EndpointTicket;
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, OnceCell};
+use tokio::sync::{Mutex, OnceCell, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use veld_core::helper::HelperClient;
 use veld_core::port::PortAllocator;
 use veld_core::share::{
-    Capability, JoinResponse, ShareInfo, ShareManifest, ShareTicket, SharesList,
+    ApprovalMode, Capability, JoinResponse, PendingInfo, ShareInfo, ShareManifest, ShareTicket,
+    SharesList,
 };
 use uuid::Uuid;
+
+/// Timeout a manual approval waits before auto-denying.
+const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 
 use super::endpoint::bind_endpoint;
 use super::host::{self, HostShare};
@@ -34,6 +38,17 @@ struct ShareEntry {
     id: String,
     manifest: ShareManifest,
     host_share: Arc<HostShare>,
+    approve_mode: ApprovalMode,
+}
+
+/// A join parked awaiting the host's manual approval.
+struct PendingRequest {
+    id: String,
+    share_id: String,
+    label: String,
+    node_id: String,
+    /// Resolved by `approve_request`/`deny_request`.
+    decision: oneshot::Sender<bool>,
 }
 
 /// A share this daemon has joined; holds everything needed to tear it down.
@@ -55,6 +70,10 @@ pub struct ShareManager {
     endpoint: OnceCell<Endpoint>,
     shares: Mutex<HashMap<String, ShareEntry>>,
     joins: Mutex<HashMap<String, JoinEntry>>,
+    /// Join requests awaiting manual approval, keyed by request id.
+    pending: Mutex<HashMap<String, PendingRequest>>,
+    /// For `first` mode: the node id that claimed each share, keyed by share id.
+    claims: Mutex<HashMap<String, EndpointId>>,
     ports: PortAllocator,
 }
 
@@ -65,6 +84,8 @@ impl ShareManager {
             endpoint: OnceCell::new(),
             shares: Mutex::new(HashMap::new()),
             joins: Mutex::new(HashMap::new()),
+            pending: Mutex::new(HashMap::new()),
+            claims: Mutex::new(HashMap::new()),
             ports: PortAllocator::new(),
         }
     }
@@ -112,15 +133,24 @@ impl ShareManager {
                         shares
                             .values()
                             .find(|s| s.host_share.capability.ct_eq(&req.capability))
-                            .map(|s| Arc::clone(&s.host_share))
+                            .map(|s| (s.id.clone(), s.approve_mode, Arc::clone(&s.host_share)))
                     };
 
-                    match matched {
-                        Some(host_share) => {
-                            debug!(label = %req.label, "accepted join");
-                            let _ = host::accept_and_serve(conn, send, host_share).await;
-                        }
-                        None => host::deny(send, "unknown or expired share").await,
+                    let Some((share_id, mode, host_share)) = matched else {
+                        host::deny(send, "unknown or expired share").await;
+                        return;
+                    };
+
+                    let node_id = conn.remote_id();
+                    let approved = mgr
+                        .resolve_approval(&share_id, mode, node_id, &req.label)
+                        .await;
+
+                    if approved {
+                        debug!(label = %req.label, share = %share_id, "join approved");
+                        let _ = host::accept_and_serve(conn, send, host_share).await;
+                    } else {
+                        host::deny(send, "join denied").await;
                     }
                 });
             }
@@ -133,6 +163,7 @@ impl ShareManager {
         self: &Arc<Self>,
         manifest: ShareManifest,
         capability: Capability,
+        approve_mode: ApprovalMode,
     ) -> Result<(String, ShareTicket)> {
         let endpoint = self.endpoint().await?;
 
@@ -166,9 +197,10 @@ impl ShareManager {
                 id: id.clone(),
                 manifest,
                 host_share,
+                approve_mode,
             },
         );
-        info!(share_id = %id, "share started");
+        info!(share_id = %id, ?approve_mode, "share started");
         Ok((id, ticket))
     }
 
@@ -280,7 +312,97 @@ impl ShareManager {
                 urls: j.urls.clone(),
             })
             .collect();
-        SharesList { shares, joins }
+        let pending = self
+            .pending
+            .lock()
+            .await
+            .values()
+            .map(|p| PendingInfo {
+                id: p.id.clone(),
+                share_id: p.share_id.clone(),
+                label: p.label.clone(),
+                node_id: p.node_id.clone(),
+            })
+            .collect();
+        SharesList {
+            shares,
+            joins,
+            pending,
+        }
+    }
+
+    /// Resolve whether a join is approved, per the share's approval mode.
+    async fn resolve_approval(
+        self: &Arc<Self>,
+        share_id: &str,
+        mode: ApprovalMode,
+        node_id: EndpointId,
+        label: &str,
+    ) -> bool {
+        match mode {
+            ApprovalMode::Auto => true,
+            ApprovalMode::First => {
+                let mut claims = self.claims.lock().await;
+                match claims.get(share_id) {
+                    None => {
+                        claims.insert(share_id.to_string(), node_id);
+                        info!(share = %share_id, node = %node_id, "first joiner claimed share");
+                        true
+                    }
+                    // Re-connections from the same pinned peer are allowed.
+                    Some(existing) => *existing == node_id,
+                }
+            }
+            ApprovalMode::Manual => {
+                let (tx, rx) = oneshot::channel();
+                let req_id = gen_id("req");
+                self.pending.lock().await.insert(
+                    req_id.clone(),
+                    PendingRequest {
+                        id: req_id.clone(),
+                        share_id: share_id.to_string(),
+                        label: label.to_string(),
+                        node_id: node_id.to_string(),
+                        decision: tx,
+                    },
+                );
+                info!(req = %req_id, share = %share_id, label, "join awaiting approval");
+                open_dashboard();
+
+                let approved = matches!(
+                    tokio::time::timeout(APPROVAL_TIMEOUT, rx).await,
+                    Ok(Ok(true))
+                );
+                self.pending.lock().await.remove(&req_id);
+                approved
+            }
+        }
+    }
+
+    /// Approve a parked join request.
+    pub async fn approve_request(&self, req_id: &str) -> Result<()> {
+        let entry = self
+            .pending
+            .lock()
+            .await
+            .remove(req_id)
+            .ok_or_else(|| anyhow::anyhow!("no such request: {req_id}"))?;
+        let _ = entry.decision.send(true);
+        info!(req = %req_id, "approved");
+        Ok(())
+    }
+
+    /// Deny a parked join request.
+    pub async fn deny_request(&self, req_id: &str) -> Result<()> {
+        let entry = self
+            .pending
+            .lock()
+            .await
+            .remove(req_id)
+            .ok_or_else(|| anyhow::anyhow!("no such request: {req_id}"))?;
+        let _ = entry.decision.send(false);
+        info!(req = %req_id, "denied");
+        Ok(())
     }
 
     /// Stop hosting a share. In-flight connections end when their peers
@@ -289,6 +411,7 @@ impl ShareManager {
         if self.shares.lock().await.remove(id).is_none() {
             bail!("no such share: {id}");
         }
+        self.claims.lock().await.remove(id);
         info!(share_id = %id, "share stopped");
         Ok(())
     }
@@ -324,4 +447,22 @@ impl ShareManager {
 fn gen_id(prefix: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("{prefix}_{}", &uuid[..8])
+}
+
+/// Open the local dashboard in the default browser so the host can approve a
+/// pending join. Best-effort and OS-agnostic; a no-op where there is no opener.
+fn open_dashboard() {
+    let url = "http://127.0.0.1:19899/#shares";
+    #[cfg(target_os = "macos")]
+    let program: Option<&str> = Some("open");
+    #[cfg(target_os = "linux")]
+    let program: Option<&str> = Some("xdg-open");
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    let program: Option<&str> = None;
+
+    if let Some(program) = program {
+        if let Err(e) = std::process::Command::new(program).arg(url).spawn() {
+            debug!(error = %e, "could not open dashboard for approval");
+        }
+    }
 }

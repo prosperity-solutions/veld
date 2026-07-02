@@ -29,6 +29,8 @@ pub fn routes(manager: Arc<ShareManager>) -> Router {
         .route("/api/shares/join", post(join))
         .route("/api/shares/{id}", delete(unshare))
         .route("/api/shares/joins/{id}", delete(leave))
+        .route("/api/shares/requests/{id}/approve", post(approve))
+        .route("/api/shares/requests/{id}/deny", post(deny))
         .with_state(manager)
 }
 
@@ -59,7 +61,7 @@ async fn start(
 
     let capability = Capability::generate();
     let (share_id, ticket) = manager
-        .start_share(manifest, capability)
+        .start_share(manifest, capability, req.approve.unwrap_or_default())
         .await
         .map_err(internal)?;
     let token = ticket.encode().map_err(internal)?;
@@ -111,6 +113,32 @@ async fn leave(
     check_csrf(&headers)?;
     manager
         .leave(&id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn approve(
+    State(manager): State<Arc<ShareManager>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_csrf(&headers)?;
+    manager
+        .approve_request(&id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn deny(
+    State(manager): State<Arc<ShareManager>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_csrf(&headers)?;
+    manager
+        .deny_request(&id)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
