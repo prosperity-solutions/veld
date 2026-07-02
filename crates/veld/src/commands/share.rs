@@ -159,9 +159,50 @@ pub async fn list(json: bool) -> i32 {
     }
 }
 
-/// `veld unshare <id> [--json]`
-pub async fn unshare(id: String, json: bool) -> i32 {
-    match DaemonClient::new().unshare(&id).await {
+/// Resolve an id argument: use it if given, otherwise pick the sole share/join.
+/// `joins = true` resolves against joins, else against hosted shares.
+async fn resolve_id(
+    client: &DaemonClient,
+    id: Option<String>,
+    joins: bool,
+    json: bool,
+) -> Option<String> {
+    if let Some(id) = id {
+        return Some(id);
+    }
+    let what = if joins { "join" } else { "share" };
+    match client.list().await {
+        Ok(list) => {
+            let items = if joins { list.joins } else { list.shares };
+            match items.len() {
+                1 => Some(items[0].id.clone()),
+                0 => {
+                    output::print_error(&format!("no active {what}s"), json);
+                    None
+                }
+                _ => {
+                    output::print_error(
+                        &format!("multiple {what}s — specify an id (see `veld shares`)"),
+                        json,
+                    );
+                    None
+                }
+            }
+        }
+        Err(e) => {
+            output::print_error(&e.to_string(), json);
+            None
+        }
+    }
+}
+
+/// `veld unshare [id] [--json]` — id optional when exactly one share is active.
+pub async fn unshare(id: Option<String>, json: bool) -> i32 {
+    let client = DaemonClient::new();
+    let Some(id) = resolve_id(&client, id, false, json).await else {
+        return 1;
+    };
+    match client.unshare(&id).await {
         Ok(()) => {
             if json {
                 println!("{}", serde_json::json!({ "stopped": id }));
@@ -213,9 +254,13 @@ pub async fn deny(id: String, json: bool) -> i32 {
     }
 }
 
-/// `veld leave <id> [--json]`
-pub async fn leave(id: String, json: bool) -> i32 {
-    match DaemonClient::new().leave(&id).await {
+/// `veld leave [id] [--json]` — id optional when exactly one join is active.
+pub async fn leave(id: Option<String>, json: bool) -> i32 {
+    let client = DaemonClient::new();
+    let Some(id) = resolve_id(&client, id, true, json).await else {
+        return 1;
+    };
+    match client.leave(&id).await {
         Ok(()) => {
             if json {
                 println!("{}", serde_json::json!({ "left": id }));

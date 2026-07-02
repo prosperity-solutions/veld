@@ -317,8 +317,8 @@ enum Command {
 
     /// Stop hosting a share.
     Unshare {
-        /// Share id (from `veld shares`).
-        id: String,
+        /// Share id (from `veld shares`); optional when exactly one is active.
+        id: Option<String>,
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -326,8 +326,8 @@ enum Command {
 
     /// Leave a joined share.
     Leave {
-        /// Join id (from `veld shares`).
-        id: String,
+        /// Join id (from `veld shares`); optional when exactly one is active.
+        id: Option<String>,
         /// Output JSON.
         #[arg(long)]
         json: bool,
