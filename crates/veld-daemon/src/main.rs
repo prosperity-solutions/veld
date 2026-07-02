@@ -112,8 +112,19 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler().await;
     });
 
+    // Share manager owns the iroh endpoint and all live shares/joins. Its node
+    // key persists so the node identity is stable across restarts.
+    let share_manager = {
+        let key_path =
+            share::endpoint::key_path().context("could not determine data dir for node key")?;
+        let secret =
+            share::endpoint::load_or_create_secret_key(&key_path).context("loading node key")?;
+        std::sync::Arc::new(share::manager::ShareManager::new(secret))
+    };
+
+    let feedback_manager = std::sync::Arc::clone(&share_manager);
     let feedback_handle = tokio::spawn(async move {
-        feedback_server::run_feedback_server().await;
+        feedback_server::run_feedback_server(feedback_manager).await;
     });
 
     let accept_broadcaster = broadcaster.clone();

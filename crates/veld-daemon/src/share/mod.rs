@@ -9,14 +9,12 @@
 //! phases add the control protocol, manifest, approval flow, and CLI/dashboard
 //! surfaces; the transport primitives here are consumed then.
 
-// Phase 0 scaffolding: these primitives are wired into the daemon's control
-// plane in Phase 2. Allow until then so `clippy -D warnings` stays green.
-#![allow(dead_code)]
-
+pub mod api;
 pub mod endpoint;
 pub mod forward;
 pub mod host;
 pub mod join;
+pub mod manager;
 pub mod proto;
 
 #[cfg(test)]

@@ -34,9 +34,15 @@ pub struct SharedNode {
     pub node: String,
     /// Variant name (e.g. `local`).
     pub variant: String,
-    /// Literal hostname to reproduce on the consumer (no scheme, no port).
+    /// Literal hostname to reproduce on the consumer (no scheme, no port); used
+    /// for the consumer's Caddy route match and DNS entry.
     pub hostname: String,
-    /// Host-local TCP port the origin's service listens on (the tunnel target).
+    /// The origin's full URL, shown to the consumer as the address to open.
+    /// Valid verbatim on the consumer because both peers run the same setup mode
+    /// (identical scheme + port).
+    pub url: String,
+    /// Host-local TCP port the origin's service listens on (the tunnel target
+    /// the host dials).
     pub upstream_port: u16,
 }
 
@@ -147,6 +153,67 @@ impl ShareTicket {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Control-API DTOs (daemon HTTP on 127.0.0.1:19899, shared with the CLI client)
+// ---------------------------------------------------------------------------
+
+/// `POST /api/shares` — start sharing a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartShareRequest {
+    /// Run name to share. `None` means "the only run", resolved by the daemon.
+    pub run: Option<String>,
+    /// Node names to share; `None` shares all of the run's URL-bearing nodes.
+    pub nodes: Option<Vec<String>>,
+    /// Lifetime in seconds; defaults applied by the daemon.
+    pub ttl_secs: Option<i64>,
+    /// Approval mode; defaults to the caller's context-appropriate mode.
+    pub approve: Option<ApprovalMode>,
+}
+
+/// `POST /api/shares` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StartShareResponse {
+    pub share_id: String,
+    /// The opaque `veldshare_…` token to hand to a colleague.
+    pub ticket: String,
+    pub nodes: Vec<String>,
+    pub expires_at: i64,
+}
+
+/// `POST /api/shares/join` — join a shared environment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinRequest {
+    /// The `veldshare_…` ticket.
+    pub ticket: String,
+    /// Untrusted self-label shown to the host.
+    pub label: Option<String>,
+}
+
+/// `POST /api/shares/join` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JoinResponse {
+    pub join_id: String,
+    /// URLs now reachable locally on this machine.
+    pub urls: Vec<String>,
+}
+
+/// One entry in `GET /api/shares`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShareInfo {
+    pub id: String,
+    pub nodes: Vec<String>,
+    pub urls: Vec<String>,
+}
+
+/// `GET /api/shares` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SharesList {
+    /// Shares this machine is hosting.
+    pub shares: Vec<ShareInfo>,
+    /// Shares this machine has joined.
+    pub joins: Vec<ShareInfo>,
+}
+
 /// Errors from ticket encoding/decoding.
 #[derive(Debug, thiserror::Error)]
 pub enum TicketError {
@@ -158,6 +225,134 @@ pub enum TicketError {
     Serialize(serde_json::Error),
     #[error("ticket JSON is invalid: {0}")]
     Deserialize(serde_json::Error),
+}
+
+// ---------------------------------------------------------------------------
+// Daemon control-API client (used by the CLI)
+// ---------------------------------------------------------------------------
+
+/// Base URL of the daemon's local control API.
+const DAEMON_BASE: &str = "http://127.0.0.1:19899";
+
+/// Errors talking to the local daemon.
+#[derive(Debug, thiserror::Error)]
+pub enum DaemonError {
+    #[error("the veld daemon is not running (run `veld setup` or start the service)")]
+    NotRunning,
+    #[error("daemon request failed: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("{0}")]
+    Api(String),
+}
+
+/// Thin HTTP client for the daemon's `/api/shares` control API.
+pub struct DaemonClient {
+    http: reqwest::Client,
+    base: String,
+}
+
+impl Default for DaemonClient {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DaemonClient {
+    pub fn new() -> Self {
+        Self {
+            http: reqwest::Client::new(),
+            base: DAEMON_BASE.to_string(),
+        }
+    }
+
+    fn map_send(e: reqwest::Error) -> DaemonError {
+        if e.is_connect() {
+            DaemonError::NotRunning
+        } else {
+            DaemonError::Http(e)
+        }
+    }
+
+    async fn parse<T: serde::de::DeserializeOwned>(
+        resp: reqwest::Response,
+    ) -> Result<T, DaemonError> {
+        if resp.status().is_success() {
+            resp.json::<T>().await.map_err(DaemonError::Http)
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(DaemonError::Api(format!("{status}: {body}")))
+        }
+    }
+
+    async fn expect_empty(resp: reqwest::Response) -> Result<(), DaemonError> {
+        if resp.status().is_success() {
+            Ok(())
+        } else {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            Err(DaemonError::Api(format!("{status}: {body}")))
+        }
+    }
+
+    pub async fn start_share(
+        &self,
+        req: &StartShareRequest,
+    ) -> Result<StartShareResponse, DaemonError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/shares", self.base))
+            .header("X-Veld-Request", "1")
+            .json(req)
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::parse(resp).await
+    }
+
+    pub async fn join(&self, req: &JoinRequest) -> Result<JoinResponse, DaemonError> {
+        let resp = self
+            .http
+            .post(format!("{}/api/shares/join", self.base))
+            .header("X-Veld-Request", "1")
+            .json(req)
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::parse(resp).await
+    }
+
+    pub async fn list(&self) -> Result<SharesList, DaemonError> {
+        let resp = self
+            .http
+            .get(format!("{}/api/shares", self.base))
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::parse(resp).await
+    }
+
+    pub async fn unshare(&self, id: &str) -> Result<(), DaemonError> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/shares/{id}", self.base))
+            .header("X-Veld-Request", "1")
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::expect_empty(resp).await
+    }
+
+    pub async fn leave(&self, id: &str) -> Result<(), DaemonError> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/shares/joins/{id}", self.base))
+            .header("X-Veld-Request", "1")
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        Self::expect_empty(resp).await
+    }
 }
 
 #[cfg(test)]
@@ -172,6 +367,7 @@ mod tests {
                 node: "app".to_string(),
                 variant: "host".to_string(),
                 hostname: "app.demo.irohtest.localhost".to_string(),
+                url: "https://app.demo.irohtest.localhost".to_string(),
                 upstream_port: 19001,
             }],
             created_at: 1_000_000,
