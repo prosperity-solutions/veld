@@ -373,6 +373,20 @@ impl DaemonClient {
         Self::expect_empty(resp).await
     }
 
+    /// Stop all shares tied to a run (best-effort cleanup on `veld stop`).
+    /// Returns how many shares were stopped.
+    pub async fn unshare_run(&self, run_id: &str) -> Result<usize, DaemonError> {
+        let resp = self
+            .http
+            .delete(format!("{}/api/shares/by-run/{run_id}", self.base))
+            .header("X-Veld-Request", "1")
+            .send()
+            .await
+            .map_err(Self::map_send)?;
+        let v: serde_json::Value = Self::parse(resp).await?;
+        Ok(v.get("unshared").and_then(|n| n.as_u64()).unwrap_or(0) as usize)
+    }
+
     pub async fn approve(&self, req_id: &str) -> Result<(), DaemonError> {
         let resp = self
             .http

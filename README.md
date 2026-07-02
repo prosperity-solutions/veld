@@ -322,7 +322,7 @@ Two gates protect a share: a capability token embedded in the ticket, plus host 
 
 Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees your URLs or content. To use your own iroh-relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
 
-If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Default TTL is 7200s.
+If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) also stops its shares automatically, and the consumer's join tears itself down when the tunnel closes. Default TTL is 7200s.
 
 ## Requirements
 

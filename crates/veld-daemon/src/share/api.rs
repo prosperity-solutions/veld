@@ -12,6 +12,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{delete, get, post};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
+use uuid::Uuid;
 use veld_core::share::{
     Capability, JoinRequest, JoinResponse, ShareManifest, SharedNode, SharesList,
     StartShareRequest, StartShareResponse,
@@ -28,6 +29,7 @@ pub fn routes(manager: Arc<ShareManager>) -> Router {
         .route("/api/shares", get(list).post(start))
         .route("/api/shares/join", post(join))
         .route("/api/shares/{id}", delete(unshare))
+        .route("/api/shares/by-run/{run_id}", delete(unshare_run))
         .route("/api/shares/joins/{id}", delete(leave))
         .route("/api/shares/requests/{id}/approve", post(approve))
         .route("/api/shares/requests/{id}/deny", post(deny))
@@ -119,6 +121,19 @@ async fn leave(
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn unshare_run(
+    State(manager): State<Arc<ShareManager>>,
+    headers: HeaderMap,
+    Path(run_id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_csrf(&headers)?;
+    let run_id = run_id
+        .parse::<Uuid>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid run id: {e}")))?;
+    let stopped = manager.unshare_run(run_id).await;
+    Ok(Json(serde_json::json!({ "unshared": stopped })))
 }
 
 async fn approve(

@@ -511,6 +511,26 @@ impl ShareManager {
         Ok(())
     }
 
+    /// Stop every share minted from a given run — called when the run is
+    /// stopped, so shares don't outlive the environment they expose.
+    pub async fn unshare_run(&self, run_id: Uuid) -> usize {
+        let ids: Vec<String> = {
+            let shares = self.shares.lock().await;
+            shares
+                .values()
+                .filter(|s| s.manifest.run_id == run_id)
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let mut stopped = 0;
+        for id in ids {
+            if self.unshare(&id).await.is_ok() {
+                stopped += 1;
+            }
+        }
+        stopped
+    }
+
     /// Leave a joined share: remove routes/DNS, drop listeners, close the tunnel.
     pub async fn leave(&self, id: &str) -> Result<()> {
         let entry = self
