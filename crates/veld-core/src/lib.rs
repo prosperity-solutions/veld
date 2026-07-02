@@ -11,6 +11,7 @@ pub mod process;
 pub mod progress;
 pub mod sensitive;
 pub mod setup;
+pub mod share;
 pub mod state;
 pub mod url;
 pub mod variables;

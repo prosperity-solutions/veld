@@ -1,0 +1,230 @@
+//! Shared types for peer-to-peer environment sharing.
+//!
+//! These types are used by both the daemon (which runs the iroh endpoint and
+//! forwards traffic) and the CLI (which encodes/decodes tickets and talks to the
+//! daemon's control API). Keeping them in `veld-core` avoids duplicating the
+//! wire format. The transport itself (iroh) lives only in the daemon.
+//!
+//! See `RFC-p2p-sharing.md` and `PLAN-p2p-implementation.md`.
+
+use base64::prelude::*;
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use uuid::Uuid;
+
+/// How a host resolves incoming join requests to one of its shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ApprovalMode {
+    /// Auto-approve the first token-valid joiner, pin it, hold the rest.
+    #[default]
+    First,
+    /// Every join waits for explicit host approval (dashboard / CLI).
+    Manual,
+    /// Approve every token-valid joiner (multi-viewer; least restrictive).
+    Auto,
+}
+
+/// One service exposed by a share. The `hostname` is the *literal* host from the
+/// origin's `NodeState.url`, shipped verbatim so the consumer reproduces the
+/// exact same URL (redirects, cookies, and CORS then work unmodified).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedNode {
+    /// Node name (e.g. `frontend`).
+    pub node: String,
+    /// Variant name (e.g. `local`).
+    pub variant: String,
+    /// Literal hostname to reproduce on the consumer (no scheme, no port).
+    pub hostname: String,
+    /// Host-local TCP port the origin's service listens on (the tunnel target).
+    pub upstream_port: u16,
+}
+
+/// The set of services a host is sharing, plus lifetime metadata. Carried inside
+/// the ticket so the consumer can reproduce every URL locally.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareManifest {
+    /// The origin run this share was minted from.
+    pub run_id: Uuid,
+    /// Project name (for display / namespacing).
+    pub project: String,
+    /// Shared services.
+    pub nodes: Vec<SharedNode>,
+    /// Unix seconds when the share was created.
+    pub created_at: i64,
+    /// Unix seconds when the share expires.
+    pub expires_at: i64,
+}
+
+/// A 32-byte bearer secret embedded in a ticket. A host serves a connection only
+/// if it presents the matching capability (gate 1 of the security model).
+///
+/// Comparison is constant-time; do not derive `PartialEq` to avoid timing-unsafe
+/// comparisons on the auth path.
+#[derive(Debug, Clone)]
+pub struct Capability([u8; 32]);
+
+impl Capability {
+    /// Generate a fresh random capability. Uses two v4 UUIDs (244 random bits).
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        bytes[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+        bytes[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+        Self(bytes)
+    }
+
+    /// Raw bytes.
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// Constant-time equality — the only comparison used on the auth path.
+    pub fn ct_eq(&self, other: &Capability) -> bool {
+        let mut diff = 0u8;
+        for (a, b) in self.0.iter().zip(other.0.iter()) {
+            diff |= a ^ b;
+        }
+        diff == 0
+    }
+}
+
+impl Serialize for Capability {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&BASE64_URL_SAFE_NO_PAD.encode(self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for Capability {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = BASE64_URL_SAFE_NO_PAD
+            .decode(s.as_bytes())
+            .map_err(D::Error::custom)?;
+        let arr: [u8; 32] = bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| D::Error::custom("capability must be 32 bytes"))?;
+        Ok(Self(arr))
+    }
+}
+
+/// A shareable ticket: everything a consumer needs to dial the host and
+/// reproduce its URLs. Serialized as URL-safe base64 of its JSON so it survives
+/// a paste into Slack/email as one opaque token.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ShareTicket {
+    /// iroh `EndpointTicket` string (NodeId + relay + direct addrs). Opaque to
+    /// core; the daemon parses it to dial.
+    pub iroh_ticket: String,
+    /// Services + lifetime.
+    pub manifest: ShareManifest,
+    /// Bearer capability (gate 1).
+    pub capability: Capability,
+}
+
+// `Capability` has no `PartialEq`; derive it structurally for `ShareTicket`
+// tests only, via byte comparison of the encoded form.
+impl PartialEq for Capability {
+    fn eq(&self, other: &Self) -> bool {
+        self.ct_eq(other)
+    }
+}
+
+impl ShareTicket {
+    /// Encode to a single opaque, paste-safe token.
+    pub fn encode(&self) -> Result<String, TicketError> {
+        let json = serde_json::to_vec(self).map_err(TicketError::Serialize)?;
+        Ok(format!("veldshare_{}", BASE64_URL_SAFE_NO_PAD.encode(json)))
+    }
+
+    /// Decode from the token produced by [`encode`](Self::encode).
+    pub fn decode(s: &str) -> Result<Self, TicketError> {
+        let b64 = s.strip_prefix("veldshare_").ok_or(TicketError::BadPrefix)?;
+        let json = BASE64_URL_SAFE_NO_PAD
+            .decode(b64.as_bytes())
+            .map_err(TicketError::Base64)?;
+        serde_json::from_slice(&json).map_err(TicketError::Deserialize)
+    }
+}
+
+/// Errors from ticket encoding/decoding.
+#[derive(Debug, thiserror::Error)]
+pub enum TicketError {
+    #[error("ticket is missing the `veldshare_` prefix")]
+    BadPrefix,
+    #[error("ticket base64 is invalid: {0}")]
+    Base64(base64::DecodeError),
+    #[error("ticket JSON serialize failed: {0}")]
+    Serialize(serde_json::Error),
+    #[error("ticket JSON is invalid: {0}")]
+    Deserialize(serde_json::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_manifest() -> ShareManifest {
+        ShareManifest {
+            run_id: Uuid::new_v4(),
+            project: "irohtest".to_string(),
+            nodes: vec![SharedNode {
+                node: "app".to_string(),
+                variant: "host".to_string(),
+                hostname: "app.demo.irohtest.localhost".to_string(),
+                upstream_port: 19001,
+            }],
+            created_at: 1_000_000,
+            expires_at: 1_007_200,
+        }
+    }
+
+    #[test]
+    fn ticket_round_trips() {
+        let ticket = ShareTicket {
+            iroh_ticket: "endpointaaaa".to_string(),
+            manifest: sample_manifest(),
+            capability: Capability::generate(),
+        };
+        let encoded = ticket.encode().expect("encode");
+        assert!(encoded.starts_with("veldshare_"));
+        let decoded = ShareTicket::decode(&encoded).expect("decode");
+        assert_eq!(ticket, decoded);
+    }
+
+    #[test]
+    fn decode_rejects_bad_prefix() {
+        assert!(matches!(
+            ShareTicket::decode("nope_xxxx"),
+            Err(TicketError::BadPrefix)
+        ));
+    }
+
+    #[test]
+    fn capability_ct_eq() {
+        let a = Capability::generate();
+        let b = a.clone();
+        let c = Capability::generate();
+        assert!(a.ct_eq(&b));
+        assert!(!a.ct_eq(&c));
+    }
+
+    #[test]
+    fn capability_serializes_as_base64_string() {
+        let cap = Capability::generate();
+        let json = serde_json::to_string(&cap).expect("ser");
+        // A JSON string, not an array of bytes.
+        assert!(json.starts_with('"') && json.ends_with('"'));
+        let back: Capability = serde_json::from_str(&json).expect("de");
+        assert!(cap.ct_eq(&back));
+    }
+
+    #[test]
+    fn approval_mode_serde_is_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&ApprovalMode::First).unwrap(),
+            "\"first\""
+        );
+        assert_eq!(ApprovalMode::default(), ApprovalMode::First);
+    }
+}
