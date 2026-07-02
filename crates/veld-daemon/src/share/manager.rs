@@ -65,8 +65,8 @@ struct JoinEntry {
     routes: Vec<(String, String)>,
     /// Local listener tasks; aborted on leave to drop the listeners.
     tasks: Vec<JoinHandle<()>>,
-    /// Keeps the QUIC connection alive for the duration of the join.
-    _conn: Connection,
+    /// The QUIC connection to the host; closed on leave to stop the tunnel.
+    conn: Connection,
 }
 
 /// Owns the iroh endpoint and all live shares/joins.
@@ -79,6 +79,8 @@ pub struct ShareManager {
     pending: Mutex<HashMap<String, PendingRequest>>,
     /// For `first` mode: the node id that claimed each share, keyed by share id.
     claims: Mutex<HashMap<String, EndpointId>>,
+    /// Live inbound connections per hosted share, so `unshare` can close them.
+    conns: Mutex<HashMap<String, Vec<Connection>>>,
     ports: PortAllocator,
 }
 
@@ -91,6 +93,7 @@ impl ShareManager {
             joins: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
             claims: Mutex::new(HashMap::new()),
+            conns: Mutex::new(HashMap::new()),
             ports: PortAllocator::new(),
         }
     }
@@ -154,6 +157,7 @@ impl ShareManager {
 
                     if approved {
                         debug!(label = %req.label, share = %share_id, "join approved");
+                        mgr.register_conn(&share_id, conn.clone()).await;
                         let _ = host::accept_and_serve(conn, send, host_share).await;
                     } else {
                         host::deny(send, "join denied").await;
@@ -183,6 +187,16 @@ impl ShareManager {
                 }
             }
         });
+    }
+
+    /// Track a live inbound connection so `unshare` can force it closed.
+    async fn register_conn(&self, share_id: &str, conn: Connection) {
+        self.conns
+            .lock()
+            .await
+            .entry(share_id.to_string())
+            .or_default()
+            .push(conn);
     }
 
     /// Register a share for `manifest`, minting a ticket. The capability gates
@@ -334,6 +348,16 @@ impl ShareManager {
 
         let _ = helper.reload_dns().await;
 
+        // Self-heal: if the tunnel drops (host unshared, stopped, or crashed),
+        // tear this join down locally so routes/listeners don't go stale.
+        let watcher = Arc::clone(self);
+        let watcher_id = join_id.clone();
+        let watch_conn = conn.clone();
+        tokio::spawn(async move {
+            watch_conn.closed().await;
+            let _ = watcher.leave(&watcher_id).await;
+        });
+
         self.joins.lock().await.insert(
             join_id.clone(),
             JoinEntry {
@@ -342,7 +366,7 @@ impl ShareManager {
                 urls: urls.clone(),
                 routes,
                 tasks,
-                _conn: conn,
+                conn,
             },
         );
         info!(join_id = %join_id, count = urls.len(), "joined share");
@@ -477,6 +501,12 @@ impl ShareManager {
             bail!("no such share: {id}");
         }
         self.claims.lock().await.remove(id);
+        // Close live tunnels so consumers stop being able to reach the host.
+        if let Some(conns) = self.conns.lock().await.remove(id) {
+            for conn in conns {
+                conn.close(0u32.into(), b"share stopped");
+            }
+        }
         info!(share_id = %id, "share stopped");
         Ok(())
     }
@@ -493,6 +523,8 @@ impl ShareManager {
         for task in &entry.tasks {
             task.abort();
         }
+        // Close the tunnel (also wakes the drop-watcher so it doesn't dangle).
+        entry.conn.close(0u32.into(), b"left");
 
         if let Ok(helper) = HelperClient::connect().await {
             for (hostname, route_id) in &entry.routes {

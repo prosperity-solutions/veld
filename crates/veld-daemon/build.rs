@@ -23,7 +23,10 @@ fn main() {
             .status()
             .expect("failed to run `npm ci` — is Node.js installed?");
         if !install.success() {
-            panic!("`npm ci` failed in frontend (exit code {:?})", install.code());
+            panic!(
+                "`npm ci` failed in frontend (exit code {:?})",
+                install.code()
+            );
         }
     }
 
