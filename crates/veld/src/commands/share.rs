@@ -90,6 +90,9 @@ pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
                 for url in &resp.urls {
                     println!("    {}", output::cyan(url));
                 }
+                for w in &resp.warnings {
+                    println!("  {} {}", output::yellow("!"), w);
+                }
                 println!();
                 println!(
                     "  Leave with: {}",

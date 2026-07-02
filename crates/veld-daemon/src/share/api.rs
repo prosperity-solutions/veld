@@ -221,7 +221,7 @@ fn sole_run(registry: &GlobalRegistry) -> Result<String, ApiError> {
 }
 
 /// Strip scheme and port from a URL, leaving the bare hostname.
-fn hostname_of(url: &str) -> String {
+pub(crate) fn hostname_of(url: &str) -> String {
     let no_scheme = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))

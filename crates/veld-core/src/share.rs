@@ -195,6 +195,10 @@ pub struct JoinResponse {
     pub join_id: String,
     /// URLs now reachable locally on this machine.
     pub urls: Vec<String>,
+    /// Non-fatal notes (e.g. nodes skipped because a local URL already owns the
+    /// hostname — the local URL always wins).
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// One entry in `GET /api/shares`.

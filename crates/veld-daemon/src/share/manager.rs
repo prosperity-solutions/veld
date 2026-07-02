@@ -24,10 +24,13 @@ use veld_core::share::{
     ApprovalMode, Capability, JoinResponse, PendingInfo, ShareInfo, ShareManifest, ShareTicket,
     SharesList,
 };
+use veld_core::state::GlobalRegistry;
 use uuid::Uuid;
 
 /// Timeout a manual approval waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often the reaper scans for expired shares.
+const REAPER_INTERVAL: Duration = Duration::from_secs(60);
 
 use super::endpoint::bind_endpoint;
 use super::host::{self, HostShare};
@@ -39,6 +42,8 @@ struct ShareEntry {
     manifest: ShareManifest,
     host_share: Arc<HostShare>,
     approve_mode: ApprovalMode,
+    /// Unix seconds after which the reaper removes this share.
+    expires_at: i64,
 }
 
 /// A join parked awaiting the host's manual approval.
@@ -99,6 +104,7 @@ impl ShareManager {
                 let ep = bind_endpoint(self.secret_key.clone()).await?;
                 info!(node_id = %ep.id(), "iroh share endpoint bound");
                 self.clone().spawn_accept_loop(ep.clone());
+                self.clone().spawn_reaper();
                 Ok::<_, anyhow::Error>(ep)
             })
             .await?;
@@ -157,6 +163,28 @@ impl ShareManager {
         });
     }
 
+    /// Periodically remove shares past their TTL, closing them fail-closed.
+    fn spawn_reaper(self: Arc<Self>) {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(REAPER_INTERVAL).await;
+                let now = chrono::Utc::now().timestamp();
+                let expired: Vec<String> = {
+                    let shares = self.shares.lock().await;
+                    shares
+                        .values()
+                        .filter(|s| s.expires_at <= now)
+                        .map(|s| s.id.clone())
+                        .collect()
+                };
+                for id in expired {
+                    let _ = self.unshare(&id).await;
+                    info!(share_id = %id, "share expired");
+                }
+            }
+        });
+    }
+
     /// Register a share for `manifest`, minting a ticket. The capability gates
     /// all inbound connections to this share.
     pub async fn start_share(
@@ -191,6 +219,7 @@ impl ShareManager {
         };
 
         let id = gen_id("shr");
+        let expires_at = manifest.expires_at;
         self.shares.lock().await.insert(
             id.clone(),
             ShareEntry {
@@ -198,6 +227,7 @@ impl ShareManager {
                 manifest,
                 host_share,
                 approve_mode,
+                expires_at,
             },
         );
         info!(share_id = %id, ?approve_mode, "share started");
@@ -226,8 +256,19 @@ impl ShareManager {
         let mut nodes = Vec::new();
         let mut routes = Vec::new();
         let mut tasks = Vec::new();
+        let mut warnings = Vec::new();
 
         for node in &ticket.manifest.nodes {
+            // Local URL wins: never clobber a hostname this machine already
+            // serves from one of its own runs.
+            if hostname_in_use_locally(&node.hostname) {
+                warnings.push(format!(
+                    "skipped '{}': {} is already in use locally (local URL wins)",
+                    node.node, node.hostname
+                ));
+                continue;
+            }
+
             // Allocate a local port, then release the guard so we can bind our
             // own listener on it (mirrors the orchestrator's port handoff).
             let reservation = self.ports.allocate().context("allocating local port")?;
@@ -285,7 +326,11 @@ impl ShareManager {
             },
         );
         info!(join_id = %join_id, count = urls.len(), "joined share");
-        Ok(JoinResponse { join_id, urls })
+        Ok(JoinResponse {
+            join_id,
+            urls,
+            warnings,
+        })
     }
 
     /// List active shares and joins.
@@ -447,6 +492,19 @@ impl ShareManager {
 fn gen_id(prefix: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("{prefix}_{}", &uuid[..8])
+}
+
+/// True if any of this machine's own runs already serves `hostname`.
+fn hostname_in_use_locally(hostname: &str) -> bool {
+    match GlobalRegistry::load() {
+        Ok(reg) => reg.projects.values().any(|entry| {
+            entry
+                .runs
+                .values()
+                .any(|run| run.urls.values().any(|u| super::api::hostname_of(u) == hostname))
+        }),
+        Err(_) => false,
+    }
 }
 
 /// Open the local dashboard in the default browser so the host can approve a

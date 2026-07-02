@@ -8,10 +8,15 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use iroh::endpoint::presets;
-use iroh::{Endpoint, SecretKey};
+use iroh::{Endpoint, RelayMode, RelayUrl, SecretKey};
+use tracing::warn;
 
 /// ALPN protocol identifier for veld's share tunnels.
 pub const ALPN: &[u8] = b"veld/share/1";
+
+/// Env var to point the endpoint at a self-hosted relay instead of n0's public
+/// relays (e.g. `VELD_SHARE_RELAY=https://relay.example.com`).
+const RELAY_ENV: &str = "VELD_SHARE_RELAY";
 
 /// Path to the persistent node key: `<data_dir>/veld/node.key`.
 pub fn key_path() -> Option<PathBuf> {
@@ -55,10 +60,17 @@ fn restrict_permissions(_path: &Path) {}
 /// veld share ALPN. The endpoint accepts inbound share connections and can dial
 /// out to peers.
 pub async fn bind_endpoint(secret_key: SecretKey) -> Result<Endpoint> {
-    Endpoint::builder(presets::N0)
+    let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
-        .alpns(vec![ALPN.to_vec()])
-        .bind()
-        .await
-        .context("binding iroh endpoint")
+        .alpns(vec![ALPN.to_vec()]);
+
+    // Optional self-hosted relay override (teams / privacy).
+    if let Ok(raw) = std::env::var(RELAY_ENV) {
+        match raw.parse::<RelayUrl>() {
+            Ok(url) => builder = builder.relay_mode(RelayMode::custom([url])),
+            Err(e) => warn!(error = %e, value = %raw, "ignoring invalid {RELAY_ENV}"),
+        }
+    }
+
+    builder.bind().await.context("binding iroh endpoint")
 }
