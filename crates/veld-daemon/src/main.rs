@@ -2,6 +2,7 @@ mod broadcaster;
 mod feedback_server;
 mod gc;
 mod monitor;
+mod share;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
