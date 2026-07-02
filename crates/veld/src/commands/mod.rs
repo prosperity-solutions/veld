@@ -12,6 +12,7 @@ pub mod presets;
 pub mod restart;
 pub mod runs;
 pub mod setup;
+pub mod share;
 pub mod start;
 pub mod status;
 pub mod stop;

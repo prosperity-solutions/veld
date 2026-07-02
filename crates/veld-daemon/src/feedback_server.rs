@@ -40,7 +40,7 @@ struct AppState {
 // ---------------------------------------------------------------------------
 
 /// Start the feedback HTTP server on `127.0.0.1:FEEDBACK_PORT`.
-pub async fn run_feedback_server() {
+pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::ShareManager>) {
     let state = Arc::new(AppState {
         event_notify: Notify::new(),
     });
@@ -84,7 +84,8 @@ pub async fn run_feedback_server() {
         // Management UI (served at veld.localhost via Caddy, also reachable
         // directly on this port for debugging). Merged after with_state()
         // because management routes are stateless.
-        .merge(management::routes());
+        .merge(management::routes())
+        .merge(crate::share::api::routes(share_manager));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], FEEDBACK_PORT));
     info!("feedback server listening on {addr}");

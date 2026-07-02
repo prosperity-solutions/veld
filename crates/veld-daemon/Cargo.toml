@@ -24,3 +24,5 @@ libc = "0.2"
 axum = "0.8"
 reqwest = { workspace = true }
 uuid = { workspace = true }
+iroh = "1"
+iroh-tickets = "1"

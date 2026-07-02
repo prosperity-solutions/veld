@@ -40,6 +40,24 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .empty p{font-size:13px;line-height:1.6}
 .empty code{background:var(--surface2);padding:2px 8px;border-radius:4px;font-size:13px}
 
+.shares-panel{margin-bottom:28px}
+.shares-panel h3{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--text2);font-weight:600;margin:16px 0 8px}
+.shares-panel h3:first-child{margin-top:0}
+.share-row{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:8px}
+.share-row.pending{border-color:var(--yellow);background:var(--yellow-bg)}
+.share-row .grow{flex:1;min-width:0}
+.share-row .sid{font-family:var(--mono);font-size:11px;color:var(--text2)}
+.share-row .urls{font-size:13px;word-break:break-all;margin-bottom:2px}
+.share-row .surl{display:block;line-height:1.5}
+.share-row .label{font-weight:600}
+.share-row .nid{font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:2px}
+.sbtn{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;flex-shrink:0}
+.sbtn:hover{border-color:var(--text2)}
+.sbtn.approve{border-color:var(--green);color:var(--green)}
+.sbtn.approve:hover{background:var(--green-bg)}
+.sbtn.deny,.sbtn.danger{border-color:var(--red);color:var(--red)}
+.sbtn.deny:hover,.sbtn.danger:hover{background:var(--red-bg)}
+
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
 .card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
 .card-project{font-weight:600;font-size:15px}
@@ -157,6 +175,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       <span id="status-text">connecting...</span>
     </div>
   </header>
+  <section id="shares-panel" class="shares-panel" hidden></section>
   <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
 <script>
@@ -525,7 +544,57 @@ function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
+const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
+async function refreshShares(){
+  try{
+    const resp=await fetch('/api/shares');if(!resp.ok)return;
+    const d=await resp.json();
+    const panel=document.getElementById('shares-panel');
+    const has=(d.pending&&d.pending.length)||(d.shares&&d.shares.length)||(d.joins&&d.joins.length);
+    if(!has){panel.hidden=true;panel.innerHTML='';return;}
+    let html='';
+    if(d.pending&&d.pending.length){
+      html+='<h3>Join requests</h3>';
+      for(const p of d.pending){
+        html+='<div class="share-row pending"><div class="grow"><span class="label">'+esc(p.label||'(no label)')
+          +'</span> wants to join <span class="sid">'+esc(p.share_id)+'</span><div class="nid">'+esc(p.node_id)+'</div></div>'
+          +'<button class="sbtn approve" data-sact="approve" data-sid="'+esc(p.id)+'">Approve</button>'
+          +'<button class="sbtn deny" data-sact="deny" data-sid="'+esc(p.id)+'">Deny</button></div>';
+      }
+    }
+    if(d.shares&&d.shares.length){
+      html+='<h3>Sharing</h3>';
+      for(const s of d.shares){
+        html+='<div class="share-row"><div class="grow"><div class="urls">'+linkUrls(s.urls)
+          +'</div><span class="sid">'+esc(s.id)+'</span></div>'
+          +'<button class="sbtn danger" data-sact="unshare" data-sid="'+esc(s.id)+'">Stop</button></div>';
+      }
+    }
+    if(d.joins&&d.joins.length){
+      html+='<h3>Joined</h3>';
+      for(const j of d.joins){
+        html+='<div class="share-row"><div class="grow"><div class="urls">'+linkUrls(j.urls)
+          +'</div><span class="sid">'+esc(j.id)+'</span></div>'
+          +'<button class="sbtn" data-sact="leave" data-sid="'+esc(j.id)+'">Leave</button></div>';
+      }
+    }
+    panel.innerHTML=html;panel.hidden=false;
+  }catch(e){}
+}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-sact]');if(!b)return;
+  const act=b.dataset.sact,id=b.dataset.sid,H={'X-Veld-Request':'1'};
+  b.disabled=true;
+  try{
+    if(act==='approve')await fetch('/api/shares/requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:H});
+    else if(act==='deny')await fetch('/api/shares/requests/'+encodeURIComponent(id)+'/deny',{method:'POST',headers:H});
+    else if(act==='unshare')await fetch('/api/shares/'+encodeURIComponent(id),{method:'DELETE',headers:H});
+    else if(act==='leave')await fetch('/api/shares/joins/'+encodeURIComponent(id),{method:'DELETE',headers:H});
+  }catch(e){}
+  refreshShares();
+});
 refresh();setInterval(refresh,3000);
+refreshShares();setInterval(refreshShares,3000);
 })();
 </script>
 </body>
