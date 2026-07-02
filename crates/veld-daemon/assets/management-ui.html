@@ -48,6 +48,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .share-row .grow{flex:1;min-width:0}
 .share-row .sid{font-family:var(--mono);font-size:11px;color:var(--text2)}
 .share-row .urls{font-size:13px;word-break:break-all;margin-bottom:2px}
+.share-row .surl{display:block;line-height:1.5}
 .share-row .label{font-weight:600}
 .share-row .nid{font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:2px}
 .sbtn{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;flex-shrink:0}
@@ -543,6 +544,7 @@ function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
+const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
 async function refreshShares(){
   try{
     const resp=await fetch('/api/shares');if(!resp.ok)return;
@@ -563,7 +565,7 @@ async function refreshShares(){
     if(d.shares&&d.shares.length){
       html+='<h3>Sharing</h3>';
       for(const s of d.shares){
-        html+='<div class="share-row"><div class="grow"><div class="urls">'+esc((s.urls||[]).join('  '))
+        html+='<div class="share-row"><div class="grow"><div class="urls">'+linkUrls(s.urls)
           +'</div><span class="sid">'+esc(s.id)+'</span></div>'
           +'<button class="sbtn danger" data-sact="unshare" data-sid="'+esc(s.id)+'">Stop</button></div>';
       }
@@ -571,7 +573,7 @@ async function refreshShares(){
     if(d.joins&&d.joins.length){
       html+='<h3>Joined</h3>';
       for(const j of d.joins){
-        html+='<div class="share-row"><div class="grow"><div class="urls">'+esc((j.urls||[]).join('  '))
+        html+='<div class="share-row"><div class="grow"><div class="urls">'+linkUrls(j.urls)
           +'</div><span class="sid">'+esc(j.id)+'</span></div>'
           +'<button class="sbtn" data-sact="leave" data-sid="'+esc(j.id)+'">Leave</button></div>';
       }
