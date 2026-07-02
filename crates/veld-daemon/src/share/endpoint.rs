@@ -27,8 +27,8 @@ pub fn key_path() -> Option<PathBuf> {
 /// does not yet exist. The file holds the raw 32-byte ed25519 secret.
 pub fn load_or_create_secret_key(path: &Path) -> Result<SecretKey> {
     if path.exists() {
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading node key {}", path.display()))?;
+        let bytes =
+            std::fs::read(path).with_context(|| format!("reading node key {}", path.display()))?;
         let arr: [u8; 32] = bytes
             .as_slice()
             .try_into()

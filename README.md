@@ -28,6 +28,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
 - **Internal logs** — liveness probe outcomes (with stderr), recovery decisions, health state transitions; view with `veld logs --source internal`
+- **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine. No accounts, no Veld-hosted server.
 
 ## Install
 
@@ -146,6 +147,13 @@ veld stop --name dev
 | `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a `veldshare_…` ticket |
+| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
+| `veld shares [--json]` | List active shares, joins, and pending join requests |
+| `veld approve <REQ_ID> [--json]` | Approve a pending join request |
+| `veld deny <REQ_ID> [--json]` | Deny a pending join request |
+| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
+| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
 | `veld ui` | Open the management dashboard in the browser |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
@@ -294,6 +302,27 @@ veld setup hammerspoon
 This installs the `Veld.spoon` into `~/.hammerspoon/Spoons/` and offers to patch your `init.lua` to load it automatically. No sudo required. The menu includes an "Open Management UI" item for quick access to the browser dashboard.
 
 Check extension status with `veld doctor`.
+
+## Sharing
+
+Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel (iroh: QUIC with NAT hole-punching and an n0 relay fallback). No accounts, no Veld-hosted server.
+
+```sh
+veld share my-feature        # prints a veldshare_… ticket to send
+veld join veldshare_…        # colleague runs this; blocks until you approve
+```
+
+Both people must have Veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match. The consumer's own Caddy issues a locally-trusted cert, so there's no cert warning.
+
+Two gates protect a share: a capability token embedded in the ticket, plus host approval. Approval modes (`--approve`):
+
+- **`manual`** (default for interactive use) — you approve each join via the dashboard (which opens automatically) or `veld approve <REQ_ID>`
+- **`first`** (default with `--json`) — auto-approves and pins the first token-valid joiner, rejecting the rest
+- **`auto`** — approves any token-valid joiner
+
+Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees your URLs or content. To use your own iroh-relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
+
+If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Default TTL is 7200s.
 
 ## Requirements
 

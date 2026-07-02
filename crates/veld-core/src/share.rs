@@ -376,7 +376,10 @@ impl DaemonClient {
     pub async fn approve(&self, req_id: &str) -> Result<(), DaemonError> {
         let resp = self
             .http
-            .post(format!("{}/api/shares/requests/{req_id}/approve", self.base))
+            .post(format!(
+                "{}/api/shares/requests/{req_id}/approve",
+                self.base
+            ))
             .header("X-Veld-Request", "1")
             .send()
             .await

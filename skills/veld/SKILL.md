@@ -117,6 +117,33 @@ The management dashboard (`veld ui`) shows a button for each available action on
 the node's row. Clicking it runs the action server-side via the CLI, so any
 credentials never reach the browser.
 
+## Sharing environments (peer-to-peer)
+
+Share a running environment with a colleague so they open the **same** URLs on
+their own machine, over an encrypted P2P tunnel (iroh: QUIC + NAT hole-punching
++ n0 relay fallback). No accounts, no Veld-hosted server.
+
+```sh
+veld share my-feature                       # print a veldshare_… ticket to send
+veld share my-feature --node frontend       # share only specific nodes (repeatable)
+veld share my-feature --ttl 3600            # TTL in seconds (default 7200)
+veld share my-feature --approve first        # first|manual|auto (default: manual, or first with --json)
+veld join veldshare_… --label alice         # join by ticket; blocks until the host approves
+veld shares                                  # list active shares, joins, pending requests
+veld approve <REQ_ID>                        # resolve a pending join request
+veld deny <REQ_ID>
+veld unshare <SHARE_ID>                      # stop hosting a share
+veld leave <JOIN_ID>                         # disconnect from a joined share
+```
+
+Two gates protect a share: a capability token in the ticket, plus host approval.
+Approval modes: `manual` (host approves each join via the dashboard — which opens
+automatically — or `veld approve`), `first` (auto-approve + pin the first
+token-valid joiner, reject the rest), `auto` (approve any token-valid joiner).
+Traffic is end-to-end encrypted; a relay only forwards sealed bytes and never
+sees URLs or content. Set `VELD_SHARE_RELAY=<https url>` on the daemon to use a
+self-hosted iroh-relay instead of n0's public relays.
+
 ## Editing veld.json
 
 For the full config schema, variables, and node types, see [reference/config.md](reference/config.md).
@@ -187,6 +214,10 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results
+- **Sharing needs matching setup modes** — both people must have veld installed and be in the *same* mode (both privileged → clean URLs, or both unprivileged → `:18443` in URLs), or the shared URLs won't match
+- **Local URL wins on collision** — if the joiner already runs the same environment, their local URL is kept; that shared node is skipped and reported as a warning
+- **`--approve manual` vs `first`** — manual (interactive default) needs `veld approve <REQ_ID>` (or the dashboard) per join; first (default with `--json`) auto-pins the first token-valid joiner and rejects the rest
+- **Shares are in-memory** — if the daemon stops, shares stop (fail-closed); a ticket alone doesn't grant access without host approval
 
 ## Troubleshooting
 

@@ -44,7 +44,10 @@ fn check_csrf(headers: &HeaderMap) -> Result<(), ApiError> {
     if headers.contains_key("x-veld-request") {
         Ok(())
     } else {
-        Err((StatusCode::FORBIDDEN, "missing X-Veld-Request header".to_string()))
+        Err((
+            StatusCode::FORBIDDEN,
+            "missing X-Veld-Request header".to_string(),
+        ))
     }
 }
 

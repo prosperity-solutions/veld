@@ -11,7 +11,11 @@ use tokio::net::TcpStream;
 /// Splice `tcp` to the QUIC bi-stream (`send`/`recv`) until either direction
 /// closes, then tear the other direction down cleanly so websocket-style
 /// long-lived connections don't hang half-open.
-pub async fn splice(tcp: TcpStream, mut send: SendStream, mut recv: RecvStream) -> std::io::Result<()> {
+pub async fn splice(
+    tcp: TcpStream,
+    mut send: SendStream,
+    mut recv: RecvStream,
+) -> std::io::Result<()> {
     let (mut tcp_read, mut tcp_write) = tcp.into_split();
 
     let upstream = async {

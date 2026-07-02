@@ -18,6 +18,7 @@ use tokio::net::TcpListener;
 use tokio::sync::{Mutex, OnceCell, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::port::PortAllocator;
 use veld_core::share::{
@@ -25,7 +26,6 @@ use veld_core::share::{
     SharesList,
 };
 use veld_core::state::GlobalRegistry;
-use uuid::Uuid;
 
 /// Timeout a manual approval waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -269,15 +269,29 @@ impl ShareManager {
                 continue;
             }
 
-            // Allocate a local port, then release the guard so we can bind our
-            // own listener on it (mirrors the orchestrator's port handoff).
-            let reservation = self.ports.allocate().context("allocating local port")?;
+            // Per-node setup is non-fatal: on any failure we clean up what we
+            // started for this node, warn, and move on — never leaving a leaked
+            // listener, bound port, or half-registered route behind.
+            let reservation = match self.ports.allocate() {
+                Ok(r) => r,
+                Err(e) => {
+                    warnings.push(format!("skipped '{}': no local port ({e})", node.node));
+                    continue;
+                }
+            };
             let local_port = reservation.port;
             reservation.release();
 
-            let listener = TcpListener::bind(("127.0.0.1", local_port))
-                .await
-                .with_context(|| format!("binding local listener on {local_port}"))?;
+            let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
+                Ok(l) => l,
+                Err(e) => {
+                    warnings.push(format!(
+                        "skipped '{}': bind {local_port} failed ({e})",
+                        node.node
+                    ));
+                    continue;
+                }
+            };
 
             let conn_for_task = conn.clone();
             let hostname_for_task = node.hostname.clone();
@@ -292,7 +306,6 @@ impl ShareManager {
                     });
                 }
             });
-            tasks.push(handle);
 
             // Register DNS + Caddy route pointing at our local listener.
             let route_id = format!("veld-join-{join_id}-{}", node.node);
@@ -302,11 +315,18 @@ impl ShareManager {
                 "hostname": node.hostname,
                 "upstream": format!("localhost:{local_port}"),
             });
-            helper
-                .add_route(route)
-                .await
-                .with_context(|| format!("adding route for {}", node.hostname))?;
+            if let Err(e) = helper.add_route(route).await {
+                // Undo everything we did for this node so nothing leaks.
+                handle.abort();
+                let _ = helper.remove_host(&node.hostname).await;
+                warnings.push(format!(
+                    "skipped '{}': route registration failed ({e})",
+                    node.node
+                ));
+                continue;
+            }
 
+            tasks.push(handle);
             routes.push((node.hostname.clone(), route_id));
             urls.push(node.url.clone());
             nodes.push(node.node.clone());
@@ -498,10 +518,11 @@ fn gen_id(prefix: &str) -> String {
 fn hostname_in_use_locally(hostname: &str) -> bool {
     match GlobalRegistry::load() {
         Ok(reg) => reg.projects.values().any(|entry| {
-            entry
-                .runs
-                .values()
-                .any(|run| run.urls.values().any(|u| super::api::hostname_of(u) == hostname))
+            entry.runs.values().any(|run| {
+                run.urls
+                    .values()
+                    .any(|u| super::api::hostname_of(u) == hostname)
+            })
         }),
         Err(_) => false,
     }

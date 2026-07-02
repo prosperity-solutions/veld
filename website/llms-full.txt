@@ -130,6 +130,12 @@ veld stop --name dev
 | `veld runs` | List all runs |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a `veldshare_…` ticket |
+| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
+| `veld shares [--json]` | List active shares, joins, and pending join requests |
+| `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
+| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
+| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld init` | Create a new veld.json |
@@ -179,6 +185,48 @@ The feedback server runs per-run and exposes:
 The feedback overlay automatically captures React and Vue component stack traces when available, providing agents with component-level context (not just CSS selectors) for precise modifications.
 
 This makes veld uniquely suited for agentic workflows where AI agents build UI and humans provide iterative feedback without context-switching.
+
+---
+
+## Peer-to-Peer Sharing
+
+Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel. No accounts, no Veld-hosted server. The tunnel uses iroh (QUIC with NAT hole-punching and an n0 relay fallback).
+
+### How it works
+
+1. The host runs `veld share <run>` and gets a `veldshare_…` ticket to send to a colleague
+2. The colleague runs `veld join <ticket>`; the command blocks until the host approves
+3. Once approved, veld materializes the shared URLs locally, so the colleague opens the same URLs the host sees
+4. The consumer's own Caddy issues a locally-trusted cert, so there is no cert warning
+
+Both people must have veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match.
+
+### Security
+
+Two gates protect every share: a capability token embedded in the ticket, plus host approval. Approval modes (`--approve`):
+
+- **`manual`** (default for interactive use) — the host approves each join via the dashboard (which opens automatically in the browser) or `veld approve <REQ_ID>`
+- **`first`** (default with `--json`) — auto-approves and pins the first token-valid joiner, rejecting the rest
+- **`auto`** — approves any token-valid joiner
+
+Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees URLs or content. To use a self-hosted relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
+
+### Behavior
+
+- **Collision** — if the consumer already runs the same environment, the local URL wins: that node is skipped and reported as a warning
+- **Fail-closed** — shares are held in the daemon's memory; if the daemon stops, shares stop
+- **TTL** — shares expire after `--ttl` seconds (default 7200)
+
+### CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Start sharing a running env; prints a `veldshare_…` ticket |
+| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket (blocks until approved) |
+| `veld shares [--json]` | List active shares, joins, and pending join requests |
+| `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
+| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
+| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
 
 ---
 

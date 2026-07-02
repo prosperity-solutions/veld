@@ -40,7 +40,10 @@ pub async fn share(
     match DaemonClient::new().start_share(&req).await {
         Ok(resp) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&resp).unwrap_or_default()
+                );
             } else {
                 output::print_success(&format!(
                     "Sharing {} node(s) over peer-to-peer.",
@@ -80,7 +83,10 @@ pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
     match DaemonClient::new().join(&req).await {
         Ok(resp) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&resp).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&resp).unwrap_or_default()
+                );
             } else {
                 output::print_success(&format!(
                     "Joined — {} URL(s) now reachable on this machine:",
@@ -113,7 +119,10 @@ pub async fn list(json: bool) -> i32 {
     match DaemonClient::new().list().await {
         Ok(list) => {
             if json {
-                println!("{}", serde_json::to_string_pretty(&list).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&list).unwrap_or_default()
+                );
                 return 0;
             }
             if list.shares.is_empty() && list.joins.is_empty() {

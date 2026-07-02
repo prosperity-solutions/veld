@@ -45,7 +45,13 @@ pub async fn dial(
 /// fresh data stream.
 pub async fn forward_local(conn: &Connection, hostname: &str, tcp: TcpStream) -> Result<()> {
     let (mut send, recv) = conn.open_bi().await?;
-    proto::write_json(&mut send, &proto::OpenStream { hostname: hostname.to_string() }).await?;
+    proto::write_json(
+        &mut send,
+        &proto::OpenStream {
+            hostname: hostname.to_string(),
+        },
+    )
+    .await?;
     forward::splice(tcp, send, recv).await?;
     Ok(())
 }

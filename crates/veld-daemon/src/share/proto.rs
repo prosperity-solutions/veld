@@ -35,10 +35,16 @@ pub struct ControlResponse {
 
 impl ControlResponse {
     pub fn approved() -> Self {
-        Self { approved: true, reason: None }
+        Self {
+            approved: true,
+            reason: None,
+        }
     }
     pub fn denied(reason: impl Into<String>) -> Self {
-        Self { approved: false, reason: Some(reason.into()) }
+        Self {
+            approved: false,
+            reason: Some(reason.into()),
+        }
     }
 }
 

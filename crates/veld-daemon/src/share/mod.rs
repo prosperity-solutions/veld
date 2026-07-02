@@ -19,7 +19,7 @@ pub mod proto;
 
 #[cfg(test)]
 mod tests {
-    use super::endpoint::{load_or_create_secret_key, ALPN};
+    use super::endpoint::{ALPN, load_or_create_secret_key};
 
     #[test]
     fn alpn_is_versioned() {
@@ -66,7 +66,10 @@ mod tests {
         let hostname = "app.demo.irohtest.localhost".to_string();
         let mut upstreams = HashMap::new();
         upstreams.insert(hostname.clone(), echo_port);
-        let share = Arc::new(HostShare { capability: capability.clone(), upstreams });
+        let share = Arc::new(HostShare {
+            capability: capability.clone(),
+            upstreams,
+        });
 
         // Host accept loop.
         let host_ep2 = host_ep.clone();
