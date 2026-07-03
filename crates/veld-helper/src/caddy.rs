@@ -224,6 +224,43 @@ impl CaddyManager {
         Ok(())
     }
 
+    /// Remove every route whose `@id` starts with `prefix`. Returns how many were
+    /// removed. Used to purge orphaned `veld-join-*` routes on daemon startup.
+    pub async fn remove_routes_by_prefix(&self, prefix: &str) -> Result<usize> {
+        let list_url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes");
+        let resp = self
+            .client
+            .get(&list_url)
+            .send()
+            .await
+            .context("listing caddy routes")?;
+        if !resp.status().is_success() {
+            // Server/routes not configured yet — nothing to purge.
+            return Ok(0);
+        }
+        let routes: serde_json::Value = resp.json().await.context("parsing caddy routes")?;
+        let ids: Vec<String> = routes
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|r| r.get("@id").and_then(|v| v.as_str()))
+                    .filter(|id| id.starts_with(prefix))
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut removed = 0;
+        for id in ids {
+            if self.remove_route(&id).await.is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            info!(prefix, removed, "purged caddy routes by prefix");
+        }
+        Ok(removed)
+    }
+
     /// Check whether caddy is running and reachable by querying the veld
     /// sentinel route. Returns `true` only when our Caddy instance is running
     /// (i.e. the sentinel route exists), not an unrelated Caddy process.

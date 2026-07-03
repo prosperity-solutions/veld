@@ -20,7 +20,6 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 use veld_core::helper::HelperClient;
-use veld_core::port::PortAllocator;
 use veld_core::share::{
     ApprovalMode, Capability, JoinResponse, PendingInfo, ShareInfo, ShareManifest, ShareTicket,
     SharesList,
@@ -31,6 +30,13 @@ use veld_core::state::GlobalRegistry;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the reaper scans for expired shares.
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
+/// Max time to wait for an inbound peer to send its control frame before the
+/// per-connection task gives up (pre-auth, so a leaked link can't pile up
+/// stalled tasks holding a connection).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Max time a consumer's `join` waits to dial the host (hole-punch + approval)
+/// before returning a clean error instead of hanging the HTTP request.
+const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 
 use super::endpoint::bind_endpoint;
 use super::host::{self, HostShare};
@@ -72,6 +78,9 @@ struct JoinEntry {
     /// Capability of the joined share, so repeat opens of the same link are
     /// idempotent instead of creating duplicate joins.
     capability: Capability,
+    /// Non-fatal notes from the join (e.g. skipped nodes), preserved so a repeat
+    /// open of the same link reports them instead of an empty list.
+    warnings: Vec<String>,
 }
 
 /// Owns the iroh endpoint and all live shares/joins.
@@ -87,7 +96,6 @@ pub struct ShareManager {
     /// Live inbound connections per hosted share (keyed by connection stable id),
     /// so `unshare` can close them and the dashboard can count joiners.
     conns: Mutex<HashMap<String, HashMap<usize, Connection>>>,
-    ports: PortAllocator,
 }
 
 impl ShareManager {
@@ -100,7 +108,6 @@ impl ShareManager {
             pending: Mutex::new(HashMap::new()),
             claims: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
-            ports: PortAllocator::new(),
         }
     }
 
@@ -127,19 +134,19 @@ impl ShareManager {
             while let Some(incoming) = endpoint.accept().await {
                 let mgr = Arc::clone(&self);
                 tokio::spawn(async move {
-                    let conn = match incoming.await {
-                        Ok(conn) => conn,
-                        Err(e) => {
-                            debug!(error = %e, "incoming connection failed");
-                            return;
-                        }
+                    // Bounded handshake: a peer that completes the QUIC connect
+                    // but never sends its control frame (e.g. a leaked link)
+                    // must not park this task forever holding a connection.
+                    let handshake = async {
+                        let conn = incoming.await.ok()?;
+                        let (req, send, recv) = host::read_control(&conn).await.ok()?;
+                        Some((conn, req, send, recv))
                     };
-                    let (req, send, recv) = match host::read_control(&conn).await {
-                        Ok(parts) => parts,
-                        Err(e) => {
-                            debug!(error = %e, "control handshake failed");
-                            return;
-                        }
+                    let Ok(Some((conn, req, send, recv))) =
+                        tokio::time::timeout(HANDSHAKE_TIMEOUT, handshake).await
+                    else {
+                        debug!("inbound handshake failed or timed out");
+                        return;
                     };
                     drop(recv);
 
@@ -161,15 +168,28 @@ impl ShareManager {
                         .resolve_approval(&share_id, mode, node_id, &req.label)
                         .await;
 
-                    if approved {
-                        debug!(label = %req.label, share = %share_id, "join approved");
-                        let sid = conn.stable_id();
-                        mgr.register_conn(&share_id, conn.clone()).await;
-                        let _ = host::accept_and_serve(conn, send, host_share).await;
-                        mgr.unregister_conn(&share_id, sid).await;
-                    } else {
+                    if !approved {
                         host::deny(send, "join denied").await;
+                        return;
                     }
+
+                    // The share may have been stopped (unshare/expiry) while this
+                    // request was parked awaiting manual approval — re-check
+                    // before serving so a stopped share can't keep admitting.
+                    if !mgr.shares.lock().await.contains_key(&share_id) {
+                        host::deny(send, "share stopped").await;
+                        mgr.clear_claim(&share_id, node_id).await;
+                        return;
+                    }
+
+                    debug!(label = %req.label, share = %share_id, "join approved");
+                    let sid = conn.stable_id();
+                    mgr.register_conn(&share_id, conn.clone()).await;
+                    let _ = host::accept_and_serve(conn, send, host_share).await;
+                    mgr.unregister_conn(&share_id, sid).await;
+                    // First-mode: release the claim when the pinned peer's session
+                    // ends so a different colleague can join next.
+                    mgr.clear_claim(&share_id, node_id).await;
                 });
             }
         });
@@ -273,20 +293,27 @@ impl ShareManager {
         let endpoint = self.endpoint().await?;
         let ticket = ShareTicket::decode(ticket_str).context("decoding ticket")?;
 
-        // Idempotent: opening the same join link again returns the existing live
-        // join rather than dialing a second time. (A left join is removed from
-        // the map, so this correctly re-joins after a leave.)
+        // Idempotent for a *successful* join: opening the same link again returns
+        // the existing live join (with its original warnings) rather than dialing
+        // twice. A prior all-skipped join (no URLs materialised) is torn down so
+        // this attempt can retry; a left join is already gone, so it re-joins.
         {
-            let joins = self.joins.lock().await;
-            if let Some(existing) = joins
-                .values()
-                .find(|j| j.capability.ct_eq(&ticket.capability))
-            {
-                return Ok(JoinResponse {
-                    join_id: existing.id.clone(),
-                    urls: existing.urls.clone(),
-                    warnings: Vec::new(),
-                });
+            let existing = {
+                let joins = self.joins.lock().await;
+                joins
+                    .values()
+                    .find(|j| j.capability.ct_eq(&ticket.capability))
+                    .map(|j| (j.id.clone(), j.urls.clone(), j.warnings.clone()))
+            };
+            if let Some((id, urls, warnings)) = existing {
+                if !urls.is_empty() {
+                    return Ok(JoinResponse {
+                        join_id: id,
+                        urls,
+                        warnings,
+                    });
+                }
+                let _ = self.leave(&id).await;
             }
         }
 
@@ -297,8 +324,17 @@ impl ShareManager {
 
         let label = if label.is_empty() { "veld" } else { label };
         // The host sends the manifest over the tunnel after approving — the
-        // ticket itself carries none, keeping it short.
-        let (conn, manifest) = join::dial(&endpoint, addr, &ticket.capability, label).await?;
+        // ticket itself carries none, keeping it short. Bounded so a browser
+        // join doesn't hang forever on an unreachable host.
+        let (conn, manifest) = match tokio::time::timeout(
+            DIAL_TIMEOUT,
+            join::dial(&endpoint, addr, &ticket.capability, label),
+        )
+        .await
+        {
+            Ok(res) => res?,
+            Err(_) => bail!("timed out connecting to the host (unreachable, or no relay path)"),
+        };
 
         let helper = HelperClient::connect()
             .await
@@ -313,8 +349,10 @@ impl ShareManager {
 
         for node in &manifest.nodes {
             // Local URL wins: never clobber a hostname this machine already
-            // serves from one of its own runs.
-            if hostname_in_use_locally(&node.hostname) {
+            // serves — from one of its own runs, or from another active join.
+            if hostname_in_use_locally(&node.hostname)
+                || self.hostname_in_active_join(&node.hostname).await
+            {
                 warnings.push(format!(
                     "skipped '{}': {} is already in use locally (local URL wins)",
                     node.node, node.hostname
@@ -323,25 +361,23 @@ impl ShareManager {
             }
 
             // Per-node setup is non-fatal: on any failure we clean up what we
-            // started for this node, warn, and move on — never leaving a leaked
-            // listener, bound port, or half-registered route behind.
-            let reservation = match self.ports.allocate() {
-                Ok(r) => r,
-                Err(e) => {
-                    warnings.push(format!("skipped '{}': no local port ({e})", node.node));
-                    continue;
-                }
-            };
-            let local_port = reservation.port;
-            reservation.release();
-
-            let listener = match TcpListener::bind(("127.0.0.1", local_port)).await {
+            // started for this node, warn, and move on. Bind an OS-assigned port
+            // directly (we own the listener) — no allocator handoff, so no
+            // leak/TOCTOU.
+            let listener = match TcpListener::bind(("127.0.0.1", 0)).await {
                 Ok(l) => l,
                 Err(e) => {
                     warnings.push(format!(
-                        "skipped '{}': bind {local_port} failed ({e})",
+                        "skipped '{}': could not bind a local port ({e})",
                         node.node
                     ));
+                    continue;
+                }
+            };
+            let local_port = match listener.local_addr() {
+                Ok(a) => a.port(),
+                Err(e) => {
+                    warnings.push(format!("skipped '{}': no local address ({e})", node.node));
                     continue;
                 }
             };
@@ -362,7 +398,14 @@ impl ShareManager {
 
             // Register DNS + Caddy route pointing at our local listener.
             let route_id = format!("veld-join-{join_id}-{}", node.node);
-            let _ = helper.add_host(&node.hostname, "127.0.0.1").await;
+            if let Err(e) = helper.add_host(&node.hostname, "127.0.0.1").await {
+                // add_host is a no-op for `.localhost` (RFC 6761); for custom
+                // apex domains a failure means the URL won't resolve — warn.
+                warnings.push(format!(
+                    "'{}': DNS entry for {} may be incomplete ({e})",
+                    node.node, node.hostname
+                ));
+            }
             let route = serde_json::json!({
                 "route_id": route_id,
                 "hostname": node.hostname,
@@ -387,16 +430,9 @@ impl ShareManager {
 
         let _ = helper.reload_dns().await;
 
-        // Self-heal: if the tunnel drops (host unshared, stopped, or crashed),
-        // tear this join down locally so routes/listeners don't go stale.
-        let watcher = Arc::clone(self);
-        let watcher_id = join_id.clone();
-        let watch_conn = conn.clone();
-        tokio::spawn(async move {
-            watch_conn.closed().await;
-            let _ = watcher.leave(&watcher_id).await;
-        });
-
+        // Insert the join BEFORE spawning the drop-watcher: if the tunnel drops
+        // in between, the watcher's leave() must find the entry to clean it up
+        // (otherwise an orphan with stale routes is left behind).
         self.joins.lock().await.insert(
             join_id.clone(),
             JoinEntry {
@@ -405,10 +441,21 @@ impl ShareManager {
                 urls: urls.clone(),
                 routes,
                 tasks,
-                conn,
+                conn: conn.clone(),
                 capability: ticket.capability.clone(),
+                warnings: warnings.clone(),
             },
         );
+
+        // Self-heal: if the tunnel drops (host unshared, stopped, or crashed),
+        // tear this join down locally so routes/listeners don't go stale.
+        let watcher = Arc::clone(self);
+        let watcher_id = join_id.clone();
+        tokio::spawn(async move {
+            conn.closed().await;
+            let _ = watcher.leave(&watcher_id).await;
+        });
+
         info!(join_id = %join_id, count = urls.len(), "joined share");
         Ok(JoinResponse {
             join_id,
@@ -504,18 +551,27 @@ impl ShareManager {
             ApprovalMode::Manual => {
                 let (tx, rx) = oneshot::channel();
                 let req_id = gen_id("req");
-                self.pending.lock().await.insert(
-                    req_id.clone(),
-                    PendingRequest {
-                        id: req_id.clone(),
-                        share_id: share_id.to_string(),
-                        label: label.to_string(),
-                        node_id: node_id.to_string(),
-                        decision: tx,
-                    },
-                );
+                // Only pop the browser if this share has no request already
+                // pending — avoids a new tab per retry / per concurrent joiner.
+                let already_pending = {
+                    let mut pending = self.pending.lock().await;
+                    let had = pending.values().any(|p| p.share_id == share_id);
+                    pending.insert(
+                        req_id.clone(),
+                        PendingRequest {
+                            id: req_id.clone(),
+                            share_id: share_id.to_string(),
+                            label: label.to_string(),
+                            node_id: node_id.to_string(),
+                            decision: tx,
+                        },
+                    );
+                    had
+                };
                 info!(req = %req_id, share = %share_id, label, "join awaiting approval");
-                open_dashboard();
+                if !already_pending {
+                    open_dashboard();
+                }
 
                 let approved = matches!(
                     tokio::time::timeout(APPROVAL_TIMEOUT, rx).await,
@@ -525,6 +581,25 @@ impl ShareManager {
                 approved
             }
         }
+    }
+
+    /// Release a `first`-mode claim held by `node_id` on `share_id` (no-op if a
+    /// different node holds it or none does).
+    async fn clear_claim(&self, share_id: &str, node_id: EndpointId) {
+        let mut claims = self.claims.lock().await;
+        if claims.get(share_id) == Some(&node_id) {
+            claims.remove(share_id);
+        }
+    }
+
+    /// True if a currently-joined share already materialises `hostname` locally
+    /// (so a second join for the same hostname is skipped — local URL wins).
+    async fn hostname_in_active_join(&self, hostname: &str) -> bool {
+        self.joins
+            .lock()
+            .await
+            .values()
+            .any(|j| j.routes.iter().any(|(h, _)| h == hostname))
     }
 
     /// Approve a parked join request.
@@ -560,6 +635,21 @@ impl ShareManager {
             bail!("no such share: {id}");
         }
         self.claims.lock().await.remove(id);
+        // Revoke any requests parked awaiting approval for this share so a
+        // pending approval can't admit a joiner after the share is gone.
+        {
+            let mut pending = self.pending.lock().await;
+            let stale: Vec<String> = pending
+                .iter()
+                .filter(|(_, p)| p.share_id == id)
+                .map(|(rid, _)| rid.clone())
+                .collect();
+            for rid in stale {
+                if let Some(req) = pending.remove(&rid) {
+                    let _ = req.decision.send(false);
+                }
+            }
+        }
         // Close live tunnels so consumers stop being able to reach the host.
         if let Some(conns) = self.conns.lock().await.remove(id) {
             for conn in conns.into_values() {

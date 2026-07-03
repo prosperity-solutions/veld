@@ -66,10 +66,24 @@ pub enum HelperError {
 /// `command` + `args` object that veld-helper's server expects.
 #[derive(Debug, Clone)]
 pub enum HelperCommand {
-    AddHost { hostname: String, ip: String },
-    RemoveHost { hostname: String },
-    AddRoute { route: serde_json::Value },
-    RemoveRoute { route_id: String },
+    AddHost {
+        hostname: String,
+        ip: String,
+    },
+    RemoveHost {
+        hostname: String,
+    },
+    AddRoute {
+        route: serde_json::Value,
+    },
+    RemoveRoute {
+        route_id: String,
+    },
+    /// Remove every Caddy route whose id starts with `prefix` (used to purge
+    /// orphaned `veld-join-*` routes on daemon startup).
+    RemoveRoutesByPrefix {
+        prefix: String,
+    },
     ReloadDns,
     CaddyStart,
     CaddyStop,
@@ -93,6 +107,10 @@ impl Serialize for HelperCommand {
             HelperCommand::RemoveRoute { route_id } => {
                 ("remove_route", serde_json::json!({ "route_id": route_id }))
             }
+            HelperCommand::RemoveRoutesByPrefix { prefix } => (
+                "remove_routes_by_prefix",
+                serde_json::json!({ "prefix": prefix }),
+            ),
             HelperCommand::ReloadDns => {
                 ("reload_dns", serde_json::Value::Object(Default::default()))
             }
@@ -209,6 +227,16 @@ impl HelperClient {
     pub async fn remove_route(&self, route_id: &str) -> Result<HelperResponse, HelperError> {
         self.send(&HelperCommand::RemoveRoute {
             route_id: route_id.to_owned(),
+        })
+        .await
+    }
+
+    pub async fn remove_routes_by_prefix(
+        &self,
+        prefix: &str,
+    ) -> Result<HelperResponse, HelperError> {
+        self.send(&HelperCommand::RemoveRoutesByPrefix {
+            prefix: prefix.to_owned(),
         })
         .await
     }
