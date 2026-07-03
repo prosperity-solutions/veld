@@ -40,6 +40,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::{TcpListener, TcpStream};
+        use veld_core::share::ShareManifest;
 
         // Local echo server standing in for the shared dev service.
         let echo = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
@@ -66,9 +67,18 @@ mod tests {
         let hostname = "app.demo.irohtest.localhost".to_string();
         let mut upstreams = HashMap::new();
         upstreams.insert(hostname.clone(), echo_port);
+        let manifest = ShareManifest {
+            run_id: uuid::Uuid::new_v4(),
+            run: "demo".to_string(),
+            project: "irohtest".to_string(),
+            nodes: vec![],
+            created_at: 0,
+            expires_at: 0,
+        };
         let share = Arc::new(HostShare {
             capability: capability.clone(),
             upstreams,
+            manifest,
         });
 
         // Host accept loop.
@@ -82,7 +92,7 @@ mod tests {
         });
 
         // Consumer dials, opens a data stream, echoes bytes.
-        let conn = join::dial(&client_ep, host_addr, &capability, "test")
+        let (conn, _manifest) = join::dial(&client_ep, host_addr, &capability, "test")
             .await
             .unwrap();
 

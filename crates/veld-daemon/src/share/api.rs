@@ -218,6 +218,7 @@ fn build_manifest(
     let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
     Ok(ShareManifest {
         run_id: run_state.run_id,
+        run: run_name.clone(),
         project: run_state.project.clone(),
         nodes,
         created_at: now,

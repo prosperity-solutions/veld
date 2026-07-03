@@ -11,7 +11,7 @@
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use veld_core::share::Capability;
+use veld_core::share::{Capability, ShareManifest};
 
 /// Maximum length of a single framed control message (payloads, not tunnel
 /// data, which is unframed after the opening frame).
@@ -26,24 +26,28 @@ pub struct ControlRequest {
     pub label: String,
 }
 
-/// Host → consumer, on the control stream.
+/// Host → consumer, on the control stream. On approval it carries the manifest
+/// (which URLs/ports to materialise) so the ticket doesn't have to.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ControlResponse {
     pub approved: bool,
     pub reason: Option<String>,
+    pub manifest: Option<ShareManifest>,
 }
 
 impl ControlResponse {
-    pub fn approved() -> Self {
+    pub fn approved(manifest: ShareManifest) -> Self {
         Self {
             approved: true,
             reason: None,
+            manifest: Some(manifest),
         }
     }
     pub fn denied(reason: impl Into<String>) -> Self {
         Self {
             approved: false,
             reason: Some(reason.into()),
+            manifest: None,
         }
     }
 }

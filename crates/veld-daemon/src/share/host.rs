@@ -13,15 +13,17 @@ use anyhow::Result;
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::net::TcpStream;
 use tracing::{debug, warn};
-use veld_core::share::Capability;
+use veld_core::share::{Capability, ShareManifest};
 
 use super::{forward, proto};
 
-/// What a host is willing to serve on one share: the capability that gates it
-/// and the map of shared hostname → local upstream port.
+/// What a host is willing to serve on one share: the capability that gates it,
+/// the map of shared hostname → local upstream port, and the manifest sent to
+/// the consumer on approval.
 pub struct HostShare {
     pub capability: Capability,
     pub upstreams: HashMap<String, u16>,
+    pub manifest: ShareManifest,
 }
 
 /// Read the control request that opens every connection. The caller inspects
@@ -45,7 +47,11 @@ pub async fn accept_and_serve(
     mut send: SendStream,
     share: Arc<HostShare>,
 ) -> Result<()> {
-    proto::write_json(&mut send, &proto::ControlResponse::approved()).await?;
+    proto::write_json(
+        &mut send,
+        &proto::ControlResponse::approved(share.manifest.clone()),
+    )
+    .await?;
     run_data_loop(conn, share).await
 }
 

@@ -224,11 +224,11 @@ impl ShareManager {
         let host_share = Arc::new(HostShare {
             capability: capability.clone(),
             upstreams,
+            manifest: manifest.clone(),
         });
 
         let ticket = ShareTicket {
             iroh_ticket,
-            manifest: manifest.clone(),
             capability,
         };
 
@@ -259,7 +259,9 @@ impl ShareManager {
             .clone();
 
         let label = if label.is_empty() { "veld" } else { label };
-        let conn = join::dial(&endpoint, addr, &ticket.capability, label).await?;
+        // The host sends the manifest over the tunnel after approving — the
+        // ticket itself carries none, keeping it short.
+        let (conn, manifest) = join::dial(&endpoint, addr, &ticket.capability, label).await?;
 
         let helper = HelperClient::connect()
             .await
@@ -272,7 +274,7 @@ impl ShareManager {
         let mut tasks = Vec::new();
         let mut warnings = Vec::new();
 
-        for node in &ticket.manifest.nodes {
+        for node in &manifest.nodes {
             // Local URL wins: never clobber a hostname this machine already
             // serves from one of its own runs.
             if hostname_in_use_locally(&node.hostname) {

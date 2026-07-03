@@ -5,19 +5,20 @@ use anyhow::{Result, bail};
 use iroh::endpoint::Connection;
 use iroh::{Endpoint, EndpointAddr};
 use tokio::net::TcpStream;
-use veld_core::share::Capability;
+use veld_core::share::{Capability, ShareManifest};
 
 use super::endpoint::ALPN;
 use super::{forward, proto};
 
-/// Dial the host and complete the control handshake. Returns the live
-/// connection on approval; errors if the host denies or is unreachable.
+/// Dial the host and complete the control handshake. On approval the host sends
+/// the manifest (which URLs/ports to materialise), returned alongside the live
+/// connection. Errors if the host denies or is unreachable.
 pub async fn dial(
     endpoint: &Endpoint,
     addr: impl Into<EndpointAddr>,
     capability: &Capability,
     label: &str,
-) -> Result<Connection> {
+) -> Result<(Connection, ShareManifest)> {
     let conn = endpoint.connect(addr, ALPN).await?;
 
     let (mut send, mut recv) = conn.open_bi().await?;
@@ -38,7 +39,10 @@ pub async fn dial(
         }
     }
 
-    Ok(conn)
+    let manifest = resp
+        .manifest
+        .ok_or_else(|| anyhow::anyhow!("host approved but sent no manifest"))?;
+    Ok((conn, manifest))
 }
 
 /// Forward one locally-accepted TCP connection to `hostname` on the host over a

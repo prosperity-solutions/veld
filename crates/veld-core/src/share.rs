@@ -52,6 +52,8 @@ pub struct SharedNode {
 pub struct ShareManifest {
     /// The origin run this share was minted from.
     pub run_id: Uuid,
+    /// Run name (for display and matching a share to its run card).
+    pub run: String,
     /// Project name (for display / namespacing).
     pub project: String,
     /// Shared services.
@@ -114,16 +116,16 @@ impl<'de> Deserialize<'de> for Capability {
     }
 }
 
-/// A shareable ticket: everything a consumer needs to dial the host and
-/// reproduce its URLs. Serialized as URL-safe base64 of its JSON so it survives
-/// a paste into Slack/email as one opaque token.
+/// A shareable ticket: the minimum a consumer needs to *dial* the host. It is
+/// deliberately small and constant-size — the manifest (which URLs, ports) is
+/// **not** here; the host sends it over the tunnel after approval. This keeps
+/// the ticket (and the join URL built from it) short no matter how many URLs a
+/// run exposes. Serialized as URL-safe base64 JSON so it pastes as one token.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ShareTicket {
     /// iroh `EndpointTicket` string (NodeId + relay + direct addrs). Opaque to
     /// core; the daemon parses it to dial.
     pub iroh_ticket: String,
-    /// Services + lifetime.
-    pub manifest: ShareManifest,
     /// Bearer capability (gate 1).
     pub capability: Capability,
 }
@@ -420,6 +422,7 @@ mod tests {
     fn sample_manifest() -> ShareManifest {
         ShareManifest {
             run_id: Uuid::new_v4(),
+            run: "demo".to_string(),
             project: "irohtest".to_string(),
             nodes: vec![SharedNode {
                 node: "app".to_string(),
@@ -437,13 +440,14 @@ mod tests {
     fn ticket_round_trips() {
         let ticket = ShareTicket {
             iroh_ticket: "endpointaaaa".to_string(),
-            manifest: sample_manifest(),
             capability: Capability::generate(),
         };
         let encoded = ticket.encode().expect("encode");
         assert!(encoded.starts_with("veldshare_"));
         let decoded = ShareTicket::decode(&encoded).expect("decode");
         assert_eq!(ticket, decoded);
+        // sample_manifest still constructs a valid manifest (sent over the wire).
+        assert_eq!(sample_manifest().run, "demo");
     }
 
     #[test]
