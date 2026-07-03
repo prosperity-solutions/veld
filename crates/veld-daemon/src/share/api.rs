@@ -14,7 +14,7 @@ use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
 use veld_core::share::{
-    Capability, JoinRequest, JoinResponse, ShareManifest, SharedNode, SharesList,
+    ApprovalMode, Capability, JoinRequest, JoinResponse, ShareManifest, SharedNode, SharesList,
     StartShareRequest, StartShareResponse,
 };
 use veld_core::state::{GlobalRegistry, ProjectState};
@@ -29,6 +29,7 @@ pub fn routes(manager: Arc<ShareManager>) -> Router {
         .route("/api/shares", get(list).post(start))
         .route("/api/shares/join", post(join))
         .route("/api/shares/{id}", delete(unshare))
+        .route("/api/shares/{id}/mode", post(set_mode))
         .route("/api/shares/by-run/{run_id}", delete(unshare_run))
         .route("/api/shares/joins/{id}", delete(leave))
         .route("/api/shares/requests/{id}/approve", post(approve))
@@ -118,6 +119,25 @@ async fn leave(
     check_csrf(&headers)?;
     manager
         .leave(&id)
+        .await
+        .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Deserialize)]
+struct ModeReq {
+    approve: ApprovalMode,
+}
+
+async fn set_mode(
+    State(manager): State<Arc<ShareManager>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<ModeReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    check_csrf(&headers)?;
+    manager
+        .set_approve_mode(&id, req.approve)
         .await
         .map_err(|e| (StatusCode::NOT_FOUND, e.to_string()))?;
     Ok(StatusCode::NO_CONTENT)

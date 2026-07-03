@@ -42,6 +42,8 @@ struct ShareEntry {
     manifest: ShareManifest,
     host_share: Arc<HostShare>,
     approve_mode: ApprovalMode,
+    /// The encoded `veldshare_…` token, so the dashboard can build a join link.
+    ticket: String,
     /// Unix seconds after which the reaper removes this share.
     expires_at: i64,
 }
@@ -231,6 +233,7 @@ impl ShareManager {
             iroh_ticket,
             capability,
         };
+        let token = ticket.encode().context("encoding ticket")?;
 
         let id = gen_id("shr");
         let expires_at = manifest.expires_at;
@@ -241,6 +244,7 @@ impl ShareManager {
                 manifest,
                 host_share,
                 approve_mode,
+                ticket: token,
                 expires_at,
             },
         );
@@ -388,8 +392,11 @@ impl ShareManager {
             .values()
             .map(|s| ShareInfo {
                 id: s.id.clone(),
+                run: s.manifest.run.clone(),
+                approve: Some(s.approve_mode),
                 nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
                 urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
+                ticket: Some(s.ticket.clone()),
             })
             .collect();
         let joins = self
@@ -399,8 +406,11 @@ impl ShareManager {
             .values()
             .map(|j| ShareInfo {
                 id: j.id.clone(),
+                run: String::new(),
+                approve: None,
                 nodes: j.nodes.clone(),
                 urls: j.urls.clone(),
+                ticket: None,
             })
             .collect();
         let pending = self
@@ -531,6 +541,18 @@ impl ShareManager {
             }
         }
         stopped
+    }
+
+    /// Change a hosted share's approval mode (the dashboard's auto-accept toggle).
+    /// Applies to subsequent join attempts.
+    pub async fn set_approve_mode(&self, id: &str, mode: ApprovalMode) -> Result<()> {
+        let mut shares = self.shares.lock().await;
+        let entry = shares
+            .get_mut(id)
+            .ok_or_else(|| anyhow::anyhow!("no such share: {id}"))?;
+        entry.approve_mode = mode;
+        info!(share_id = %id, ?mode, "approval mode changed");
+        Ok(())
     }
 
     /// Leave a joined share: remove routes/DNS, drop listeners, close the tunnel.

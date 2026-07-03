@@ -207,8 +207,18 @@ pub struct JoinResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareInfo {
     pub id: String,
+    /// Run name this share exposes (empty for joins). Used to attach a hosted
+    /// share to its run card in the dashboard.
+    #[serde(default)]
+    pub run: String,
+    /// Approval mode of a hosted share (`first`/`manual`/`auto`).
+    #[serde(default)]
+    pub approve: Option<ApprovalMode>,
     pub nodes: Vec<String>,
     pub urls: Vec<String>,
+    /// The join ticket (hosted shares only) so the dashboard can build the link.
+    #[serde(default)]
+    pub ticket: Option<String>,
 }
 
 /// A join awaiting the host's approval (manual mode).
