@@ -694,7 +694,16 @@ document.addEventListener('click',async e=>{
   const act=b.dataset.action,H={'X-Veld-Request':'1'};
   if(act==='copy-join'){navigator.clipboard.writeText(b.dataset.joinurl);flashBtn(b,'Copied');return;}
   if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
-  if(act==='start-share'){b.disabled=true;try{await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run:b.dataset.run,approve:'manual'})});}catch(e){}refresh();refreshShares();return;}
+  if(act==='start-share'){
+    b.disabled=true;const run=b.dataset.run;let copied=false;
+    try{
+      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,approve:'manual'})});
+      if(r.ok){const d=await r.json();if(d.join_url){try{await navigator.clipboard.writeText(d.join_url);copied=true;}catch(e){}}}
+    }catch(e){}
+    await refresh();refreshShares();
+    if(copied){document.querySelectorAll('.card').forEach(c=>{if(c.dataset.run===run){const cb=c.querySelector('[data-action="copy-join"]');if(cb)flashBtn(cb,'Link copied!');}});}
+    return;
+  }
   if(act==='stop-share'){try{await fetch('/api/shares/'+encodeURIComponent(b.dataset.share),{method:'DELETE',headers:H});}catch(e){}refresh();refreshShares();return;}
 });
 document.addEventListener('change',async e=>{

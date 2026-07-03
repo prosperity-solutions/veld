@@ -640,7 +640,7 @@ fn gen_id(prefix: &str) -> String {
 /// Base for browser join URLs, from the setup mode. Uses `veld.localhost` (via
 /// Caddy) — never the daemon's raw `127.0.0.1:19899` — so a copied link works
 /// on the recipient's machine.
-fn join_base() -> String {
+pub(crate) fn join_base() -> String {
     let mode = dirs::home_dir()
         .and_then(|h| std::fs::read_to_string(h.join(".veld").join("setup.json")).ok())
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())

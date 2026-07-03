@@ -178,6 +178,9 @@ pub struct StartShareResponse {
     pub share_id: String,
     /// The opaque `veldshare_…` token to hand to a colleague.
     pub ticket: String,
+    /// Full browser join URL (built by the daemon from the setup mode).
+    #[serde(default)]
+    pub join_url: String,
     pub nodes: Vec<String>,
     pub expires_at: i64,
 }

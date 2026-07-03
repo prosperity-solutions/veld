@@ -71,10 +71,12 @@ async fn start(
         .await
         .map_err(internal)?;
     let token = ticket.encode().map_err(internal)?;
+    let join_url = format!("{}/join#{}", super::manager::join_base(), token);
 
     Ok(Json(StartShareResponse {
         share_id,
         ticket: token,
+        join_url,
         nodes: node_names,
         expires_at,
     }))
