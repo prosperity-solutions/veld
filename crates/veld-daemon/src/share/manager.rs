@@ -668,7 +668,9 @@ fn hostname_in_use_locally(hostname: &str) -> bool {
 /// Open the local dashboard in the default browser so the host can approve a
 /// pending join. Best-effort and OS-agnostic; a no-op where there is no opener.
 fn open_dashboard() {
-    let url = "http://127.0.0.1:19899/#shares";
+    // Open the Caddy-fronted dashboard (veld.localhost), not the daemon's raw
+    // 127.0.0.1:19899 port.
+    let url = format!("{}/#shares", join_base());
     #[cfg(target_os = "macos")]
     let program: Option<&str> = Some("open");
     #[cfg(target_os = "linux")]
@@ -677,7 +679,7 @@ fn open_dashboard() {
     let program: Option<&str> = None;
 
     if let Some(program) = program {
-        if let Err(e) = std::process::Command::new(program).arg(url).spawn() {
+        if let Err(e) = std::process::Command::new(program).arg(&url).spawn() {
             debug!(error = %e, "could not open dashboard for approval");
         }
     }
