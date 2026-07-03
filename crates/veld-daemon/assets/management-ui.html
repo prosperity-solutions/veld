@@ -69,7 +69,6 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
 
 .share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;margin-bottom:10px;border-top:1px solid var(--border);font-size:12px}
-.share-bar .share-label{font-size:10px;letter-spacing:.1em;color:var(--dim);font-weight:600;margin-right:2px}
 .share-bar .share-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
 .share-bar .share-on{color:var(--text2)}
 .share-bar .share-on b{color:var(--text);font-weight:600}
@@ -290,7 +289,6 @@ function render(data){
       // Share status strip — only while a share is active.
       if(sh){
         h+='<div class="share-bar">';
-        h+='<span class="share-label">SHARE</span>';
         h+='<span class="share-dot"></span>';
         h+='<span class="share-on">Sharing'+(sh.joiners?(' · <b>'+sh.joiners+'</b> connected'):'')+'</span>';
         h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
@@ -670,7 +668,7 @@ document.addEventListener('click',async e=>{
   }catch(e){}
   refreshShares();
 });
-function flashBtn(b,txt){const o=b.textContent;b.textContent=txt;b.disabled=true;setTimeout(()=>{b.textContent=o;b.disabled=false;},1200);}
+function flashBtn(b,txt){const o=b.textContent;b.textContent=txt;b.classList.add('ok');setTimeout(()=>{b.textContent=o;b.classList.remove('ok');},1400);}
 document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-action]');if(!b)return;
   const act=b.dataset.action,H={'X-Veld-Request':'1'};
