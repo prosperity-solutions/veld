@@ -40,10 +40,50 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .empty p{font-size:13px;line-height:1.6}
 .empty code{background:var(--surface2);padding:2px 8px;border-radius:4px;font-size:13px}
 
+.shares-panel{margin-bottom:28px}
+.shares-panel h3{font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--text2);font-weight:600;margin:16px 0 8px}
+.shares-panel h3:first-child{margin-top:0}
+.share-row{display:flex;align-items:center;gap:12px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:8px}
+.share-row.pending{border-color:var(--yellow);background:var(--yellow-bg)}
+.share-row .grow{flex:1;min-width:0}
+.share-row .sid{font-family:var(--mono);font-size:11px;color:var(--text2)}
+.share-row .urls{font-size:13px;word-break:break-all;margin-bottom:2px}
+.share-row .surl{display:block;line-height:1.5}
+.share-row .label{font-weight:600}
+.share-row .nid{font-family:var(--mono);font-size:11px;color:var(--text2);margin-top:2px}
+.sbtn{border:1px solid var(--border);background:var(--surface2);color:var(--text);border-radius:6px;padding:6px 12px;font-size:12px;flex-shrink:0}
+.sbtn:hover{border-color:var(--text2)}
+.sbtn.approve{border-color:var(--green);color:var(--green)}
+.sbtn.approve:hover{background:var(--green-bg)}
+.sbtn.deny,.sbtn.danger{border-color:var(--red);color:var(--red)}
+.sbtn.deny:hover,.sbtn.danger:hover{background:var(--red-bg)}
+
+.join-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px}
+.join-overlay[hidden]{display:none}
+.join-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:36px;max-width:560px;width:100%;text-align:center}
+.join-card h2{font-size:19px;margin-bottom:10px}
+.join-card p{color:var(--text2);font-size:14px;line-height:1.5}
+.join-card .big{font-size:40px;margin-bottom:6px}
+.join-card .urls{margin:16px 0;text-align:left}
+.join-card .surl{display:block;margin:6px 0;word-break:break-all;font-size:14px}
+.join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
+
+.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;margin-bottom:10px;border-top:1px solid var(--border);font-size:12px}
+.share-bar .share-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.share-bar .share-on{color:var(--text2)}
+.share-bar .share-on b{color:var(--text);font-weight:600}
+.share-bar .share-toggle{display:flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer;margin-left:auto}
+.share-bar .share-toggle input{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);cursor:pointer;position:relative;flex-shrink:0}
+.share-bar .share-toggle input:hover{border-color:var(--text2)}
+.share-bar .share-toggle input:checked{background:var(--accent);border-color:var(--accent)}
+.share-bar .share-toggle input:checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
+.card-btn.danger{color:var(--red)}
+.card-btn.danger:hover{background:var(--red-bg);border-color:var(--red)}
+
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
-.card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
-.card-project{font-weight:600;font-size:15px}
-.card-run{font-family:var(--mono);font-size:13px;font-weight:500;margin-left:auto}
+.card-head{display:flex;align-items:center;gap:8px;padding:14px 18px 10px}
+.card-run{font-family:var(--mono);font-size:16px;font-weight:600;color:var(--text)}
+.card-project{font-size:13px;color:var(--text2)}
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
 .badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
@@ -52,9 +92,8 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.recovering,.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
 
-.card-sub{display:flex;align-items:center;gap:8px;padding:0 18px 12px;font-size:12px;color:var(--text2)}
-.card-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;max-width:60%}
-.card-actions{display:flex;gap:4px;margin-left:auto}
+.card-path{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;flex:1;min-width:0}
+.card-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 18px 12px}
 .card-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 8px;border-radius:5px;transition:color .15s,border-color .15s}
 .card-btn:hover{color:var(--text);border-color:var(--text2)}
 .card-btn.ok{color:var(--green);border-color:var(--green)}
@@ -157,14 +196,18 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
       <span id="status-text">connecting...</span>
     </div>
   </header>
+  <section id="shares-panel" class="shares-panel" hidden></section>
   <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
+<div id="join-overlay" class="join-overlay" hidden><div class="join-card"><div id="join-body"></div></div></div>
 <script>
 (function(){
 const $=(s,p)=>(p||document).querySelector(s);
 const $$=(s,p)=>(p||document).querySelectorAll(s);
 const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
 let lastFP=null;
+let sharesByRun={};
+let joinCount=0;
 const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
@@ -184,16 +227,26 @@ async function refresh(){
   try{
     const resp=await fetch('/api/environments');if(!resp.ok)throw 0;
     const data=await resp.json();
+    // Hosted shares fold into their run card; fetch + index by run name.
+    let shares=[];
+    try{const sr=await fetch('/api/shares');if(sr.ok){const sd=await sr.json();shares=sd.shares||[];joinCount=(sd.joins||[]).length;}}catch(e){}
+    sharesByRun={};for(const s of shares){if(s.run)sharesByRun[s.run]=s;}
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
-    statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
-    statusText.textContent=running>0?running+' running':total>0?'all stopped':'no environments';
-    const f=fp(data);if(f===lastFP)return;lastFP=f;render(data);
+    statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
+    statusText.textContent=running>0?running+' running':(joinCount>0?joinCount+' joined':(total>0?'all stopped':'no environments'));
+    const sf=shares.map(s=>s.run+':'+s.approve+':'+s.id+':'+(s.joiners||0)).sort().join(',');
+    const f=fp(data)+'||'+sf+'||j'+joinCount;if(f===lastFP)return;lastFP=f;render(data);
   }catch(e){statusDot.innerHTML='<span class="dot off"></span>';statusText.textContent='disconnected';}
 }
 
 function render(data){
-  if(!data.projects.length){content.innerHTML='<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';return;}
+  if(!data.projects.length){
+    content.innerHTML=joinCount>0
+      ?'<div class="empty fade-in"><h2>No local environments</h2><p>You’ve joined '+joinCount+' shared environment'+(joinCount>1?'s':'')+' — see the panel above.</p></div>'
+      :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
+    return;
+  }
   for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
   for(const proj of data.projects){
@@ -208,20 +261,41 @@ function render(data){
       const nodes=run.nodes||[];
       const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
 
+      const sh=(run.status==='running')?sharesByRun[run.name]:null;
+      const active=run.status==='running'||run.status==='starting';
+
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
-      h+='<div class="card-top"><span class="card-project">'+esc(proj.name)+'</span>';
+      // Zone 1 — identity: run name primary, project + path as context, status.
+      h+='<div class="card-head">';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
+      h+='<span class="card-project">'+esc(proj.name)+'</span>';
+      h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
       h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
-      if(run.status==='running'||run.status==='starting'){
-        h+='<button class="card-btn" data-action="restart-env" style="margin-left:6px" title="Restart environment">Restart</button>';
+      h+='</div>';
+      // Zone 2 — one action toolbar (lifecycle + utility + share).
+      h+='<div class="card-toolbar">';
+      if(active){
+        h+='<button class="card-btn" data-action="restart-env" title="Restart environment">Restart</button>';
         h+='<button class="card-btn" data-action="stop-env" title="Stop environment">Stop</button>';
       }
-      h+='</div>';
-      h+='<div class="card-sub"><span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
-      h+='<span class="card-actions">';
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
       h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
-      h+='</span></div>';
+      if(run.status==='running'&&!sh){
+        h+='<button class="card-btn" data-action="start-share" data-run="'+esc(run.name)+'" title="Share over an encrypted P2P tunnel">Share</button>';
+      }else if(sh){
+        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'" title="Stop sharing">Stop sharing</button>';
+      }
+      h+='</div>';
+      // Share status strip — only while a share is active.
+      if(sh){
+        h+='<div class="share-bar">';
+        h+='<span class="share-dot"></span>';
+        h+='<span class="share-on">Sharing'+(sh.joiners?(' · <b>'+sh.joiners+'</b> connected'):'')+'</span>';
+        h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
+        h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
+        h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
+      h+='</div>';
+      }
       // Segmented control
       h+='<div class="segmented">';
       h+='<button class="seg-btn'+(st.tab==='services'?' active':'')+'" data-action="tab" data-tab="services">Services</button>';
@@ -525,7 +599,121 @@ function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
+const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
+function setJoinState(kind,data){
+  const ov=document.getElementById('join-overlay'),body=document.getElementById('join-body');
+  ov.hidden=false;
+  if(kind==='waiting'){
+    body.innerHTML='<div class="spinner" style="margin:0 auto 18px"></div><h2>Joining…</h2><p>'+esc(data)+'</p>';
+  }else if(kind==='ok'){
+    const warn=(data.warnings&&data.warnings.length)?'<p>'+data.warnings.map(esc).join('<br>')+'</p>':'';
+    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
+  }else if(kind==='ended'){
+    body.innerHTML='<div class="big">🔌</div><h2>Share ended</h2><p>The host stopped sharing — these URLs are no longer reachable.</p><a class="sbtn" href="/">Go to dashboard</a>';
+  }else{
+    body.innerHTML='<div class="big">⛔</div><h2>Join failed</h2><p>'+esc(typeof data==='string'?data:JSON.stringify(data))+'</p><a class="sbtn" href="/">Go to dashboard</a>';
+  }
+}
+let joinWatch=null;
+// Poll whether this join still exists locally; the daemon removes it when the
+// host stops sharing (or goes away), so this flips the modal to "share ended".
+function watchJoin(joinId){
+  if(joinWatch)clearInterval(joinWatch);
+  joinWatch=setInterval(async()=>{
+    try{
+      const r=await fetch('/api/shares');if(!r.ok)return;
+      const d=await r.json();
+      if(!(d.joins||[]).some(j=>j.id===joinId)){
+        clearInterval(joinWatch);joinWatch=null;
+        setJoinState('ended');
+      }
+    }catch(e){}
+  },3000);
+}
+async function runJoinFlow(){
+  const ticket=decodeURIComponent((location.hash||'').replace(/^#/,'')).trim();
+  if(!ticket){setJoinState('error','This join link has no ticket. Ask the host to resend it.');return;}
+  setJoinState('waiting','Connecting to the host and waiting for approval…');
+  try{
+    const resp=await fetch('/api/shares/join',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({ticket})});
+    if(!resp.ok){setJoinState('error',(await resp.text())||('HTTP '+resp.status));return;}
+    const d=await resp.json();
+    setJoinState('ok',d);
+    watchJoin(d.join_id);
+  }catch(e){setJoinState('error',String(e));}
+}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-join-leave]');if(!b)return;
+  b.disabled=true;
+  try{await fetch('/api/shares/joins/'+encodeURIComponent(b.dataset.joinLeave),{method:'DELETE',headers:{'X-Veld-Request':'1'}});}catch(e){}
+  location.href='/';
+});
+async function refreshShares(){
+  try{
+    const resp=await fetch('/api/shares');if(!resp.ok)return;
+    const d=await resp.json();
+    const panel=document.getElementById('shares-panel');
+    const has=(d.pending&&d.pending.length)||(d.joins&&d.joins.length);
+    if(!has){panel.hidden=true;panel.innerHTML='';return;}
+    let html='';
+    if(d.pending&&d.pending.length){
+      html+='<h3>Join requests</h3>';
+      for(const p of d.pending){
+        html+='<div class="share-row pending"><div class="grow"><span class="label">'+esc(p.label||'(no label)')
+          +'</span> wants to join <span class="sid">'+esc(p.share_id)+'</span><div class="nid">'+esc(p.node_id)+'</div></div>'
+          +'<button class="sbtn approve" data-sact="approve" data-sid="'+esc(p.id)+'">Approve</button>'
+          +'<button class="sbtn deny" data-sact="deny" data-sid="'+esc(p.id)+'">Deny</button></div>';
+      }
+    }
+    if(d.joins&&d.joins.length){
+      html+='<h3>Joined</h3>';
+      for(const j of d.joins){
+        html+='<div class="share-row"><div class="grow"><div class="urls">'+linkUrls(j.urls)
+          +'</div><span class="sid">'+esc(j.id)+'</span></div>'
+          +'<button class="sbtn" data-sact="leave" data-sid="'+esc(j.id)+'">Leave</button></div>';
+      }
+    }
+    panel.innerHTML=html;panel.hidden=false;
+  }catch(e){}
+}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-sact]');if(!b)return;
+  const act=b.dataset.sact,id=b.dataset.sid,H={'X-Veld-Request':'1'};
+  b.disabled=true;
+  try{
+    if(act==='approve')await fetch('/api/shares/requests/'+encodeURIComponent(id)+'/approve',{method:'POST',headers:H});
+    else if(act==='deny')await fetch('/api/shares/requests/'+encodeURIComponent(id)+'/deny',{method:'POST',headers:H});
+    else if(act==='unshare')await fetch('/api/shares/'+encodeURIComponent(id),{method:'DELETE',headers:H});
+    else if(act==='leave')await fetch('/api/shares/joins/'+encodeURIComponent(id),{method:'DELETE',headers:H});
+  }catch(e){}
+  refreshShares();
+});
+function flashBtn(b,txt){const o=b.textContent;b.textContent=txt;b.classList.add('ok');setTimeout(()=>{b.textContent=o;b.classList.remove('ok');},1400);}
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-action]');if(!b)return;
+  const act=b.dataset.action,H={'X-Veld-Request':'1'};
+  if(act==='copy-join'){navigator.clipboard.writeText(b.dataset.joinurl);flashBtn(b,'Copied');return;}
+  if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
+  if(act==='start-share'){
+    b.disabled=true;const run=b.dataset.run;let copied=false;
+    try{
+      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,approve:'manual'})});
+      if(r.ok){const d=await r.json();if(d.join_url){try{await navigator.clipboard.writeText(d.join_url);copied=true;}catch(e){}}}
+    }catch(e){}
+    await refresh();refreshShares();
+    if(copied){document.querySelectorAll('.card').forEach(c=>{if(c.dataset.run===run){const cb=c.querySelector('[data-action="copy-join"]');if(cb)flashBtn(cb,'Link copied!');}});}
+    return;
+  }
+  if(act==='stop-share'){try{await fetch('/api/shares/'+encodeURIComponent(b.dataset.share),{method:'DELETE',headers:H});}catch(e){}refresh();refreshShares();return;}
+});
+document.addEventListener('change',async e=>{
+  const t=e.target.closest('[data-action="toggle-auto"]');if(!t)return;
+  try{await fetch('/api/shares/'+encodeURIComponent(t.dataset.share)+'/mode',{method:'POST',headers:{'X-Veld-Request':'1','Content-Type':'application/json'},body:JSON.stringify({approve:t.checked?'auto':'manual'})});}catch(e){}
+  refresh();
+});
 refresh();setInterval(refresh,3000);
+refreshShares();setInterval(refreshShares,3000);
+if(location.pathname.replace(/\/+$/,'').endsWith('/join'))runJoinFlow();
 })();
 </script>
 </body>

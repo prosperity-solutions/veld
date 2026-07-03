@@ -2,6 +2,7 @@ mod broadcaster;
 mod feedback_server;
 mod gc;
 mod monitor;
+mod share;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -101,18 +102,46 @@ async fn main() -> Result<()> {
     // Shared broadcaster for connected CLI clients.
     let broadcaster = broadcaster::Broadcaster::new();
 
+    // Share manager owns the iroh endpoint and all live shares/joins. Its node
+    // key persists so the node identity is stable across restarts. Created early
+    // because GC and the startup route purge both need it.
+    let share_manager = {
+        let key_path =
+            share::endpoint::key_path().context("could not determine data dir for node key")?;
+        let secret =
+            share::endpoint::load_or_create_secret_key(&key_path).context("loading node key")?;
+        std::sync::Arc::new(share::manager::ShareManager::new(secret))
+    };
+
+    // Purge orphaned `veld-join-*` Caddy routes left by a previous daemon that
+    // crashed while a join was active. In-memory join state is empty at boot, so
+    // every such route is stale. Best-effort, retried with backoff because on a
+    // cold boot the helper/Caddy may not be reachable yet when the daemon starts.
+    tokio::spawn(async {
+        for attempt in 0..5u64 {
+            if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+                if helper.remove_routes_by_prefix("veld-join-").await.is_ok() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt + 1))).await;
+        }
+    });
+
     // Spawn background tasks.
     let monitor_broadcaster = broadcaster.clone();
     let monitor_handle = tokio::spawn(async move {
         monitor::run_health_monitor(monitor_broadcaster).await;
     });
 
+    let gc_manager = std::sync::Arc::clone(&share_manager);
     let gc_handle = tokio::spawn(async move {
-        gc::run_gc_scheduler().await;
+        gc::run_gc_scheduler(gc_manager).await;
     });
 
+    let feedback_manager = std::sync::Arc::clone(&share_manager);
     let feedback_handle = tokio::spawn(async move {
-        feedback_server::run_feedback_server().await;
+        feedback_server::run_feedback_server(feedback_manager).await;
     });
 
     let accept_broadcaster = broadcaster.clone();

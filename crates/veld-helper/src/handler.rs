@@ -42,6 +42,7 @@ impl State {
             "remove_host" => self.handle_remove_host(&request.args).await,
             "add_route" => self.handle_add_route(&request.args).await,
             "remove_route" => self.handle_remove_route(&request.args).await,
+            "remove_routes_by_prefix" => self.handle_remove_routes_by_prefix(&request.args).await,
             "reload_dns" => self.handle_reload_dns().await,
             "caddy_start" => self.handle_caddy_start().await,
             "caddy_stop" => self.handle_caddy_stop().await,
@@ -152,6 +153,18 @@ impl State {
 
         match self.caddy.remove_route(route_id).await {
             Ok(()) => Response::ok(),
+            Err(e) => Response::err(format!("{e:#}")),
+        }
+    }
+
+    async fn handle_remove_routes_by_prefix(&self, args: &Value) -> Response {
+        let prefix = match args.get("prefix").and_then(Value::as_str) {
+            Some(v) => v,
+            None => return Response::err("missing 'prefix' in args"),
+        };
+
+        match self.caddy.remove_routes_by_prefix(prefix).await {
+            Ok(_) => Response::ok(),
             Err(e) => Response::err(format!("{e:#}")),
         }
     }

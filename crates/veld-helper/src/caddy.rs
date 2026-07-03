@@ -224,6 +224,34 @@ impl CaddyManager {
         Ok(())
     }
 
+    /// Remove every route whose `@id` starts with `prefix`. Returns how many were
+    /// removed. Used to purge orphaned `veld-join-*` routes on daemon startup.
+    pub async fn remove_routes_by_prefix(&self, prefix: &str) -> Result<usize> {
+        let list_url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes");
+        let resp = self
+            .client
+            .get(&list_url)
+            .send()
+            .await
+            .context("listing caddy routes")?;
+        if !resp.status().is_success() {
+            // Server/routes not configured yet — nothing to purge.
+            return Ok(0);
+        }
+        let routes: serde_json::Value = resp.json().await.context("parsing caddy routes")?;
+        let ids = filter_route_ids_by_prefix(&routes, prefix);
+        let mut removed = 0;
+        for id in ids {
+            if self.remove_route(&id).await.is_ok() {
+                removed += 1;
+            }
+        }
+        if removed > 0 {
+            info!(prefix, removed, "purged caddy routes by prefix");
+        }
+        Ok(removed)
+    }
+
     /// Check whether caddy is running and reachable by querying the veld
     /// sentinel route. Returns `true` only when our Caddy instance is running
     /// (i.e. the sentinel route exists), not an unrelated Caddy process.
@@ -342,6 +370,20 @@ fn build_base_config(
 ///    chunk and passes the rest through. This enables streaming SSR, WebSocket
 ///    upgrades, and SSE without any bypass routes (the handler properly
 ///    delegates Flusher and Hijacker).
+// Route ids starting with the given prefix, taken from a Caddy routes array.
+fn filter_route_ids_by_prefix(routes: &serde_json::Value, prefix: &str) -> Vec<String> {
+    routes
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("@id").and_then(|v| v.as_str()))
+                .filter(|id| id.starts_with(prefix))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_route_json(
     route_id: &str,
     hostname: &str,
@@ -591,6 +633,23 @@ fn is_process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filter_route_ids_by_prefix() {
+        let routes = serde_json::json!([
+            { "@id": "veld-join-abc-app" },
+            { "@id": "veld-join-abc-db" },
+            { "@id": "veld-demo-frontend-local" },
+            { "@id": "veld-management" },
+            { "no_id": true },
+        ]);
+        let mut ids = filter_route_ids_by_prefix(&routes, "veld-join-");
+        ids.sort();
+        assert_eq!(ids, vec!["veld-join-abc-app", "veld-join-abc-db"]);
+        // Non-array / empty inputs are safe no-ops.
+        assert!(filter_route_ids_by_prefix(&serde_json::json!({}), "veld-join-").is_empty());
+        assert!(filter_route_ids_by_prefix(&serde_json::json!([]), "veld-join-").is_empty());
+    }
 
     // -----------------------------------------------------------------------
     // Route structure tests

@@ -277,6 +277,80 @@ enum Command {
         json: bool,
     },
 
+    /// Share a running environment with a colleague over peer-to-peer.
+    Share {
+        /// Run to share (defaults to the only active run).
+        #[arg(value_name = "RUN")]
+        run: Option<String>,
+        /// Limit to specific nodes (default: all URL-bearing nodes).
+        #[arg(long, value_name = "NODE")]
+        node: Vec<String>,
+        /// Share lifetime in seconds (default 7200).
+        #[arg(long)]
+        ttl: Option<i64>,
+        /// Approval mode: first | manual | auto (default: manual, or first with --json).
+        #[arg(long, value_name = "MODE")]
+        approve: Option<String>,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Join a shared environment by ticket.
+    Join {
+        /// The `veldshare_…` ticket from the host.
+        ticket: String,
+        /// A label the host sees on approval (e.g. your name).
+        #[arg(long)]
+        label: Option<String>,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List active shares and joins.
+    Shares {
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Stop hosting a share.
+    Unshare {
+        /// Share id (from `veld shares`); optional when exactly one is active.
+        id: Option<String>,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Leave a joined share.
+    Leave {
+        /// Join id (from `veld shares`); optional when exactly one is active.
+        id: Option<String>,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Approve a pending join request (see `veld shares`).
+    Approve {
+        /// Request id (from `veld shares` or the approval prompt).
+        id: String,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Deny a pending join request.
+    Deny {
+        /// Request id (from `veld shares`).
+        id: String,
+        /// Output JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Print version information for all Veld binaries.
     Version,
 
@@ -439,6 +513,30 @@ async fn main() {
         Command::Ui => commands::ui::run().await,
 
         Command::Doctor { json } => commands::doctor::run(json).await,
+
+        Command::Share {
+            run,
+            node,
+            ttl,
+            approve,
+            json,
+        } => commands::share::share(run, node, ttl, approve, json).await,
+
+        Command::Join {
+            ticket,
+            label,
+            json,
+        } => commands::share::join(ticket, label, json).await,
+
+        Command::Shares { json } => commands::share::list(json).await,
+
+        Command::Unshare { id, json } => commands::share::unshare(id, json).await,
+
+        Command::Leave { id, json } => commands::share::leave(id, json).await,
+
+        Command::Approve { id, json } => commands::share::approve(id, json).await,
+
+        Command::Deny { id, json } => commands::share::deny(id, json).await,
 
         Command::Version => {
             commands::version::print_version();

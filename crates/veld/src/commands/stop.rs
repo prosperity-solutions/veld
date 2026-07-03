@@ -1,6 +1,13 @@
 use veld_core::orchestrator::{Orchestrator, StopResult};
+use veld_core::share::DaemonClient;
 
 use crate::output;
+
+/// Best-effort: stop any P2P shares tied to a run so they don't outlive it.
+/// Silent on failure (daemon may be down, or there may be no shares).
+async fn unshare_run(run_id: &str) {
+    let _ = DaemonClient::new().unshare_run(run_id).await;
+}
 
 /// `veld stop [--name <n>] [--all]`
 pub async fn run(name: Option<String>, all: bool) -> i32 {
@@ -19,6 +26,12 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
     };
 
     if all {
+        // Capture run ids before stopping so we can unshare afterwards.
+        let run_ids: Vec<String> = project_state
+            .runs
+            .values()
+            .map(|r| r.run_id.to_string())
+            .collect();
         let run_names: Vec<String> = project_state.runs.keys().cloned().collect();
         if run_names.is_empty() {
             output::print_info("No runs to stop.");
@@ -35,6 +48,10 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
             }
         }
 
+        for run_id in &run_ids {
+            unshare_run(run_id).await;
+        }
+
         output::print_success(&format!("Stopped {stopped} environment(s)."));
         0
     } else {
@@ -43,13 +60,24 @@ pub async fn run(name: Option<String>, all: bool) -> i32 {
             None => return 1,
         };
         let run_name = run_name.as_str();
+        // Capture the run id before stopping (state may change afterwards).
+        let run_id = project_state
+            .runs
+            .get(run_name)
+            .map(|r| r.run_id.to_string());
 
         match orchestrator.stop(run_name).await {
             Ok(StopResult::Stopped) => {
+                if let Some(run_id) = &run_id {
+                    unshare_run(run_id).await;
+                }
                 output::print_success(&format!("Environment '{run_name}' stopped."));
                 0
             }
             Ok(StopResult::AlreadyStopped) => {
+                if let Some(run_id) = &run_id {
+                    unshare_run(run_id).await;
+                }
                 output::print_info(&format!("Environment '{run_name}' is already stopped."));
                 0
             }

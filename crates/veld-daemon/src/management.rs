@@ -22,6 +22,8 @@ const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 pub fn routes() -> Router {
     Router::new()
         .route("/", get(dashboard))
+        // Same SPA; the join ticket rides in the URL fragment (client-only).
+        .route("/join", get(dashboard))
         .route("/api/environments", get(list_environments))
         .route("/api/logs/{run}", get(get_logs))
         .route("/api/open-terminal", post(open_terminal))

@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::state::{GlobalRegistry, ProjectState, RunState, RunStatus};
+
+use crate::share::manager::ShareManager;
 
 /// Interval between garbage-collection runs (seconds).
 const GC_INTERVAL_SECS: u64 = 600; // 10 minutes
@@ -13,7 +18,7 @@ const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 
 /// Run the garbage-collection scheduler. This function loops forever and
 /// performs GC on the configured interval.
-pub async fn run_gc_scheduler() {
+pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(GC_INTERVAL_SECS));
 
     loop {
@@ -29,6 +34,12 @@ pub async fn run_gc_scheduler() {
                     summary.logs_pruned,
                     summary.routes_cleaned
                 );
+                // Stop any shares whose run just died so they don't outlive the
+                // environment they expose (crash path — CLI `veld stop` already
+                // unshares directly).
+                for run_id in summary.orphaned_runs {
+                    share_manager.unshare_run(run_id).await;
+                }
             }
             Err(e) => {
                 warn!("gc error: {e}");
@@ -44,6 +55,9 @@ pub struct GcSummary {
     pub orphans_killed: usize,
     pub logs_pruned: usize,
     pub routes_cleaned: usize,
+    /// Run ids whose processes were found dead this pass — their P2P shares
+    /// should be stopped.
+    pub orphaned_runs: Vec<Uuid>,
 }
 
 /// Perform a single garbage-collection pass.
@@ -103,6 +117,7 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                             if let Some(run) = project_state.get_run_mut(run_name) {
                                 run.status = RunStatus::Stopped;
                                 run.stopped_at = Some(chrono::Utc::now());
+                                summary.orphaned_runs.push(run.run_id);
                                 for node in run.nodes.values_mut() {
                                     if let Some(pid) = node.pid {
                                         if !is_process_alive(pid) {
