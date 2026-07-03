@@ -144,9 +144,10 @@ dashboard, which connects, waits for host approval, then shows the shared URLs a
 clickable links. The ticket is short and constant-size regardless of how many URLs
 the run exposes — the manifest is sent over the tunnel after approval, not embedded
 in the ticket. You can also share from the **dashboard**: each running run's card
-has a **Share** button; once shared it shows **Copy link** / **Copy command**
-buttons, an **auto-accept** toggle, and **Stop sharing**, with pending join
-requests (Approve/Deny) and joined shares in a panel.
+has a **Share** button (which also copies the join link to your clipboard); once
+shared it shows **Copy link** / **Copy command** buttons, a live joiner count, an
+**auto-accept** toggle, and **Stop sharing**, with pending join requests
+(Approve/Deny) and joined shares in a panel.
 
 Two gates protect a share: a capability token in the ticket, plus host approval.
 Approval modes: `manual` (host approves each join via the dashboard — which opens

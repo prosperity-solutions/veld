@@ -3,11 +3,7 @@
 //! The daemon hosts a single long-lived iroh [`Endpoint`](iroh::Endpoint).
 //! A *share* exposes selected local services to token-bearing peers; a *join*
 //! dials a share and materialises its URLs locally as Caddy routes over the
-//! tunnel. See `RFC-p2p-sharing.md` and `PLAN-p2p-implementation.md`.
-//!
-//! Phase 0 lays the transport foundation (endpoint + stream splice). Later
-//! phases add the control protocol, manifest, approval flow, and CLI/dashboard
-//! surfaces; the transport primitives here are consumed then.
+//! tunnel.
 
 pub mod api;
 pub mod endpoint;

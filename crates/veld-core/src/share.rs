@@ -4,8 +4,6 @@
 //! forwards traffic) and the CLI (which encodes/decodes tickets and talks to the
 //! daemon's control API). Keeping them in `veld-core` avoids duplicating the
 //! wire format. The transport itself (iroh) lives only in the daemon.
-//!
-//! See `RFC-p2p-sharing.md` and `PLAN-p2p-implementation.md`.
 
 use base64::prelude::*;
 use serde::de::Error as _;

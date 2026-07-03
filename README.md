@@ -313,7 +313,7 @@ veld share my-feature        # prints a join URL to send (plus a veld join comma
 
 `veld share` prints a **join URL** as the primary way to share: `https://veld.localhost/join#<ticket>` (or `:18443` in unprivileged mode). Send it to a colleague — they **open it in their browser**, which loads their own Veld dashboard, connects, waits for your approval, then shows the shared URLs as clickable links. The `veld join <ticket>` command is an alternative for a terminal-only join, and `--json` output includes a `join_url` field. The ticket is short and constant-size no matter how many URLs the run exposes — the URL manifest is sent over the tunnel after approval, not embedded in the ticket.
 
-You can also drive sharing from the **dashboard**: each running run's card has a **Share** button; once shared it exposes **Copy link** / **Copy command** buttons, an **auto-accept** toggle, and **Stop sharing**. Pending join requests (Approve/Deny) and joined shares appear in a panel.
+You can also drive sharing from the **dashboard**: each running run's card has a **Share** button (which also copies the join link to your clipboard); once shared it exposes **Copy link** / **Copy command** buttons, a live joiner count, an **auto-accept** toggle, and **Stop sharing**. Pending join requests (Approve/Deny) and joined shares appear in a panel.
 
 Both people must have Veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match. The consumer's own Caddy issues a locally-trusted cert, so there's no cert warning.
 
