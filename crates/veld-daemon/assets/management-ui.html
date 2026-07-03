@@ -68,7 +68,8 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .join-card .surl{display:block;margin:6px 0;word-break:break-all;font-size:14px}
 .join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
 
-.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:9px 18px;border-top:1px solid var(--border);font-size:13px}
+.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:13px}
+.share-bar .share-label{font-size:10px;letter-spacing:.1em;color:var(--dim);font-weight:600;margin-right:2px}
 .share-bar .share-on{color:var(--accent);font-weight:600}
 .share-bar .share-hint{color:var(--text2);font-size:12px}
 .share-bar .share-toggle{display:flex;align-items:center;gap:5px;color:var(--text2);font-size:12px;cursor:pointer;margin-left:auto}
@@ -202,6 +203,7 @@ const $$=(s,p)=>(p||document).querySelectorAll(s);
 const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
 let lastFP=null;
 let sharesByRun={};
+let joinCount=0;
 const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
@@ -223,19 +225,24 @@ async function refresh(){
     const data=await resp.json();
     // Hosted shares fold into their run card; fetch + index by run name.
     let shares=[];
-    try{const sr=await fetch('/api/shares');if(sr.ok)shares=(await sr.json()).shares||[];}catch(e){}
+    try{const sr=await fetch('/api/shares');if(sr.ok){const sd=await sr.json();shares=sd.shares||[];joinCount=(sd.joins||[]).length;}}catch(e){}
     sharesByRun={};for(const s of shares){if(s.run)sharesByRun[s.run]=s;}
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
-    statusDot.innerHTML=running>0?'<span class="dot"></span>':'<span class="dot off"></span>';
-    statusText.textContent=running>0?running+' running':total>0?'all stopped':'no environments';
-    const sf=shares.map(s=>s.run+':'+s.approve+':'+s.id).sort().join(',');
-    const f=fp(data)+'||'+sf;if(f===lastFP)return;lastFP=f;render(data);
+    statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
+    statusText.textContent=running>0?running+' running':(joinCount>0?joinCount+' joined':(total>0?'all stopped':'no environments'));
+    const sf=shares.map(s=>s.run+':'+s.approve+':'+s.id+':'+(s.joiners||0)).sort().join(',');
+    const f=fp(data)+'||'+sf+'||j'+joinCount;if(f===lastFP)return;lastFP=f;render(data);
   }catch(e){statusDot.innerHTML='<span class="dot off"></span>';statusText.textContent='disconnected';}
 }
 
 function render(data){
-  if(!data.projects.length){content.innerHTML='<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';return;}
+  if(!data.projects.length){
+    content.innerHTML=joinCount>0
+      ?'<div class="empty fade-in"><h2>No local environments</h2><p>You’ve joined '+joinCount+' shared environment'+(joinCount>1?'s':'')+' — see the panel above.</p></div>'
+      :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
+    return;
+  }
   for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
   for(const proj of data.projects){
@@ -268,9 +275,10 @@ function render(data){
       if(run.status==='running'){
         const sh=sharesByRun[run.name];
         h+='<div class="share-bar">';
+        h+='<span class="share-label">SHARE</span>';
         if(sh){
-          h+='<span class="share-on">● Sharing</span>';
-          h+='<button class="card-btn" data-action="copy-join" data-ticket="'+esc(sh.ticket||'')+'">Copy link</button>';
+          h+='<span class="share-on">● Sharing'+(sh.joiners?(' · '+sh.joiners+' connected'):'')+'</span>';
+          h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
           h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
           h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
           h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'">Stop sharing</button>';
@@ -591,7 +599,7 @@ function setJoinState(kind,data){
     body.innerHTML='<div class="spinner" style="margin:0 auto 18px"></div><h2>Joining…</h2><p>'+esc(data)+'</p>';
   }else if(kind==='ok'){
     const warn=(data.warnings&&data.warnings.length)?'<p>'+data.warnings.map(esc).join('<br>')+'</p>':'';
-    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a>';
+    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
   }else{
     body.innerHTML='<div class="big">⛔</div><h2>Join failed</h2><p>'+esc(typeof data==='string'?data:JSON.stringify(data))+'</p><a class="sbtn" href="/">Go to dashboard</a>';
   }
@@ -606,6 +614,12 @@ async function runJoinFlow(){
     setJoinState('ok',await resp.json());
   }catch(e){setJoinState('error',String(e));}
 }
+document.addEventListener('click',async e=>{
+  const b=e.target.closest('[data-join-leave]');if(!b)return;
+  b.disabled=true;
+  try{await fetch('/api/shares/joins/'+encodeURIComponent(b.dataset.joinLeave),{method:'DELETE',headers:{'X-Veld-Request':'1'}});}catch(e){}
+  location.href='/';
+});
 async function refreshShares(){
   try{
     const resp=await fetch('/api/shares');if(!resp.ok)return;
@@ -650,9 +664,9 @@ function flashBtn(b,txt){const o=b.textContent;b.textContent=txt;b.disabled=true
 document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-action]');if(!b)return;
   const act=b.dataset.action,H={'X-Veld-Request':'1'};
-  if(act==='copy-join'){navigator.clipboard.writeText(location.origin+'/join#'+b.dataset.ticket);flashBtn(b,'Copied');return;}
+  if(act==='copy-join'){navigator.clipboard.writeText(b.dataset.joinurl);flashBtn(b,'Copied');return;}
   if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
-  if(act==='start-share'){b.disabled=true;try{await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run:b.dataset.run})});}catch(e){}refresh();refreshShares();return;}
+  if(act==='start-share'){b.disabled=true;try{await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run:b.dataset.run,approve:'manual'})});}catch(e){}refresh();refreshShares();return;}
   if(act==='stop-share'){try{await fetch('/api/shares/'+encodeURIComponent(b.dataset.share),{method:'DELETE',headers:H});}catch(e){}refresh();refreshShares();return;}
 });
 document.addEventListener('change',async e=>{

@@ -219,6 +219,13 @@ pub struct ShareInfo {
     /// The join ticket (hosted shares only) so the dashboard can build the link.
     #[serde(default)]
     pub ticket: Option<String>,
+    /// Full browser join URL (hosted shares only), built by the daemon so it's
+    /// correct regardless of how the dashboard was opened.
+    #[serde(default)]
+    pub join_url: Option<String>,
+    /// Number of consumers currently connected (hosted shares only).
+    #[serde(default)]
+    pub joiners: usize,
 }
 
 /// A join awaiting the host's approval (manual mode).

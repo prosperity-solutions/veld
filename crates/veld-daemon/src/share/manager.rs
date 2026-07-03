@@ -69,6 +69,9 @@ struct JoinEntry {
     tasks: Vec<JoinHandle<()>>,
     /// The QUIC connection to the host; closed on leave to stop the tunnel.
     conn: Connection,
+    /// Capability of the joined share, so repeat opens of the same link are
+    /// idempotent instead of creating duplicate joins.
+    capability: Capability,
 }
 
 /// Owns the iroh endpoint and all live shares/joins.
@@ -81,8 +84,9 @@ pub struct ShareManager {
     pending: Mutex<HashMap<String, PendingRequest>>,
     /// For `first` mode: the node id that claimed each share, keyed by share id.
     claims: Mutex<HashMap<String, EndpointId>>,
-    /// Live inbound connections per hosted share, so `unshare` can close them.
-    conns: Mutex<HashMap<String, Vec<Connection>>>,
+    /// Live inbound connections per hosted share (keyed by connection stable id),
+    /// so `unshare` can close them and the dashboard can count joiners.
+    conns: Mutex<HashMap<String, HashMap<usize, Connection>>>,
     ports: PortAllocator,
 }
 
@@ -159,8 +163,10 @@ impl ShareManager {
 
                     if approved {
                         debug!(label = %req.label, share = %share_id, "join approved");
+                        let sid = conn.stable_id();
                         mgr.register_conn(&share_id, conn.clone()).await;
                         let _ = host::accept_and_serve(conn, send, host_share).await;
+                        mgr.unregister_conn(&share_id, sid).await;
                     } else {
                         host::deny(send, "join denied").await;
                     }
@@ -191,14 +197,23 @@ impl ShareManager {
         });
     }
 
-    /// Track a live inbound connection so `unshare` can force it closed.
+    /// Track a live inbound connection so `unshare` can force it closed and the
+    /// dashboard can count joiners.
     async fn register_conn(&self, share_id: &str, conn: Connection) {
+        let sid = conn.stable_id();
         self.conns
             .lock()
             .await
             .entry(share_id.to_string())
             .or_default()
-            .push(conn);
+            .insert(sid, conn);
+    }
+
+    /// Drop a connection from the live set when its session ends.
+    async fn unregister_conn(&self, share_id: &str, stable_id: usize) {
+        if let Some(m) = self.conns.lock().await.get_mut(share_id) {
+            m.remove(&stable_id);
+        }
     }
 
     /// Register a share for `manifest`, minting a ticket. The capability gates
@@ -257,6 +272,24 @@ impl ShareManager {
     pub async fn join(self: &Arc<Self>, ticket_str: &str, label: &str) -> Result<JoinResponse> {
         let endpoint = self.endpoint().await?;
         let ticket = ShareTicket::decode(ticket_str).context("decoding ticket")?;
+
+        // Idempotent: opening the same join link again returns the existing live
+        // join rather than dialing a second time. (A left join is removed from
+        // the map, so this correctly re-joins after a leave.)
+        {
+            let joins = self.joins.lock().await;
+            if let Some(existing) = joins
+                .values()
+                .find(|j| j.capability.ct_eq(&ticket.capability))
+            {
+                return Ok(JoinResponse {
+                    join_id: existing.id.clone(),
+                    urls: existing.urls.clone(),
+                    warnings: Vec::new(),
+                });
+            }
+        }
+
         let addr: EndpointAddr = EndpointTicket::from_str(&ticket.iroh_ticket)
             .context("parsing iroh ticket")?
             .endpoint_addr()
@@ -373,6 +406,7 @@ impl ShareManager {
                 routes,
                 tasks,
                 conn,
+                capability: ticket.capability.clone(),
             },
         );
         info!(join_id = %join_id, count = urls.len(), "joined share");
@@ -385,6 +419,15 @@ impl ShareManager {
 
     /// List active shares and joins.
     pub async fn list(&self) -> SharesList {
+        // Snapshot joiner counts first (separate lock) to avoid nested locking.
+        let counts: HashMap<String, usize> = self
+            .conns
+            .lock()
+            .await
+            .iter()
+            .map(|(k, v)| (k.clone(), v.len()))
+            .collect();
+        let base = join_base();
         let shares = self
             .shares
             .lock()
@@ -397,6 +440,8 @@ impl ShareManager {
                 nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
                 urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
                 ticket: Some(s.ticket.clone()),
+                join_url: Some(format!("{base}/join#{}", s.ticket)),
+                joiners: counts.get(&s.id).copied().unwrap_or(0),
             })
             .collect();
         let joins = self
@@ -411,6 +456,8 @@ impl ShareManager {
                 nodes: j.nodes.clone(),
                 urls: j.urls.clone(),
                 ticket: None,
+                join_url: None,
+                joiners: 0,
             })
             .collect();
         let pending = self
@@ -515,7 +562,7 @@ impl ShareManager {
         self.claims.lock().await.remove(id);
         // Close live tunnels so consumers stop being able to reach the host.
         if let Some(conns) = self.conns.lock().await.remove(id) {
-            for conn in conns {
+            for conn in conns.into_values() {
                 conn.close(0u32.into(), b"share stopped");
             }
         }
@@ -588,6 +635,20 @@ impl ShareManager {
 fn gen_id(prefix: &str) -> String {
     let uuid = Uuid::new_v4().simple().to_string();
     format!("{prefix}_{}", &uuid[..8])
+}
+
+/// Base for browser join URLs, from the setup mode. Uses `veld.localhost` (via
+/// Caddy) — never the daemon's raw `127.0.0.1:19899` — so a copied link works
+/// on the recipient's machine.
+fn join_base() -> String {
+    let mode = dirs::home_dir()
+        .and_then(|h| std::fs::read_to_string(h.join(".veld").join("setup.json")).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.get("mode").and_then(|m| m.as_str()).map(String::from));
+    match mode.as_deref() {
+        Some("unprivileged") => "https://veld.localhost:18443".to_string(),
+        _ => "https://veld.localhost".to_string(),
+    }
 }
 
 /// True if any of this machine's own runs already serves `hostname`.
