@@ -68,12 +68,16 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .join-card .surl{display:block;margin:6px 0;word-break:break-all;font-size:14px}
 .join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
 
-.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:12px}
+.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;margin-bottom:10px;border-top:1px solid var(--border);font-size:12px}
 .share-bar .share-label{font-size:10px;letter-spacing:.1em;color:var(--dim);font-weight:600;margin-right:2px}
 .share-bar .share-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
 .share-bar .share-on{color:var(--text2)}
 .share-bar .share-on b{color:var(--text);font-weight:600}
-.share-bar .share-toggle{display:flex;align-items:center;gap:5px;color:var(--text2);cursor:pointer;margin-left:auto}
+.share-bar .share-toggle{display:flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer;margin-left:auto}
+.share-bar .share-toggle input{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);cursor:pointer;position:relative;flex-shrink:0}
+.share-bar .share-toggle input:hover{border-color:var(--text2)}
+.share-bar .share-toggle input:checked{background:var(--accent);border-color:var(--accent)}
+.share-bar .share-toggle input:checked::after{content:"";position:absolute;left:4px;top:1px;width:4px;height:8px;border:solid var(--bg);border-width:0 2px 2px 0;transform:rotate(45deg)}
 .card-btn.danger{color:var(--red)}
 .card-btn.danger:hover{background:var(--red-bg);border-color:var(--red)}
 
@@ -279,6 +283,8 @@ function render(data){
       h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
       if(run.status==='running'&&!sh){
         h+='<button class="card-btn" data-action="start-share" data-run="'+esc(run.name)+'" title="Share over an encrypted P2P tunnel">Share</button>';
+      }else if(sh){
+        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'" title="Stop sharing">Stop sharing</button>';
       }
       h+='</div>';
       // Share status strip — only while a share is active.
@@ -290,7 +296,6 @@ function render(data){
         h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
         h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
         h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
-        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'">Stop sharing</button>';
       h+='</div>';
       }
       // Segmented control
