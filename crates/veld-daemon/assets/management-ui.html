@@ -68,17 +68,19 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .join-card .surl{display:block;margin:6px 0;word-break:break-all;font-size:14px}
 .join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
 
-.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:13px}
+.share-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 18px;border-top:1px solid var(--border);border-bottom:1px solid var(--border);font-size:12px}
 .share-bar .share-label{font-size:10px;letter-spacing:.1em;color:var(--dim);font-weight:600;margin-right:2px}
-.share-bar .share-on{color:var(--accent);font-weight:600}
-.share-bar .share-hint{color:var(--text2);font-size:12px}
-.share-bar .share-toggle{display:flex;align-items:center;gap:5px;color:var(--text2);font-size:12px;cursor:pointer;margin-left:auto}
-.card-btn.danger{color:var(--red);border-color:var(--red)}
+.share-bar .share-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.share-bar .share-on{color:var(--text2)}
+.share-bar .share-on b{color:var(--text);font-weight:600}
+.share-bar .share-toggle{display:flex;align-items:center;gap:5px;color:var(--text2);cursor:pointer;margin-left:auto}
+.card-btn.danger{color:var(--red)}
+.card-btn.danger:hover{background:var(--red-bg);border-color:var(--red)}
 
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
-.card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
-.card-project{font-weight:600;font-size:15px}
-.card-run{font-family:var(--mono);font-size:13px;font-weight:500;margin-left:auto}
+.card-head{display:flex;align-items:center;gap:8px;padding:14px 18px 10px}
+.card-run{font-family:var(--mono);font-size:16px;font-weight:600;color:var(--text)}
+.card-project{font-size:13px;color:var(--text2)}
 .badge{display:inline-flex;align-items:center;font-size:11px;font-weight:600;padding:2px 8px;border-radius:10px;text-transform:uppercase;letter-spacing:.04em}
 .badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
@@ -87,9 +89,8 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.recovering,.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
 
-.card-sub{display:flex;align-items:center;gap:8px;padding:0 18px 12px;font-size:12px;color:var(--text2)}
-.card-path{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;max-width:60%}
-.card-actions{display:flex;gap:4px;margin-left:auto}
+.card-path{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;flex:1;min-width:0}
+.card-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 18px 12px}
 .card-btn{background:none;border:1px solid var(--border);color:var(--text2);font-size:11px;padding:3px 8px;border-radius:5px;transition:color .15s,border-color .15s}
 .card-btn:hover{color:var(--text);border-color:var(--text2)}
 .card-btn.ok{color:var(--green);border-color:var(--green)}
@@ -257,36 +258,40 @@ function render(data){
       const nodes=run.nodes||[];
       const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
 
+      const sh=(run.status==='running')?sharesByRun[run.name]:null;
+      const active=run.status==='running'||run.status==='starting';
+
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
-      h+='<div class="card-top"><span class="card-project">'+esc(proj.name)+'</span>';
+      // Zone 1 — identity: run name primary, project + path as context, status.
+      h+='<div class="card-head">';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
+      h+='<span class="card-project">'+esc(proj.name)+'</span>';
+      h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
       h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
-      if(run.status==='running'||run.status==='starting'){
-        h+='<button class="card-btn" data-action="restart-env" style="margin-left:6px" title="Restart environment">Restart</button>';
+      h+='</div>';
+      // Zone 2 — one action toolbar (lifecycle + utility + share).
+      h+='<div class="card-toolbar">';
+      if(active){
+        h+='<button class="card-btn" data-action="restart-env" title="Restart environment">Restart</button>';
         h+='<button class="card-btn" data-action="stop-env" title="Stop environment">Stop</button>';
       }
-      h+='</div>';
-      h+='<div class="card-sub"><span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
-      h+='<span class="card-actions">';
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
       h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
-      h+='</span></div>';
-      // Share bar (host side): fold P2P sharing into the run card.
-      if(run.status==='running'){
-        const sh=sharesByRun[run.name];
+      if(run.status==='running'&&!sh){
+        h+='<button class="card-btn" data-action="start-share" data-run="'+esc(run.name)+'" title="Share over an encrypted P2P tunnel">Share</button>';
+      }
+      h+='</div>';
+      // Share status strip — only while a share is active.
+      if(sh){
         h+='<div class="share-bar">';
         h+='<span class="share-label">SHARE</span>';
-        if(sh){
-          h+='<span class="share-on">● Sharing'+(sh.joiners?(' · '+sh.joiners+' connected'):'')+'</span>';
-          h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
-          h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
-          h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
-          h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'">Stop sharing</button>';
-        }else{
-          h+='<button class="card-btn" data-action="start-share" data-run="'+esc(run.name)+'">Share</button>';
-          h+='<span class="share-hint">share this env with a colleague over an encrypted P2P tunnel</span>';
-        }
-        h+='</div>';
+        h+='<span class="share-dot"></span>';
+        h+='<span class="share-on">Sharing'+(sh.joiners?(' · <b>'+sh.joiners+'</b> connected'):'')+'</span>';
+        h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
+        h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
+        h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
+        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'">Stop sharing</button>';
+      h+='</div>';
       }
       // Segmented control
       h+='<div class="segmented">';
