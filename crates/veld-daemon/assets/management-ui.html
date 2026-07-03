@@ -58,6 +58,15 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .sbtn.deny,.sbtn.danger{border-color:var(--red);color:var(--red)}
 .sbtn.deny:hover,.sbtn.danger:hover{background:var(--red-bg)}
 
+.join-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100;padding:24px}
+.join-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:36px;max-width:560px;width:100%;text-align:center}
+.join-card h2{font-size:19px;margin-bottom:10px}
+.join-card p{color:var(--text2);font-size:14px;line-height:1.5}
+.join-card .big{font-size:40px;margin-bottom:6px}
+.join-card .urls{margin:16px 0;text-align:left}
+.join-card .surl{display:block;margin:6px 0;word-break:break-all;font-size:14px}
+.join-card a.sbtn{display:inline-block;margin-top:18px;text-decoration:none}
+
 .card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:16px;overflow:hidden}
 .card-top{display:flex;align-items:center;gap:10px;padding:14px 18px}
 .card-project{font-weight:600;font-size:15px}
@@ -178,6 +187,7 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
   <section id="shares-panel" class="shares-panel" hidden></section>
   <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
+<div id="join-overlay" class="join-overlay" hidden><div class="join-card"><div id="join-body"></div></div></div>
 <script>
 (function(){
 const $=(s,p)=>(p||document).querySelector(s);
@@ -545,6 +555,28 @@ function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
 const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
+function setJoinState(kind,data){
+  const ov=document.getElementById('join-overlay'),body=document.getElementById('join-body');
+  ov.hidden=false;
+  if(kind==='waiting'){
+    body.innerHTML='<div class="spinner" style="margin:0 auto 18px"></div><h2>Joining…</h2><p>'+esc(data)+'</p>';
+  }else if(kind==='ok'){
+    const warn=(data.warnings&&data.warnings.length)?'<p>'+data.warnings.map(esc).join('<br>')+'</p>':'';
+    body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a>';
+  }else{
+    body.innerHTML='<div class="big">⛔</div><h2>Join failed</h2><p>'+esc(typeof data==='string'?data:JSON.stringify(data))+'</p><a class="sbtn" href="/">Go to dashboard</a>';
+  }
+}
+async function runJoinFlow(){
+  const ticket=decodeURIComponent((location.hash||'').replace(/^#/,'')).trim();
+  if(!ticket){setJoinState('error','This join link has no ticket. Ask the host to resend it.');return;}
+  setJoinState('waiting','Connecting to the host and waiting for approval…');
+  try{
+    const resp=await fetch('/api/shares/join',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({ticket})});
+    if(!resp.ok){setJoinState('error',(await resp.text())||('HTTP '+resp.status));return;}
+    setJoinState('ok',await resp.json());
+  }catch(e){setJoinState('error',String(e));}
+}
 async function refreshShares(){
   try{
     const resp=await fetch('/api/shares');if(!resp.ok)return;
@@ -595,6 +627,7 @@ document.addEventListener('click',async e=>{
 });
 refresh();setInterval(refresh,3000);
 refreshShares();setInterval(refreshShares,3000);
+if(location.pathname.replace(/\/+$/,'').endsWith('/join'))runJoinFlow();
 })();
 </script>
 </body>

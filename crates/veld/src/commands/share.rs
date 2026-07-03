@@ -39,31 +39,39 @@ pub async fn share(
 
     match DaemonClient::new().start_share(&req).await {
         Ok(resp) => {
+            let join_url = join_url(&resp.ticket);
             if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&resp).unwrap_or_default()
-                );
+                let mut v = serde_json::to_value(&resp).unwrap_or_default();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("join_url".to_string(), serde_json::json!(join_url));
+                }
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
             } else {
                 output::print_success(&format!(
                     "Sharing {} node(s) over peer-to-peer.",
                     resp.nodes.len()
                 ));
                 println!();
-                println!("  Send this ticket to your colleague:");
+                println!("  Send this link (opens in their browser):");
+                println!("    {}", output::cyan(&join_url));
                 println!();
-                println!("    {}", output::cyan(&resp.ticket));
-                println!();
-                println!("  They run:  {}", output::dim("veld join <ticket>"));
                 println!(
-                    "  Stop with: {}",
+                    "  …or run:  {}",
+                    output::dim(&format!("veld join {}", resp.ticket))
+                );
+                println!(
+                    "  Stop:     {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
+                println!();
+                println!(
+                    "  {}",
+                    output::dim("(the recipient needs veld installed and running)")
+                );
                 if approve_mode == ApprovalMode::Manual {
-                    println!();
                     println!(
-                        "  When they join, approve in the browser or run {}.",
-                        output::dim("veld approve <id>")
+                        "  {}",
+                        output::dim("when they join, approve in the browser or run `veld approve`")
                     );
                 }
             }
@@ -74,6 +82,16 @@ pub async fn share(
             1
         }
     }
+}
+
+/// Build the browser join URL for a ticket. The port matches this machine's
+/// setup mode; both peers run the same mode, so it's correct on the recipient.
+fn join_url(ticket: &str) -> String {
+    let base = match super::read_setup_mode().as_deref() {
+        Some("unprivileged") => "https://veld.localhost:18443",
+        _ => "https://veld.localhost",
+    };
+    format!("{base}/join#{ticket}")
 }
 
 /// `veld join <ticket> [--label ...] [--json]`
