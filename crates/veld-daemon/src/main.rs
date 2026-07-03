@@ -115,10 +115,16 @@ async fn main() -> Result<()> {
 
     // Purge orphaned `veld-join-*` Caddy routes left by a previous daemon that
     // crashed while a join was active. In-memory join state is empty at boot, so
-    // every such route is stale. Best-effort.
+    // every such route is stale. Best-effort, retried with backoff because on a
+    // cold boot the helper/Caddy may not be reachable yet when the daemon starts.
     tokio::spawn(async {
-        if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
-            let _ = helper.remove_routes_by_prefix("veld-join-").await;
+        for attempt in 0..5u64 {
+            if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+                if helper.remove_routes_by_prefix("veld-join-").await.is_ok() {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt + 1))).await;
         }
     });
 

@@ -173,18 +173,22 @@ impl ShareManager {
                         return;
                     }
 
-                    // The share may have been stopped (unshare/expiry) while this
-                    // request was parked awaiting manual approval — re-check
-                    // before serving so a stopped share can't keep admitting.
+                    // Register the connection FIRST, then re-check the share
+                    // still exists. This closes the race with a concurrent
+                    // unshare (which was parked awaiting manual approval): unshare
+                    // either sees this conn in the map and force-closes it, or we
+                    // observe the share gone here and tear down. Registering after
+                    // the re-check would let a conn slip past unshare's close.
+                    let sid = conn.stable_id();
+                    mgr.register_conn(&share_id, conn.clone()).await;
                     if !mgr.shares.lock().await.contains_key(&share_id) {
-                        host::deny(send, "share stopped").await;
+                        mgr.unregister_conn(&share_id, sid).await;
                         mgr.clear_claim(&share_id, node_id).await;
+                        host::deny(send, "share stopped").await;
                         return;
                     }
 
                     debug!(label = %req.label, share = %share_id, "join approved");
-                    let sid = conn.stable_id();
-                    mgr.register_conn(&share_id, conn.clone()).await;
                     let _ = host::accept_and_serve(conn, send, host_share).await;
                     mgr.unregister_conn(&share_id, sid).await;
                     // First-mode: release the claim when the pinned peer's session
@@ -772,5 +776,69 @@ fn open_dashboard() {
         if let Err(e) = std::process::Command::new(program).arg(&url).spawn() {
             debug!(error = %e, "could not open dashboard for approval");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use veld_core::share::SharedNode;
+
+    fn sample_manifest() -> ShareManifest {
+        ShareManifest {
+            run_id: Uuid::new_v4(),
+            run: "demo".to_string(),
+            project: "p".to_string(),
+            nodes: vec![SharedNode {
+                node: "app".to_string(),
+                variant: "local".to_string(),
+                hostname: "app.demo.p.localhost".to_string(),
+                url: "https://app.demo.p.localhost".to_string(),
+                upstream_port: 19001,
+            }],
+            created_at: 0,
+            expires_at: i64::MAX,
+        }
+    }
+
+    // A share stopped while a join is parked awaiting approval must revoke that
+    // request (deny it) rather than leave it to admit a joiner post-unshare.
+    #[tokio::test]
+    async fn unshare_revokes_parked_pending() {
+        let mgr = std::sync::Arc::new(ShareManager::new(SecretKey::generate()));
+        let manifest = sample_manifest();
+        let host_share = Arc::new(HostShare {
+            capability: Capability::generate(),
+            upstreams: HashMap::new(),
+            manifest: manifest.clone(),
+        });
+        mgr.shares.lock().await.insert(
+            "shr_1".to_string(),
+            ShareEntry {
+                id: "shr_1".to_string(),
+                manifest,
+                host_share,
+                approve_mode: ApprovalMode::Manual,
+                ticket: "veldshare_x".to_string(),
+                expires_at: i64::MAX,
+            },
+        );
+        let (tx, rx) = oneshot::channel();
+        mgr.pending.lock().await.insert(
+            "req_1".to_string(),
+            PendingRequest {
+                id: "req_1".to_string(),
+                share_id: "shr_1".to_string(),
+                label: "bob".to_string(),
+                node_id: "n".to_string(),
+                decision: tx,
+            },
+        );
+
+        mgr.unshare("shr_1").await.expect("unshare");
+
+        assert!(mgr.shares.lock().await.is_empty(), "share removed");
+        assert!(mgr.pending.lock().await.is_empty(), "pending drained");
+        assert_eq!(rx.await, Ok(false), "parked request denied");
     }
 }

@@ -239,16 +239,7 @@ impl CaddyManager {
             return Ok(0);
         }
         let routes: serde_json::Value = resp.json().await.context("parsing caddy routes")?;
-        let ids: Vec<String> = routes
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|r| r.get("@id").and_then(|v| v.as_str()))
-                    .filter(|id| id.starts_with(prefix))
-                    .map(String::from)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let ids = filter_route_ids_by_prefix(&routes, prefix);
         let mut removed = 0;
         for id in ids {
             if self.remove_route(&id).await.is_ok() {
@@ -379,6 +370,20 @@ fn build_base_config(
 ///    chunk and passes the rest through. This enables streaming SSR, WebSocket
 ///    upgrades, and SSE without any bypass routes (the handler properly
 ///    delegates Flusher and Hijacker).
+// Route ids starting with the given prefix, taken from a Caddy routes array.
+fn filter_route_ids_by_prefix(routes: &serde_json::Value, prefix: &str) -> Vec<String> {
+    routes
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| r.get("@id").and_then(|v| v.as_str()))
+                .filter(|id| id.starts_with(prefix))
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn build_route_json(
     route_id: &str,
     hostname: &str,
@@ -628,6 +633,23 @@ fn is_process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filter_route_ids_by_prefix() {
+        let routes = serde_json::json!([
+            { "@id": "veld-join-abc-app" },
+            { "@id": "veld-join-abc-db" },
+            { "@id": "veld-demo-frontend-local" },
+            { "@id": "veld-management" },
+            { "no_id": true },
+        ]);
+        let mut ids = filter_route_ids_by_prefix(&routes, "veld-join-");
+        ids.sort();
+        assert_eq!(ids, vec!["veld-join-abc-app", "veld-join-abc-db"]);
+        // Non-array / empty inputs are safe no-ops.
+        assert!(filter_route_ids_by_prefix(&serde_json::json!({}), "veld-join-").is_empty());
+        assert!(filter_route_ids_by_prefix(&serde_json::json!([]), "veld-join-").is_empty());
+    }
 
     // -----------------------------------------------------------------------
     // Route structure tests
