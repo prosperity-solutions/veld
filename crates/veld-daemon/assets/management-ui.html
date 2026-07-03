@@ -608,9 +608,27 @@ function setJoinState(kind,data){
   }else if(kind==='ok'){
     const warn=(data.warnings&&data.warnings.length)?'<p>'+data.warnings.map(esc).join('<br>')+'</p>':'';
     body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
+  }else if(kind==='ended'){
+    body.innerHTML='<div class="big">🔌</div><h2>Share ended</h2><p>The host stopped sharing — these URLs are no longer reachable.</p><a class="sbtn" href="/">Go to dashboard</a>';
   }else{
     body.innerHTML='<div class="big">⛔</div><h2>Join failed</h2><p>'+esc(typeof data==='string'?data:JSON.stringify(data))+'</p><a class="sbtn" href="/">Go to dashboard</a>';
   }
+}
+let joinWatch=null;
+// Poll whether this join still exists locally; the daemon removes it when the
+// host stops sharing (or goes away), so this flips the modal to "share ended".
+function watchJoin(joinId){
+  if(joinWatch)clearInterval(joinWatch);
+  joinWatch=setInterval(async()=>{
+    try{
+      const r=await fetch('/api/shares');if(!r.ok)return;
+      const d=await r.json();
+      if(!(d.joins||[]).some(j=>j.id===joinId)){
+        clearInterval(joinWatch);joinWatch=null;
+        setJoinState('ended');
+      }
+    }catch(e){}
+  },3000);
 }
 async function runJoinFlow(){
   const ticket=decodeURIComponent((location.hash||'').replace(/^#/,'')).trim();
@@ -619,7 +637,9 @@ async function runJoinFlow(){
   try{
     const resp=await fetch('/api/shares/join',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({ticket})});
     if(!resp.ok){setJoinState('error',(await resp.text())||('HTTP '+resp.status));return;}
-    setJoinState('ok',await resp.json());
+    const d=await resp.json();
+    setJoinState('ok',d);
+    watchJoin(d.join_id);
   }catch(e){setJoinState('error',String(e));}
 }
 document.addEventListener('click',async e=>{
