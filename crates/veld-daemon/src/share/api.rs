@@ -277,7 +277,7 @@ pub(crate) fn hostname_of(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::hostname_of;
+    use super::*;
 
     #[test]
     fn hostname_strips_scheme_and_port() {
@@ -289,5 +289,14 @@ mod tests {
             hostname_of("https://frontend.x.proj.localhost"),
             "frontend.x.proj.localhost"
         );
+    }
+
+    // matchit (axum's router) panics at build time on a route conflict. The
+    // `{id}` (3-seg), `{id}/mode` (4-seg), and `by-run/{run_id}` (4-seg) routes
+    // are distinct — this proves they coexist without shadowing.
+    #[test]
+    fn share_routes_build_without_conflict() {
+        let mgr = Arc::new(ShareManager::new(iroh::SecretKey::generate()));
+        let _ = routes(mgr);
     }
 }

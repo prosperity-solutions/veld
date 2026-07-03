@@ -124,17 +124,29 @@ their own machine, over an encrypted P2P tunnel (iroh: QUIC + NAT hole-punching
 + n0 relay fallback). No accounts, no Veld-hosted server.
 
 ```sh
-veld share my-feature                       # print a veldshare_… ticket to send
+veld share my-feature                       # print a join URL to send (plus a veld join command)
 veld share my-feature --node frontend       # share only specific nodes (repeatable)
 veld share my-feature --ttl 3600            # TTL in seconds (default 7200)
 veld share my-feature --approve first        # first|manual|auto (default: manual, or first with --json)
-veld join veldshare_… --label alice         # join by ticket; blocks until the host approves
+veld join veldshare_… --label alice         # terminal join by ticket; blocks until the host approves
 veld shares                                  # list active shares, joins, pending requests
 veld approve <REQ_ID>                        # resolve a pending join request
 veld deny <REQ_ID>
-veld unshare <SHARE_ID>                      # stop hosting a share
-veld leave <JOIN_ID>                         # disconnect from a joined share
+veld unshare [SHARE_ID]                      # stop hosting a share (id optional → sole active share)
+veld leave [JOIN_ID]                         # disconnect from a joined share (id optional → sole active join)
 ```
+
+`veld share` prints a **join URL** as the primary way to share:
+`https://veld.localhost/join#<ticket>` (or `:18443` in unprivileged mode), plus a
+`veld join <ticket>` command as an alternative; `--json` adds a `join_url` field.
+The recipient **opens the URL in their browser** — it loads their own Veld
+dashboard, which connects, waits for host approval, then shows the shared URLs as
+clickable links. The ticket is short and constant-size regardless of how many URLs
+the run exposes — the manifest is sent over the tunnel after approval, not embedded
+in the ticket. You can also share from the **dashboard**: each running run's card
+has a **Share** button; once shared it shows **Copy link** / **Copy command**
+buttons, an **auto-accept** toggle, and **Stop sharing**, with pending join
+requests (Approve/Deny) and joined shares in a panel.
 
 Two gates protect a share: a capability token in the ticket, plus host approval.
 Approval modes: `manual` (host approves each join via the dashboard — which opens
@@ -142,7 +154,9 @@ automatically — or `veld approve`), `first` (auto-approve + pin the first
 token-valid joiner, reject the rest), `auto` (approve any token-valid joiner).
 Traffic is end-to-end encrypted; a relay only forwards sealed bytes and never
 sees URLs or content. Set `VELD_SHARE_RELAY=<https url>` on the daemon to use a
-self-hosted iroh-relay instead of n0's public relays.
+self-hosted iroh-relay instead of n0's public relays. Stopping the run
+(`veld stop`) auto-unshares its shares, and a consumer's join self-tears-down when
+the tunnel closes.
 
 ## Editing veld.json
 
@@ -217,6 +231,8 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **Sharing needs matching setup modes** — both people must have veld installed and be in the *same* mode (both privileged → clean URLs, or both unprivileged → `:18443` in URLs), or the shared URLs won't match
 - **Local URL wins on collision** — if the joiner already runs the same environment, their local URL is kept; that shared node is skipped and reported as a warning
 - **`--approve manual` vs `first`** — manual (interactive default) needs `veld approve <REQ_ID>` (or the dashboard) per join; first (default with `--json`) auto-pins the first token-valid joiner and rejects the rest
+- **Share via the join URL** — `veld share` prints `https://veld.localhost/join#<ticket>` (or `:18443` unprivileged); the recipient opens it in a browser to join, or uses `veld join <ticket>` in a terminal
+- **`unshare`/`leave` ids are optional** — omit the id to resolve the sole active share/join; `veld stop` auto-unshares the run's shares and a consumer's join self-tears-down when the tunnel closes
 - **Shares are in-memory** — if the daemon stops, shares stop (fail-closed); a ticket alone doesn't grant access without host approval
 
 ## Troubleshooting

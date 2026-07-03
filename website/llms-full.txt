@@ -130,12 +130,12 @@ veld stop --name dev
 | `veld runs` | List all runs |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
-| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a `veldshare_…` ticket |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
 | `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
-| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
-| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
+| `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
+| `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld init` | Create a new veld.json |
@@ -194,12 +194,18 @@ Share a running environment with a colleague so they open the **same** URLs on t
 
 ### How it works
 
-1. The host runs `veld share <run>` and gets a `veldshare_…` ticket to send to a colleague
-2. The colleague runs `veld join <ticket>`; the command blocks until the host approves
-3. Once approved, veld materializes the shared URLs locally, so the colleague opens the same URLs the host sees
+1. The host runs `veld share <run>` and gets a **join URL** to send to a colleague: `https://veld.localhost/join#<ticket>` (or `:18443` in unprivileged mode), plus a `veld join <ticket>` command as an alternative (`--json` adds a `join_url` field)
+2. The colleague **opens the join URL in their browser** — it loads their own veld dashboard, which connects and waits for the host to approve (or they run `veld join <ticket>` in a terminal, which blocks until approved)
+3. Once approved, veld materializes the shared URLs locally and the dashboard shows them as clickable links, so the colleague opens the same URLs the host sees
 4. The consumer's own Caddy issues a locally-trusted cert, so there is no cert warning
 
+The ticket is short and constant-size regardless of how many URLs the run exposes — the URL manifest is sent over the tunnel after approval, not embedded in the ticket.
+
 Both people must have veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match.
+
+### Dashboard controls
+
+Sharing can be driven entirely from the dashboard: each running run's card has a **Share** button; once shared it shows **Copy link** / **Copy command** buttons, an **auto-accept** toggle, and **Stop sharing**. Pending join requests (Approve/Deny) and joined shares appear in a panel.
 
 ### Security
 
@@ -215,18 +221,20 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 - **Collision** — if the consumer already runs the same environment, the local URL wins: that node is skipped and reported as a warning
 - **Fail-closed** — shares are held in the daemon's memory; if the daemon stops, shares stop
+- **Auto-teardown** — stopping the run (`veld stop`) auto-unshares its shares, and a consumer's join self-tears-down when the tunnel closes
+- **Optional ids** — `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted
 - **TTL** — shares expire after `--ttl` seconds (default 7200)
 
 ### CLI Commands
 
 | Command | Description |
 |---------|-------------|
-| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Start sharing a running env; prints a `veldshare_…` ticket |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Start sharing a running env; prints a join URL (and `veld join` command) |
 | `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket (blocks until approved) |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
-| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
-| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
+| `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
+| `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 
 ---
 

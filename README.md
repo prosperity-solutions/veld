@@ -147,13 +147,13 @@ veld stop --name dev
 | `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
-| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a `veldshare_…` ticket |
+| `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
 | `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` | Approve a pending join request |
 | `veld deny <REQ_ID> [--json]` | Deny a pending join request |
-| `veld unshare <SHARE_ID> [--json]` | Stop hosting a share |
-| `veld leave <JOIN_ID> [--json]` | Disconnect from a joined share |
+| `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
+| `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld ui` | Open the management dashboard in the browser |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
@@ -308,9 +308,12 @@ Check extension status with `veld doctor`.
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel (iroh: QUIC with NAT hole-punching and an n0 relay fallback). No accounts, no Veld-hosted server.
 
 ```sh
-veld share my-feature        # prints a veldshare_… ticket to send
-veld join veldshare_…        # colleague runs this; blocks until you approve
+veld share my-feature        # prints a join URL to send (plus a veld join command)
 ```
+
+`veld share` prints a **join URL** as the primary way to share: `https://veld.localhost/join#<ticket>` (or `:18443` in unprivileged mode). Send it to a colleague — they **open it in their browser**, which loads their own Veld dashboard, connects, waits for your approval, then shows the shared URLs as clickable links. The `veld join <ticket>` command is an alternative for a terminal-only join, and `--json` output includes a `join_url` field. The ticket is short and constant-size no matter how many URLs the run exposes — the URL manifest is sent over the tunnel after approval, not embedded in the ticket.
+
+You can also drive sharing from the **dashboard**: each running run's card has a **Share** button; once shared it exposes **Copy link** / **Copy command** buttons, an **auto-accept** toggle, and **Stop sharing**. Pending join requests (Approve/Deny) and joined shares appear in a panel.
 
 Both people must have Veld installed and be in the **same setup mode** — both privileged (clean URLs) or both unprivileged (`:18443` in URLs) — so the URLs match. The consumer's own Caddy issues a locally-trusted cert, so there's no cert warning.
 
@@ -322,7 +325,7 @@ Two gates protect a share: a capability token embedded in the ticket, plus host 
 
 Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees your URLs or content. To use your own iroh-relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
 
-If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) also stops its shares automatically, and the consumer's join tears itself down when the tunnel closes. Default TTL is 7200s.
+If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) also auto-unshares its shares, and the consumer's join self-tears-down when the tunnel closes. `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted. Default TTL is 7200s.
 
 ## Requirements
 
