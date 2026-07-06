@@ -22,6 +22,7 @@
   --vf-text: #f1f5f9;
   --vf-text-muted: #94a3b8;
   --vf-border: #2a2a30;
+  --vf-goo-outline: rgba(255,255,255,.24);
   --vf-shadow: 0 4px 20px rgba(0,0,0,.4);
   --vf-radius: 10px;
   --vf-z: 999999;
@@ -42,6 +43,7 @@
     --vf-text: #1a1a2e;
     --vf-text-muted: #64748b;
     --vf-border: #d4d4d8;
+    --vf-goo-outline: rgba(0,0,0,.16);
     --vf-shadow: 0 4px 20px rgba(0,0,0,.1);
   }
 }
@@ -59,6 +61,7 @@
   --vf-text: #f1f5f9;
   --vf-text-muted: #94a3b8;
   --vf-border: #2a2a30;
+  --vf-goo-outline: rgba(255,255,255,.24);
   --vf-shadow: 0 4px 20px rgba(0,0,0,.4);
 }
 :host([data-theme="light"]) {
@@ -73,6 +76,7 @@
   --vf-text: #1a1a2e;
   --vf-text-muted: #64748b;
   --vf-border: #d4d4d8;
+  --vf-goo-outline: rgba(0,0,0,.16);
   --vf-shadow: 0 4px 20px rgba(0,0,0,.1);
 }
 
@@ -102,41 +106,127 @@
   opacity: 1; transform: translateX(-50%) translateY(0);
 }
 
-/* Toolbar container — fixed, draggable, anchor for radial buttons */
+/* ── Arc menu ─────────────────────────────────────────────────────────────
+   A floating bubble that expands into a radial arc of tool items with
+   metaball "goo" physics. The container is zero-size and positioned (left/top)
+   at the bubble center by the engine; everything inside is laid out relative
+   to that origin. Three layers:
+     goo-layer  — solid circles only, merged by the SVG goo filter
+     glow-layer — accent click-flash gradients
+     icon-layer — crisp icons, tooltip text, bubble cover + hit target
+   ------------------------------------------------------------------------- */
 .veld-feedback-toolbar-container {
   position: fixed;
   z-index: var(--vf-z);
   user-select: none;
-  /* FAB is centered at (20px, 20px) within this 40×40 container */
-  width: 40px; height: 40px;
+  width: 0; height: 0;
 }
 
-/* FAB */
+.veld-feedback-goo-layer,
+.veld-feedback-glow-layer,
+.veld-feedback-icon-layer {
+  position: absolute; top: 0; left: 0;
+  width: 0; height: 0;
+  pointer-events: none;
+}
+/* The metaball surface: blur + alpha-threshold merges nearby circles into
+   liquid necks. The four zero-blur drop-shadows paint a 1px contrast hairline
+   around the whole silhouette (so a dark shape reads on a dark page); the final
+   blurred shadow adds depth. */
+.veld-feedback-goo-layer {
+  filter:
+    url(#veld-feedback-goo)
+    drop-shadow(1px 0 0 var(--vf-goo-outline))
+    drop-shadow(-1px 0 0 var(--vf-goo-outline))
+    drop-shadow(0 1px 0 var(--vf-goo-outline))
+    drop-shadow(0 -1px 0 var(--vf-goo-outline))
+    drop-shadow(0 3px 12px rgba(0,0,0,.28));
+}
+
+/* Solid circles that the goo filter operates on (bubble + item blobs). */
+.veld-feedback-goo-blob {
+  position: absolute; top: 0; left: 0;
+  border-radius: 50%;
+  background: var(--vf-bg);
+  transform: translate(-50%, -50%);
+  will-change: transform, width, height;
+}
+.veld-feedback-goo-bubble { z-index: 1; }
+
+/* Tooltip pill — lives in the goo layer so it buds off the item blob.
+   Hidden by default; the engine reveals it (opacity + scale) on hover. Without
+   this the pill would flash full-size at idle before the rAF loop first
+   positions it. */
+.veld-feedback-goo-tooltip {
+  position: absolute; top: 0; left: 0;
+  height: 26px; min-width: 26px;
+  border-radius: 13px;
+  background: var(--vf-bg);
+  opacity: 0;
+  will-change: transform, opacity;
+}
+
+/* Accent halo behind an active item — a soft glow rather than a hard blob
+   tint, so the item still merges cleanly with its neighbours. */
+.veld-feedback-accent-glow {
+  position: absolute; top: 0; left: 0;
+  width: 58px; height: 58px; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--vf-accent) 60%, transparent) 0%, transparent 68%);
+  opacity: 0; pointer-events: none;
+  transition: opacity .25s ease;
+}
+
+/* Accent glow behind the bubble (flash on open/click). */
+.veld-feedback-bubble-glow {
+  position: absolute; top: 0; left: 0;
+  width: 84px; height: 84px; border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: radial-gradient(circle, color-mix(in srgb, var(--vf-accent) 45%, transparent) 0%, transparent 65%);
+  opacity: 0; pointer-events: none;
+  transition: opacity .5s ease-out;
+  z-index: 9;
+}
+
+/* Solid cover that masks the goo bubble so items emerge from behind it.
+   No border — the goo-layer hairline outlines the bubble silhouette. */
+.veld-feedback-bubble-cover {
+  position: absolute; top: 0; left: 0;
+  border-radius: 50%;
+  background: var(--vf-bg);
+  transform: translate(-50%, -50%);
+  z-index: 8;
+}
+
+/* Bubble hit target (drag + click) — transparent; the cover is the surface. */
 .veld-feedback-fab {
-  width: 40px; height: 40px; border-radius: 50%;
-  border: 1px solid var(--vf-border);
-  cursor: pointer; background: var(--vf-bg);
-  color: var(--vf-text); display: flex;
-  align-items: center; justify-content: center;
-  box-shadow: var(--vf-shadow); transition: background .2s, transform .15s;
-  position: relative; z-index: 2;
-  flex-shrink: 0;
+  position: absolute; top: 0; left: 0;
+  border-radius: 50%;
+  border: none; background: transparent;
+  color: var(--vf-text);
+  display: flex; align-items: center; justify-content: center;
+  transform: translate(-50%, -50%);
+  cursor: grab; pointer-events: auto;
+  z-index: 10;
 }
-.veld-feedback-fab:hover {
-  background: var(--vf-bg-card); transform: scale(1.07);
+.veld-feedback-fab:focus, .veld-feedback-fab:focus-visible { outline: none; }
+.veld-feedback-fab.veld-feedback-dragging { cursor: grabbing; }
+.veld-feedback-fab-icon {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--vf-text);
+  transition: opacity .12s ease, transform .4s cubic-bezier(0.34, 1.56, 0.64, 1);
+  pointer-events: none;
 }
-.veld-feedback-fab svg {
-  width: 20px; height: 20px;
-}
+.veld-feedback-fab-icon svg { width: 20px; height: 20px; }
 .veld-feedback-fab-pulse {
   animation: veld-feedback-fab-glow 2s ease-in-out infinite;
 }
 @keyframes veld-feedback-fab-glow {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.5); }
-  50% { box-shadow: 0 0 0 10px rgba(196, 245, 106, 0); }
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--vf-accent) 50%, transparent); }
+  50% { box-shadow: 0 0 0 10px transparent; }
 }
 
-/* Badge */
+/* FAB unread badge. */
 .veld-feedback-badge {
   position: absolute; top: -4px; right: -4px;
   min-width: 16px; height: 16px; border-radius: 8px;
@@ -144,37 +234,39 @@
   font: 700 10px/1 var(--vf-font);
   display: flex; align-items: center; justify-content: center;
   padding: 0 4px; pointer-events: none;
+  z-index: 12;
 }
 .veld-feedback-badge-hidden { display: none; }
 
-/* Radial toolbar button — positioned absolutely around FAB, no border (arc backdrop provides container) */
+/* Item icon overlay — crisp, unfiltered, positioned/scaled by the engine. */
 .veld-feedback-tool-btn {
-  position: absolute;
-  width: 30px; height: 30px; border-radius: 50%;
-  border: none;
-  cursor: pointer; background: transparent;
-  color: var(--vf-text-muted); display: flex;
-  align-items: center; justify-content: center;
-  /* Centered on FAB: (40 - 30) / 2 = 5 */
-  top: 5px; left: 5px;
-  /* Start collapsed at FAB center */
-  transform: translate(0, 0) scale(0);
+  position: absolute; top: 0; left: 0;
+  width: 32px; height: 32px; border-radius: 50%;
+  border: none; background: transparent;
+  color: var(--vf-text); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transform: translate(-50%, -50%) scale(0);
   opacity: 0; pointer-events: none;
-  transition: transform .2s ease, opacity .15s ease, background .15s, color .15s;
-  z-index: 1;
+  transition: color .15s;
+  z-index: 5;
 }
-.veld-feedback-tool-btn:hover {
-  background: rgba(255,255,255,.08); color: var(--vf-text);
+.veld-feedback-tool-btn:focus, .veld-feedback-tool-btn:focus-visible { outline: none; }
+.veld-feedback-tool-btn svg { width: 16px; height: 16px; }
+/* Active = accent-coloured icon (on the surface-coloured blob) + soft halo. */
+.veld-feedback-tool-btn.veld-feedback-tool-active { color: var(--vf-accent); }
+
+/* Listening dot — an empty tool item that shows a pulsing accent dot. */
+.veld-feedback-listening-dot::after {
+  content: ""; width: 10px; height: 10px; border-radius: 50%;
+  background: var(--vf-accent);
+  animation: veld-feedback-listen-pulse 1.6s ease-in-out infinite;
 }
-.veld-feedback-tool-btn.veld-feedback-tool-active {
-  background: var(--vf-accent); color: var(--vf-accent-text);
+@keyframes veld-feedback-listen-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(0.7); opacity: 0.55; }
 }
-.veld-feedback-tool-btn svg {
-  width: 15px; height: 15px;
-}
-.veld-feedback-tool-btn.veld-feedback-radial-open {
-  opacity: 1; pointer-events: auto;
-}
+
+/* Unread count on the Threads item (added live by badge.ts). */
 .veld-feedback-tool-badge {
   position: absolute;
   top: -2px; right: -2px;
@@ -186,6 +278,26 @@
   text-align: center;
   padding: 0 3px;
   pointer-events: none;
+}
+
+/* Goo tooltip text (crisp, above everything). */
+.veld-feedback-tt-text {
+  position: absolute; top: 0; left: 0;
+  transform: translate(-50%, -50%);
+  display: flex; align-items: center; gap: 6px;
+  white-space: nowrap; pointer-events: none;
+  color: var(--vf-text);
+  opacity: 0;
+  z-index: 25;
+}
+.veld-feedback-tt-label { font: 500 11.5px/1 var(--vf-font); letter-spacing: .2px; }
+.veld-feedback-tt-arrow { font-size: 12px; color: var(--vf-text-muted); margin-left: -2px; }
+.veld-feedback-tt-kbd { display: inline-flex; gap: 2px; }
+.veld-feedback-tt-kbd kbd {
+  font: 500 9.5px/1 var(--vf-font); letter-spacing: .3px;
+  padding: 2px 4px; border-radius: 3px;
+  color: var(--vf-text-muted);
+  background: color-mix(in srgb, var(--vf-text) 10%, transparent);
 }
 
 /* Feedback mode backdrop */

@@ -1,74 +1,23 @@
-import { refs } from "./refs";
+// FAB (bubble) positioning + persistence.
+//
+// Drag, momentum, bounce, and live viewport collision are all owned by the
+// arc-menu engine now. This module keeps the position API the rest of the
+// overlay relies on (restore/clamp on init, nudge for the arc) and mirrors the
+// bubble center into the store + sessionStorage.
 import { getState, dispatch } from "./store";
-import { PREFIX, FAB_MARGIN, FAB_TOOLBAR_MARGIN } from "./constants";
-import { suppressTooltip } from "./tooltip";
-import { positionRadialButtons } from "./toolbar";
+import { FAB_MARGIN } from "./constants";
+import { getArc } from "./toolbar";
 
-export function initDrag(): void {
-  let startX = 0;
-  let startY = 0;
-  let origX = 0;
-  let origY = 0;
-  let dragging = false;
-  let moved = false;
-
-  refs.fab.addEventListener("mousedown", function (e: MouseEvent) {
-    if (e.button !== 0) return;
-    dragging = true;
-    moved = false;
-    startX = e.clientX;
-    startY = e.clientY;
-    origX = getState().fabCX;
-    origY = getState().fabCY;
-    e.preventDefault();
-  });
-
-  document.addEventListener("mousemove", function (e: MouseEvent) {
-    if (!dragging) return;
-    const dx = e.clientX - startX;
-    const dy = e.clientY - startY;
-    if (!moved && Math.abs(dx) < 4 && Math.abs(dy) < 4) return;
-    if (!moved) suppressTooltip(true);
-    moved = true;
-    let nx = origX + dx;
-    let ny = origY + dy;
-    nx = Math.max(
-      20 + FAB_MARGIN,
-      Math.min(window.innerWidth - 20 - FAB_MARGIN, nx),
-    );
-    ny = Math.max(
-      20 + FAB_MARGIN,
-      Math.min(window.innerHeight - 20 - FAB_MARGIN, ny),
-    );
-    positionFab(nx, ny, false);
-    positionRadialButtons();
-  });
-
-  document.addEventListener("mouseup", function () {
-    if (!dragging) return;
-    dragging = false;
-    if (moved) {
-      dispatch({ type: "SET_FAB_DRAGGED", dragged: true });
-      setTimeout(function () {
-        dispatch({ type: "SET_FAB_DRAGGED", dragged: false });
-        suppressTooltip(false);
-      }, 300);
-      saveFabPos(getState().fabCX, getState().fabCY);
-    }
-  });
-}
-
+/** Move the bubble center to (cx, cy). Updates the engine + store. */
 export function positionFab(cx: number, cy: number, animate: boolean): void {
   dispatch({ type: "SET_FAB_POS", cx, cy });
-  refs.toolbarContainer.style.transition = animate ? "all .2s ease" : "none";
-  refs.toolbarContainer.style.top = cy - 20 + "px";
-  refs.toolbarContainer.style.left = cx - 20 + "px";
+  getArc()?.setPosition(cx, cy, animate);
 }
 
 export function saveFabPos(x: number, y: number): void {
   try {
-    sessionStorage.setItem("veld-fab-pos", JSON.stringify({ x: x, y: y }));
-  } catch (_) {}
+    sessionStorage.setItem("veld-fab-pos", JSON.stringify({ x, y }));
+  } catch (_) { /* ignore */ }
 }
 
 export function restoreFabPos(): void {
@@ -79,60 +28,34 @@ export function restoreFabPos(): void {
       positionFab(pos.x, pos.y, false);
       return;
     }
-  } catch (_) {}
-  positionFab(
-    20 + FAB_MARGIN,
-    window.innerHeight - 20 - FAB_MARGIN,
-    false,
-  );
+  } catch (_) { /* ignore */ }
+  positionFab(20 + FAB_MARGIN, window.innerHeight - 20 - FAB_MARGIN, false);
 }
 
+/** Clamp the bubble into the viewport (called on init + resize). */
 export function clampFabToViewport(): void {
-  let cx = getState().fabCX;
-  let cy = getState().fabCY;
-  let clamped = false;
+  const arc = getArc();
+  if (arc) {
+    arc.clampToViewport();
+    return;
+  }
+  // Fallback (no engine): simple viewport clamp against the store position.
   const maxX = window.innerWidth - 20 - FAB_MARGIN;
   const maxY = window.innerHeight - 20 - FAB_MARGIN;
   const minXY = 20 + FAB_MARGIN;
-  if (cx > maxX) {
-    cx = maxX;
-    clamped = true;
-  }
-  if (cx < minXY) {
-    cx = minXY;
-    clamped = true;
-  }
-  if (cy > maxY) {
-    cy = maxY;
-    clamped = true;
-  }
-  if (cy < minXY) {
-    cy = minXY;
-    clamped = true;
-  }
-  if (clamped) {
+  const cx = Math.max(minXY, Math.min(maxX, getState().fabCX));
+  const cy = Math.max(minXY, Math.min(maxY, getState().fabCY));
+  if (cx !== getState().fabCX || cy !== getState().fabCY) {
     positionFab(cx, cy, false);
     saveFabPos(cx, cy);
   }
 }
 
 /**
- * If the FAB is too close to an edge for the toolbar arc,
- * smoothly animate it inward to the toolbar-safe margin.
+ * When the menu opens near an edge, the engine's live bounds-correction nudges
+ * the bubble inward on its own. This remains as an explicit trigger for callers
+ * that open the menu programmatically.
  */
 export function nudgeFabForToolbar(): void {
-  let cx = getState().fabCX;
-  let cy = getState().fabCY;
-  let nudged = false;
-  const maxX = window.innerWidth - 20 - FAB_TOOLBAR_MARGIN;
-  const maxY = window.innerHeight - 20 - FAB_TOOLBAR_MARGIN;
-  const minXY = 20 + FAB_TOOLBAR_MARGIN;
-  if (cx > maxX) { cx = maxX; nudged = true; }
-  if (cx < minXY) { cx = minXY; nudged = true; }
-  if (cy > maxY) { cy = maxY; nudged = true; }
-  if (cy < minXY) { cy = minXY; nudged = true; }
-  if (nudged) {
-    positionFab(cx, cy, true); // animate: true
-    saveFabPos(cx, cy);
-  }
+  getArc()?.moveIntoView(true);
 }

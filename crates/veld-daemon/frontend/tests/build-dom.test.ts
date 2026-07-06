@@ -1,0 +1,49 @@
+// @vitest-environment jsdom
+import { describe, it, expect, beforeEach } from "vitest";
+import { initState } from "../src/feedback-overlay/state";
+import { refs } from "../src/feedback-overlay/refs";
+import { registerDeps } from "../src/shared/registry";
+import { buildDOM } from "../src/feedback-overlay/dom";
+import { makeFakeDeps } from "./test-helpers";
+
+/**
+ * Smoke test for the real buildDOM() (as opposed to the mock refs used
+ * elsewhere). Guards against dropping a DOM element during refactors — a
+ * missing ref (e.g. screenshotRect) surfaces as a null-deref at runtime, not
+ * in the mock-based unit tests.
+ */
+describe("buildDOM", () => {
+  beforeEach(() => {
+    document.body.innerHTML = "";
+    const host = document.createElement("veld-feedback");
+    const shadow = host.attachShadow({ mode: "open" });
+    document.body.appendChild(host);
+    initState(shadow, host);
+    registerDeps(makeFakeDeps());
+  });
+
+  it("initializes every DOM ref", () => {
+    buildDOM();
+    const required = [
+      "toolbarContainer", "fab", "fabBadge", "toolbar", "toolBtnSelect",
+      "toolBtnScreenshot", "toolBtnDraw", "toolBtnPageComment", "toolBtnComments",
+      "toolBtnHide", "toolbarOverflow", "listeningModule", "moreBtn", "overlay",
+      "hoverOutline", "componentTraceEl", "screenshotRect", "panel", "panelBody",
+      "panelHeadTitle", "panelBackBtn", "markReadBtn", "segBtnActive",
+      "segBtnResolved", "tooltip",
+    ] as const;
+    for (const key of required) {
+      expect(refs[key], `refs.${key} should be initialized`).toBeTruthy();
+    }
+    expect(refs.radialButtons.length).toBeGreaterThan(0);
+    expect(refs.overflowButtons.length).toBeGreaterThan(0);
+  });
+
+  it("screenshot mode teardown does not throw", async () => {
+    buildDOM();
+    const { setMode } = await import("../src/feedback-overlay/modes");
+    setMode("screenshot");
+    // Teardown touches refs.screenshotRect — must exist.
+    expect(() => setMode(null)).not.toThrow();
+  });
+});

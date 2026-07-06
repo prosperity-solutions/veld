@@ -150,6 +150,15 @@ import { createStore, type Store as StoreInterface } from "../shared/create-stor
 
 let instance: StoreInterface<Store, Action>;
 
+/** Restore the persisted toolbar theme, defaulting to auto (contrast). */
+function readStoredTheme(): ThemeMode {
+  try {
+    const t = localStorage.getItem("veld-theme");
+    if (t === "dark" || t === "light" || t === "auto") return t;
+  } catch (_) { /* ignore */ }
+  return "auto";
+}
+
 function createInitial(): Store {
   return {
     threads: [],
@@ -167,7 +176,7 @@ function createInitial(): Store {
     overflowOpen: false,
     hidden: false,
     shortcutsDisabled: false,
-    theme: "auto",
+    theme: readStoredTheme(),
     expandedThreadId: null,
     pins: {},
     captureStream: null,

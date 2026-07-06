@@ -4,11 +4,11 @@ import { getState, dispatch } from "./store";
 import type { ThemeMode } from "./store";
 import { mkEl, appendGuarded } from "./helpers";
 import { PREFIX, ICONS, KEY_MOD, KEY_SHIFT } from "./constants";
-import { initTooltip, attachTooltip, tipHtml } from "./tooltip";
+import { initTooltip, attachTooltip } from "./tooltip";
 import { toast } from "./toast";
 import { initBackdropEvents } from "./backdrop";
-import { initDrag } from "./fab";
-import { toggleToolbar, makeToolBtn, toggleOverflow } from "./toolbar";
+import { initArc, makeToolBtn, handleToolAction } from "./toolbar";
+import type { ArcItem } from "./arc-menu";
 import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead } from "./panel";
 import { sendAllGood } from "./listening";
 
@@ -26,32 +26,52 @@ export function buildDOM(): void {
   refs.componentTraceEl = mkEl("div", "component-trace");
   appendGuarded(document.body, refs.componentTraceEl);
 
-  // Toolbar container (shadow DOM) — anchor for radial buttons
+  // Screenshot selection rectangle (light DOM) — drawn on the backdrop.
+  refs.screenshotRect = mkEl("div", "screenshot-rect");
+  appendGuarded(document.body, refs.screenshotRect);
+
+  // Float container (shadow DOM) — anchor for the arc-menu engine. Zero-size,
+  // translated to the bubble center; the engine builds its goo/glow/icon layers
+  // inside it.
   refs.toolbarContainer = mkEl("div", "toolbar-container");
   refs.toolbar = refs.toolbarContainer; // alias for compatibility
 
-  // --- Primary radial buttons ---
-  refs.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair, tipHtml("Select element", [KEY_MOD, KEY_SHIFT, "F"]));
-  refs.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot, tipHtml("Screenshot", [KEY_MOD, KEY_SHIFT, "S"]));
-  refs.toolBtnDraw = makeToolBtn("draw", ICONS.draw, tipHtml("Draw", [KEY_MOD, KEY_SHIFT, "D"]));
-  refs.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment, tipHtml("Page comment", [KEY_MOD, KEY_SHIFT, "P"]));
-  refs.toolBtnComments = makeToolBtn("show-comments", ICONS.chat, tipHtml("Threads", [KEY_MOD, KEY_SHIFT, "C"]));
+  // --- Primary tool icons (reused by the engine as crisp icon overlays) ---
+  refs.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair);
+  refs.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot);
+  refs.toolBtnDraw = makeToolBtn("draw", ICONS.draw);
+  refs.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment);
+  refs.toolBtnComments = makeToolBtn("show-comments", ICONS.chat);
 
-  // Listening dot — also a radial button, conditionally visible
+  // Listening dot — conditionally-visible tool.
   refs.listeningModule = mkEl("button", "tool-btn listening-dot");
-  attachTooltip(refs.listeningModule, "All Good");
-  refs.listeningModule.addEventListener("click", function (e) { e.stopPropagation(); sendAllGood(); });
 
-  // Three-dot overflow toggle
-  refs.moreBtn = mkEl("button", "tool-btn");
-  refs.moreBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg>';
-  attachTooltip(refs.moreBtn, tipHtml("More options", []));
-  refs.moreBtn.addEventListener("click", function (e) {
-    e.stopPropagation();
-    toggleOverflow();
-  });
+  // Three-dot overflow — opens the secondary tools as a submenu.
+  refs.moreBtn = makeToolBtn("more", ICONS.more);
 
-  // Register primary buttons in display order
+  // --- Overflow (secondary) tools ---
+  const toolBtnShortcuts = makeToolBtn("shortcuts", ICONS.keyboard);
+  const THEME_ICONS: Record<ThemeMode, string> = {
+    auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
+    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>',
+    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
+  };
+  const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
+  const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
+  const toolBtnTheme = makeToolBtn("theme", THEME_ICONS[getState().theme]);
+  const toolBtnDashboard = makeToolBtn("dashboard", ICONS.dashboard);
+  refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff);
+
+  // Reflect the current theme on the icon + host, and persist it.
+  function applyTheme(): void {
+    const theme = getState().theme;
+    toolBtnTheme.innerHTML = THEME_ICONS[theme];
+    refs.hostEl.setAttribute("data-theme", theme);
+    document.documentElement.setAttribute("data-veld-theme", theme === "auto" ? "" : theme);
+    try { localStorage.setItem("veld-theme", theme); } catch (_) { /* ignore */ }
+  }
+
+  // Keep the ref arrays populated (legacy compat / debugging).
   refs.radialButtons = [
     refs.toolBtnSelect,
     refs.toolBtnScreenshot,
@@ -61,79 +81,119 @@ export function buildDOM(): void {
     refs.listeningModule,
     refs.moreBtn,
   ];
-
-  // Append all primary buttons to the container
-  refs.radialButtons.forEach(function (btn) {
-    refs.toolbarContainer.appendChild(btn);
-  });
-
-  // --- Overflow (secondary) radial buttons ---
-  const toolBtnShortcuts = mkEl("button", "tool-btn");
-  toolBtnShortcuts.innerHTML = ICONS.keyboard;
-  attachTooltip(toolBtnShortcuts, tipHtml("Disable shortcuts", []));
-  toolBtnShortcuts.addEventListener("click", function (e) {
-    e.stopPropagation();
-    dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: !getState().shortcutsDisabled });
-    toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", getState().shortcutsDisabled);
-    toast(getState().shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
-  });
-
-  const THEME_ICONS: Record<ThemeMode, string> = {
-    auto: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>',
-    dark: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1111.21 3 7 7 0 0021 12.79z"/></svg>',
-    light: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>'
-  };
-  const THEME_LABELS: Record<ThemeMode, string> = { auto: "Auto (contrast)", dark: "Dark", light: "Light" };
-  const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
-  const toolBtnTheme = mkEl("button", "tool-btn");
-  toolBtnTheme.innerHTML = THEME_ICONS[getState().theme];
-  attachTooltip(toolBtnTheme, tipHtml(THEME_LABELS[getState().theme], []));
-  toolBtnTheme.addEventListener("click", function (e) {
-    e.stopPropagation();
-    const idx = (THEME_ORDER.indexOf(getState().theme) + 1) % THEME_ORDER.length;
-    dispatch({ type: "SET_THEME", theme: THEME_ORDER[idx] });
-    toolBtnTheme.innerHTML = THEME_ICONS[getState().theme];
-    refs.hostEl.setAttribute("data-theme", getState().theme);
-    document.documentElement.setAttribute("data-veld-theme", getState().theme === "auto" ? "" : getState().theme);
-    toast("Theme: " + THEME_LABELS[getState().theme]);
-  });
-
-  const toolBtnDashboard = mkEl("button", "tool-btn");
-  toolBtnDashboard.innerHTML = ICONS.dashboard;
-  attachTooltip(toolBtnDashboard, tipHtml("Management UI", []));
-  toolBtnDashboard.addEventListener("click", function (e) {
-    e.stopPropagation();
-    window.open("https://veld.localhost:" + window.location.port, "_blank");
-  });
-
-  refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff, tipHtml("Hide", [KEY_MOD, KEY_SHIFT, "."]));
-
   refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, refs.toolBtnHide];
-  refs.overflowButtons.forEach(function (btn) {
-    refs.toolbarContainer.appendChild(btn);
-  });
+  refs.toolbarOverflow = refs.toolbarContainer; // test compat
 
-  // Keep toolbarOverflow ref for test compat (points to container, overflow state tracked in store)
-  refs.toolbarOverflow = refs.toolbarContainer;
+  // --- Item model ---------------------------------------------------------
+  const overflowItems: ArcItem[] = [
+    {
+      id: "shortcuts",
+      el: toolBtnShortcuts,
+      label: "Shortcuts",
+      stayOpen: true,
+      isActive: () => getState().shortcutsDisabled,
+      onSelect: () => {
+        dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: !getState().shortcutsDisabled });
+        toolBtnShortcuts.classList.toggle(PREFIX + "tool-active", getState().shortcutsDisabled);
+        toast(getState().shortcutsDisabled ? "Shortcuts disabled" : "Shortcuts enabled");
+      },
+    },
+    {
+      id: "theme",
+      el: toolBtnTheme,
+      label: "Theme",
+      stayOpen: true,
+      onSelect: () => {
+        const idx = (THEME_ORDER.indexOf(getState().theme) + 1) % THEME_ORDER.length;
+        dispatch({ type: "SET_THEME", theme: THEME_ORDER[idx] });
+        applyTheme();
+        toast("Theme: " + THEME_LABELS[getState().theme]);
+      },
+    },
+    {
+      id: "dashboard",
+      el: toolBtnDashboard,
+      label: "Management UI",
+      onSelect: () => window.open("https://veld.localhost:" + window.location.port, "_blank"),
+    },
+    {
+      id: "hide",
+      el: refs.toolBtnHide,
+      label: "Hide",
+      kbd: [KEY_MOD, KEY_SHIFT, "."],
+      onSelect: () => handleToolAction("hide"),
+    },
+  ];
 
-  // Screenshot rect (light DOM)
-  refs.screenshotRect = mkEl("div", "screenshot-rect");
-  appendGuarded(document.body, refs.screenshotRect);
+  const rootItems: ArcItem[] = [
+    {
+      id: "select-element",
+      el: refs.toolBtnSelect,
+      label: "Select element",
+      kbd: [KEY_MOD, KEY_SHIFT, "F"],
+      stayOpen: true,
+      isActive: () => getState().activeMode === "select-element",
+      onSelect: () => handleToolAction("select-element"),
+    },
+    {
+      id: "screenshot",
+      el: refs.toolBtnScreenshot,
+      label: "Screenshot",
+      kbd: [KEY_MOD, KEY_SHIFT, "S"],
+      isActive: () => getState().activeMode === "screenshot",
+      onSelect: () => handleToolAction("screenshot"),
+    },
+    {
+      id: "draw",
+      el: refs.toolBtnDraw,
+      label: "Draw",
+      kbd: [KEY_MOD, KEY_SHIFT, "D"],
+      isActive: () => getState().activeMode === "draw",
+      onSelect: () => handleToolAction("draw"),
+    },
+    {
+      id: "page-comment",
+      el: refs.toolBtnPageComment,
+      label: "Page comment",
+      kbd: [KEY_MOD, KEY_SHIFT, "P"],
+      onSelect: () => handleToolAction("page-comment"),
+    },
+    {
+      id: "show-comments",
+      el: refs.toolBtnComments,
+      label: "Threads",
+      kbd: [KEY_MOD, KEY_SHIFT, "C"],
+      onSelect: () => handleToolAction("show-comments"),
+    },
+    {
+      id: "listening",
+      el: refs.listeningModule,
+      label: "All good",
+      isVisible: () => getState().agentListening,
+      onSelect: () => sendAllGood(),
+    },
+    {
+      id: "more",
+      el: refs.moreBtn,
+      label: "More",
+      sub: overflowItems,
+    },
+  ];
 
-  // FAB
+  // --- Bubble -------------------------------------------------------------
   refs.fab = mkEl("button", "fab");
-  attachTooltip(refs.fab, tipHtml("Veld Feedback", [KEY_MOD, KEY_SHIFT, "V"]));
-  refs.fab.innerHTML = ICONS.logo;
+  const fabIcon = mkEl("div", "fab-icon");
+  refs.fab.appendChild(fabIcon);
   refs.fabBadge = mkEl("span", "badge badge-hidden");
   refs.fab.appendChild(refs.fabBadge);
-  refs.fab.addEventListener("click", function () {
-    if (getState().fabWasDragged) { dispatch({ type: "SET_FAB_DRAGGED", dragged: false }); return; }
-    toggleToolbar();
-  });
-  refs.toolbarContainer.appendChild(refs.fab);
 
   refs.shadow.appendChild(refs.toolbarContainer);
-  initDrag();
+
+  // Boot the arc-menu engine (it moves the bubble into its icon layer).
+  initArc(fabIcon, rootItems, { label: "Veld Feedback", kbd: [KEY_MOD, KEY_SHIFT, "V"] });
+
+  // Apply the restored theme (icon + host attributes).
+  applyTheme();
 
   // Panel (shadow DOM)
   refs.panel = mkEl("div", "panel");
