@@ -44,6 +44,7 @@ export function buildDOM(): void {
 
   // Listening dot — conditionally-visible tool.
   refs.listeningModule = mkEl("button", "tool-btn listening-dot");
+  refs.listeningModule.innerHTML = ICONS.check;
 
   // Three-dot overflow — opens the secondary tools as a submenu.
   refs.moreBtn = makeToolBtn("more", ICONS.more);

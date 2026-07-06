@@ -255,15 +255,18 @@
 /* Active = accent-coloured icon (on the surface-coloured blob) + soft halo. */
 .veld-feedback-tool-btn.veld-feedback-tool-active { color: var(--vf-accent); }
 
-/* Listening dot — an empty tool item that shows a pulsing accent dot. */
+/* "Done — no more feedback" action: a check icon that pulses with a soft ring
+   while an agent is listening, so it reads as an action, not just a status dot. */
+.veld-feedback-listening-dot { position: relative; color: var(--vf-accent); }
+.veld-feedback-listening-dot svg { width: 16px; height: 16px; }
 .veld-feedback-listening-dot::after {
-  content: ""; width: 10px; height: 10px; border-radius: 50%;
-  background: var(--vf-accent);
-  animation: veld-feedback-listen-pulse 1.6s ease-in-out infinite;
+  content: ""; position: absolute; inset: -2px;
+  border-radius: 50%; pointer-events: none;
+  animation: veld-feedback-listen-pulse 1.8s ease-in-out infinite;
 }
 @keyframes veld-feedback-listen-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(0.7); opacity: 0.55; }
+  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(196, 245, 106, 0); }
 }
 
 /* Unread count on the Threads item (added live by badge.ts). */
@@ -714,19 +717,6 @@
 }
 
 /* --- Listening dot (radial button) --- */
-.veld-feedback-listening-dot {
-  /* Inherits radial positioning from .tool-btn via JS */
-}
-.veld-feedback-listening-dot::after {
-  content: ""; display: block;
-  width: 10px; height: 10px; border-radius: 50%;
-  background: var(--vf-accent);
-  animation: veld-feedback-pulse-dot 2s ease-in-out infinite;
-}
-@keyframes veld-feedback-pulse-dot {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.6); }
-  50% { box-shadow: 0 0 0 5px rgba(196, 245, 106, 0); }
-}
 .veld-feedback-listening-allgood {
   padding: 3px 8px; border-radius: 6px; border: none;
   background: var(--vf-accent); color: var(--vf-accent-text);
