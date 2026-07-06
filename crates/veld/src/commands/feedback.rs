@@ -335,7 +335,9 @@ fn emit_next(result: &'static str, thread: Option<&Thread>, store: &FeedbackStor
             }
         }
         "ended" => output::print_info("Feedback session ended — the reviewer clicked \"Done\"."),
-        _ => output::print_info("No feedback waiting (timeout). Run `next` again to keep watching."),
+        _ => {
+            output::print_info("No feedback waiting (timeout). Run `next` again to keep watching.")
+        }
     }
 }
 
@@ -613,7 +615,10 @@ fn print_thread_context(thread: &Thread, store: &FeedbackStore) {
         };
         println!("    [{}] {}", output::dim(author), msg.body);
         if let Some(ref screenshot) = msg.screenshot {
-            println!("    Screenshot: {}", output::dim(&screenshot_abs_path(screenshot, store)));
+            println!(
+                "    Screenshot: {}",
+                output::dim(&screenshot_abs_path(screenshot, store))
+            );
         }
     }
 }
@@ -689,7 +694,14 @@ mod tests {
         store.save_screenshot("ss_1", b"PNG").unwrap();
 
         let msg = new_message(Author::Human, "look here", Some("ss_1.png".into()), None);
-        let thread = new_thread(ThreadScope::Global, ThreadOrigin::Human, None, None, None, msg);
+        let thread = new_thread(
+            ThreadScope::Global,
+            ThreadOrigin::Human,
+            None,
+            None,
+            None,
+            msg,
+        );
 
         let nt = NextThread::from_thread(&thread, &store);
         let ss = nt.messages[0].screenshot.as_deref().unwrap();
@@ -704,7 +716,14 @@ mod tests {
         // Referenced screenshot file was never saved (or was pruned) — don't
         // hand the agent a dangling path it can't read.
         let msg = new_message(Author::Human, "look here", Some("gone.png".into()), None);
-        let thread = new_thread(ThreadScope::Global, ThreadOrigin::Human, None, None, None, msg);
+        let thread = new_thread(
+            ThreadScope::Global,
+            ThreadOrigin::Human,
+            None,
+            None,
+            None,
+            msg,
+        );
 
         let nt = NextThread::from_thread(&thread, &store);
         assert!(nt.messages[0].screenshot.is_none());

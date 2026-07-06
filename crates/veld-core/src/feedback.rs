@@ -643,7 +643,10 @@ impl FeedbackStore {
 /// the entire machine-side queue model — no stored `blocked` field.
 pub fn thread_is_waiting(thread: &Thread) -> bool {
     thread.status == ThreadStatus::Open
-        && matches!(thread.messages.last().map(|m| m.author), Some(Author::Human))
+        && matches!(
+            thread.messages.last().map(|m| m.author),
+            Some(Author::Human)
+        )
 }
 
 pub fn new_message(
@@ -1073,7 +1076,14 @@ mod tests {
             controls: None,
             created_at: ts,
         };
-        let mut t = new_thread(ThreadScope::Global, ThreadOrigin::Human, None, None, None, msg);
+        let mut t = new_thread(
+            ThreadScope::Global,
+            ThreadOrigin::Human,
+            None,
+            None,
+            None,
+            msg,
+        );
         t.created_at = ts;
         t.updated_at = ts;
         store.save_thread(&t).unwrap();
