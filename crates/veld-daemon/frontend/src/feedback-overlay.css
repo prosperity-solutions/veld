@@ -265,6 +265,26 @@
 }
 .veld-feedback-listening-dot svg { width: 16px; height: 16px; }
 
+/* "An agent is watching" announcement banner (top-center). */
+.veld-feedback-listening-popover {
+  position: fixed; left: 50%; top: 24px; transform: translate(-50%, -12px);
+  z-index: var(--vf-z); max-width: 400px; width: calc(100vw - 32px);
+  background: var(--vf-bg); color: var(--vf-text);
+  border: 1px solid var(--vf-accent); border-radius: 12px;
+  box-shadow: 0 8px 40px rgba(0,0,0,.45);
+  padding: 14px 16px; font: 13px/1.5 var(--vf-font);
+  opacity: 0; transition: opacity .25s ease, transform .25s ease;
+}
+.veld-feedback-listening-popover-show { opacity: 1; transform: translate(-50%, 0); }
+.veld-feedback-listening-popover-title {
+  display: flex; align-items: center; gap: 6px;
+  font-weight: 600; margin-bottom: 4px;
+}
+.veld-feedback-listening-popover-icon { display: inline-flex; color: var(--vf-accent); }
+.veld-feedback-listening-popover-icon svg { width: 16px; height: 16px; }
+.veld-feedback-listening-popover-body { color: var(--vf-text-muted); margin-bottom: 10px; }
+.veld-feedback-listening-popover-actions { display: flex; justify-content: flex-end; }
+
 /* Unread count on the Threads item (added live by badge.ts). */
 .veld-feedback-tool-badge {
   position: absolute;

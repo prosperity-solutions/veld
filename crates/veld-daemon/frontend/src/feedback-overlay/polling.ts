@@ -2,7 +2,7 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
-import { PREFIX } from "./constants";
+import { PREFIX, ICONS } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { mkEl } from "./helpers";
@@ -39,12 +39,20 @@ export function primeEventSeq(): void {
   }).catch(function () {});
 }
 
+// Guards the "agent started listening" announcement so it doesn't fire for the
+// initial discovery of an already-listening agent on (re)load — only for a
+// transition that happens while the page is open.
+let listeningPrimed = false;
+
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
     const wasListening = getState().agentListening;
-    dispatch({ type: "SET_LISTENING", listening: !!(data && data.listening) });
-    if (getState().agentListening !== wasListening) updateListeningModule();
+    const nowListening = !!(data && data.listening);
+    dispatch({ type: "SET_LISTENING", listening: nowListening });
+    if (nowListening !== wasListening) updateListeningModule();
+    if (listeningPrimed && !wasListening && nowListening) notifyAgentListening();
+    listeningPrimed = true;
   }).catch(function () {});
 }
 
@@ -63,6 +71,7 @@ function handleEvent(event: FeedbackEvent): void {
       handleThreadReopened(event);
       break;
     case "agent_listening":
+      if (!getState().agentListening) notifyAgentListening();
       dispatch({ type: "SET_LISTENING", listening: true });
       updateListeningModule();
       break;
@@ -201,6 +210,53 @@ export function showAgentReplyToast(threadId: string, preview: string): void {
     t.classList.remove(PREFIX + "agent-toast-show");
     setTimeout(function () { t.remove(); }, 300);
   }, 8000);
+}
+
+/** Prominent, auto-dismissing banner shown when an agent starts a session. */
+function showListeningPopover(): void {
+  const existing = refs.shadow.querySelector("." + PREFIX + "listening-popover");
+  if (existing) existing.remove();
+
+  const pop = mkEl("div", "listening-popover");
+  let done = false;
+  const dismiss = function (): void {
+    if (done) return;
+    done = true;
+    pop.classList.remove(PREFIX + "listening-popover-show");
+    setTimeout(function () { pop.remove(); }, 300);
+  };
+
+  const title = mkEl("div", "listening-popover-title");
+  const icon = mkEl("span", "listening-popover-icon");
+  icon.innerHTML = ICONS.robot;
+  title.appendChild(icon);
+  title.appendChild(document.createTextNode("An agent is watching for your feedback"));
+  pop.appendChild(title);
+  pop.appendChild(mkEl("div", "listening-popover-body",
+    "Click an element, the page, or take a screenshot to leave a comment. Hit Done when you're finished."));
+  const actions = mkEl("div", "listening-popover-actions");
+  const gotIt = mkEl("button", "btn btn-primary btn-sm", "Got it");
+  gotIt.addEventListener("click", dismiss);
+  actions.appendChild(gotIt);
+  pop.appendChild(actions);
+
+  refs.shadow.appendChild(pop);
+  requestAnimationFrame(function () { pop.classList.add(PREFIX + "listening-popover-show"); });
+  setTimeout(dismiss, 12000);
+}
+
+/** Announce that an agent just started a feedback session: in-page popover
+ *  always, browser notification when the tab isn't focused. */
+function notifyAgentListening(): void {
+  showListeningPopover();
+  if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+    const n = new Notification("Veld — agent is listening", {
+      body: "An agent is watching for your feedback on this page.",
+      icon: "/__veld__/feedback/logo.svg",
+      tag: "veld-listening",
+    });
+    n.addEventListener("click", function () { window.focus(); n.close(); });
+  }
 }
 
 export function sendBrowserNotification(title: string, body: string, threadId: string): void {
