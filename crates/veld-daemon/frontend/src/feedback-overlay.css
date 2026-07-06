@@ -255,19 +255,15 @@
 /* Active = accent-coloured icon (on the surface-coloured blob) + soft halo. */
 .veld-feedback-tool-btn.veld-feedback-tool-active { color: var(--vf-accent); }
 
-/* "Done — no more feedback" action: a check icon that pulses with a soft ring
-   while an agent is listening, so it reads as an action, not just a status dot. */
-.veld-feedback-listening-dot { position: relative; color: var(--vf-accent); }
+/* "Done — no more feedback" action: a check icon with a soft, static accent
+   glow behind it. No pulse — the bubble already pulses while an agent is
+   listening, and two competing pulses clashed. */
+.veld-feedback-listening-dot {
+  color: var(--vf-accent);
+  background: radial-gradient(circle at center,
+    color-mix(in srgb, var(--vf-accent) 30%, transparent), transparent 72%);
+}
 .veld-feedback-listening-dot svg { width: 16px; height: 16px; }
-.veld-feedback-listening-dot::after {
-  content: ""; position: absolute; inset: -2px;
-  border-radius: 50%; pointer-events: none;
-  animation: veld-feedback-listen-pulse 1.8s ease-in-out infinite;
-}
-@keyframes veld-feedback-listen-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(196, 245, 106, 0.55); }
-  50% { box-shadow: 0 0 0 6px rgba(196, 245, 106, 0); }
-}
 
 /* Unread count on the Threads item (added live by badge.ts). */
 .veld-feedback-tool-badge {
