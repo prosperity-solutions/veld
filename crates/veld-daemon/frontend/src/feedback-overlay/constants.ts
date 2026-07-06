@@ -5,7 +5,6 @@ export const KEY_MOD = IS_MAC ? "\u2318" : "Ctrl";
 export const KEY_SHIFT = IS_MAC ? "\u21E7" : "Shift";
 export const SUBMIT_HINT = " " + KEY_MOD + "\u21B5";
 export const FAB_MARGIN = 16;          // drag clamping — allow FAB near edges
-export const FAB_TOOLBAR_MARGIN = 50;  // when toolbar is open — enough for arc
 
 export const ICONS = {
   logo: '<svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M13.2 28L4 4H8.4L15.7 23.8H15.8L23.1 4H27.5L18.3 28H13.2Z" fill="currentColor"/><path d="M24.5 29C25.88 29 27 27.88 27 26.5C27 25.12 25.88 24 24.5 24C23.12 24 22 25.12 22 26.5C22 27.88 23.12 29 24.5 29Z" fill="#C4F56A"/></svg>',
@@ -26,4 +25,5 @@ export const ICONS = {
   person: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>',
   dashboard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>',
   panelSide: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="7 16 3 12 7 8"/><polyline points="17 16 21 12 17 8"/></svg>',
+  more: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="5" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/><circle cx="12" cy="19" r="1.5" fill="currentColor" stroke="none"/></svg>',
 } as const;

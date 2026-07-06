@@ -6,7 +6,7 @@ import { toast } from "./toast";
 import { closeActivePopover } from "./popover";
 import { stopCaptureStream } from "./screenshot";
 import { ensureDrawScript, setupGlobalDrawCanvas, teardownGlobalDrawCanvas } from "./draw-mode";
-import { toggleToolbar } from "./toolbar";
+import { closeToolbar } from "./toolbar";
 
 export function setMode(mode: UIMode): void {
   // Tear down previous mode
@@ -56,19 +56,18 @@ export function setMode(mode: UIMode): void {
   if (mode === "screenshot") {
     // No acquireCaptureStream — selection starts instantly without screen share dialog.
     // Capture is deferred to after the user finishes drawing the selection rectangle.
+    // Close the menu so the arc doesn't float over the capture region.
+    closeToolbar();
     refs.overlay.classList.add(PREFIX + "overlay-active");
     refs.overlay.classList.add(PREFIX + "overlay-crosshair");
     window.focus();
     toast("Draw a rectangle to capture a screenshot");
   }
   if (mode === "draw") {
-    // Close the radial toolbar visually but DON'T call toggleToolbar() —
-    // it calls setMode(null) which clobbers activeMode before the async
-    // setupGlobalDrawCanvas() runs.
-    if (getState().toolbarOpen) {
-      dispatch({ type: "SET_TOOLBAR_OPEN", open: false });
-      dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
-    }
+    // Close the arc menu (the engine is the sole authority for open state).
+    // Safe to call here: SET_MODE was already dispatched above, so the engine's
+    // onOpenChange guard (only clears select-element) won't clobber draw mode.
+    closeToolbar();
     // No acquireCaptureStream — draw starts instantly without screen share dialog.
     // Capture is deferred to Done (for compositing) or blur tool (for pixelation).
     ensureDrawScript().then(() => {

@@ -1,34 +1,33 @@
+// Toolbar — thin adapter between the Veld feedback overlay and the arc-menu
+// engine. It owns the engine instance, translates engine callbacks into store
+// dispatches, and preserves the public API that other modules + tests depend on
+// (toggleToolbar, positionRadialButtons, makeToolBtn).
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { mkEl } from "./helpers";
-import { PREFIX } from "./constants";
-import { attachTooltip } from "./tooltip";
+import { PREFIX, ICONS } from "./constants";
 import { updateBadge } from "./badge";
 import { deps } from "../shared/registry";
-import { nudgeFabForToolbar } from "./fab";
+import { saveFabPos } from "./fab";
+import { createArcMenu, type ArcItem, type ArcMenuHandle } from "./arc-menu";
 
-const RADIUS = 48;           // center-to-center distance from FAB
-const ARC_SPAN = Math.PI;    // 180° arc
-const ARC_THICKNESS = 32;    // arc backdrop thickness
-const SVG_NS = "http://www.w3.org/2000/svg";
+let arc: ArcMenuHandle | null = null;
 
-// Arc backdrop SVG elements (created lazily)
-let arcSvg: SVGSVGElement | null = null;
-let arcPathEl: SVGPathElement | null = null;
+/** The live engine handle (null before buildDOM / in unit tests). */
+export function getArc(): ArcMenuHandle | null {
+  return arc;
+}
 
-export function makeToolBtn(action: string, iconSvg: string, title: string): HTMLElement {
+/** Create a bare icon button. Label/kbd/action are carried by the ArcItem. */
+export function makeToolBtn(action: string, iconSvg: string): HTMLElement {
   const btn = mkEl("button", "tool-btn");
   (btn as HTMLElement & { dataset: DOMStringMap }).dataset.action = action;
   btn.innerHTML = iconSvg;
-  attachTooltip(btn, title);
-  btn.addEventListener("click", (e: Event) => {
-    e.stopPropagation();
-    handleToolAction(action);
-  });
   return btn;
 }
 
-function handleToolAction(action: string): void {
+/** Perform a standard tool action (modes / panel / page-comment / hide). */
+export function handleToolAction(action: string): void {
   if (action === "select-element") {
     deps().setMode(getState().activeMode === "select-element" ? null : "select-element");
   } else if (action === "screenshot") {
@@ -44,163 +43,84 @@ function handleToolAction(action: string): void {
   }
 }
 
-/** Compute the base angle for the arc: points from FAB toward viewport center. */
-function computeBaseAngle(): number {
-  const cx = getState().fabCX / window.innerWidth;
-  const cy = getState().fabCY / window.innerHeight;
-  return Math.atan2(0.5 - cy, 0.5 - cx);
-}
-
 /**
- * Get the currently active button set.
- * When overflow is open, show overflow buttons + the ⋯ toggle.
- * Otherwise, show primary buttons (filtering hidden listening dot).
+ * Instantiate the arc-menu engine. Called once from buildDOM with the bubble's
+ * icon element and the assembled root item model.
  */
-function getActiveButtons(): HTMLElement[] {
-  if (getState().overflowOpen) {
-    // Overflow page: overflow buttons + the ⋯ toggle (to switch back)
-    return [...refs.overflowButtons, refs.moreBtn];
-  }
-  // Primary page: primary tools, conditional listening, ⋯ toggle
-  return refs.radialButtons.filter(function (btn) {
-    if (btn === refs.listeningModule && !getState().agentListening) return false;
-    return true;
-  });
-}
-
-/** Build an SVG arc (ring segment) path string with rounded endcaps. */
-function arcPath(
-  centerX: number, centerY: number,
-  radius: number, thickness: number,
-  startAngle: number, endAngle: number,
-): string {
-  const rOuter = radius + thickness / 2;
-  const rInner = radius - thickness / 2;
-  const capR = (rOuter - rInner) / 2;
-  const pad = capR * 0.35 / radius;
-  const a1 = startAngle - pad;
-  const a2 = endAngle + pad;
-  const largeArc = Math.abs(a2 - a1) > Math.PI ? 1 : 0;
-
-  const ox1 = centerX + Math.cos(a1) * rOuter;
-  const oy1 = centerY + Math.sin(a1) * rOuter;
-  const ox2 = centerX + Math.cos(a2) * rOuter;
-  const oy2 = centerY + Math.sin(a2) * rOuter;
-  const ix2 = centerX + Math.cos(a2) * rInner;
-  const iy2 = centerY + Math.sin(a2) * rInner;
-  const ix1 = centerX + Math.cos(a1) * rInner;
-  const iy1 = centerY + Math.sin(a1) * rInner;
-
-  return [
-    "M", ox1, oy1,
-    "A", rOuter, rOuter, 0, largeArc, 1, ox2, oy2,
-    "A", capR, capR, 0, 0, 1, ix2, iy2,
-    "A", rInner, rInner, 0, largeArc, 0, ix1, iy1,
-    "A", capR, capR, 0, 0, 1, ox1, oy1,
-    "Z"
-  ].join(" ");
-}
-
-/** Ensure the arc SVG exists, create lazily. */
-function ensureArc(): { svg: SVGSVGElement; path: SVGPathElement } {
-  if (!arcSvg) {
-    arcSvg = document.createElementNS(SVG_NS, "svg");
-    arcSvg.style.cssText = "position:absolute;top:0;left:0;pointer-events:none;overflow:visible;width:40px;height:40px;z-index:0;";
-    arcPathEl = document.createElementNS(SVG_NS, "path");
-    arcPathEl.setAttribute("fill", "var(--vf-bg)");
-    arcPathEl.setAttribute("stroke", "var(--vf-border)");
-    arcPathEl.setAttribute("stroke-width", "1");
-    arcPathEl.style.filter = "drop-shadow(0 2px 8px rgba(0,0,0,.25))";
-    arcPathEl.style.transition = "d .2s ease";
-    arcSvg.appendChild(arcPathEl);
-    refs.toolbarContainer.insertBefore(arcSvg, refs.toolbarContainer.firstChild);
-  }
-  return { svg: arcSvg, path: arcPathEl! };
-}
-
-/** Hide all buttons (both primary and overflow). */
-function hideAllButtons(): void {
-  const all = [...refs.radialButtons, ...refs.overflowButtons];
-  all.forEach(function (btn) {
-    btn.classList.remove(PREFIX + "radial-open");
-    btn.style.transform = "translate(0, 0) scale(0)";
+export function initArc(
+  bubbleIcon: HTMLElement,
+  rootItems: ArcItem[],
+  bubbleTooltip?: { label: string; kbd?: string[] },
+): void {
+  arc?.destroy(); // unbind a prior engine's listeners before replacing it
+  arc = createArcMenu({
+    container: refs.toolbarContainer,
+    scope: refs.shadow,
+    bubble: refs.fab,
+    bubbleIcon,
+    prefix: PREFIX,
+    items: () => rootItems,
+    icons: {
+      logo: ICONS.logo,
+      close: ICONS.cancel,
+      back: ICONS.back,
+    },
+    bubbleTooltip,
+    callbacks: {
+      onMove: (x, y, committed) => {
+        dispatch({ type: "SET_FAB_POS", cx: x, cy: y });
+        if (committed) saveFabPos(x, y);
+      },
+      onOpenChange: (open) => {
+        dispatch({ type: "SET_TOOLBAR_OPEN", open });
+        dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
+        // Closing the menu exits the menu-coupled inspection mode, but leaves
+        // full-screen takeovers (screenshot / draw) running.
+        if (!open && getState().activeMode === "select-element") {
+          deps().setMode(null);
+        }
+        updateBadge();
+      },
+      shouldCloseOnOutsideClick: () => !getState().activeMode,
+    },
   });
 }
 
 /**
- * Position the active button set around the FAB.
- * Called on open, during drag, on overflow toggle, and on window resize.
+ * Toggle the menu open/closed.
+ *
+ * With the engine present (production) the engine drives open state and fires
+ * onOpenChange to update the store. Without an engine (unit tests) we mutate
+ * the store directly so the documented state semantics still hold.
  */
-export function positionRadialButtons(): void {
-  if (!getState().toolbarOpen) return;
-  const baseAngle = computeBaseAngle();
-  const active = getActiveButtons();
-  const count = active.length;
-  if (count === 0) return;
-
-  const startAngle = baseAngle - ARC_SPAN / 2;
-  const step = count > 1 ? ARC_SPAN / (count - 1) : 0;
-  const cx = 20, cy = 20;
-
-  for (let i = 0; i < count; i++) {
-    const angle = startAngle + step * i;
-    const x = Math.cos(angle) * RADIUS;
-    const y = Math.sin(angle) * RADIUS;
-    active[i].style.transform = "translate(" + Math.round(x) + "px, " + Math.round(y) + "px) scale(1)";
-  }
-
-  // Update arc backdrop
-  const { path } = ensureArc();
-  const endAngle = startAngle + step * (count - 1);
-  path.setAttribute("d", arcPath(cx, cy, RADIUS, ARC_THICKNESS, startAngle, endAngle));
-}
-
-/** Toggle between primary and overflow button sets in the same arc. */
-export function toggleOverflow(): void {
-  const nowOpen = !getState().overflowOpen;
-  dispatch({ type: "SET_OVERFLOW_OPEN", open: nowOpen });
-
-  // Hide the old set, show the new set
-  hideAllButtons();
-  positionRadialButtons();
-  const active = getActiveButtons();
-  active.forEach(function (btn, i) {
-    setTimeout(function () {
-      btn.classList.add(PREFIX + "radial-open");
-    }, i * 30);
-  });
-}
-
 export function toggleToolbar(): void {
-  dispatch({ type: "SET_TOOLBAR_OPEN", open: !getState().toolbarOpen });
-
-  if (getState().toolbarOpen) {
-    nudgeFabForToolbar();
-    positionRadialButtons();
-    if (arcSvg) arcSvg.style.opacity = "1";
-    const active = getActiveButtons();
-    active.forEach(function (btn, i) {
-      setTimeout(function () {
-        btn.classList.add(PREFIX + "radial-open");
-      }, i * 30);
-    });
-  } else {
-    deps().setMode(null);
-    dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
-    const active = getActiveButtons();
-    const total = active.length;
-    active.forEach(function (btn, i) {
-      setTimeout(function () {
-        btn.classList.remove(PREFIX + "radial-open");
-        btn.style.transform = "translate(0, 0) scale(0)";
-      }, (total - 1 - i) * 30);
-    });
-    // Also hide any buttons from the other set
-    hideAllButtons();
-    setTimeout(function () {
-      if (arcSvg) arcSvg.style.opacity = "0";
-    }, total * 30);
+  if (arc) {
+    arc.toggle();
+    return;
   }
-
+  const open = !getState().toolbarOpen;
+  dispatch({ type: "SET_TOOLBAR_OPEN", open });
+  if (!open) dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
   updateBadge();
+}
+
+/** Re-sync the arc when the visible item set changes (e.g. listening dot). */
+export function positionRadialButtons(): void {
+  arc?.reflow();
+}
+
+/**
+ * Close the menu. Used by mode entry (draw / screenshot) and hide, which need
+ * the engine — the sole authority for open state — to actually collapse.
+ * Falls back to store-only in unit tests where no engine exists.
+ */
+export function closeToolbar(): void {
+  if (arc) {
+    arc.close(); // engine fires onOpenChange → store + badge update
+    return;
+  }
+  // No engine (unit tests): keep the store consistent. Badge sync is the
+  // engine's job in production, so we don't touch refs here.
+  dispatch({ type: "SET_TOOLBAR_OPEN", open: false });
+  dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
 }

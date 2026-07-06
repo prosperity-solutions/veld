@@ -35,7 +35,6 @@ export interface Store {
   // FAB positioning
   fabCX: number;
   fabCY: number;
-  fabWasDragged: boolean;
 
   // Misc
   rafPending: boolean;
@@ -69,7 +68,6 @@ export type Action =
   | { type: "REMOVE_PIN"; threadId: string }
   | { type: "CLEAR_PINS" }
   | { type: "SET_FAB_POS"; cx: number; cy: number }
-  | { type: "SET_FAB_DRAGGED"; dragged: boolean }
   | { type: "SET_RAF_PENDING"; pending: boolean }
   | { type: "SET_LAST_EVENT_SEQ"; seq: number }
   | { type: "SET_LAST_PATHNAME"; path: string }
@@ -133,8 +131,6 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, pins: {} };
     case "SET_FAB_POS":
       return { ...s, fabCX: action.cx, fabCY: action.cy };
-    case "SET_FAB_DRAGGED":
-      return { ...s, fabWasDragged: action.dragged };
     case "SET_RAF_PENDING":
       return { ...s, rafPending: action.pending };
     case "SET_LAST_EVENT_SEQ":
@@ -150,6 +146,24 @@ import { createStore, type Store as StoreInterface } from "../shared/create-stor
 
 let instance: StoreInterface<Store, Action>;
 
+/** Restore the persisted toolbar theme, defaulting to auto (contrast). */
+function readStoredTheme(): ThemeMode {
+  try {
+    const t = localStorage.getItem("veld-theme");
+    if (t === "dark" || t === "light" || t === "auto") return t;
+  } catch (_) { /* ignore */ }
+  return "auto";
+}
+
+/** Restore panel side. Wrapped: merely accessing localStorage throws in
+ *  sandboxed / cross-origin iframes, which would abort overlay boot. */
+function readPanelSide(): "left" | "right" {
+  try {
+    if (localStorage.getItem("veld-panel-side") === "left") return "left";
+  } catch (_) { /* ignore */ }
+  return "right";
+}
+
 function createInitial(): Store {
   return {
     threads: [],
@@ -157,7 +171,7 @@ function createInitial(): Store {
     lastSeenAt: {},
     agentListening: false,
     panelOpen: false,
-    panelSide: (typeof localStorage !== "undefined" && localStorage.getItem("veld-panel-side")) === "left" ? "left" : "right",
+    panelSide: readPanelSide(),
     panelTab: "active",
     activePopover: null,
     activeMode: null,
@@ -167,7 +181,7 @@ function createInitial(): Store {
     overflowOpen: false,
     hidden: false,
     shortcutsDisabled: false,
-    theme: "auto",
+    theme: readStoredTheme(),
     expandedThreadId: null,
     pins: {},
     captureStream: null,
@@ -177,7 +191,6 @@ function createInitial(): Store {
     prevOverflow: null,
     fabCX: 0,
     fabCY: 0,
-    fabWasDragged: false,
     rafPending: false,
     lastPathname: typeof window !== "undefined" ? window.location.pathname : "/",
   };
