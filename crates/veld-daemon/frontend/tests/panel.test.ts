@@ -131,13 +131,16 @@ describe("renderPanel — list view", () => {
     expect(refs.panelBody.classList.contains(PREFIX + "panel-body-thread")).toBe(false);
   });
 
-  it("shows empty message when no active threads", () => {
+  it("shows both lanes with empty states and (0) counts when no active threads", () => {
     dispatch({ type: "SET_THREADS", threads: [] });
     dispatch({ type: "SET_PANEL_TAB", tab: "active" });
     renderPanel();
-    const empty = refs.panelBody.querySelector("." + PREFIX + "panel-empty");
-    expect(empty).not.toBeNull();
-    expect(empty!.textContent).toContain("No active threads");
+    const sections = refs.panelBody.querySelectorAll("." + PREFIX + "panel-section");
+    expect(sections.length).toBe(2);
+    const empties = refs.panelBody.querySelectorAll("." + PREFIX + "panel-lane-empty");
+    expect(empties.length).toBe(2);
+    expect(refs.panelBody.textContent).toContain("Your turn (0)");
+    expect(refs.panelBody.textContent).toContain("With the agent (0)");
   });
 
   it("shows resolved tab content", () => {

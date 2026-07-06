@@ -600,10 +600,19 @@
 /* --- Panel section (page group) --- */
 .veld-feedback-panel-section { margin-bottom: 12px; }
 .veld-feedback-panel-section-heading {
-  font-size: 11px; color: var(--vf-text-muted);
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; font-weight: 600; color: var(--vf-text-muted);
   padding: 4px 0 8px; margin-bottom: 4px;
   border-bottom: 1px solid var(--vf-border);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.veld-feedback-panel-section-icon { display: inline-flex; flex-shrink: 0; }
+.veld-feedback-panel-section-icon svg { width: 13px; height: 13px; }
+.veld-feedback-panel-lane-empty {
+  color: var(--vf-text-muted); font-size: 12px; font-style: italic;
+  padding: 10px 12px; margin-bottom: 6px;
+  border: 1px dashed var(--vf-border); border-radius: 8px;
+  text-align: center; opacity: .8;
 }
 
 /* --- Thread card (compact) --- */

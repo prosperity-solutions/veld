@@ -266,27 +266,32 @@ function lastMessageAuthor(t: Thread): "human" | "agent" | undefined {
 
 function renderActiveThreads(): void {
   const active = getState().threads.filter(function (t: Thread) { return t.status === "open"; });
-  if (!active.length) {
-    refs.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
-    return;
-  }
   const byRecency = function (a: Thread, b: Thread) {
     return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
   };
   // Two lanes mirroring the agent's queue: a thread whose last message is the
   // agent's is waiting on you ("Your turn"); one whose last message is human
-  // (or none yet) is in the agent's queue ("With the agent").
+  // (or none yet) is in the agent's queue ("With the agent"). Both lanes always
+  // render — with a count and an empty state when there's nothing in them.
   const yourTurn = active.filter(function (t) { return lastMessageAuthor(t) === "agent"; }).sort(byRecency);
   const withAgent = active.filter(function (t) { return lastMessageAuthor(t) !== "agent"; }).sort(byRecency);
-  renderLane("Your turn", yourTurn);
-  renderLane("With the agent", withAgent);
+  renderLane("Your turn", ICONS.person, yourTurn, "Nothing needs your reply.");
+  renderLane("With the agent", ICONS.robot, withAgent, "Nothing waiting on the agent.");
 }
 
-function renderLane(label: string, threads: Thread[]): void {
-  if (!threads.length) return;
+function renderLane(label: string, icon: string, threads: Thread[], emptyText: string): void {
   const section = mkEl("div", "panel-section");
-  section.appendChild(mkEl("div", "panel-section-heading", label));
-  threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
+  const heading = mkEl("div", "panel-section-heading");
+  const iconEl = mkEl("span", "panel-section-icon");
+  iconEl.innerHTML = icon;
+  heading.appendChild(iconEl);
+  heading.appendChild(document.createTextNode(label + " (" + threads.length + ")"));
+  section.appendChild(heading);
+  if (threads.length) {
+    threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
+  } else {
+    section.appendChild(mkEl("div", "panel-lane-empty", emptyText));
+  }
   refs.panelBody.appendChild(section);
 }
 
