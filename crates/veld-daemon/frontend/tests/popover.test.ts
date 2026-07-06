@@ -31,7 +31,6 @@ function makeFakeDeps() {
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),
     positionTooltip: vi.fn(),
-    ensureDrawScript: vi.fn().mockResolvedValue(undefined),
   };
 }
 

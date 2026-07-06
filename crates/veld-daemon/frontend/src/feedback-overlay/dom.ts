@@ -39,7 +39,6 @@ export function buildDOM(): void {
   // --- Primary tool icons (reused by the engine as crisp icon overlays) ---
   refs.toolBtnSelect = makeToolBtn("select-element", ICONS.crosshair);
   refs.toolBtnScreenshot = makeToolBtn("screenshot", ICONS.screenshot);
-  refs.toolBtnDraw = makeToolBtn("draw", ICONS.draw);
   refs.toolBtnPageComment = makeToolBtn("page-comment", ICONS.pageComment);
   refs.toolBtnComments = makeToolBtn("show-comments", ICONS.chat);
 
@@ -75,7 +74,6 @@ export function buildDOM(): void {
   refs.radialButtons = [
     refs.toolBtnSelect,
     refs.toolBtnScreenshot,
-    refs.toolBtnDraw,
     refs.toolBtnPageComment,
     refs.toolBtnComments,
     refs.listeningModule,
@@ -144,14 +142,6 @@ export function buildDOM(): void {
       onSelect: () => handleToolAction("screenshot"),
     },
     {
-      id: "draw",
-      el: refs.toolBtnDraw,
-      label: "Draw",
-      kbd: [KEY_MOD, KEY_SHIFT, "D"],
-      isActive: () => getState().activeMode === "draw",
-      onSelect: () => handleToolAction("draw"),
-    },
-    {
       id: "page-comment",
       el: refs.toolBtnPageComment,
       label: "Page comment",
@@ -168,7 +158,7 @@ export function buildDOM(): void {
     {
       id: "listening",
       el: refs.listeningModule,
-      label: "All good",
+      label: "Done — no more feedback",
       isVisible: () => getState().agentListening,
       onSelect: () => sendAllGood(),
     },

@@ -26,7 +26,7 @@ describe("buildDOM", () => {
     buildDOM();
     const required = [
       "toolbarContainer", "fab", "fabBadge", "toolbar", "toolBtnSelect",
-      "toolBtnScreenshot", "toolBtnDraw", "toolBtnPageComment", "toolBtnComments",
+      "toolBtnScreenshot", "toolBtnPageComment", "toolBtnComments",
       "toolBtnHide", "toolbarOverflow", "listeningModule", "moreBtn", "overlay",
       "hoverOutline", "componentTraceEl", "screenshotRect", "panel", "panelBody",
       "panelHeadTitle", "panelBackBtn", "markReadBtn", "segBtnActive",

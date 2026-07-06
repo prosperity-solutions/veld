@@ -33,13 +33,13 @@ describe("shared/registry", () => {
       "addPin", "removePin", "renderAllPins", "renderPanel",
       "openThreadInPanel", "scrollToThread", "checkPendingScroll",
       "updateBadge", "captureScreenshot", "showCreatePopover",
-      "positionTooltip", "ensureDrawScript",
+      "positionTooltip",
     ];
 
     for (const key of keys) {
       expect(typeof d[key]).toBe("function");
     }
-    expect(keys.length).toBe(19);
+    expect(keys.length).toBe(18);
   });
 
   it("deps functions are callable", async () => {
@@ -75,6 +75,5 @@ function makeFakeDeps() {
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),
     positionTooltip: vi.fn(),
-    ensureDrawScript: vi.fn().mockResolvedValue(undefined),
   };
 }

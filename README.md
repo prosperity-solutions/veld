@@ -143,8 +143,9 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
-| `veld feedback listen [--name <n>] [--after <seq>]` | Listen for feedback events (agent-facing) |
-| `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
+| `veld feedback next [--wait] [--name <n>] [--json]` | Get the next feedback item to work on (agent-facing; pure read, no cursor) |
+| `veld feedback reply <thread-id> "<msg>"` | Reply to a feedback thread (parks it on the reviewer) |
+| `veld feedback resolve <thread-id>` | Resolve a thread (agent-facing; only on explicit approval) |
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |

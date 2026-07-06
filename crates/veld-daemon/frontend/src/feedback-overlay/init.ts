@@ -1,7 +1,6 @@
 // Initialization — wires all module dependencies and starts the overlay.
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import { createControlsRegistry } from "../shared/controls";
 import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
@@ -15,7 +14,6 @@ import { hideOverlay, showOverlay } from "./visibility";
 import { addPin, removePin, renderAllPins, scheduleReposition } from "./pins";
 import { scrollToThread, checkPendingScroll, onNavigate } from "./navigation";
 import { captureScreenshot } from "./screenshot";
-import { ensureDrawScript } from "./draw-mode";
 import { positionTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 import { registerDeps } from "../shared/registry";
@@ -40,7 +38,6 @@ function wireDeps(): void {
     captureScreenshot,
     showCreatePopover,
     positionTooltip,
-    ensureDrawScript,
   });
 }
 
@@ -50,11 +47,6 @@ export function init(): void {
       dispatch({ type: "SET_HIDDEN", hidden: true });
     }
   } catch (_) { /* ignore */ }
-
-  // Inject controls registry into window for framework hooks
-  if (!window.__veld_controls) {
-    window.__veld_controls = createControlsRegistry();
-  }
 
   wireDeps();
   buildDOM();

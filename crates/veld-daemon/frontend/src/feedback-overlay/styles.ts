@@ -61,8 +61,11 @@ export const LIGHT_CSS = `
 .veld-feedback-overlay-crosshair { cursor: crosshair; }
 .veld-feedback-hover-outline {
   position: absolute;
-  outline: 2px dashed var(--vfl-accent);
+  outline: 2px solid var(--vfl-accent);
   outline-offset: 2px;
+  /* Dark backdrop with the hovered element cut out: the huge box-shadow dims
+     the whole page while the element's own box stays clear (a spotlight). */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.45);
   pointer-events: none;
   z-index: 999998;
   border-radius: 3px;
@@ -88,14 +91,6 @@ export const LIGHT_CSS = `
   z-index: 999998;
   border-radius: 3px;
   display: none;
-}
-.veld-feedback-draw-canvas {
-  position: fixed; inset: 0;
-  width: 100%; height: 100%;
-  z-index: 999997;
-  cursor: crosshair;
-  touch-action: none;
-  background: transparent;
 }
 .veld-feedback-pin {
   position: absolute; z-index: 999998;

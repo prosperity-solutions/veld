@@ -16,7 +16,7 @@ export function updateListeningModule(): void {
 export function sendAllGood(): void {
   api("POST", "/session/end")
     .then(function () {
-      toast("All Good signal sent!");
+      toast("Done — feedback session ended.");
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
     })

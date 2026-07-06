@@ -10,7 +10,6 @@ export interface DOMRefs {
   toolbar: HTMLElement;
   toolBtnSelect: HTMLElement;
   toolBtnScreenshot: HTMLElement;
-  toolBtnDraw: HTMLElement;
   toolBtnPageComment: HTMLElement;
   toolBtnComments: HTMLElement;
   toolBtnHide: HTMLElement;
@@ -55,7 +54,6 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     toolbar: null!,
     toolBtnSelect: null!,
     toolBtnScreenshot: null!,
-    toolBtnDraw: null!,
     toolBtnPageComment: null!,
     toolBtnComments: null!,
     toolBtnHide: null!,

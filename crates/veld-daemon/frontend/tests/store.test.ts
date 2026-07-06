@@ -15,8 +15,8 @@ describe("store + dispatch", () => {
   });
 
   it("SET_MODE updates activeMode", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    expect(getState().activeMode).toBe("draw");
+    dispatch({ type: "SET_MODE", mode: "screenshot" });
+    expect(getState().activeMode).toBe("screenshot");
     dispatch({ type: "SET_MODE", mode: null });
     expect(getState().activeMode).toBeNull();
   });

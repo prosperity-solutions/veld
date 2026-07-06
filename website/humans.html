@@ -1618,7 +1618,7 @@
           <span class="terminal-dot green"></span>
           <span class="terminal-title">Agent receives feedback as JSON</span>
         </div>
-        <div class="terminal-body" id="agentOutput"><span class="t-dim">$</span> <span class="t-white">veld feedback --wait --name dev --json</span>
+        <div class="terminal-body" id="agentOutput"><span class="t-dim">$</span> <span class="t-white">veld feedback next --wait --name dev --json</span>
 <span class="t-dim">Listening for feedback on run </span><span class="t-accent">dev</span><span class="t-dim">...</span>
 <span class="t-dim">Waiting for user input at </span><span class="t-blue">https://app.dev.acme.com</span></div>
       </div>
@@ -1646,7 +1646,7 @@ veld start --preset fullstack --name dev
 <span class="t-dim"># "The auth flow is broken - the login button should redirect to /auth/login"</span>
 
 <span class="t-dim"># Claude receives it as JSON, fixes the code, server reloads:</span>
-veld feedback --wait --name dev --json
+veld feedback next --wait --name dev --json
 
 <span class="t-dim"># Check all service URLs:</span>
 veld urls --name dev</div>
@@ -1878,7 +1878,7 @@ veld status --name dev</div>
         // Update agent terminal with realistic output
         var now = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
         agentOutput.innerHTML =
-          '<span class="t-dim">$</span> <span class="t-white">veld feedback --wait --name dev --json</span>\n' +
+          '<span class="t-dim">$</span> <span class="t-white">veld feedback next --wait --name dev --json</span>\n' +
           '<span class="t-dim">Listening for feedback on run </span><span class="t-accent">dev</span><span class="t-dim">...</span>\n' +
           '<span class="t-dim">Waiting for user input at </span><span class="t-blue">https://app.dev.acme.com</span>\n\n' +
           '<span class="t-green">Feedback received:</span>\n' +

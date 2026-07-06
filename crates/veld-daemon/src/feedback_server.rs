@@ -55,7 +55,6 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         )
         // Overlay assets (loaded dynamically by the veld_inject bootstrap script).
         .route("/feedback/script.js", get(overlay_script))
-        .route("/feedback/draw.js", get(draw_script))
         .route("/feedback/logo.svg", get(logo_svg))
         // Thread API.
         .route("/feedback/api/threads", get(list_threads))
@@ -67,10 +66,6 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         )
         .route("/feedback/api/threads/{id}/resolve", post(resolve_thread))
         .route("/feedback/api/threads/{id}/reopen", post(reopen_thread))
-        .route(
-            "/feedback/api/threads/{id}/release",
-            post(release_thread_claim),
-        )
         .route("/feedback/api/threads/{id}/seen", put(mark_thread_seen))
         // Event API.
         .route("/feedback/api/events", get(get_events))
@@ -183,17 +178,6 @@ async fn overlay_script() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         feedback_assets::OVERLAY_JS,
-    )
-        .into_response()
-}
-
-async fn draw_script() -> Response {
-    (
-        [
-            (header::CONTENT_TYPE, "application/javascript"),
-            (header::CACHE_CONTROL, "no-cache"),
-        ],
-        feedback_assets::DRAW_JS,
     )
         .into_response()
 }
@@ -599,32 +583,6 @@ async fn reopen_thread(
     Ok(Json(thread))
 }
 
-async fn release_thread_claim(
-    headers: axum::http::HeaderMap,
-    Path(id): Path<String>,
-    state: State<Arc<AppState>>,
-) -> Result<Json<Thread>, StatusCode> {
-    let run_name = headers
-        .get("x-veld-run")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::BAD_REQUEST)?;
-    let store = resolve_store(Some(run_name), None, &headers)?;
-
-    let thread = store
-        .release_thread(&id, None) // Force release (no agent check) — for UI use.
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    store
-        .append_event(EventType::ThreadReleased {
-            thread_id: id,
-            agent_id: "ui".to_owned(),
-        })
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    state.event_notify.notify_waiters();
-    Ok(Json(thread))
-}
-
 async fn mark_thread_seen(
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
@@ -670,9 +628,14 @@ async fn get_session(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
 
+    // Don't report "listening" once the reviewer clicked Done — even while the
+    // agent drains the last items — so the FAB doesn't re-pulse after Done.
     let listening = store
         .is_listening(60)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        && !store
+            .is_ended()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(serde_json::json!({ "listening": listening })))
 }

@@ -25,12 +25,8 @@ export interface Store {
   expandedThreadId: string | null;
   pins: Record<string, HTMLElement>;
 
-  // Draw/capture
+  // Capture (screenshot)
   captureStream: MediaStream | null;
-  drawLoaded: boolean;
-  drawCleanup: (() => void) | null;
-  drawCanvas: HTMLCanvasElement | null;
-  prevOverflow: string | null;
 
   // FAB positioning
   fabCX: number;
@@ -60,10 +56,6 @@ export type Action =
   | { type: "SET_LISTENING"; listening: boolean }
   | { type: "MARK_SEEN"; threadId: string }
   | { type: "SET_CAPTURE_STREAM"; stream: MediaStream | null }
-  | { type: "SET_DRAW_LOADED"; loaded: boolean }
-  | { type: "SET_DRAW_CANVAS"; canvas: HTMLCanvasElement | null }
-  | { type: "SET_DRAW_CLEANUP"; cleanup: (() => void) | null }
-  | { type: "SET_PREV_OVERFLOW"; overflow: string | null }
   | { type: "SET_PIN"; threadId: string; el: HTMLElement }
   | { type: "REMOVE_PIN"; threadId: string }
   | { type: "CLEAR_PINS" }
@@ -111,14 +103,6 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, lastSeenAt: { ...s.lastSeenAt, [action.threadId]: Date.now() } };
     case "SET_CAPTURE_STREAM":
       return { ...s, captureStream: action.stream };
-    case "SET_DRAW_LOADED":
-      return { ...s, drawLoaded: action.loaded };
-    case "SET_DRAW_CANVAS":
-      return { ...s, drawCanvas: action.canvas };
-    case "SET_DRAW_CLEANUP":
-      return { ...s, drawCleanup: action.cleanup };
-    case "SET_PREV_OVERFLOW":
-      return { ...s, prevOverflow: action.overflow };
     case "SET_PIN": {
       const pins = { ...s.pins, [action.threadId]: action.el };
       return { ...s, pins };
@@ -185,10 +169,6 @@ function createInitial(): Store {
     expandedThreadId: null,
     pins: {},
     captureStream: null,
-    drawLoaded: false,
-    drawCleanup: null,
-    drawCanvas: null,
-    prevOverflow: null,
     fabCX: 0,
     fabCY: 0,
     rafPending: false,

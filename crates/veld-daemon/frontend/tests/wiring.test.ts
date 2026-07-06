@@ -34,7 +34,6 @@ function makeFakeDeps() {
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),
     positionTooltip: vi.fn(),
-    ensureDrawScript: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -52,7 +51,6 @@ function setupState() {
   refs.fab = document.createElement("div");
   refs.toolBtnSelect = document.createElement("div");
   refs.toolBtnScreenshot = document.createElement("div");
-  refs.toolBtnDraw = document.createElement("div");
   refs.toolBtnPageComment = document.createElement("div");
   refs.toolBtnComments = document.createElement("div");
   refs.toolBtnHide = document.createElement("div");
@@ -75,19 +73,7 @@ describe("toolbar wiring", () => {
 describe("keyboard wiring", () => {
   beforeEach(setupState);
 
-  it("ESC in draw mode is passed through to draw overlay", () => {
-    const fakeDeps = makeFakeDeps();
-    registerDeps(fakeDeps);
-
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    const event = new KeyboardEvent("keydown", { key: "Escape" });
-    onKeyDown(event);
-    // ESC in draw mode is now handled by the draw overlay (confirm bar),
-    // so keyboard.ts should NOT call setMode.
-    expect(fakeDeps.setMode).not.toHaveBeenCalled();
-  });
-
-  it("shortcuts disabled blocks all except ESC in draw mode", () => {
+  it("shortcuts disabled blocks all shortcuts", () => {
     const fakeDeps = makeFakeDeps();
     registerDeps(fakeDeps);
 

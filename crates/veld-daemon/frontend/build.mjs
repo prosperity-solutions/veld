@@ -24,7 +24,6 @@ const shared = {
 // JS entry points (CSS is bundled into feedback-overlay.js via import)
 for (const { src, out } of [
   { src: "src/feedback-overlay/index.ts", out: "feedback-overlay.js" },
-  { src: "src/draw-overlay/index.ts", out: "draw-overlay.js" },
   { src: "src/client-log/index.ts", out: "client-log.js" },
 ]) {
   await esbuild.build({

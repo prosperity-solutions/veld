@@ -25,7 +25,6 @@ describe("initState", () => {
     expect(getState().theme).toBe("auto");
     expect(getState().pins).toEqual({});
     expect(getState().captureStream).toBeNull();
-    expect(getState().drawLoaded).toBe(false);
   });
 
   it("state is mutable singleton", () => {

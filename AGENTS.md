@@ -46,9 +46,9 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 1. Start the website: `veld start website:local --name dev`
 2. Open the URL in your browser
 3. Use the feedback overlay to leave comments on the website
-4. The agent reads feedback: `veld feedback --wait --name dev`
-5. The agent makes changes based on feedback
-6. Repeat
+4. The agent pulls the next item: `veld feedback next --wait --name dev --json`
+5. The agent fixes it, then `veld feedback reply <thread-id> "..."` and loops
+6. Repeat until the reviewer clicks "Done" (`result: "ended"`)
 
 ## Agent Skills
 

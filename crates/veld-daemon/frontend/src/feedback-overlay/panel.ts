@@ -3,7 +3,6 @@ import { getState, dispatch } from "./store";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
-import { parseControls, renderControls } from "./controls-renderer";
 import { toast } from "./toast";
 import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
@@ -67,13 +66,7 @@ export function updateMarkReadBtn(): void {
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
-// Track control cleanups to prevent memory leaks on re-render
-let controlCleanups: (() => void)[] = [];
-
 export function renderPanel(): void {
-  // Clean up previous control listeners before re-rendering
-  controlCleanups.forEach((fn) => fn());
-  controlCleanups = [];
   refs.panelBody.innerHTML = "";
 
   const expandedId = getState().expandedThreadId;
@@ -268,54 +261,15 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
     card.appendChild(mkEl("div", "thread-card-selector", thread.scope.selector));
   }
 
-  if (thread.claimed_by) {
-    const claimBadge = mkEl("div", "thread-card-claim-badge");
-    const badgeIcon = mkEl("span", "thread-card-claim-icon");
-    badgeIcon.innerHTML = ICONS.robot;
-    claimBadge.appendChild(badgeIcon);
-    claimBadge.appendChild(document.createTextNode(thread.claimed_by));
-    if (thread.claimed_at) {
-      claimBadge.appendChild(mkEl("span", "thread-card-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
-    }
-    card.appendChild(claimBadge);
-    card.classList.add(PREFIX + "thread-card-claimed");
-  }
-
   card.addEventListener("click", function () { showThreadDetail(thread.id); });
   return card;
-}
-
-function makeClaimRow(thread: Thread): HTMLElement {
-  const claimRow = mkEl("div", "message message-claim");
-  const claimIcon = mkEl("span", "message-author-icon");
-  claimIcon.innerHTML = ICONS.robot;
-  claimRow.appendChild(claimIcon);
-  const claimBody = mkEl("div", "message-body");
-  const claimText = mkEl("div", "message-claim-text", "Being worked on by " + thread.claimed_by);
-  claimBody.appendChild(claimText);
-  if (thread.claimed_at) {
-    claimBody.appendChild(mkEl("div", "message-meta", timeAgo(thread.claimed_at)));
-  }
-  claimRow.appendChild(claimBody);
-  return claimRow;
 }
 
 function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
-  const msgCount = thread.messages.length;
 
-  // If claimed, find where the claim event fits chronologically.
-  const claimTime = thread.claimed_by && thread.claimed_at ? new Date(thread.claimed_at).getTime() : null;
-  let claimInserted = false;
-
-  thread.messages.forEach(function (msg: Message, msgIndex: number) {
-    // Insert claim row before the first message that came after the claim.
-    if (claimTime && !claimInserted && new Date(msg.created_at).getTime() > claimTime) {
-      msgList.appendChild(makeClaimRow(thread));
-      claimInserted = true;
-    }
-
+  thread.messages.forEach(function (msg: Message) {
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -323,28 +277,11 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const body = mkEl("div", "message-body");
     body.appendChild(mkEl("div", "message-text", msg.body));
 
-    // Render interactive controls if present.
-    // Controls are inactive if a later message exists (values were applied).
-    const controls = parseControls(msg);
-    if (controls && window.__veld_controls) {
-      const isLastMessage = msgIndex === msgCount - 1;
-      const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id, {
-        inactive: !isLastMessage,
-      });
-      body.appendChild(element);
-      controlCleanups.push(cleanup);
-    }
-
     const authorLabel = msg.author === "agent" ? "Agent" : "You";
     body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
     msgEl.appendChild(body);
     msgList.appendChild(msgEl);
   });
-
-  // If claim happened after all messages, append at the end.
-  if (claimTime && !claimInserted && thread.claimed_by) {
-    msgList.appendChild(makeClaimRow(thread));
-  }
 
   container.appendChild(msgList);
 
@@ -358,21 +295,6 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");
-
-  if (thread.claimed_by) {
-    const releaseBtn = mkEl("button", "btn btn-sm btn-release");
-    releaseBtn.innerHTML = "Release " + ICONS.robot;
-    releaseBtn.addEventListener("click", function () {
-      api("POST", "/threads/" + thread.id + "/release").then(function () {
-        thread.claimed_by = null;
-        thread.claimed_at = null;
-        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        renderPanel();
-        toast("Thread released");
-      });
-    });
-    inputActions.appendChild(releaseBtn);
-  }
 
   const resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
   resolveBtn.addEventListener("click", function () {

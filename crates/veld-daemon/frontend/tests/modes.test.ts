@@ -41,13 +41,14 @@ describe("setMode", () => {
 
     expect(refs.toolBtnSelect.classList.contains(PREFIX + "tool-active")).toBe(false);
     expect(refs.toolBtnScreenshot.classList.contains(PREFIX + "tool-active")).toBe(false);
-    expect(refs.toolBtnDraw.classList.contains(PREFIX + "tool-active")).toBe(false);
   });
 
-  it("screenshot adds overlay-active and overlay-crosshair", () => {
+  it("screenshot activates screenshot mode and highlights its button", () => {
+    // Freeze-first: the backdrop + crosshair appear only after a frame is
+    // grabbed (async, and getDisplayMedia is unavailable in jsdom). Entry sets
+    // the mode and marks the button active synchronously.
     setMode("screenshot");
-    expect(refs.overlay.classList.contains(PREFIX + "overlay-active")).toBe(true);
-    expect(refs.overlay.classList.contains(PREFIX + "overlay-crosshair")).toBe(true);
+    expect(getState().activeMode).toBe("screenshot");
     expect(refs.toolBtnScreenshot.classList.contains(PREFIX + "tool-active")).toBe(true);
   });
 
@@ -66,8 +67,8 @@ describe("setMode", () => {
 
     // select-element teardown should have happened
     expect(refs.hoverOutline.style.display).toBe("none");
+    expect(refs.overlay.classList.contains(PREFIX + "overlay-active")).toBe(false);
     // screenshot should be active
-    expect(refs.overlay.classList.contains(PREFIX + "overlay-crosshair")).toBe(true);
     expect(getState().activeMode).toBe("screenshot");
   });
 
@@ -79,54 +80,4 @@ describe("setMode", () => {
     expect(refs.overlay.classList.contains(PREFIX + "overlay-active")).toBe(false);
   });
 
-  it("setMode(null) from draw mode tears down draw", () => {
-    // Simulate being in draw mode with a canvas in the DOM
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    const canvas = document.createElement("canvas");
-    document.body.appendChild(canvas);
-    dispatch({ type: "SET_DRAW_CANVAS", canvas });
-    dispatch({ type: "SET_DRAW_CLEANUP", cleanup: () => {} });
-
-    setMode(null);
-
-    expect(getState().activeMode).toBeNull();
-    expect(getState().drawCanvas).toBeNull();
-    expect(canvas.parentNode).toBeNull();
-  });
-
-  it("setMode('select-element') from draw mode tears down draw first", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    const canvas = document.createElement("canvas");
-    document.body.appendChild(canvas);
-    dispatch({ type: "SET_DRAW_CANVAS", canvas });
-    dispatch({ type: "SET_DRAW_CLEANUP", cleanup: () => {} });
-
-    setMode("select-element");
-
-    // draw teardown should have happened
-    expect(canvas.parentNode).toBeNull();
-    expect(getState().drawCanvas).toBeNull();
-    // select-element should be active
-    expect(getState().activeMode).toBe("select-element");
-    expect(refs.overlay.classList.contains(PREFIX + "overlay-active")).toBe(true);
-  });
-
-  it("setMode(null) from draw mode succeeds even if teardown throws", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    const canvas = document.createElement("canvas");
-    document.body.appendChild(canvas);
-    dispatch({ type: "SET_DRAW_CANVAS", canvas });
-    dispatch({
-      type: "SET_DRAW_CLEANUP",
-      cleanup: () => { throw new Error("cleanup throws"); },
-    });
-
-    // Should not throw
-    setMode(null);
-
-    // Mode should still transition
-    expect(getState().activeMode).toBeNull();
-    // Canvas should be force-removed by the catch block
-    expect(getState().drawCanvas).toBeNull();
-  });
 });
