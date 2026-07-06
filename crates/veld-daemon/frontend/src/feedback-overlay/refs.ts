@@ -34,6 +34,8 @@ export interface DOMRefs {
   panelHeadTitle: HTMLElement;
   panelBackBtn: HTMLElement;
   markReadBtn: HTMLElement;
+  panelModeBtn: HTMLElement;
+  panelResize: HTMLElement;
   segBtnActive: HTMLElement;
   segBtnResolved: HTMLElement;
 
@@ -71,6 +73,8 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     panelHeadTitle: null!,
     panelBackBtn: null!,
     markReadBtn: null!,
+    panelModeBtn: null!,
+    panelResize: null!,
     segBtnActive: null!,
     segBtnResolved: null!,
     tooltip: null!,

@@ -28,6 +28,9 @@ export interface Thread {
   component_trace?: string[] | null;
   viewport_width?: number;
   viewport_height?: number;
+  /** Count of messages the human has marked seen — persisted server-side, so
+   *  unread state survives a reload. */
+  last_human_seen_seq?: number | null;
 }
 
 export interface FeedbackEvent {

@@ -45,7 +45,7 @@ describe("timeAgo", () => {
 describe("hasUnread", () => {
   it("returns false for thread with no messages", () => {
     const thread = makeThread();
-    expect(hasUnread(thread, {})).toBe(false);
+    expect(hasUnread(thread)).toBe(false);
   });
 
   it("returns false for thread with only human messages", () => {
@@ -59,7 +59,7 @@ describe("hasUnread", () => {
         },
       ],
     });
-    expect(hasUnread(thread, {})).toBe(false);
+    expect(hasUnread(thread)).toBe(false);
   });
 
   it("returns true for thread with unseen agent message", () => {
@@ -73,22 +73,22 @@ describe("hasUnread", () => {
         },
       ],
     });
-    expect(hasUnread(thread, {})).toBe(true);
+    expect(hasUnread(thread)).toBe(true);
   });
 
-  it("returns false when agent message is older than last seen", () => {
-    const msgTime = new Date(Date.now() - 10_000).toISOString();
+  it("returns false when the agent message has already been seen", () => {
     const thread = makeThread({
       messages: [
         {
           id: "m1",
           body: "reply",
           author: "agent" as const,
-          created_at: msgTime,
+          created_at: new Date().toISOString(),
         },
       ],
+      last_human_seen_seq: 1,
     });
-    expect(hasUnread(thread, { t1: Date.now() })).toBe(false);
+    expect(hasUnread(thread)).toBe(false);
   });
 });
 

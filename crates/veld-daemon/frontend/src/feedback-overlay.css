@@ -503,6 +503,21 @@
   background: var(--vf-bg-card); color: var(--vf-text);
 }
 .veld-feedback-panel-side-toggle svg { width: 14px; height: 14px; }
+.veld-feedback-panel-mode-toggle {
+  width: 28px; height: 28px; border-radius: 6px; border: none;
+  background: transparent; color: var(--vf-text-muted);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  flex-shrink: 0; transition: background .15s, color .15s;
+}
+.veld-feedback-panel-mode-toggle:hover { background: var(--vf-bg-card); color: var(--vf-text); }
+.veld-feedback-panel-mode-toggle-active { color: var(--vf-accent); }
+.veld-feedback-panel-mode-toggle svg { width: 14px; height: 14px; }
+.veld-feedback-panel-resize {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  width: 8px; cursor: ew-resize; z-index: 3; touch-action: none;
+}
+.veld-feedback-panel-resize:hover { background: var(--vf-accent); opacity: .35; }
+.veld-feedback-panel-left .veld-feedback-panel-resize { left: auto; right: 0; }
 .veld-feedback-panel-close {
   background: none; border: none; color: var(--vf-text-muted);
   cursor: pointer; font-size: 20px; line-height: 1; padding: 0 2px;

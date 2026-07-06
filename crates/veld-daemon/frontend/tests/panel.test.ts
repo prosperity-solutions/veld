@@ -108,12 +108,14 @@ describe("renderPanel — list view", () => {
     setupMockRefs();
   });
 
-  it("shows active threads grouped by page", () => {
+  it("splits active threads into 'Your turn' and 'With the agent' lanes", () => {
     dispatch({
       type: "SET_THREADS",
       threads: [
-        makeThread({ id: "t1", scope: { type: "page", page_url: "/" }, messages: [makeMessage()] }),
-        makeThread({ id: "t2", scope: { type: "page", page_url: "/about" }, messages: [makeMessage()] }),
+        // last message from the agent → waiting on the human ("Your turn")
+        makeThread({ id: "t1", messages: [makeMessage({ author: "agent" })] }),
+        // last message from the human → in the agent's queue ("With the agent")
+        makeThread({ id: "t2", messages: [makeMessage({ author: "human" })] }),
       ],
     });
     dispatch({ type: "SET_PANEL_TAB", tab: "active" });

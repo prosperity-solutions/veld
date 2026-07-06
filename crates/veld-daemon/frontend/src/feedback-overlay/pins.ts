@@ -36,7 +36,7 @@ export function addPin(thread: Thread): void {
     pin.appendChild(count);
   }
 
-  if (hasUnread(thread, getState().lastSeenAt)) {
+  if (hasUnread(thread)) {
     const dot = mkEl("span", "pin-unread-dot");
     pin.appendChild(dot);
   }

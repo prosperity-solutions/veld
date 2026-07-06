@@ -9,7 +9,7 @@ import { toast } from "./toast";
 import { initBackdropEvents } from "./backdrop";
 import { initArc, makeToolBtn, handleToolAction } from "./toolbar";
 import type { ArcItem } from "./arc-menu";
-import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead } from "./panel";
+import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead, applyPanelLayout, togglePanelMode, initPanelResize } from "./panel";
 import { sendAllGood } from "./listening";
 
 export function buildDOM(): void {
@@ -219,6 +219,12 @@ export function buildDOM(): void {
   sideBtn.addEventListener("click", function (e) { e.stopPropagation(); togglePanelSide(); });
   panelHead.appendChild(sideBtn);
 
+  refs.panelModeBtn = mkEl("button", "panel-mode-toggle");
+  refs.panelModeBtn.innerHTML = ICONS.dock;
+  attachTooltip(refs.panelModeBtn, "Dock / float panel");
+  refs.panelModeBtn.addEventListener("click", function (e) { e.stopPropagation(); togglePanelMode(); });
+  panelHead.appendChild(refs.panelModeBtn);
+
   const closeBtn = mkEl("button", "panel-close");
   closeBtn.innerHTML = "&times;";
   closeBtn.addEventListener("click", togglePanel);
@@ -227,6 +233,11 @@ export function buildDOM(): void {
 
   refs.panelBody = mkEl("div", "panel-body");
   refs.panel.appendChild(refs.panelBody);
+
+  refs.panelResize = mkEl("div", "panel-resize");
+  refs.panel.appendChild(refs.panelResize);
+  initPanelResize();
+  applyPanelLayout();
 
   refs.shadow.appendChild(refs.panel);
 }

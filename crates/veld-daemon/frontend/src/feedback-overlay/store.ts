@@ -12,6 +12,8 @@ export interface Store {
   // UI state
   panelOpen: boolean;
   panelSide: "left" | "right";
+  panelMode: "float" | "dock";
+  panelWidth: number;
   panelTab: "active" | "resolved";
   activePopover: VeldPopoverElement | null;
   activeMode: UIMode;
@@ -43,6 +45,8 @@ export type Action =
   | { type: "SET_OVERFLOW_OPEN"; open: boolean }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SET_PANEL_SIDE"; side: "left" | "right" }
+  | { type: "SET_PANEL_MODE"; mode: "float" | "dock" }
+  | { type: "SET_PANEL_WIDTH"; width: number }
   | { type: "SET_PANEL_TAB"; tab: "active" | "resolved" }
   | { type: "SET_EXPANDED_THREAD"; threadId: string | null }
   | { type: "SET_HIDDEN"; hidden: boolean }
@@ -77,6 +81,10 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, panelOpen: action.open };
     case "SET_PANEL_SIDE":
       return { ...s, panelSide: action.side };
+    case "SET_PANEL_MODE":
+      return { ...s, panelMode: action.mode };
+    case "SET_PANEL_WIDTH":
+      return { ...s, panelWidth: action.width };
     case "SET_PANEL_TAB":
       return { ...s, panelTab: action.tab };
     case "SET_EXPANDED_THREAD":
@@ -148,6 +156,23 @@ function readPanelSide(): "left" | "right" {
   return "right";
 }
 
+/** Restore panel display mode (float overlay vs docked/push). */
+function readPanelMode(): "float" | "dock" {
+  try {
+    if (localStorage.getItem("veld-panel-mode") === "dock") return "dock";
+  } catch (_) { /* ignore */ }
+  return "float";
+}
+
+/** Restore persisted panel width, clamped to a sane range. */
+function readPanelWidth(): number {
+  try {
+    const w = parseInt(localStorage.getItem("veld-panel-width") || "", 10);
+    if (!isNaN(w) && w >= 300 && w <= 900) return w;
+  } catch (_) { /* ignore */ }
+  return 380;
+}
+
 function createInitial(): Store {
   return {
     threads: [],
@@ -156,6 +181,8 @@ function createInitial(): Store {
     agentListening: false,
     panelOpen: false,
     panelSide: readPanelSide(),
+    panelMode: readPanelMode(),
+    panelWidth: readPanelWidth(),
     panelTab: "active",
     activePopover: null,
     activeMode: null,

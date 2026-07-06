@@ -100,17 +100,16 @@ export function timeAgo(dateStr: string): string {
   return days + "d ago";
 }
 
-/** Check if a thread has messages the user hasn't seen. */
-export function hasUnread(thread: Thread, lastSeenAt: Record<string, number>): boolean {
-  if (!thread.messages.length) return false;
-  const lastSeen = lastSeenAt[thread.id] || 0;
-  for (let i = 0; i < thread.messages.length; i++) {
-    if (
-      thread.messages[i].author === "agent" &&
-      new Date(thread.messages[i].created_at).getTime() > lastSeen
-    ) {
-      return true;
-    }
+/** Check if a thread has agent messages the human hasn't seen.
+ *
+ *  Uses the persisted `last_human_seen_seq` (count of messages seen, stored
+ *  server-side via PUT /seen) rather than an in-memory map, so unread state
+ *  survives a page reload. Messages beyond the seen count that are agent-
+ *  authored are unread. */
+export function hasUnread(thread: Thread): boolean {
+  const seen = thread.last_human_seen_seq ?? 0;
+  for (let i = seen; i < thread.messages.length; i++) {
+    if (thread.messages[i].author === "agent") return true;
   }
   return false;
 }

@@ -6,7 +6,7 @@ import { PREFIX } from "./constants";
 /** Update badges: FAB badge when toolbar is closed, threads button badge when open. */
 export function updateBadge(): void {
   const count = getState().threads.filter((t) => {
-    return t.status === "open" && hasUnread(t, getState().lastSeenAt);
+    return t.status === "open" && hasUnread(t);
   }).length;
   const hasCount = count > 0;
   const toolbarOpen = getState().toolbarOpen;

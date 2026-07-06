@@ -12,6 +12,7 @@ export function togglePanel(): void {
   dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
   if (getState().panelOpen) dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   refs.panel.classList.toggle(PREFIX + "panel-open", getState().panelOpen);
+  applyPanelLayout();
   if (getState().panelOpen) renderPanel();
 }
 
@@ -24,6 +25,71 @@ export function togglePanelSide(): void {
 
 export function syncPanelSideClass(): void {
   refs.panel.classList.toggle(PREFIX + "panel-left", getState().panelSide === "left");
+  applyPanelLayout();
+}
+
+/** Apply the current panel width and float/dock layout.
+ *
+ *  In dock mode we shrink the document via a margin on <html> so the page
+ *  reflows beside the panel; in float mode the panel overlays the page. The
+ *  margin is cleared when the panel is closed or the overlay is hidden.
+ *
+ *  Caveat: `position: fixed`/`sticky` page elements are viewport-relative and
+ *  won't respect the margin — an inherent limit of pushing pages we don't own,
+ *  so float stays the default. */
+export function applyPanelLayout(): void {
+  const s = getState();
+  if (refs.panel) refs.panel.style.width = s.panelWidth + "px";
+  if (refs.panelModeBtn) {
+    refs.panelModeBtn.classList.toggle(PREFIX + "panel-mode-toggle-active", s.panelMode === "dock");
+  }
+  const root = document.documentElement;
+  root.style.marginLeft = "";
+  root.style.marginRight = "";
+  if (s.panelMode === "dock" && s.panelOpen && !s.hidden) {
+    root.style.transition = "margin .2s ease";
+    if (s.panelSide === "left") root.style.marginLeft = s.panelWidth + "px";
+    else root.style.marginRight = s.panelWidth + "px";
+  }
+}
+
+/** Toggle between float (overlay) and dock (push content aside) modes. */
+export function togglePanelMode(): void {
+  const mode = getState().panelMode === "dock" ? "float" : "dock";
+  dispatch({ type: "SET_PANEL_MODE", mode });
+  try { localStorage.setItem("veld-panel-mode", mode); } catch (_) { /* ignore */ }
+  applyPanelLayout();
+  toast(mode === "dock" ? "Panel docked — content pushed aside" : "Panel floating over content");
+}
+
+/** Wire drag-to-resize on the panel's inner edge; persists the chosen width. */
+export function initPanelResize(): void {
+  const handle = refs.panelResize;
+  if (!handle) return;
+  const MIN = 300;
+  const maxW = function () { return Math.min(760, Math.round(window.innerWidth * 0.9)); };
+  let dragging = false;
+  const onMove = function (e: PointerEvent) {
+    if (!dragging) return;
+    const raw = getState().panelSide === "left" ? e.clientX : window.innerWidth - e.clientX;
+    const w = Math.max(MIN, Math.min(maxW(), Math.round(raw)));
+    dispatch({ type: "SET_PANEL_WIDTH", width: w });
+    applyPanelLayout();
+  };
+  const onUp = function () {
+    if (!dragging) return;
+    dragging = false;
+    document.removeEventListener("pointermove", onMove, true);
+    document.removeEventListener("pointerup", onUp, true);
+    try { localStorage.setItem("veld-panel-width", String(getState().panelWidth)); } catch (_) { /* ignore */ }
+  };
+  handle.addEventListener("pointerdown", function (e: PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    document.addEventListener("pointermove", onMove, true);
+    document.addEventListener("pointerup", onUp, true);
+  });
 }
 
 export function showThreadDetail(threadId: string): void {
@@ -41,6 +107,7 @@ export function openThreadInPanel(threadId: string): void {
   dispatch({ type: "SET_PANEL_TAB", tab: "active" });
   dispatch({ type: "SET_EXPANDED_THREAD", threadId });
   refs.panel.classList.add(PREFIX + "panel-open");
+  applyPanelLayout();
   renderPanel();
 }
 
@@ -62,7 +129,7 @@ export function updateMarkReadBtn(): void {
     refs.markReadBtn.style.display = "none";
     return;
   }
-  const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t, getState().lastSeenAt); });
+  const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t); });
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
@@ -193,30 +260,34 @@ function renderThreadDetail(thread: Thread): void {
   }
 }
 
+function lastMessageAuthor(t: Thread): "human" | "agent" | undefined {
+  return t.messages.length ? t.messages[t.messages.length - 1].author : undefined;
+}
+
 function renderActiveThreads(): void {
   const active = getState().threads.filter(function (t: Thread) { return t.status === "open"; });
   if (!active.length) {
     refs.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
     return;
   }
-  const byPage: Record<string, Thread[]> = {};
-  const pageOrder: string[] = [];
-  active.forEach(function (t: Thread) {
-    const url = getThreadPageUrl(t);
-    const path = (url || "/").split("?")[0];
-    if (!byPage[path]) { byPage[path] = []; pageOrder.push(path); }
-    byPage[path].push(t);
-  });
-  pageOrder.sort(function (a, b) {
-    if (a === window.location.pathname) return -1;
-    if (b === window.location.pathname) return 1;
-    return a.localeCompare(b);
-  });
-  pageOrder.forEach(function (p) {
-    let label = "Page " + p;
-    if (p === "/") label += " (home)";
-    renderThreadGroup(label, byPage[p]);
-  });
+  const byRecency = function (a: Thread, b: Thread) {
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+  };
+  // Two lanes mirroring the agent's queue: a thread whose last message is the
+  // agent's is waiting on you ("Your turn"); one whose last message is human
+  // (or none yet) is in the agent's queue ("With the agent").
+  const yourTurn = active.filter(function (t) { return lastMessageAuthor(t) === "agent"; }).sort(byRecency);
+  const withAgent = active.filter(function (t) { return lastMessageAuthor(t) !== "agent"; }).sort(byRecency);
+  renderLane("Your turn", yourTurn);
+  renderLane("With the agent", withAgent);
+}
+
+function renderLane(label: string, threads: Thread[]): void {
+  if (!threads.length) return;
+  const section = mkEl("div", "panel-section");
+  section.appendChild(mkEl("div", "panel-section-heading", label));
+  threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
+  refs.panelBody.appendChild(section);
 }
 
 function renderResolvedThreads(): void {
@@ -231,19 +302,9 @@ function renderResolvedThreads(): void {
   resolved.forEach(function (t: Thread) { refs.panelBody.appendChild(makeThreadCard(t, true)); });
 }
 
-function renderThreadGroup(label: string, threads: Thread[]): void {
-  threads.sort(function (a: Thread, b: Thread) {
-    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
-  });
-  const section = mkEl("div", "panel-section");
-  section.appendChild(mkEl("div", "panel-section-heading", label));
-  threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
-  refs.panelBody.appendChild(section);
-}
-
 function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   const card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
-  if (hasUnread(thread, getState().lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
+  if (hasUnread(thread) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
   (card as HTMLElement).dataset.threadId = thread.id;
 
   const row1 = mkEl("div", "thread-card-row");
@@ -347,9 +408,11 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 }
 
 export function markThreadSeen(threadId: string): void {
-  dispatch({ type: "MARK_SEEN", threadId });
   const thread = findThread(getState().threads, threadId);
   const lastSeq = thread && thread.messages.length > 0 ? thread.messages.length : 0;
+  // Update the persisted seen-count locally so unread clears immediately, then
+  // persist it server-side so it survives a reload.
+  if (thread) thread.last_human_seen_seq = lastSeq;
   api("PUT", "/threads/" + threadId + "/seen", { seq: lastSeq }).catch(function () {});
   if (thread) deps().addPin(thread);
   updateBadge();
@@ -358,9 +421,9 @@ export function markThreadSeen(threadId: string): void {
 
 export function markAllRead(): void {
   getState().threads.forEach(function (t: Thread) {
-    if (hasUnread(t, getState().lastSeenAt)) {
-      dispatch({ type: "MARK_SEEN", threadId: t.id });
+    if (hasUnread(t)) {
       const seenSeq = t.messages.length > 0 ? t.messages.length : 0;
+      t.last_human_seen_seq = seenSeq;
       api("PUT", "/threads/" + t.id + "/seen", { seq: seenSeq }).catch(function () {});
     }
   });
