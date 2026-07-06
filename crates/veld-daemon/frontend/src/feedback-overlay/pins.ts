@@ -103,6 +103,12 @@ export function repositionPins(): void {
 }
 
 export function scheduleReposition(): void {
+  // Some environments (jsdom in tests) lack requestAnimationFrame — reposition
+  // synchronously there rather than throwing.
+  if (typeof requestAnimationFrame !== "function") {
+    repositionPins();
+    return;
+  }
   if (getState().rafPending) return;
   dispatch({ type: "SET_RAF_PENDING", pending: true });
   requestAnimationFrame(function () {

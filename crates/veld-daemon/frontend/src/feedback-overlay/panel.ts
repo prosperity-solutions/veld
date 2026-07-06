@@ -7,6 +7,7 @@ import { toast } from "./toast";
 import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
 import { deps } from "../shared/registry";
+import { scheduleReposition } from "./pins";
 
 export function togglePanel(): void {
   dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
@@ -65,8 +66,10 @@ export function applyPanelLayout(): void {
     else root.style.marginRight = width + "px";
   }
   // The <html> margin reflows page content but fires no scroll/resize, so
-  // element-anchored pins would drift by the panel width — reposition them.
-  deps().renderAllPins();
+  // element-anchored pins would drift by the panel width. Reposition them to
+  // their current element locations — `renderAllPins` would re-add pins at the
+  // stale stored coords, so re-query the DOM via `scheduleReposition`.
+  scheduleReposition();
 }
 
 /** Toggle between float (overlay) and dock (push content aside) modes. */
