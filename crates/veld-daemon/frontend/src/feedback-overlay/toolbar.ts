@@ -52,6 +52,7 @@ export function initArc(
   rootItems: ArcItem[],
   bubbleTooltip?: { label: string; kbd?: string[] },
 ): void {
+  arc?.destroy(); // unbind a prior engine's listeners before replacing it
   arc = createArcMenu({
     container: refs.toolbarContainer,
     scope: refs.shadow,
@@ -106,4 +107,20 @@ export function toggleToolbar(): void {
 /** Re-sync the arc when the visible item set changes (e.g. listening dot). */
 export function positionRadialButtons(): void {
   arc?.reflow();
+}
+
+/**
+ * Close the menu. Used by mode entry (draw / screenshot) and hide, which need
+ * the engine — the sole authority for open state — to actually collapse.
+ * Falls back to store-only in unit tests where no engine exists.
+ */
+export function closeToolbar(): void {
+  if (arc) {
+    arc.close(); // engine fires onOpenChange → store + badge update
+    return;
+  }
+  // No engine (unit tests): keep the store consistent. Badge sync is the
+  // engine's job in production, so we don't touch refs here.
+  dispatch({ type: "SET_TOOLBAR_OPEN", open: false });
+  dispatch({ type: "SET_OVERFLOW_OPEN", open: false });
 }

@@ -183,6 +183,11 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
   const P = opts.prefix;
   const cls = (name: string) => P + name;
 
+  // All engine listeners share one AbortController so destroy() unbinds every
+  // window/bubble/item handler in one call (no leaks across re-init).
+  const ac = new AbortController();
+  const sig = ac.signal;
+
   // ── layers ──────────────────────────────────────────────────────────
   const container = opts.container;
   const gooLayer = document.createElement("div");
@@ -392,6 +397,7 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
       // Icon overlay — the caller's persistent tool button, inserted BELOW the
       // bubble cover so items emerge from behind the bubble.
       item.el.classList.add(cls("tool-btn"));
+      item.el.setAttribute("aria-label", item.label);
       iconLayer.insertBefore(item.el, bubbleGlow);
 
       // Tooltip text (crisp). Built first so we can size the pill from its
@@ -565,6 +571,7 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
     flashBubbleGlow();
     buildItems(visible(opts.items()));
     updateBubbleIcon();
+    opts.bubble.setAttribute("aria-expanded", "true");
     cb.onOpenChange?.(true);
     ensureLoop();
   }
@@ -581,6 +588,7 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
     S.animStart = performance.now();
     hideAllTooltips();
     updateBubbleIcon();
+    opts.bubble.setAttribute("aria-expanded", "false");
     cb.onOpenChange?.(false);
     ensureLoop();
   }
@@ -601,8 +609,12 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
   function goBack(): void {
     if (!S.stack.length || S.retracting) return;
     hideAllTooltips();
-    S.pending = S.stack[S.stack.length - 1];
     S.pendingStack = S.stack.slice(0, -1);
+    // Recompute visibility when returning to the root (the only level with a
+    // conditional item — the listening dot); use the snapshot for deeper levels.
+    S.pending = S.pendingStack.length
+      ? S.stack[S.stack.length - 1]
+      : visible(opts.items());
     S.retracting = true;
     S.opening = false;
     // Icon returns to logo/close only after rebuild; keep back arrow meanwhile.
@@ -1033,28 +1045,45 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
     item.el.addEventListener("pointerenter", () => {
       const idx = S.menu.indexOf(item);
       if (idx >= 0) hovIdx = idx;
-    });
+    }, { signal: sig });
     item.el.addEventListener("pointerleave", () => {
       hovIdx = -1;
-    });
-    item.el.addEventListener("pointerdown", (e) => e.stopPropagation());
+    }, { signal: sig });
+    item.el.addEventListener("pointerdown", (e) => e.stopPropagation(), { signal: sig });
     item.el.addEventListener("click", (e) => {
       e.stopPropagation();
       const idx = S.menu.indexOf(item);
       if (idx >= 0) clickItem(idx);
-    });
+    }, { signal: sig });
+  }
+
+  // Keyboard activation on the focused bubble (pointer path is separate).
+  function onBubbleKeyDown(e: KeyboardEvent): void {
+    if (e.key !== "Enter" && e.key !== " " && e.key !== "Spacebar") return;
+    e.preventDefault();
+    if (S.open && !S.closing && !S.retracting) {
+      if (S.stack.length > 0) goBack();
+      else closeMenu();
+    } else if (!S.open && !S.opening) {
+      openMenu();
+    }
   }
 
   // ── event registration ──────────────────────────────────────────────────
-  opts.bubble.addEventListener("pointerdown", onBubblePointerDown as EventListener);
-  window.addEventListener("pointermove", onWindowPointerMove as EventListener);
-  window.addEventListener("pointerup", onWindowPointerUp as EventListener);
-  window.addEventListener("pointerdown", onOutsidePointerDown as EventListener);
+  // Window listeners use capture so a host page that stops propagation at
+  // document/body can't starve drag / outside-click-close.
+  opts.bubble.addEventListener("pointerdown", onBubblePointerDown as EventListener, { signal: sig });
+  opts.bubble.addEventListener("keydown", onBubbleKeyDown as EventListener, { signal: sig });
+  window.addEventListener("pointermove", onWindowPointerMove as EventListener, { capture: true, signal: sig });
+  window.addEventListener("pointerup", onWindowPointerUp as EventListener, { capture: true, signal: sig });
+  window.addEventListener("pointerdown", onOutsidePointerDown as EventListener, { capture: true, signal: sig });
 
   // ── init bubble geometry ───────────────────────────────────────────────
   opts.bubbleIcon.innerHTML = opts.icons.logo;
   currentIconKey = "logo";
   applyBubbleScale(1);
+  opts.bubble.setAttribute("aria-label", opts.bubbleTooltip?.label || "Feedback menu");
+  opts.bubble.setAttribute("aria-haspopup", "true");
 
   // ── public handle ─────────────────────────────────────────────────────
   return {
@@ -1124,10 +1153,7 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
       if (physFrame != null) cancelAnimationFrame(physFrame);
       if (iconTimer) clearTimeout(iconTimer);
       if (closeTimer) { clearTimeout(closeTimer); closeTimer = null; }
-      opts.bubble.removeEventListener("pointerdown", onBubblePointerDown as EventListener);
-      window.removeEventListener("pointermove", onWindowPointerMove as EventListener);
-      window.removeEventListener("pointerup", onWindowPointerUp as EventListener);
-      window.removeEventListener("pointerdown", onOutsidePointerDown as EventListener);
+      ac.abort(); // unbinds all window/bubble/item listeners at once
       if (bubbleTT) bubbleTT.remove();
       if (bubbleTTText) bubbleTTText.remove();
       destroyItems();
@@ -1180,7 +1206,7 @@ function ensureGooFilter(scope: ShadowRoot, prefix: string, C: ArcConfig): void 
 }
 
 function escapeHtml(s: string): string {
-  return s
+  return String(s ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");

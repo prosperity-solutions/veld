@@ -50,12 +50,3 @@ export function clampFabToViewport(): void {
     saveFabPos(cx, cy);
   }
 }
-
-/**
- * When the menu opens near an edge, the engine's live bounds-correction nudges
- * the bubble inward on its own. This remains as an explicit trigger for callers
- * that open the menu programmatically.
- */
-export function nudgeFabForToolbar(): void {
-  getArc()?.moveIntoView(true);
-}

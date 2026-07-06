@@ -2,6 +2,7 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { deps } from "../shared/registry";
+import { closeToolbar } from "./toolbar";
 
 export function hideOverlay(): void {
   dispatch({ type: "SET_HIDDEN", hidden: true });
@@ -14,6 +15,7 @@ export function hideOverlay(): void {
   refs.hoverOutline.style.display = "none";
   refs.componentTraceEl.style.display = "none";
   deps().setMode(null);
+  closeToolbar(); // collapse the arc so it doesn't tick behind the hidden overlay
   if (getState().panelOpen) deps().togglePanel();
 }
 
