@@ -6,7 +6,7 @@ import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
 import { onKeyDown } from "./keyboard";
 import { pollEvents, pollListenStatus, loadThreads, primeEventSeq } from "./polling";
-import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass } from "./panel";
+import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass, applyPanelLayout } from "./panel";
 import { setMode } from "./modes";
 import { toggleToolbar } from "./toolbar";
 import { togglePageComment, closeActivePopover, showCreatePopover } from "./popover";
@@ -63,6 +63,7 @@ export function init(): void {
   window.addEventListener("resize", () => {
     scheduleReposition();
     clampFabToViewport();
+    applyPanelLayout(); // re-clamp panel width / dock margin to the new viewport
   });
   window.addEventListener("popstate", onNavigate);
 

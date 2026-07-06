@@ -77,11 +77,6 @@ describe("store + dispatch", () => {
     expect(getState().agentListening).toBe(true);
   });
 
-  it("MARK_SEEN records timestamp", () => {
-    dispatch({ type: "MARK_SEEN", threadId: "t1" });
-    expect(getState().lastSeenAt["t1"]).toBeGreaterThan(0);
-  });
-
   it("SET_PIN and REMOVE_PIN manage pins", () => {
     const el = {} as HTMLElement;
     dispatch({ type: "SET_PIN", threadId: "t1", el });

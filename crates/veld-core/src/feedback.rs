@@ -369,7 +369,10 @@ impl FeedbackStore {
     /// Update `last_human_seen_seq` for a thread.
     pub fn mark_thread_seen(&self, thread_id: &str, seq: u64) -> anyhow::Result<()> {
         self.modify_thread(thread_id, move |thread| {
-            thread.last_human_seen_seq = Some(seq);
+            // Never lower the seen count: a stale/racing write (multi-tab, or a
+            // late `markAllRead` after a per-thread PUT) must not resurrect unread.
+            let seen = seq.max(thread.last_human_seen_seq.unwrap_or(0));
+            thread.last_human_seen_seq = Some(seen);
         })?;
         Ok(())
     }
@@ -567,11 +570,10 @@ impl FeedbackStore {
     /// Explicitly end the session — the human clicked "Done".
     ///
     /// Sets `ended_at`, which `is_ended` reads. When the agent's queue drains,
-    /// an ended session tells it to stop, and the agent then consumes the flag
-    /// via [`clear_ended`](Self::clear_ended) so a freshly-launched loop starts
-    /// clean instead of immediately re-stopping on a stale Done. A human message
-    /// newer than `ended_at` also supersedes it, so a post-Done comment revives
-    /// the loop.
+    /// an ended session tells it to stop; the agent then calls
+    /// [`mark_stopped`](Self::mark_stopped) as it exits. A human message newer
+    /// than `ended_at` also supersedes it, so a post-Done comment revives the
+    /// loop.
     pub fn end_session(&self) -> anyhow::Result<()> {
         let now = Utc::now();
         self.modify_session(move |s| {
@@ -581,12 +583,15 @@ impl FeedbackStore {
         })
     }
 
-    /// Consume the "Done" flag. The agent calls this as it reports the `ended`
-    /// stop, so the next launched loop starts fresh rather than immediately
-    /// re-stopping on the same Done. Called only by the agent process (not an
-    /// HTTP handler), so it doesn't race `end_session`.
-    pub fn clear_ended(&self) -> anyhow::Result<()> {
+    /// Mark the agent as no longer listening — called as it reports the `ended`
+    /// stop and exits. Sets status to Idle (so `is_listening` → false and the
+    /// browser stops showing "listening" and won't re-announce the exited agent)
+    /// and consumes `ended_at` (so a freshly-launched loop starts clean rather
+    /// than re-stopping on the same Done). Called only by the agent process, so
+    /// it doesn't race `end_session`.
+    pub fn mark_stopped(&self) -> anyhow::Result<()> {
         self.modify_session(|s| {
+            s.status = SessionStatus::Idle;
             s.ended_at = None;
         })
     }
@@ -1210,21 +1215,20 @@ mod tests {
     }
 
     #[test]
-    fn test_clear_ended_consumes_flag() {
+    fn test_mark_stopped_consumes_flag_and_stops_listening() {
         let tmp = TempDir::new().unwrap();
         let store = make_store(&tmp);
 
+        store.heartbeat().unwrap();
         store.end_session().unwrap();
         assert!(store.is_ended().unwrap());
 
-        // Agent consumes the flag when it reports the stop → a relaunched loop
-        // must not immediately see "ended" again.
-        store.clear_ended().unwrap();
+        // Agent reports the stop and exits: the session is no longer ended (so a
+        // relaunched loop won't immediately re-stop) and no longer listening (so
+        // /session won't re-announce the now-exited agent).
+        store.mark_stopped().unwrap();
         assert!(!store.is_ended().unwrap());
-
-        // A heartbeat must not resurrect it.
-        store.heartbeat().unwrap();
-        assert!(!store.is_ended().unwrap());
+        assert!(!store.is_listening(60).unwrap());
     }
 
     #[test]

@@ -37,20 +37,36 @@ export function syncPanelSideClass(): void {
  *  Caveat: `position: fixed`/`sticky` page elements are viewport-relative and
  *  won't respect the margin — an inherent limit of pushing pages we don't own,
  *  so float stays the default. */
+export const PANEL_MIN_W = 300;
+/** Max panel width — never wider than the drag handle can produce or 90% of the
+ *  current viewport, so a wide persisted width can't squeeze content off-screen. */
+export function panelMaxW(): number {
+  return Math.min(760, Math.round(window.innerWidth * 0.9));
+}
+function clampPanelWidth(w: number): number {
+  return Math.max(PANEL_MIN_W, Math.min(panelMaxW(), Math.round(w)));
+}
+
 export function applyPanelLayout(): void {
   const s = getState();
-  if (refs.panel) refs.panel.style.width = s.panelWidth + "px";
+  const width = clampPanelWidth(s.panelWidth);
+  if (refs.panel) refs.panel.style.width = width + "px";
   if (refs.panelModeBtn) {
     refs.panelModeBtn.classList.toggle(PREFIX + "panel-mode-toggle-active", s.panelMode === "dock");
   }
+  // Dock mode pushes page content aside via an <html> margin, clamped to the
+  // viewport. No CSS transition on the margin: it lagged during drag-resize and
+  // lingered on the host page.
   const root = document.documentElement;
   root.style.marginLeft = "";
   root.style.marginRight = "";
   if (s.panelMode === "dock" && s.panelOpen && !s.hidden) {
-    root.style.transition = "margin .2s ease";
-    if (s.panelSide === "left") root.style.marginLeft = s.panelWidth + "px";
-    else root.style.marginRight = s.panelWidth + "px";
+    if (s.panelSide === "left") root.style.marginLeft = width + "px";
+    else root.style.marginRight = width + "px";
   }
+  // The <html> margin reflows page content but fires no scroll/resize, so
+  // element-anchored pins would drift by the panel width — reposition them.
+  deps().renderAllPins();
 }
 
 /** Toggle between float (overlay) and dock (push content aside) modes. */
@@ -66,14 +82,11 @@ export function togglePanelMode(): void {
 export function initPanelResize(): void {
   const handle = refs.panelResize;
   if (!handle) return;
-  const MIN = 300;
-  const maxW = function () { return Math.min(760, Math.round(window.innerWidth * 0.9)); };
   let dragging = false;
   const onMove = function (e: PointerEvent) {
     if (!dragging) return;
     const raw = getState().panelSide === "left" ? e.clientX : window.innerWidth - e.clientX;
-    const w = Math.max(MIN, Math.min(maxW(), Math.round(raw)));
-    dispatch({ type: "SET_PANEL_WIDTH", width: w });
+    dispatch({ type: "SET_PANEL_WIDTH", width: clampPanelWidth(raw) });
     applyPanelLayout();
   };
   const onUp = function () {

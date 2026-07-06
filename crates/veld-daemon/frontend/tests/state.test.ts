@@ -15,7 +15,6 @@ describe("initState", () => {
     expect(refs.hostEl).toBe(hostEl);
     expect(getState().threads).toEqual([]);
     expect(getState().lastEventSeq).toBe(0);
-    expect(getState().lastSeenAt).toEqual({});
     expect(getState().agentListening).toBe(false);
     expect(getState().panelOpen).toBe(false);
     expect(getState().activeMode).toBeNull();

@@ -6,7 +6,6 @@ export interface Store {
   // Data
   threads: Thread[];
   lastEventSeq: number;
-  lastSeenAt: Record<string, number>;
   agentListening: boolean;
 
   // UI state
@@ -58,7 +57,6 @@ export type Action =
   | { type: "SET_HOVERED"; el: Element | null }
   | { type: "SET_LOCKED"; el: Element | null }
   | { type: "SET_LISTENING"; listening: boolean }
-  | { type: "MARK_SEEN"; threadId: string }
   | { type: "SET_CAPTURE_STREAM"; stream: MediaStream | null }
   | { type: "SET_PIN"; threadId: string; el: HTMLElement }
   | { type: "REMOVE_PIN"; threadId: string }
@@ -107,8 +105,6 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, lockedEl: action.el };
     case "SET_LISTENING":
       return { ...s, agentListening: action.listening };
-    case "MARK_SEEN":
-      return { ...s, lastSeenAt: { ...s.lastSeenAt, [action.threadId]: Date.now() } };
     case "SET_CAPTURE_STREAM":
       return { ...s, captureStream: action.stream };
     case "SET_PIN": {
@@ -168,7 +164,7 @@ function readPanelMode(): "float" | "dock" {
 function readPanelWidth(): number {
   try {
     const w = parseInt(localStorage.getItem("veld-panel-width") || "", 10);
-    if (!isNaN(w) && w >= 300 && w <= 900) return w;
+    if (!isNaN(w) && w >= 300 && w <= 760) return w;
   } catch (_) { /* ignore */ }
   return 380;
 }
@@ -177,7 +173,6 @@ function createInitial(): Store {
   return {
     threads: [],
     lastEventSeq: 0,
-    lastSeenAt: {},
     agentListening: false,
     panelOpen: false,
     panelSide: readPanelSide(),

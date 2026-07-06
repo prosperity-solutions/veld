@@ -8,6 +8,7 @@ import {
   renderPanel,
   showThreadDetail,
   showThreadList,
+  applyPanelLayout,
 } from "../src/feedback-overlay/panel";
 import { refs } from "../src/feedback-overlay/refs";
 import { getState, dispatch } from "../src/feedback-overlay/store";
@@ -206,5 +207,33 @@ describe("renderPanel — detail view", () => {
     renderPanel();
     expect(getState().expandedThreadId).toBeNull();
     expect(refs.panelBackBtn.style.display).toBe("none");
+  });
+});
+
+describe("panel float/dock layout", () => {
+  beforeEach(() => {
+    setupMockRefs();
+    document.documentElement.style.marginLeft = "";
+    document.documentElement.style.marginRight = "";
+  });
+
+  it("dock mode pushes content via an <html> margin; float clears it", () => {
+    dispatch({ type: "SET_PANEL_WIDTH", width: 380 });
+    dispatch({ type: "SET_PANEL_SIDE", side: "right" });
+    dispatch({ type: "SET_PANEL_MODE", mode: "dock" });
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("380px");
+
+    dispatch({ type: "SET_PANEL_MODE", mode: "float" });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("");
+  });
+
+  it("closed panel clears the dock margin", () => {
+    dispatch({ type: "SET_PANEL_MODE", mode: "dock" });
+    dispatch({ type: "SET_PANEL_OPEN", open: false });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("");
   });
 });

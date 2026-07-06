@@ -4,7 +4,6 @@ import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
 import { PREFIX, ICONS } from "./constants";
 import { api } from "./api";
-import { toast } from "./toast";
 import { mkEl } from "./helpers";
 import { updateBadge } from "./badge";
 import { updateListeningModule } from "./listening";
@@ -44,6 +43,12 @@ export function primeEventSeq(): void {
 // transition that happens while the page is open.
 let listeningPrimed = false;
 
+// Announce the "agent is watching" popover/notification at most once per
+// session. The heartbeat can briefly lapse during a long edit (>60s) and flip
+// listening false→true again; without this guard that would re-announce every
+// work cycle. Reset only on a real session end (agent_stopped / session_ended).
+let announcedListening = false;
+
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
@@ -78,11 +83,12 @@ function handleEvent(event: FeedbackEvent): void {
     case "agent_stopped":
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
-      toast("Agent stopped listening");
+      announcedListening = false; // a genuinely new session re-announces
       break;
     case "session_ended":
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
+      announcedListening = false; // a genuinely new session re-announces
       break;
     case "thread_created":
       if (event.thread && !findThread(getState().threads, event.thread.id)) {
@@ -248,30 +254,36 @@ function showListeningPopover(): void {
 /** Announce that an agent just started a feedback session: in-page popover
  *  always, browser notification when the tab isn't focused. */
 function notifyAgentListening(): void {
+  if (announcedListening) return; // already announced for this session
+  announcedListening = true;
   showListeningPopover();
   if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
-    const n = new Notification("Veld — agent is listening", {
-      body: "An agent is watching for your feedback on this page.",
-      icon: "/__veld__/feedback/logo.svg",
-      tag: "veld-listening",
-    });
-    n.addEventListener("click", function () { window.focus(); n.close(); });
+    try {
+      const n = new Notification("Veld — agent is listening", {
+        body: "An agent is watching for your feedback on this page.",
+        icon: "/__veld__/feedback/logo.svg",
+        tag: "veld-listening",
+      });
+      n.addEventListener("click", function () { window.focus(); n.close(); });
+    } catch (_) { /* some browsers throw constructing non-persistent notifications */ }
   }
 }
 
 export function sendBrowserNotification(title: string, body: string, threadId: string): void {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
-  const n = new Notification(title, {
-    body: body,
-    icon: "/__veld__/feedback/logo.svg",
-    tag: "veld-thread-" + threadId
-  });
-  n.addEventListener("click", function () {
-    window.focus();
-    deps().openThreadInPanel(threadId);
-    deps().scrollToThread(threadId);
-    n.close();
-  });
+  try {
+    const n = new Notification(title, {
+      body: body,
+      icon: "/__veld__/feedback/logo.svg",
+      tag: "veld-thread-" + threadId
+    });
+    n.addEventListener("click", function () {
+      window.focus();
+      deps().openThreadInPanel(threadId);
+      deps().scrollToThread(threadId);
+      n.close();
+    });
+  } catch (_) { /* some browsers throw constructing non-persistent notifications */ }
 }
 
 export function loadThreads(): void {

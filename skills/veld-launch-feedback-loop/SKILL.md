@@ -34,9 +34,9 @@ drops off, and the next call returns the following one.
 
 ## On invocation — start looping now
 
-1. **Find the run.** `veld feedback next` auto-selects the only active run; if
-   several are running, pass `--name <run>`. If none is active, tell the human to
-   `veld start <node> --name <run>` first, then come back.
+1. **Find the run.** `veld feedback next` auto-selects the current run (a single
+   active or recently-used run); if several exist, pass `--name <run>`. If there
+   is no run at all, ask the human to `veld start <node> --name <run>` first.
 2. **Enter the loop below and keep running it until you get `"ended"`.** Don't
    stop after one item — this is a Ralph loop; you keep pulling.
 
@@ -61,7 +61,7 @@ The `item` payload has everything you need in one call:
 |-------|-----|
 | `thread.messages` (last human one) | What to do right now; earlier messages are context |
 | `thread.scope.selector` | CSS selector — grep the codebase for it to find the source |
-| `thread.scope.component_trace` | React/Vue hierarchy — the **deepest** component is usually the file to edit |
+| `thread.component_trace` | React/Vue hierarchy — the **deepest** component is usually the file to edit |
 | `thread.scope.page_url` | Which route |
 | `thread.messages[].screenshot` | Absolute path to a PNG — `Read` it directly |
 | `thread.viewport_width` / `height` | Check for responsive issues |

@@ -294,11 +294,14 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
                 return 0;
             }
             Ok(None) => {
-                // Queue drained. If the reviewer clicked "Done", stop the loop —
-                // and consume the flag so a relaunched loop starts fresh instead
-                // of immediately re-stopping on the same Done.
+                // Queue drained. If the reviewer clicked "Done", stop the loop.
+                // Mark the session stopped (status Idle + consume the Done flag)
+                // and emit AgentStopped so the browser immediately stops showing
+                // "listening" — otherwise the still-fresh heartbeat would make
+                // /session re-announce this now-exiting agent.
                 if store.is_ended().unwrap_or(false) {
-                    let _ = store.clear_ended();
+                    let _ = store.mark_stopped();
+                    let _ = store.append_event(EventType::AgentStopped);
                     emit_next("ended", None, &store, json);
                     return 0;
                 }
@@ -385,6 +388,10 @@ async fn run_reply(name: Option<String>, thread_id: &str, body: &str) -> i32 {
         return 1;
     }
 
+    // Keep the session alive while the agent works items, so `is_listening`
+    // doesn't lapse between `next` calls and flap the "listening" indicator.
+    let _ = store.heartbeat();
+
     output::print_info(&format!(
         "Replied to thread {thread_id} — now waiting on the reviewer."
     ));
@@ -423,6 +430,7 @@ async fn run_resolve(name: Option<String>, thread_id: &str) -> i32 {
         return 1;
     }
 
+    let _ = store.heartbeat();
     output::print_info(&format!("Resolved thread {thread_id}."));
     0
 }
