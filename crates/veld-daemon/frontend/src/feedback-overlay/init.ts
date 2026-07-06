@@ -5,7 +5,7 @@ import { PREFIX } from "./constants";
 import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
 import { onKeyDown } from "./keyboard";
-import { pollEvents, pollListenStatus, loadThreads } from "./polling";
+import { pollEvents, pollListenStatus, loadThreads, primeEventSeq } from "./polling";
 import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass } from "./panel";
 import { setMode } from "./modes";
 import { toggleToolbar } from "./toolbar";
@@ -67,7 +67,7 @@ export function init(): void {
   window.addEventListener("popstate", onNavigate);
 
   loadThreads();
-  pollEvents();
+  primeEventSeq(); // baseline the cursor so a reload doesn't replay old toasts
   pollListenStatus();
   setInterval(pollEvents, 3000);
   setInterval(pollListenStatus, 5000);

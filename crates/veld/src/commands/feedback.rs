@@ -294,8 +294,11 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
                 return 0;
             }
             Ok(None) => {
-                // Queue drained. If the reviewer clicked "Done", stop the loop.
+                // Queue drained. If the reviewer clicked "Done", stop the loop —
+                // and consume the flag so a relaunched loop starts fresh instead
+                // of immediately re-stopping on the same Done.
                 if store.is_ended().unwrap_or(false) {
+                    let _ = store.clear_ended();
                     emit_next("ended", None, &store, json);
                     return 0;
                 }

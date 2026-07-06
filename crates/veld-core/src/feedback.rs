@@ -145,10 +145,10 @@ pub struct Session {
     pub status: SessionStatus,
     pub last_heartbeat: DateTime<Utc>,
     /// Set when the human clicks "Done" — a durable signal that the reviewer
-    /// has no more feedback. Never cleared directly; `is_ended` treats it as
-    /// superseded once any human message post-dates it (the reviewer
-    /// re-engaged). Distinct from `status`/`last_heartbeat`, which track agent
-    /// liveness.
+    /// has no more feedback. Consumed (cleared) by the agent when it reports the
+    /// `ended` stop, so a relaunched loop starts clean; also treated as
+    /// superseded by any newer human message (the reviewer re-engaged). Distinct
+    /// from `status`/`last_heartbeat`, which track agent liveness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
 }
@@ -566,16 +566,28 @@ impl FeedbackStore {
 
     /// Explicitly end the session — the human clicked "Done".
     ///
-    /// Sets `ended_at`, which `is_ended` reads: once the queue drains, an ended
-    /// session tells the agent to stop. It is not cleared — instead `is_ended`
-    /// treats a human message newer than `ended_at` as the reviewer re-engaging,
-    /// so a post-Done comment revives the loop with no write-ordering race.
+    /// Sets `ended_at`, which `is_ended` reads. When the agent's queue drains,
+    /// an ended session tells it to stop, and the agent then consumes the flag
+    /// via [`clear_ended`](Self::clear_ended) so a freshly-launched loop starts
+    /// clean instead of immediately re-stopping on a stale Done. A human message
+    /// newer than `ended_at` also supersedes it, so a post-Done comment revives
+    /// the loop.
     pub fn end_session(&self) -> anyhow::Result<()> {
         let now = Utc::now();
         self.modify_session(move |s| {
             s.status = SessionStatus::Idle;
             s.last_heartbeat = now;
             s.ended_at = Some(now);
+        })
+    }
+
+    /// Consume the "Done" flag. The agent calls this as it reports the `ended`
+    /// stop, so the next launched loop starts fresh rather than immediately
+    /// re-stopping on the same Done. Called only by the agent process (not an
+    /// HTTP handler), so it doesn't race `end_session`.
+    pub fn clear_ended(&self) -> anyhow::Result<()> {
+        self.modify_session(|s| {
+            s.ended_at = None;
         })
     }
 
@@ -1194,6 +1206,24 @@ mod tests {
         store
             .add_message(&t.id, &new_message(Author::Agent, "on it", None, None))
             .unwrap();
+        assert!(!store.is_ended().unwrap());
+    }
+
+    #[test]
+    fn test_clear_ended_consumes_flag() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        store.end_session().unwrap();
+        assert!(store.is_ended().unwrap());
+
+        // Agent consumes the flag when it reports the stop → a relaunched loop
+        // must not immediately see "ended" again.
+        store.clear_ended().unwrap();
+        assert!(!store.is_ended().unwrap());
+
+        // A heartbeat must not resurrect it.
+        store.heartbeat().unwrap();
         assert!(!store.is_ended().unwrap());
     }
 

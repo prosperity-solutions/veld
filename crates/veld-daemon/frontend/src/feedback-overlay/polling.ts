@@ -21,6 +21,24 @@ export function pollEvents(): void {
   }).catch(function () {});
 }
 
+/**
+ * Baseline the event cursor to the latest seq without replaying history.
+ *
+ * Called once at (re)load. Without this, the first `pollEvents` (cursor at 0)
+ * re-fetches the entire event log and re-fires a toast for every past agent
+ * reply — so notifications reappear on every reload. Current thread state comes
+ * from `loadThreads()`; the event stream only needs to surface activity that
+ * happens *after* load.
+ */
+export function primeEventSeq(): void {
+  api("GET", "/events?after=" + getState().lastEventSeq).then(function (raw) {
+    const events = raw as FeedbackEvent[];
+    if (!events || !events.length) return;
+    const maxSeq = events[events.length - 1].seq; // events are seq-ascending
+    if (maxSeq > getState().lastEventSeq) dispatch({ type: "SET_LAST_EVENT_SEQ", seq: maxSeq });
+  }).catch(function () {});
+}
+
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
