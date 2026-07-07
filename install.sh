@@ -380,12 +380,21 @@ fi
 
 if [ "$OS" = "macos" ]; then
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
-    # Privileged mode (staying in place): helper runs as a system LaunchDaemon.
+    # Privileged mode (staying in place): helper runs as a system LaunchDaemon
+    # (root). Restarting it in the system domain requires root — the old code
+    # ran `$NEED_SUDO launchctl ... system/...` with NEED_SUDO empty for the
+    # default user-path install, so it silently failed and left a stale helper.
+    # If passwordless sudo is available, kickstart it now for an immediate swap;
+    # otherwise the helper restarts itself when it detects its binary changed
+    # (in-process watcher + the plist's WatchPaths) — no password prompt.
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
-      echo "Restarting veld-helper service (privileged)..."
-      $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
-      $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
+      if sudo -n true 2>/dev/null; then
+        echo "Restarting veld-helper service (privileged)..."
+        sudo launchctl kickstart -k system/dev.veld.helper 2>/dev/null || true
+      else
+        echo "veld-helper will restart itself to pick up the new binary (no sudo needed)."
+      fi
     fi
   elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # User mode: helper runs as a user LaunchAgent.

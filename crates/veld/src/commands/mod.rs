@@ -25,14 +25,9 @@ pub mod version;
 use crate::output;
 
 /// Read the setup mode from `~/.veld/setup.json`.
+/// Delegates to the shared implementation in `veld-core` so the two never drift.
 pub fn read_setup_mode() -> Option<String> {
-    let path = dirs::home_dir()?.join(".veld").join("setup.json");
-    let content = std::fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
-    value
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+    veld_core::setup::read_setup_mode()
 }
 
 /// Resolve the run name to use. If `name` is given, use it directly. Otherwise

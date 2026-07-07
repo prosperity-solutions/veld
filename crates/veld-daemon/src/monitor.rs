@@ -14,37 +14,53 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// Key: `"project_root:run_name:node:variant"`.
 type LastCheckMap = HashMap<String, Instant>;
 
+/// Bound on how long the login-shell PATH resolution may take.
+const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Resolve the user's full PATH by spawning an interactive login shell.
 /// Falls back to the current process PATH if resolution fails.
-fn resolve_user_path() -> String {
+///
+/// Async + timeout-bounded: the previous version ran a *blocking* interactive
+/// login shell (`$SHELL -l -i`) directly on a tokio worker thread every 60s. A
+/// `.zshrc` that stalls right after a macOS wake (version managers, network
+/// init) could freeze the whole health monitor. Now it runs via `tokio::process`
+/// and is abandoned after [`PATH_RESOLVE_TIMEOUT`].
+async fn resolve_user_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
     // Use -l -i -c to get a fully initialized interactive login shell.
     // This captures PATH after .zprofile/.bash_profile/brew shellenv etc.
-    let output = std::process::Command::new(&shell)
+    let output = tokio::process::Command::new(&shell)
         .arg("-l")
         .arg("-i")
         .arg("-c")
         .arg("echo $PATH")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
+        // Kill the shell if we abandon it on timeout, so a hung `.zshrc`
+        // (common right after a macOS wake) doesn't leak a live process every
+        // 60s.
+        .kill_on_drop(true)
         .output();
 
-    match output {
-        Ok(o) if o.status.success() => {
+    match tokio::time::timeout(PATH_RESOLVE_TIMEOUT, output).await {
+        Ok(Ok(o)) if o.status.success() => {
             let path = String::from_utf8_lossy(&o.stdout).trim().to_owned();
             if !path.is_empty() {
                 info!(path = %path, "resolved user PATH from login shell");
                 return path;
             }
         }
-        Ok(o) => {
+        Ok(Ok(o)) => {
             debug!(
                 exit_code = o.status.code(),
                 "login shell PATH resolution exited non-zero, using fallback"
             );
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             debug!(error = %e, "failed to resolve user PATH, using fallback");
+        }
+        Err(_) => {
+            warn!("login shell PATH resolution timed out, using fallback");
         }
     }
 
@@ -55,11 +71,16 @@ fn resolve_user_path() -> String {
 /// When a status change is detected, update the registry and broadcast the event.
 pub async fn run_health_monitor(broadcaster: Broadcaster) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(SCAN_INTERVAL_SECS));
+    // After a macOS sleep the monotonic clock jumps; with the default `Burst`
+    // behavior an overnight sleep queues thousands of missed 5s ticks that all
+    // fire back-to-back on wake (CPU spike, PATH re-resolution storm). Skip the
+    // backlog and resume the normal cadence instead.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_checks: LastCheckMap = HashMap::new();
 
     // Resolve the user's full PATH once at startup so probe commands can
     // find tools like pg_isready even when the daemon starts at boot.
-    let mut user_path = resolve_user_path();
+    let mut user_path = resolve_user_path().await;
     let mut path_resolved_at = Instant::now();
 
     loop {
@@ -68,7 +89,7 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
 
         // Re-resolve PATH every 60s to pick up changes after user login.
         if path_resolved_at.elapsed() > Duration::from_secs(60) {
-            user_path = resolve_user_path();
+            user_path = resolve_user_path().await;
             path_resolved_at = Instant::now();
         }
 

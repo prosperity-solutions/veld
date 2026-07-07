@@ -1,4 +1,7 @@
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::sync::Mutex;
@@ -13,10 +16,24 @@ const MANAGEMENT_HOST: &str = "veld.localhost";
 /// Port the daemon's HTTP server listens on (feedback + management).
 const DAEMON_HTTP_PORT: u16 = 19899;
 
+/// Overall timeout for a single Caddy admin API request. A half-dead Caddy
+/// (e.g. after a macOS sleep/wake that reset the network stack) can accept a
+/// TCP connection but never respond; without this bound the helper's request
+/// handler — and any daemon/CLI call waiting on it — would hang forever.
+const CADDY_ADMIN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect timeout for the Caddy admin API (localhost, so fast).
+const CADDY_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Manages the Caddy process and its routes.
 #[derive(Debug)]
 pub struct CaddyManager {
     inner: Arc<Mutex<CaddyState>>,
+    /// Active per-run routes, keyed by route `@id`, persisted to disk so they
+    /// survive a Caddy restart, a helper restart (update/crash), or a reboot.
+    /// Caddy itself keeps routes only in memory, so the helper is the durable
+    /// source of truth and replays them on every (re)load.
+    routes: Arc<Mutex<RouteStore>>,
     client: reqwest::Client,
     https_port: u16,
     http_port: u16,
@@ -30,11 +47,34 @@ struct CaddyState {
     child_pid: Option<u32>,
 }
 
+/// Durable store of the Caddy routes this helper has been asked to serve.
+#[derive(Debug)]
+struct RouteStore {
+    /// route `@id` -> the fully-built Caddy route JSON (as `build_route_json`
+    /// produces it), ready to splice back into a config on reload.
+    routes: HashMap<String, serde_json::Value>,
+    /// Where the store is persisted on disk.
+    path: PathBuf,
+}
+
 impl CaddyManager {
     pub fn new(https_port: u16, http_port: u16, caddy_bin: Option<std::path::PathBuf>) -> Self {
+        let store_path = routes_store_path(&caddy_bin);
+        let routes = load_route_store(&store_path);
+        if !routes.is_empty() {
+            info!(count = routes.len(), "restored persisted Caddy routes");
+        }
         Self {
             inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
-            client: reqwest::Client::new(),
+            routes: Arc::new(Mutex::new(RouteStore {
+                routes,
+                path: store_path,
+            })),
+            client: reqwest::Client::builder()
+                .connect_timeout(CADDY_CONNECT_TIMEOUT)
+                .timeout(CADDY_ADMIN_TIMEOUT)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
             https_port,
             http_port,
             caddy_bin_override: caddy_bin,
@@ -44,8 +84,17 @@ impl CaddyManager {
     /// Start the Caddy process if it is not already running, and ensure the
     /// base config is loaded.
     pub async fn start(&self) -> Result<()> {
+        // Hold the lock across the whole start sequence so a concurrent caller
+        // (e.g. the watchdog racing a client `caddy_start`) can't double-spawn
+        // Caddy — the second caller waits, then sees the running pid and no-ops.
         let mut state = self.inner.lock().await;
+        self.start_locked(&mut state).await
+    }
 
+    /// Start Caddy, assuming the caller already holds the state lock. Split out
+    /// so `ensure_healthy` can re-check liveness and tear down + restart within
+    /// a single held-lock critical section (no concurrent `caddy_start` window).
+    async fn start_locked(&self, state: &mut CaddyState) -> Result<()> {
         if let Some(pid) = state.child_pid {
             if is_process_alive(pid) {
                 info!(pid, "caddy is already running");
@@ -55,19 +104,27 @@ impl CaddyManager {
             state.child_pid = None;
         }
 
-        // Check if Caddy is already running externally (e.g. from a previous
-        // helper instance). If it is, reload the base config to ensure any new
-        // built-in routes (e.g. management UI) are registered.
-        drop(state);
+        // Check if Caddy is already running externally (e.g. an orphaned Caddy
+        // from a previous helper instance that exited without stopping it). If
+        // so, re-adopt it: record its pid (from the pid file) so we can control
+        // it later, then reload our full config (base + persisted routes).
         if self.is_running().await {
-            info!("caddy admin API already reachable, reloading base config");
+            if let Some(pid) = read_caddy_pid(&self.caddy_bin_override) {
+                // Only adopt a pid we can positively confirm is caddy. If we
+                // can't confirm, don't record it — `stop()` still falls back to
+                // the pid file when recovery is actually needed.
+                if is_process_alive(pid) && pid_is_caddy(pid).await == Some(true) {
+                    state.child_pid = Some(pid);
+                    info!(pid, "re-adopted orphaned caddy from pid file");
+                }
+            }
+            info!("caddy admin API already reachable, reloading full config");
             self.reload()
                 .await
-                .context("failed to reload caddy base config on existing instance")?;
+                .context("failed to reload caddy config on existing instance")?;
             return Ok(());
         }
 
-        let mut state = self.inner.lock().await;
         let caddy_bin = self
             .caddy_bin_override
             .clone()
@@ -91,11 +148,13 @@ impl CaddyManager {
 
         let pid = child.id().context("failed to get caddy PID")?;
         state.child_pid = Some(pid);
-        drop(state); // release lock before HTTP call
+        // Record the pid so a future helper instance that adopts this Caddy (or
+        // needs to kill it when wedged) can regain control of it.
+        write_caddy_pid(&self.caddy_bin_override, pid);
 
-        // Wait for the admin API to become available, then load the base config
-        // (TLS internal issuer + HTTP/HTTPS listeners).
-        info!(pid, "caddy process started, loading base config...");
+        // Wait for the admin API to become available, then load the full config
+        // (base + persisted routes). The lock is intentionally still held here.
+        info!(pid, "caddy process started, loading config...");
         for _ in 0..30 {
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             if self
@@ -108,53 +167,67 @@ impl CaddyManager {
                 break;
             }
         }
-        self.reload()
-            .await
-            .context("failed to load caddy base config")?;
-        info!(pid, "caddy started with base config");
+        self.reload().await.context("failed to load caddy config")?;
+        info!(pid, "caddy started with full config");
         Ok(())
     }
 
-    /// Stop the Caddy process.
+    /// Stop the Caddy process, ensuring it is really gone.
+    ///
+    /// Tries a graceful admin-API `/stop` first (works even for an adopted
+    /// orphan while its admin API is responsive), then — critically for the
+    /// wedged case where `/stop` timed out — signals the pid (SIGTERM, then
+    /// SIGKILL) so the listener ports are freed for a restart. The pid comes
+    /// from the tracked child or, failing that, the pid file, so a helper that
+    /// adopted an orphaned Caddy can still tear it down.
     pub async fn stop(&self) -> Result<()> {
         let mut state = self.inner.lock().await;
+        self.stop_locked(&mut state).await
+    }
 
-        // Try graceful shutdown via the admin API first.
+    /// Stop Caddy, assuming the caller already holds the state lock.
+    async fn stop_locked(&self, state: &mut CaddyState) -> Result<()> {
+        let known_pid = state.child_pid.take();
+
         let stop_url = format!("{CADDY_ADMIN_API}/stop");
         match self.client.post(&stop_url).send().await {
             Ok(resp) if resp.status().is_success() => {
                 info!("caddy stopped via admin API");
-                state.child_pid = None;
-                return Ok(());
             }
             Ok(resp) => {
-                debug!(
-                    status = %resp.status(),
-                    "caddy admin API /stop returned non-success; falling back to signal"
-                );
+                debug!(status = %resp.status(), "caddy /stop non-success; will signal by pid");
             }
             Err(e) => {
-                debug!("caddy admin API not reachable for /stop: {e}; falling back to signal");
+                debug!("caddy /stop unreachable: {e}; will signal by pid");
             }
         }
 
-        // Fall back to SIGTERM.
-        if let Some(pid) = state.child_pid.take() {
-            let pid = nix::unistd::Pid::from_raw(pid as i32);
-            if let Err(e) = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM) {
-                warn!(%e, "failed to send SIGTERM to caddy");
-            } else {
-                info!(?pid, "sent SIGTERM to caddy");
-            }
+        // Ensure the process is actually dead so its ports are released.
+        if let Some(pid) = known_pid.or_else(|| read_caddy_pid(&self.caddy_bin_override)) {
+            terminate_pid(pid).await;
         }
+        clear_caddy_pid(&self.caddy_bin_override);
 
         Ok(())
     }
 
     /// Reload caddy configuration via the admin API.
+    ///
+    /// The posted config is the base config **plus every persisted per-run
+    /// route**. Caddy's `/load` replaces the entire configuration, so emitting
+    /// only the base (as this used to) would silently drop all app routes on
+    /// every reload — the exact bug that made URLs die after a helper/Caddy
+    /// restart. Splicing the stored routes back in makes reload idempotent and
+    /// self-healing.
     pub async fn reload(&self) -> Result<()> {
         let load_url = format!("{CADDY_ADMIN_API}/load");
-        let config = build_base_config(self.https_port, self.http_port, &self.caddy_bin_override);
+        let stored = self.routes.lock().await.routes.clone();
+        let config = build_full_config(
+            self.https_port,
+            self.http_port,
+            &self.caddy_bin_override,
+            &stored,
+        );
 
         let resp = self
             .client
@@ -184,8 +257,20 @@ impl CaddyManager {
     ) -> Result<()> {
         let route = build_route_json(route_id, hostname, upstream, feedback);
 
-        let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
+        // Record in the durable store first (and persist) so the route is
+        // replayed on any future reload/restart even if the live POST below
+        // fails or Caddy later dies. The store is the source of truth.
+        let existed = self.store_route(route_id, route.clone()).await;
 
+        // If this id was already present, a bare POST would create a duplicate
+        // `@id`. Reload the whole config (base + store) to reconcile instead —
+        // no dependency on Caddy's specific error wording.
+        if existed {
+            info!(route_id, "route id already present, reconciling via reload");
+            return self.reload().await;
+        }
+
+        let url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes",);
         let resp = self
             .client
             .post(&url)
@@ -206,6 +291,9 @@ impl CaddyManager {
 
     /// Remove a route by its `@id` via the Caddy admin API.
     pub async fn remove_route(&self, route_id: &str) -> Result<()> {
+        // Drop from the durable store first so it is not replayed on reload.
+        self.forget_route(route_id).await;
+
         let url = format!("{CADDY_ADMIN_API}/id/{route_id}");
 
         let resp = self
@@ -227,6 +315,10 @@ impl CaddyManager {
     /// Remove every route whose `@id` starts with `prefix`. Returns how many were
     /// removed. Used to purge orphaned `veld-join-*` routes on daemon startup.
     pub async fn remove_routes_by_prefix(&self, prefix: &str) -> Result<usize> {
+        // Drop matching routes from the durable store first so they are not
+        // replayed on the next reload.
+        self.forget_routes_by_prefix(prefix).await;
+
         let list_url = format!("{CADDY_ADMIN_API}/config/apps/http/servers/veld/routes");
         let resp = self
             .client
@@ -264,6 +356,242 @@ impl CaddyManager {
     pub async fn pid(&self) -> Option<u32> {
         self.inner.lock().await.child_pid
     }
+
+    /// Ensure Caddy is alive and serving. Returns `true` if a recovery restart
+    /// was performed. Called by the watchdog loop: if Caddy has died or wedged
+    /// (its sentinel route is unreachable within the admin timeout), it is
+    /// torn down and respawned, then all persisted routes are replayed via the
+    /// base-config reload inside `start()`.
+    pub async fn ensure_healthy(&self) -> Result<bool> {
+        // Cheap unlocked pre-check: the common case is a healthy Caddy, and we
+        // don't want to contend for the lock every tick.
+        if self.is_running().await {
+            return Ok(false);
+        }
+        // Acquire the lock and re-check *while holding it*. Any in-flight
+        // `caddy_start` holds this same lock, so by the time we get it that
+        // start has fully completed — if Caddy is now healthy we must not tear
+        // it down (which would drop live connections/HMR). Teardown + restart
+        // then happen atomically in this one critical section.
+        let mut state = self.inner.lock().await;
+        if self.is_running().await {
+            return Ok(false);
+        }
+        warn!("caddy is not responding — attempting recovery restart");
+        // Best-effort teardown of any dead/wedged process so the respawn can
+        // bind the listeners cleanly.
+        let _ = self.stop_locked(&mut state).await;
+        self.start_locked(&mut state)
+            .await
+            .context("failed to restart caddy during recovery")?;
+        info!("caddy recovered");
+        Ok(true)
+    }
+
+    // -- Route store ----------------------------------------------------------
+
+    /// Insert or replace a route in the durable store and persist it. Returns
+    /// `true` if a route with this id was already present (i.e. a replace).
+    ///
+    /// The persist happens while the store lock is held so concurrent route
+    /// operations can't write stale snapshots over each other (route ops are
+    /// infrequent, so serializing them is cheap and keeps the file correct).
+    async fn store_route(&self, route_id: &str, route: serde_json::Value) -> bool {
+        let mut store = self.routes.lock().await;
+        let existed = store.routes.insert(route_id.to_owned(), route).is_some();
+        let snapshot = store.snapshot();
+        persist_route_store(&snapshot).await;
+        existed
+    }
+
+    /// Remove a route from the durable store and persist it.
+    async fn forget_route(&self, route_id: &str) {
+        let mut store = self.routes.lock().await;
+        if store.routes.remove(route_id).is_none() {
+            return;
+        }
+        let snapshot = store.snapshot();
+        persist_route_store(&snapshot).await;
+    }
+
+    /// Remove every stored route whose id starts with `prefix` and persist.
+    async fn forget_routes_by_prefix(&self, prefix: &str) {
+        let mut store = self.routes.lock().await;
+        let before = store.routes.len();
+        store.routes.retain(|id, _| !id.starts_with(prefix));
+        if store.routes.len() == before {
+            return;
+        }
+        let snapshot = store.snapshot();
+        persist_route_store(&snapshot).await;
+    }
+
+    /// Number of routes currently in the durable store (for status/tests).
+    pub async fn stored_route_count(&self) -> usize {
+        self.routes.lock().await.routes.len()
+    }
+}
+
+impl RouteStore {
+    /// Clone the routes + path for persisting outside the lock.
+    fn snapshot(&self) -> RouteSnapshot {
+        RouteSnapshot {
+            path: self.path.clone(),
+            routes: self.routes.clone(),
+        }
+    }
+}
+
+/// A point-in-time copy of the route store, used to persist to disk without
+/// holding the store lock across the async write.
+struct RouteSnapshot {
+    path: PathBuf,
+    routes: HashMap<String, serde_json::Value>,
+}
+
+/// Caddy's data directory — where we persist the route store and pid file.
+/// Derived from the caddy binary's parent (a sibling `caddy-data`) so it shares
+/// the same (helper-writable) location across privileged/user modes.
+fn caddy_data_dir(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
+    caddy_bin_override
+        .as_ref()
+        .and_then(|p| p.parent())
+        .map(|p| p.join("caddy-data"))
+        .unwrap_or_else(veld_core::paths::caddy_data_dir)
+}
+
+/// Where the persisted route store lives.
+fn routes_store_path(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
+    caddy_data_dir(caddy_bin_override).join("veld-routes.json")
+}
+
+/// Where the managed Caddy's pid is recorded, so a restarted helper can
+/// re-adopt (or forcibly stop) an orphaned Caddy it did not itself spawn.
+fn caddy_pid_path(caddy_bin_override: &Option<PathBuf>) -> PathBuf {
+    caddy_data_dir(caddy_bin_override).join("caddy.pid")
+}
+
+fn write_caddy_pid(caddy_bin_override: &Option<PathBuf>, pid: u32) {
+    let path = caddy_pid_path(caddy_bin_override);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, pid.to_string());
+}
+
+fn read_caddy_pid(caddy_bin_override: &Option<PathBuf>) -> Option<u32> {
+    std::fs::read_to_string(caddy_pid_path(caddy_bin_override))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn clear_caddy_pid(caddy_bin_override: &Option<PathBuf>) {
+    let _ = std::fs::remove_file(caddy_pid_path(caddy_bin_override));
+}
+
+/// Whether `pid` currently belongs to a caddy process, used to guard signalling
+/// against PID reuse after a stale pid file. Returns:
+/// - `Some(true)`  — confirmed a caddy process,
+/// - `Some(false)` — `ps` ran and it is not caddy (or the pid is gone),
+/// - `None`        — `ps` could not be executed, so we can't tell.
+///
+/// Uses an absolute `/bin/ps` path (present on macOS and Linux) so PATH quirks
+/// in a launchd/systemd environment don't turn this into a false "not caddy".
+async fn pid_is_caddy(pid: u32) -> Option<bool> {
+    match tokio::process::Command::new("/bin/ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .await
+    {
+        Ok(o) if o.status.success() => {
+            let comm = String::from_utf8_lossy(&o.stdout);
+            Some(comm.trim().ends_with("caddy"))
+        }
+        // ps ran but the pid wasn't found → not a live caddy.
+        Ok(_) => Some(false),
+        // ps couldn't be executed → undetermined.
+        Err(_) => None,
+    }
+}
+
+/// Terminate a caddy process by pid: SIGTERM, wait for graceful exit, then
+/// escalate to SIGKILL. Guarded by [`pid_is_caddy`] so a stale/reused pid is
+/// never signalled. Bounded so it cannot hang the caller.
+async fn terminate_pid(pid: u32) {
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    if !is_process_alive(pid) {
+        return;
+    }
+    // Only refuse to signal when we've CONFIRMED the pid is some other process
+    // (stale pid file + reuse). If `ps` is unavailable (`None`) we proceed:
+    // the pid came from our own pid file, and refusing would strand a wedged
+    // Caddy and defeat recovery — the whole point of this path.
+    if pid_is_caddy(pid).await == Some(false) {
+        warn!(pid, "pid is not a caddy process; not signalling (stale pid file?)");
+        return;
+    }
+
+    let nix_pid = Pid::from_raw(pid as i32);
+    let _ = kill(nix_pid, Signal::SIGTERM);
+    info!(pid, "sent SIGTERM to caddy");
+    // Up to ~3s for graceful shutdown.
+    for _ in 0..30 {
+        if !is_process_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    warn!(pid, "caddy did not exit after SIGTERM; sending SIGKILL");
+    let _ = kill(nix_pid, Signal::SIGKILL);
+    for _ in 0..20 {
+        if !is_process_alive(pid) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    warn!(pid, "caddy still present after SIGKILL");
+}
+
+/// Load the persisted route store from disk. Missing/corrupt files start empty
+/// (self-healing rather than fatal).
+fn load_route_store(path: &Path) -> HashMap<String, serde_json::Value> {
+    match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|e| {
+            warn!(error = %e, "failed to parse persisted routes; starting with an empty store");
+            HashMap::new()
+        }),
+        Err(_) => HashMap::new(),
+    }
+}
+
+/// Persist the route store atomically (write to a temp file, then rename).
+async fn persist_route_store(snapshot: &RouteSnapshot) {
+    if let Some(parent) = snapshot.path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    let json = match serde_json::to_vec_pretty(&snapshot.routes) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize routes for persistence");
+            return;
+        }
+    };
+    // Per-process tmp name so two helpers sharing a data dir don't clobber
+    // each other's temp file mid-write.
+    let tmp = snapshot
+        .path
+        .with_extension(format!("json.tmp.{}", std::process::id()));
+    if let Err(e) = tokio::fs::write(&tmp, &json).await {
+        warn!(error = %e, path = %tmp.display(), "failed to write routes store");
+        return;
+    }
+    if let Err(e) = tokio::fs::rename(&tmp, &snapshot.path).await {
+        warn!(error = %e, "failed to move routes store into place");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +617,32 @@ pub struct FeedbackConfig<'a> {
 // ---------------------------------------------------------------------------
 // Caddy JSON config builders
 // ---------------------------------------------------------------------------
+
+/// Build the full Caddy config: the base config plus every persisted per-run
+/// route, spliced in after the built-in management/sentinel routes and sorted
+/// by `@id` for deterministic ordering. This is what `reload()` posts to
+/// Caddy's `/load`, so a reload never drops app routes.
+fn build_full_config(
+    https_port: u16,
+    http_port: u16,
+    caddy_bin_override: &Option<std::path::PathBuf>,
+    stored: &HashMap<String, serde_json::Value>,
+) -> serde_json::Value {
+    let mut config = build_base_config(https_port, http_port, caddy_bin_override);
+
+    let mut entries: Vec<_> = stored.values().cloned().collect();
+    entries.sort_by(|a, b| {
+        a.get("@id")
+            .and_then(|v| v.as_str())
+            .cmp(&b.get("@id").and_then(|v| v.as_str()))
+    });
+    if !entries.is_empty() {
+        if let Some(routes) = config["apps"]["http"]["servers"]["veld"]["routes"].as_array_mut() {
+            routes.extend(entries);
+        }
+    }
+    config
+}
 
 /// Build a minimal base Caddy config with a server block for Veld.
 fn build_base_config(
@@ -902,6 +1256,113 @@ mod tests {
     // -----------------------------------------------------------------------
     // Base config tests
     // -----------------------------------------------------------------------
+
+    // -----------------------------------------------------------------------
+    // Route store / full-config tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_build_full_config_splices_stored_routes() {
+        let mut stored = HashMap::new();
+        stored.insert(
+            "veld-run-b".to_string(),
+            build_route_json("veld-run-b", "b.dev.localhost", "localhost:3001", None),
+        );
+        stored.insert(
+            "veld-run-a".to_string(),
+            build_route_json("veld-run-a", "a.dev.localhost", "localhost:3000", None),
+        );
+
+        let config = build_full_config(443, 80, &None, &stored);
+        let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
+            .as_array()
+            .unwrap();
+        // Base management + sentinel, then the two stored routes sorted by id.
+        assert_eq!(routes.len(), 4);
+        assert_eq!(routes[0]["@id"], "veld-management");
+        assert_eq!(routes[1]["@id"], "veld-sentinel");
+        assert_eq!(routes[2]["@id"], "veld-run-a");
+        assert_eq!(routes[3]["@id"], "veld-run-b");
+    }
+
+    #[test]
+    fn test_build_full_config_empty_store_is_base_only() {
+        let stored = HashMap::new();
+        let config = build_full_config(443, 80, &None, &stored);
+        let routes = config["apps"]["http"]["servers"]["veld"]["routes"]
+            .as_array()
+            .unwrap();
+        assert_eq!(routes.len(), 2);
+    }
+
+    #[test]
+    fn test_load_route_store_missing_or_corrupt_is_empty() {
+        // Missing file → empty.
+        let missing = std::env::temp_dir().join("veld-does-not-exist-xyz.json");
+        assert!(load_route_store(&missing).is_empty());
+
+        // Corrupt file → empty (self-healing, not fatal).
+        let corrupt = std::env::temp_dir().join(format!("veld-corrupt-{}.json", std::process::id()));
+        std::fs::write(&corrupt, b"{ not json").unwrap();
+        assert!(load_route_store(&corrupt).is_empty());
+        let _ = std::fs::remove_file(&corrupt);
+    }
+
+    #[tokio::test]
+    async fn test_route_store_persist_load_roundtrip() {
+        let path =
+            std::env::temp_dir().join(format!("veld-routes-roundtrip-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "veld-run-a".to_string(),
+            build_route_json("veld-run-a", "a.dev.localhost", "localhost:3000", None),
+        );
+        let snapshot = RouteSnapshot {
+            path: path.clone(),
+            routes: routes.clone(),
+        };
+        persist_route_store(&snapshot).await;
+
+        let loaded = load_route_store(&path);
+        assert_eq!(loaded, routes);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_routes_store_path_uses_caddy_data_sibling() {
+        let bin = std::path::PathBuf::from("/opt/veld/lib/caddy");
+        let path = routes_store_path(&Some(bin));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/opt/veld/lib/caddy-data/veld-routes.json")
+        );
+    }
+
+    #[test]
+    fn test_caddy_pid_path_uses_caddy_data_sibling() {
+        let bin = std::path::PathBuf::from("/opt/veld/lib/caddy");
+        let path = caddy_pid_path(&Some(bin));
+        assert_eq!(
+            path,
+            std::path::PathBuf::from("/opt/veld/lib/caddy-data/caddy.pid")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_pid_file_roundtrip() {
+        // Use a unique caddy-bin so the pid path is isolated per test run.
+        let dir = std::env::temp_dir().join(format!("veld-pidtest-{}", std::process::id()));
+        let fake_caddy = dir.join("caddy");
+        let over = Some(fake_caddy);
+
+        write_caddy_pid(&over, 4242);
+        assert_eq!(read_caddy_pid(&over), Some(4242));
+        clear_caddy_pid(&over);
+        assert_eq!(read_caddy_pid(&over), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn test_build_base_config() {

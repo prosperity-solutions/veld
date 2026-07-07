@@ -20,6 +20,9 @@ const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 /// performs GC on the configured interval.
 pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(GC_INTERVAL_SECS));
+    // Don't fire a backlog of missed ticks after a macOS sleep — one GC pass on
+    // wake is enough.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         interval.tick().await;

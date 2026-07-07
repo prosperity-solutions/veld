@@ -84,11 +84,30 @@ pub async fn require_setup() -> Result<SetupStatus, SetupError> {
 /// Ensure a helper is running and reachable. Tries existing sockets first,
 /// then auto-bootstraps an unprivileged helper if needed.
 pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Error> {
-    use crate::helper::{HelperClient, user_socket_path};
+    use crate::helper::{HelperClient, system_socket_path, user_socket_path};
 
     // Migrate caddy-data from system install if needed.
     if let Err(e) = migrate_from_system_install() {
         tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
+    }
+
+    // If setup.json records an explicit mode, the helper is a managed
+    // launchd/systemd service that should already be running. Connect to *that*
+    // helper and never silently bootstrap a throwaway auto-helper — doing so
+    // used to clobber the persisted mode to "auto" and move every URL to
+    // :18443, which is exactly what forced users to re-run `veld setup
+    // privileged` after an update. If the service is momentarily down (e.g.
+    // launchd is relaunching it after `veld update` replaced the binary), wait
+    // for it; if it stays down, surface a clear error instead of downgrading.
+    match read_setup_mode().as_deref() {
+        Some("privileged") => {
+            return connect_managed_helper(&system_socket_path(), "privileged").await;
+        }
+        Some("unprivileged") => {
+            return connect_managed_helper(&user_socket_path(), "unprivileged").await;
+        }
+        // "auto" or unset — fall through to the auto-bootstrap path below.
+        _ => {}
     }
 
     // Try connecting to an existing helper (system or user socket).
@@ -175,6 +194,62 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     eprintln!();
 
     Ok(client)
+}
+
+/// Read the persisted setup mode from `~/.veld/setup.json`, if present.
+/// Returns `"privileged"`, `"unprivileged"`, `"auto"`, or `None` when unset.
+pub fn read_setup_mode() -> Option<String> {
+    let path = dirs::home_dir()?.join(".veld").join("setup.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .map(str::to_owned)
+}
+
+/// Connect to a helper that `setup.json` says is a managed service on `socket`.
+///
+/// Retries for a short bounded window so a `veld start` issued while launchd is
+/// relaunching the helper (e.g. right after `veld update` swapped the binary)
+/// rides out the gap. Never falls back to bootstrapping an auto-helper — a
+/// down managed helper is surfaced as an actionable error, not papered over
+/// with a mode downgrade.
+async fn connect_managed_helper(
+    socket: &std::path::Path,
+    mode: &str,
+) -> Result<crate::helper::HelperClient, anyhow::Error> {
+    use crate::helper::HelperClient;
+
+    // Bounded by wall-clock (~10s) rather than a fixed attempt count: each
+    // `connect_to` can itself take up to 3s on a wedged-but-open socket, so a
+    // fixed count could block `veld start` for over a minute. Usually succeeds
+    // on the first attempt.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut announced = false;
+    loop {
+        if let Ok(client) = HelperClient::connect_to(socket).await {
+            if announced {
+                eprintln!("  veld-helper is back up.");
+            }
+            return Ok(client);
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        if !announced {
+            eprintln!("Waiting for the {mode} veld-helper to come back up...");
+            announced = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    anyhow::bail!(
+        "the {mode} veld-helper is not responding at {}.\n\
+         It is managed by launchd/systemd and should restart automatically — \
+         check `veld doctor`. If it stays down, re-run `veld setup {mode}`.",
+        socket.display()
+    )
 }
 
 /// Structured JSON representation of the setup-required error.
@@ -511,16 +586,20 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     <string>dev.veld.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+        <string>{bin_path}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>{bin_path}</string>
+    </array>
 </dict>
 </plist>
 "#,
-                veld_daemon_bin.display()
+                bin_path = veld_daemon_bin.display()
             );
             let label = "dev.veld.daemon";
             let domain_target = format!("gui/{real_uid}/{label}");
@@ -742,9 +821,14 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>{bin_path}</string>
+    </array>
 </dict>
 </plist>
 "#,
+        bin_path = bin.display(),
     );
 
     // Stop the running service first (required for upgrades). Use the modern
