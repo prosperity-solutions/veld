@@ -1,9 +1,16 @@
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+
+/// Overall timeout for a single request/response round-trip with the helper.
+/// The helper bounds its own Caddy admin calls at ~10s, so this leaves margin
+/// for a slow-but-working helper while still guaranteeing a caller (e.g. the
+/// daemon's GC task) can never block forever on a wedged helper after sleep.
+const SEND_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -163,8 +170,20 @@ impl HelperClient {
         Self::new(&default_socket_path())
     }
 
-    /// Send a command and receive the response.
+    /// Send a command and receive the response, bounded by [`SEND_TIMEOUT`] so
+    /// a dead/wedged helper cannot hang the caller indefinitely.
     async fn send(&self, command: &HelperCommand) -> Result<HelperResponse, HelperError> {
+        match tokio::time::timeout(SEND_TIMEOUT, self.send_inner(command)).await {
+            Ok(result) => result,
+            Err(_) => Err(HelperError::ReadFailed(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "veld-helper did not respond within timeout",
+            ))),
+        }
+    }
+
+    /// Inner request/response round-trip without the timeout wrapper.
+    async fn send_inner(&self, command: &HelperCommand) -> Result<HelperResponse, HelperError> {
         let mut stream = UnixStream::connect(&self.socket_path).await.map_err(|e| {
             HelperError::ConnectionFailed {
                 path: self.socket_path.clone(),
@@ -283,6 +302,14 @@ impl HelperClient {
         })
     }
 
+    /// Connect to the helper at a specific socket path, verifying it is
+    /// responsive with a bounded status check. Public wrapper over
+    /// [`Self::try_connect`] for callers that know which socket a managed
+    /// helper should be on (e.g. mode-aware connection in `ensure_helper`).
+    pub async fn connect_to(socket_path: &Path) -> Result<Self, HelperError> {
+        Self::try_connect(socket_path).await
+    }
+
     /// Try to connect and verify the helper is responsive (status check).
     async fn try_connect(socket_path: &Path) -> Result<Self, HelperError> {
         let client = Self::new(socket_path);
@@ -309,5 +336,17 @@ impl HelperClient {
             .and_then(|d| d.get("https_port"))
             .and_then(|v| v.as_u64())
             .unwrap_or(443) as u16)
+    }
+
+    /// Query the running helper's version string from its status response.
+    /// Older helpers that predate this field return `None`.
+    pub async fn version(&self) -> Result<Option<String>, HelperError> {
+        let resp = self.status().await?;
+        Ok(resp
+            .data
+            .as_ref()
+            .and_then(|d| d.get("version"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned))
     }
 }

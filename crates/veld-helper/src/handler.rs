@@ -30,6 +30,31 @@ impl State {
         }
     }
 
+    /// Startup reconcile: re-adopt + reload an already-running Caddy (e.g. one
+    /// orphaned across our own self-restart) so an updated binary/config takes
+    /// effect and the watchdog can supervise it. No-op if Caddy isn't running.
+    pub async fn reconcile_caddy_on_startup(&self) {
+        self.caddy.reconcile_on_startup().await;
+    }
+
+    /// One watchdog iteration: ensure Caddy is alive and serving the persisted
+    /// routes. Only supervises once Caddy is meant to be running — either it has
+    /// been started this session, or there are persisted routes to serve (e.g.
+    /// after a reboot/update). This avoids spawning Caddy on a fresh install
+    /// that has never started a run.
+    pub async fn caddy_watchdog_tick(&self) {
+        let should_run =
+            self.caddy.pid().await.is_some() || self.caddy.stored_route_count().await > 0;
+        if !should_run {
+            return;
+        }
+        match self.caddy.ensure_healthy().await {
+            Ok(true) => info!("watchdog restarted caddy and replayed routes"),
+            Ok(false) => {}
+            Err(e) => warn!(error = %format!("{e:#}"), "watchdog caddy recovery failed"),
+        }
+    }
+
     /// Parse and dispatch a single JSON request line, returning a `Response`.
     pub async fn handle_request(&self, line: &str) -> Response {
         let request: Request = match serde_json::from_str(line) {
@@ -210,6 +235,8 @@ impl State {
             "https_port": self.https_port,
             "http_port": self.http_port,
             "helper_pid": helper_pid,
+            "version": env!("CARGO_PKG_VERSION"),
+            "stored_routes": self.caddy.stored_route_count().await,
         }))
     }
 

@@ -84,11 +84,30 @@ pub async fn require_setup() -> Result<SetupStatus, SetupError> {
 /// Ensure a helper is running and reachable. Tries existing sockets first,
 /// then auto-bootstraps an unprivileged helper if needed.
 pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Error> {
-    use crate::helper::{HelperClient, user_socket_path};
+    use crate::helper::{HelperClient, system_socket_path, user_socket_path};
 
     // Migrate caddy-data from system install if needed.
     if let Err(e) = migrate_from_system_install() {
         tracing::warn!(error = %e, "caddy-data migration failed (non-fatal)");
+    }
+
+    // If setup.json records an explicit mode, the helper is a managed
+    // launchd/systemd service that should already be running. Connect to *that*
+    // helper and never silently bootstrap a throwaway auto-helper — doing so
+    // used to clobber the persisted mode to "auto" and move every URL to
+    // :18443, which is exactly what forced users to re-run `veld setup
+    // privileged` after an update. If the service is momentarily down (e.g.
+    // launchd is relaunching it after `veld update` replaced the binary), wait
+    // for it; if it stays down, surface a clear error instead of downgrading.
+    match read_setup_mode().as_deref() {
+        Some("privileged") => {
+            return connect_managed_helper(&system_socket_path(), "privileged").await;
+        }
+        Some("unprivileged") => {
+            return connect_managed_helper(&user_socket_path(), "unprivileged").await;
+        }
+        // "auto" or unset — fall through to the auto-bootstrap path below.
+        _ => {}
     }
 
     // Try connecting to an existing helper (system or user socket).
@@ -175,6 +194,65 @@ pub async fn ensure_helper() -> Result<crate::helper::HelperClient, anyhow::Erro
     eprintln!();
 
     Ok(client)
+}
+
+/// Read the persisted setup mode from `~/.veld/setup.json`, if present.
+/// Returns `"privileged"`, `"unprivileged"`, `"auto"`, or `None` when unset.
+pub fn read_setup_mode() -> Option<String> {
+    let path = dirs::home_dir()?.join(".veld").join("setup.json");
+    let content = std::fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    value
+        .get("mode")
+        .and_then(|m| m.as_str())
+        .map(str::to_owned)
+}
+
+/// Connect to a helper that `setup.json` says is a managed service on `socket`.
+///
+/// Retries for a short bounded window so a `veld start` issued while launchd is
+/// relaunching the helper (e.g. right after `veld update` swapped the binary)
+/// rides out the gap. Never falls back to bootstrapping an auto-helper — a
+/// down managed helper is surfaced as an actionable error, not papered over
+/// with a mode downgrade.
+async fn connect_managed_helper(
+    socket: &std::path::Path,
+    mode: &str,
+) -> Result<crate::helper::HelperClient, anyhow::Error> {
+    use crate::helper::HelperClient;
+
+    // Bounded by wall-clock rather than a fixed attempt count: each
+    // `connect_to` is itself capped at 3s (its status check timeout), so a fixed
+    // count could block `veld start` for over a minute on a wedged socket.
+    // 20s is chosen to ride out a helper self-restart — the binary-change
+    // watcher can take ~12s to trigger, plus the launchd/systemd relaunch — so a
+    // `veld start` issued mid-restart waits it out instead of bailing early.
+    // Usually succeeds on the first attempt.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    let mut announced = false;
+    loop {
+        if let Ok(client) = HelperClient::connect_to(socket).await {
+            if announced {
+                eprintln!("  veld-helper is back up.");
+            }
+            return Ok(client);
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        if !announced {
+            eprintln!("Waiting for the {mode} veld-helper to come back up...");
+            announced = true;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    anyhow::bail!(
+        "the {mode} veld-helper is not responding at {}.\n\
+         It is managed by launchd/systemd and should restart automatically — \
+         check `veld doctor`. If it stays down, re-run `veld setup {mode}`.",
+        socket.display()
+    )
 }
 
 /// Structured JSON representation of the setup-required error.
@@ -511,16 +589,20 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
     <string>dev.veld.daemon</string>
     <key>ProgramArguments</key>
     <array>
-        <string>{}</string>
+        <string>{bin_path}</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>{bin_path}</string>
+    </array>
 </dict>
 </plist>
 "#,
-                veld_daemon_bin.display()
+                bin_path = veld_daemon_bin.display()
             );
             let label = "dev.veld.daemon";
             let domain_target = format!("gui/{real_uid}/{label}");
@@ -726,6 +808,15 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
         ));
     }
 
+    // Log to a file next to the binary so the self-healing story (watchdog
+    // restarts, Caddy recovery, pid adoption) is observable — launchd otherwise
+    // discards the helper's stderr, making a post-sleep recovery impossible to
+    // diagnose.
+    let log_path = bin
+        .parent()
+        .map(|p| p.join("veld-helper.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/veld-helper.log"));
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -742,9 +833,19 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     <true/>
     <key>KeepAlive</key>
     <true/>
+    <key>WatchPaths</key>
+    <array>
+        <string>{bin_path}</string>
+    </array>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
 </dict>
 </plist>
 "#,
+        bin_path = bin.display(),
+        log_path = log_path.display(),
     );
 
     // Stop the running service first (required for upgrades). Use the modern
@@ -800,8 +901,14 @@ async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     if let Some(caddy) = caddy_bin {
         exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
     }
+    // KillMode=process: on stop/restart, only kill the helper itself, not its
+    // whole cgroup. The helper spawns Caddy as a child; the default
+    // control-group kill mode would SIGKILL Caddy whenever the helper is
+    // restarted (or exits to pick up a new binary), tearing down every URL.
+    // Leaving Caddy running mirrors the macOS behavior so a helper restart
+    // doesn't drop the proxy.
     let unit = format!(
-        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
     );
     std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
 
@@ -1381,8 +1488,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        // Never migrate mode-specific runtime state across the system->user
+        // move. `caddy.pid` and `veld-routes.json` belong to the *previous*
+        // (privileged) helper session; copying them would make the new
+        // user/auto helper adopt the root Caddy's pid or replay routes bound to
+        // the old mode's ports. Migration exists only to preserve the CA/certs.
+        let name = entry.file_name();
+        if name == "caddy.pid" || name == "veld-routes.json" {
+            continue;
+        }
         let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
+        let dst_path = dst.join(&name);
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst_path)?;
         } else {

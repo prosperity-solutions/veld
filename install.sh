@@ -279,38 +279,38 @@ echo "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
 $NEED_SUDO mkdir -p "$LIB_DIR"
 
-# veld CLI goes to INSTALL_DIR (on PATH)
-$NEED_SUDO cp "${TMP_DIR}/veld" "${INSTALL_DIR}/veld"
-$NEED_SUDO chmod +x "${INSTALL_DIR}/veld"
+# Install a binary and, on macOS, immediately clear its extended attributes and
+# re-sign it BEFORE moving on to the next file.
+#
+# Downloaded binaries carry com.apple.quarantine / com.apple.provenance; on
+# macOS Sequoia (15+) an unsigned/adhoc binary can be SIGKILLed by Gatekeeper on
+# launch. Signing inline (rather than in a separate pass after all copies) keeps
+# the unsigned window to milliseconds — critical because veld-helper is now
+# relaunched automatically when its binary changes (launchd WatchPaths + the
+# helper's own binary-change watcher), and either could otherwise relaunch a
+# freshly-copied-but-not-yet-signed binary into a Gatekeeper kill/throttle loop.
+# $1 = source, $2 = destination, $3 = "sign" (macOS re-sign) | "nosign".
+install_bin() {
+  $NEED_SUDO cp "$1" "$2"
+  $NEED_SUDO chmod +x "$2"
+  if [ "$OS" = "macos" ] && [ "$3" = "sign" ]; then
+    $NEED_SUDO xattr -cr "$2" 2>/dev/null || true
+    $NEED_SUDO codesign --force --sign - "$2" 2>/dev/null || true
+  fi
+}
 
-# Helper, daemon, and Caddy go to LIB_DIR (bundled in the release tarball).
-for bin in veld-helper veld-daemon caddy; do
+# veld CLI goes to INSTALL_DIR (on PATH).
+install_bin "${TMP_DIR}/veld" "${INSTALL_DIR}/veld" sign
+
+# Helper and daemon go to LIB_DIR (bundled in the release tarball) and are
+# re-signed. Caddy is a Go binary shipped signed upstream, so it is not re-signed.
+for bin in veld-helper veld-daemon; do
   if [ -f "${TMP_DIR}/${bin}" ]; then
-    $NEED_SUDO cp "${TMP_DIR}/${bin}" "${LIB_DIR}/${bin}"
-    $NEED_SUDO chmod +x "${LIB_DIR}/${bin}"
+    install_bin "${TMP_DIR}/${bin}" "${LIB_DIR}/${bin}" sign
   fi
 done
-
-# --- macOS: clear extended attributes and re-sign binaries ---
-#
-# Downloaded binaries carry com.apple.quarantine and com.apple.provenance
-# attributes. On macOS Sequoia (15+), provenance alone can cause Gatekeeper
-# to SIGKILL unsigned/adhoc-signed binaries. Clearing all xattrs and
-# re-signing locally makes macOS treat them as trusted.
-#
-# This MUST happen before restarting services, otherwise Gatekeeper can
-# SIGKILL the freshly installed unsigned binaries on launch.
-
-if [ "$OS" = "macos" ]; then
-  echo "Clearing macOS extended attributes and re-signing binaries..."
-  $NEED_SUDO xattr -cr "${INSTALL_DIR}/veld" 2>/dev/null || true
-  $NEED_SUDO codesign --force --sign - "${INSTALL_DIR}/veld" 2>/dev/null || true
-  for bin in veld-helper veld-daemon; do
-    if [ -f "${LIB_DIR}/${bin}" ]; then
-      $NEED_SUDO xattr -cr "${LIB_DIR}/${bin}" 2>/dev/null || true
-      $NEED_SUDO codesign --force --sign - "${LIB_DIR}/${bin}" 2>/dev/null || true
-    fi
-  done
+if [ -f "${TMP_DIR}/caddy" ]; then
+  install_bin "${TMP_DIR}/caddy" "${LIB_DIR}/caddy" nosign
 fi
 
 # --- Restart running services (picks up new binaries) ---
@@ -380,12 +380,21 @@ fi
 
 if [ "$OS" = "macos" ]; then
   if [ -n "$PRIVILEGED_MODE" ] && [ -z "$SWITCHING_TO_USER_PATHS" ]; then
-    # Privileged mode (staying in place): helper runs as a system LaunchDaemon.
+    # Privileged mode (staying in place): helper runs as a system LaunchDaemon
+    # (root). Restarting it in the system domain requires root — the old code
+    # ran `$NEED_SUDO launchctl ... system/...` with NEED_SUDO empty for the
+    # default user-path install, so it silently failed and left a stale helper.
+    # If passwordless sudo is available, kickstart it now for an immediate swap;
+    # otherwise the helper restarts itself when it detects its binary changed
+    # (in-process watcher + the plist's WatchPaths) — no password prompt.
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
-      echo "Restarting veld-helper service (privileged)..."
-      $NEED_SUDO launchctl bootout system/dev.veld.helper 2>/dev/null || true
-      $NEED_SUDO launchctl bootstrap system "$HELPER_PLIST" 2>/dev/null || true
+      if sudo -n true 2>/dev/null; then
+        echo "Restarting veld-helper service (privileged)..."
+        sudo launchctl kickstart -k system/dev.veld.helper 2>/dev/null || true
+      else
+        echo "veld-helper will restart itself to pick up the new binary (no sudo needed)."
+      fi
     fi
   elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then
     # User mode: helper runs as a user LaunchAgent.

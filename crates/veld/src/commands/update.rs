@@ -58,7 +58,7 @@ pub async fn run() -> i32 {
                     output::print_success(&format!("Updated to {new_version}."));
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
-                    restart_services().await;
+                    restart_services(&new_version).await;
                     refresh_hammerspoon().await;
                     0
                 }
@@ -189,37 +189,79 @@ fn cleanup_stale_binaries() {
     }
 }
 
-/// Restart daemon and helper so they run the newly installed binaries.
+/// Restart the helper/daemon so they run the newly installed binaries, then
+/// verify the helper actually came back healthy.
 ///
-/// The install script (run by `perform_update`) already restarts launchd /
-/// systemd services for both privileged and unprivileged modes. This function
-/// only needs to handle the "auto" case (no persistent service) and print
-/// mode-specific guidance after the update.
-async fn restart_services() {
+/// A managed helper (privileged/unprivileged) restarts *itself* when its binary
+/// changes on disk (an in-process watcher exits so launchd relaunches the new
+/// version — no sudo), complemented by the plist's `WatchPaths`. Rather than
+/// assume that worked (the old bug), we poll until the helper reports the new
+/// version, and give actionable guidance if it doesn't.
+///
+/// `target_version` is the version we just updated TO (from `check_update`),
+/// NOT `env!("CARGO_PKG_VERSION")` — this process is the *old* CLI, so its
+/// compile-time version is the version we updated *from*. Comparing against
+/// that would invert the check (fail on every successful update, pass on a
+/// failed one).
+async fn restart_services(target_version: &str) {
     let mode = super::read_setup_mode();
 
-    match mode.as_deref() {
-        Some("privileged") => {
-            // The install script already bounced the system LaunchDaemon /
-            // systemd service with the new binaries — no second sudo needed.
-            // The plist on disk still has the correct binary paths since this
-            // is an in-place update (paths unchanged).
-            output::print_success("Services restarted by the installer (privileged mode).");
+    // Auto mode has no persistent service: stop the ephemeral helper so the
+    // next `veld start` re-bootstraps it with the new binary.
+    if !matches!(mode.as_deref(), Some("privileged") | Some("unprivileged")) {
+        output::print_info("Restarting auto-bootstrapped helper...");
+        let user_socket = veld_core::helper::user_socket_path();
+        let client = veld_core::helper::HelperClient::new(&user_socket);
+        if client.shutdown().await.is_ok() {
+            output::print_info("Helper stopped. It will restart on next `veld start`.");
         }
-        Some("unprivileged") => {
-            // Install script already restarted the user-level LaunchAgent /
-            // systemd --user service.
-            output::print_success("Services restarted by the installer.");
-        }
-        _ => {
-            // "auto" mode or no mode — just kill the user-level helper.
-            // Next `veld start` will re-bootstrap with the new binary.
-            output::print_info("Restarting auto-bootstrapped helper...");
-            let user_socket = veld_core::helper::user_socket_path();
-            let client = veld_core::helper::HelperClient::new(&user_socket);
-            if client.shutdown().await.is_ok() {
-                output::print_info("Helper stopped. It will restart on next `veld start`.");
+        return;
+    }
+
+    // Verify against the specific socket for this mode — not `connect()` (which
+    // falls through to the user socket and could latch onto a stale auto-helper
+    // while the privileged one is mid-restart).
+    let socket = if mode.as_deref() == Some("privileged") {
+        veld_core::helper::system_socket_path()
+    } else {
+        veld_core::helper::user_socket_path()
+    };
+    output::print_info("Waiting for veld-helper to restart with the new binary...");
+    if wait_for_helper_version(&socket, target_version, std::time::Duration::from_secs(45)).await {
+        output::print_success("veld-helper restarted and healthy.");
+    } else {
+        output::print_error(
+            "veld-helper did not pick up the new binary automatically. \
+             Run `veld doctor`; if it stays down, re-run `veld setup`.",
+            false,
+        );
+    }
+}
+
+/// Poll the helper on `socket` until it reports `expected_version`, or the
+/// timeout elapses.
+///
+/// The managed helper keeps serving the OLD binary until its watcher fires
+/// (~12s), so we wait for the version to actually flip rather than treating
+/// "a helper is reachable" as success. A pre-change helper (no `version` field)
+/// reports `None` and never matches, so this correctly times out into the
+/// actionable error instead of falsely reporting success on the first update.
+async fn wait_for_helper_version(
+    socket: &std::path::Path,
+    expected_version: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    let client = veld_core::helper::HelperClient::new(socket);
+    loop {
+        if let Ok(Some(v)) = client.version().await {
+            if v == expected_version {
+                return true;
             }
         }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }

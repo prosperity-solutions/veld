@@ -3,15 +3,22 @@ mod dns;
 mod handler;
 mod protocol;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// How often the watchdog checks that Caddy is alive and serving.
+const WATCHDOG_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How often to check whether the helper's own binary changed on disk.
+const BINARY_WATCH_INTERVAL: Duration = Duration::from_secs(10);
 
 struct HelperConfig {
     socket_path: PathBuf,
@@ -144,6 +151,50 @@ async fn main() -> Result<()> {
         shutdown_tx,
     ));
 
+    // Startup reconcile: if a Caddy is already running (orphaned across our own
+    // self-restart / helper crash), re-adopt it, reload the current config, and
+    // start supervising it. Runs before the watchdog so an updated binary/config
+    // takes effect immediately rather than on the next `veld start`.
+    {
+        let startup_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            startup_state.reconcile_caddy_on_startup().await;
+        });
+    }
+
+    // Caddy watchdog: keep Caddy alive and every persisted route served across
+    // crashes, macOS sleep/wake, and reboots. launchd's KeepAlive only restarts
+    // the *helper* on exit — it cannot detect a dead/wedged child Caddy, so we
+    // supervise Caddy ourselves.
+    let watchdog_state = Arc::clone(&state);
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(WATCHDOG_INTERVAL);
+        // Skip missed ticks instead of firing a burst after a long sleep.
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            watchdog_state.caddy_watchdog_tick().await;
+        }
+    });
+
+    // Self-restart when our own binary is replaced on disk (by `veld update`),
+    // so launchd relaunches the new version as root — no sudo, no manual
+    // `veld setup privileged`. Complements the plist's WatchPaths, which does
+    // not reliably bounce an already-running KeepAlive daemon.
+    //
+    // Only for the privileged system-domain LaunchDaemon: that's the one whose
+    // restart needs root (the exact gap this closes). The unprivileged
+    // LaunchAgent is already restarted by the installer via user-domain
+    // launchctl (no sudo), and the auto-bootstrapped helper is ephemeral and
+    // has nothing to relaunch it — so exiting there would just drop URLs.
+    if is_system_socket(&config.socket_path) {
+        tokio::spawn(watch_own_binary());
+    }
+
+    // Graceful shutdown on SIGTERM/Ctrl-C (e.g. `launchctl bootout`). Caddy is
+    // intentionally left running so URLs stay up while launchd relaunches us.
+    let mut term = signal_stream();
+
     loop {
         tokio::select! {
             result = listener.accept() => {
@@ -167,10 +218,102 @@ async fn main() -> Result<()> {
                     break;
                 }
             }
+            _ = term.recv() => {
+                info!("received termination signal, exiting (leaving caddy running)");
+                break;
+            }
         }
     }
 
     Ok(())
+}
+
+/// Future that resolves when the process receives SIGTERM or Ctrl-C.
+struct SignalStream {
+    #[cfg(unix)]
+    sigterm: tokio::signal::unix::Signal,
+}
+
+fn signal_stream() -> SignalStream {
+    #[cfg(unix)]
+    {
+        let sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler");
+        SignalStream { sigterm }
+    }
+    #[cfg(not(unix))]
+    {
+        SignalStream {}
+    }
+}
+
+impl SignalStream {
+    async fn recv(&mut self) {
+        #[cfg(unix)]
+        {
+            tokio::select! {
+                _ = self.sigterm.recv() => {}
+                _ = tokio::signal::ctrl_c() => {}
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+/// Poll the helper's own executable; when its size/mtime changes and settles,
+/// exit(0) so launchd's KeepAlive relaunches the freshly installed binary.
+async fn watch_own_binary() {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            warn!(error = %e, "could not resolve own executable path; binary self-restart disabled");
+            return;
+        }
+    };
+    let baseline = binary_signature(&exe);
+    let mut interval = tokio::time::interval(BINARY_WATCH_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick so we don't compare against ourselves at t=0.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let current = binary_signature(&exe);
+        if current.is_some() && current != baseline {
+            // Debounce: `veld update` does cp + chmod + xattr + codesign — several
+            // writes. Wait for the signature to settle before relaunching so we
+            // don't exit mid-swap.
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            if binary_signature(&exe) == current {
+                info!(
+                    "helper binary changed on disk — exiting so launchd relaunches the new version"
+                );
+                std::process::exit(0);
+            }
+        }
+    }
+}
+
+/// Whether this helper is listening on the privileged system-domain socket
+/// (`/var/run` on macOS, `/run` on Linux), i.e. it is the root LaunchDaemon /
+/// systemd service rather than an unprivileged/auto helper.
+fn is_system_socket(path: &Path) -> bool {
+    let s = path.to_string_lossy();
+    s.starts_with("/var/run") || s.starts_with("/run")
+}
+
+/// A cheap change signature for a file: (size, mtime-seconds).
+fn binary_signature(path: &Path) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime))
 }
 
 async fn handle_connection(
