@@ -10,7 +10,6 @@ export interface DOMRefs {
   toolbar: HTMLElement;
   toolBtnSelect: HTMLElement;
   toolBtnScreenshot: HTMLElement;
-  toolBtnDraw: HTMLElement;
   toolBtnPageComment: HTMLElement;
   toolBtnComments: HTMLElement;
   toolBtnHide: HTMLElement;
@@ -35,6 +34,8 @@ export interface DOMRefs {
   panelHeadTitle: HTMLElement;
   panelBackBtn: HTMLElement;
   markReadBtn: HTMLElement;
+  panelModeBtn: HTMLElement;
+  panelResize: HTMLElement;
   segBtnActive: HTMLElement;
   segBtnResolved: HTMLElement;
 
@@ -55,7 +56,6 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     toolbar: null!,
     toolBtnSelect: null!,
     toolBtnScreenshot: null!,
-    toolBtnDraw: null!,
     toolBtnPageComment: null!,
     toolBtnComments: null!,
     toolBtnHide: null!,
@@ -73,6 +73,8 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     panelHeadTitle: null!,
     panelBackBtn: null!,
     markReadBtn: null!,
+    panelModeBtn: null!,
+    panelResize: null!,
     segBtnActive: null!,
     segBtnResolved: null!,
     tooltip: null!,

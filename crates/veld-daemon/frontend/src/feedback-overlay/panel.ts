@@ -3,16 +3,17 @@ import { getState, dispatch } from "./store";
 import { mkEl, findThread, hasUnread, timeAgo, getThreadPageUrl, submitOnModEnter } from "./helpers";
 import { PREFIX, ICONS, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
-import { parseControls, renderControls } from "./controls-renderer";
 import { toast } from "./toast";
 import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
 import { deps } from "../shared/registry";
+import { scheduleReposition } from "./pins";
 
 export function togglePanel(): void {
   dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
   if (getState().panelOpen) dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   refs.panel.classList.toggle(PREFIX + "panel-open", getState().panelOpen);
+  applyPanelLayout();
   if (getState().panelOpen) renderPanel();
 }
 
@@ -25,6 +26,86 @@ export function togglePanelSide(): void {
 
 export function syncPanelSideClass(): void {
   refs.panel.classList.toggle(PREFIX + "panel-left", getState().panelSide === "left");
+  applyPanelLayout();
+}
+
+/** Apply the current panel width and float/dock layout.
+ *
+ *  In dock mode we shrink the document via a margin on <html> so the page
+ *  reflows beside the panel; in float mode the panel overlays the page. The
+ *  margin is cleared when the panel is closed or the overlay is hidden.
+ *
+ *  Caveat: `position: fixed`/`sticky` page elements are viewport-relative and
+ *  won't respect the margin — an inherent limit of pushing pages we don't own,
+ *  so float stays the default. */
+export const PANEL_MIN_W = 300;
+/** Max panel width — never wider than the drag handle can produce or 90% of the
+ *  current viewport, so a wide persisted width can't squeeze content off-screen. */
+export function panelMaxW(): number {
+  return Math.min(760, Math.round(window.innerWidth * 0.9));
+}
+function clampPanelWidth(w: number): number {
+  return Math.max(PANEL_MIN_W, Math.min(panelMaxW(), Math.round(w)));
+}
+
+export function applyPanelLayout(): void {
+  const s = getState();
+  const width = clampPanelWidth(s.panelWidth);
+  if (refs.panel) refs.panel.style.width = width + "px";
+  if (refs.panelModeBtn) {
+    refs.panelModeBtn.classList.toggle(PREFIX + "panel-mode-toggle-active", s.panelMode === "dock");
+  }
+  // Dock mode pushes page content aside via an <html> margin, clamped to the
+  // viewport. No CSS transition on the margin: it lagged during drag-resize and
+  // lingered on the host page.
+  const root = document.documentElement;
+  root.style.marginLeft = "";
+  root.style.marginRight = "";
+  if (s.panelMode === "dock" && s.panelOpen && !s.hidden) {
+    if (s.panelSide === "left") root.style.marginLeft = width + "px";
+    else root.style.marginRight = width + "px";
+  }
+  // The <html> margin reflows page content but fires no scroll/resize, so
+  // element-anchored pins would drift by the panel width. Reposition them to
+  // their current element locations — `renderAllPins` would re-add pins at the
+  // stale stored coords, so re-query the DOM via `scheduleReposition`.
+  scheduleReposition();
+}
+
+/** Toggle between float (overlay) and dock (push content aside) modes. */
+export function togglePanelMode(): void {
+  const mode = getState().panelMode === "dock" ? "float" : "dock";
+  dispatch({ type: "SET_PANEL_MODE", mode });
+  try { localStorage.setItem("veld-panel-mode", mode); } catch (_) { /* ignore */ }
+  applyPanelLayout();
+  toast(mode === "dock" ? "Panel docked — content pushed aside" : "Panel floating over content");
+}
+
+/** Wire drag-to-resize on the panel's inner edge; persists the chosen width. */
+export function initPanelResize(): void {
+  const handle = refs.panelResize;
+  if (!handle) return;
+  let dragging = false;
+  const onMove = function (e: PointerEvent) {
+    if (!dragging) return;
+    const raw = getState().panelSide === "left" ? e.clientX : window.innerWidth - e.clientX;
+    dispatch({ type: "SET_PANEL_WIDTH", width: clampPanelWidth(raw) });
+    applyPanelLayout();
+  };
+  const onUp = function () {
+    if (!dragging) return;
+    dragging = false;
+    document.removeEventListener("pointermove", onMove, true);
+    document.removeEventListener("pointerup", onUp, true);
+    try { localStorage.setItem("veld-panel-width", String(getState().panelWidth)); } catch (_) { /* ignore */ }
+  };
+  handle.addEventListener("pointerdown", function (e: PointerEvent) {
+    e.preventDefault();
+    e.stopPropagation();
+    dragging = true;
+    document.addEventListener("pointermove", onMove, true);
+    document.addEventListener("pointerup", onUp, true);
+  });
 }
 
 export function showThreadDetail(threadId: string): void {
@@ -42,6 +123,7 @@ export function openThreadInPanel(threadId: string): void {
   dispatch({ type: "SET_PANEL_TAB", tab: "active" });
   dispatch({ type: "SET_EXPANDED_THREAD", threadId });
   refs.panel.classList.add(PREFIX + "panel-open");
+  applyPanelLayout();
   renderPanel();
 }
 
@@ -63,17 +145,11 @@ export function updateMarkReadBtn(): void {
     refs.markReadBtn.style.display = "none";
     return;
   }
-  const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t, getState().lastSeenAt); });
+  const anyUnread = getState().threads.some(function (t: Thread) { return hasUnread(t); });
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
-// Track control cleanups to prevent memory leaks on re-render
-let controlCleanups: (() => void)[] = [];
-
 export function renderPanel(): void {
-  // Clean up previous control listeners before re-rendering
-  controlCleanups.forEach((fn) => fn());
-  controlCleanups = [];
   refs.panelBody.innerHTML = "";
 
   const expandedId = getState().expandedThreadId;
@@ -200,30 +276,39 @@ function renderThreadDetail(thread: Thread): void {
   }
 }
 
+function lastMessageAuthor(t: Thread): "human" | "agent" | undefined {
+  return t.messages.length ? t.messages[t.messages.length - 1].author : undefined;
+}
+
 function renderActiveThreads(): void {
   const active = getState().threads.filter(function (t: Thread) { return t.status === "open"; });
-  if (!active.length) {
-    refs.panelBody.appendChild(mkEl("div", "panel-empty", "No active threads."));
-    return;
+  const byRecency = function (a: Thread, b: Thread) {
+    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+  };
+  // Two lanes mirroring the agent's queue: a thread whose last message is the
+  // agent's is waiting on you ("Your turn"); one whose last message is human
+  // (or none yet) is in the agent's queue ("With the agent"). Both lanes always
+  // render — with a count and an empty state when there's nothing in them.
+  const yourTurn = active.filter(function (t) { return lastMessageAuthor(t) === "agent"; }).sort(byRecency);
+  const withAgent = active.filter(function (t) { return lastMessageAuthor(t) !== "agent"; }).sort(byRecency);
+  renderLane("Your turn", ICONS.person, yourTurn, "Nothing needs your reply.");
+  renderLane("With the agent", ICONS.robot, withAgent, "Nothing waiting on the agent.");
+}
+
+function renderLane(label: string, icon: string, threads: Thread[], emptyText: string): void {
+  const section = mkEl("div", "panel-section");
+  const heading = mkEl("div", "panel-section-heading");
+  const iconEl = mkEl("span", "panel-section-icon");
+  iconEl.innerHTML = icon;
+  heading.appendChild(iconEl);
+  heading.appendChild(document.createTextNode(label + " (" + threads.length + ")"));
+  section.appendChild(heading);
+  if (threads.length) {
+    threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
+  } else {
+    section.appendChild(mkEl("div", "panel-lane-empty", emptyText));
   }
-  const byPage: Record<string, Thread[]> = {};
-  const pageOrder: string[] = [];
-  active.forEach(function (t: Thread) {
-    const url = getThreadPageUrl(t);
-    const path = (url || "/").split("?")[0];
-    if (!byPage[path]) { byPage[path] = []; pageOrder.push(path); }
-    byPage[path].push(t);
-  });
-  pageOrder.sort(function (a, b) {
-    if (a === window.location.pathname) return -1;
-    if (b === window.location.pathname) return 1;
-    return a.localeCompare(b);
-  });
-  pageOrder.forEach(function (p) {
-    let label = "Page " + p;
-    if (p === "/") label += " (home)";
-    renderThreadGroup(label, byPage[p]);
-  });
+  refs.panelBody.appendChild(section);
 }
 
 function renderResolvedThreads(): void {
@@ -238,19 +323,9 @@ function renderResolvedThreads(): void {
   resolved.forEach(function (t: Thread) { refs.panelBody.appendChild(makeThreadCard(t, true)); });
 }
 
-function renderThreadGroup(label: string, threads: Thread[]): void {
-  threads.sort(function (a: Thread, b: Thread) {
-    return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
-  });
-  const section = mkEl("div", "panel-section");
-  section.appendChild(mkEl("div", "panel-section-heading", label));
-  threads.forEach(function (t: Thread) { section.appendChild(makeThreadCard(t, false)); });
-  refs.panelBody.appendChild(section);
-}
-
 function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
   const card = mkEl("div", "thread-card" + (isResolved ? " thread-card-resolved" : ""));
-  if (hasUnread(thread, getState().lastSeenAt) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
+  if (hasUnread(thread) && !isResolved) card.classList.add(PREFIX + "thread-card-unread");
   (card as HTMLElement).dataset.threadId = thread.id;
 
   const row1 = mkEl("div", "thread-card-row");
@@ -268,54 +343,15 @@ function makeThreadCard(thread: Thread, isResolved: boolean): HTMLElement {
     card.appendChild(mkEl("div", "thread-card-selector", thread.scope.selector));
   }
 
-  if (thread.claimed_by) {
-    const claimBadge = mkEl("div", "thread-card-claim-badge");
-    const badgeIcon = mkEl("span", "thread-card-claim-icon");
-    badgeIcon.innerHTML = ICONS.robot;
-    claimBadge.appendChild(badgeIcon);
-    claimBadge.appendChild(document.createTextNode(thread.claimed_by));
-    if (thread.claimed_at) {
-      claimBadge.appendChild(mkEl("span", "thread-card-claim-time", " \u00B7 " + timeAgo(thread.claimed_at)));
-    }
-    card.appendChild(claimBadge);
-    card.classList.add(PREFIX + "thread-card-claimed");
-  }
-
   card.addEventListener("click", function () { showThreadDetail(thread.id); });
   return card;
-}
-
-function makeClaimRow(thread: Thread): HTMLElement {
-  const claimRow = mkEl("div", "message message-claim");
-  const claimIcon = mkEl("span", "message-author-icon");
-  claimIcon.innerHTML = ICONS.robot;
-  claimRow.appendChild(claimIcon);
-  const claimBody = mkEl("div", "message-body");
-  const claimText = mkEl("div", "message-claim-text", "Being worked on by " + thread.claimed_by);
-  claimBody.appendChild(claimText);
-  if (thread.claimed_at) {
-    claimBody.appendChild(mkEl("div", "message-meta", timeAgo(thread.claimed_at)));
-  }
-  claimRow.appendChild(claimBody);
-  return claimRow;
 }
 
 function renderThreadMessages(thread: Thread): HTMLElement {
   const container = mkEl("div", "thread-messages");
   const msgList = mkEl("div", "thread-messages-list");
-  const msgCount = thread.messages.length;
 
-  // If claimed, find where the claim event fits chronologically.
-  const claimTime = thread.claimed_by && thread.claimed_at ? new Date(thread.claimed_at).getTime() : null;
-  let claimInserted = false;
-
-  thread.messages.forEach(function (msg: Message, msgIndex: number) {
-    // Insert claim row before the first message that came after the claim.
-    if (claimTime && !claimInserted && new Date(msg.created_at).getTime() > claimTime) {
-      msgList.appendChild(makeClaimRow(thread));
-      claimInserted = true;
-    }
-
+  thread.messages.forEach(function (msg: Message) {
     const msgEl = mkEl("div", "message message-" + msg.author);
     const icon = mkEl("span", "message-author-icon");
     icon.innerHTML = msg.author === "agent" ? ICONS.robot : ICONS.chat;
@@ -323,28 +359,11 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const body = mkEl("div", "message-body");
     body.appendChild(mkEl("div", "message-text", msg.body));
 
-    // Render interactive controls if present.
-    // Controls are inactive if a later message exists (values were applied).
-    const controls = parseControls(msg);
-    if (controls && window.__veld_controls) {
-      const isLastMessage = msgIndex === msgCount - 1;
-      const { element, cleanup } = renderControls(controls, window.__veld_controls, thread.id, {
-        inactive: !isLastMessage,
-      });
-      body.appendChild(element);
-      controlCleanups.push(cleanup);
-    }
-
     const authorLabel = msg.author === "agent" ? "Agent" : "You";
     body.appendChild(mkEl("div", "message-meta", authorLabel + " \u00B7 " + timeAgo(msg.created_at)));
     msgEl.appendChild(body);
     msgList.appendChild(msgEl);
   });
-
-  // If claim happened after all messages, append at the end.
-  if (claimTime && !claimInserted && thread.claimed_by) {
-    msgList.appendChild(makeClaimRow(thread));
-  }
 
   container.appendChild(msgList);
 
@@ -358,21 +377,6 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");
-
-  if (thread.claimed_by) {
-    const releaseBtn = mkEl("button", "btn btn-sm btn-release");
-    releaseBtn.innerHTML = "Release " + ICONS.robot;
-    releaseBtn.addEventListener("click", function () {
-      api("POST", "/threads/" + thread.id + "/release").then(function () {
-        thread.claimed_by = null;
-        thread.claimed_at = null;
-        dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-        renderPanel();
-        toast("Thread released");
-      });
-    });
-    inputActions.appendChild(releaseBtn);
-  }
 
   const resolveBtn = mkEl("button", "btn btn-secondary btn-sm", "Resolve \u2713");
   resolveBtn.addEventListener("click", function () {
@@ -425,9 +429,11 @@ function renderThreadMessages(thread: Thread): HTMLElement {
 }
 
 export function markThreadSeen(threadId: string): void {
-  dispatch({ type: "MARK_SEEN", threadId });
   const thread = findThread(getState().threads, threadId);
   const lastSeq = thread && thread.messages.length > 0 ? thread.messages.length : 0;
+  // Update the persisted seen-count locally so unread clears immediately, then
+  // persist it server-side so it survives a reload.
+  if (thread) thread.last_human_seen_seq = lastSeq;
   api("PUT", "/threads/" + threadId + "/seen", { seq: lastSeq }).catch(function () {});
   if (thread) deps().addPin(thread);
   updateBadge();
@@ -436,9 +442,9 @@ export function markThreadSeen(threadId: string): void {
 
 export function markAllRead(): void {
   getState().threads.forEach(function (t: Thread) {
-    if (hasUnread(t, getState().lastSeenAt)) {
-      dispatch({ type: "MARK_SEEN", threadId: t.id });
+    if (hasUnread(t)) {
       const seenSeq = t.messages.length > 0 ? t.messages.length : 0;
+      t.last_human_seen_seq = seenSeq;
       api("PUT", "/threads/" + t.id + "/seen", { seq: seenSeq }).catch(function () {});
     }
   });

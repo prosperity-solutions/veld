@@ -53,11 +53,6 @@ describe("onKeyDown", () => {
     expect(deps.setMode).toHaveBeenCalledWith("screenshot");
   });
 
-  it("Mod+Shift+D toggles draw mode", () => {
-    onKeyDown(makeKeyEvent("KeyD"));
-    expect(deps.setMode).toHaveBeenCalledWith("draw");
-  });
-
   it("Mod+Shift+P toggles page comment", () => {
     onKeyDown(makeKeyEvent("KeyP"));
     expect(deps.togglePageComment).toHaveBeenCalled();
@@ -97,13 +92,6 @@ describe("onKeyDown", () => {
     expect(deps.setMode).toHaveBeenCalledWith(null);
   });
 
-  it("Escape in draw mode is ignored", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    onKeyDown(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-    expect(deps.setMode).not.toHaveBeenCalled();
-    expect(deps.closeActivePopover).not.toHaveBeenCalled();
-  });
-
   it("shortcuts disabled when shortcutsDisabled is true", () => {
     dispatch({ type: "SET_SHORTCUTS_DISABLED", disabled: true });
     onKeyDown(makeKeyEvent("KeyF"));
@@ -116,15 +104,15 @@ describe("onKeyDown", () => {
     expect(deps.setMode).not.toHaveBeenCalled();
   });
 
-  it("Mod+Shift+F from draw mode switches to select-element", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
+  it("Mod+Shift+F from screenshot mode switches to select-element", () => {
+    dispatch({ type: "SET_MODE", mode: "screenshot" });
     dispatch({ type: "SET_TOOLBAR_OPEN", open: true });
     onKeyDown(makeKeyEvent("KeyF"));
     expect(deps.setMode).toHaveBeenCalledWith("select-element");
   });
 
-  it("Mod+Shift+S from draw mode switches to screenshot", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
+  it("Mod+Shift+S from select-element mode switches to screenshot", () => {
+    dispatch({ type: "SET_MODE", mode: "select-element" });
     dispatch({ type: "SET_TOOLBAR_OPEN", open: true });
     onKeyDown(makeKeyEvent("KeyS"));
     expect(deps.setMode).toHaveBeenCalledWith("screenshot");

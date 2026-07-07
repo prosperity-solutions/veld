@@ -8,6 +8,7 @@ import {
   renderPanel,
   showThreadDetail,
   showThreadList,
+  applyPanelLayout,
 } from "../src/feedback-overlay/panel";
 import { refs } from "../src/feedback-overlay/refs";
 import { getState, dispatch } from "../src/feedback-overlay/store";
@@ -108,12 +109,14 @@ describe("renderPanel — list view", () => {
     setupMockRefs();
   });
 
-  it("shows active threads grouped by page", () => {
+  it("splits active threads into 'Your turn' and 'With the agent' lanes", () => {
     dispatch({
       type: "SET_THREADS",
       threads: [
-        makeThread({ id: "t1", scope: { type: "page", page_url: "/" }, messages: [makeMessage()] }),
-        makeThread({ id: "t2", scope: { type: "page", page_url: "/about" }, messages: [makeMessage()] }),
+        // last message from the agent → waiting on the human ("Your turn")
+        makeThread({ id: "t1", messages: [makeMessage({ author: "agent" })] }),
+        // last message from the human → in the agent's queue ("With the agent")
+        makeThread({ id: "t2", messages: [makeMessage({ author: "human" })] }),
       ],
     });
     dispatch({ type: "SET_PANEL_TAB", tab: "active" });
@@ -129,13 +132,16 @@ describe("renderPanel — list view", () => {
     expect(refs.panelBody.classList.contains(PREFIX + "panel-body-thread")).toBe(false);
   });
 
-  it("shows empty message when no active threads", () => {
+  it("shows both lanes with empty states and (0) counts when no active threads", () => {
     dispatch({ type: "SET_THREADS", threads: [] });
     dispatch({ type: "SET_PANEL_TAB", tab: "active" });
     renderPanel();
-    const empty = refs.panelBody.querySelector("." + PREFIX + "panel-empty");
-    expect(empty).not.toBeNull();
-    expect(empty!.textContent).toContain("No active threads");
+    const sections = refs.panelBody.querySelectorAll("." + PREFIX + "panel-section");
+    expect(sections.length).toBe(2);
+    const empties = refs.panelBody.querySelectorAll("." + PREFIX + "panel-lane-empty");
+    expect(empties.length).toBe(2);
+    expect(refs.panelBody.textContent).toContain("Your turn (0)");
+    expect(refs.panelBody.textContent).toContain("With the agent (0)");
   });
 
   it("shows resolved tab content", () => {
@@ -201,5 +207,33 @@ describe("renderPanel — detail view", () => {
     renderPanel();
     expect(getState().expandedThreadId).toBeNull();
     expect(refs.panelBackBtn.style.display).toBe("none");
+  });
+});
+
+describe("panel float/dock layout", () => {
+  beforeEach(() => {
+    setupMockRefs();
+    document.documentElement.style.marginLeft = "";
+    document.documentElement.style.marginRight = "";
+  });
+
+  it("dock mode pushes content via an <html> margin; float clears it", () => {
+    dispatch({ type: "SET_PANEL_WIDTH", width: 380 });
+    dispatch({ type: "SET_PANEL_SIDE", side: "right" });
+    dispatch({ type: "SET_PANEL_MODE", mode: "dock" });
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("380px");
+
+    dispatch({ type: "SET_PANEL_MODE", mode: "float" });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("");
+  });
+
+  it("closed panel clears the dock margin", () => {
+    dispatch({ type: "SET_PANEL_MODE", mode: "dock" });
+    dispatch({ type: "SET_PANEL_OPEN", open: false });
+    applyPanelLayout();
+    expect(document.documentElement.style.marginRight).toBe("");
   });
 });

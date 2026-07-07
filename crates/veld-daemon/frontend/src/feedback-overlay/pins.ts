@@ -36,7 +36,7 @@ export function addPin(thread: Thread): void {
     pin.appendChild(count);
   }
 
-  if (hasUnread(thread, getState().lastSeenAt)) {
+  if (hasUnread(thread)) {
     const dot = mkEl("span", "pin-unread-dot");
     pin.appendChild(dot);
   }
@@ -103,6 +103,12 @@ export function repositionPins(): void {
 }
 
 export function scheduleReposition(): void {
+  // Some environments (jsdom in tests) lack requestAnimationFrame — reposition
+  // synchronously there rather than throwing.
+  if (typeof requestAnimationFrame !== "function") {
+    repositionPins();
+    return;
+  }
   if (getState().rafPending) return;
   dispatch({ type: "SET_RAF_PENDING", pending: true });
   requestAnimationFrame(function () {

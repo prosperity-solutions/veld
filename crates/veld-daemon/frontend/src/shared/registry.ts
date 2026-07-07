@@ -19,7 +19,6 @@ export interface Deps {
   captureScreenshot: (x: number, y: number, w: number, h: number) => void;
   showCreatePopover: (rect: { x: number; y: number; width: number; height: number }, selector: string | null, tagInfo: string | null, targetEl: Element | null, trace: string[] | null) => void;
   positionTooltip: (el: HTMLElement, viewportRect: DOMRect) => void;
-  ensureDrawScript: () => Promise<void>;
 }
 
 let _deps: Deps | null = null;

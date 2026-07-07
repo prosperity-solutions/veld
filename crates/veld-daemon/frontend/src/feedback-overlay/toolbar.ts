@@ -32,8 +32,6 @@ export function handleToolAction(action: string): void {
     deps().setMode(getState().activeMode === "select-element" ? null : "select-element");
   } else if (action === "screenshot") {
     deps().setMode(getState().activeMode === "screenshot" ? null : "screenshot");
-  } else if (action === "draw") {
-    deps().setMode(getState().activeMode === "draw" ? null : "draw");
   } else if (action === "page-comment") {
     deps().togglePageComment();
   } else if (action === "show-comments") {

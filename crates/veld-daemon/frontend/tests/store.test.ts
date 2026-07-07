@@ -15,8 +15,8 @@ describe("store + dispatch", () => {
   });
 
   it("SET_MODE updates activeMode", () => {
-    dispatch({ type: "SET_MODE", mode: "draw" });
-    expect(getState().activeMode).toBe("draw");
+    dispatch({ type: "SET_MODE", mode: "screenshot" });
+    expect(getState().activeMode).toBe("screenshot");
     dispatch({ type: "SET_MODE", mode: null });
     expect(getState().activeMode).toBeNull();
   });
@@ -75,11 +75,6 @@ describe("store + dispatch", () => {
   it("SET_LISTENING updates agent listening state", () => {
     dispatch({ type: "SET_LISTENING", listening: true });
     expect(getState().agentListening).toBe(true);
-  });
-
-  it("MARK_SEEN records timestamp", () => {
-    dispatch({ type: "MARK_SEEN", threadId: "t1" });
-    expect(getState().lastSeenAt["t1"]).toBeGreaterThan(0);
   });
 
   it("SET_PIN and REMOVE_PIN manage pins", () => {

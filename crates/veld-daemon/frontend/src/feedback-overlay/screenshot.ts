@@ -1,37 +1,35 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import type { UIMode, Thread, VeldPopoverElement } from "./types";
+import type { Thread, VeldPopoverElement } from "./types";
 import { mkEl, submitOnModEnter } from "./helpers";
-import { PREFIX, ICONS, API, SUBMIT_HINT } from "./constants";
+import { PREFIX, API, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { closeActivePopover, positionPopover } from "./popover";
 import { deps } from "../shared/registry";
 
+// The single captured frame the user selects over. Held here (not in the store)
+// because it is a transient ImageBitmap tied to one screenshot flow.
+let frozenBitmap: ImageBitmap | null = null;
+
 /**
- * Acquire a screen capture stream, showing a disclaimer modal the first time.
- * Resolves when the stream is available in `getState().captureStream`.
+ * Acquire a screen-capture stream. Chromium's `preferCurrentTab` /
+ * `displaySurface` hints bias the picker toward the current tab.
  */
 export function acquireCaptureStream(): Promise<void> {
   if (getState().captureStream) return Promise.resolve();
 
-  return Promise.resolve().then(() => {
-    // preferCurrentTab and displaySurface are Chromium-only extensions
-    const opts: VeldDisplayMediaStreamOptions = {
-      video: { displaySurface: "browser" },
-      preferCurrentTab: true,
-    };
-    return navigator.mediaDevices.getDisplayMedia(opts).then((stream) => {
-      dispatch({ type: "SET_CAPTURE_STREAM", stream });
-      // If the user stops sharing via browser UI, clean up.
-      stream.getVideoTracks()[0].addEventListener("ended", () => {
-        dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
-        if (getState().activeMode === "screenshot") {
-          // Late-bind to avoid circular import with modes.ts
-          import("./modes").then((m) => m.setMode(null));
-        }
-      });
-    });
+  const md = navigator.mediaDevices;
+  if (!md || typeof md.getDisplayMedia !== "function") {
+    return Promise.reject(new Error("screen capture unavailable"));
+  }
+
+  const opts: VeldDisplayMediaStreamOptions = {
+    video: { displaySurface: "browser" },
+    preferCurrentTab: true,
+  };
+  return md.getDisplayMedia(opts).then((stream) => {
+    dispatch({ type: "SET_CAPTURE_STREAM", stream });
   });
 }
 
@@ -39,18 +37,106 @@ export function acquireCaptureStream(): Promise<void> {
 export function stopCaptureStream(): void {
   const stream = getState().captureStream;
   if (stream) {
-    stream.getTracks().forEach((t) => {
-      t.stop();
-    });
+    stream.getTracks().forEach((t) => t.stop());
     dispatch({ type: "SET_CAPTURE_STREAM", stream: null });
   }
 }
 
 /**
- * Capture a screenshot of the selected viewport region.
- * Acquires the capture stream on demand (after region selection) so the
- * browser permission dialog doesn't appear until the user has drawn the
- * selection rectangle.
+ * Freeze-first capture. Called on screenshot-mode entry:
+ *   1. acquire the display stream (permission picker)
+ *   2. grab ONE frame, then stop the stream immediately (the share banner
+ *      only flashes for that instant)
+ *   3. paint the frozen frame as the selection surface
+ *
+ * The user then drags a rectangle over the frozen frame; the crop is taken
+ * from the same pixels they selected, so the browser's share banner can't
+ * shift the layout between selecting and capturing.
+ */
+export function beginScreenshotCapture(): void {
+  // ImageCapture is Chromium-only. Firefox/Safari support getDisplayMedia but
+  // not ImageCapture, so detect up front rather than surfacing a misleading
+  // "capture denied" when the constructor throws.
+  if (typeof ImageCapture === "undefined") {
+    failCapture("Screen capture isn't supported in this browser");
+    return;
+  }
+  acquireCaptureStream()
+    .then(() => {
+      const stream = getState().captureStream;
+      if (!stream) {
+        failCapture("Screen capture unavailable");
+        return;
+      }
+      const grabber = new ImageCapture(stream.getVideoTracks()[0]);
+      // A freshly-acquired capture track's first frame is often blank/black.
+      // Let the compositor produce a couple of frames before grabbing.
+      afterWarmup(() => {
+        grabber
+          .grabFrame()
+          .then((bitmap: ImageBitmap) => {
+            stopCaptureStream(); // banner disappears immediately
+            if (getState().activeMode !== "screenshot") {
+              bitmap.close(); // user bailed while the picker was up
+              return;
+            }
+            if (frozenBitmap) frozenBitmap.close(); // guard rapid re-entry
+            frozenBitmap = bitmap;
+            showFrozenFrame(bitmap);
+          })
+          .catch(() => failCapture("Screen capture failed"));
+      });
+    })
+    .catch(() => failCapture("Screen capture denied"));
+}
+
+/**
+ * Give the freshly-acquired capture track a moment to produce a real (non-blank)
+ * frame before grabbing. Uses setTimeout, not requestAnimationFrame — rAF is
+ * paused in backgrounded tabs, which would leave the capture stream (and the OS
+ * "sharing" indicator) live with no grab until the tab was refocused.
+ */
+function afterWarmup(fn: () => void): void {
+  setTimeout(fn, 120);
+}
+
+/** Paint the frozen frame onto the backdrop and enable the selection cursor. */
+function showFrozenFrame(bitmap: ImageBitmap): void {
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+
+  // background-size 100% 100% maps the frame 1:1 onto the fixed, viewport-sized
+  // backdrop, so a rectangle drawn in viewport coordinates maps straight back
+  // onto the bitmap.
+  refs.overlay.style.backgroundImage = `url(${canvas.toDataURL("image/png")})`;
+  refs.overlay.style.backgroundSize = "100% 100%";
+  refs.overlay.classList.add(PREFIX + "overlay-active");
+  refs.overlay.classList.add(PREFIX + "overlay-crosshair");
+  toast("Drag to capture a region");
+}
+
+/** Reset the frozen-frame backdrop and release the bitmap. */
+export function clearFrozenFrame(): void {
+  refs.overlay.style.backgroundImage = "";
+  refs.overlay.style.backgroundSize = "";
+  if (frozenBitmap) {
+    frozenBitmap.close();
+    frozenBitmap = null;
+  }
+}
+
+function failCapture(message: string): void {
+  clearFrozenFrame();
+  stopCaptureStream();
+  if (getState().activeMode === "screenshot") deps().setMode(null);
+  toast(message, true);
+}
+
+/**
+ * Crop the frozen frame to the selected region and open the editor. Called from
+ * the backdrop mouseup once the user finishes the selection rectangle.
  */
 export function captureScreenshot(
   viewX: number,
@@ -58,79 +144,16 @@ export function captureScreenshot(
   viewW: number,
   viewH: number,
 ): void {
-  // Hide veld UI so the screenshot is clean.
-  const _sel =
-    "[class^='" + PREFIX + "'], [class*=' " + PREFIX + "']";
-  const veldEls = Array.from(document.querySelectorAll(_sel)).concat(
-    Array.from(refs.shadow.querySelectorAll(_sel)),
-  );
-  refs.hostEl.style.visibility = "hidden";
-  const hiddenEls: { el: HTMLElement; prev: string }[] = [];
-  veldEls.forEach((el) => {
-    if ((el as HTMLElement).style.display !== "none") {
-      hiddenEls.push({
-        el: el as HTMLElement,
-        prev: (el as HTMLElement).style.visibility,
-      });
-      (el as HTMLElement).style.visibility = "hidden";
-    }
-  });
+  // Detach the bitmap before setMode(null) so teardown doesn't close it.
+  const bitmap = frozenBitmap;
+  frozenBitmap = null;
+  deps().setMode(null); // teardown clears the backdrop + resets the cursor
 
-  // Exit screenshot mode (removes backdrop).
-  deps().setMode(null);
-
-  // Acquire the capture stream now (after region selection).
-  acquireCaptureStream()
-    .then(() => {
-      const stream = getState().captureStream;
-      if (!stream) {
-        restoreVeldUI(hiddenEls);
-        showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
-        return;
-      }
-
-      const track = stream.getVideoTracks()[0];
-
-      function grabCleanFrame(): void {
-        const grabber = new ImageCapture(track);
-        grabber
-          .grabFrame()
-          .then((bitmap: ImageBitmap) => {
-            stopCaptureStream();
-            restoreVeldUI(hiddenEls);
-            cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
-          })
-          .catch(() => {
-            stopCaptureStream();
-            restoreVeldUI(hiddenEls);
-            showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
-          });
-      }
-
-      // Wait for the UI to fully repaint before capturing: two rAF cycles
-      // to flush styles + composite, plus a small timeout as safety margin
-      // for slower compositors.
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => {
-          setTimeout(grabCleanFrame, 50);
-        });
-      });
-    })
-    .catch(() => {
-      restoreVeldUI(hiddenEls);
-      toast("Screen capture denied", true);
-      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
-    });
-}
-
-/** Restore visibility of veld UI elements hidden for a clean screenshot. */
-export function restoreVeldUI(
-  hiddenEls: { el: HTMLElement; prev: string }[],
-): void {
-  hiddenEls.forEach((item) => {
-    item.el.style.visibility = item.prev;
-  });
-  refs.hostEl.style.visibility = "";
+  if (!bitmap) {
+    showScreenshotThreadEditor(null, null);
+    return;
+  }
+  cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
 }
 
 /** Crop the captured bitmap to the selected region and show the editor. */
@@ -141,7 +164,7 @@ export function cropAndShowEditor(
   viewW: number,
   viewH: number,
 ): void {
-  // The captured bitmap may be at native resolution (dpr-scaled).
+  // The bitmap is at native (dpr-scaled) resolution; the selection is in CSS px.
   const scaleX = bitmap.width / window.innerWidth;
   const scaleY = bitmap.height / window.innerHeight;
 
@@ -150,7 +173,6 @@ export function cropAndShowEditor(
   canvas.height = Math.round(viewH * scaleY);
   const ctx = canvas.getContext("2d")!;
 
-  // Crop: draw the full bitmap offset so only the selected area is visible.
   ctx.drawImage(
     bitmap,
     Math.round(viewX * scaleX),
@@ -166,21 +188,15 @@ export function cropAndShowEditor(
 
   canvas.toBlob((pngBlob) => {
     if (!pngBlob) {
-      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+      showScreenshotThreadEditor(null, null);
       return;
     }
-    uploadAndShowEditor(pngBlob, viewX, viewY, viewW, viewH);
+    uploadAndShowEditor(pngBlob);
   }, "image/png");
 }
 
 /** Upload a screenshot blob to the API, then show the thread editor. */
-export function uploadAndShowEditor(
-  pngBlob: Blob,
-  viewX: number,
-  viewY: number,
-  viewW: number,
-  viewH: number,
-): void {
+export function uploadAndShowEditor(pngBlob: Blob): void {
   const screenshotId =
     "ss_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
 
@@ -191,39 +207,26 @@ export function uploadAndShowEditor(
   })
     .then((res) => {
       if (!res.ok) throw new Error("Upload failed: " + res.status);
-      showScreenshotThreadEditor(
-        pngBlob,
-        screenshotId,
-        viewX,
-        viewY,
-        viewW,
-        viewH,
-      );
+      showScreenshotThreadEditor(pngBlob, screenshotId);
     })
     .catch((err) => {
       toast("Screenshot upload failed: " + err.message, true);
       // Still show the editor, just without the stored screenshot.
-      showScreenshotThreadEditor(null, null, viewX, viewY, viewW, viewH);
+      showScreenshotThreadEditor(null, null);
     });
 }
 
-/** Show the screenshot thread editor popover with optional preview and annotation. */
+/** Show the screenshot thread editor popover with an optional preview. */
 export function showScreenshotThreadEditor(
   pngBlob: Blob | null,
   screenshotId: string | null,
-  viewX: number,
-  viewY: number,
-  viewW: number,
-  viewH: number,
 ): void {
   closeActivePopover();
 
   const pop = mkEl("div", "popover popover-screenshot") as VeldPopoverElement;
   pop._veldType = "screenshot";
 
-  // Screenshot preview (if available)
   let previewUrl: string | null = null;
-  let annotateDrawCleanup: (() => void) | null = null;
   if (pngBlob) {
     previewUrl = URL.createObjectURL(pngBlob);
     const previewContainer = mkEl("div", "screenshot-preview");
@@ -231,109 +234,11 @@ export function showScreenshotThreadEditor(
     previewImg.src = previewUrl;
     previewImg.className = PREFIX + "screenshot-img";
     previewContainer.appendChild(previewImg);
-
-    // Annotate button — overlaid on the preview image
-    const annotateBtn = document.createElement("button");
-    annotateBtn.className = PREFIX + "annotate-btn";
-    annotateBtn.innerHTML = ICONS.draw + " Annotate";
-    annotateBtn.type = "button";
-    annotateBtn.addEventListener("click", () => {
-      deps().ensureDrawScript().then(() => {
-            // Create canvas sized to image natural dimensions over the preview
-            const drawCanvas = document.createElement("canvas");
-            drawCanvas.className = PREFIX + "draw-canvas-inline";
-            // Wait for image to load to get natural dimensions
-            const setCanvasSize = (): void => {
-              drawCanvas.width =
-                previewImg.naturalWidth || previewImg.width;
-              drawCanvas.height =
-                previewImg.naturalHeight || previewImg.height;
-            };
-            if (previewImg.complete) {
-              setCanvasSize();
-            } else {
-              previewImg.addEventListener("load", setCanvasSize, {
-                once: true,
-              });
-              setCanvasSize(); // fallback
-            }
-            previewContainer.appendChild(drawCanvas);
-            annotateBtn.style.display = "none";
-
-            // Create a "Done" button to replace annotate
-            const doneAnnotateBtn = document.createElement("button");
-            doneAnnotateBtn.className = PREFIX + "annotate-btn";
-            doneAnnotateBtn.innerHTML = ICONS.check + " Done";
-            doneAnnotateBtn.type = "button";
-            previewContainer.appendChild(doneAnnotateBtn);
-
-            annotateDrawCleanup = window.__veld_draw!.activate(
-              drawCanvas,
-              {
-                inline: true,
-                baseImage: previewImg,
-                mountTarget: previewContainer,
-                onDone: finishAnnotation,
-              },
-            );
-
-            function finishAnnotation(): void {
-              window.__veld_draw!
-                .compositeOnto(pngBlob!, drawCanvas)
-                .then((newBlob: Blob) => {
-                  // Update the preview with composited image
-                  pngBlob = newBlob;
-                  if (previewUrl) URL.revokeObjectURL(previewUrl);
-                  previewUrl = URL.createObjectURL(newBlob);
-                  previewImg.src = previewUrl;
-
-                  // Re-upload the composited screenshot
-                  if (screenshotId) {
-                    fetch(API + "/screenshots/" + screenshotId, {
-                      method: "POST",
-                      headers: { "Content-Type": "image/png" },
-                      body: newBlob,
-                    }).catch(() => {
-                      toast(
-                        "Failed to upload annotated screenshot",
-                        true,
-                      );
-                    });
-                  }
-
-                  // Cleanup draw state
-                  if (annotateDrawCleanup) {
-                    annotateDrawCleanup();
-                    annotateDrawCleanup = null;
-                  }
-                  if (drawCanvas.parentNode)
-                    drawCanvas.parentNode.removeChild(drawCanvas);
-                  if (doneAnnotateBtn.parentNode)
-                    doneAnnotateBtn.parentNode.removeChild(doneAnnotateBtn);
-                  annotateBtn.style.display = "";
-                })
-                .catch((err: Error) => {
-                  toast("Annotation failed: " + err.message, true);
-                });
-            }
-
-            doneAnnotateBtn.addEventListener("click", finishAnnotation);
-      })
-      .catch(() => {
-        toast("Failed to load draw module", true);
-      });
-    });
-    previewContainer.appendChild(annotateBtn);
-
     pop.appendChild(previewContainer);
   }
 
-  // Ensure the Object URL is revoked when the popover is closed by any means
+  // Revoke the object URL when the popover is closed by any means.
   pop._veldCleanup = (): void => {
-    if (annotateDrawCleanup) {
-      annotateDrawCleanup();
-      annotateDrawCleanup = null;
-    }
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
       previewUrl = null;
@@ -343,13 +248,13 @@ export function showScreenshotThreadEditor(
   const header = mkEl(
     "div",
     "popover-header",
-    "Screenshot \u2014 " + window.location.pathname,
+    "Screenshot — " + window.location.pathname,
   );
   pop.appendChild(header);
 
   const body = mkEl("div", "popover-body");
   const ta = mkEl("textarea", "textarea") as HTMLTextAreaElement;
-  (ta as HTMLTextAreaElement).placeholder = "Describe what you see\u2026";
+  ta.placeholder = "Describe what you see…";
   body.appendChild(ta);
 
   const actions = mkEl("div", "popover-actions");
@@ -370,12 +275,11 @@ export function showScreenshotThreadEditor(
     }
     if (sendBtn.disabled) return;
     sendBtn.disabled = true;
-    const scope = {
-      type: "page",
-      page_url: window.location.pathname,
-    };
     const payload = {
-      scope: scope,
+      scope: {
+        type: "page",
+        page_url: window.location.pathname,
+      },
       message: text,
       component_trace: null,
       screenshot: screenshotId || null,
@@ -387,7 +291,6 @@ export function showScreenshotThreadEditor(
         const thread = raw as Thread;
         dispatch({ type: "ADD_THREAD", thread });
         closeActivePopover();
-        // addPin and updateBadge are called from the monolith via event flow
         toast("Thread created");
       })
       .catch((err: Error) => {
@@ -401,13 +304,13 @@ export function showScreenshotThreadEditor(
   body.appendChild(actions);
   pop.appendChild(body);
 
-  // Highlight screenshot toolbar button while editor is open.
+  // Highlight the screenshot toolbar button while the editor is open.
   refs.toolBtnScreenshot.classList.add(PREFIX + "tool-active");
 
   refs.shadow.appendChild(pop);
   dispatch({ type: "SET_POPOVER", popover: pop });
 
-  // Position in center of viewport.
+  // Position in the center of the viewport.
   const centerRect = {
     x: window.scrollX + window.innerWidth / 2 - 160,
     y: window.scrollY + window.innerHeight / 3,

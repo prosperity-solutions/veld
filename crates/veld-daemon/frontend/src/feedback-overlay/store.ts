@@ -6,12 +6,13 @@ export interface Store {
   // Data
   threads: Thread[];
   lastEventSeq: number;
-  lastSeenAt: Record<string, number>;
   agentListening: boolean;
 
   // UI state
   panelOpen: boolean;
   panelSide: "left" | "right";
+  panelMode: "float" | "dock";
+  panelWidth: number;
   panelTab: "active" | "resolved";
   activePopover: VeldPopoverElement | null;
   activeMode: UIMode;
@@ -25,12 +26,8 @@ export interface Store {
   expandedThreadId: string | null;
   pins: Record<string, HTMLElement>;
 
-  // Draw/capture
+  // Capture (screenshot)
   captureStream: MediaStream | null;
-  drawLoaded: boolean;
-  drawCleanup: (() => void) | null;
-  drawCanvas: HTMLCanvasElement | null;
-  prevOverflow: string | null;
 
   // FAB positioning
   fabCX: number;
@@ -47,6 +44,8 @@ export type Action =
   | { type: "SET_OVERFLOW_OPEN"; open: boolean }
   | { type: "SET_PANEL_OPEN"; open: boolean }
   | { type: "SET_PANEL_SIDE"; side: "left" | "right" }
+  | { type: "SET_PANEL_MODE"; mode: "float" | "dock" }
+  | { type: "SET_PANEL_WIDTH"; width: number }
   | { type: "SET_PANEL_TAB"; tab: "active" | "resolved" }
   | { type: "SET_EXPANDED_THREAD"; threadId: string | null }
   | { type: "SET_HIDDEN"; hidden: boolean }
@@ -58,12 +57,7 @@ export type Action =
   | { type: "SET_HOVERED"; el: Element | null }
   | { type: "SET_LOCKED"; el: Element | null }
   | { type: "SET_LISTENING"; listening: boolean }
-  | { type: "MARK_SEEN"; threadId: string }
   | { type: "SET_CAPTURE_STREAM"; stream: MediaStream | null }
-  | { type: "SET_DRAW_LOADED"; loaded: boolean }
-  | { type: "SET_DRAW_CANVAS"; canvas: HTMLCanvasElement | null }
-  | { type: "SET_DRAW_CLEANUP"; cleanup: (() => void) | null }
-  | { type: "SET_PREV_OVERFLOW"; overflow: string | null }
   | { type: "SET_PIN"; threadId: string; el: HTMLElement }
   | { type: "REMOVE_PIN"; threadId: string }
   | { type: "CLEAR_PINS" }
@@ -85,6 +79,10 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, panelOpen: action.open };
     case "SET_PANEL_SIDE":
       return { ...s, panelSide: action.side };
+    case "SET_PANEL_MODE":
+      return { ...s, panelMode: action.mode };
+    case "SET_PANEL_WIDTH":
+      return { ...s, panelWidth: action.width };
     case "SET_PANEL_TAB":
       return { ...s, panelTab: action.tab };
     case "SET_EXPANDED_THREAD":
@@ -107,18 +105,8 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, lockedEl: action.el };
     case "SET_LISTENING":
       return { ...s, agentListening: action.listening };
-    case "MARK_SEEN":
-      return { ...s, lastSeenAt: { ...s.lastSeenAt, [action.threadId]: Date.now() } };
     case "SET_CAPTURE_STREAM":
       return { ...s, captureStream: action.stream };
-    case "SET_DRAW_LOADED":
-      return { ...s, drawLoaded: action.loaded };
-    case "SET_DRAW_CANVAS":
-      return { ...s, drawCanvas: action.canvas };
-    case "SET_DRAW_CLEANUP":
-      return { ...s, drawCleanup: action.cleanup };
-    case "SET_PREV_OVERFLOW":
-      return { ...s, prevOverflow: action.overflow };
     case "SET_PIN": {
       const pins = { ...s.pins, [action.threadId]: action.el };
       return { ...s, pins };
@@ -164,14 +152,32 @@ function readPanelSide(): "left" | "right" {
   return "right";
 }
 
+/** Restore panel display mode (float overlay vs docked/push). */
+function readPanelMode(): "float" | "dock" {
+  try {
+    if (localStorage.getItem("veld-panel-mode") === "dock") return "dock";
+  } catch (_) { /* ignore */ }
+  return "float";
+}
+
+/** Restore persisted panel width, clamped to a sane range. */
+function readPanelWidth(): number {
+  try {
+    const w = parseInt(localStorage.getItem("veld-panel-width") || "", 10);
+    if (!isNaN(w) && w >= 300 && w <= 760) return w;
+  } catch (_) { /* ignore */ }
+  return 380;
+}
+
 function createInitial(): Store {
   return {
     threads: [],
     lastEventSeq: 0,
-    lastSeenAt: {},
     agentListening: false,
     panelOpen: false,
     panelSide: readPanelSide(),
+    panelMode: readPanelMode(),
+    panelWidth: readPanelWidth(),
     panelTab: "active",
     activePopover: null,
     activeMode: null,
@@ -185,10 +191,6 @@ function createInitial(): Store {
     expandedThreadId: null,
     pins: {},
     captureStream: null,
-    drawLoaded: false,
-    drawCleanup: null,
-    drawCanvas: null,
-    prevOverflow: null,
     fabCX: 0,
     fabCY: 0,
     rafPending: false,

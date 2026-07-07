@@ -1,5 +1,5 @@
 export type ThreadStatus = "open" | "resolved";
-export type UIMode = null | "select-element" | "screenshot" | "draw";
+export type UIMode = null | "select-element" | "screenshot";
 
 export interface ThreadScope {
   type: "page" | "element" | "global";
@@ -15,7 +15,6 @@ export interface Message {
   author: "human" | "agent";
   created_at: string;
   screenshot?: string | null;
-  controls?: unknown[];
 }
 
 export interface Thread {
@@ -29,8 +28,9 @@ export interface Thread {
   component_trace?: string[] | null;
   viewport_width?: number;
   viewport_height?: number;
-  claimed_by?: string | null;
-  claimed_at?: string | null;
+  /** Count of messages the human has marked seen — persisted server-side, so
+   *  unread state survives a reload. */
+  last_human_seen_seq?: number | null;
 }
 
 export interface FeedbackEvent {

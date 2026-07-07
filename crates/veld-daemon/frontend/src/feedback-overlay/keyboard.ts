@@ -3,11 +3,6 @@ import { modKey } from "./helpers";
 import { deps } from "../shared/registry";
 
 export function onKeyDown(e: KeyboardEvent): void {
-  // ESC in draw mode is handled by the draw overlay itself (shows confirm bar)
-  if (e.key === "Escape" && getState().activeMode === "draw") {
-    return; // let draw overlay's keydown handler deal with it
-  }
-
   if (getState().shortcutsDisabled) return;
 
   const mod = modKey(e) && e.shiftKey;
@@ -45,14 +40,6 @@ export function onKeyDown(e: KeyboardEvent): void {
     return;
   }
 
-  // Mod+Shift+D: draw mode
-  if (mod && e.code === "KeyD") {
-    e.preventDefault();
-    if (!getState().toolbarOpen) deps().toggleToolbar();
-    deps().setMode(getState().activeMode === "draw" ? null : "draw");
-    return;
-  }
-
   // Mod+Shift+P: page comment
   if (mod && e.code === "KeyP") {
     e.preventDefault();
@@ -69,9 +56,7 @@ export function onKeyDown(e: KeyboardEvent): void {
   }
 
   // Escape: cascading dismiss.
-  // Draw mode handles its own ESC (confirm bar) — don't interfere.
   if (e.key === "Escape") {
-    if (getState().activeMode === "draw") return;
     if (getState().activePopover) {
       deps().closeActivePopover();
     } else if (getState().activeMode) {

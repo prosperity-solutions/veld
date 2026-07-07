@@ -2,9 +2,8 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import type { Thread, Message, FeedbackEvent } from "./types";
 import { findThread } from "./helpers";
-import { PREFIX } from "./constants";
+import { PREFIX, ICONS } from "./constants";
 import { api } from "./api";
-import { toast } from "./toast";
 import { mkEl } from "./helpers";
 import { updateBadge } from "./badge";
 import { updateListeningModule } from "./listening";
@@ -21,12 +20,44 @@ export function pollEvents(): void {
   }).catch(function () {});
 }
 
+/**
+ * Baseline the event cursor to the latest seq without replaying history.
+ *
+ * Called once at (re)load. Without this, the first `pollEvents` (cursor at 0)
+ * re-fetches the entire event log and re-fires a toast for every past agent
+ * reply — so notifications reappear on every reload. Current thread state comes
+ * from `loadThreads()`; the event stream only needs to surface activity that
+ * happens *after* load.
+ */
+export function primeEventSeq(): void {
+  api("GET", "/events?after=" + getState().lastEventSeq).then(function (raw) {
+    const events = raw as FeedbackEvent[];
+    if (!events || !events.length) return;
+    const maxSeq = events[events.length - 1].seq; // events are seq-ascending
+    if (maxSeq > getState().lastEventSeq) dispatch({ type: "SET_LAST_EVENT_SEQ", seq: maxSeq });
+  }).catch(function () {});
+}
+
+// Guards the "agent started listening" announcement so it doesn't fire for the
+// initial discovery of an already-listening agent on (re)load — only for a
+// transition that happens while the page is open.
+let listeningPrimed = false;
+
+// Announce the "agent is watching" popover/notification at most once per
+// session. The heartbeat can briefly lapse during a long edit (>60s) and flip
+// listening false→true again; without this guard that would re-announce every
+// work cycle. Reset only on a real session end (agent_stopped / session_ended).
+let announcedListening = false;
+
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
     const data = raw as { listening?: boolean } | null;
     const wasListening = getState().agentListening;
-    dispatch({ type: "SET_LISTENING", listening: !!(data && data.listening) });
-    if (getState().agentListening !== wasListening) updateListeningModule();
+    const nowListening = !!(data && data.listening);
+    dispatch({ type: "SET_LISTENING", listening: nowListening });
+    if (nowListening !== wasListening) updateListeningModule();
+    if (listeningPrimed && !wasListening && nowListening) notifyAgentListening();
+    listeningPrimed = true;
   }).catch(function () {});
 }
 
@@ -45,39 +76,19 @@ function handleEvent(event: FeedbackEvent): void {
       handleThreadReopened(event);
       break;
     case "agent_listening":
+      if (!getState().agentListening) notifyAgentListening();
       dispatch({ type: "SET_LISTENING", listening: true });
       updateListeningModule();
       break;
     case "agent_stopped":
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
-      toast("Agent stopped listening");
+      announcedListening = false; // a genuinely new session re-announces
       break;
     case "session_ended":
       dispatch({ type: "SET_LISTENING", listening: false });
       updateListeningModule();
-      break;
-    case "thread_claimed":
-      if (event.thread_id) {
-        const clThread = findThread(getState().threads, event.thread_id);
-        if (clThread) {
-          clThread.claimed_by = event.agent_id || null;
-          clThread.claimed_at = new Date().toISOString();
-          dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-          if (getState().panelOpen) deps().renderPanel();
-        }
-      }
-      break;
-    case "thread_released":
-      if (event.thread_id) {
-        const rlThread = findThread(getState().threads, event.thread_id);
-        if (rlThread) {
-          rlThread.claimed_by = null;
-          rlThread.claimed_at = null;
-          dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
-          if (getState().panelOpen) deps().renderPanel();
-        }
-      }
+      announcedListening = false; // a genuinely new session re-announces
       break;
     case "thread_created":
       if (event.thread && !findThread(getState().threads, event.thread.id)) {
@@ -207,19 +218,72 @@ export function showAgentReplyToast(threadId: string, preview: string): void {
   }, 8000);
 }
 
+/** Prominent, auto-dismissing banner shown when an agent starts a session. */
+function showListeningPopover(): void {
+  const existing = refs.shadow.querySelector("." + PREFIX + "listening-popover");
+  if (existing) existing.remove();
+
+  const pop = mkEl("div", "listening-popover");
+  let done = false;
+  const dismiss = function (): void {
+    if (done) return;
+    done = true;
+    pop.classList.remove(PREFIX + "listening-popover-show");
+    setTimeout(function () { pop.remove(); }, 300);
+  };
+
+  const title = mkEl("div", "listening-popover-title");
+  const icon = mkEl("span", "listening-popover-icon");
+  icon.innerHTML = ICONS.robot;
+  title.appendChild(icon);
+  title.appendChild(document.createTextNode("An agent is watching for your feedback"));
+  pop.appendChild(title);
+  pop.appendChild(mkEl("div", "listening-popover-body",
+    "Click an element, the page, or take a screenshot to leave a comment. Hit Done when you're finished."));
+  const actions = mkEl("div", "listening-popover-actions");
+  const gotIt = mkEl("button", "btn btn-primary btn-sm", "Got it");
+  gotIt.addEventListener("click", dismiss);
+  actions.appendChild(gotIt);
+  pop.appendChild(actions);
+
+  refs.shadow.appendChild(pop);
+  requestAnimationFrame(function () { pop.classList.add(PREFIX + "listening-popover-show"); });
+  setTimeout(dismiss, 12000);
+}
+
+/** Announce that an agent just started a feedback session: in-page popover
+ *  always, browser notification when the tab isn't focused. */
+function notifyAgentListening(): void {
+  if (announcedListening) return; // already announced for this session
+  announcedListening = true;
+  showListeningPopover();
+  if (!document.hasFocus() && "Notification" in window && Notification.permission === "granted") {
+    try {
+      const n = new Notification("Veld — agent is listening", {
+        body: "An agent is watching for your feedback on this page.",
+        icon: "/__veld__/feedback/logo.svg",
+        tag: "veld-listening",
+      });
+      n.addEventListener("click", function () { window.focus(); n.close(); });
+    } catch (_) { /* some browsers throw constructing non-persistent notifications */ }
+  }
+}
+
 export function sendBrowserNotification(title: string, body: string, threadId: string): void {
   if (!("Notification" in window) || Notification.permission !== "granted") return;
-  const n = new Notification(title, {
-    body: body,
-    icon: "/__veld__/feedback/logo.svg",
-    tag: "veld-thread-" + threadId
-  });
-  n.addEventListener("click", function () {
-    window.focus();
-    deps().openThreadInPanel(threadId);
-    deps().scrollToThread(threadId);
-    n.close();
-  });
+  try {
+    const n = new Notification(title, {
+      body: body,
+      icon: "/__veld__/feedback/logo.svg",
+      tag: "veld-thread-" + threadId
+    });
+    n.addEventListener("click", function () {
+      window.focus();
+      deps().openThreadInPanel(threadId);
+      deps().scrollToThread(threadId);
+      n.close();
+    });
+  } catch (_) { /* some browsers throw constructing non-persistent notifications */ }
 }
 
 export function loadThreads(): void {

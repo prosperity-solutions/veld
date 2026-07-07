@@ -6,9 +6,9 @@ description: >
   (nodes, services, dependencies, presets, health checks, ports, URL templates); or
   debug environment issues like port conflicts or health-check failures. Also use when
   the user wants to show their UI to a human for review, get visual feedback on
-  changes, listen for comments, run a feedback loop, or coordinate multiple agents
-  working on feedback threads — even if they say "let me check," "show the user,"
-  "wait for feedback," or "let them review it." Covers any `veld` CLI command.
+  changes, watch for comments, or run a feedback loop — even if they say
+  "let me check," "show the user," "wait for feedback," or "let them review it."
+  Covers any `veld` CLI command.
 triggers:
   - veld
   - veld.json
@@ -194,9 +194,21 @@ Quick reference for the two node types:
 
 ## Feedback Loop
 
-For the full feedback workflow, events, thread fields, interactive controls, and framework binding templates, see [reference/feedback.md](reference/feedback.md).
+For the full feedback workflow, the `next` output schema, thread fields, and the resolve policy, see [reference/feedback.md](reference/feedback.md).
 
-Core pattern: listen (returns all pending feedback at once) → fix → release with status comment → listen again with `--after <last_seq>` → repeat until `session_ended`. Threads are auto-claimed so multiple agents can work in parallel without conflicts.
+Core pattern — a single agent draining a linear queue, no cursor to track:
+
+```
+loop:
+  out = veld feedback next --wait --name <run> --json
+  → "item"    : fix it, then `veld feedback reply <id> "..."` (or resolve on explicit approval)
+  → "timeout" : call next again
+  → "ended"   : reviewer clicked "Done" → stop
+```
+
+`next` is a pure read (same item until you reply/resolve), so it's safe to
+re-run and resumes cleanly after a restart. Reply parks a thread on the human
+and drops it off the queue; a new human comment brings it back automatically.
 
 ## Reading Outputs
 

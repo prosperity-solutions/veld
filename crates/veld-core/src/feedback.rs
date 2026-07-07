@@ -90,12 +90,6 @@ pub struct Thread {
     /// The seq of the last message the human has viewed in this thread.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_human_seen_seq: Option<u64>,
-    /// Which agent has claimed this thread (agent name/id), if any.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_by: Option<String>,
-    /// When the claim was created.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub claimed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub viewport_width: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -133,8 +127,6 @@ pub enum EventType {
     AgentThreadCreated { thread: Thread },
     AgentListening,
     AgentStopped,
-    ThreadClaimed { thread_id: String, agent_id: String },
-    ThreadReleased { thread_id: String, agent_id: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -152,6 +144,13 @@ pub enum SessionStatus {
 pub struct Session {
     pub status: SessionStatus,
     pub last_heartbeat: DateTime<Utc>,
+    /// Set when the human clicks "Done" — a durable signal that the reviewer
+    /// has no more feedback. Consumed (cleared) by the agent when it reports the
+    /// `ended` stop, so a relaunched loop starts clean; also treated as
+    /// superseded by any newer human message (the reviewer re-engaged). Distinct
+    /// from `status`/`last_heartbeat`, which track agent liveness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<DateTime<Utc>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -370,75 +369,38 @@ impl FeedbackStore {
     /// Update `last_human_seen_seq` for a thread.
     pub fn mark_thread_seen(&self, thread_id: &str, seq: u64) -> anyhow::Result<()> {
         self.modify_thread(thread_id, move |thread| {
-            thread.last_human_seen_seq = Some(seq);
+            // Never lower the seen count: a stale/racing write (multi-tab, or a
+            // late `markAllRead` after a per-thread PUT) must not resurrect unread.
+            let seen = seq.max(thread.last_human_seen_seq.unwrap_or(0));
+            thread.last_human_seen_seq = Some(seen);
         })?;
         Ok(())
     }
 
-    /// Claim a thread atomically. Succeeds if unclaimed or already claimed by the same agent.
-    /// Returns Err if already claimed by a different agent.
-    pub fn claim_thread(&self, thread_id: &str, agent_id: &str) -> anyhow::Result<Thread> {
-        let aid = agent_id.to_owned();
-        self.modify_thread(thread_id, move |thread| {
-            if let Some(ref existing) = thread.claimed_by {
-                if existing != &aid {
-                    // Will be caught after modify_thread returns — see below.
-                    return;
-                }
-            }
-            thread.claimed_by = Some(aid);
-            thread.claimed_at = Some(Utc::now());
-        })
-        .and_then(|thread| {
-            // Check if the claim actually took effect.
-            if thread.claimed_by.as_deref() == Some(agent_id) {
-                Ok(thread)
-            } else {
-                anyhow::bail!(
-                    "thread {} already claimed by {}",
-                    thread_id,
-                    thread.claimed_by.as_deref().unwrap_or("unknown")
-                )
-            }
-        })
-    }
-
-    /// Release a claim. If `agent_id` is Some, only releases if it matches the claimer.
-    /// If `agent_id` is None, force-releases (for UI button use).
-    pub fn release_thread(
-        &self,
-        thread_id: &str,
-        agent_id: Option<&str>,
-    ) -> anyhow::Result<Thread> {
-        let aid = agent_id.map(|s| s.to_owned());
-        self.modify_thread(thread_id, move |thread| {
-            if let Some(ref required) = aid {
-                if thread.claimed_by.as_deref() != Some(required.as_str()) {
-                    return; // Don't release — wrong agent.
-                }
-            }
-            thread.claimed_by = None;
-            thread.claimed_at = None;
-        })
-        .and_then(|thread| {
-            if let Some(required) = agent_id {
-                // If the caller specified an agent_id, verify the release happened.
-                if thread.claimed_by.is_some() {
-                    anyhow::bail!(
-                        "thread {} is claimed by {}, not {}",
-                        thread_id,
-                        thread.claimed_by.as_deref().unwrap_or("unknown"),
-                        required
-                    );
-                }
-            }
-            Ok(thread)
-        })
-    }
-
-    /// Check if a thread is currently claimed.
-    pub fn is_claimed(thread: &Thread) -> bool {
-        thread.claimed_by.is_some()
+    /// Return the head of the agent's linear queue: the oldest *waiting* thread.
+    ///
+    /// A thread is "waiting" when it is Open and its most recent message came
+    /// from a human (see [`thread_is_waiting`]). Agent replies flip a thread to
+    /// blocked (hidden); a new human message flips it back.
+    ///
+    /// This is a **pure read** — it never mutates state, so calling it
+    /// repeatedly returns the same thread until a `reply`/`resolve` moves the
+    /// head. Ordering is FIFO by last-activity: the thread whose last message
+    /// is oldest comes first, so a fresh human comment naturally moves its
+    /// thread to the back of the queue.
+    pub fn next_waiting_thread(&self) -> anyhow::Result<Option<Thread>> {
+        let mut waiting: Vec<Thread> = self
+            .list_threads(Some(ThreadStatus::Open))?
+            .into_iter()
+            .filter(thread_is_waiting)
+            .collect();
+        waiting.sort_by_key(|t| {
+            t.messages
+                .last()
+                .map(|m| m.created_at)
+                .unwrap_or(t.created_at)
+        });
+        Ok(waiting.into_iter().next())
     }
 
     // -- Event log ------------------------------------------------------------
@@ -534,15 +496,49 @@ impl FeedbackStore {
 
     // -- Session / heartbeat --------------------------------------------------
 
-    /// Write a heartbeat — marks session as listening with current timestamp.
-    pub fn heartbeat(&self) -> anyhow::Result<()> {
+    /// Read-modify-write `session.json` under an exclusive file lock.
+    ///
+    /// The agent process heartbeats once per second while the daemon handles the
+    /// human's "Done" click in a *different* process. Without locking, a
+    /// heartbeat's blind write can clobber the `ended_at` flag `end_session` just
+    /// set — losing the stop signal so the agent loops forever. This serializes
+    /// all session mutations (mirrors `next_seq` / `modify_thread`).
+    fn modify_session(&self, mutate: impl FnOnce(&mut Session)) -> anyhow::Result<()> {
         self.ensure_dirs()?;
-        let session = Session {
-            status: SessionStatus::Listening,
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&self.session_path)?;
+
+        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
+            .map_err(|(_file, errno)| errno)?;
+
+        let mut data = String::new();
+        locked.read_to_string(&mut data)?;
+        let mut session = serde_json::from_str::<Session>(&data).unwrap_or(Session {
+            status: SessionStatus::Idle,
             last_heartbeat: Utc::now(),
-        };
-        std::fs::write(&self.session_path, serde_json::to_string_pretty(&session)?)?;
+            ended_at: None,
+        });
+        mutate(&mut session);
+
+        let new_data = serde_json::to_string_pretty(&session)?;
+        locked.seek(std::io::SeekFrom::Start(0))?;
+        locked.set_len(0)?;
+        locked.write_all(new_data.as_bytes())?;
         Ok(())
+    }
+
+    /// Write a heartbeat — marks session as listening with current timestamp.
+    /// Preserves the `ended_at` flag: agent liveness and the human's "Done"
+    /// signal are independent.
+    pub fn heartbeat(&self) -> anyhow::Result<()> {
+        self.modify_session(|s| {
+            s.status = SessionStatus::Listening;
+            s.last_heartbeat = Utc::now();
+        })
     }
 
     /// Read the current session state.
@@ -550,8 +546,12 @@ impl FeedbackStore {
         if !self.session_path.exists() {
             return Ok(None);
         }
+        // A concurrent writer may briefly truncate the file mid-update (see
+        // `modify_session`); treat an empty/partial read as "no session yet"
+        // rather than erroring, matching how `current_seq` / `list_threads`
+        // tolerate torn reads. Readers self-heal on the next poll.
         let data = std::fs::read_to_string(&self.session_path)?;
-        Ok(Some(serde_json::from_str(&data)?))
+        Ok(serde_json::from_str(&data).ok())
     }
 
     /// Check if an agent is actively listening (heartbeat within threshold).
@@ -567,17 +567,59 @@ impl FeedbackStore {
         }
     }
 
-    /// Explicitly end the session (set to idle).
+    /// Explicitly end the session — the human clicked "Done".
+    ///
+    /// Sets `ended_at`, which `is_ended` reads. When the agent's queue drains,
+    /// an ended session tells it to stop; the agent then calls
+    /// [`mark_stopped`](Self::mark_stopped) as it exits. A human message newer
+    /// than `ended_at` also supersedes it, so a post-Done comment revives the
+    /// loop.
     pub fn end_session(&self) -> anyhow::Result<()> {
-        let session = Session {
-            status: SessionStatus::Idle,
-            last_heartbeat: Utc::now(),
+        let now = Utc::now();
+        self.modify_session(move |s| {
+            s.status = SessionStatus::Idle;
+            s.last_heartbeat = now;
+            s.ended_at = Some(now);
+        })
+    }
+
+    /// Mark the agent as no longer listening — called as it reports the `ended`
+    /// stop and exits. Sets status to Idle (so `is_listening` → false and the
+    /// browser stops showing "listening" and won't re-announce the exited agent)
+    /// and consumes `ended_at` (so a freshly-launched loop starts clean rather
+    /// than re-stopping on the same Done). Called only by the agent process, so
+    /// it doesn't race `end_session`.
+    pub fn mark_stopped(&self) -> anyhow::Result<()> {
+        self.modify_session(|s| {
+            s.status = SessionStatus::Idle;
+            s.ended_at = None;
+        })
+    }
+
+    /// Whether the human has ended the session (clicked "Done") and has not
+    /// since sent new feedback.
+    ///
+    /// Timestamp-based rather than a mutable flag: if any open thread carries a
+    /// human message newer than `ended_at`, the reviewer re-engaged after
+    /// clicking Done, so the session is not ended. This is derived purely from
+    /// timestamps, so there is no race between "Done" and a near-simultaneous
+    /// new comment arriving on a separate HTTP request — whichever the human
+    /// actually did last (by message time) wins.
+    pub fn is_ended(&self) -> anyhow::Result<bool> {
+        let ended_at = match self.get_session()?.and_then(|s| s.ended_at) {
+            Some(t) => t,
+            None => return Ok(false),
         };
-        if let Some(parent) = self.session_path.parent() {
-            std::fs::create_dir_all(parent)?;
+        for thread in self.list_threads(Some(ThreadStatus::Open))? {
+            if thread
+                .messages
+                .iter()
+                .any(|m| matches!(m.author, Author::Human) && m.created_at > ended_at)
+            {
+                return Ok(false);
+            }
         }
-        std::fs::write(&self.session_path, serde_json::to_string_pretty(&session)?)?;
-        Ok(())
+        Ok(true)
     }
 
     // -- Screenshots (unchanged) ----------------------------------------------
@@ -611,6 +653,18 @@ impl FeedbackStore {
 // ---------------------------------------------------------------------------
 // Helper: create a new message.
 // ---------------------------------------------------------------------------
+
+/// A thread is "waiting" (actionable by the agent) when it is Open and its most
+/// recent message came from a human. An agent reply makes the latest author the
+/// agent → blocked; a human reply flips it back → waiting. This derived state is
+/// the entire machine-side queue model — no stored `blocked` field.
+pub fn thread_is_waiting(thread: &Thread) -> bool {
+    thread.status == ThreadStatus::Open
+        && matches!(
+            thread.messages.last().map(|m| m.author),
+            Some(Author::Human)
+        )
+}
 
 pub fn new_message(
     author: Author,
@@ -646,8 +700,6 @@ pub fn new_thread(
         status: ThreadStatus::Open,
         messages: vec![initial_message],
         last_human_seen_seq: None,
-        claimed_by: None,
-        claimed_at: None,
         viewport_width,
         viewport_height,
         created_at: now,
@@ -1029,137 +1081,206 @@ mod tests {
         assert_eq!(*all_seqs.last().unwrap(), 100);
     }
 
-    #[test]
-    fn test_claim_thread() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Needs fixing");
-        store.save_thread(&t).unwrap();
-
-        let claimed = store.claim_thread(&t.id, "agent-1").unwrap();
-        assert_eq!(claimed.claimed_by.as_deref(), Some("agent-1"));
-        assert!(claimed.claimed_at.is_some());
-
-        // Same agent can re-claim (idempotent).
-        let reclaimed = store.claim_thread(&t.id, "agent-1").unwrap();
-        assert_eq!(reclaimed.claimed_by.as_deref(), Some("agent-1"));
-    }
-
-    #[test]
-    fn test_claim_already_claimed() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Contested");
-        store.save_thread(&t).unwrap();
-
-        store.claim_thread(&t.id, "agent-1").unwrap();
-
-        // Different agent cannot claim.
-        let err = store.claim_thread(&t.id, "agent-2").unwrap_err();
-        assert!(err.to_string().contains("already claimed by agent-1"));
-    }
-
-    #[test]
-    fn test_claim_no_expiry() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Long task");
-        store.save_thread(&t).unwrap();
-
-        store.claim_thread(&t.id, "agent-1").unwrap();
-
-        // Claim persists — another agent still cannot claim.
-        let err = store.claim_thread(&t.id, "agent-2").unwrap_err();
-        assert!(err.to_string().contains("already claimed"));
-    }
-
-    #[test]
-    fn test_release_thread() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Will release");
-        store.save_thread(&t).unwrap();
-
-        store.claim_thread(&t.id, "agent-1").unwrap();
-
-        let released = store.release_thread(&t.id, Some("agent-1")).unwrap();
-        assert!(released.claimed_by.is_none());
-        assert!(released.claimed_at.is_none());
-
-        // Now another agent can claim.
-        let claimed = store.claim_thread(&t.id, "agent-2").unwrap();
-        assert_eq!(claimed.claimed_by.as_deref(), Some("agent-2"));
-    }
-
-    #[test]
-    fn test_release_wrong_agent() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Guarded");
-        store.save_thread(&t).unwrap();
-
-        store.claim_thread(&t.id, "agent-1").unwrap();
-
-        let err = store.release_thread(&t.id, Some("agent-2")).unwrap_err();
-        assert!(err.to_string().contains("claimed by agent-1"));
-    }
-
-    #[test]
-    fn test_force_release() {
-        let tmp = TempDir::new().unwrap();
-        let store = make_store(&tmp);
-
-        let t = make_thread("Force release");
-        store.save_thread(&t).unwrap();
-
-        store.claim_thread(&t.id, "agent-1").unwrap();
-
-        // Force release (no agent_id check) — for UI button.
-        let released = store.release_thread(&t.id, None).unwrap();
-        assert!(released.claimed_by.is_none());
-    }
-
-    #[test]
-    fn test_is_claimed() {
-        let t = make_thread("Check claimed");
-        assert!(!FeedbackStore::is_claimed(&t));
-
-        let mut t2 = t;
-        t2.claimed_by = Some("agent-1".into());
-        t2.claimed_at = Some(Utc::now());
-        assert!(FeedbackStore::is_claimed(&t2));
-    }
-
-    #[test]
-    fn test_claim_event_types_serde() {
-        let event = Event {
-            seq: 1,
-            event_type: EventType::ThreadClaimed {
-                thread_id: "t_abc".into(),
-                agent_id: "agent-1".into(),
-            },
-            timestamp: Utc::now(),
+    /// Build a Human-authored waiting thread with an explicit age so queue
+    /// ordering tests are deterministic.
+    fn waiting_thread(store: &FeedbackStore, body: &str, age_secs: i64) -> Thread {
+        let ts = Utc::now() - chrono::Duration::seconds(age_secs);
+        let msg = Message {
+            id: uuid::Uuid::new_v4().to_string(),
+            author: Author::Human,
+            body: body.to_owned(),
+            screenshot: None,
+            controls: None,
+            created_at: ts,
         };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains(r#""event":"thread_claimed"#));
-        assert!(json.contains(r#""agent_id":"agent-1"#));
-        let _: Event = serde_json::from_str(&json).unwrap();
+        let mut t = new_thread(
+            ThreadScope::Global,
+            ThreadOrigin::Human,
+            None,
+            None,
+            None,
+            msg,
+        );
+        t.created_at = ts;
+        t.updated_at = ts;
+        store.save_thread(&t).unwrap();
+        t
+    }
 
-        let event = Event {
-            seq: 2,
-            event_type: EventType::ThreadReleased {
-                thread_id: "t_abc".into(),
-                agent_id: "agent-1".into(),
-            },
-            timestamp: Utc::now(),
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        assert!(json.contains(r#""event":"thread_released"#));
-        let _: Event = serde_json::from_str(&json).unwrap();
+    #[test]
+    fn test_thread_is_waiting() {
+        let mut t = make_thread("Human said something");
+        // Open + last author human → waiting.
+        assert!(thread_is_waiting(&t));
+
+        // Agent replies → blocked.
+        t.messages
+            .push(new_message(Author::Agent, "Done", None, None));
+        assert!(!thread_is_waiting(&t));
+
+        // Human follows up → waiting again.
+        t.messages
+            .push(new_message(Author::Human, "Not quite", None, None));
+        assert!(thread_is_waiting(&t));
+
+        // Resolved → never waiting, even with a trailing human message.
+        t.status = ThreadStatus::Resolved;
+        assert!(!thread_is_waiting(&t));
+    }
+
+    #[test]
+    fn test_next_waiting_thread_blocks_and_unblocks() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = waiting_thread(&store, "Fix the button", 10);
+
+        // Human comment is at the head.
+        let head = store.next_waiting_thread().unwrap().unwrap();
+        assert_eq!(head.id, t.id);
+
+        // Pure read: calling again returns the same head (no side effects).
+        let head2 = store.next_waiting_thread().unwrap().unwrap();
+        assert_eq!(head2.id, t.id);
+
+        // Agent replies → thread becomes blocked → queue empties.
+        store
+            .add_message(&t.id, &new_message(Author::Agent, "Fixed", None, None))
+            .unwrap();
+        assert!(store.next_waiting_thread().unwrap().is_none());
+
+        // Human replies → unblocked → back at the head.
+        store
+            .add_message(&t.id, &new_message(Author::Human, "Still off", None, None))
+            .unwrap();
+        assert_eq!(store.next_waiting_thread().unwrap().unwrap().id, t.id);
+    }
+
+    #[test]
+    fn test_next_waiting_fifo_and_moves_to_back() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let older = waiting_thread(&store, "Older", 100);
+        let newer = waiting_thread(&store, "Newer", 50);
+
+        // Oldest last-activity first.
+        assert_eq!(store.next_waiting_thread().unwrap().unwrap().id, older.id);
+
+        // A fresh human comment on the older thread moves it to the back.
+        store
+            .add_message(&older.id, &new_message(Author::Human, "More", None, None))
+            .unwrap();
+        assert_eq!(store.next_waiting_thread().unwrap().unwrap().id, newer.id);
+    }
+
+    #[test]
+    fn test_next_waiting_ignores_resolved() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = waiting_thread(&store, "Approved", 10);
+        store
+            .set_thread_status(&t.id, ThreadStatus::Resolved)
+            .unwrap();
+        assert!(store.next_waiting_thread().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_ended_flag_lifecycle() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        assert!(!store.is_ended().unwrap());
+
+        // Human clicks Done.
+        store.end_session().unwrap();
+        assert!(store.is_ended().unwrap());
+
+        // Agent heartbeat must not clobber the Done flag.
+        store.heartbeat().unwrap();
+        assert!(store.is_ended().unwrap());
+
+        // New human feedback after Done (message post-dates ended_at) → the
+        // reviewer re-engaged, so the session is no longer ended.
+        let t = waiting_thread(&store, "one more thing", -1);
+        assert!(!store.is_ended().unwrap());
+
+        // Agent replies (thread becomes blocked) but the human message still
+        // post-dates Done, so the conversation is ongoing — still not ended.
+        store
+            .add_message(&t.id, &new_message(Author::Agent, "on it", None, None))
+            .unwrap();
+        assert!(!store.is_ended().unwrap());
+    }
+
+    #[test]
+    fn test_mark_stopped_consumes_flag_and_stops_listening() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        store.heartbeat().unwrap();
+        store.end_session().unwrap();
+        assert!(store.is_ended().unwrap());
+
+        // Agent reports the stop and exits: the session is no longer ended (so a
+        // relaunched loop won't immediately re-stop) and no longer listening (so
+        // /session won't re-announce the now-exited agent).
+        store.mark_stopped().unwrap();
+        assert!(!store.is_ended().unwrap());
+        assert!(!store.is_listening(60).unwrap());
+    }
+
+    #[test]
+    fn test_ended_flag_survives_concurrent_heartbeats() {
+        // Regression: the agent process heartbeats every second while the daemon
+        // sets `ended_at` on "Done". Without a lock on session.json a heartbeat's
+        // write clobbers the flag and the agent never stops. With the lock, no
+        // interleaving of concurrent heartbeats can lose an end_session.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().to_owned();
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let p = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let s = FeedbackStore::new(&p, "test-run");
+                for _ in 0..50 {
+                    s.heartbeat().unwrap();
+                }
+            }));
+        }
+
+        // End the session while the heartbeats are in flight.
+        FeedbackStore::new(&path, "test-run").end_session().unwrap();
+
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // A heartbeat must never have clobbered the Done flag.
+        assert!(FeedbackStore::new(&path, "test-run").is_ended().unwrap());
+    }
+
+    #[test]
+    fn test_skip_dont_crash_on_bad_thread_file() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        // A valid, waiting thread.
+        let good = waiting_thread(&store, "Real feedback", 10);
+
+        // A garbage / old-format file sitting alongside it.
+        store.ensure_dirs().unwrap();
+        std::fs::write(
+            store.threads_dir.join("deadbeef.json"),
+            b"{ not valid json, from an old version",
+        )
+        .unwrap();
+
+        // list / next must skip the bad file, not panic.
+        let listed = store.list_threads(None).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(store.next_waiting_thread().unwrap().unwrap().id, good.id);
     }
 }

@@ -143,8 +143,9 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
-| `veld feedback listen [--name <n>] [--after <seq>]` | Listen for feedback events (agent-facing) |
-| `veld feedback answer --thread <id> "<msg>"` | Reply to a feedback thread |
+| `veld feedback next [--wait] [--name <n>] [--json]` | Get the next feedback item to work on (agent-facing; pure read, no cursor) |
+| `veld feedback reply <thread-id> "<msg>"` | Reply to a feedback thread (parks it on the reviewer) |
+| `veld feedback resolve <thread-id>` | Resolve a thread (agent-facing; only on explicit approval) |
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
@@ -340,7 +341,7 @@ Veld ships skills for AI coding agents (Claude Code, Cursor, Codex, Windsurf, an
 npx skills add prosperity-solutions/veld
 ```
 
-This installs the **veld** skill — a single skill covering CLI usage, `veld.json` configuration, and the bidirectional feedback workflow. It loads live project state (nodes, presets, active runs, current config) at invocation time so your agent can act immediately without discovery steps.
+This installs the Veld skills: **`veld`** — CLI usage, `veld.json` configuration, and the bidirectional feedback workflow, loading live project state (nodes, presets, active runs, current config) at invocation time so your agent can act without discovery steps — and **`veld-launch-feedback-loop`**, a focused skill that parks an agent on the `veld feedback next` loop to work in-browser review comments one at a time.
 
 ## Contributing
 

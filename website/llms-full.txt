@@ -129,7 +129,7 @@ veld stop --name dev
 | `veld presets` | List presets |
 | `veld runs` | List all runs |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
-| `veld feedback --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
+| `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
 | `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
@@ -164,7 +164,7 @@ veld includes a built-in feedback overlay for human-AI collaboration. When an AI
 
 1. When a `start_server` service is running, veld can inject a feedback overlay into the served pages
 2. Humans open the feedback overlay in their browser and leave comments
-3. AI agents receive the feedback via `veld feedback --wait`, which blocks until new feedback arrives
+3. AI agents receive the feedback via `veld feedback next --wait`, which blocks until new feedback arrives
 4. The agent reads the structured feedback and iterates
 
 ### CLI Commands
@@ -172,7 +172,7 @@ veld includes a built-in feedback overlay for human-AI collaboration. When an AI
 | Command | Description |
 |---------|-------------|
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
-| `veld feedback --wait [--name <n>]` | Block until feedback is submitted (designed for agent tool-use loops) |
+| `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (designed for agent tool-use loops) |
 
 ### Feedback API
 

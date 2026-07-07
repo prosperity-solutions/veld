@@ -50,7 +50,7 @@ Veld has three tiers of binaries with different lifecycles:
 Use `just dev` or `veld-dev` for read-only CLI commands:
 
 ```sh
-just dev feedback listen --name myrun --json
+just dev feedback next --wait --name myrun --json
 just dev status
 veld-dev doctor
 ```
@@ -59,7 +59,7 @@ veld-dev doctor
 
 ```sh
 veld start --name myrun website:local    # uses installed veld
-veld-dev feedback listen --name myrun    # uses source build for CLI
+veld-dev feedback next --wait --name myrun    # uses source build for CLI
 ```
 
 For cross-project CLI use:
@@ -67,7 +67,7 @@ For cross-project CLI use:
 ```sh
 just dev-link    # one-time: creates ~/.local/bin/veld-dev
 cd ~/other-project
-veld-dev feedback listen --name myrun
+veld-dev feedback next --wait --name myrun
 ```
 
 ### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)

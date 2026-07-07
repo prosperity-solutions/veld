@@ -46,7 +46,6 @@ export function makeFakeDeps() {
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),
     positionTooltip: vi.fn(),
-    ensureDrawScript: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -82,7 +81,6 @@ export function setupMockRefs() {
   refs.fabBadge = document.createElement("span");
   refs.toolBtnSelect = document.createElement("button");
   refs.toolBtnScreenshot = document.createElement("button");
-  refs.toolBtnDraw = document.createElement("button");
   refs.toolBtnPageComment = document.createElement("button");
   refs.toolBtnComments = document.createElement("button");
   refs.toolBtnHide = document.createElement("button");
