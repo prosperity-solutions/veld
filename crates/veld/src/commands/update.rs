@@ -236,6 +236,54 @@ async fn restart_services(target_version: &str) {
             false,
         );
     }
+
+    // The daemon is a user-level service (LaunchAgent / systemd --user) that the
+    // installer restarts. Verify it came back on the new binary too — otherwise
+    // `veld update` returns while the daemon is mid-restart, and an immediate
+    // `veld doctor` shows "Daemon: not running / Feedback server not responding"
+    // even though it self-heals moments later.
+    output::print_info("Waiting for veld-daemon to restart with the new binary...");
+    if wait_for_daemon_version(target_version, std::time::Duration::from_secs(45)).await {
+        output::print_success("veld-daemon restarted and healthy.");
+    } else {
+        output::print_error(
+            "veld-daemon did not pick up the new binary automatically. \
+             Run `veld doctor`; if it stays down, re-run `veld setup`.",
+            false,
+        );
+    }
+}
+
+/// Poll the daemon's `/api/health` until it reports `expected_version`, or the
+/// timeout elapses.
+///
+/// The daemon is hard-restarted by the installer (bootout + bootstrap), so its
+/// HTTP endpoint goes down and comes back; waiting for the version to match
+/// confirms the NEW daemon is serving, not a lingering old instance or a
+/// pre-change daemon that has no `version` field (which reports nothing and
+/// correctly times out into the actionable error).
+async fn wait_for_daemon_version(expected_version: &str, timeout: std::time::Duration) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(2))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let start = std::time::Instant::now();
+    loop {
+        if let Ok(resp) = client.get("http://127.0.0.1:19899/api/health").send().await {
+            if let Ok(body) = resp.json::<serde_json::Value>().await {
+                if body.get("version").and_then(|v| v.as_str()) == Some(expected_version) {
+                    return true;
+                }
+            }
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 
 /// Poll the helper on `socket` until it reports `expected_version`, or the

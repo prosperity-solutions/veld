@@ -24,6 +24,10 @@ pub fn routes() -> Router {
         .route("/", get(dashboard))
         // Same SPA; the join ticket rides in the URL fragment (client-only).
         .route("/join", get(dashboard))
+        // Liveness + version probe. `veld update` polls this to confirm the
+        // daemon actually restarted onto the new binary (not just that *some*
+        // daemon is reachable), mirroring the helper's version check.
+        .route("/api/health", get(health))
         .route("/api/environments", get(list_environments))
         .route("/api/logs/{run}", get(get_logs))
         .route("/api/open-terminal", post(open_terminal))
@@ -35,6 +39,15 @@ pub fn routes() -> Router {
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// Liveness + version. Returns the daemon's compiled version so callers can
+/// confirm which binary is actually serving.
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
 
 async fn dashboard() -> Response {
     (
