@@ -1,8 +1,8 @@
 {
   "branches": ["main"],
   "plugins": [
-    "@semantic-release/commit-analyzer",
-    "@semantic-release/release-notes-generator",
+    ["@semantic-release/commit-analyzer", { "preset": "conventionalcommits" }],
+    ["@semantic-release/release-notes-generator", { "preset": "conventionalcommits" }],
     ["@semantic-release/exec", {
       "prepareCmd": "sed -i'' -e 's/Requires veld v[0-9][0-9.]*/Requires veld v${nextRelease.version}/' -e 's/version: \"[0-9][0-9.]*\"/version: \"${nextRelease.version}\"/' skills/veld/SKILL.md && sed -i'' -e \"s/^version = \\\"[^\\\"]*\\\"/version = \\\"${nextRelease.version}\\\"/\" Cargo.toml"
     }],
