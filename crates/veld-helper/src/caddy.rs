@@ -531,7 +531,10 @@ async fn terminate_pid(pid: u32) {
     // the pid came from our own pid file, and refusing would strand a wedged
     // Caddy and defeat recovery — the whole point of this path.
     if pid_is_caddy(pid).await == Some(false) {
-        warn!(pid, "pid is not a caddy process; not signalling (stale pid file?)");
+        warn!(
+            pid,
+            "pid is not a caddy process; not signalling (stale pid file?)"
+        );
         return;
     }
 
@@ -1302,7 +1305,8 @@ mod tests {
         assert!(load_route_store(&missing).is_empty());
 
         // Corrupt file → empty (self-healing, not fatal).
-        let corrupt = std::env::temp_dir().join(format!("veld-corrupt-{}.json", std::process::id()));
+        let corrupt =
+            std::env::temp_dir().join(format!("veld-corrupt-{}.json", std::process::id()));
         std::fs::write(&corrupt, b"{ not json").unwrap();
         assert!(load_route_store(&corrupt).is_empty());
         let _ = std::fs::remove_file(&corrupt);
