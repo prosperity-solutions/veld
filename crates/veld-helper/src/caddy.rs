@@ -388,6 +388,22 @@ impl CaddyManager {
         Ok(true)
     }
 
+    /// On helper startup, re-adopt and reload an already-running Caddy — e.g.
+    /// one left running across our own binary self-restart. This re-applies the
+    /// current base config (so an updated Caddy binary / new built-in routes
+    /// take effect), replays persisted routes, and records the pid so the
+    /// watchdog supervises it thereafter. It deliberately does NOT spawn a new
+    /// Caddy: a cold boot with no runs stays idle until the first `caddy_start`.
+    pub async fn reconcile_on_startup(&self) {
+        if !self.is_running().await {
+            return;
+        }
+        let mut state = self.inner.lock().await;
+        if let Err(e) = self.start_locked(&mut state).await {
+            warn!(error = %format!("{e:#}"), "startup caddy reconcile failed");
+        }
+    }
+
     // -- Route store ----------------------------------------------------------
 
     /// Insert or replace a route in the durable store and persist it. Returns
@@ -476,7 +492,12 @@ fn write_caddy_pid(caddy_bin_override: &Option<PathBuf>, pid: u32) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(&path, pid.to_string());
+    // Warn (don't silently swallow) on failure: e.g. after a mode switch the
+    // data dir may be owned by the other mode's helper, and a silent EACCES here
+    // would quietly disable pid-based recovery.
+    if let Err(e) = std::fs::write(&path, pid.to_string()) {
+        warn!(error = %e, path = %path.display(), "failed to write caddy pid file");
+    }
 }
 
 fn read_caddy_pid(caddy_bin_override: &Option<PathBuf>) -> Option<u32> {
@@ -506,8 +527,12 @@ async fn pid_is_caddy(pid: u32) -> Option<bool> {
         .await
     {
         Ok(o) if o.status.success() => {
+            // macOS `ps -o comm=` prints the full executable path; Linux prints
+            // the command name. Compare the basename EXACTLY so we don't match
+            // an unrelated process like `/x/notcaddy` or `mycaddy`.
             let comm = String::from_utf8_lossy(&o.stdout);
-            Some(comm.trim().ends_with("caddy"))
+            let name = comm.trim().rsplit('/').next().unwrap_or("").trim();
+            Some(name == "caddy")
         }
         // ps ran but the pid wasn't found → not a live caddy.
         Ok(_) => Some(false),

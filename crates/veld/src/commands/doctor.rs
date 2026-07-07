@@ -120,8 +120,23 @@ impl Diagnostics {
     // -- Services ------------------------------------------------------------
 
     async fn gather_services(&mut self) {
-        // Helper
-        match veld_core::helper::HelperClient::connect().await {
+        // Helper — connect to the socket for the CONFIGURED mode so we report on
+        // the right helper. Plain `connect()` falls through system -> user, which
+        // in privileged mode would report a stray user/auto helper on :18443 when
+        // the privileged LaunchDaemon is actually down, masking the real failure
+        // (and contradicting the mode-aware errors from `veld start`/`veld update`).
+        let helper_conn = match super::read_setup_mode().as_deref() {
+            Some("privileged") => veld_core::helper::HelperClient::connect_to(
+                &veld_core::helper::system_socket_path(),
+            )
+            .await,
+            Some("unprivileged") => {
+                veld_core::helper::HelperClient::connect_to(&veld_core::helper::user_socket_path())
+                    .await
+            }
+            _ => veld_core::helper::HelperClient::connect().await,
+        };
+        match helper_conn {
             Ok(client) => {
                 let status_data = client.status().await.ok().and_then(|r| r.data);
 

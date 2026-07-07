@@ -221,11 +221,14 @@ async fn connect_managed_helper(
 ) -> Result<crate::helper::HelperClient, anyhow::Error> {
     use crate::helper::HelperClient;
 
-    // Bounded by wall-clock (~10s) rather than a fixed attempt count: each
-    // `connect_to` can itself take up to 3s on a wedged-but-open socket, so a
-    // fixed count could block `veld start` for over a minute. Usually succeeds
-    // on the first attempt.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    // Bounded by wall-clock rather than a fixed attempt count: each
+    // `connect_to` is itself capped at 3s (its status check timeout), so a fixed
+    // count could block `veld start` for over a minute on a wedged socket.
+    // 20s is chosen to ride out a helper self-restart — the binary-change
+    // watcher can take ~12s to trigger, plus the launchd/systemd relaunch — so a
+    // `veld start` issued mid-restart waits it out instead of bailing early.
+    // Usually succeeds on the first attempt.
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
     let mut announced = false;
     loop {
         if let Ok(client) = HelperClient::connect_to(socket).await {
@@ -805,6 +808,15 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
         ));
     }
 
+    // Log to a file next to the binary so the self-healing story (watchdog
+    // restarts, Caddy recovery, pid adoption) is observable — launchd otherwise
+    // discards the helper's stderr, making a post-sleep recovery impossible to
+    // diagnose.
+    let log_path = bin
+        .parent()
+        .map(|p| p.join("veld-helper.log"))
+        .unwrap_or_else(|| PathBuf::from("/tmp/veld-helper.log"));
+
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -825,10 +837,15 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     <array>
         <string>{bin_path}</string>
     </array>
+    <key>StandardOutPath</key>
+    <string>{log_path}</string>
+    <key>StandardErrorPath</key>
+    <string>{log_path}</string>
 </dict>
 </plist>
 "#,
         bin_path = bin.display(),
+        log_path = log_path.display(),
     );
 
     // Stop the running service first (required for upgrades). Use the modern
@@ -884,8 +901,14 @@ async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     if let Some(caddy) = caddy_bin {
         exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
     }
+    // KillMode=process: on stop/restart, only kill the helper itself, not its
+    // whole cgroup. The helper spawns Caddy as a child; the default
+    // control-group kill mode would SIGKILL Caddy whenever the helper is
+    // restarted (or exits to pick up a new binary), tearing down every URL.
+    // Leaving Caddy running mirrors the macOS behavior so a helper restart
+    // doesn't drop the proxy.
     let unit = format!(
-        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=Veld Helper\n\n[Service]\nExecStart={exec_start}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=multi-user.target\n",
     );
     std::fs::write(unit_path, unit).context("failed to write helper systemd unit")?;
 
@@ -1465,8 +1488,17 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
         let entry = entry?;
+        // Never migrate mode-specific runtime state across the system->user
+        // move. `caddy.pid` and `veld-routes.json` belong to the *previous*
+        // (privileged) helper session; copying them would make the new
+        // user/auto helper adopt the root Caddy's pid or replay routes bound to
+        // the old mode's ports. Migration exists only to preserve the CA/certs.
+        let name = entry.file_name();
+        if name == "caddy.pid" || name == "veld-routes.json" {
+            continue;
+        }
         let ty = entry.file_type()?;
-        let dst_path = dst.join(entry.file_name());
+        let dst_path = dst.join(&name);
         if ty.is_dir() {
             copy_dir_recursive(&entry.path(), &dst_path)?;
         } else {

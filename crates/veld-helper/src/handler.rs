@@ -30,6 +30,13 @@ impl State {
         }
     }
 
+    /// Startup reconcile: re-adopt + reload an already-running Caddy (e.g. one
+    /// orphaned across our own self-restart) so an updated binary/config takes
+    /// effect and the watchdog can supervise it. No-op if Caddy isn't running.
+    pub async fn reconcile_caddy_on_startup(&self) {
+        self.caddy.reconcile_on_startup().await;
+    }
+
     /// One watchdog iteration: ensure Caddy is alive and serving the persisted
     /// routes. Only supervises once Caddy is meant to be running — either it has
     /// been started this session, or there are persisted routes to serve (e.g.

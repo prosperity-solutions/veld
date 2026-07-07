@@ -151,6 +151,17 @@ async fn main() -> Result<()> {
         shutdown_tx,
     ));
 
+    // Startup reconcile: if a Caddy is already running (orphaned across our own
+    // self-restart / helper crash), re-adopt it, reload the current config, and
+    // start supervising it. Runs before the watchdog so an updated binary/config
+    // takes effect immediately rather than on the next `veld start`.
+    {
+        let startup_state = Arc::clone(&state);
+        tokio::spawn(async move {
+            startup_state.reconcile_caddy_on_startup().await;
+        });
+    }
+
     // Caddy watchdog: keep Caddy alive and every persisted route served across
     // crashes, macOS sleep/wake, and reboots. launchd's KeepAlive only restarts
     // the *helper* on exit — it cannot detect a dead/wedged child Caddy, so we

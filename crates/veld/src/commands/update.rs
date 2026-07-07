@@ -58,7 +58,7 @@ pub async fn run() -> i32 {
                     output::print_success(&format!("Updated to {new_version}."));
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
-                    restart_services().await;
+                    restart_services(&new_version).await;
                     refresh_hammerspoon().await;
                     0
                 }
@@ -197,7 +197,13 @@ fn cleanup_stale_binaries() {
 /// version — no sudo), complemented by the plist's `WatchPaths`. Rather than
 /// assume that worked (the old bug), we poll until the helper reports the new
 /// version, and give actionable guidance if it doesn't.
-async fn restart_services() {
+///
+/// `target_version` is the version we just updated TO (from `check_update`),
+/// NOT `env!("CARGO_PKG_VERSION")` — this process is the *old* CLI, so its
+/// compile-time version is the version we updated *from*. Comparing against
+/// that would invert the check (fail on every successful update, pass on a
+/// failed one).
+async fn restart_services(target_version: &str) {
     let mode = super::read_setup_mode();
 
     // Auto mode has no persistent service: stop the ephemeral helper so the
@@ -220,9 +226,8 @@ async fn restart_services() {
     } else {
         veld_core::helper::user_socket_path()
     };
-    let new_version = env!("CARGO_PKG_VERSION");
     output::print_info("Waiting for veld-helper to restart with the new binary...");
-    if wait_for_helper_version(&socket, new_version, std::time::Duration::from_secs(45)).await {
+    if wait_for_helper_version(&socket, target_version, std::time::Duration::from_secs(45)).await {
         output::print_success("veld-helper restarted and healthy.");
     } else {
         output::print_error(
