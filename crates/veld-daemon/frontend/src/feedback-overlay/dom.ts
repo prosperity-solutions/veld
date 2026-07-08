@@ -11,6 +11,7 @@ import { initArc, makeToolBtn, handleToolAction } from "./toolbar";
 import type { ArcItem } from "./arc-menu";
 import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead, applyPanelLayout, togglePanelMode, initPanelResize } from "./panel";
 import { sendAllGood } from "./listening";
+import { captureFullScreenshot } from "./screenshot";
 
 export function buildDOM(): void {
   initTooltip();
@@ -27,8 +28,31 @@ export function buildDOM(): void {
   appendGuarded(document.body, refs.componentTraceEl);
 
   // Screenshot selection rectangle (light DOM) — drawn on the backdrop.
+  // Four corner brackets give it the "viewfinder" look asked for instead of
+  // a bare dashed box; the huge box-shadow (see CSS) is the same spotlight
+  // trick as the hover-outline, dimming everything outside the selection.
   refs.screenshotRect = mkEl("div", "screenshot-rect");
+  (["tl", "tr", "bl", "br"] as const).forEach((corner) => {
+    refs.screenshotRect.appendChild(mkEl("span", "screenshot-corner screenshot-corner-" + corner));
+  });
   appendGuarded(document.body, refs.screenshotRect);
+
+  // Screenshot mode instruction banner (light DOM) — explicit, always-visible
+  // guidance instead of a single toast that scrolls off. Doubles as the
+  // "capture everything, no cropping" escape hatch.
+  refs.screenshotBanner = mkEl("div", "screenshot-banner");
+  refs.screenshotBanner.appendChild(
+    mkEl("span", "screenshot-banner-text", "Drag to select an area to capture"),
+  );
+  refs.screenshotFullBtn = mkEl("button", "screenshot-banner-btn", "Capture full screen");
+  refs.screenshotFullBtn.addEventListener("click", function (e) {
+    e.preventDefault();
+    e.stopPropagation();
+    captureFullScreenshot();
+  });
+  refs.screenshotBanner.appendChild(refs.screenshotFullBtn);
+  refs.screenshotBanner.appendChild(mkEl("span", "screenshot-banner-hint", "Esc to cancel"));
+  appendGuarded(document.body, refs.screenshotBanner);
 
   // Float container (shadow DOM) — anchor for the arc-menu engine. Zero-size,
   // translated to the bubble center; the engine builds its goo/glow/icon layers

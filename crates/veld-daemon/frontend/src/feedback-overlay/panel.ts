@@ -149,7 +149,53 @@ export function updateMarkReadBtn(): void {
   refs.markReadBtn.style.display = anyUnread ? "" : "none";
 }
 
+/** Snapshot of an in-progress reply draft, taken right before a re-render
+ *  destroys the textarea that holds it (e.g. an agent reply arriving over
+ *  the poll while the human is typing). Keyed by thread id so a draft never
+ *  leaks onto a different thread's box after navigating away. */
+interface DraftSnapshot {
+  threadId: string;
+  value: string;
+  selStart: number | null;
+  selEnd: number | null;
+  focused: boolean;
+}
+
+function captureDraft(): DraftSnapshot | null {
+  // Only the thread-detail view ever holds a reply textarea — skip the query
+  // entirely when the thread list is showing (the common case on a poll tick).
+  if (!getState().expandedThreadId) return null;
+  const ta = refs.panelBody.querySelector("textarea." + PREFIX + "textarea") as HTMLTextAreaElement | null;
+  if (!ta || !ta.value) return null;
+  const threadId = ta.dataset.threadId;
+  if (!threadId) return null;
+  return {
+    threadId,
+    value: ta.value,
+    selStart: ta.selectionStart,
+    selEnd: ta.selectionEnd,
+    // `document.activeElement` retargets across an open shadow boundary to
+    // the shadow *host*, never the focused descendant — the panel lives
+    // inside refs.shadow, so activeElement has to be read from there.
+    focused: refs.shadow.activeElement === ta,
+  };
+}
+
+function restoreDraft(draft: DraftSnapshot | null): void {
+  if (!draft) return;
+  const ta = refs.panelBody.querySelector(
+    "textarea." + PREFIX + "textarea[data-thread-id=\"" + draft.threadId + "\"]"
+  ) as HTMLTextAreaElement | null;
+  if (!ta) return;
+  ta.value = draft.value;
+  if (draft.focused) {
+    ta.focus();
+    try { ta.setSelectionRange(draft.selStart ?? draft.value.length, draft.selEnd ?? draft.value.length); } catch (_) { /* ignore */ }
+  }
+}
+
 export function renderPanel(): void {
+  const draft = captureDraft();
   refs.panelBody.innerHTML = "";
 
   const expandedId = getState().expandedThreadId;
@@ -164,6 +210,7 @@ export function renderPanel(): void {
       refs.panelHeadTitle.textContent = "Thread";
       refs.panelBody.classList.toggle(PREFIX + "panel-body-thread", thread.status === "open");
       renderThreadDetail(thread);
+      restoreDraft(draft);
       return;
     }
     dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
@@ -236,8 +283,14 @@ function renderThreadDetail(thread: Thread): void {
   if (thread.component_trace && thread.component_trace.length) {
     header.appendChild(makeCopyRow("", thread.component_trace.join(" > "), "panel-detail-trace"));
   }
-  if (thread.scope.type === "element" && thread.scope.selector) {
-    header.appendChild(makeCopyRow("", thread.scope.selector, "panel-detail-selector"));
+  if (thread.scope.type === "element") {
+    const scope = thread.scope;
+    if (scope.selector) header.appendChild(makeCopyRow("", scope.selector, "panel-detail-selector"));
+    if (scope.element_text) header.appendChild(makeCopyRow("", "“" + scope.element_text + "”", "panel-detail-selector"));
+    if (scope.source_file) {
+      const loc = scope.source_file + (scope.source_line != null ? ":" + scope.source_line : "");
+      header.appendChild(makeCopyRow("", loc, "panel-detail-selector"));
+    }
   }
 
   refs.panelBody.appendChild(header);
@@ -374,6 +427,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   textarea.className = PREFIX + "textarea";
   textarea.placeholder = "Reply...";
   textarea.rows = 2;
+  textarea.dataset.threadId = thread.id;
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");

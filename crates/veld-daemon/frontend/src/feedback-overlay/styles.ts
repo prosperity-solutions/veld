@@ -59,6 +59,12 @@ export const LIGHT_CSS = `
 }
 .veld-feedback-overlay-active { display: block; }
 .veld-feedback-overlay-crosshair { cursor: crosshair; }
+/* Screenshot mode: the frame is painted as a background-image with
+   background-size:contain (see screenshot.ts), so it can letterbox instead
+   of stretching when its aspect ratio doesn't match the viewport. This near-
+   opaque backing makes the letterbox bars read as an intentional frame edge
+   rather than the live page bleeding through. */
+.veld-feedback-overlay-frame { background-color: rgba(8,8,10,.92); }
 .veld-feedback-hover-outline {
   position: absolute;
   outline: 2px solid var(--vfl-accent);
@@ -87,10 +93,47 @@ export const LIGHT_CSS = `
   outline: 2px dashed var(--vfl-accent);
   outline-offset: 2px;
   background: rgba(100,100,100,.06);
+  /* Same spotlight trick as the hover-outline: dims everything outside the
+     drawn selection so it's unambiguous what will be captured. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   pointer-events: none;
   z-index: 999998;
   border-radius: 3px;
   display: none;
+}
+.veld-feedback-screenshot-corner {
+  position: absolute;
+  width: 16px; height: 16px;
+  border: 2px solid var(--vfl-accent);
+  pointer-events: none;
+}
+.veld-feedback-screenshot-corner-tl { top: -2px; left: -2px; border-right: none; border-bottom: none; }
+.veld-feedback-screenshot-corner-tr { top: -2px; right: -2px; border-left: none; border-bottom: none; }
+.veld-feedback-screenshot-corner-bl { bottom: -2px; left: -2px; border-right: none; border-top: none; }
+.veld-feedback-screenshot-corner-br { bottom: -2px; right: -2px; border-left: none; border-top: none; }
+.veld-feedback-screenshot-banner {
+  position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+  z-index: 1000000;
+  /* The banner sits above the drag surface, so a selection that starts under
+     it (e.g. capturing a page header near the top of the viewport) would
+     otherwise never reach the overlay's mousedown handler. Disable hit-
+     testing on the banner itself and re-enable it only on the button. */
+  pointer-events: none;
+  display: none; align-items: center; gap: 10px;
+  background: var(--vfl-bg); color: var(--vfl-text);
+  border: 1px solid var(--vfl-border); border-radius: 10px;
+  padding: 10px 14px;
+  font: 500 12px/1.4 var(--vfl-font);
+  box-shadow: 0 8px 30px rgba(0,0,0,.4);
+}
+.veld-feedback-screenshot-banner-show { display: flex; }
+.veld-feedback-screenshot-banner-text { white-space: nowrap; }
+.veld-feedback-screenshot-banner-hint { color: var(--vfl-text-muted); font-size: 11px; white-space: nowrap; }
+.veld-feedback-screenshot-banner-btn {
+  pointer-events: auto;
+  padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+  background: var(--vfl-accent); color: var(--vfl-bg);
+  font: 600 11px/1.4 var(--vfl-font); white-space: nowrap;
 }
 .veld-feedback-pin {
   position: absolute; z-index: 999998;

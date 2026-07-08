@@ -92,6 +92,8 @@ export function setupMockRefs() {
   refs.hoverOutline = document.createElement("div");
   refs.componentTraceEl = document.createElement("div");
   refs.screenshotRect = document.createElement("div");
+  refs.screenshotBanner = document.createElement("div");
+  refs.screenshotFullBtn = document.createElement("button");
 
   // Set up tooltip
   refs.tooltip = document.createElement("div");
