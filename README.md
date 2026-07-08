@@ -60,6 +60,11 @@ Both modes support the full feature set with one difference: unprivileged mode u
 
 To install a specific version: `VELD_VERSION=1.0.0 curl -fsSL https://veld.oss.life.li/get | bash`
 
+In containers or CI images without a working launchd/systemd, `veld setup` fails
+service registration on purpose (an unmanaged helper dies permanently on the next
+update). Set `VELD_ALLOW_UNMANAGED_HELPER=1` to let setup direct-spawn the helper
+anyway — it will not survive reboots or binary updates.
+
 ### Build from source
 
 ```sh

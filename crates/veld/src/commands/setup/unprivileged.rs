@@ -145,7 +145,7 @@ async fn install_unprivileged_helper() -> Result<String, anyhow::Error> {
     let via = if service_ok {
         "service registered and running"
     } else {
-        "started directly (service registration skipped)"
+        "started directly (service registration FAILED — helper will not survive reboots; re-run `veld setup unprivileged`)"
     };
     Ok(format!("veld-helper {via}, Caddy started"))
 }
@@ -158,9 +158,9 @@ async fn install_helper_launchagent(
     let home = dirs::home_dir().context("cannot determine home directory")?;
     let plist_dir = home.join("Library/LaunchAgents");
     std::fs::create_dir_all(&plist_dir).context("failed to create LaunchAgents directory")?;
-    let plist_path = plist_dir.join("dev.veld.helper.plist");
+    let plist_path = plist_dir.join(veld_core::setup::helper_plist_filename());
 
-    let label = "dev.veld.helper";
+    let label = veld_core::setup::HELPER_LABEL_MACOS;
     let plist = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
@@ -204,39 +204,54 @@ async fn install_helper_launchagent(
         .status()
         .await;
 
-    std::fs::write(&plist_path, &plist).context("failed to write helper LaunchAgent plist")?;
-
-    // Bootstrap the agent in the current user's GUI domain.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        Command::new("launchctl")
-            .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
-            .stdin(std::process::Stdio::null())
-            .status(),
+    // Same race as the privileged LaunchDaemon path: bootout returns before
+    // launchd finishes removing the job, and bootstrapping into that window
+    // fails with exit 5. Wait for the removal to drain first.
+    let _ = veld_core::setup::wait_for_launchd_job_removal(
+        &domain,
+        label,
+        std::time::Duration::from_secs(10),
     )
     .await;
 
-    match result {
-        Ok(Ok(status)) if status.success() => Ok(true),
-        Ok(Ok(status)) if status.code() == Some(37) => {
-            // Already loaded — kickstart to restart with new binary.
-            let _ = Command::new("launchctl")
-                .args(["kickstart", "-k", &domain_target])
-                .stdin(std::process::Stdio::null())
-                .status()
-                .await;
-            Ok(true)
+    std::fs::write(&plist_path, &plist).context("failed to write helper LaunchAgent plist")?;
+
+    // Bootstrap the agent in the current user's GUI domain with the shared
+    // race-safe choreography (retry-on-drain, kickstart last resort, legacy
+    // `load -w` fallback for headless sessions).
+    let outcome = match veld_core::setup::bootstrap_launchd_job(
+        &domain,
+        label,
+        &plist_path,
+        None,
+        true,
+    )
+    .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            tracing::warn!(error = %e, "helper LaunchAgent registration failed");
+            return Ok(false);
         }
-        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
-            // bootstrap failed — fall back to legacy `load` command.
-            let load_result = Command::new("launchctl")
-                .args(["load", "-w", &plist_path.to_string_lossy()])
-                .stdin(std::process::Stdio::null())
-                .status()
-                .await;
-            Ok(load_result.is_ok_and(|s| s.success()))
-        }
+    };
+
+    // Legacy `load -w` (headless SSH: no bootstrappable GUI domain) places the
+    // job where a gui/<uid> query may not see it — verifying there would
+    // mislabel a genuinely managed helper as unmanaged. The caller's socket
+    // check still validates it actually serves.
+    if outcome == veld_core::setup::BootstrapOutcome::LegacyLoaded {
+        return Ok(true);
     }
+
+    // Don't trust exit codes alone — confirm launchd reports the agent
+    // running. A false here sends the caller down the direct-spawn fallback,
+    // which is reported to the user as unmanaged.
+    Ok(veld_core::setup::wait_for_launchd_job_running(
+        &domain,
+        label,
+        std::time::Duration::from_secs(20),
+    )
+    .await)
 }
 
 /// Install veld-helper as a systemd user unit (Linux, no sudo needed).

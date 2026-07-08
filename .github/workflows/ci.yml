@@ -368,6 +368,27 @@ jobs:
           fi
 
           echo ""
+          echo "=== Re-run setup while helper is running (bootout/bootstrap race) ==="
+          # Regression test: re-running privileged setup used to race launchctl
+          # bootout against bootstrap, silently losing the launchd job and
+          # leaving an unmanaged orphan helper that died on the next update.
+          sudo $VELD setup privileged
+          sleep 2
+          if sudo launchctl print system/dev.veld.helper | grep -qE '^[[:space:]]*pid = [1-9]'; then
+            echo "Helper job still registered and running after re-setup"
+          else
+            echo "FAIL: helper launchd job lost after re-running setup"
+            exit 1
+          fi
+          $VELD doctor --json > /tmp/doctor-resetup.json 2>/dev/null || true
+          if grep -q "NOT managed" /tmp/doctor-resetup.json; then
+            echo "FAIL: doctor reports unmanaged helper after re-setup"
+            cat /tmp/doctor-resetup.json
+            exit 1
+          fi
+          echo "Re-setup race check PASSED"
+
+          echo ""
           echo "=== Uninstall (privileged) ==="
           sudo $VELD uninstall || echo "WARNING: uninstall returned non-zero"
 

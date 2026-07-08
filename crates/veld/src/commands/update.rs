@@ -51,6 +51,29 @@ pub async fn run() -> i32 {
             }
 
             output::print_info(&format!("New version available: {current} → {new_version}"));
+
+            // Privileged mode relies on the helper's own binary-change watcher
+            // plus launchd/systemd (KeepAlive + WatchPaths) to bring up the new
+            // version — restarting the root service from here would need sudo.
+            // Both mechanisms require the service to still be REGISTERED. A
+            // merely-unresponsive process behind an intact registration gets
+            // relaunched onto the new binary, so only the job being gone means
+            // the update truly can't self-apply. Check BEFORE installing so
+            // that's reported as the pre-existing problem it is, instead of a
+            // 45-second wait ending in a misleading "did not pick up the new
+            // binary". In unprivileged mode the installer bootstraps the
+            // LaunchAgent itself, so no pre-flight skip there.
+            let helper_dead_privileged = super::read_setup_mode().as_deref() == Some("privileged")
+                && !privileged_helper_serviceable().await;
+            if helper_dead_privileged {
+                output::print_error(
+                    "The veld-helper service is not registered with the service manager. The \
+                     update will install new binaries, but the helper cannot restart itself — \
+                     run `veld setup privileged` afterwards.",
+                    false,
+                );
+            }
+
             output::print_info("Installing update...");
 
             match veld_core::setup::perform_update(&new_version).await {
@@ -58,7 +81,7 @@ pub async fn run() -> i32 {
                     output::print_success(&format!("Updated to {new_version}."));
                     cleanup_stale_binaries();
                     output::print_info("Restarting services with new binaries...");
-                    restart_services(&new_version).await;
+                    restart_services(&new_version, helper_dead_privileged).await;
                     refresh_hammerspoon().await;
                     0
                 }
@@ -189,6 +212,29 @@ fn cleanup_stale_binaries() {
     }
 }
 
+/// Whether the privileged helper can pick up a new binary by itself: either
+/// its socket answers (live helper with a watcher), or the service manager
+/// still has it registered (launchd KeepAlive/WatchPaths or systemd
+/// Restart=always relaunch it onto the new binary even if the process is
+/// transiently down).
+async fn privileged_helper_serviceable() -> bool {
+    let socket = veld_core::helper::system_socket_path();
+    let client = veld_core::helper::HelperClient::new(&socket);
+    if client.status().await.is_ok() {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        // Only a definitive "no job" counts as unserviceable — a failed/timed
+        // out query (None) must not scare the user into re-running setup.
+        veld_core::setup::launchd_job_registered("system", veld_core::setup::HELPER_LABEL_MACOS)
+            .await
+            != Some(false)
+    } else {
+        veld_core::setup::systemd_pid_query(veld_core::setup::HELPER_SERVICE_LINUX, false).await
+            != Some(None)
+    }
+}
+
 /// Restart the helper/daemon so they run the newly installed binaries, then
 /// verify the helper actually came back healthy.
 ///
@@ -203,7 +249,7 @@ fn cleanup_stale_binaries() {
 /// compile-time version is the version we updated *from*. Comparing against
 /// that would invert the check (fail on every successful update, pass on a
 /// failed one).
-async fn restart_services(target_version: &str) {
+async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
     let mode = super::read_setup_mode();
 
     // Auto mode has no persistent service: stop the ephemeral helper so the
@@ -218,23 +264,36 @@ async fn restart_services(target_version: &str) {
         return;
     }
 
-    // Verify against the specific socket for this mode — not `connect()` (which
-    // falls through to the user socket and could latch onto a stale auto-helper
-    // while the privileged one is mid-restart).
-    let socket = if mode.as_deref() == Some("privileged") {
-        veld_core::helper::system_socket_path()
-    } else {
-        veld_core::helper::user_socket_path()
-    };
-    output::print_info("Waiting for veld-helper to restart with the new binary...");
-    if wait_for_helper_version(&socket, target_version, std::time::Duration::from_secs(45)).await {
-        output::print_success("veld-helper restarted and healthy.");
-    } else {
+    if helper_dead_privileged {
+        // Already reported before the install; a dead privileged helper has no
+        // watcher and nothing here can restart it without sudo, so waiting 45s
+        // for its version to flip would only produce a second, misleading error.
         output::print_error(
-            "veld-helper did not pick up the new binary automatically. \
-             Run `veld doctor`; if it stays down, re-run `veld setup`.",
+            "Skipping helper restart check — the helper service was not registered before the \
+             update. Run `veld setup privileged` to start it on the new version.",
             false,
         );
+    } else {
+        // Verify against the specific socket for this mode — not `connect()` (which
+        // falls through to the user socket and could latch onto a stale auto-helper
+        // while the privileged one is mid-restart).
+        let socket = if mode.as_deref() == Some("privileged") {
+            veld_core::helper::system_socket_path()
+        } else {
+            veld_core::helper::user_socket_path()
+        };
+        output::print_info("Waiting for veld-helper to restart with the new binary...");
+        if wait_for_helper_version(&socket, target_version, std::time::Duration::from_secs(45))
+            .await
+        {
+            output::print_success("veld-helper restarted and healthy.");
+        } else {
+            output::print_error(
+                "veld-helper did not pick up the new binary automatically. \
+                 Run `veld doctor`; if it stays down, re-run `veld setup`.",
+                false,
+            );
+        }
     }
 
     // The daemon is a user-level service (LaunchAgent / systemd --user) that the

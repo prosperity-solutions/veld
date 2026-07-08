@@ -617,6 +617,13 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .status()
                 .await;
 
+            // Same bootout/bootstrap race as the helper: bootout returns
+            // before the job is gone, and bootstrapping into that window
+            // fails. Wait for the removal to drain.
+            let _ =
+                wait_for_launchd_job_removal(&domain, label, std::time::Duration::from_secs(10))
+                    .await;
+
             std::fs::write(&plist_path, &plist)
                 .context("failed to write daemon LaunchAgent plist")?;
 
@@ -629,49 +636,34 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
                 .status()
                 .await;
 
-            // Load the agent as the real user via `launchctl asuser <uid>`.
-            // This works even when the current process is root.
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                Command::new("launchctl")
-                    .args([
-                        "asuser",
-                        &real_uid,
-                        "launchctl",
-                        "bootstrap",
-                        &domain,
-                        &plist_path.to_string_lossy(),
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .status(),
-            )
-            .await;
-            match result {
-                Ok(Ok(status)) if status.success() => {}
-                Ok(Ok(status)) if status.code() == Some(37) => {
-                    // Already loaded — kickstart to restart with new binary.
-                    let _ = Command::new("launchctl")
-                        .args(["kickstart", "-k", &domain_target])
-                        .stdin(std::process::Stdio::null())
-                        .status()
-                        .await;
+            // Load the agent as the real user via `launchctl asuser <uid>`
+            // (works even when the current process is root), with the shared
+            // race-safe choreography: retry-on-drain, kickstart last resort,
+            // legacy `load -w` fallback for sessions without a GUI domain
+            // (CI/SSH). Soft-fail: the daemon is non-critical for setup and
+            // the verification below reports a dead one.
+            match bootstrap_launchd_job(&domain, label, &plist_path, Some(&real_uid), true).await {
+                Ok(BootstrapOutcome::Bootstrapped) | Ok(BootstrapOutcome::LegacyLoaded) => {}
+                Ok(BootstrapOutcome::KickstartedStale) => {
+                    eprintln!(
+                        "  Warning: could not load the new veld-daemon service definition; \
+                         restarted the existing registration instead."
+                    );
                 }
-                _ => {
-                    // bootstrap failed (e.g. no GUI domain in CI/SSH).
-                    // Fall back to `launchctl asuser <uid> launchctl load`.
-                    let _ = Command::new("launchctl")
-                        .args([
-                            "asuser",
-                            &real_uid,
-                            "launchctl",
-                            "load",
-                            "-w",
-                            &plist_path.to_string_lossy(),
-                        ])
-                        .stdin(std::process::Stdio::null())
-                        .status()
-                        .await;
+                Err(e) => {
+                    eprintln!("  Warning: could not register veld-daemon with launchd: {e:#}");
                 }
+            }
+
+            // Soft verification only: CI/SSH sessions have no GUI domain, so a
+            // missing job is expected there — but on a real machine this makes
+            // a silently-dead daemon visible instead of reporting success.
+            if !wait_for_launchd_job_running(&domain, label, std::time::Duration::from_secs(10))
+                .await
+            {
+                eprintln!(
+                    "  Warning: launchd does not report veld-daemon running; run `veld doctor` to check."
+                );
             }
         }
         "linux" => {
@@ -691,6 +683,15 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             // restart to pick up new binary on upgrades.
             let _ = run_cmd("systemctl", &["--user", "restart", "veld-daemon"]).await;
             run_cmd("systemctl", &["--user", "enable", "--now", "veld-daemon"]).await?;
+
+            // Soft verification, mirroring the macOS branch.
+            if !wait_for_systemd_running("veld-daemon", true, std::time::Duration::from_secs(10))
+                .await
+            {
+                eprintln!(
+                    "  Warning: systemd does not report veld-daemon running; run `veld doctor` to check."
+                );
+            }
         }
         other => anyhow::bail!("unsupported OS: {other}"),
     }
@@ -730,47 +731,71 @@ async fn install_helper_inner(
 ) -> Result<StepResult, anyhow::Error> {
     let socket = crate::helper::system_socket_path();
 
-    // Try to register as a system service. If launchctl/systemctl fails
-    // (e.g. in CI), fall back to starting the helper directly.
-    let service_ok = match std::env::consts::OS {
-        "macos" => install_helper_macos(&veld_helper_bin, caddy_bin.as_deref())
-            .await
-            .is_ok(),
-        "linux" => install_helper_linux(&veld_helper_bin, caddy_bin.as_deref())
-            .await
-            .is_ok(),
+    // Register as a system service. No silent direct-spawn fallback here: a
+    // directly-spawned root helper has no service manager behind it, so it
+    // dies permanently on the next binary update or reboot — and it can
+    // split-brain against a registered KeepAlive job that is still starting.
+    // That orphan state is exactly the incident this code path used to cause.
+    // `VELD_ALLOW_UNMANAGED_HELPER=1` restores the old fallback for
+    // environments with no working service manager (e.g. containers).
+    let service_result = match std::env::consts::OS {
+        "macos" => install_helper_macos(&veld_helper_bin, caddy_bin.as_deref()).await,
+        "linux" => install_helper_linux(&veld_helper_bin, caddy_bin.as_deref()).await,
         other => anyhow::bail!("unsupported OS: {other}"),
     };
+    let allow_unmanaged = matches!(
+        std::env::var("VELD_ALLOW_UNMANAGED_HELPER")
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "1" | "true" | "yes"
+    );
+    let service_ok = match service_result {
+        Ok(()) => true,
+        Err(e) if allow_unmanaged => {
+            eprintln!("  Warning: service registration failed: {e:#}");
+            eprintln!("  Starting unmanaged helper (VELD_ALLOW_UNMANAGED_HELPER=1).");
+            let _child = std::process::Command::new(&veld_helper_bin)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .context("failed to spawn veld-helper directly")?;
+            false
+        }
+        Err(e) => {
+            return Err(e.context(
+                "veld-helper service registration failed — an unmanaged helper would die \
+                 permanently on the next update, so setup stops here. Re-run `veld setup`; \
+                 set VELD_ALLOW_UNMANAGED_HELPER=1 to force a direct spawn anyway",
+            ));
+        }
+    };
 
-    // Give the service a moment to start.
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-
-    // Check if the helper is reachable.
+    // Wait for the helper (whether launchd/systemd just started it, or the
+    // unmanaged spawn above) to serve its socket. 40×250ms = 10s: the service
+    // manager already confirmed the process is up, so this only covers socket
+    // bind + permission setup, which is near-instant when healthy.
     let client = HelperClient::new(&socket);
-    let helper_up = client.status().await.is_ok();
-
+    let mut helper_up = false;
+    for _ in 0..40 {
+        if client.status().await.is_ok() {
+            helper_up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
     if !helper_up {
-        // Service registration may have failed or the daemon hasn't started
-        // yet. Start the helper directly as a background process.
-        tracing::info!("helper not reachable via service manager, starting directly");
-        let _child = std::process::Command::new(&veld_helper_bin)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .context("failed to spawn veld-helper directly")?;
-
-        // Wait for the socket to appear.
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-            if client.status().await.is_ok() {
-                break;
-            }
+        if service_ok {
+            anyhow::bail!(
+                "veld-helper service is registered but its socket at {} is not answering",
+                socket.display()
+            );
         }
-
-        if client.status().await.is_err() {
-            anyhow::bail!("veld-helper failed to start — socket not reachable");
-        }
+        anyhow::bail!(
+            "directly-spawned veld-helper did not answer on its socket at {}",
+            socket.display()
+        );
     }
 
     // Start Caddy via the helper (with timeout — Caddy startup waits for
@@ -788,7 +813,7 @@ async fn install_helper_inner(
     let via = if service_ok {
         "service registered and running"
     } else {
-        "started directly (service registration skipped)"
+        "started directly (service registration FAILED — helper will not survive reboots or updates; re-run `veld setup`)"
     };
     Ok(StepResult::success(format!(
         "veld-helper {via}, Caddy started"
@@ -796,8 +821,12 @@ async fn install_helper_inner(
 }
 
 async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
-    let plist_path = Path::new("/Library/LaunchDaemons/dev.veld.helper.plist");
-    let label = "dev.veld.helper";
+    let plist_path_buf = PathBuf::from(format!(
+        "/Library/LaunchDaemons/{}",
+        helper_plist_filename()
+    ));
+    let plist_path = plist_path_buf.as_path();
+    let label = HELPER_LABEL_MACOS;
 
     // Build ProgramArguments with optional --caddy-bin.
     let mut program_args = format!("        <string>{}</string>", bin.display());
@@ -831,6 +860,9 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <!-- KeepAlive must stay unconditionally true: the helper self-updates by
+         exit(0) from its binary watcher and relies on launchd relaunching it.
+         A SuccessfulExit=false variant would leave it dead after every update. -->
     <key>KeepAlive</key>
     <true/>
     <key>WatchPaths</key>
@@ -859,44 +891,366 @@ async fn install_helper_macos(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
         .status()
         .await;
 
+    // `bootout` can return before launchd finishes tearing the job down.
+    // Bootstrapping into that window fails with exit 5, and the kickstart
+    // fallback then targets a registration that is being removed — leaving no
+    // service loaded at all while every error is swallowed. Wait until the job
+    // is actually gone before re-registering.
+    let removed =
+        wait_for_launchd_job_removal("system", label, std::time::Duration::from_secs(10)).await;
+    if !removed {
+        tracing::warn!("old {label} job still registered after bootout; bootstrap may conflict");
+    }
+
     std::fs::write(plist_path, plist).context("failed to write helper LaunchDaemon plist")?;
 
-    // Register and start via the modern `bootstrap` API.
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
-        Command::new("launchctl")
-            .args(["bootstrap", "system", &plist_path.to_string_lossy()])
-            .stdin(std::process::Stdio::null())
-            .status(),
-    )
-    .await;
+    match bootstrap_launchd_job("system", label, plist_path, None, false).await? {
+        BootstrapOutcome::Bootstrapped | BootstrapOutcome::LegacyLoaded => {}
+        BootstrapOutcome::KickstartedStale => {
+            // User-visible, not just a trace log: the running job uses the OLD
+            // plist until the next successful setup.
+            eprintln!(
+                "  Warning: could not load the new veld-helper service definition; restarted \
+                 the existing registration instead. Re-run `veld setup privileged` if helper \
+                 settings changed."
+            );
+        }
+    }
 
-    match result {
-        Ok(Ok(status)) if status.success() => Ok(()),
-        Ok(Ok(status)) => {
-            // bootstrap returns 37 if already loaded, or 5 (I/O error) if the
-            // service is still registered from a previous install and the
-            // bootout hasn't fully completed. In both cases, kickstart the
-            // existing service instead.
-            let code = status.code().unwrap_or(-1);
-            if code == 37 || code == 5 {
-                let _ = Command::new("launchctl")
-                    .args(["kickstart", "-k", &format!("system/{label}")])
-                    .stdin(std::process::Stdio::null())
-                    .status()
-                    .await;
-                Ok(())
-            } else {
-                anyhow::bail!("launchctl bootstrap failed for veld-helper (exit {})", code)
+    // Don't trust bootstrap/kickstart exit codes alone: verify launchd actually
+    // has the job registered and running before reporting success. 20s covers
+    // a slow first launch (Gatekeeper verification of the freshly-signed
+    // binary) without stalling setup badly when genuinely broken.
+    if !wait_for_launchd_job_running("system", label, std::time::Duration::from_secs(20)).await {
+        // Registered-but-slow is a transient (launchd will still start it),
+        // and an inconclusive query proves nothing — only a definitive
+        // "no job" is a hard failure.
+        if launchd_job_registered("system", label).await == Some(false) {
+            anyhow::bail!(
+                "veld-helper service was bootstrapped but launchd does not report it running"
+            );
+        }
+        eprintln!(
+            "  Warning: veld-helper is registered but launchd has not reported it running \
+             yet; run `veld doctor` to confirm it came up."
+        );
+    }
+    Ok(())
+}
+
+/// How a launchd job ended up loaded (see [`bootstrap_launchd_job`]).
+#[derive(Debug, PartialEq)]
+pub enum BootstrapOutcome {
+    /// The new plist was bootstrapped cleanly.
+    Bootstrapped,
+    /// The new plist could not be loaded; the pre-existing registration was
+    /// kickstarted instead and may run a STALE service definition.
+    KickstartedStale,
+    /// Registered via legacy `launchctl load -w` (no bootstrap-capable
+    /// domain, e.g. headless CI/SSH sessions).
+    LegacyLoaded,
+}
+
+/// Load-and-start a launchd job from `plist_path` with the full race-safe
+/// choreography this codebase requires: bootstrap → on exit 5/37 re-drain the
+/// old registration and retry (loads the NEW plist) → kickstart the surviving
+/// registration only as a last resort → optionally fall back to legacy
+/// `load -w` for sessions without a bootstrap-capable domain.
+///
+/// Callers must have written the plist and booted out + drained the old job
+/// first (`wait_for_launchd_job_removal`). `asuser_uid` wraps bootstrap/load
+/// in `launchctl asuser <uid>` so a root process can load user-domain agents.
+pub async fn bootstrap_launchd_job(
+    domain: &str,
+    label: &str,
+    plist_path: &Path,
+    asuser_uid: Option<&str>,
+    legacy_load_fallback: bool,
+) -> Result<BootstrapOutcome, anyhow::Error> {
+    let plist_str = plist_path.to_string_lossy().to_string();
+    let bootstrap_args: Vec<String> = match asuser_uid {
+        Some(uid) => vec![
+            "asuser".into(),
+            uid.into(),
+            "launchctl".into(),
+            "bootstrap".into(),
+            domain.into(),
+            plist_str.clone(),
+        ],
+        None => vec!["bootstrap".into(), domain.into(), plist_str.clone()],
+    };
+
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            Command::new("launchctl")
+                .args(&bootstrap_args)
+                .stdin(std::process::Stdio::null())
+                .status(),
+        )
+        .await;
+
+        let code = match result {
+            Ok(Ok(status)) if status.success() => return Ok(BootstrapOutcome::Bootstrapped),
+            Ok(Ok(status)) => status.code().unwrap_or(-1),
+            Ok(Err(e)) => return Err(e.into()),
+            Err(_) => anyhow::bail!("launchctl bootstrap timed out for {label}"),
+        };
+
+        // 37 = already loaded; 5 = I/O error from a registration still
+        // draining out of launchd. Both can clear once the old job is gone.
+        if (code == 37 || code == 5) && attempt == 1 {
+            let _ = wait_for_launchd_job_removal(domain, label, std::time::Duration::from_secs(5))
+                .await;
+            continue;
+        }
+        if code == 37 || code == 5 {
+            tracing::warn!(
+                "bootstrap still failing (exit {code}) for {label}; kickstarting the existing \
+                 registration (may run a stale plist until the next setup)"
+            );
+            let kick = Command::new("launchctl")
+                .args(["kickstart", "-k", &format!("{domain}/{label}")])
+                .stdin(std::process::Stdio::null())
+                .status()
+                .await;
+            if kick.map(|s| s.success()).unwrap_or(false) {
+                return Ok(BootstrapOutcome::KickstartedStale);
+            }
+            if !legacy_load_fallback {
+                anyhow::bail!(
+                    "launchctl bootstrap failed (exit {code}) and kickstart fallback also failed for {label}"
+                );
+            }
+            // Fall through to legacy load: a missing GUI domain (headless
+            // CI/SSH) also surfaces as exit 5, where kickstart has nothing to
+            // target but `load -w` can still register the agent.
+        }
+
+        // Optionally fall back to legacy `load -w` (headless sessions where
+        // the target domain can't be bootstrapped).
+        if legacy_load_fallback {
+            let load_args: Vec<String> = match asuser_uid {
+                Some(uid) => vec![
+                    "asuser".into(),
+                    uid.into(),
+                    "launchctl".into(),
+                    "load".into(),
+                    "-w".into(),
+                    plist_str.clone(),
+                ],
+                None => vec!["load".into(), "-w".into(), plist_str.clone()],
+            };
+            let load = Command::new("launchctl")
+                .args(&load_args)
+                .stdin(std::process::Stdio::null())
+                .status()
+                .await;
+            if load.map(|s| s.success()).unwrap_or(false) {
+                return Ok(BootstrapOutcome::LegacyLoaded);
             }
         }
-        Ok(Err(e)) => Err(e.into()),
-        Err(_) => anyhow::bail!("launchctl bootstrap timed out for veld-helper"),
+        anyhow::bail!("launchctl bootstrap failed for {label} (exit {code})");
     }
 }
 
+/// Poll `launchctl print <domain>/<label>` until it no longer finds the job
+/// (bootout finished), or the timeout elapses. Returns true if the job is gone.
+pub async fn wait_for_launchd_job_removal(
+    domain: &str,
+    label: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        // Only a clean "not found" proves removal; a failed/timed-out query
+        // proves nothing, so keep polling until the deadline.
+        if launchd_job_registered(domain, label).await == Some(false) {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Whether launchd has a job registered under `domain/label` — `Some(true)`
+/// even for a registered-but-not-running job (contrast [`launchd_job_pid`],
+/// which requires a live pid). `None` means the query itself failed or timed
+/// out ([`SERVICE_QUERY_TIMEOUT`]) and proves nothing — callers must not
+/// treat that as "job absent" (a wedged launchctl would otherwise read as an
+/// orphaned helper).
+pub async fn launchd_job_registered(domain: &str, label: &str) -> Option<bool> {
+    let status = tokio::time::timeout(
+        SERVICE_QUERY_TIMEOUT,
+        Command::new("launchctl")
+            .args(["print", &format!("{domain}/{label}")])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status(),
+    )
+    .await;
+    match status {
+        Ok(Ok(s)) => Some(s.success()),
+        _ => None,
+    }
+}
+
+/// Poll systemd until `service` reports a running MainPID, or the timeout
+/// elapses. `user_unit` selects the `--user` manager.
+pub async fn wait_for_systemd_running(
+    service: &str,
+    user_unit: bool,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if systemd_main_pid_in(service, user_unit).await.is_some() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Poll `launchctl print <domain>/<label>` until the job reports a running
+/// pid, or the timeout elapses.
+pub async fn wait_for_launchd_job_running(
+    domain: &str,
+    label: &str,
+    timeout: std::time::Duration,
+) -> bool {
+    let start = std::time::Instant::now();
+    loop {
+        if launchd_job_pid(domain, label).await.is_some() {
+            return true;
+        }
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// launchd label of the helper on macOS (system LaunchDaemon in privileged
+/// mode, user LaunchAgent in unprivileged mode). The helper's binary watcher,
+/// doctor's managed-check, the plists, and uninstall all key on this — a
+/// rename must change every consumer atomically or the helper stops
+/// recognising itself as managed and auto-update silently dies. Shell copies
+/// exist in `install.sh` and `.github/workflows/ci.yml`; update those in
+/// lockstep.
+pub const HELPER_LABEL_MACOS: &str = "dev.veld.helper";
+
+/// systemd unit name of the helper on Linux. Same lockstep rules as
+/// [`HELPER_LABEL_MACOS`].
+pub const HELPER_SERVICE_LINUX: &str = "veld-helper";
+
+/// Filename of the helper's launchd plist (shared by the system LaunchDaemon
+/// and user LaunchAgent installs), derived from the label so the two cannot
+/// drift apart.
+pub fn helper_plist_filename() -> String {
+    format!("{HELPER_LABEL_MACOS}.plist")
+}
+
+/// Upper bound on a single launchctl/systemctl query. These are queried from
+/// polling loops, `veld doctor`, and the helper's own binary watcher — a
+/// wedged service manager must degrade to "unknown", never hang the caller.
+pub const SERVICE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The MainPID systemd reports for a service, if it exists and is running.
+/// `MainPID=0` means not running. `user_unit` selects `systemctl --user`.
+pub async fn systemd_main_pid(service: &str) -> Option<u32> {
+    systemd_main_pid_in(service, false).await
+}
+
+/// See [`systemd_main_pid`]; `user_unit` selects the `--user` manager.
+pub async fn systemd_main_pid_in(service: &str, user_unit: bool) -> Option<u32> {
+    systemd_pid_query(service, user_unit).await.flatten()
+}
+
+/// Three-state systemd query: `None` = systemctl failed/timed out (proves
+/// nothing), `Some(None)` = query succeeded but the unit is not running
+/// (MainPID=0), `Some(Some(pid))` = running. Callers that need to tell "unit
+/// down" apart from "can't tell" (e.g. doctor's orphan check) must use this
+/// instead of the flattened [`systemd_main_pid_in`].
+pub async fn systemd_pid_query(service: &str, user_unit: bool) -> Option<Option<u32>> {
+    let mut args = vec!["show", "-p", "MainPID", "--value", service];
+    if user_unit {
+        args.insert(0, "--user");
+    }
+    let out = tokio::time::timeout(
+        SERVICE_QUERY_TIMEOUT,
+        Command::new("systemctl")
+            .args(&args)
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(parse_systemd_main_pid(&String::from_utf8_lossy(
+        &out.stdout,
+    )))
+}
+
+/// Parse `systemctl show -p MainPID --value` output into a running pid.
+/// `0` means the unit exists but is not running.
+pub fn parse_systemd_main_pid(output: &str) -> Option<u32> {
+    output.trim().parse().ok().filter(|&pid: &u32| pid != 0)
+}
+
+/// The pid launchd reports for a job in `domain` (e.g. `system` or
+/// `gui/501`), if the job exists and is running.
+pub async fn launchd_job_pid(domain: &str, label: &str) -> Option<u32> {
+    let out = tokio::time::timeout(
+        SERVICE_QUERY_TIMEOUT,
+        Command::new("launchctl")
+            .args(["print", &format!("{domain}/{label}")])
+            .stdin(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_launchctl_pid(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The pid launchd reports for a system-domain job, if the job exists and is
+/// running.
+pub async fn macos_job_pid(label: &str) -> Option<u32> {
+    launchd_job_pid("system", label).await
+}
+
+/// Extract the running pid from `launchctl print` output (the `pid = N`
+/// line). A registered-but-not-running job (no pid line, or `pid = 0`) is
+/// `None` — mirrors the `MainPID=0` filter for systemd.
+pub fn parse_launchctl_pid(output: &str) -> Option<u32> {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("pid = ") {
+            return rest.trim().parse().ok().filter(|&pid| pid != 0);
+        }
+    }
+    None
+}
+
 async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<(), anyhow::Error> {
-    let unit_path = Path::new("/etc/systemd/system/veld-helper.service");
+    let unit_path_buf = PathBuf::from(format!(
+        "/etc/systemd/system/{HELPER_SERVICE_LINUX}.service"
+    ));
+    let unit_path = unit_path_buf.as_path();
     let mut exec_start = bin.display().to_string();
     if let Some(caddy) = caddy_bin {
         exec_start.push_str(&format!(" --caddy-bin {}", caddy.display()));
@@ -914,8 +1268,20 @@ async fn install_helper_linux(bin: &Path, caddy_bin: Option<&Path>) -> Result<()
 
     run_cmd("systemctl", &["daemon-reload"]).await?;
     // restart (not just enable) to pick up new binary on upgrades.
-    let _ = run_cmd("systemctl", &["restart", "veld-helper"]).await;
-    run_cmd("systemctl", &["enable", "--now", "veld-helper"]).await?;
+    let _ = run_cmd("systemctl", &["restart", HELPER_SERVICE_LINUX]).await;
+    run_cmd("systemctl", &["enable", "--now", HELPER_SERVICE_LINUX]).await?;
+
+    // Mirror the macOS path: don't trust exit codes alone, verify systemd
+    // actually reports the service running.
+    if !wait_for_systemd_running(
+        HELPER_SERVICE_LINUX,
+        false,
+        std::time::Duration::from_secs(20),
+    )
+    .await
+    {
+        anyhow::bail!("veld-helper service was enabled but systemd does not report it running");
+    }
     Ok(())
 }
 
@@ -1023,18 +1389,24 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     match std::env::consts::OS {
         "macos" => {
             // Stop and remove helper (system daemon).
-            let helper_plist = "/Library/LaunchDaemons/dev.veld.helper.plist";
+            let helper_plist = format!("/Library/LaunchDaemons/{}", helper_plist_filename());
             let _ = Command::new("launchctl")
-                .args(["bootout", "system/dev.veld.helper"])
+                .args(["bootout", &format!("system/{HELPER_LABEL_MACOS}")])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .await;
-            let _ = std::fs::remove_file(helper_plist);
+            let _ = std::fs::remove_file(&helper_plist);
 
             // Stop and remove daemon (user agent). Use resolve_real_user_macos
             // so uninstall works correctly when running under sudo.
             if let Ok((_user, uid, home)) = resolve_real_user_macos() {
                 let _ = Command::new("launchctl")
                     .args(["bootout", &format!("gui/{uid}/dev.veld.daemon")])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status()
                     .await;
                 let daemon_plist = home.join("Library/LaunchAgents/dev.veld.daemon.plist");
@@ -1042,24 +1414,30 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
                 // Stop and remove user-level helper LaunchAgent (unprivileged mode).
                 let _ = Command::new("launchctl")
-                    .args(["bootout", &format!("gui/{uid}/dev.veld.helper")])
+                    .args(["bootout", &format!("gui/{uid}/{HELPER_LABEL_MACOS}")])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status()
                     .await;
-                let helper_agent_plist = home.join("Library/LaunchAgents/dev.veld.helper.plist");
+                let helper_agent_plist = home
+                    .join("Library/LaunchAgents")
+                    .join(helper_plist_filename());
                 let _ = std::fs::remove_file(&helper_agent_plist);
             }
         }
         "linux" => {
             // Stop and disable helper (system service).
+            let helper_unit = format!("{HELPER_SERVICE_LINUX}.service");
             let _ = Command::new("systemctl")
-                .args(["stop", "veld-helper"])
+                .args(["stop", HELPER_SERVICE_LINUX])
                 .status()
                 .await;
             let _ = Command::new("systemctl")
-                .args(["disable", "veld-helper"])
+                .args(["disable", HELPER_SERVICE_LINUX])
                 .status()
                 .await;
-            let _ = std::fs::remove_file("/etc/systemd/system/veld-helper.service");
+            let _ = std::fs::remove_file(format!("/etc/systemd/system/{helper_unit}"));
 
             // Stop and disable daemon (user service).
             let _ = Command::new("systemctl")
@@ -1075,14 +1453,15 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
 
                 // Stop and remove user-level helper service (unprivileged mode).
                 let _ = Command::new("systemctl")
-                    .args(["--user", "stop", "veld-helper"])
+                    .args(["--user", "stop", HELPER_SERVICE_LINUX])
                     .status()
                     .await;
                 let _ = Command::new("systemctl")
-                    .args(["--user", "disable", "veld-helper"])
+                    .args(["--user", "disable", HELPER_SERVICE_LINUX])
                     .status()
                     .await;
-                let _ = std::fs::remove_file(home.join(".config/systemd/user/veld-helper.service"));
+                let _ =
+                    std::fs::remove_file(home.join(format!(".config/systemd/user/{helper_unit}")));
             }
         }
         _ => {}
@@ -1506,4 +1885,55 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_launchctl_pid, parse_systemd_main_pid};
+
+    #[test]
+    fn launchctl_pid_running_job() {
+        let out = "system/dev.veld.helper = {\n\tactive count = 1\n\tpath = /Library/LaunchDaemons/dev.veld.helper.plist\n\tstate = running\n\n\tprogram = /Users/x/.local/lib/veld/veld-helper\n\tpid = 48490\n\truns = 2\n}\n";
+        assert_eq!(parse_launchctl_pid(out), Some(48490));
+    }
+
+    #[test]
+    fn launchctl_pid_zero_is_not_running() {
+        assert_eq!(parse_launchctl_pid("\tpid = 0\n"), None);
+    }
+
+    #[test]
+    fn launchctl_pid_missing_line_is_not_running() {
+        let out = "system/dev.veld.helper = {\n\tstate = not running\n\tlast exit code = 0\n}\n";
+        assert_eq!(parse_launchctl_pid(out), None);
+    }
+
+    #[test]
+    fn launchctl_pid_garbage_is_none() {
+        assert_eq!(parse_launchctl_pid("pid = abc\n"), None);
+        assert_eq!(parse_launchctl_pid(""), None);
+    }
+
+    #[test]
+    fn launchctl_pid_ignores_other_pid_like_lines() {
+        // "spawn pid" style lines must not match the `pid = ` prefix check.
+        let out = "\tspawn pid = 99\n\tpid = 1234\n";
+        assert_eq!(parse_launchctl_pid(out), Some(1234));
+    }
+
+    #[test]
+    fn systemd_main_pid_running() {
+        assert_eq!(parse_systemd_main_pid("1234\n"), Some(1234));
+    }
+
+    #[test]
+    fn systemd_main_pid_zero_is_not_running() {
+        assert_eq!(parse_systemd_main_pid("0\n"), None);
+    }
+
+    #[test]
+    fn systemd_main_pid_garbage_is_none() {
+        assert_eq!(parse_systemd_main_pid(""), None);
+        assert_eq!(parse_systemd_main_pid("not-a-pid"), None);
+    }
 }

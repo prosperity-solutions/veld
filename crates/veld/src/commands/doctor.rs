@@ -62,6 +62,22 @@ struct Check {
     label: String,
 }
 
+/// The real user's uid — `SUDO_UID` when running under sudo (the services
+/// live in the invoking user's gui domain, not root's), else `id -u`.
+fn current_uid() -> Option<String> {
+    if let Ok(uid) = std::env::var("SUDO_UID") {
+        if !uid.is_empty() {
+            return Some(uid);
+        }
+    }
+    let out = std::process::Command::new("id").arg("-u").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!uid.is_empty()).then_some(uid)
+}
+
 struct Extension {
     name: String,
     status: String,
@@ -248,6 +264,90 @@ impl Diagnostics {
 
     // -- Checks --------------------------------------------------------------
 
+    /// Verify the mode-appropriate helper is actually owned by its service
+    /// manager (launchd/systemd), not an unmanaged direct-spawned process.
+    /// Three-state: pid match → pass; job absent or pid mismatch → fail
+    /// (orphan); query failure/timeout → no check emitted, since a transient
+    /// launchctl/systemctl hiccup must not tell users to redo setup.
+    async fn check_helper_managed(&mut self, privileged: bool) {
+        let socket = if privileged {
+            veld_core::helper::system_socket_path()
+        } else {
+            veld_core::helper::user_socket_path()
+        };
+        let Ok(client) = veld_core::helper::HelperClient::connect_to(&socket).await else {
+            return; // helper down — already reported by the socket check
+        };
+        let Some(socket_pid) = client
+            .status()
+            .await
+            .ok()
+            .and_then(|r| r.data)
+            .and_then(|d| d.get("helper_pid").and_then(|v| v.as_u64()))
+        else {
+            return; // pre-`helper_pid` helper — can't verify
+        };
+
+        let verdict = if cfg!(target_os = "macos") {
+            let label = veld_core::setup::HELPER_LABEL_MACOS;
+            let domain = if privileged {
+                "system".to_string()
+            } else {
+                let Some(uid) = current_uid() else { return };
+                format!("gui/{uid}")
+            };
+            // Job absent is the orphan signal; distinguish it from a wedged
+            // launchctl (query returns None) which proves nothing.
+            match veld_core::setup::launchd_job_pid(&domain, label).await {
+                Some(pid) => Some(pid == socket_pid as u32),
+                // In unprivileged mode "no job in gui/<uid>" is NOT proof of an
+                // orphan: a legacy `load -w` agent (headless-session fallback)
+                // is genuinely managed but invisible to that query. Only the
+                // system domain gives a definitive answer.
+                None if !privileged => None,
+                None => match veld_core::setup::launchd_job_registered(&domain, label).await {
+                    Some(false) => Some(false), // no job at all: unmanaged orphan
+                    // Registered without readable pid, or query failed/timed
+                    // out — inconclusive either way.
+                    Some(true) | None => None,
+                },
+            }
+            .map(|m| (m, "launchd"))
+        } else {
+            // Same three-state on Linux: `systemctl show` succeeding with
+            // MainPID=0 means the unit exists but is NOT running this helper —
+            // orphan. Only a failed/timed-out query is inconclusive.
+            match veld_core::setup::systemd_pid_query(
+                veld_core::setup::HELPER_SERVICE_LINUX,
+                !privileged,
+            )
+            .await
+            {
+                Some(Some(pid)) => Some(pid == socket_pid as u32),
+                Some(None) => Some(false),
+                None => None,
+            }
+            .map(|m| (m, "systemd"))
+        };
+
+        let Some((managed, manager)) = verdict else {
+            return;
+        };
+        let setup_cmd = if privileged {
+            "veld setup privileged"
+        } else {
+            "veld setup unprivileged"
+        };
+        self.checks.push(Check {
+            pass: managed,
+            label: if managed {
+                format!("Helper managed by {manager}")
+            } else {
+                format!("Helper running but NOT managed by {manager} — run `{setup_cmd}`")
+            },
+        });
+    }
+
     async fn gather_checks(&mut self) {
         // 1. Helper socket reachable
         let helper_ok = veld_core::helper::HelperClient::connect().await.is_ok();
@@ -260,11 +360,30 @@ impl Diagnostics {
             },
         });
 
-        // Determine HTTPS port for later checks
-        let https_port: u16 = if let Ok(client) = veld_core::helper::HelperClient::connect().await {
-            client.https_port().await.unwrap_or(18443)
+        // In managed modes, a reachable socket is not enough: a helper spawned
+        // outside launchd/systemd (setup's direct-spawn fallback) serves the
+        // socket fine but nothing relaunches it after a crash, reboot, or binary
+        // update. Catch that state while everything still looks healthy.
+        let mode = super::read_setup_mode();
+        if matches!(mode.as_deref(), Some("privileged") | Some("unprivileged")) {
+            self.check_helper_managed(mode.as_deref() == Some("privileged"))
+                .await;
+        }
+
+        // Determine HTTPS port for later checks. When the helper is down we
+        // can't ask it, so fall back based on the configured mode — privileged
+        // serves on 443; probing 18443 there checks a port nothing should be
+        // listening on and misdiagnoses a healthy Caddy.
+        let mode = super::read_setup_mode();
+        let fallback_port: u16 = if mode.as_deref() == Some("privileged") {
+            443
         } else {
             18443
+        };
+        let https_port: u16 = if let Ok(client) = veld_core::helper::HelperClient::connect().await {
+            client.https_port().await.unwrap_or(fallback_port)
+        } else {
+            fallback_port
         };
 
         // 2. Caddy admin API responds
