@@ -27,6 +27,9 @@ export interface DOMRefs {
   hoverOutline: HTMLElement;
   componentTraceEl: HTMLElement;
   screenshotRect: HTMLElement;
+  screenshotFrame: HTMLImageElement;
+  screenshotBanner: HTMLElement;
+  screenshotFullBtn: HTMLElement;
 
   // Panel
   panel: HTMLElement;
@@ -68,6 +71,9 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     hoverOutline: null!,
     componentTraceEl: null!,
     screenshotRect: null!,
+    screenshotFrame: null!,
+    screenshotBanner: null!,
+    screenshotFullBtn: null!,
     panel: null!,
     panelBody: null!,
     panelHeadTitle: null!,

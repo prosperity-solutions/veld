@@ -19,6 +19,9 @@ export function setMode(mode: UIMode): void {
     refs.overlay.classList.remove(PREFIX + "overlay-active");
     refs.overlay.classList.remove(PREFIX + "overlay-crosshair");
     refs.screenshotRect.style.display = "none";
+    // Only un-hide if the toolbar wasn't already hidden via the separate
+    // "Hide" feature before screenshot mode started — don't fight that.
+    if (!getState().hidden) refs.toolbarContainer.classList.remove(PREFIX + "hidden");
     clearFrozenFrame();
     stopCaptureStream();
   }
@@ -32,8 +35,11 @@ export function setMode(mode: UIMode): void {
     refs.overlay.classList.add(PREFIX + "overlay-active");
   }
   if (mode === "screenshot") {
-    // Close the menu so the arc doesn't float over the capture region.
+    // Close the menu so the arc doesn't float over the capture region, and
+    // hide the bubble entirely — it has no purpose mid-capture and just
+    // clutters a screen that's about to be photographed.
     closeToolbar();
+    refs.toolbarContainer.classList.add(PREFIX + "hidden");
     window.focus();
     // Freeze-first: acquire the display stream, grab one frame, stop the stream,
     // then let the user draw the selection rectangle over the frozen image. This

@@ -1,4 +1,5 @@
 import type { UIMode, Thread } from "../feedback-overlay/types";
+import type { CreatePopoverExtra } from "../feedback-overlay/popover";
 
 export interface Deps {
   setMode: (mode: UIMode) => void;
@@ -17,7 +18,7 @@ export interface Deps {
   checkPendingScroll: () => void;
   updateBadge: () => void;
   captureScreenshot: (x: number, y: number, w: number, h: number) => void;
-  showCreatePopover: (rect: { x: number; y: number; width: number; height: number }, selector: string | null, tagInfo: string | null, targetEl: Element | null, trace: string[] | null) => void;
+  showCreatePopover: (rect: { x: number; y: number; width: number; height: number }, selector: string | null, tagInfo: string | null, targetEl: Element | null, trace: string[] | null, extra?: CreatePopoverExtra | null) => void;
   positionTooltip: (el: HTMLElement, viewportRect: DOMRect) => void;
 }
 

@@ -13,7 +13,7 @@ import { togglePageComment, closeActivePopover, showCreatePopover } from "./popo
 import { hideOverlay, showOverlay } from "./visibility";
 import { addPin, removePin, renderAllPins, scheduleReposition } from "./pins";
 import { scrollToThread, checkPendingScroll, onNavigate } from "./navigation";
-import { captureScreenshot } from "./screenshot";
+import { captureScreenshot, repositionFrozenFrame } from "./screenshot";
 import { positionTooltip } from "./tooltip";
 import { updateBadge } from "./badge";
 import { registerDeps } from "../shared/registry";
@@ -64,6 +64,7 @@ export function init(): void {
     scheduleReposition();
     clampFabToViewport();
     applyPanelLayout(); // re-clamp panel width / dock margin to the new viewport
+    repositionFrozenFrame(); // keep the screenshot frame in sync if mid-selection
   });
   window.addEventListener("popstate", onNavigate);
 

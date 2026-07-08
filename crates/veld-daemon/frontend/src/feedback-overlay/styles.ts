@@ -59,6 +59,44 @@ export const LIGHT_CSS = `
 }
 .veld-feedback-overlay-active { display: block; }
 .veld-feedback-overlay-crosshair { cursor: crosshair; }
+/* Screenshot mode: a near-opaque dark backdrop behind the framed capture
+   (see .veld-feedback-screenshot-frame below) — this is what reads as "the
+   live page is gone, you're looking at something else now" even when the
+   captured content looks identical to the page underneath. */
+.veld-feedback-overlay-frame { background-color: rgba(8,8,10,.92); }
+/* The frozen frame, always inset from the viewport edge with a visible
+   border/shadow (see currentFrameRect's margin, screenshot.ts) — a "photo
+   card" floating on the dark backdrop, never edge-to-edge. Without this
+   inset+border, a capture of a static page looks pixel-identical to the
+   live page and screenshot mode is invisible until you notice the cursor. */
+.veld-feedback-screenshot-frame {
+  position: fixed;
+  display: none;
+  object-fit: contain;
+  border-radius: 8px;
+  border: 1px solid rgba(255,255,255,.16);
+  box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.35);
+  /* Must outrank the overlay's own z-index (999997) — the overlay's dark
+     background-color (.overlay-frame, above) covers its *entire* fixed
+     inset:0 box, so if the frame sat below it in stacking order the scrim
+     would paint straight over the image instead of just around it. */
+  z-index: 999998;
+  pointer-events: none;
+}
+.veld-feedback-screenshot-frame-show {
+  display: block;
+  animation: veld-feedback-frame-glow 1.4s ease-in-out infinite;
+}
+@keyframes veld-feedback-frame-glow {
+  0%, 100% {
+    box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.35),
+      0 0 12px 2px color-mix(in srgb, var(--vfl-accent) 42%, transparent);
+  }
+  50% {
+    box-shadow: 0 24px 70px rgba(0,0,0,.65), 0 0 0 1px rgba(0,0,0,.35),
+      0 0 20px 4px color-mix(in srgb, var(--vfl-accent) 58%, transparent);
+  }
+}
 .veld-feedback-hover-outline {
   position: absolute;
   outline: 2px solid var(--vfl-accent);
@@ -87,10 +125,47 @@ export const LIGHT_CSS = `
   outline: 2px dashed var(--vfl-accent);
   outline-offset: 2px;
   background: rgba(100,100,100,.06);
+  /* Same spotlight trick as the hover-outline: dims everything outside the
+     drawn selection so it's unambiguous what will be captured. */
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.55);
   pointer-events: none;
   z-index: 999998;
   border-radius: 3px;
   display: none;
+}
+.veld-feedback-screenshot-corner {
+  position: absolute;
+  width: 16px; height: 16px;
+  border: 2px solid var(--vfl-accent);
+  pointer-events: none;
+}
+.veld-feedback-screenshot-corner-tl { top: -2px; left: -2px; border-right: none; border-bottom: none; }
+.veld-feedback-screenshot-corner-tr { top: -2px; right: -2px; border-left: none; border-bottom: none; }
+.veld-feedback-screenshot-corner-bl { bottom: -2px; left: -2px; border-right: none; border-top: none; }
+.veld-feedback-screenshot-corner-br { bottom: -2px; right: -2px; border-left: none; border-top: none; }
+.veld-feedback-screenshot-banner {
+  position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%);
+  z-index: 1000000;
+  /* The banner sits above the drag surface, so a selection that starts under
+     it (e.g. capturing a page header near the top of the viewport) would
+     otherwise never reach the overlay's mousedown handler. Disable hit-
+     testing on the banner itself and re-enable it only on the button. */
+  pointer-events: none;
+  display: none; align-items: center; gap: 10px;
+  background: var(--vfl-bg); color: var(--vfl-text);
+  border: 1px solid var(--vfl-border); border-radius: 10px;
+  padding: 10px 14px;
+  font: 500 12px/1.4 var(--vfl-font);
+  box-shadow: 0 8px 30px rgba(0,0,0,.4);
+}
+.veld-feedback-screenshot-banner-show { display: flex; }
+.veld-feedback-screenshot-banner-text { white-space: nowrap; }
+.veld-feedback-screenshot-banner-hint { color: var(--vfl-text-muted); font-size: 11px; white-space: nowrap; }
+.veld-feedback-screenshot-banner-btn {
+  pointer-events: auto;
+  padding: 5px 12px; border-radius: 6px; border: none; cursor: pointer;
+  background: var(--vfl-accent); color: var(--vfl-bg);
+  font: 600 11px/1.4 var(--vfl-font); white-space: nowrap;
 }
 .veld-feedback-pin {
   position: absolute; z-index: 999998;

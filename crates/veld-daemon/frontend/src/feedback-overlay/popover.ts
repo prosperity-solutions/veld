@@ -52,12 +52,19 @@ export function closeActivePopover(): void {
   if (refs.toolBtnScreenshot) refs.toolBtnScreenshot.classList.remove(PREFIX + "tool-active");
 }
 
+export interface CreatePopoverExtra {
+  elementText?: string | null;
+  sourceFile?: string | null;
+  sourceLine?: number | null;
+}
+
 export function showCreatePopover(
   rect: { x: number; y: number; width: number; height: number },
   selector: string | null,
   tagInfo: string | null,
   targetEl: Element | null,
   trace: string[] | null,
+  extra?: CreatePopoverExtra | null,
 ): void {
   closeActivePopover();
   dispatch({ type: "SET_LOCKED", el: targetEl });
@@ -69,6 +76,7 @@ export function showCreatePopover(
     const formatted = formatTrace(trace);
     if (formatted) popover.appendChild(mkEl("div", "popover-trace", formatted));
   }
+  if (extra?.elementText) popover.appendChild(mkEl("div", "popover-selector", "“" + extra.elementText + "”"));
 
   const popoverBody = mkEl("div", "popover-body");
 
@@ -89,7 +97,15 @@ export function showCreatePopover(
     if (!text || sendBtn.disabled) return;
     sendBtn.disabled = true;
     const scope = selector
-      ? { type: "element", page_url: window.location.pathname, selector, position: rect }
+      ? {
+          type: "element",
+          page_url: window.location.pathname,
+          selector,
+          position: rect,
+          element_text: extra?.elementText || undefined,
+          source_file: extra?.sourceFile || undefined,
+          source_line: extra?.sourceLine ?? undefined,
+        }
       : { type: "page", page_url: window.location.pathname };
     api("POST", "/threads", {
       scope, message: text, component_trace: trace || null,

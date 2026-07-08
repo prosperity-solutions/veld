@@ -55,6 +55,9 @@ function setupState() {
   refs.toolBtnComments = document.createElement("div");
   refs.toolBtnHide = document.createElement("div");
   refs.screenshotRect = document.createElement("div");
+  refs.screenshotFrame = document.createElement("img");
+  refs.screenshotBanner = document.createElement("div");
+  refs.screenshotFullBtn = document.createElement("button");
   registerDeps(makeFakeDeps());
 }
 

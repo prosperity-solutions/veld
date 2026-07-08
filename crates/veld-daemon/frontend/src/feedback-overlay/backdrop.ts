@@ -1,9 +1,11 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
-import { docRect, selectorFor, formatTrace } from "./helpers";
-import { getComponentTrace } from "./component-trace";
+import { docRect, selectorFor, formatTrace, truncateMiddle } from "./helpers";
+import { getComponentTrace, getComponentSource } from "./component-trace";
+import { clampToFrame } from "./screenshot";
 import { deps } from "../shared/registry";
+import { toast } from "./toast";
 
 export function elementBelowBackdrop(x: number, y: number): Element | null {
   refs.overlay.style.display = "none";
@@ -53,10 +55,13 @@ export function initBackdropEvents(): void {
         refs.componentTraceEl.style.display = "none";
       }
     } else if (getState().activeMode === "screenshot" && ssDragging) {
-      const x = Math.min(ssStartX, e.clientX);
-      const y = Math.min(ssStartY, e.clientY);
-      const w = Math.abs(e.clientX - ssStartX);
-      const h = Math.abs(e.clientY - ssStartY);
+      const rawX = Math.min(ssStartX, e.clientX);
+      const rawY = Math.min(ssStartY, e.clientY);
+      const rawW = Math.abs(e.clientX - ssStartX);
+      const rawH = Math.abs(e.clientY - ssStartY);
+      // Clamp to the displayed frame so a drag into a letterbox bar can't
+      // select "outside the image".
+      const { x, y, w, h } = clampToFrame(rawX, rawY, rawW, rawH);
       refs.screenshotRect.style.display = "block";
       refs.screenshotRect.style.left = (x + window.scrollX) + "px";
       refs.screenshotRect.style.top = (y + window.scrollY) + "px";
@@ -81,13 +86,20 @@ export function initBackdropEvents(): void {
     e.stopPropagation();
     if (getState().activeMode === "screenshot" && ssDragging) {
       ssDragging = false;
-      const x = Math.min(ssStartX, e.clientX);
-      const y = Math.min(ssStartY, e.clientY);
-      const w = Math.abs(e.clientX - ssStartX);
-      const h = Math.abs(e.clientY - ssStartY);
+      const rawX = Math.min(ssStartX, e.clientX);
+      const rawY = Math.min(ssStartY, e.clientY);
+      const rawW = Math.abs(e.clientX - ssStartX);
+      const rawH = Math.abs(e.clientY - ssStartY);
+      const { x, y, w, h } = clampToFrame(rawX, rawY, rawW, rawH);
       refs.screenshotRect.style.display = "none";
+      // Judge "was this a real drag" on the raw gesture, not the clamped
+      // result — a deliberate drag that lands mostly in a letterbox bar
+      // would otherwise clamp below the threshold and silently no-op.
+      if (rawW <= 10 || rawH <= 10) return;
       if (w > 10 && h > 10) {
         deps().captureScreenshot(x, y, w, h);
+      } else {
+        toast("Selection was outside the captured frame", true);
       }
     }
   });
@@ -98,6 +110,11 @@ export function initBackdropEvents(): void {
     if (getState().activeMode === "select-element") {
       const target = getState().hoveredEl || elementBelowBackdrop(e.clientX, e.clientY);
       if (!target) return;
+      // Read innerText first — it forces a synchronous layout, so doing it
+      // before the getBoundingClientRect()/fiber-walk calls below avoids
+      // sandwiching a reflow between two other layout-touching reads.
+      const rawText = (target as HTMLElement).innerText ?? target.textContent ?? "";
+      const elementText = rawText.trim() ? truncateMiddle(rawText) : null;
       const rect = docRect(target);
       const selector = selectorFor(target);
       let tagInfo = target.tagName.toLowerCase();
@@ -106,7 +123,12 @@ export function initBackdropEvents(): void {
         if (cls.length) tagInfo += "." + cls.slice(0, 3).join(".");
       }
       const trace = getComponentTrace(target);
-      deps().showCreatePopover(rect, selector, tagInfo, target, trace);
+      const source = getComponentSource(target);
+      deps().showCreatePopover(rect, selector, tagInfo, target, trace, {
+        elementText,
+        sourceFile: source?.file,
+        sourceLine: source?.line,
+      });
     }
   });
 }

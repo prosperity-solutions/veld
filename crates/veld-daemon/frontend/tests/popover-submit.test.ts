@@ -78,6 +78,37 @@ describe("showCreatePopover", () => {
     });
   });
 
+  it("threads element_text/source_file/source_line from `extra` into the posted scope", async () => {
+    const thread = makeThread({ id: "t-extra" });
+    mockApi.mockResolvedValueOnce(thread);
+
+    showCreatePopover(
+      { x: 100, y: 100, width: 50, height: 30 },
+      ".el", null, null, null,
+      { elementText: "Submit", sourceFile: "src/Button.tsx", sourceLine: 42 },
+    );
+
+    const popover = refs.shadow.querySelector("." + PREFIX + "popover")!;
+    const textarea = popover.querySelector("textarea")!;
+    const sendBtn = popover.querySelector("." + PREFIX + "btn-primary") as HTMLButtonElement;
+    textarea.value = "too small";
+    sendBtn.click();
+
+    await vi.waitFor(() => {
+      expect(mockApi).toHaveBeenCalledWith(
+        "POST",
+        "/threads",
+        expect.objectContaining({
+          scope: expect.objectContaining({
+            element_text: "Submit",
+            source_file: "src/Button.tsx",
+            source_line: 42,
+          }),
+        }),
+      );
+    });
+  });
+
   it("send button does nothing with empty text", () => {
     showCreatePopover(
       { x: 100, y: 100, width: 50, height: 30 },

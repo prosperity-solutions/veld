@@ -637,9 +637,24 @@ fn print_thread_context(thread: &Thread, store: &FeedbackStore) {
 fn print_scope(scope: &ThreadScope) {
     match scope {
         ThreadScope::Element {
-            page_url, selector, ..
+            page_url,
+            selector,
+            element_text,
+            source_file,
+            source_line,
+            ..
         } => {
             println!("  Element: {}", output::dim(selector));
+            if let Some(text) = element_text {
+                println!("  Text: {}", output::dim(&format!("\"{text}\"")));
+            }
+            if let Some(file) = source_file {
+                let loc = match source_line {
+                    Some(line) => format!("{file}:{line}"),
+                    None => file.clone(),
+                };
+                println!("  Source: {}", output::dim(&loc));
+            }
             println!("  Page: {}", output::dim(page_url));
         }
         ThreadScope::Page { page_url } => {

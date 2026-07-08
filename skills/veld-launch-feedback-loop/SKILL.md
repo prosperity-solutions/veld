@@ -61,6 +61,8 @@ The `item` payload has everything you need in one call:
 |-------|-----|
 | `thread.messages` (last human one) | What to do right now; earlier messages are context |
 | `thread.scope.selector` | CSS selector — grep the codebase for it to find the source |
+| `thread.scope.element_text` | Visible text of the element (middle-truncated) — disambiguates when the selector alone matches several elements |
+| `thread.scope.source_file` / `source_line` | Best-effort file:line of the element's JSX/template tag — jump straight there instead of grepping for the selector. Absent in production builds (and on React 19, which dropped the dev-source metadata this reads) |
 | `thread.component_trace` | React/Vue hierarchy — the **deepest** component is usually the file to edit |
 | `thread.scope.page_url` | Which route |
 | `thread.messages[].screenshot` | Absolute path to a PNG — `Read` it directly |

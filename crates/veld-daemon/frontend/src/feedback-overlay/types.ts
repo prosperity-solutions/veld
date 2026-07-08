@@ -7,6 +7,11 @@ export interface ThreadScope {
   selector?: string;
   label?: string;
   position?: { x: number; y: number; width: number; height: number };
+  /** Visible text of the scoped element, middle-truncated — helps an agent
+   *  disambiguate when the CSS selector alone matches ambiguously. */
+  element_text?: string;
+  source_file?: string;
+  source_line?: number;
 }
 
 export interface Message {

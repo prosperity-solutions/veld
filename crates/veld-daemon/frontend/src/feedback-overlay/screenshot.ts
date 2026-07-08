@@ -12,6 +12,79 @@ import { deps } from "../shared/registry";
 // because it is a transient ImageBitmap tied to one screenshot flow.
 let frozenBitmap: ImageBitmap | null = null;
 
+/** Native pixel dimensions of the frozen frame — fixed once captured. Used to
+ *  recompute the on-screen rect on demand (see `currentFrameRect`) rather
+ *  than caching it, since the viewport can resize between freezing the frame
+ *  and finishing the drag-select (window resize, devtools toggling), which
+ *  would otherwise leave a stale rect and misalign the crop. */
+let frozenBitmapDims: { w: number; h: number } | null = null;
+
+export interface FrameRect { x: number; y: number; w: number; h: number }
+
+/** Pure contain-fit math, exported for unit testing — the core of the
+ *  distortion fix, so it's worth covering directly rather than only through
+ *  the full capture flow (which needs getDisplayMedia/ImageCapture mocks). */
+export function computeContainRect(bitmapW: number, bitmapH: number, boxW: number, boxH: number): FrameRect {
+  const scale = Math.min(boxW / bitmapW, boxH / bitmapH);
+  const w = bitmapW * scale;
+  const h = bitmapH * scale;
+  return { x: (boxW - w) / 2, y: (boxH - h) / 2, w, h };
+}
+
+/** Fixed gap kept between the frame and the viewport edge on every side.
+ *  Without it, a capture whose aspect ratio happens to match the viewport
+ *  fills it edge-to-edge with zero visual difference from the live page —
+ *  the exact "I can't tell I'm looking at a screenshot" complaint this
+ *  margin fixes. Always applied, not just when letterboxing would occur. */
+const FRAME_MARGIN = 32;
+
+/** Where the frozen frame is currently drawn on screen, in viewport CSS px.
+ *  A captured stream's native resolution doesn't always match the viewport's
+ *  aspect ratio 1:1 (browser chrome, multi-monitor scaling, etc.), so the
+ *  frame is fit with `computeContainRect` and may be letterboxed within its
+ *  margin-inset box — that mismatch was what stretched screenshots before
+ *  this fix.
+ *
+ *  Measures `refs.overlay`'s own painted box rather than
+ *  `window.innerWidth/innerHeight`: on platforms with classic (non-overlay)
+ *  scrollbars, the fixed-position overlay's content box is narrower than
+ *  `innerWidth` (which includes the scrollbar gutter), and using the wrong
+ *  one would offset the selection/crop by the scrollbar's width. */
+function currentFrameRect(): FrameRect | null {
+  if (!frozenBitmapDims) return null;
+  const box = refs.overlay.getBoundingClientRect();
+  const innerW = Math.max(1, box.width - FRAME_MARGIN * 2);
+  const innerH = Math.max(1, box.height - FRAME_MARGIN * 2);
+  const rect = computeContainRect(frozenBitmapDims.w, frozenBitmapDims.h, innerW, innerH);
+  return { x: rect.x + FRAME_MARGIN, y: rect.y + FRAME_MARGIN, w: rect.w, h: rect.h };
+}
+
+/** Reposition the visible frame `<img>` to match `currentFrameRect()` — call
+ *  whenever the frame is (re)shown and on every viewport resize while it's
+ *  up, since the frame's position/size are now plain inline styles rather
+ *  than CSS `background-size: contain` (which used to reflow for free). */
+export function repositionFrozenFrame(): void {
+  if (getState().activeMode !== "screenshot") return;
+  const frame = currentFrameRect();
+  if (!frame) return;
+  refs.screenshotFrame.style.left = frame.x + "px";
+  refs.screenshotFrame.style.top = frame.y + "px";
+  refs.screenshotFrame.style.width = frame.w + "px";
+  refs.screenshotFrame.style.height = frame.h + "px";
+}
+
+/** Clamp a selection rectangle (viewport CSS px) to the displayed frame's
+ *  bounds, so dragging into a letterbox bar can't select "outside the image". */
+export function clampToFrame(x: number, y: number, w: number, h: number): { x: number; y: number; w: number; h: number } {
+  const frame = currentFrameRect();
+  if (!frame) return { x, y, w, h };
+  const x1 = Math.max(x, frame.x);
+  const y1 = Math.max(y, frame.y);
+  const x2 = Math.min(x + w, frame.x + frame.w);
+  const y2 = Math.min(y + h, frame.y + frame.h);
+  return { x: x1, y: y1, w: Math.max(0, x2 - x1), h: Math.max(0, y2 - y1) };
+}
+
 /**
  * Acquire a screen-capture stream. Chromium's `preferCurrentTab` /
  * `displaySurface` hints bias the picker toward the current tab.
@@ -100,27 +173,50 @@ function afterWarmup(fn: () => void): void {
   setTimeout(fn, 120);
 }
 
-/** Paint the frozen frame onto the backdrop and enable the selection cursor. */
+/** Paint the frozen frame as a bordered, shadowed, margin-inset "photo card"
+ *  (`refs.screenshotFrame`) and enable the selection cursor on the — now
+ *  transparent — drag-catching overlay above it.
+ *
+ *  Drawn as its own `<img>` rather than a full-bleed `background-image` so
+ *  it can never look identical to the live page underneath: the fixed
+ *  `FRAME_MARGIN` inset plus border/shadow (see CSS) is always visible, even
+ *  when the capture's aspect ratio happens to match the viewport exactly (in
+ *  which case there'd otherwise be no letterboxing at all to hint that
+ *  anything changed). `frozenBitmapDims` records the bitmap's native size so
+ *  `currentFrameRect()`/`repositionFrozenFrame()` can recompute the on-screen
+ *  rect on demand — both at capture time and on resize, since positioning is
+ *  now plain inline styles rather than CSS `background-size: contain`, which
+ *  used to reflow for free. */
 function showFrozenFrame(bitmap: ImageBitmap): void {
   const canvas = document.createElement("canvas");
   canvas.width = bitmap.width;
   canvas.height = bitmap.height;
   canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
 
-  // background-size 100% 100% maps the frame 1:1 onto the fixed, viewport-sized
-  // backdrop, so a rectangle drawn in viewport coordinates maps straight back
-  // onto the bitmap.
-  refs.overlay.style.backgroundImage = `url(${canvas.toDataURL("image/png")})`;
-  refs.overlay.style.backgroundSize = "100% 100%";
+  frozenBitmapDims = { w: bitmap.width, h: bitmap.height };
+
+  refs.screenshotFrame.src = canvas.toDataURL("image/png");
+  refs.screenshotFrame.classList.add(PREFIX + "screenshot-frame-show");
+
+  // Activate (display:block) the overlay BEFORE positioning the frame:
+  // repositionFrozenFrame() measures refs.overlay.getBoundingClientRect(),
+  // which returns 0×0 while the overlay is still display:none — sizing the
+  // frame to ~1px on first paint. Must come first.
   refs.overlay.classList.add(PREFIX + "overlay-active");
   refs.overlay.classList.add(PREFIX + "overlay-crosshair");
-  toast("Drag to capture a region");
+  refs.overlay.classList.add(PREFIX + "overlay-frame");
+  refs.screenshotBanner.classList.add(PREFIX + "screenshot-banner-show");
+
+  repositionFrozenFrame();
 }
 
 /** Reset the frozen-frame backdrop and release the bitmap. */
 export function clearFrozenFrame(): void {
-  refs.overlay.style.backgroundImage = "";
-  refs.overlay.style.backgroundSize = "";
+  refs.screenshotFrame.classList.remove(PREFIX + "screenshot-frame-show");
+  refs.screenshotFrame.src = "";
+  refs.overlay.classList.remove(PREFIX + "overlay-frame");
+  refs.screenshotBanner.classList.remove(PREFIX + "screenshot-banner-show");
+  frozenBitmapDims = null;
   if (frozenBitmap) {
     frozenBitmap.close();
     frozenBitmap = null;
@@ -144,39 +240,54 @@ export function captureScreenshot(
   viewW: number,
   viewH: number,
 ): void {
-  // Detach the bitmap before setMode(null) so teardown doesn't close it.
+  // Read the bitmap and current frame rect before setMode(null) — teardown
+  // calls clearFrozenFrame(), which closes the bitmap and clears the dims
+  // currentFrameRect() depends on. Computing the frame here (rather than
+  // reusing a value cached at freeze time) keeps it correct even if the
+  // viewport resized during the drag.
   const bitmap = frozenBitmap;
+  const frame = currentFrameRect();
   frozenBitmap = null;
   deps().setMode(null); // teardown clears the backdrop + resets the cursor
 
-  if (!bitmap) {
+  if (!bitmap || !frame) {
     showScreenshotThreadEditor(null, null);
     return;
   }
-  cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH);
+  cropAndShowEditor(bitmap, viewX, viewY, viewW, viewH, frame);
 }
 
-/** Crop the captured bitmap to the selected region and show the editor. */
-export function cropAndShowEditor(
+/** Crop the captured bitmap to the selected region and show the editor.
+ *
+ *  `viewX/Y/W/H` are viewport CSS px relative to the *displayed, letterboxed*
+ *  frame (`frame`, from `currentFrameRect()`) — not the raw viewport — so the
+ *  scale factor here is against the frame's own on-screen size, and the
+ *  frame's top-left offset is subtracted before scaling into bitmap pixels.
+ *
+ *  Not exported: `frame` must come from `currentFrameRect()`, which is
+ *  module-private — an outside caller has no valid way to construct one and
+ *  would be tempted to hand-roll `{x:0,y:0,w:innerWidth,h:innerHeight}`,
+ *  silently reintroducing the stretch bug this function exists to fix. */
+function cropAndShowEditor(
   bitmap: ImageBitmap,
   viewX: number,
   viewY: number,
   viewW: number,
   viewH: number,
+  frame: FrameRect,
 ): void {
-  // The bitmap is at native (dpr-scaled) resolution; the selection is in CSS px.
-  const scaleX = bitmap.width / window.innerWidth;
-  const scaleY = bitmap.height / window.innerHeight;
+  const scaleX = bitmap.width / frame.w;
+  const scaleY = bitmap.height / frame.h;
 
   const canvas = document.createElement("canvas");
-  canvas.width = Math.round(viewW * scaleX);
-  canvas.height = Math.round(viewH * scaleY);
+  canvas.width = Math.max(1, Math.round(viewW * scaleX));
+  canvas.height = Math.max(1, Math.round(viewH * scaleY));
   const ctx = canvas.getContext("2d")!;
 
   ctx.drawImage(
     bitmap,
-    Math.round(viewX * scaleX),
-    Math.round(viewY * scaleY),
+    Math.round((viewX - frame.x) * scaleX),
+    Math.round((viewY - frame.y) * scaleY),
     canvas.width,
     canvas.height,
     0,
@@ -193,6 +304,23 @@ export function cropAndShowEditor(
     }
     uploadAndShowEditor(pngBlob);
   }, "image/png");
+}
+
+/** Capture the whole frozen frame, no cropping — the banner's explicit
+ *  fallback for reviewers who don't want to drag a selection. Just crops to
+ *  the frame's own full extent, so it shares the same code path/rounding as
+ *  a manual selection. */
+export function captureFullScreenshot(): void {
+  const bitmap = frozenBitmap;
+  const frame = currentFrameRect();
+  frozenBitmap = null;
+  deps().setMode(null); // teardown clears the backdrop + resets the cursor
+
+  if (!bitmap || !frame) {
+    showScreenshotThreadEditor(null, null);
+    return;
+  }
+  cropAndShowEditor(bitmap, frame.x, frame.y, frame.w, frame.h, frame);
 }
 
 /** Upload a screenshot blob to the API, then show the thread editor. */

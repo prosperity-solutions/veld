@@ -162,6 +162,24 @@ export function appendGuarded(parent: Node, el: Node): () => void {
   return () => obs.disconnect();
 }
 
+/** Truncate long text for a payload, keeping a long start and a short end
+ *  (rather than cutting off the tail) so an agent can still recognize where
+ *  the text ends even when the middle is dropped. */
+export function truncateMiddle(text: string, maxLen = 200, tailLen = 20): string {
+  const collapse = (s: string) => s.replace(/\s+/g, " ").trim();
+  // Bound the head slice before the regex collapse — callers may pass an
+  // element's full innerText, which can run to tens of thousands of
+  // characters for a loosely-scoped container, when only ~maxLen survives.
+  // The tail is bounded and collapsed separately (not sliced off the
+  // head-bounded string) so it reflects the text's true end, not whatever
+  // was left after the head cutoff.
+  const head = collapse(text.length > maxLen * 10 ? text.slice(0, maxLen * 10) : text);
+  if (head.length <= maxLen) return head;
+  const headLen = Math.max(maxLen - tailLen - 1, 0);
+  const tail = collapse(text.length > tailLen * 10 ? text.slice(-tailLen * 10) : text);
+  return head.slice(0, headLen) + "…" + tail.slice(Math.max(0, tail.length - tailLen));
+}
+
 export function formatTrace(trace: string[] | null): string | null {
   if (!trace || !trace.length) return null;
   let deduped = [trace[0]];

@@ -19,6 +19,17 @@ pub enum ThreadScope {
         selector: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<ElementPosition>,
+        /// Visible text of the element, middle-truncated by the client —
+        /// helps an agent disambiguate when the selector alone is ambiguous.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        element_text: Option<String>,
+        /// Source file of the element's JSX/template tag, when the
+        /// framework's dev build exposes it (React `_debugSource`, Vue
+        /// `__file`). Best-effort — absent in production builds.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_file: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_line: Option<u32>,
     },
     /// Attached to a page but not a specific element.
     Page { page_url: String },
@@ -727,6 +738,9 @@ mod tests {
                 page_url: "/dashboard".into(),
                 selector: "h1.title".into(),
                 position: None,
+                element_text: None,
+                source_file: None,
+                source_line: None,
             },
             ThreadOrigin::Human,
             Some(vec!["App".into(), "Header".into()]),
@@ -1023,10 +1037,26 @@ mod tests {
                 width: 100.0,
                 height: 50.0,
             }),
+            element_text: Some("Submit".into()),
+            source_file: Some("src/components/Button.tsx".into()),
+            source_line: Some(42),
         };
         let json = serde_json::to_string(&scope).unwrap();
         assert!(json.contains(r#""type":"element"#));
-        let _: ThreadScope = serde_json::from_str(&json).unwrap();
+        let roundtrip: ThreadScope = serde_json::from_str(&json).unwrap();
+        match roundtrip {
+            ThreadScope::Element {
+                element_text,
+                source_file,
+                source_line,
+                ..
+            } => {
+                assert_eq!(element_text.as_deref(), Some("Submit"));
+                assert_eq!(source_file.as_deref(), Some("src/components/Button.tsx"));
+                assert_eq!(source_line, Some(42));
+            }
+            _ => panic!("expected ThreadScope::Element"),
+        }
 
         // Page scope.
         let scope = ThreadScope::Page {

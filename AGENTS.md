@@ -60,7 +60,7 @@ Follow this workflow for every feature or fix:
 
 1. **Implement** — Make the code changes.
 2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
-3. **Self-review rounds** — Use sub-agents to review the diff. Iterate (review → fix → review → fix) until no issues remain.
+3. **Self-review rounds** — Use sub-agents to review the diff. Iterate (review → fix → review → fix) until no issues remain. For a non-trivial change (or whenever asked for a deeper look), follow up with the four-angle adversarial review in [docs/agentic-review.md](docs/agentic-review.md) before pushing.
 4. **Push to draft PR** — Push the branch and open a draft PR on GitHub.
 5. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet.
 6. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
