@@ -31,11 +31,19 @@ export function computeContainRect(bitmapW: number, bitmapH: number, boxW: numbe
   return { x: (boxW - w) / 2, y: (boxH - h) / 2, w, h };
 }
 
+/** Fixed gap kept between the frame and the viewport edge on every side.
+ *  Without it, a capture whose aspect ratio happens to match the viewport
+ *  fills it edge-to-edge with zero visual difference from the live page —
+ *  the exact "I can't tell I'm looking at a screenshot" complaint this
+ *  margin fixes. Always applied, not just when letterboxing would occur. */
+const FRAME_MARGIN = 32;
+
 /** Where the frozen frame is currently drawn on screen, in viewport CSS px.
  *  A captured stream's native resolution doesn't always match the viewport's
  *  aspect ratio 1:1 (browser chrome, multi-monitor scaling, etc.), so the
- *  frame is displayed via `background-size: contain` and may be letterboxed
- *  — that mismatch was what stretched screenshots before this fix.
+ *  frame is fit with `computeContainRect` and may be letterboxed within its
+ *  margin-inset box — that mismatch was what stretched screenshots before
+ *  this fix.
  *
  *  Measures `refs.overlay`'s own painted box rather than
  *  `window.innerWidth/innerHeight`: on platforms with classic (non-overlay)
@@ -45,7 +53,24 @@ export function computeContainRect(bitmapW: number, bitmapH: number, boxW: numbe
 function currentFrameRect(): FrameRect | null {
   if (!frozenBitmapDims) return null;
   const box = refs.overlay.getBoundingClientRect();
-  return computeContainRect(frozenBitmapDims.w, frozenBitmapDims.h, box.width, box.height);
+  const innerW = Math.max(1, box.width - FRAME_MARGIN * 2);
+  const innerH = Math.max(1, box.height - FRAME_MARGIN * 2);
+  const rect = computeContainRect(frozenBitmapDims.w, frozenBitmapDims.h, innerW, innerH);
+  return { x: rect.x + FRAME_MARGIN, y: rect.y + FRAME_MARGIN, w: rect.w, h: rect.h };
+}
+
+/** Reposition the visible frame `<img>` to match `currentFrameRect()` — call
+ *  whenever the frame is (re)shown and on every viewport resize while it's
+ *  up, since the frame's position/size are now plain inline styles rather
+ *  than CSS `background-size: contain` (which used to reflow for free). */
+export function repositionFrozenFrame(): void {
+  if (getState().activeMode !== "screenshot") return;
+  const frame = currentFrameRect();
+  if (!frame) return;
+  refs.screenshotFrame.style.left = frame.x + "px";
+  refs.screenshotFrame.style.top = frame.y + "px";
+  refs.screenshotFrame.style.width = frame.w + "px";
+  refs.screenshotFrame.style.height = frame.h + "px";
 }
 
 /** Clamp a selection rectangle (viewport CSS px) to the displayed frame's
@@ -148,18 +173,20 @@ function afterWarmup(fn: () => void): void {
   setTimeout(fn, 120);
 }
 
-/** Paint the frozen frame onto the backdrop and enable the selection cursor.
+/** Paint the frozen frame as a bordered, shadowed, margin-inset "photo card"
+ *  (`refs.screenshotFrame`) and enable the selection cursor on the — now
+ *  transparent — drag-catching overlay above it.
  *
- *  Uses `background-size: contain` (not `100% 100%`) so a captured frame
- *  whose aspect ratio doesn't exactly match the viewport — common when the
- *  capture stream includes a sliver of browser chrome, or on a scaled
- *  display — letterboxes instead of stretching. `frozenBitmapDims` records
- *  its native size so `currentFrameRect()` can recompute the on-screen rect
- *  on demand, staying correct even if the viewport resizes mid-selection.
- *
- *  The `contain`/`center` set here and `computeContainRect`'s math encode
- *  the same layout in two places (CSS vs. JS) with nothing enforcing they
- *  match — if one changes, change the other. */
+ *  Drawn as its own `<img>` rather than a full-bleed `background-image` so
+ *  it can never look identical to the live page underneath: the fixed
+ *  `FRAME_MARGIN` inset plus border/shadow (see CSS) is always visible, even
+ *  when the capture's aspect ratio happens to match the viewport exactly (in
+ *  which case there'd otherwise be no letterboxing at all to hint that
+ *  anything changed). `frozenBitmapDims` records the bitmap's native size so
+ *  `currentFrameRect()`/`repositionFrozenFrame()` can recompute the on-screen
+ *  rect on demand — both at capture time and on resize, since positioning is
+ *  now plain inline styles rather than CSS `background-size: contain`, which
+ *  used to reflow for free. */
 function showFrozenFrame(bitmap: ImageBitmap): void {
   const canvas = document.createElement("canvas");
   canvas.width = bitmap.width;
@@ -168,22 +195,25 @@ function showFrozenFrame(bitmap: ImageBitmap): void {
 
   frozenBitmapDims = { w: bitmap.width, h: bitmap.height };
 
-  refs.overlay.style.backgroundImage = `url(${canvas.toDataURL("image/png")})`;
-  refs.overlay.style.backgroundSize = "contain";
-  refs.overlay.style.backgroundRepeat = "no-repeat";
-  refs.overlay.style.backgroundPosition = "center";
+  refs.screenshotFrame.src = canvas.toDataURL("image/png");
+  refs.screenshotFrame.classList.add(PREFIX + "screenshot-frame-show");
+
+  // Activate (display:block) the overlay BEFORE positioning the frame:
+  // repositionFrozenFrame() measures refs.overlay.getBoundingClientRect(),
+  // which returns 0×0 while the overlay is still display:none — sizing the
+  // frame to ~1px on first paint. Must come first.
   refs.overlay.classList.add(PREFIX + "overlay-active");
   refs.overlay.classList.add(PREFIX + "overlay-crosshair");
   refs.overlay.classList.add(PREFIX + "overlay-frame");
   refs.screenshotBanner.classList.add(PREFIX + "screenshot-banner-show");
+
+  repositionFrozenFrame();
 }
 
 /** Reset the frozen-frame backdrop and release the bitmap. */
 export function clearFrozenFrame(): void {
-  refs.overlay.style.backgroundImage = "";
-  refs.overlay.style.backgroundSize = "";
-  refs.overlay.style.backgroundRepeat = "";
-  refs.overlay.style.backgroundPosition = "";
+  refs.screenshotFrame.classList.remove(PREFIX + "screenshot-frame-show");
+  refs.screenshotFrame.src = "";
   refs.overlay.classList.remove(PREFIX + "overlay-frame");
   refs.screenshotBanner.classList.remove(PREFIX + "screenshot-banner-show");
   frozenBitmapDims = null;

@@ -17,6 +17,14 @@ export function buildDOM(): void {
   initTooltip();
 
   // Light DOM elements
+
+  // The frozen frame itself (light DOM, sits just below the overlay). Drawn
+  // as an inset, bordered/shadowed "photo card" — never edge-to-edge — so a
+  // capture whose content happens to match the live page 1:1 still reads
+  // unmistakably as "you're looking at a frozen image now", not the page.
+  refs.screenshotFrame = mkEl("img", "screenshot-frame") as HTMLImageElement;
+  appendGuarded(document.body, refs.screenshotFrame);
+
   refs.overlay = mkEl("div", "overlay");
   appendGuarded(document.body, refs.overlay);
   initBackdropEvents();

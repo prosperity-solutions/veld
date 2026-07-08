@@ -358,7 +358,10 @@
   display: none;
 }
 
-/* Popover */
+/* Popover — element comment, page comment, and screenshot compose all share
+   this base, so the pulsing accent glow (same treatment as the frozen-frame
+   selection, see veld-feedback-frame-glow in styles.ts) applies to all three
+   uniformly rather than being a screenshot-only special case. */
 .veld-feedback-popover {
   position: absolute; z-index: var(--vf-z);
   width: 360px; max-width: calc(100vw - 32px);
@@ -368,11 +371,19 @@
   box-shadow: var(--vf-shadow);
   font: 13px/1.5 var(--vf-font);
   overflow: hidden;
-  animation: veld-feedback-fadeIn .15s ease;
+  animation: veld-feedback-fadeIn .15s ease, veld-feedback-popover-glow 1.4s ease-in-out infinite;
 }
 @keyframes veld-feedback-fadeIn {
   from { opacity: 0; transform: translateY(6px); }
   to { opacity: 1; transform: translateY(0); }
+}
+@keyframes veld-feedback-popover-glow {
+  0%, 100% {
+    box-shadow: var(--vf-shadow), 0 0 10px 1px color-mix(in srgb, var(--vf-accent) 42%, transparent);
+  }
+  50% {
+    box-shadow: var(--vf-shadow), 0 0 18px 3px color-mix(in srgb, var(--vf-accent) 58%, transparent);
+  }
 }
 
 .veld-feedback-popover-header {
@@ -791,16 +802,22 @@
   cursor: crosshair;
 }
 
-/* Screenshot popover — clamped to viewport, centered */
+/* Screenshot popover — clamped to viewport, bottom-center. Anchored at the
+   same spot the screenshot-mode instruction banner occupies (see the light-
+   DOM .veld-feedback-screenshot-banner in styles.ts) so selecting a region
+   feels like one continuous bottom panel morphing from "pick an area" to
+   "describe it", not a totally different popup appearing elsewhere. */
 .veld-feedback-popover-screenshot {
   position: fixed !important;
-  top: 20px !important; left: 50% !important;
+  bottom: 24px !important; left: 50% !important;
+  top: auto !important;
   transform: translateX(-50%) !important;
   width: auto;
   max-width: calc(100vw - 60px);
   max-height: calc(100vh - 40px);
   display: flex; flex-direction: column;
   overflow-y: auto;
+  /* Glow animation is inherited from the shared .veld-feedback-popover base. */
 }
 
 /* Screenshot preview in popover */

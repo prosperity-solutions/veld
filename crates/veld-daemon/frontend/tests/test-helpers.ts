@@ -92,6 +92,7 @@ export function setupMockRefs() {
   refs.hoverOutline = document.createElement("div");
   refs.componentTraceEl = document.createElement("div");
   refs.screenshotRect = document.createElement("div");
+  refs.screenshotFrame = document.createElement("img");
   refs.screenshotBanner = document.createElement("div");
   refs.screenshotFullBtn = document.createElement("button");
 
