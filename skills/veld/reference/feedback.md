@@ -99,7 +99,7 @@ usually enough.
 | `messages` (last human one) | What the human wants right now |
 | `scope.selector` | CSS selector — find it in code |
 | `scope.element_text` | Visible text of the element (middle-truncated) — use with the selector when it's ambiguous (e.g. matches several similar elements) |
-| `scope.source_file` / `scope.source_line` | Best-effort file:line of the element's JSX/template tag (React dev builds; Vue gives file only). Absent in production builds — fall back to the selector/component_trace |
+| `scope.source_file` / `scope.source_line` | Best-effort file:line of the element's JSX/template tag (React ≤18 dev builds; Vue gives file only). Absent in production builds, and on React 19+, which dropped the dev-source metadata this reads — fall back to the selector/component_trace |
 | `component_trace` | React/Vue hierarchy, nearest-ancestor-last and capped to ~12 entries — the deepest component is usually the file to edit |
 | `scope.page_url` | Which route |
 | `scope.type` | `element`, `page`, or `global` |

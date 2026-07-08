@@ -1043,7 +1043,20 @@ mod tests {
         };
         let json = serde_json::to_string(&scope).unwrap();
         assert!(json.contains(r#""type":"element"#));
-        let _: ThreadScope = serde_json::from_str(&json).unwrap();
+        let roundtrip: ThreadScope = serde_json::from_str(&json).unwrap();
+        match roundtrip {
+            ThreadScope::Element {
+                element_text,
+                source_file,
+                source_line,
+                ..
+            } => {
+                assert_eq!(element_text.as_deref(), Some("Submit"));
+                assert_eq!(source_file.as_deref(), Some("src/components/Button.tsx"));
+                assert_eq!(source_line, Some(42));
+            }
+            _ => panic!("expected ThreadScope::Element"),
+        }
 
         // Page scope.
         let scope = ThreadScope::Page {

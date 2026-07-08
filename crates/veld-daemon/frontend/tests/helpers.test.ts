@@ -5,6 +5,7 @@ import {
   isCurrentPage,
   formatTrace,
   findThread,
+  truncateMiddle,
 } from "../src/feedback-overlay/helpers";
 import type { Thread } from "../src/feedback-overlay/types";
 
@@ -125,6 +126,31 @@ describe("findThread", () => {
 
   it("returns undefined for missing id", () => {
     expect(findThread([], "x")).toBeUndefined();
+  });
+});
+
+describe("truncateMiddle", () => {
+  it("returns short text unchanged", () => {
+    expect(truncateMiddle("hello world")).toBe("hello world");
+  });
+
+  it("collapses internal whitespace/newlines even when under the limit", () => {
+    expect(truncateMiddle("hello   \n\n  world")).toBe("hello world");
+  });
+
+  it("truncates the middle, keeping a long head and short tail", () => {
+    const text = "A".repeat(50) + "MIDDLE" + "B".repeat(50) + "END";
+    const result = truncateMiddle(text, 30, 10);
+    expect(result.length).toBe(30);
+    expect(result.startsWith("A".repeat(19))).toBe(true);
+    expect(result.endsWith("BBEND")).toBe(true); // true tail, not sliced off a head-bounded copy
+    expect(result).toContain("…");
+  });
+
+  it("preserves the text's true end even when it's far beyond maxLen*10", () => {
+    const text = "x".repeat(5000) + "THE-VERY-END";
+    const result = truncateMiddle(text, 50, 12);
+    expect(result.endsWith("THE-VERY-END")).toBe(true);
   });
 });
 

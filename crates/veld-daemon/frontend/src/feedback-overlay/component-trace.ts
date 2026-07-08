@@ -58,9 +58,11 @@ export function getComponentTrace(el: Element): string[] | null {
 }
 
 /** Source location of the clicked element's own JSX/template tag, when the
- *  framework's dev build exposes it. React's dev JSX transform stamps
- *  `_debugSource` on the fiber for every element; Vue's dev loader stamps
- *  `__file` on the component options (no line number available there). */
+ *  framework's dev build exposes it. React ≤18's dev JSX transform stamps
+ *  `_debugSource` on the fiber for every element (React 19 removed it, so
+ *  this yields nothing there — falls back to the selector/component_trace);
+ *  Vue's dev loader stamps `__file` on the component options (no line
+ *  number available there). */
 export interface ComponentSource {
   file: string;
   line?: number;

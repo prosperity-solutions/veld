@@ -21,7 +21,10 @@ let frozenBitmapDims: { w: number; h: number } | null = null;
 
 export interface FrameRect { x: number; y: number; w: number; h: number }
 
-function computeContainRect(bitmapW: number, bitmapH: number, boxW: number, boxH: number): FrameRect {
+/** Pure contain-fit math, exported for unit testing — the core of the
+ *  distortion fix, so it's worth covering directly rather than only through
+ *  the full capture flow (which needs getDisplayMedia/ImageCapture mocks). */
+export function computeContainRect(bitmapW: number, bitmapH: number, boxW: number, boxH: number): FrameRect {
   const scale = Math.min(boxW / bitmapW, boxH / bitmapH);
   const w = bitmapW * scale;
   const h = bitmapH * scale;
@@ -32,10 +35,17 @@ function computeContainRect(bitmapW: number, bitmapH: number, boxW: number, boxH
  *  A captured stream's native resolution doesn't always match the viewport's
  *  aspect ratio 1:1 (browser chrome, multi-monitor scaling, etc.), so the
  *  frame is displayed via `background-size: contain` and may be letterboxed
- *  — that mismatch was what stretched screenshots before this fix. */
+ *  — that mismatch was what stretched screenshots before this fix.
+ *
+ *  Measures `refs.overlay`'s own painted box rather than
+ *  `window.innerWidth/innerHeight`: on platforms with classic (non-overlay)
+ *  scrollbars, the fixed-position overlay's content box is narrower than
+ *  `innerWidth` (which includes the scrollbar gutter), and using the wrong
+ *  one would offset the selection/crop by the scrollbar's width. */
 function currentFrameRect(): FrameRect | null {
   if (!frozenBitmapDims) return null;
-  return computeContainRect(frozenBitmapDims.w, frozenBitmapDims.h, window.innerWidth, window.innerHeight);
+  const box = refs.overlay.getBoundingClientRect();
+  return computeContainRect(frozenBitmapDims.w, frozenBitmapDims.h, box.width, box.height);
 }
 
 /** Clamp a selection rectangle (viewport CSS px) to the displayed frame's
@@ -145,7 +155,11 @@ function afterWarmup(fn: () => void): void {
  *  capture stream includes a sliver of browser chrome, or on a scaled
  *  display — letterboxes instead of stretching. `frozenBitmapDims` records
  *  its native size so `currentFrameRect()` can recompute the on-screen rect
- *  on demand, staying correct even if the viewport resizes mid-selection. */
+ *  on demand, staying correct even if the viewport resizes mid-selection.
+ *
+ *  The `contain`/`center` set here and `computeContainRect`'s math encode
+ *  the same layout in two places (CSS vs. JS) with nothing enforcing they
+ *  match — if one changes, change the other. */
 function showFrozenFrame(bitmap: ImageBitmap): void {
   const canvas = document.createElement("canvas");
   canvas.width = bitmap.width;
@@ -218,8 +232,13 @@ export function captureScreenshot(
  *  `viewX/Y/W/H` are viewport CSS px relative to the *displayed, letterboxed*
  *  frame (`frame`, from `currentFrameRect()`) — not the raw viewport — so the
  *  scale factor here is against the frame's own on-screen size, and the
- *  frame's top-left offset is subtracted before scaling into bitmap pixels. */
-export function cropAndShowEditor(
+ *  frame's top-left offset is subtracted before scaling into bitmap pixels.
+ *
+ *  Not exported: `frame` must come from `currentFrameRect()`, which is
+ *  module-private — an outside caller has no valid way to construct one and
+ *  would be tempted to hand-roll `{x:0,y:0,w:innerWidth,h:innerHeight}`,
+ *  silently reintroducing the stretch bug this function exists to fix. */
+function cropAndShowEditor(
   bitmap: ImageBitmap,
   viewX: number,
   viewY: number,

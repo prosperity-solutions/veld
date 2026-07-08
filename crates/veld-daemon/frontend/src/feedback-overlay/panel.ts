@@ -188,6 +188,11 @@ function restoreDraft(draft: DraftSnapshot | null): void {
   ) as HTMLTextAreaElement | null;
   if (!ta) return;
   ta.value = draft.value;
+  // Setting .value programmatically fires no input/change event — harmless
+  // today (Send reads ta.value directly at click time), but any future
+  // input-gating (disabled-until-non-empty, a char counter) would silently
+  // stay stuck in its pre-restore state without this.
+  ta.dispatchEvent(new Event("input", { bubbles: true }));
   if (draft.focused) {
     ta.focus();
     try { ta.setSelectionRange(draft.selStart ?? draft.value.length, draft.selEnd ?? draft.value.length); } catch (_) { /* ignore */ }
