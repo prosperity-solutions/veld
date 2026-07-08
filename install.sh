@@ -7,6 +7,12 @@
 # Options (via env vars):
 #   VELD_VERSION=1.0.0    Install a specific version (default: latest)
 #   VELD_INSTALL_DIR=$HOME/.local/bin   Where to put the veld binary
+#
+# Related (read by `veld setup`, not this script):
+#   VELD_ALLOW_UNMANAGED_HELPER=1   Let setup direct-spawn the helper when
+#                                   service registration fails (containers/CI
+#                                   without launchd/systemd). Unmanaged helpers
+#                                   do not survive reboots or binary updates.
 
 set -euo pipefail
 
@@ -393,7 +399,7 @@ if [ "$OS" = "macos" ]; then
         echo "Restarting veld-helper service (privileged)..."
         sudo launchctl kickstart -k system/dev.veld.helper 2>/dev/null || true
       else
-        echo "veld-helper will restart itself to pick up the new binary (no sudo needed)."
+        echo "Privileged veld-helper will restart itself to pick up the new binary (no sudo needed)."
       fi
     fi
   elif [ -z "$SWITCHING_TO_USER_PATHS" ]; then

@@ -90,14 +90,22 @@ pub async fn run(
                 .unwrap_or_default();
             if !uid.is_empty() {
                 let _ = tokio::process::Command::new("launchctl")
-                    .args(["bootout", &format!("gui/{uid}/dev.veld.helper")])
+                    .args([
+                        "bootout",
+                        &format!("gui/{uid}/{}", veld_core::setup::HELPER_LABEL_MACOS),
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status()
                     .await;
             }
             // Also try to remove the plist file
             if let Ok(sudo_user) = std::env::var("SUDO_USER") {
-                let plist =
-                    format!("/Users/{sudo_user}/Library/LaunchAgents/dev.veld.helper.plist");
+                let plist = format!(
+                    "/Users/{sudo_user}/Library/LaunchAgents/{}",
+                    veld_core::setup::helper_plist_filename()
+                );
                 let _ = std::fs::remove_file(&plist);
             }
         }
@@ -111,7 +119,7 @@ pub async fn run(
                         "systemctl",
                         "--user",
                         "stop",
-                        "veld-helper",
+                        veld_core::setup::HELPER_SERVICE_LINUX,
                     ])
                     .status()
                     .await;
@@ -122,7 +130,7 @@ pub async fn run(
                         "systemctl",
                         "--user",
                         "disable",
-                        "veld-helper",
+                        veld_core::setup::HELPER_SERVICE_LINUX,
                     ])
                     .status()
                     .await;

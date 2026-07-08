@@ -278,6 +278,10 @@ async fn watch_own_binary() {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // Consume the immediate first tick so we don't compare against ourselves at t=0.
     interval.tick().await;
+    // Re-warn periodically (not once, not every 10s tick): an operator who
+    // starts tailing the log later must still see the unmanaged-stale state.
+    const REWARN_TICKS: u32 = 60; // ~10 minutes at BINARY_WATCH_INTERVAL
+    let mut ticks_since_warn: u32 = 0;
     loop {
         interval.tick().await;
         let current = binary_signature(&exe);
@@ -287,12 +291,49 @@ async fn watch_own_binary() {
             // don't exit mid-swap.
             tokio::time::sleep(Duration::from_secs(2)).await;
             if binary_signature(&exe) == current {
-                info!(
-                    "helper binary changed on disk — exiting so launchd relaunches the new version"
-                );
-                std::process::exit(0);
+                // Binding the system socket does not prove launchd/systemd is
+                // behind us: a helper spawned directly (e.g. by setup's
+                // fallback path) also binds it, and if that one exits nothing
+                // relaunches it — every URL goes dark until the next
+                // `veld setup`. Only exit when the service manager reports
+                // *this* pid as the managed instance. Keep polling on failure:
+                // the query can fail transiently, and the binary still differs
+                // from baseline, so a later tick gets another chance to exit.
+                if service_manager_owns_us().await {
+                    info!(
+                        "helper binary changed on disk — exiting so launchd relaunches the new version"
+                    );
+                    std::process::exit(0);
+                }
+                if ticks_since_warn == 0 {
+                    warn!(
+                        "helper binary changed on disk, but this helper is not managed by a \
+                         service manager — staying alive on the old binary. Run `veld setup` \
+                         to restart onto the new version."
+                    );
+                }
+                ticks_since_warn = (ticks_since_warn + 1) % REWARN_TICKS;
             }
         }
+    }
+}
+
+/// Whether the SYSTEM-DOMAIN service manager reports *this process* as the
+/// running instance of the veld-helper service. Distinguishes a
+/// launchd/systemd-managed helper (safe to exit — it gets relaunched) from a
+/// directly-spawned orphan that merely bound the same socket (exiting would
+/// leave nothing behind). Queries are bounded inside veld-core
+/// ([`veld_core::setup::SERVICE_QUERY_TIMEOUT`]) and degrade to "not owned" —
+/// the safe direction. NOTE: system domain only (`system/…`, root systemd);
+/// do not copy this for user-domain agents like veld-daemon.
+async fn service_manager_owns_us() -> bool {
+    let own_pid = std::process::id();
+    if cfg!(target_os = "macos") {
+        veld_core::setup::launchd_job_pid("system", veld_core::setup::HELPER_LABEL_MACOS).await
+            == Some(own_pid)
+    } else {
+        veld_core::setup::systemd_main_pid(veld_core::setup::HELPER_SERVICE_LINUX).await
+            == Some(own_pid)
     }
 }
 

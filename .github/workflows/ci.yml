@@ -342,6 +342,33 @@ jobs:
             sleep 2
           done
 
+          echo ""
+          echo "=== Re-run setup while helper is running (bootout/bootstrap race) ==="
+          # Regression test: re-running privileged setup used to race launchctl
+          # bootout against bootstrap, silently losing the launchd job and
+          # leaving an unmanaged orphan helper that died on the next update.
+          # Stage Caddy in the user lib dir too: later steps (veld start) can
+          # create ~/.local/lib/veld and flip lib_dir() resolution, so keep the
+          # binary present in both candidate paths.
+          mkdir -p "$HOME/.local/lib/veld"
+          cp /tmp/caddy-preserve "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
+          chmod +x "$HOME/.local/lib/veld/caddy" 2>/dev/null || true
+          sudo $VELD setup privileged
+          sleep 2
+          if sudo launchctl print system/dev.veld.helper | grep -qE '^[[:space:]]*pid = [1-9]'; then
+            echo "Helper job still registered and running after re-setup"
+          else
+            echo "FAIL: helper launchd job lost after re-running setup"
+            exit 1
+          fi
+          $VELD doctor --json > /tmp/doctor-resetup.json 2>/dev/null || true
+          if grep -q "NOT managed" /tmp/doctor-resetup.json; then
+            echo "FAIL: doctor reports unmanaged helper after re-setup"
+            cat /tmp/doctor-resetup.json
+            exit 1
+          fi
+          echo "Re-setup race check PASSED"
+
           if [ "$CADDY_OK" = "1" ]; then
             echo "Caddy running (sentinel verified)"
             curl -sf http://localhost:2019/config/apps/http/servers/veld/listen | grep -q '":443"'
