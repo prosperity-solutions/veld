@@ -470,7 +470,7 @@ async fn run_ask(name: Option<String>, page: Option<&str>, body: &str) -> i32 {
         return 1;
     }
 
-    output::print_info(&format!("Created thread {} — question posted.", &thread.id));
+    output::print_info(&format!("Created thread {} — question posted.", thread.id));
     0
 }
 
@@ -611,7 +611,7 @@ fn print_thread_context(thread: &Thread, store: &FeedbackStore) {
     }
     println!(
         "  Thread: {} ({} message(s), {})",
-        &thread.id,
+        thread.id,
         thread.messages.len(),
         if thread.status == ThreadStatus::Open {
             "open"
@@ -679,7 +679,7 @@ fn print_thread(thread: &Thread) {
     println!(
         "{} {} [{}] (by {}, {} message(s))",
         output::bold("Thread"),
-        &thread.id,
+        thread.id,
         status,
         origin,
         thread.messages.len(),
