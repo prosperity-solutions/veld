@@ -18,22 +18,32 @@ export function buildDOM(): void {
 
   // Light DOM elements
 
+  // Light-DOM root wrapper. Everything below is appended here instead of
+  // straight to <body>, and this element (not <html>) carries the theme
+  // attribute. `display:contents` means it creates no box and no containing
+  // block, so its fixed/absolute-positioned children behave exactly as if
+  // they were direct <body> children — but the host app's SSR-owned
+  // <html>/<body> stay untouched, so React never sees a hydration mismatch.
+  refs.lightRoot = mkEl("div", "light-root");
+  refs.lightRoot.style.cssText = "display:contents";
+  appendGuarded(document.body, refs.lightRoot);
+
   // The frozen frame itself (light DOM, sits just below the overlay). Drawn
   // as an inset, bordered/shadowed "photo card" — never edge-to-edge — so a
   // capture whose content happens to match the live page 1:1 still reads
   // unmistakably as "you're looking at a frozen image now", not the page.
   refs.screenshotFrame = mkEl("img", "screenshot-frame") as HTMLImageElement;
-  appendGuarded(document.body, refs.screenshotFrame);
+  appendGuarded(refs.lightRoot, refs.screenshotFrame);
 
   refs.overlay = mkEl("div", "overlay");
-  appendGuarded(document.body, refs.overlay);
+  appendGuarded(refs.lightRoot, refs.overlay);
   initBackdropEvents();
 
   refs.hoverOutline = mkEl("div", "hover-outline");
-  appendGuarded(document.body, refs.hoverOutline);
+  appendGuarded(refs.lightRoot, refs.hoverOutline);
 
   refs.componentTraceEl = mkEl("div", "component-trace");
-  appendGuarded(document.body, refs.componentTraceEl);
+  appendGuarded(refs.lightRoot, refs.componentTraceEl);
 
   // Screenshot selection rectangle (light DOM) — drawn on the backdrop.
   // Four corner brackets give it the "viewfinder" look asked for instead of
@@ -43,7 +53,7 @@ export function buildDOM(): void {
   (["tl", "tr", "bl", "br"] as const).forEach((corner) => {
     refs.screenshotRect.appendChild(mkEl("span", "screenshot-corner screenshot-corner-" + corner));
   });
-  appendGuarded(document.body, refs.screenshotRect);
+  appendGuarded(refs.lightRoot, refs.screenshotRect);
 
   // Screenshot mode instruction banner (light DOM) — explicit, always-visible
   // guidance instead of a single toast that scrolls off. Doubles as the
@@ -60,7 +70,7 @@ export function buildDOM(): void {
   });
   refs.screenshotBanner.appendChild(refs.screenshotFullBtn);
   refs.screenshotBanner.appendChild(mkEl("span", "screenshot-banner-hint", "Esc to cancel"));
-  appendGuarded(document.body, refs.screenshotBanner);
+  appendGuarded(refs.lightRoot, refs.screenshotBanner);
 
   // Float container (shadow DOM) — anchor for the arc-menu engine. Zero-size,
   // translated to the bubble center; the engine builds its goo/glow/icon layers
@@ -94,12 +104,14 @@ export function buildDOM(): void {
   const toolBtnDashboard = makeToolBtn("dashboard", ICONS.dashboard);
   refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff);
 
-  // Reflect the current theme on the icon + host, and persist it.
+  // Reflect the current theme on the icon + host, and persist it. The theme
+  // attribute goes on our own light-DOM root, never on <html> — mutating the
+  // app's SSR-owned <html> triggers a React hydration mismatch.
   function applyTheme(): void {
     const theme = getState().theme;
     toolBtnTheme.innerHTML = THEME_ICONS[theme];
     refs.hostEl.setAttribute("data-theme", theme);
-    document.documentElement.setAttribute("data-veld-theme", theme === "auto" ? "" : theme);
+    refs.lightRoot.setAttribute("data-veld-theme", theme === "auto" ? "" : theme);
     try { localStorage.setItem("veld-theme", theme); } catch (_) { /* ignore */ }
   }
 

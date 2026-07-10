@@ -8,6 +8,7 @@ import {
   hasUnread,
 } from "./helpers";
 import { PREFIX, ICONS } from "./constants";
+import { refs } from "./refs";
 import { deps } from "../shared/registry";
 import type { Thread } from "./types";
 
@@ -51,7 +52,7 @@ export function addPin(thread: Thread): void {
     deps().openThreadInPanel(thread.id);
   });
 
-  const disconnect = appendGuarded(document.body, pin);
+  const disconnect = appendGuarded(refs.lightRoot, pin);
   guards.set(thread.id, disconnect);
   dispatch({ type: "SET_PIN", threadId: thread.id, el: pin });
 }

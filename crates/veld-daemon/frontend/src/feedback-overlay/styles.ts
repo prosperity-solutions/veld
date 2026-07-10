@@ -28,7 +28,7 @@ export const LIGHT_CSS = `
     --vfl-border: #d4d4d8;
   }
 }
-:root[data-veld-theme="dark"] {
+.veld-feedback-light-root[data-veld-theme="dark"] {
   --vfl-bg: #0a0a0a;
   --vfl-bg-card: #1e1e24;
   --vfl-text: #f1f5f9;
@@ -37,7 +37,7 @@ export const LIGHT_CSS = `
   --vfl-danger: #ef4444;
   --vfl-border: #2a2a30;
 }
-:root[data-veld-theme="light"] {
+.veld-feedback-light-root[data-veld-theme="light"] {
   --vfl-bg: #f8f8fa;
   --vfl-bg-card: #eeeef2;
   --vfl-text: #1a1a2e;

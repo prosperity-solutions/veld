@@ -27,7 +27,8 @@ describe("buildDOM", () => {
     const required = [
       "toolbarContainer", "fab", "fabBadge", "toolbar", "toolBtnSelect",
       "toolBtnScreenshot", "toolBtnPageComment", "toolBtnComments",
-      "toolBtnHide", "toolbarOverflow", "listeningModule", "moreBtn", "overlay",
+      "toolBtnHide", "toolbarOverflow", "listeningModule", "moreBtn", "lightRoot",
+      "overlay",
       "hoverOutline", "componentTraceEl", "screenshotRect", "panel", "panelBody",
       "panelHeadTitle", "panelBackBtn", "markReadBtn", "segBtnActive",
       "segBtnResolved", "tooltip",
@@ -37,6 +38,24 @@ describe("buildDOM", () => {
     }
     expect(refs.radialButtons.length).toBeGreaterThan(0);
     expect(refs.overflowButtons.length).toBeGreaterThan(0);
+  });
+
+  it("puts the theme attribute on lightRoot, never on <html>", () => {
+    // Regression guard: setting data-veld-theme on document.documentElement
+    // mutated the host app's SSR-owned <html>, causing React hydration
+    // mismatches in Next.js. The attribute must live on our own light root.
+    buildDOM();
+    expect(refs.lightRoot.hasAttribute("data-veld-theme")).toBe(true);
+    expect(document.documentElement.hasAttribute("data-veld-theme")).toBe(false);
+  });
+
+  it("re-parents light-DOM elements under lightRoot, not straight into <body>", () => {
+    buildDOM();
+    // Theme override CSS scopes to `.veld-feedback-light-root[data-veld-theme]`,
+    // so themed light elements must inherit through lightRoot.
+    expect(refs.overlay.parentElement).toBe(refs.lightRoot);
+    expect(refs.screenshotBanner.parentElement).toBe(refs.lightRoot);
+    expect(refs.componentTraceEl.parentElement).toBe(refs.lightRoot);
   });
 
   it("screenshot mode teardown does not throw", async () => {
