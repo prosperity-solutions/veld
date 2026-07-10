@@ -72,7 +72,7 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let mut registry_changed = false;
 
     // Phase 1: Process each project's runs -- remove stale entries and kill orphans.
-    for (_project_path, reg_entry) in registry.projects.iter_mut() {
+    for reg_entry in registry.projects.values_mut() {
         let project_root = reg_entry.project_root.clone();
 
         let mut project_state = match ProjectState::load(&project_root) {
