@@ -23,6 +23,12 @@ export interface DOMRefs {
   moreBtn: HTMLElement;
 
   // Light DOM
+  /** Light-DOM root wrapper (display:contents). All light-DOM overlay
+   *  elements are appended here rather than straight to <body>, and it
+   *  carries the `data-veld-theme` attribute. Keeping the attribute off the
+   *  host page's <html>/<body> avoids React hydration mismatches (those
+   *  elements are owned by the app's SSR tree). */
+  lightRoot: HTMLElement;
   overlay: HTMLElement;
   hoverOutline: HTMLElement;
   componentTraceEl: HTMLElement;
@@ -67,6 +73,7 @@ export function initRefs(shadow: ShadowRoot, hostEl: HTMLElement): void {
     radialButtons: [],
     overflowButtons: [],
     moreBtn: null!,
+    lightRoot: null!,
     overlay: null!,
     hoverOutline: null!,
     componentTraceEl: null!,

@@ -44,6 +44,9 @@ function setupState() {
   // Create minimal DOM refs that modules expect
   refs.toolbarContainer = document.createElement("div");
   refs.toolbar = document.createElement("div");
+  refs.lightRoot = document.createElement("div");
+  refs.lightRoot.style.cssText = "display:contents";
+  document.body.appendChild(refs.lightRoot);
   refs.overlay = document.createElement("div");
   refs.hoverOutline = document.createElement("div");
   refs.componentTraceEl = document.createElement("div");
