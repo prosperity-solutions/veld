@@ -154,6 +154,70 @@ describe("renderPanel — list view", () => {
     const cards = refs.panelBody.querySelectorAll("." + PREFIX + "thread-card");
     expect(cards.length).toBe(1);
   });
+
+  it("shows no 'Currently running' lane when no agent session is live", () => {
+    dispatch({
+      type: "SET_THREADS",
+      threads: [makeThread({ id: "t1", messages: [makeMessage({ author: "human" })] })],
+    });
+    dispatch({ type: "SET_PANEL_TAB", tab: "active" });
+    renderPanel();
+    expect(refs.panelBody.textContent).not.toContain("Currently running");
+    const sections = refs.panelBody.querySelectorAll("." + PREFIX + "panel-section");
+    expect(sections.length).toBe(2);
+  });
+
+  it("shows the thread `next` handed the agent under 'Currently running'", () => {
+    dispatch({
+      type: "SET_THREADS",
+      threads: [
+        // Delivered to the agent via `next` → currently running.
+        makeThread({ id: "t-running", messages: [makeMessage({ author: "human" })] }),
+        // Waiting — stays in the agent's queue.
+        makeThread({ id: "t-queued", messages: [makeMessage({ author: "human" })] }),
+      ],
+    });
+    dispatch({ type: "SET_CURRENT_THREAD", threadId: "t-running" });
+    dispatch({ type: "SET_PANEL_TAB", tab: "active" });
+    renderPanel();
+
+    expect(refs.panelBody.textContent).toContain("Currently running (1)");
+    expect(refs.panelBody.textContent).toContain("With the agent (1)");
+    const running = refs.panelBody.querySelector("." + PREFIX + "panel-section-running");
+    expect(running).not.toBeNull();
+    const runningCard = running!.querySelector("." + PREFIX + "thread-card") as HTMLElement;
+    expect(runningCard.dataset.threadId).toBe("t-running");
+  });
+
+  it("shows an idle 'Currently running' lane while listening with nothing delivered", () => {
+    dispatch({ type: "SET_LISTENING", listening: true });
+    dispatch({
+      type: "SET_THREADS",
+      threads: [makeThread({ id: "t1", messages: [makeMessage({ author: "agent" })] })],
+    });
+    dispatch({ type: "SET_PANEL_TAB", tab: "active" });
+    renderPanel();
+
+    expect(refs.panelBody.textContent).toContain("Currently running (0)");
+    const sections = refs.panelBody.querySelectorAll("." + PREFIX + "panel-section");
+    expect(sections.length).toBe(3);
+  });
+
+  it("drops a running thread from the lane once it is resolved", () => {
+    // Session still live, but the delivered thread got resolved (e.g. by the
+    // human) before the marker cleared — it must not linger as "running".
+    dispatch({ type: "SET_LISTENING", listening: true });
+    dispatch({
+      type: "SET_THREADS",
+      threads: [makeThread({ id: "t-done", status: "resolved", messages: [makeMessage({ author: "human" })] })],
+    });
+    dispatch({ type: "SET_CURRENT_THREAD", threadId: "t-done" });
+    dispatch({ type: "SET_PANEL_TAB", tab: "active" });
+    renderPanel();
+    const running = refs.panelBody.querySelector("." + PREFIX + "panel-section-running");
+    expect(running).not.toBeNull();
+    expect(running!.querySelector("." + PREFIX + "thread-card")).toBeNull();
+  });
 });
 
 describe("renderPanel — detail view", () => {

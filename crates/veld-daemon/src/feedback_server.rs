@@ -630,14 +630,30 @@ async fn get_session(
 
     // Don't report "listening" once the reviewer clicked Done — even while the
     // agent drains the last items — so the FAB doesn't re-pulse after Done.
+    let ended = store
+        .is_ended()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let listening = store
         .is_listening(60)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        && !store
-            .is_ended()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        && !ended;
 
-    Ok(Json(serde_json::json!({ "listening": listening })))
+    // The thread `next` last handed the agent — the overlay's "Currently
+    // running" lane. Read with a 30-minute window rather than the 60s
+    // liveness one: the heartbeat naturally lapses while the agent edits code
+    // between `next` and `reply`, and the marker is cleared by reply/resolve
+    // anyway; the cap only stops a crashed agent pinning a thread forever.
+    let current_thread_id = if ended {
+        None
+    } else {
+        store
+            .current_thread(1800)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    };
+
+    Ok(Json(
+        serde_json::json!({ "listening": listening, "current_thread_id": current_thread_id }),
+    ))
 }
 
 async fn end_session(

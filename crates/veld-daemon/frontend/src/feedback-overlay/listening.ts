@@ -4,6 +4,7 @@ import { PREFIX } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { positionRadialButtons } from "./toolbar";
+import { deps } from "../shared/registry";
 
 export function updateListeningModule(): void {
   if (refs.fab) {
@@ -11,6 +12,9 @@ export function updateListeningModule(): void {
   }
   // Recompute radial layout since listening dot visibility changed
   positionRadialButtons();
+  // The "Currently running" lane derives from listening state — keep an open
+  // panel in sync when the agent session starts or stops.
+  if (getState().panelOpen) deps().renderPanel();
 }
 
 export function sendAllGood(): void {

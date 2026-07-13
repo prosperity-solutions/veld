@@ -348,13 +348,27 @@ function renderActiveThreads(): void {
   // (or none yet) is in the agent's queue ("With the agent"). Both lanes always
   // render — with a count and an empty state when there's nothing in them.
   const yourTurn = active.filter(function (t) { return lastMessageAuthor(t) === "agent"; }).sort(byRecency);
-  const withAgent = active.filter(function (t) { return lastMessageAuthor(t) !== "agent"; }).sort(byRecency);
+  let withAgent = active.filter(function (t) { return lastMessageAuthor(t) !== "agent"; }).sort(byRecency);
+
+  // "Currently running": the thread `next` actually handed the agent (from
+  // /session), not a client-side guess — the agent's reply/resolve clears it
+  // server-side. Shown whenever a delivery is in flight; while the agent is
+  // merely listening with nothing delivered, the lane shows as idle. Hidden
+  // entirely when no agent session is live.
+  const currentId = getState().currentThreadId;
+  const running = currentId
+    ? active.filter(function (t) { return t.id === currentId; })
+    : [];
+  if (running.length || getState().agentListening) {
+    withAgent = withAgent.filter(function (t) { return t.id !== currentId; });
+    renderLane("Currently running", ICONS.activity, running, "Agent is live — picking up the next thread.", "panel-section-running");
+  }
   renderLane("Your turn", ICONS.person, yourTurn, "Nothing needs your reply.");
   renderLane("With the agent", ICONS.robot, withAgent, "Nothing waiting on the agent.");
 }
 
-function renderLane(label: string, icon: string, threads: Thread[], emptyText: string): void {
-  const section = mkEl("div", "panel-section");
+function renderLane(label: string, icon: string, threads: Thread[], emptyText: string, extraClass?: string): void {
+  const section = mkEl("div", "panel-section" + (extraClass ? " " + extraClass : ""));
   const heading = mkEl("div", "panel-section-heading");
   const iconEl = mkEl("span", "panel-section-icon");
   iconEl.innerHTML = icon;

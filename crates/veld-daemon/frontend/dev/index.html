@@ -260,9 +260,9 @@
         if (/\/events/.test(path)) {
           return _mockJson([]);
         }
-        // GET /session (listen status)
+        // GET /session (listen status + the thread `next` handed the agent)
         if (/\/session/.test(path)) {
-          return _mockJson({ listening: true });
+          return _mockJson({ listening: true, current_thread_id: "thread-3" });
         }
         // POST /client-logs
         if (/\/client-logs/.test(path)) {
