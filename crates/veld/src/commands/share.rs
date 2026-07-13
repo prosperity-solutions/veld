@@ -49,6 +49,9 @@ pub async fn share(
                     "Sharing {} node(s) over peer-to-peer.",
                     resp.nodes.len()
                 ));
+                for w in &resp.warnings {
+                    println!("  {}", output::dim(&format!("note: {w}")));
+                }
                 println!();
                 println!("  Send this link (opens in their browser):");
                 println!("    {}", output::cyan(&resp.join_url));

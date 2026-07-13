@@ -123,6 +123,10 @@ Share a running environment with a colleague so they open the **same** URLs on
 their own machine, over an encrypted P2P tunnel (iroh: QUIC + NAT hole-punching
 + n0 relay fallback). No accounts, no Veld-hosted server.
 
+**Opt-in is required.** A service is shareable only if its variant declares
+`share.expose` in `veld.json`; `veld share` errors on anything that hasn't opted
+in. Add `"share": { "expose": ["peer"] }` to the variant(s) you want to share.
+
 ```sh
 veld share my-feature                       # print a join URL to send (plus a veld join command)
 veld share my-feature --node frontend       # share only specific nodes (repeatable)
@@ -154,10 +158,15 @@ Approval modes: `manual` (host approves each join via the dashboard — which op
 automatically — or `veld approve`), `first` (auto-approve + pin the first
 token-valid joiner, reject the rest), `auto` (approve any token-valid joiner).
 Traffic is end-to-end encrypted; a relay only forwards sealed bytes and never
-sees URLs or content. Set `VELD_SHARE_RELAY=<https url>` on the daemon to use a
-self-hosted iroh-relay instead of n0's public relays. Stopping the run
-(`veld stop`) auto-unshares its shares, and a consumer's join self-tears-down when
-the tunnel closes.
+sees URLs or content. Relay selection is a config compliance control and must be
+opted into explicitly (no implicit default): set `sharing.relays` to `"public"`
+or an array of self-hosted relay URLs, else `veld share` is refused. Config wins
+over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's env, not your
+shell; not an enforceable floor). The daemon binds one iroh endpoint per relay
+policy on demand, so shares on different relays run concurrently. `share.expose` also accepts `web` (public browser access via a
+`sharing.gateway` server) but that gateway ships later; today only `peer` is
+served. Stopping the run (`veld stop`) auto-unshares its shares, and a consumer's
+join self-tears-down when the tunnel closes.
 
 ## Editing veld.json
 

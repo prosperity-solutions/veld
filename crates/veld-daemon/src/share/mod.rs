@@ -29,7 +29,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires network; manual transport check"]
     async fn full_tunnel_echoes_over_iroh() {
-        use super::endpoint::bind_endpoint;
+        use super::endpoint::{RelayChoice, bind_endpoint};
         use super::{host::HostShare, join};
         use iroh::SecretKey;
         use std::collections::HashMap;
@@ -54,8 +54,12 @@ mod tests {
             }
         });
 
-        let host_ep = bind_endpoint(SecretKey::generate()).await.unwrap();
-        let client_ep = bind_endpoint(SecretKey::generate()).await.unwrap();
+        let host_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
+            .await
+            .unwrap();
+        let client_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
+            .await
+            .unwrap();
         host_ep.online().await;
         let host_addr = host_ep.addr();
 

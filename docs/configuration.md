@@ -41,6 +41,7 @@ All relative paths in the configuration resolve relative to the directory contai
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
+| `sharing`           | object | No       | Sharing policy: relays and public gateway (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
 | `teardown`          | array  | No       | Lifecycle steps that run after all nodes stop (see [Setup & Teardown]) |
 | `nodes`             | object | Yes      | The dependency graph nodes                        |
@@ -333,6 +334,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `skip_if`           | string           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
+| `share`             | object           | No       | any (inert on `command`) | Sharing opt-in for this variant (see [Sharing](#sharing)) |
 
 ### `type`
 
@@ -651,6 +653,62 @@ If the `on_stop` command fails (non-zero exit code or execution error), Veld log
   "health_check": { "type": "port" }
 }
 ```
+
+---
+
+## Sharing
+
+Sharing has two config surfaces: an environment-wide `sharing` block (relays and the public gateway) and a per-variant `share` opt-in. A service is shareable **only** if its variant declares `share` — `veld share` refuses any service that hasn't opted in. This makes what leaves your machine explicit and auditable.
+
+> **Behavior change:** earlier versions shared every URL-bearing service in a run. Now nothing is shared until its variant declares `share.expose`; `veld share` errors (listing the candidate `node:variant`s) until you opt one in.
+
+```json
+{
+  "sharing": {
+    "relays": ["https://relay.acme.internal"],
+    "gateway": "https://share.acme.internal"
+  },
+  "nodes": {
+    "frontend": {
+      "variants": {
+        "local": {
+          "type": "start_server",
+          "command": "npm run dev",
+          "share": { "expose": ["peer"] }
+        }
+      }
+    }
+  }
+}
+```
+
+### `sharing.relays`
+
+Which iroh relays share traffic routes through — a compliance control. Relays forward only sealed, end-to-end-encrypted bytes; they never see URLs or content. **Relays must be opted into explicitly — including public.** There is no implicit default, so nothing is routed over public relays by accident; `veld share` refuses a run whose config sets no relay (and no `VELD_SHARE_RELAY` env override is present).
+
+- `"public"` — n0's public relays (an explicit opt-in, not a default).
+- An array of relay URLs — confine traffic to relays you self-host (a single Docker container). Must be non-empty; use `"public"` for public relays.
+
+When set here, config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor — `"relays": "public"` overrides it). The custom-relay guarantee covers the host's outbound leg; a consumer joining over the same self-hosted relays should configure them on their side too. The daemon binds **one iroh endpoint per relay policy** on demand, each with its own node identity (the public endpoint reuses the daemon's persistent identity; custom-relay endpoints get a fresh per-run one), so shares on different relays run concurrently without conflict.
+
+### `sharing.gateway`
+
+Base URL of the public web gateway this environment points at, e.g. `"https://share.acme.internal"`. Only needed by services that `expose` `web`. The gateway is a self-hosted server that joins the share and reverse-proxies it onto a public URL. **Reserved:** the gateway ships in a later release; today only `peer` sharing is served.
+
+### `share.expose`
+
+The audiences a variant may be shared to. A list; an empty list (or an absent `share` block) means the service is never shareable.
+
+| Value  | Audience          | URL fidelity                       | Status         |
+|--------|-------------------|------------------------------------|----------------|
+| `peer` | Other Veld users  | Verbatim — exact origin URL reproduced | Available      |
+| `web`  | Any browser       | Best-effort (rewritten host, operator-configured domain) | Reserved (gateway ships later) |
+
+```json
+"share": { "expose": ["peer", "web"] }
+```
+
+Sharing only ever exposes services with a URL, so `share` is meaningful on `start_server` variants; on a `command` variant it is accepted but inert (nothing to share). A `web`-only opt-in (no `peer`) is not yet shareable — `veld share` reports it distinctly and points you at `peer`.
 
 ---
 
