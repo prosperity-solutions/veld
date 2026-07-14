@@ -51,10 +51,19 @@ let announcedListening = false;
 
 export function pollListenStatus(): void {
   api("GET", "/session").then(function (raw) {
-    const data = raw as { listening?: boolean } | null;
+    const data = raw as { listening?: boolean; current_thread_id?: string | null } | null;
     const wasListening = getState().agentListening;
     const nowListening = !!(data && data.listening);
     dispatch({ type: "SET_LISTENING", listening: nowListening });
+    // The thread `next` last handed the agent — drives the panel's
+    // "Currently running" lane. Re-render on change so the lane follows the
+    // agent from thread to thread without waiting for a message event.
+    const wasCurrent = getState().currentThreadId;
+    const nowCurrent = (data && data.current_thread_id) || null;
+    if (nowCurrent !== wasCurrent) {
+      dispatch({ type: "SET_CURRENT_THREAD", threadId: nowCurrent });
+      if (getState().panelOpen) deps().renderPanel();
+    }
     if (nowListening !== wasListening) updateListeningModule();
     if (listeningPrimed && !wasListening && nowListening) notifyAgentListening();
     listeningPrimed = true;

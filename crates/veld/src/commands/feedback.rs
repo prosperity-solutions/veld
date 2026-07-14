@@ -289,6 +289,10 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
     loop {
         match store.next_waiting_thread() {
             Ok(Some(thread)) => {
+                // Record the delivery so the overlay can show this thread as
+                // "currently running". Session metadata only (like the
+                // heartbeat) — the queue itself stays a pure read.
+                let _ = store.set_current_thread(&thread.id);
                 emit_next("item", Some(&thread), &store, json);
                 let _ = store.heartbeat();
                 return 0;
@@ -391,6 +395,8 @@ async fn run_reply(name: Option<String>, thread_id: &str, body: &str) -> i32 {
     // Keep the session alive while the agent works items, so `is_listening`
     // doesn't lapse between `next` calls and flap the "listening" indicator.
     let _ = store.heartbeat();
+    // The reply blocks the thread — it is no longer the one being worked.
+    let _ = store.clear_current_thread(&thread_id);
 
     output::print_info(&format!(
         "Replied to thread {thread_id} — now waiting on the reviewer."
@@ -431,6 +437,7 @@ async fn run_resolve(name: Option<String>, thread_id: &str) -> i32 {
     }
 
     let _ = store.heartbeat();
+    let _ = store.clear_current_thread(&thread_id);
     output::print_info(&format!("Resolved thread {thread_id}."));
     0
 }

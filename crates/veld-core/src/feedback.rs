@@ -162,6 +162,13 @@ pub struct Session {
     /// from `status`/`last_heartbeat`, which track agent liveness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<DateTime<Utc>>,
+    /// The thread `next` last handed to the agent — session-level observability
+    /// (same class as `last_heartbeat`), NOT claiming: it never affects what
+    /// `next` returns, needs no release, and dies with the session. Cleared by
+    /// the agent's `reply`/`resolve` on that thread and on session stop/end, so
+    /// while set it marks the thread the agent is working right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_thread_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -532,6 +539,7 @@ impl FeedbackStore {
             status: SessionStatus::Idle,
             last_heartbeat: Utc::now(),
             ended_at: None,
+            current_thread_id: None,
         });
         mutate(&mut session);
 
@@ -549,6 +557,24 @@ impl FeedbackStore {
         self.modify_session(|s| {
             s.status = SessionStatus::Listening;
             s.last_heartbeat = Utc::now();
+        })
+    }
+
+    /// Record the thread `next` just handed to the agent. Overwritten by the
+    /// next delivery — no release step exists or is needed.
+    pub fn set_current_thread(&self, thread_id: &str) -> anyhow::Result<()> {
+        let id = thread_id.to_owned();
+        self.modify_session(move |s| s.current_thread_id = Some(id))
+    }
+
+    /// Clear the delivery marker, but only if it still points at `thread_id` —
+    /// a reply to an older thread must not wipe a newer delivery.
+    pub fn clear_current_thread(&self, thread_id: &str) -> anyhow::Result<()> {
+        let id = thread_id.to_owned();
+        self.modify_session(move |s| {
+            if s.current_thread_id.as_deref() == Some(id.as_str()) {
+                s.current_thread_id = None;
+            }
         })
     }
 
@@ -578,6 +604,28 @@ impl FeedbackStore {
         }
     }
 
+    /// The thread the agent is working right now, if any: the delivery marker,
+    /// readable while the session is Listening and the heartbeat is younger
+    /// than `threshold_secs`. Callers pass a threshold well above the 60s
+    /// liveness window — the heartbeat naturally lapses while the agent edits
+    /// code between `next` and `reply` — it exists only so a crashed agent
+    /// can't pin a thread as "running" forever.
+    pub fn current_thread(&self, threshold_secs: u64) -> anyhow::Result<Option<String>> {
+        match self.get_session()? {
+            Some(session) if session.status == SessionStatus::Listening => {
+                let elapsed = Utc::now()
+                    .signed_duration_since(session.last_heartbeat)
+                    .num_seconds();
+                if elapsed >= 0 && (elapsed as u64) < threshold_secs {
+                    Ok(session.current_thread_id)
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Explicitly end the session — the human clicked "Done".
     ///
     /// Sets `ended_at`, which `is_ended` reads. When the agent's queue drains,
@@ -591,6 +639,7 @@ impl FeedbackStore {
             s.status = SessionStatus::Idle;
             s.last_heartbeat = now;
             s.ended_at = Some(now);
+            s.current_thread_id = None;
         })
     }
 
@@ -604,6 +653,7 @@ impl FeedbackStore {
         self.modify_session(|s| {
             s.status = SessionStatus::Idle;
             s.ended_at = None;
+            s.current_thread_id = None;
         })
     }
 
@@ -934,6 +984,40 @@ mod tests {
         assert!(!store.is_listening(60).unwrap());
         let session = store.get_session().unwrap().unwrap();
         assert_eq!(session.status, SessionStatus::Idle);
+    }
+
+    #[test]
+    fn test_current_thread_marker() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        // Nothing running without a session.
+        assert!(store.current_thread(1800).unwrap().is_none());
+
+        // Delivery sets the marker; readable while listening.
+        store.heartbeat().unwrap();
+        store.set_current_thread("t-1").unwrap();
+        assert_eq!(store.current_thread(1800).unwrap().as_deref(), Some("t-1"));
+
+        // A clear for a different thread must not wipe a newer delivery.
+        store.clear_current_thread("t-0").unwrap();
+        assert_eq!(store.current_thread(1800).unwrap().as_deref(), Some("t-1"));
+
+        // A matching clear (reply/resolve on that thread) removes it.
+        store.clear_current_thread("t-1").unwrap();
+        assert!(store.current_thread(1800).unwrap().is_none());
+
+        // Session end clears an in-flight marker.
+        store.set_current_thread("t-2").unwrap();
+        store.end_session().unwrap();
+        assert!(store.get_session().unwrap().unwrap().current_thread_id.is_none());
+        assert!(store.current_thread(1800).unwrap().is_none());
+
+        // mark_stopped clears it too (agent exiting mid-thread).
+        store.heartbeat().unwrap();
+        store.set_current_thread("t-3").unwrap();
+        store.mark_stopped().unwrap();
+        assert!(store.current_thread(1800).unwrap().is_none());
     }
 
     #[test]

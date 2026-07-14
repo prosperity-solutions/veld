@@ -646,6 +646,21 @@
   text-align: center; opacity: .8;
 }
 
+/* --- "Currently running" lane (live agent work, derived from the queue head) --- */
+.veld-feedback-panel-section-running .veld-feedback-panel-section-heading {
+  color: var(--vf-accent); border-bottom-color: var(--vf-accent);
+}
+.veld-feedback-panel-section-running .veld-feedback-thread-card {
+  border-left: 3px solid var(--vf-accent); padding-left: 9px;
+}
+.veld-feedback-panel-section-running .veld-feedback-panel-section-icon {
+  animation: veld-feedback-running-blink 1.6s ease-in-out infinite;
+}
+@keyframes veld-feedback-running-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
+}
+
 /* --- Thread card (compact) --- */
 .veld-feedback-thread-card {
   background: var(--vf-bg-card); border-radius: 8px;

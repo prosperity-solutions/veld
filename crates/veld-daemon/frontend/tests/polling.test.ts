@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { showAgentReplyToast, loadThreads } from "../src/feedback-overlay/polling";
+import { showAgentReplyToast, loadThreads, pollListenStatus } from "../src/feedback-overlay/polling";
 import { refs } from "../src/feedback-overlay/refs";
 import { dispatch, getState } from "../src/feedback-overlay/store";
 import { PREFIX } from "../src/feedback-overlay/constants";
@@ -99,5 +99,36 @@ describe("loadThreads", () => {
     await new Promise((r) => setTimeout(r, 10));
     // State unchanged
     expect(getState().threads).toEqual([]);
+  });
+});
+
+describe("pollListenStatus", () => {
+  let fakeDeps: ReturnType<typeof setupMockRefs>["deps"];
+
+  beforeEach(() => {
+    fakeDeps = setupMockRefs().deps;
+    mockApi.mockReset();
+  });
+
+  it("stores current_thread_id from /session and re-renders an open panel", async () => {
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    mockApi.mockResolvedValueOnce({ listening: true, current_thread_id: "t-x" });
+
+    pollListenStatus();
+    await vi.waitFor(() => {
+      expect(getState().currentThreadId).toBe("t-x");
+    });
+    expect(getState().agentListening).toBe(true);
+    expect(fakeDeps.renderPanel).toHaveBeenCalled();
+  });
+
+  it("clears the current thread when the session reports none", async () => {
+    dispatch({ type: "SET_CURRENT_THREAD", threadId: "t-x" });
+    mockApi.mockResolvedValueOnce({ listening: false });
+
+    pollListenStatus();
+    await vi.waitFor(() => {
+      expect(getState().currentThreadId).toBeNull();
+    });
   });
 });
