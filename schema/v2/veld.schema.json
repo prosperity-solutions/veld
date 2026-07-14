@@ -489,7 +489,7 @@
       "additionalProperties": false,
       "properties": {
         "relays": {
-          "description": "Which iroh relays to route share traffic through. Must be opted into explicitly (no implicit default) — veld share is refused if unset and no VELD_SHARE_RELAY env override is present. \"public\" uses n0's public relays; an array of URLs confines traffic to self-hosted relays. When set, config wins over the VELD_SHARE_RELAY env override.",
+          "description": "Which iroh relays to route share traffic through. Must be opted into explicitly (no implicit default) — veld share is refused if unset and no VELD_SHARE_RELAY env override is present. \"public\" uses n0's public relays; an array confines traffic to self-hosted relays. Each array entry is either a bare relay URL string or a { url, token } object; the optional token gates a self-hosted relay via an Authorization: Bearer header. When set, config wins over the VELD_SHARE_RELAY env override.",
           "oneOf": [
             {
               "const": "public"
@@ -497,7 +497,7 @@
             {
               "type": "array",
               "items": {
-                "type": "string"
+                "$ref": "#/$defs/RelayEntry"
               },
               "minItems": 1
             }
@@ -508,6 +508,72 @@
           "description": "Base URL of the public web gateway this environment points at (e.g. https://share.acme.internal). Only needed for services that expose \"web\"."
         }
       }
+    },
+    "RelayEntry": {
+      "description": "A self-hosted relay in a sharing.relays list: either a bare URL string, or an object with a url and an optional authorization token.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Relay URL (no authorization token)."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url"],
+          "properties": {
+            "url": {
+              "type": "string",
+              "description": "Relay URL (e.g. https://relay.acme.internal)."
+            },
+            "token": {
+              "$ref": "#/$defs/SecretSource",
+              "description": "Authorization token sent to the relay as an Authorization: Bearer header, gating who may use a self-hosted relay. Resolved on the daemon at share time; a token that fails to resolve fails the share."
+            }
+          }
+        }
+      ]
+    },
+    "SecretSource": {
+      "description": "Where a secret is read from at use time. A plain string is a literal (inline in config, so it lands in version control — prefer the object forms). Object forms keep the secret out of config: env reads an environment variable; file reads a file (Docker/K8s secret mounts); command runs a shell command and uses its stdout (1Password/Vault CLI).",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Literal secret value, inline in config."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["env"],
+          "properties": {
+            "env": {
+              "type": "string",
+              "description": "Name of an environment variable (read from the daemon's process environment) holding the secret."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["file"],
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Path to a file whose contents (trailing whitespace trimmed) are the secret."
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command"],
+          "properties": {
+            "command": {
+              "type": "string",
+              "description": "Shell command (run via sh -c) whose stdout (trailing whitespace trimmed) is the secret."
+            }
+          }
+        }
+      ]
     },
     "SharePolicy": {
       "type": "object",

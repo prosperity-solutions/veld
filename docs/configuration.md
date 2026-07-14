@@ -687,9 +687,44 @@ Sharing has two config surfaces: an environment-wide `sharing` block (relays and
 Which iroh relays share traffic routes through — a compliance control. Relays forward only sealed, end-to-end-encrypted bytes; they never see URLs or content. **Relays must be opted into explicitly — including public.** There is no implicit default, so nothing is routed over public relays by accident; `veld share` refuses a run whose config sets no relay (and no `VELD_SHARE_RELAY` env override is present).
 
 - `"public"` — n0's public relays (an explicit opt-in, not a default).
-- An array of relay URLs — confine traffic to relays you self-host (a single Docker container). Must be non-empty; use `"public"` for public relays.
+- An array of relay entries — confine traffic to relays you self-host (a single Docker container). Must be non-empty; use `"public"` for public relays. Each entry is either a bare URL string or an object `{ "url": ..., "token": ... }` (see [Relay auth tokens](#relay-auth-tokens)).
 
 When set here, config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor — `"relays": "public"` overrides it). The custom-relay guarantee covers the host's outbound leg; a consumer joining over the same self-hosted relays should configure them on their side too. The daemon binds **one iroh endpoint per relay policy** on demand, each with its own node identity (the public endpoint reuses the daemon's persistent identity; custom-relay endpoints get a fresh per-run one), so shares on different relays run concurrently without conflict.
+
+#### Relay auth tokens
+
+A self-hosted relay can require an **authorization token** so it isn't an open relay anyone can route through. Veld sends the token to the relay as an `Authorization: Bearer <token>` header when it connects (iroh's native relay auth). This is a lightweight gate — "you need the shared secret to use our relay" — not a per-user identity system.
+
+Give a relay entry a `token` to send one:
+
+```json
+{
+  "sharing": {
+    "relays": [
+      "https://open.acme.internal",
+      { "url": "https://lit.acme.internal",  "token": "the-shared-secret" },
+      { "url": "https://env.acme.internal",  "token": { "env": "VELD_RELAY_TOKEN" } },
+      { "url": "https://file.acme.internal", "token": { "file": "/run/secrets/relay-token" } },
+      { "url": "https://op.acme.internal",   "token": { "command": "op read op://vault/relay/token" } }
+    ]
+  }
+}
+```
+
+`token` is one of:
+
+| Form | Meaning | Use for |
+|------|---------|---------|
+| `"a-string"` | Literal token, inline in config | Quick local setup — but it lands the secret in `veld.json` (and version control) |
+| `{ "env": "VAR" }` | Read environment variable `VAR` **from the daemon's process environment, not your shell** (so `export VAR=… && veld share` won't work — a running daemon doesn't inherit it) | 12-factor / CI secret injection |
+| `{ "file": "/path" }` | Read the file's contents (trailing whitespace trimmed). Use an absolute path — a relative one resolves against the daemon's working directory, not your project | Docker / Kubernetes secret mounts (`/run/secrets/…`) |
+| `{ "command": "…" }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed) | 1Password, Vault, or any secret-manager CLI |
+
+All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
+
+**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config, so a colleague joining a share routed over a token-gated relay supplies the token via the `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` env vars on **their** daemon (the same way they point at the relay in the first place) — there is no config path for a joiner's relay token.
+
+Because a token declaration is part of a relay's endpoint identity, changing the *declaration* (e.g. switching the `env` var name) is picked up on the next share, but rotating the *underlying* secret behind an unchanged declaration takes effect only when the daemon next binds that relay — in practice, on daemon restart, since a bound endpoint is cached for the daemon's life.
 
 ### `sharing.gateway`
 

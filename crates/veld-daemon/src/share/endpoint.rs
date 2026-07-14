@@ -6,12 +6,13 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use iroh::endpoint::presets;
-use iroh::{Endpoint, RelayMode, RelayUrl, SecretKey};
+use iroh::{Endpoint, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey};
 use tracing::warn;
-use veld_core::config::RelayPolicy;
+use veld_core::config::{RelayEntry, RelayPolicy, SecretSource};
 
 /// ALPN protocol identifier for veld's share tunnels.
 pub const ALPN: &[u8] = b"veld/share/1";
@@ -21,17 +22,37 @@ pub const ALPN: &[u8] = b"veld/share/1";
 /// when a project does not declare `sharing.relays` in its config.
 const RELAY_ENV: &str = "VELD_SHARE_RELAY";
 
+/// Env var holding the authorization token for the `VELD_SHARE_RELAY` relay.
+/// Only consulted alongside `RELAY_ENV` (the config path carries its own
+/// per-relay tokens). Read from the daemon's environment at bind time.
+const RELAY_TOKEN_ENV: &str = "VELD_SHARE_RELAY_TOKEN";
+
+/// Upper bound on how long resolving a relay token may take from a source that
+/// can block on external I/O — a `command` (hung secret-manager CLI, network
+/// stall reaching a vault) or a `file` (a FIFO with no writer, a hung network
+/// mount). Token resolution runs on the share/bind path (see `ShareManager`), so
+/// neither must wedge sharing indefinitely — it fails after this instead.
+const TOKEN_RESOLVE_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// The concrete relay decision an endpoint is bound with. Derived from a
 /// project's `sharing.relays` policy, falling back to the `VELD_SHARE_RELAY`
 /// env override, or `None` when nothing is opted in (relays are never chosen
 /// implicitly). Used as the key of the daemon's per-policy endpoint map (see
 /// `ShareManager`), so each distinct choice gets its own endpoint.
+///
+/// The `Custom` variant carries the full [`RelayEntry`] list (URL + optional
+/// token *declaration*), sorted by URL for a stable identity. Tokens are held
+/// unresolved here — the command/file/env is only read at `bind_endpoint` time —
+/// so this stays a cheap, hashable map key and no secret value lives in it. Two
+/// configs that differ only in their token declaration key distinct endpoints;
+/// rotating the *underlying* secret behind an unchanged declaration reuses the
+/// already-bound endpoint until the daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RelayChoice {
     /// n0's public relays (only via an explicit `"public"` opt-in).
     Public,
-    /// Self-hosted relay URLs, sorted for a stable identity/comparison.
-    Custom(Vec<String>),
+    /// Self-hosted relays, sorted by URL for a stable identity/comparison.
+    Custom(Vec<RelayEntry>),
 }
 
 impl RelayChoice {
@@ -44,37 +65,56 @@ impl RelayChoice {
     /// not the shell that ran `veld share` — a long-lived daemon won't see an
     /// export made after it started. Prefer `sharing.relays` in config.
     pub fn resolve(policy: Option<&RelayPolicy>) -> Option<Self> {
-        Self::resolve_with_env(policy, std::env::var(RELAY_ENV).ok())
+        Self::resolve_with_env(
+            policy,
+            std::env::var(RELAY_ENV).ok(),
+            std::env::var(RELAY_TOKEN_ENV).ok(),
+        )
     }
 
-    /// Core of `resolve`, with the env override injected so it can be unit-tested
+    /// Core of `resolve`, with the env overrides injected so it can be unit-tested
     /// without mutating the process environment (which would be a data race under
     /// multithreaded `cargo test`).
-    fn resolve_with_env(policy: Option<&RelayPolicy>, env: Option<String>) -> Option<Self> {
+    fn resolve_with_env(
+        policy: Option<&RelayPolicy>,
+        relay_env: Option<String>,
+        token_env: Option<String>,
+    ) -> Option<Self> {
         match policy {
             Some(RelayPolicy::Public) => Some(RelayChoice::Public),
-            Some(RelayPolicy::Custom(urls)) => Some(RelayChoice::custom(urls.clone())),
-            None => match env {
+            Some(RelayPolicy::Custom(entries)) => Some(RelayChoice::custom(entries.clone())),
+            None => match relay_env {
                 Some(raw) if !raw.trim().is_empty() => {
-                    Some(RelayChoice::custom(vec![raw.trim().to_owned()]))
+                    let token = token_env
+                        .map(|t| t.trim().to_owned())
+                        .filter(|t| !t.is_empty())
+                        .map(SecretSource::Literal);
+                    Some(RelayChoice::custom(vec![RelayEntry {
+                        url: raw.trim().to_owned(),
+                        token,
+                    }]))
                 }
                 _ => None,
             },
         }
     }
 
-    fn custom(urls: Vec<String>) -> Self {
-        // Normalize (trim + drop a trailing slash) before sort/dedup so the
-        // choice has a stable identity: it keys the per-policy endpoint map, so
-        // `https://r` and `https://r/` must map to the same endpoint. Case and
-        // default-port differences are left as-is.
-        let mut urls: Vec<String> = urls
+    fn custom(entries: Vec<RelayEntry>) -> Self {
+        // Normalize each URL (trim + drop a trailing slash) then sort/dedup by
+        // URL so the choice has a stable identity: it keys the per-policy
+        // endpoint map, so `https://r` and `https://r/` must map to the same
+        // endpoint. Case and default-port differences are left as-is. On a
+        // duplicate URL the first entry's token wins (dedup keeps the earlier).
+        let mut entries: Vec<RelayEntry> = entries
             .into_iter()
-            .map(|u| u.trim().trim_end_matches('/').to_owned())
+            .map(|mut e| {
+                e.url = e.url.trim().trim_end_matches('/').to_owned();
+                e
+            })
             .collect();
-        urls.sort();
-        urls.dedup();
-        RelayChoice::Custom(urls)
+        entries.sort_by(|a, b| a.url.cmp(&b.url));
+        entries.dedup_by(|a, b| a.url == b.url);
+        RelayChoice::Custom(entries)
     }
 }
 
@@ -82,7 +122,11 @@ impl fmt::Display for RelayChoice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             RelayChoice::Public => write!(f, "public"),
-            RelayChoice::Custom(urls) => write!(f, "[{}]", urls.join(", ")),
+            // URLs only — never render token declarations here (this feeds logs).
+            RelayChoice::Custom(entries) => {
+                let urls: Vec<&str> = entries.iter().map(|e| e.url.as_str()).collect();
+                write!(f, "[{}]", urls.join(", "))
+            }
         }
     }
 }
@@ -132,34 +176,129 @@ fn restrict_permissions(_path: &Path) {}
 /// For a custom relay choice, every URL that fails to parse is dropped with a
 /// warning; if *no* URL survives, binding fails rather than silently falling
 /// back to public relays — a silent fallback would violate the compliance
-/// intent of pinning relays.
+/// intent of pinning relays. Each surviving relay's token declaration is
+/// resolved here (env / file / command) and attached as the relay's
+/// authorization token; a token that fails to resolve is a hard error — we never
+/// bind unauthenticated when a token was declared. A relay whose URL fails to
+/// parse is skipped *before* its token is resolved, so no token command runs for
+/// a dead URL.
+///
+/// Note: the resolved token is moved into iroh's `RelayConfig`, whose derived
+/// `Debug` prints `auth_token` in the clear. Veld's own types redact it (see
+/// `SecretSource`'s `Debug`) and never log the built `RelayConfig`/`RelayMap` —
+/// keep it that way (no `debug!(?config)` on these).
 pub async fn bind_endpoint(secret_key: SecretKey, choice: &RelayChoice) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .alpns(vec![ALPN.to_vec()]);
 
-    if let RelayChoice::Custom(urls) = choice {
-        let parsed: Vec<RelayUrl> = urls
-            .iter()
-            .filter_map(|raw| match raw.parse::<RelayUrl>() {
-                Ok(url) => Some(url),
+    if let RelayChoice::Custom(entries) = choice {
+        let mut configs: Vec<RelayConfig> = Vec::new();
+        for entry in entries {
+            let url = match entry.url.parse::<RelayUrl>() {
+                Ok(url) => url,
                 Err(e) => {
-                    warn!(error = %e, value = %raw, "ignoring invalid share relay URL");
-                    None
+                    warn!(error = %e, value = %entry.url, "ignoring invalid share relay URL");
+                    continue;
                 }
-            })
-            .collect();
-        if parsed.is_empty() {
+            };
+            let mut config = RelayConfig::from(url);
+            if let Some(source) = &entry.token {
+                let token = resolve_secret(source)
+                    .await
+                    .with_context(|| format!("resolving relay auth token for {}", entry.url))?;
+                config = config.with_auth_token(token);
+            }
+            configs.push(config);
+        }
+        if configs.is_empty() {
+            let urls: Vec<&str> = entries.iter().map(|e| e.url.as_str()).collect();
             bail!(
                 "no valid relay URLs to bind ({}); set via sharing.relays in veld.json or \
                  the VELD_SHARE_RELAY env var. Refusing to fall back to public relays.",
                 urls.join(", ")
             );
         }
-        builder = builder.relay_mode(RelayMode::custom(parsed));
+        builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(configs)));
     }
 
     builder.bind().await.context("binding iroh endpoint")
+}
+
+/// Resolve a [`SecretSource`] into the actual secret string at use time.
+///
+/// All forms trim trailing whitespace, since secret stores commonly append a
+/// newline (`op read`, a `printf`'d file, a Kubernetes `envFrom` value):
+///
+/// - `Literal` is returned as-is apart from that trim.
+/// - `Env` reads a process environment variable (the daemon's, not the caller's
+///   shell).
+/// - `File` reads a file, bounded by [`TOKEN_RESOLVE_TIMEOUT`]. A relative path
+///   resolves against the *daemon's* working directory, not the project — prefer
+///   an absolute path (the doc examples use `/run/secrets/…`).
+/// - `Command` runs the string through `sh -c` and takes its stdout, bounded by
+///   [`TOKEN_RESOLVE_TIMEOUT`]. The child is killed if that bound elapses.
+///
+/// A resolved-but-empty secret is treated as a misconfiguration and errors,
+/// rather than silently sending an empty `Authorization: Bearer` header.
+async fn resolve_secret(source: &SecretSource) -> Result<String> {
+    let value = match source {
+        SecretSource::Literal(v) => v.trim_end().to_owned(),
+        SecretSource::Env(name) => std::env::var(name)
+            .with_context(|| format!("reading env var {name}"))?
+            .trim_end()
+            .to_owned(),
+        SecretSource::File(path) => {
+            tokio::time::timeout(TOKEN_RESOLVE_TIMEOUT, tokio::fs::read_to_string(path))
+                .await
+                .with_context(|| {
+                    format!(
+                        "reading token file {path} timed out after {}s",
+                        TOKEN_RESOLVE_TIMEOUT.as_secs()
+                    )
+                })?
+                .with_context(|| format!("reading token file {path}"))?
+                .trim_end()
+                .to_owned()
+        }
+        SecretSource::Command(cmd) => {
+            let output = tokio::time::timeout(
+                TOKEN_RESOLVE_TIMEOUT,
+                // kill_on_drop so a command that outlives the timeout (a hung
+                // CLI, a vault stall) is reaped when the timed-out future drops,
+                // rather than orphaned and left running on the daemon.
+                tokio::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "token command `{cmd}` timed out after {}s",
+                    TOKEN_RESOLVE_TIMEOUT.as_secs()
+                )
+            })?
+            .with_context(|| format!("running token command `{cmd}`"))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!(
+                    "token command `{cmd}` failed ({}): {}",
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            String::from_utf8(output.stdout)
+                .with_context(|| format!("token command `{cmd}` produced non-UTF-8 output"))?
+                .trim_end()
+                .to_owned()
+        }
+    };
+    if value.is_empty() {
+        bail!("resolved relay auth token is empty");
+    }
+    Ok(value)
 }
 
 #[cfg(test)]
@@ -177,15 +316,15 @@ mod tests {
     #[test]
     fn resolve_custom_policy_sorts_and_dedups() {
         let policy = RelayPolicy::Custom(vec![
-            "https://b.example".into(),
-            "https://a.example".into(),
-            "https://b.example".into(),
+            RelayEntry::url("https://b.example"),
+            RelayEntry::url("https://a.example"),
+            RelayEntry::url("https://b.example"),
         ]);
         assert_eq!(
             RelayChoice::resolve(Some(&policy)),
             Some(RelayChoice::Custom(vec![
-                "https://a.example".into(),
-                "https://b.example".into()
+                RelayEntry::url("https://a.example"),
+                RelayEntry::url("https://b.example")
             ]))
         );
     }
@@ -193,28 +332,76 @@ mod tests {
     #[test]
     fn custom_choices_compare_regardless_of_input_order() {
         let a = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![
-            "https://x".into(),
-            "https://y".into(),
+            RelayEntry::url("https://x"),
+            RelayEntry::url("https://y"),
         ])));
         let b = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![
-            "https://y".into(),
-            "https://x".into(),
+            RelayEntry::url("https://y"),
+            RelayEntry::url("https://x"),
         ])));
         assert_eq!(a, b);
     }
 
     #[test]
+    fn custom_preserves_tokens_and_keys_distinct_declarations() {
+        // Same URL, different token declarations → distinct endpoint keys.
+        let with_env = RelayChoice::custom(vec![RelayEntry {
+            url: "https://r.example".into(),
+            token: Some(SecretSource::Env("A".into())),
+        }]);
+        let with_lit = RelayChoice::custom(vec![RelayEntry {
+            url: "https://r.example".into(),
+            token: Some(SecretSource::Literal("x".into())),
+        }]);
+        let no_token = RelayChoice::custom(vec![RelayEntry::url("https://r.example")]);
+        assert_ne!(with_env, with_lit);
+        assert_ne!(with_env, no_token);
+        // The token declaration survives normalization.
+        assert_eq!(
+            with_env,
+            RelayChoice::Custom(vec![RelayEntry {
+                url: "https://r.example".into(),
+                token: Some(SecretSource::Env("A".into())),
+            }])
+        );
+    }
+
+    #[test]
+    fn custom_dedup_keeps_first_token() {
+        // On a duplicate URL the earlier entry's token wins.
+        let choice = RelayChoice::custom(vec![
+            RelayEntry {
+                url: "https://r.example".into(),
+                token: Some(SecretSource::Env("FIRST".into())),
+            },
+            RelayEntry {
+                url: "https://r.example".into(),
+                token: Some(SecretSource::Env("SECOND".into())),
+            },
+        ]);
+        assert_eq!(
+            choice,
+            RelayChoice::Custom(vec![RelayEntry {
+                url: "https://r.example".into(),
+                token: Some(SecretSource::Env("FIRST".into())),
+            }])
+        );
+    }
+
+    #[test]
     fn custom_normalizes_trailing_slash_and_whitespace() {
-        let a = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![
-            "https://relay.example/".into(),
-        ])));
-        let b = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![
-            " https://relay.example ".into(),
-        ])));
+        let a = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![RelayEntry::url(
+            "https://relay.example/",
+        )])));
+        let b = RelayChoice::resolve(Some(&RelayPolicy::Custom(vec![RelayEntry::url(
+            " https://relay.example ",
+        )])));
         assert_eq!(a, b);
         assert_eq!(
             a,
-            Some(RelayChoice::Custom(vec!["https://relay.example".into()]))
+            Some(RelayChoice::Custom(vec![RelayEntry::url(
+                "https://relay.example"
+            )]))
         );
     }
 
@@ -223,22 +410,54 @@ mod tests {
         let env = Some("https://env-relay.example".to_owned());
         // A `Some(..)` policy never consults the env, so config always wins.
         assert_eq!(
-            RelayChoice::resolve_with_env(Some(&RelayPolicy::Public), env.clone()),
+            RelayChoice::resolve_with_env(Some(&RelayPolicy::Public), env.clone(), None),
             Some(RelayChoice::Public)
         );
         assert_eq!(
             RelayChoice::resolve_with_env(
-                Some(&RelayPolicy::Custom(vec!["https://cfg.example".into()])),
-                env.clone()
+                Some(&RelayPolicy::Custom(vec![RelayEntry::url(
+                    "https://cfg.example"
+                )])),
+                env.clone(),
+                None,
             ),
-            Some(RelayChoice::Custom(vec!["https://cfg.example".into()]))
+            Some(RelayChoice::Custom(vec![RelayEntry::url(
+                "https://cfg.example"
+            )]))
         );
         // With no config policy, the env override is consulted.
         assert_eq!(
-            RelayChoice::resolve_with_env(None, env),
-            Some(RelayChoice::Custom(vec![
-                "https://env-relay.example".into()
-            ]))
+            RelayChoice::resolve_with_env(None, env, None),
+            Some(RelayChoice::Custom(vec![RelayEntry::url(
+                "https://env-relay.example"
+            )]))
+        );
+    }
+
+    #[test]
+    fn env_relay_carries_token_env() {
+        // VELD_SHARE_RELAY_TOKEN pairs with VELD_SHARE_RELAY as a literal token.
+        assert_eq!(
+            RelayChoice::resolve_with_env(
+                None,
+                Some("https://env-relay.example".to_owned()),
+                Some(" tok3n ".to_owned()),
+            ),
+            Some(RelayChoice::Custom(vec![RelayEntry {
+                url: "https://env-relay.example".into(),
+                token: Some(SecretSource::Literal("tok3n".into())),
+            }]))
+        );
+        // A blank token env is ignored, not treated as an empty token.
+        assert_eq!(
+            RelayChoice::resolve_with_env(
+                None,
+                Some("https://env-relay.example".to_owned()),
+                Some("   ".to_owned()),
+            ),
+            Some(RelayChoice::Custom(vec![RelayEntry::url(
+                "https://env-relay.example"
+            )]))
         );
     }
 
@@ -246,20 +465,117 @@ mod tests {
     fn resolve_requires_explicit_opt_in() {
         // No config policy and no env override → nothing is opted in; never
         // falls back to public relays implicitly.
-        assert_eq!(RelayChoice::resolve_with_env(None, None), None);
+        assert_eq!(RelayChoice::resolve_with_env(None, None, None), None);
         // Blank / whitespace-only env is ignored, not treated as an opt-in.
         assert_eq!(
-            RelayChoice::resolve_with_env(None, Some("   ".into())),
+            RelayChoice::resolve_with_env(None, Some("   ".into()), None),
             None
         );
     }
 
     #[test]
-    fn display_renders_choice() {
+    fn display_renders_urls_only() {
         assert_eq!(RelayChoice::Public.to_string(), "public");
+        // Even with tokens set, Display shows URLs only — never the token.
+        let choice = RelayChoice::Custom(vec![
+            RelayEntry::url("https://a"),
+            RelayEntry {
+                url: "https://b".into(),
+                token: Some(SecretSource::Literal("secret".into())),
+            },
+        ]);
+        let rendered = choice.to_string();
+        assert_eq!(rendered, "[https://a, https://b]");
+        assert!(!rendered.contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_literal_and_command() {
+        // A literal is returned trimmed (trailing newline/space dropped).
         assert_eq!(
-            RelayChoice::Custom(vec!["https://a".into(), "https://b".into()]).to_string(),
-            "[https://a, https://b]"
+            resolve_secret(&SecretSource::Literal("abc\n".into()))
+                .await
+                .unwrap(),
+            "abc"
+        );
+        // Command stdout is captured with trailing whitespace trimmed.
+        assert_eq!(
+            resolve_secret(&SecretSource::Command("printf 'tok3n\\n'".into()))
+                .await
+                .unwrap(),
+            "tok3n"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_file_trims_trailing_newline() {
+        // A token file (as `op read > file` would write) is read and trimmed.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("relay.token");
+        tokio::fs::write(&path, "file-tok3n\n").await.unwrap();
+        assert_eq!(
+            resolve_secret(&SecretSource::File(path.to_string_lossy().into_owned()))
+                .await
+                .unwrap(),
+            "file-tok3n"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_missing_file_errors() {
+        let err = resolve_secret(&SecretSource::File("/no/such/relay.token".into()))
+            .await
+            .unwrap_err();
+        // Never falls back to an empty/absent token — it fails loudly.
+        assert!(err.to_string().contains("token file"));
+    }
+
+    #[tokio::test]
+    async fn bind_skips_token_resolution_for_invalid_url() {
+        // A relay whose URL fails to parse is dropped before its token is
+        // resolved — no token command runs for a dead URL (guards the ordering
+        // in `bind_endpoint`). With no valid URL left, binding bails without
+        // touching the network.
+        let dir = tempfile::tempdir().unwrap();
+        let sentinel = dir.path().join("ran");
+        let choice = RelayChoice::Custom(vec![RelayEntry {
+            url: "not-a-valid-relay-url".into(),
+            token: Some(SecretSource::Command(format!(
+                "touch {}",
+                sentinel.display()
+            ))),
+        }]);
+        let err = bind_endpoint(SecretKey::generate(), &choice)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("no valid relay URLs"));
+        assert!(
+            !sentinel.exists(),
+            "token command ran for an unparseable relay URL"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_command_failure_errors() {
+        assert!(
+            resolve_secret(&SecretSource::Command("exit 7".into()))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_secret_rejects_empty() {
+        assert!(
+            resolve_secret(&SecretSource::Literal(String::new()))
+                .await
+                .is_err()
+        );
+        // Command producing only whitespace trims to empty → error.
+        assert!(
+            resolve_secret(&SecretSource::Command("printf '\\n'".into()))
+                .await
+                .is_err()
         );
     }
 }
