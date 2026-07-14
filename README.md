@@ -28,7 +28,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
 - **Internal logs** — liveness probe outcomes (with stderr), recovery decisions, health state transitions; view with `veld logs --source internal`
-- **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine. No accounts, no Veld-hosted server.
+- **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine. Services opt in explicitly in config, and relays are configurable (public or self-hosted) for compliance. No accounts, no Veld-hosted server.
 
 ## Install
 
@@ -313,6 +313,21 @@ Check extension status with `veld doctor`.
 
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel (iroh: QUIC with NAT hole-punching and an n0 relay fallback). No accounts, no Veld-hosted server.
 
+**Services must opt in.** A service is shareable only if its variant declares `share.expose` in `veld.json` — `veld share` refuses to expose anything that hasn't. This makes what leaves your machine explicit and auditable:
+
+```json
+{
+  "sharing": { "relays": "public" },
+  "nodes": {
+    "frontend": {
+      "variants": {
+        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer"] } }
+      }
+    }
+  }
+}
+```
+
 ```sh
 veld share my-feature        # prints a join URL to send (plus a veld join command)
 ```
@@ -329,7 +344,11 @@ Two gates protect a share: a capability token embedded in the ticket, plus host 
 - **`first`** (default with `--json`) — auto-approves and pins the first token-valid joiner, rejecting the rest
 - **`auto`** — approves any token-valid joiner
 
-Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees your URLs or content. To use your own iroh-relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
+Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees your URLs or content. Relay selection is a config-level compliance control and **must be opted into explicitly** — there is no implicit default, so nothing is ever routed over n0's public relays by accident. Set `sharing.relays` to `"public"` (n0's public relays) or to an array of self-hosted relay URLs to confine share traffic to relays you run (a single Docker container). `veld share` refuses to share a run whose config sets no relay. Config wins over the legacy `VELD_SHARE_RELAY` env var — which is read from the daemon's environment, not your shell, and is not an enforceable floor (a project setting `"relays": "public"` overrides it). The custom-relay guarantee covers the **host's** outbound leg; a consumer joining over the same self-hosted relays should configure them too (or set the env var on their daemon). The daemon binds **one iroh endpoint per relay policy** on demand, so shares on different relays (e.g. one project on public, another on your private relay) run side by side — no conflict, no restart.
+
+`share.expose` is a list of audiences. `peer` (Veld-to-Veld, described here) reproduces the origin URL verbatim. `web` (public browser access via a self-hosted gateway, configured with `sharing.gateway`) is reserved — the gateway ships in a later release; today only `peer` is served.
+
+> **Upgrading:** opt-in is a behavior change. Before, `veld share` exposed every URL-bearing service in a run; now it shares only services whose variant declares `share.expose`, and errors (naming the candidates) if none have opted in. Add `"share": { "expose": ["peer"] }` to the variants you previously relied on sharing.
 
 If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) also auto-unshares its shares, and the consumer's join self-tears-down when the tunnel closes. `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted. Default TTL is 7200s.
 

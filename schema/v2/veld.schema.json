@@ -59,6 +59,10 @@
       "$ref": "#/$defs/EnvMap",
       "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
     },
+    "sharing": {
+      "$ref": "#/$defs/SharingConfig",
+      "description": "Environment-wide sharing policy: which relays to route share traffic through, and the public web gateway URL. Per-service opt-in lives on each variant (share)."
+    },
     "setup": {
       "type": "array",
       "description": "Steps that run sequentially before the dependency graph executes. If any step exits non-zero, startup is aborted. Not nodes \u2014 no variants, no health checks, no dependency graph participation.",
@@ -261,6 +265,10 @@
         "cwd": {
           "type": "string",
           "description": "Working directory for this variant. Relative paths are resolved from the project root. Overrides node-level cwd. Supports Veld variable substitution."
+        },
+        "share": {
+          "$ref": "#/$defs/SharePolicy",
+          "description": "Sharing opt-in for this variant. Absent (or an empty expose list) means the service can never be shared — veld share refuses it."
         }
       },
       "allOf": [
@@ -473,6 +481,50 @@
       "description": "A map of environment variable names to values. Values support Veld variable substitution (e.g. ${veld.port}, ${nodes.backend.url}).",
       "additionalProperties": {
         "type": "string"
+      }
+    },
+    "SharingConfig": {
+      "type": "object",
+      "description": "Environment-wide sharing policy.",
+      "additionalProperties": false,
+      "properties": {
+        "relays": {
+          "description": "Which iroh relays to route share traffic through. Must be opted into explicitly (no implicit default) — veld share is refused if unset and no VELD_SHARE_RELAY env override is present. \"public\" uses n0's public relays; an array of URLs confines traffic to self-hosted relays. When set, config wins over the VELD_SHARE_RELAY env override.",
+          "oneOf": [
+            {
+              "const": "public"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1
+            }
+          ]
+        },
+        "gateway": {
+          "type": "string",
+          "description": "Base URL of the public web gateway this environment points at (e.g. https://share.acme.internal). Only needed for services that expose \"web\"."
+        }
+      }
+    },
+    "SharePolicy": {
+      "type": "object",
+      "description": "Per-variant sharing opt-in.",
+      "additionalProperties": false,
+      "properties": {
+        "expose": {
+          "type": "array",
+          "description": "Audiences this service may be exposed to. Empty means not shareable. \"peer\" = other Veld users (verbatim URL). \"web\" = any browser via the public gateway (reserved; ships in a later release).",
+          "items": {
+            "type": "string",
+            "enum": [
+              "peer",
+              "web"
+            ]
+          }
+        }
       }
     },
     "HealthCheck": {

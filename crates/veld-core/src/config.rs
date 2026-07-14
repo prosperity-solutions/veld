@@ -1,4 +1,4 @@
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -69,6 +69,11 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<HashMap<String, String>>,
 
+    /// Environment sharing policy: which relays to use, and where the public
+    /// web gateway lives. Per-service opt-in lives on each variant (`share`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharing: Option<SharingConfig>,
+
     /// Setup steps that run sequentially before the dependency graph.
     /// If any step exits non-zero, startup is aborted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -110,6 +115,106 @@ pub struct SetupStep {
 
 fn default_url_template() -> String {
     "{service}.{run}.{project}.localhost".to_owned()
+}
+
+// ---------------------------------------------------------------------------
+// Sharing
+// ---------------------------------------------------------------------------
+
+/// Environment-wide sharing policy. Relay selection is a compliance control:
+/// `public` uses n0's public relays; a custom list confines share traffic to
+/// relays the operator runs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharingConfig {
+    /// Relay policy. Relays must be opted into explicitly — including public —
+    /// so nothing is routed over public relays by accident. Absent means "unset":
+    /// the daemon then falls back to the `VELD_SHARE_RELAY` env override, and if
+    /// that is also unset, `veld share` is refused. When set, config wins over
+    /// the env var.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relays: Option<RelayPolicy>,
+
+    /// Base URL of the public web gateway this environment points at. Only
+    /// needed for services that `expose` `web`. Example:
+    /// `https://share.acme.internal`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway: Option<String>,
+}
+
+/// Which iroh relays to route share traffic through. Serializes as either the
+/// string `"public"` or an array of relay URLs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayPolicy {
+    /// n0's public relay set (only via an explicit `"public"` opt-in).
+    Public,
+    /// Self-hosted relays. Share traffic is confined to these.
+    Custom(Vec<String>),
+}
+
+impl Serialize for RelayPolicy {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            RelayPolicy::Public => s.serialize_str("public"),
+            RelayPolicy::Custom(urls) => urls.serialize(s),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RelayPolicy {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(d)?;
+        match value {
+            serde_json::Value::String(s) if s == "public" => Ok(RelayPolicy::Public),
+            serde_json::Value::String(s) => Err(D::Error::custom(format!(
+                "relays must be \"public\" or an array of relay URLs, got \"{s}\""
+            ))),
+            serde_json::Value::Array(arr) => {
+                let urls: Vec<String> = arr
+                    .into_iter()
+                    .map(|v| {
+                        v.as_str().map(str::to_owned).ok_or_else(|| {
+                            D::Error::custom("relays array must contain URL strings")
+                        })
+                    })
+                    .collect::<Result<_, _>>()?;
+                if urls.is_empty() {
+                    return Err(D::Error::custom(
+                        "relays array must not be empty; use \"public\" for public relays",
+                    ));
+                }
+                Ok(RelayPolicy::Custom(urls))
+            }
+            _ => Err(D::Error::custom(
+                "relays must be \"public\" or an array of relay URLs",
+            )),
+        }
+    }
+}
+
+/// Per-variant sharing opt-in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharePolicy {
+    /// Audiences this service may be exposed to. Empty means not shareable.
+    #[serde(default)]
+    pub expose: Vec<ExposeMode>,
+}
+
+impl SharePolicy {
+    /// Whether this policy permits the given audience.
+    pub fn allows(&self, mode: ExposeMode) -> bool {
+        self.expose.contains(&mode)
+    }
+}
+
+/// A sharing audience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExposeMode {
+    /// Other Veld users. The origin URL is reproduced verbatim on the consumer.
+    Peer,
+    /// Any browser, via the public web gateway. Best-effort URL fidelity.
+    Web,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,6 +398,12 @@ pub struct VariantConfig {
     /// Overrides node-level `cwd`. Supports variable substitution.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+
+    /// Sharing opt-in for this variant. Absent (or an empty `expose` list) means
+    /// this service can never be shared — `veld share` refuses it. This is the
+    /// explicit, per-service consent that makes sharing auditable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<SharePolicy>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1225,5 +1336,98 @@ mod tests {
         let v: VariantConfig = serde_json::from_str(json).unwrap();
         let probe = v.readiness_probe().unwrap();
         assert_eq!(probe.check_type, "http");
+    }
+
+    // -- Sharing config tests -------------------------------------------------
+
+    #[test]
+    fn test_relay_policy_public_string() {
+        let p: RelayPolicy = serde_json::from_str(r#""public""#).unwrap();
+        assert_eq!(p, RelayPolicy::Public);
+        // round-trips back to the string form
+        assert_eq!(serde_json::to_string(&p).unwrap(), r#""public""#);
+    }
+
+    #[test]
+    fn test_relay_policy_custom_list() {
+        let p: RelayPolicy = serde_json::from_str(r#"["https://relay.example.com"]"#).unwrap();
+        assert_eq!(
+            p,
+            RelayPolicy::Custom(vec!["https://relay.example.com".into()])
+        );
+        assert_eq!(
+            serde_json::to_string(&p).unwrap(),
+            r#"["https://relay.example.com"]"#
+        );
+    }
+
+    #[test]
+    fn test_relay_policy_rejects_empty_list() {
+        assert!(serde_json::from_str::<RelayPolicy>("[]").is_err());
+    }
+
+    #[test]
+    fn test_relay_policy_rejects_unknown_string() {
+        assert!(serde_json::from_str::<RelayPolicy>(r#""private""#).is_err());
+    }
+
+    #[test]
+    fn test_share_policy_allows() {
+        let json = r#"{ "expose": ["peer", "web"] }"#;
+        let s: SharePolicy = serde_json::from_str(json).unwrap();
+        assert!(s.allows(ExposeMode::Peer));
+        assert!(s.allows(ExposeMode::Web));
+    }
+
+    #[test]
+    fn test_share_policy_empty_expose_allows_nothing() {
+        let s: SharePolicy = serde_json::from_str(r#"{ "expose": [] }"#).unwrap();
+        assert!(!s.allows(ExposeMode::Peer));
+        assert!(!s.allows(ExposeMode::Web));
+    }
+
+    #[test]
+    fn test_variant_share_defaults_to_none() {
+        let v: VariantConfig =
+            serde_json::from_str(r#"{ "type": "start_server", "command": "x" }"#).unwrap();
+        assert!(v.share.is_none());
+    }
+
+    #[test]
+    fn test_sharing_config_parses_on_veld_config() {
+        let json = r#"{
+            "schemaVersion": "2",
+            "name": "demo",
+            "sharing": {
+                "relays": ["https://relay.acme.internal"],
+                "gateway": "https://share.acme.internal"
+            },
+            "nodes": {
+                "web": {
+                    "variants": {
+                        "local": {
+                            "type": "start_server",
+                            "command": "npm start",
+                            "share": { "expose": ["peer"] }
+                        }
+                    }
+                }
+            }
+        }"#;
+        let cfg: VeldConfig = serde_json::from_str(json).unwrap();
+        let sharing = cfg.sharing.unwrap();
+        assert_eq!(
+            sharing.relays,
+            Some(RelayPolicy::Custom(vec![
+                "https://relay.acme.internal".into()
+            ]))
+        );
+        assert_eq!(
+            sharing.gateway.as_deref(),
+            Some("https://share.acme.internal")
+        );
+        let share = cfg.nodes["web"].variants["local"].share.as_ref().unwrap();
+        assert!(share.allows(ExposeMode::Peer));
+        assert!(!share.allows(ExposeMode::Web));
     }
 }

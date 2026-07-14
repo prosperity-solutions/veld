@@ -1,9 +1,11 @@
-//! In-memory manager for active shares and joins, plus the single iroh endpoint
-//! the daemon uses for all P2P traffic.
+//! In-memory manager for active shares and joins, plus the iroh endpoints the
+//! daemon uses for P2P traffic — one endpoint per relay policy, bound on demand,
+//! so shares on different relays run concurrently.
 //!
 //! State is intentionally ephemeral: if the daemon stops, shares and joins stop
-//! with it (fail-closed; a consumer then gets a clean connection error). Only
-//! the node keypair persists, giving the daemon a stable identity.
+//! with it (fail-closed; a consumer then gets a clean connection error). The
+//! persistent node keypair backs the public endpoint (stable identity);
+//! custom-relay endpoints get a fresh per-run identity.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -38,7 +40,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// before returning a clean error instead of hanging the HTTP request.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 
-use super::endpoint::bind_endpoint;
+use super::endpoint::{RelayChoice, bind_endpoint};
 use super::host::{self, HostShare};
 use super::join;
 
@@ -52,6 +54,11 @@ struct ShareEntry {
     ticket: String,
     /// Unix seconds after which the reaper removes this share.
     expires_at: i64,
+    /// The relay policy (endpoint) this share is served on. An inbound
+    /// connection is matched to this share only if it arrived on the *same*
+    /// endpoint — so a custom-relay share is never served over the public
+    /// endpoint, keeping relay confinement airtight.
+    relay: RelayChoice,
 }
 
 /// A join parked awaiting the host's manual approval.
@@ -83,10 +90,19 @@ struct JoinEntry {
     warnings: Vec<String>,
 }
 
-/// Owns the iroh endpoint and all live shares/joins.
+/// Owns the iroh endpoints and all live shares/joins.
 pub struct ShareManager {
     secret_key: SecretKey,
-    endpoint: OnceCell<Endpoint>,
+    /// One iroh endpoint per relay policy, bound on demand. The daemon can host
+    /// concurrent shares on different relays (e.g. public + a self-hosted relay)
+    /// by routing each share/join to the endpoint matching its policy. The
+    /// public endpoint reuses the daemon's persistent identity; custom-relay
+    /// endpoints get a fresh per-run identity (shares are ephemeral, so their
+    /// node id need not survive a restart).
+    endpoints: Mutex<HashMap<RelayChoice, Endpoint>>,
+    /// The reaper scans all shares regardless of endpoint, so it runs once —
+    /// started on the first endpoint bind.
+    reaper: OnceCell<()>,
     shares: Mutex<HashMap<String, ShareEntry>>,
     joins: Mutex<HashMap<String, JoinEntry>>,
     /// Join requests awaiting manual approval, keyed by request id.
@@ -102,7 +118,8 @@ impl ShareManager {
     pub fn new(secret_key: SecretKey) -> Self {
         Self {
             secret_key,
-            endpoint: OnceCell::new(),
+            endpoints: Mutex::new(HashMap::new()),
+            reaper: OnceCell::new(),
             shares: Mutex::new(HashMap::new()),
             joins: Mutex::new(HashMap::new()),
             pending: Mutex::new(HashMap::new()),
@@ -111,28 +128,56 @@ impl ShareManager {
         }
     }
 
-    /// Lazily bind the endpoint on first use and start the accept loop that
-    /// routes inbound connections to the matching share by capability.
-    async fn endpoint(self: &Arc<Self>) -> Result<Endpoint> {
-        let ep = self
-            .endpoint
-            .get_or_try_init(|| async {
-                let ep = bind_endpoint(self.secret_key.clone()).await?;
-                info!(node_id = %ep.id(), "iroh share endpoint bound");
-                self.clone().spawn_accept_loop(ep.clone());
-                self.clone().spawn_reaper();
-                Ok::<_, anyhow::Error>(ep)
-            })
-            .await?;
-        Ok(ep.clone())
+    /// Endpoint for the join (consumer) side. Joining is *consuming*, not
+    /// exposing, and the join path has no project config — so unlike hosting
+    /// (which requires an explicit relay opt-in), a join uses `VELD_SHARE_RELAY`
+    /// if set and otherwise falls back to public relays so a bare
+    /// `veld join <ticket>` keeps working.
+    async fn endpoint_join(self: &Arc<Self>) -> Result<Endpoint> {
+        let choice = RelayChoice::resolve(None).unwrap_or(RelayChoice::Public);
+        self.get_or_bind(&choice).await
+    }
+
+    /// The secret key (node identity) for an endpoint on `choice`. The public
+    /// endpoint reuses the daemon's persistent key; each custom-relay endpoint
+    /// gets its own fresh key so no two live endpoints share a node id (iroh
+    /// requires one identity per endpoint).
+    fn key_for(&self, choice: &RelayChoice) -> SecretKey {
+        match choice {
+            RelayChoice::Public => self.secret_key.clone(),
+            RelayChoice::Custom(_) => SecretKey::generate(),
+        }
+    }
+
+    /// Get (or bind on demand) the endpoint for `requested`, starting its accept
+    /// loop, and the global reaper on the first bind of any endpoint.
+    async fn get_or_bind(self: &Arc<Self>, requested: &RelayChoice) -> Result<Endpoint> {
+        // Hold the map lock across bind so two callers racing on the same policy
+        // can't bind two endpoints for it (binds are infrequent).
+        let mut endpoints = self.endpoints.lock().await;
+        if let Some(ep) = endpoints.get(requested) {
+            return Ok(ep.clone());
+        }
+        let ep = bind_endpoint(self.key_for(requested), requested).await?;
+        info!(node_id = %ep.id(), relays = %requested, "iroh share endpoint bound");
+        self.clone()
+            .spawn_accept_loop(ep.clone(), requested.clone());
+        endpoints.insert(requested.clone(), ep.clone());
+        drop(endpoints);
+
+        if self.reaper.set(()).is_ok() {
+            self.clone().spawn_reaper();
+        }
+        Ok(ep)
     }
 
     /// Accept inbound connections and dispatch each to the share whose
     /// capability the peer presents.
-    fn spawn_accept_loop(self: Arc<Self>, endpoint: Endpoint) {
+    fn spawn_accept_loop(self: Arc<Self>, endpoint: Endpoint, relay: RelayChoice) {
         tokio::spawn(async move {
             while let Some(incoming) = endpoint.accept().await {
                 let mgr = Arc::clone(&self);
+                let relay = relay.clone();
                 tokio::spawn(async move {
                     // Bounded handshake: a peer that completes the QUIC connect
                     // but never sends its control frame (e.g. a leaked link)
@@ -150,11 +195,17 @@ impl ShareManager {
                     };
                     drop(recv);
 
+                    // Match the capability only against shares served on THIS
+                    // endpoint's relay policy. A share minted on a custom relay
+                    // must never be served over the public endpoint (and vice
+                    // versa), or relay confinement would leak.
                     let matched = {
                         let shares = mgr.shares.lock().await;
                         shares
                             .values()
-                            .find(|s| s.host_share.capability.ct_eq(&req.capability))
+                            .find(|s| {
+                                s.relay == relay && s.host_share.capability.ct_eq(&req.capability)
+                            })
                             .map(|s| (s.id.clone(), s.approve_mode, Arc::clone(&s.host_share)))
                     };
 
@@ -247,8 +298,10 @@ impl ShareManager {
         manifest: ShareManifest,
         capability: Capability,
         approve_mode: ApprovalMode,
+        relay: RelayChoice,
     ) -> Result<(String, ShareTicket)> {
-        let endpoint = self.endpoint().await?;
+        let choice = relay;
+        let endpoint = self.get_or_bind(&choice).await?;
 
         // Wait (bounded) for the endpoint to learn its addresses/relay so the
         // ticket is dialable; proceed with whatever we have on timeout.
@@ -285,6 +338,7 @@ impl ShareManager {
                 approve_mode,
                 ticket: token,
                 expires_at,
+                relay: choice,
             },
         );
         info!(share_id = %id, ?approve_mode, "share started");
@@ -294,7 +348,7 @@ impl ShareManager {
     /// Join a shared environment: dial the host, then materialise each shared
     /// URL locally as a Caddy route tunnelled over the connection.
     pub async fn join(self: &Arc<Self>, ticket_str: &str, label: &str) -> Result<JoinResponse> {
-        let endpoint = self.endpoint().await?;
+        let endpoint = self.endpoint_join().await?;
         let ticket = ShareTicket::decode(ticket_str).context("decoding ticket")?;
 
         // Idempotent for a *successful* join: opening the same link again returns
@@ -821,6 +875,7 @@ mod tests {
                 approve_mode: ApprovalMode::Manual,
                 ticket: "veldshare_x".to_string(),
                 expires_at: i64::MAX,
+                relay: RelayChoice::Public,
             },
         );
         let (tx, rx) = oneshot::channel();

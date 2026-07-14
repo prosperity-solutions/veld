@@ -192,6 +192,8 @@ This makes veld uniquely suited for agentic workflows where AI agents build UI a
 
 Share a running environment with a colleague so they open the **same** URLs on their own machine, over an encrypted peer-to-peer tunnel. No accounts, no Veld-hosted server. The tunnel uses iroh (QUIC with NAT hole-punching and an n0 relay fallback).
 
+Services opt in explicitly: a service is shareable only if its variant declares `share.expose` in `veld.json` (`"share": { "expose": ["peer"] }`), and `veld share` refuses anything that hasn't opted in — so what leaves your machine is explicit and auditable.
+
 ### How it works
 
 1. The host runs `veld share <run>` and gets a **join URL** to send to a colleague: `https://veld.localhost/join#<ticket>` (or `:18443` in unprivileged mode), plus a `veld join <ticket>` command as an alternative (`--json` adds a `join_url` field)
@@ -215,7 +217,7 @@ Two gates protect every share: a capability token embedded in the ticket, plus h
 - **`first`** (default with `--json`) — auto-approves and pins the first token-valid joiner, rejecting the rest
 - **`auto`** — approves any token-valid joiner
 
-Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees URLs or content. To use a self-hosted relay instead of n0's public relays, set `VELD_SHARE_RELAY=<https url>` on the daemon.
+Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees URLs or content. Relay selection is a config compliance control and must be opted into explicitly — there is no implicit default, so nothing is routed over n0's public relays by accident: set `sharing.relays` in `veld.json` to `"public"` (n0's relays) or to an array of self-hosted relay URLs to keep share traffic on relays you run. `veld share` is refused if no relay is configured. Config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor). The custom-relay guarantee covers the host's outbound leg; a joining consumer should configure the same relays. The daemon binds one iroh endpoint per relay policy on demand, so shares on different relays (e.g. public and a self-hosted relay) run concurrently without conflict. (`share.expose` also accepts `web` for public browser access via a self-hosted `sharing.gateway`, but the gateway ships in a later release; today only `peer` is served.)
 
 ### Behavior
 

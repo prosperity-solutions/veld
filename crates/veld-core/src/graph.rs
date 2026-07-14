@@ -488,6 +488,7 @@ mod tests {
             client_log_levels: None,
             features: None,
             cwd: None,
+            share: None,
         };
         let api_variant = VariantConfig {
             step_type: StepType::StartServer,
@@ -506,6 +507,7 @@ mod tests {
             client_log_levels: None,
             features: None,
             cwd: None,
+            share: None,
         };
         let frontend_variant = VariantConfig {
             step_type: StepType::StartServer,
@@ -524,6 +526,7 @@ mod tests {
             client_log_levels: None,
             features: None,
             cwd: None,
+            share: None,
         };
 
         VeldConfig {
@@ -535,6 +538,7 @@ mod tests {
             client_log_levels: None,
             features: None,
             env: None,
+            sharing: None,
             setup: None,
             teardown: None,
             nodes: HashMap::from([

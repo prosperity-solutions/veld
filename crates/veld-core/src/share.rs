@@ -162,7 +162,8 @@ impl ShareTicket {
 pub struct StartShareRequest {
     /// Run name to share. `None` means "the only run", resolved by the daemon.
     pub run: Option<String>,
-    /// Node names to share; `None` shares all of the run's URL-bearing nodes.
+    /// Node names to share; `None` shares all of the run's `peer`-opted-in
+    /// URL-bearing nodes. A filter narrows within that opted-in set.
     pub nodes: Option<Vec<String>>,
     /// Lifetime in seconds; defaults applied by the daemon.
     pub ttl_secs: Option<i64>,
@@ -181,6 +182,11 @@ pub struct StartShareResponse {
     pub join_url: String,
     pub nodes: Vec<String>,
     pub expires_at: i64,
+    /// Non-fatal notes — e.g. URL-bearing services excluded from this share
+    /// because their variant did not opt into `peer` sharing. Surfaced so a
+    /// partial share doesn't silently under-expose.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 /// `POST /api/shares/join` — join a shared environment.
