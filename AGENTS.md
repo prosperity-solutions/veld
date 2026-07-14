@@ -60,7 +60,7 @@ Follow this workflow for every feature or fix:
 
 1. **Implement** — Make the code changes.
 2. **Docs audit** — Before considering the work done, check the [documentation checklist](#documentation-checklist) below.
-3. **Review rounds (repeated four-angle)** — Run the four-angle adversarial review in [docs/agentic-review.md](docs/agentic-review.md) on the diff, fix the findings, then repeat the four-angle review on the post-fix diff. Iterate until a round surfaces no critical/major findings. Do not run separate single-reviewer warm-up rounds — the four-angle pass replaces them. (For trivial changes, two angles — counterfactual + what-isn't-here — suffice, per the tuning notes in the review doc.)
+3. **Review rounds (repeated multi-angle)** — Run the five-angle adversarial review in [docs/agentic-review.md](docs/agentic-review.md) on the diff, fix the findings, then repeat the review on the post-fix diff. Iterate until a round surfaces no critical/major findings (see the doc's stop condition + round cap). Do not run separate single-reviewer warm-up rounds — the multi-angle pass replaces them. (For trivial changes, three angles — counterfactual + what-isn't-here + self-consistency — suffice, per the tuning notes in the review doc.)
 4. **Push to draft PR** — Push the branch and open a draft PR on GitHub.
 5. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet.
 6. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.

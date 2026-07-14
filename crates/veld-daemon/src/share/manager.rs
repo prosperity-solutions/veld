@@ -153,7 +153,15 @@ impl ShareManager {
     /// loop, and the global reaper on the first bind of any endpoint.
     async fn get_or_bind(self: &Arc<Self>, requested: &RelayChoice) -> Result<Endpoint> {
         // Hold the map lock across bind so two callers racing on the same policy
-        // can't bind two endpoints for it (binds are infrequent).
+        // can't bind two endpoints for it (binds are infrequent, and each policy
+        // binds at most once for the daemon's life). `bind_endpoint` resolves any
+        // relay auth tokens here — including a `command`/`file` source — so this
+        // is held across that work; I/O-bound resolution is time-bounded
+        // (`TOKEN_RESOLVE_TIMEOUT`) so a hung secret source can't wedge the lock
+        // indefinitely. Trade-off (accepted, given binds are rare): a slow token
+        // source stalls binds for *other* policies too for up to that bound;
+        // resolving before the lock (double-checked insert) would remove that but
+        // isn't worth the added complexity here.
         let mut endpoints = self.endpoints.lock().await;
         if let Some(ep) = endpoints.get(requested) {
             return Ok(ep.clone());

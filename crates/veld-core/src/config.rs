@@ -142,20 +142,223 @@ pub struct SharingConfig {
 }
 
 /// Which iroh relays to route share traffic through. Serializes as either the
-/// string `"public"` or an array of relay URLs.
+/// string `"public"` or an array of relay entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayPolicy {
     /// n0's public relay set (only via an explicit `"public"` opt-in).
     Public,
     /// Self-hosted relays. Share traffic is confined to these.
-    Custom(Vec<String>),
+    Custom(Vec<RelayEntry>),
+}
+
+/// A single self-hosted relay in a [`RelayPolicy::Custom`] list.
+///
+/// A relay may require an authorization token (iroh sends it as an
+/// `Authorization: Bearer <token>` header on the relay connection) so that only
+/// authorized clients can use it — a cheap gate that keeps a self-hosted relay
+/// from being an open one. The token is resolved at share time from its
+/// [`SecretSource`]; it is never persisted in resolved form.
+///
+/// Serializes as a bare URL string when no token is set (round-tripping the
+/// pre-token config form), or as `{ "url": ..., "token": ... }` when it is.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RelayEntry {
+    /// The relay URL (e.g. `https://relay.acme.internal`).
+    pub url: String,
+    /// Optional authorization token source. `None` = the relay is open / needs
+    /// no auth.
+    pub token: Option<SecretSource>,
+}
+
+impl RelayEntry {
+    /// A relay entry with no authorization token (an open relay).
+    pub fn url(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            token: None,
+        }
+    }
+}
+
+impl std::fmt::Debug for RelayEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegates the token field to `SecretSource`'s redacting Debug.
+        f.debug_struct("RelayEntry")
+            .field("url", &self.url)
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+/// Where a secret (currently only relay auth tokens) is read from at use time.
+///
+/// A plain string in config is a [`SecretSource::Literal`] — convenient for
+/// local dev, but it lands the secret in `veld.json` (and version control).
+/// The object forms keep the secret *out* of config and are preferred for real
+/// deployments:
+///
+/// - `{ "env": "VAR" }` — read from the daemon's environment (12-factor).
+/// - `{ "file": "/path" }` — read from a file (Docker/Kubernetes secret mounts).
+/// - `{ "command": "op read op://vault/relay/token" }` — run a shell command and
+///   use its stdout (1Password / Vault / any secret-manager CLI).
+///
+/// Resolution (running the command, reading the file/env) happens in the daemon
+/// at share time, not in this crate — this type only carries the declaration.
+///
+/// Adding a variant here means updating, in lockstep: `Serialize` /
+/// `secret_source_from_value` below (deserialize is a catch-all `Err`, so a new
+/// variant compiles + serializes but *silently fails to parse* until added),
+/// the `Debug` redaction below, `resolve_secret` in the daemon
+/// (`share/endpoint.rs`), and the `SecretSource` `$def` in
+/// `schema/v2/veld.schema.json` (hand-maintained — no compiler check ties it to
+/// this enum).
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum SecretSource {
+    /// The literal secret value, inline in config.
+    Literal(String),
+    /// Name of an environment variable holding the secret.
+    Env(String),
+    /// Path to a file whose (trimmed) contents are the secret.
+    File(String),
+    /// A shell command whose (trimmed) stdout is the secret.
+    Command(String),
+}
+
+impl std::fmt::Debug for SecretSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never render a literal secret — it could otherwise leak into logs /
+        // error output. The reference forms (env name, file path, command) are
+        // not themselves secret and stay visible for debugging.
+        match self {
+            SecretSource::Literal(_) => f.write_str("Literal(\"***\")"),
+            SecretSource::Env(v) => f.debug_tuple("Env").field(v).finish(),
+            SecretSource::File(p) => f.debug_tuple("File").field(p).finish(),
+            SecretSource::Command(c) => f.debug_tuple("Command").field(c).finish(),
+        }
+    }
+}
+
+impl Serialize for SecretSource {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match self {
+            SecretSource::Literal(v) => s.serialize_str(v),
+            SecretSource::Env(v) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("env", v)?;
+                m.end()
+            }
+            SecretSource::File(v) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("file", v)?;
+                m.end()
+            }
+            SecretSource::Command(v) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("command", v)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretSource {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        secret_source_from_value(serde_json::Value::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// Parse a [`SecretSource`] from a JSON value: a string is a literal secret; an
+/// object must carry exactly one of `env` / `file` / `command` with a string
+/// value.
+fn secret_source_from_value(value: serde_json::Value) -> Result<SecretSource, String> {
+    match value {
+        serde_json::Value::String(s) => Ok(SecretSource::Literal(s)),
+        serde_json::Value::Object(map) => {
+            if map.len() != 1 {
+                return Err(
+                    "token object must have exactly one of \"env\", \"file\", or \"command\""
+                        .to_owned(),
+                );
+            }
+            let (key, val) = map.into_iter().next().expect("len checked == 1");
+            let s = val
+                .as_str()
+                .ok_or_else(|| format!("token \"{key}\" must be a string"))?
+                .to_owned();
+            match key.as_str() {
+                "env" => Ok(SecretSource::Env(s)),
+                "file" => Ok(SecretSource::File(s)),
+                "command" => Ok(SecretSource::Command(s)),
+                other => Err(format!(
+                    "unknown token source \"{other}\"; expected \"env\", \"file\", or \"command\""
+                )),
+            }
+        }
+        _ => Err("token must be a string or an { env | file | command } object".to_owned()),
+    }
+}
+
+impl Serialize for RelayEntry {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match &self.token {
+            // No token → bare string, so token-less configs round-trip to the
+            // original list-of-URLs form.
+            None => s.serialize_str(&self.url),
+            Some(token) => {
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry("url", &self.url)?;
+                m.serialize_entry("token", token)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for RelayEntry {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        relay_entry_from_value(serde_json::Value::deserialize(d)?).map_err(D::Error::custom)
+    }
+}
+
+/// Parse a [`RelayEntry`] from a JSON value: a bare string is a token-less URL;
+/// an object must carry a `url` string and may carry a `token`.
+fn relay_entry_from_value(value: serde_json::Value) -> Result<RelayEntry, String> {
+    match value {
+        serde_json::Value::String(url) => Ok(RelayEntry { url, token: None }),
+        serde_json::Value::Object(mut map) => {
+            let url = map
+                .remove("url")
+                .ok_or("relay entry object must have a \"url\"")?;
+            let url = url
+                .as_str()
+                .ok_or("relay entry \"url\" must be a string")?
+                .to_owned();
+            let token = match map.remove("token") {
+                Some(t) => Some(secret_source_from_value(t)?),
+                None => None,
+            };
+            if !map.is_empty() {
+                let unknown: Vec<&str> = map.keys().map(String::as_str).collect();
+                return Err(format!(
+                    "unknown key(s) in relay entry: {}; expected \"url\" and optional \"token\"",
+                    unknown.join(", ")
+                ));
+            }
+            Ok(RelayEntry { url, token })
+        }
+        _ => Err("relay entry must be a URL string or a { url, token } object".to_owned()),
+    }
 }
 
 impl Serialize for RelayPolicy {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
             RelayPolicy::Public => s.serialize_str("public"),
-            RelayPolicy::Custom(urls) => urls.serialize(s),
+            RelayPolicy::Custom(entries) => entries.serialize(s),
         }
     }
 }
@@ -167,26 +370,24 @@ impl<'de> Deserialize<'de> for RelayPolicy {
         match value {
             serde_json::Value::String(s) if s == "public" => Ok(RelayPolicy::Public),
             serde_json::Value::String(s) => Err(D::Error::custom(format!(
-                "relays must be \"public\" or an array of relay URLs, got \"{s}\""
+                "relays must be \"public\" or an array of relay URLs (or {{ url, token }} \
+                 objects), got \"{s}\""
             ))),
             serde_json::Value::Array(arr) => {
-                let urls: Vec<String> = arr
-                    .into_iter()
-                    .map(|v| {
-                        v.as_str().map(str::to_owned).ok_or_else(|| {
-                            D::Error::custom("relays array must contain URL strings")
-                        })
-                    })
-                    .collect::<Result<_, _>>()?;
-                if urls.is_empty() {
+                if arr.is_empty() {
                     return Err(D::Error::custom(
                         "relays array must not be empty; use \"public\" for public relays",
                     ));
                 }
-                Ok(RelayPolicy::Custom(urls))
+                let entries: Vec<RelayEntry> = arr
+                    .into_iter()
+                    .map(relay_entry_from_value)
+                    .collect::<Result<_, _>>()
+                    .map_err(D::Error::custom)?;
+                Ok(RelayPolicy::Custom(entries))
             }
             _ => Err(D::Error::custom(
-                "relays must be \"public\" or an array of relay URLs",
+                "relays must be \"public\" or an array of relay URLs (or { url, token } objects)",
             )),
         }
     }
@@ -1353,8 +1554,9 @@ mod tests {
         let p: RelayPolicy = serde_json::from_str(r#"["https://relay.example.com"]"#).unwrap();
         assert_eq!(
             p,
-            RelayPolicy::Custom(vec!["https://relay.example.com".into()])
+            RelayPolicy::Custom(vec![RelayEntry::url("https://relay.example.com")])
         );
+        // A token-less entry round-trips back to the bare-string list form.
         assert_eq!(
             serde_json::to_string(&p).unwrap(),
             r#"["https://relay.example.com"]"#
@@ -1369,6 +1571,107 @@ mod tests {
     #[test]
     fn test_relay_policy_rejects_unknown_string() {
         assert!(serde_json::from_str::<RelayPolicy>(r#""private""#).is_err());
+    }
+
+    #[test]
+    fn test_relay_policy_mixed_tokens() {
+        let json = r#"[
+            "https://open.example.com",
+            { "url": "https://lit.example.com", "token": "s3cret" },
+            { "url": "https://env.example.com", "token": { "env": "RELAY_TOKEN" } },
+            { "url": "https://file.example.com", "token": { "file": "/run/secrets/relay" } },
+            { "url": "https://cmd.example.com", "token": { "command": "op read op://v/t" } }
+        ]"#;
+        let p: RelayPolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p,
+            RelayPolicy::Custom(vec![
+                RelayEntry::url("https://open.example.com"),
+                RelayEntry {
+                    url: "https://lit.example.com".into(),
+                    token: Some(SecretSource::Literal("s3cret".into())),
+                },
+                RelayEntry {
+                    url: "https://env.example.com".into(),
+                    token: Some(SecretSource::Env("RELAY_TOKEN".into())),
+                },
+                RelayEntry {
+                    url: "https://file.example.com".into(),
+                    token: Some(SecretSource::File("/run/secrets/relay".into())),
+                },
+                RelayEntry {
+                    url: "https://cmd.example.com".into(),
+                    token: Some(SecretSource::Command("op read op://v/t".into())),
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn test_relay_entry_with_token_round_trips() {
+        let entry = RelayEntry {
+            url: "https://relay.example.com".into(),
+            token: Some(SecretSource::Env("RELAY_TOKEN".into())),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert_eq!(
+            json,
+            r#"{"url":"https://relay.example.com","token":{"env":"RELAY_TOKEN"}}"#
+        );
+        assert_eq!(serde_json::from_str::<RelayEntry>(&json).unwrap(), entry);
+    }
+
+    #[test]
+    fn test_secret_source_all_variants_round_trip() {
+        // Every variant must survive serialize → deserialize. `Serialize` is an
+        // exhaustive match (compiler-checked) but deserialize dispatch is a
+        // catch-all, so a new variant can silently fail to parse — this guards it.
+        for src in [
+            SecretSource::Literal("lit".into()),
+            SecretSource::Env("VAR".into()),
+            SecretSource::File("/run/secrets/relay".into()),
+            SecretSource::Command("op read op://v/t".into()),
+        ] {
+            let json = serde_json::to_string(&src).unwrap();
+            assert_eq!(
+                serde_json::from_str::<SecretSource>(&json).unwrap(),
+                src,
+                "round-trip failed for {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_secret_source_debug_redacts_literal() {
+        // A literal secret must never appear in Debug output (logs / errors).
+        let dbg = format!("{:?}", SecretSource::Literal("hunter2".into()));
+        assert!(!dbg.contains("hunter2"), "literal leaked: {dbg}");
+        // Reference forms stay visible — they are not themselves secret.
+        assert!(format!("{:?}", SecretSource::Env("VAR".into())).contains("VAR"));
+    }
+
+    #[test]
+    fn test_relay_entry_rejects_token_object_with_multiple_keys() {
+        let json = r#"{ "url": "https://r", "token": { "env": "A", "file": "/b" } }"#;
+        assert!(serde_json::from_str::<RelayEntry>(json).is_err());
+    }
+
+    #[test]
+    fn test_relay_entry_rejects_unknown_token_source() {
+        let json = r#"{ "url": "https://r", "token": { "vault": "x" } }"#;
+        assert!(serde_json::from_str::<RelayEntry>(json).is_err());
+    }
+
+    #[test]
+    fn test_relay_entry_rejects_unknown_key() {
+        let json = r#"{ "url": "https://r", "auth": "x" }"#;
+        assert!(serde_json::from_str::<RelayEntry>(json).is_err());
+    }
+
+    #[test]
+    fn test_relay_entry_rejects_missing_url() {
+        let json = r#"{ "token": "x" }"#;
+        assert!(serde_json::from_str::<RelayEntry>(json).is_err());
     }
 
     #[test]
@@ -1418,9 +1721,9 @@ mod tests {
         let sharing = cfg.sharing.unwrap();
         assert_eq!(
             sharing.relays,
-            Some(RelayPolicy::Custom(vec![
-                "https://relay.acme.internal".into()
-            ]))
+            Some(RelayPolicy::Custom(vec![RelayEntry::url(
+                "https://relay.acme.internal"
+            )]))
         );
         assert_eq!(
             sharing.gateway.as_deref(),

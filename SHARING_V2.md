@@ -148,6 +148,19 @@ instead of reading a single env var:
   falling back to public (a silent fallback to n0 would be a compliance
   violation — the whole point was to avoid public relays).
 
+**Relay auth tokens (shipped).** A self-hosted relay entry may be an object
+`{ "url", "token" }` instead of a bare URL string. `token` is a `SecretSource`:
+a literal string, or `{ "env" | "file" | "command" }` so the secret can be read
+from the daemon's environment, a file (Docker/K8s secret mounts), or a
+secret-manager CLI (`op read …`) rather than living in `veld.json`. iroh sends it
+as an `Authorization: Bearer <token>` header (`RelayConfig::with_auth_token`), a
+lightweight "you need the shared secret to use our relay" gate — not per-user
+identity. The token *declaration* is part of the endpoint-map key (so it stays a
+cheap, hashable key with no resolved secret in it); resolution happens at
+`bind_endpoint` time and a token that fails to resolve is a hard error (never
+bind unauthenticated). `VELD_SHARE_RELAY_TOKEN` pairs a literal token with the
+`VELD_SHARE_RELAY` env override.
+
 **One endpoint per relay policy.** The daemon binds a distinct iroh endpoint for
 each relay policy on demand, held in a `Map<RelayChoice, Endpoint>`. Each share /
 join routes to the endpoint matching its policy, so shares on different relays

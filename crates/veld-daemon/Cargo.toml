@@ -26,3 +26,6 @@ reqwest = { workspace = true }
 uuid = { workspace = true }
 iroh = "1"
 iroh-tickets = "1"
+
+[dev-dependencies]
+tempfile = "3"

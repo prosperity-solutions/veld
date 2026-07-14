@@ -163,7 +163,11 @@ opted into explicitly (no implicit default): set `sharing.relays` to `"public"`
 or an array of self-hosted relay URLs, else `veld share` is refused. Config wins
 over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's env, not your
 shell; not an enforceable floor). The daemon binds one iroh endpoint per relay
-policy on demand, so shares on different relays run concurrently. `share.expose` also accepts `web` (public browser access via a
+policy on demand, so shares on different relays run concurrently. A self-hosted
+relay can require an auth token: write the relay as `{ "url": ..., "token": ... }`
+where `token` is a literal string or `{ "env": ... }` / `{ "file": ... }` /
+`{ "command": ... }` (resolved on the daemon at share time; keep secrets out of
+`veld.json` with the non-literal forms). `share.expose` also accepts `web` (public browser access via a
 `sharing.gateway` server) but that gateway ships later; today only `peer` is
 served. Stopping the run (`veld stop`) auto-unshares its shares, and a consumer's
 join self-tears-down when the tunnel closes.
