@@ -128,16 +128,6 @@ impl ShareManager {
         }
     }
 
-    /// Endpoint for the join (consumer) side. Joining is *consuming*, not
-    /// exposing, and the join path has no project config — so unlike hosting
-    /// (which requires an explicit relay opt-in), a join uses `VELD_SHARE_RELAY`
-    /// if set and otherwise falls back to public relays so a bare
-    /// `veld join <ticket>` keeps working.
-    async fn endpoint_join(self: &Arc<Self>) -> Result<Endpoint> {
-        let choice = RelayChoice::resolve(None).unwrap_or(RelayChoice::Public);
-        self.get_or_bind(&choice).await
-    }
-
     /// The secret key (node identity) for an endpoint on `choice`. The public
     /// endpoint reuses the daemon's persistent key; each custom-relay endpoint
     /// gets its own fresh key so no two live endpoints share a node id (iroh
@@ -315,7 +305,26 @@ impl ShareManager {
         // ticket is dialable; proceed with whatever we have on timeout.
         let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
 
-        let iroh_ticket = EndpointTicket::new(endpoint.addr()).to_string();
+        let addr = endpoint.addr();
+
+        // Fail closed for a custom-relay policy: the ticket MUST advertise the
+        // relay, or the consumer's `RelayChoice::for_join` sees no relay in the
+        // ticket and silently falls back to n0's public relays — breaking the
+        // custom-relay compliance guarantee. This happens when the configured
+        // relay is unreachable at mint time (the `online()` wait above times out
+        // without a home relay). Refuse to mint a relay-less ticket instead —
+        // consistent with `bind_endpoint`'s refusal to fall back to public. (An
+        // endpoint bound `RelayMode::Custom` only ever advertises the configured
+        // relays, so a non-empty `relay_urls()` here is one of them.)
+        if matches!(choice, RelayChoice::Custom(_)) && addr.relay_urls().next().is_none() {
+            bail!(
+                "relay not ready: the share endpoint has no relay address to put \
+                 in the ticket (the configured relay may be unreachable). Refusing \
+                 to mint a ticket that would let joiners fall back to public relays."
+            );
+        }
+
+        let iroh_ticket = EndpointTicket::new(addr).to_string();
 
         let upstreams: HashMap<String, u16> = manifest
             .nodes
@@ -356,7 +365,6 @@ impl ShareManager {
     /// Join a shared environment: dial the host, then materialise each shared
     /// URL locally as a Caddy route tunnelled over the connection.
     pub async fn join(self: &Arc<Self>, ticket_str: &str, label: &str) -> Result<JoinResponse> {
-        let endpoint = self.endpoint_join().await?;
         let ticket = ShareTicket::decode(ticket_str).context("decoding ticket")?;
 
         // Idempotent for a *successful* join: opening the same link again returns
@@ -387,6 +395,14 @@ impl ShareManager {
             .context("parsing iroh ticket")?
             .endpoint_addr()
             .clone();
+
+        // Bind the join endpoint on the SAME relay(s) the host advertised in
+        // the ticket. A share minted on a custom relay must be joined over that
+        // relay — never silently over n0's public relays. Only a relay-less
+        // ticket (a direct-address-only host) resolves to the public endpoint;
+        // a custom-relay host refuses to mint such a ticket (see `start_share`).
+        let choice = RelayChoice::for_join(addr.relay_urls());
+        let endpoint = self.get_or_bind(&choice).await?;
 
         let label = if label.is_empty() { "veld" } else { label };
         // The host sends the manifest over the tunnel after approving — the

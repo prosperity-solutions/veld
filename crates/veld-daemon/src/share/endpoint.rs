@@ -99,6 +99,85 @@ impl RelayChoice {
         }
     }
 
+    /// Derive the relay choice for the *consumer* side of a join, mirroring the
+    /// relay(s) the host advertised in its ticket. A share minted on a custom
+    /// relay must be joined over that same relay — never silently over n0's
+    /// public relays — so the join is confined to exactly the ticket's relays.
+    /// When the ticket carries no relay URL at all — a host reachable only via
+    /// direct addresses — this falls back to public. (A public-relay host still
+    /// advertises its relay URL in the ticket, so it takes the mirror path above,
+    /// not this fallback; and a custom-relay host refuses to mint a relay-less
+    /// ticket, see `ShareManager::start_share`.)
+    ///
+    /// Tickets carry relay URLs but never tokens (a ticket is a shareable link;
+    /// a token in it would leak). A token is attached to a relay only when the
+    /// joiner has explicitly configured that *same* relay via the
+    /// `VELD_SHARE_RELAY` / `VELD_SHARE_RELAY_TOKEN` env pair — matched by parsed
+    /// [`RelayUrl`] equality, not string comparison — so a hostile ticket naming
+    /// an attacker-controlled relay cannot harvest the joiner's token.
+    pub fn for_join<'a>(ticket_relay_urls: impl IntoIterator<Item = &'a RelayUrl>) -> Self {
+        Self::for_join_with_env(
+            ticket_relay_urls,
+            std::env::var(RELAY_ENV).ok(),
+            std::env::var(RELAY_TOKEN_ENV).ok(),
+        )
+    }
+
+    /// Core of [`for_join`](Self::for_join), with the env overrides injected so
+    /// it can be unit-tested without mutating the process environment.
+    fn for_join_with_env<'a>(
+        ticket_relay_urls: impl IntoIterator<Item = &'a RelayUrl>,
+        env_relay: Option<String>,
+        env_token: Option<String>,
+    ) -> Self {
+        // The relay the joiner explicitly configured (if any), parsed so the
+        // comparison against the ticket's RelayUrl is canonical rather than
+        // string-wise (RelayUrl normalizes host case, trailing dot/slash, etc.).
+        let configured: Option<RelayUrl> = env_relay
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .and_then(|s| match s.parse() {
+                Ok(url) => Some(url),
+                Err(e) => {
+                    // A set-but-unparseable VELD_SHARE_RELAY means the joiner's
+                    // token can't be matched to any ticket relay and is silently
+                    // dropped (the join then fails against a token-gated relay).
+                    // Surface it rather than fail mysteriously.
+                    warn!(error = %e, value = %s, "ignoring invalid VELD_SHARE_RELAY; relay token will not be attached");
+                    None
+                }
+            });
+        let token: Option<String> = env_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_owned);
+
+        let entries: Vec<RelayEntry> = ticket_relay_urls
+            .into_iter()
+            .map(|u| {
+                // Attach the token only to the relay the joiner explicitly named.
+                let tok = match &token {
+                    Some(t) if configured.as_ref() == Some(u) => {
+                        Some(SecretSource::Literal(t.clone()))
+                    }
+                    _ => None,
+                };
+                RelayEntry {
+                    url: u.to_string(),
+                    token: tok,
+                }
+            })
+            .collect();
+
+        if entries.is_empty() {
+            RelayChoice::Public
+        } else {
+            RelayChoice::custom(entries)
+        }
+    }
+
     fn custom(entries: Vec<RelayEntry>) -> Self {
         // Normalize each URL (trim + drop a trailing slash) then sort/dedup by
         // URL so the choice has a stable identity: it keys the per-policy
@@ -458,6 +537,123 @@ mod tests {
             Some(RelayChoice::Custom(vec![RelayEntry::url(
                 "https://env-relay.example"
             )]))
+        );
+    }
+
+    fn relay_url(s: &str) -> RelayUrl {
+        s.parse().expect("valid relay url")
+    }
+
+    #[test]
+    fn for_join_no_relay_falls_back_to_public() {
+        // A ticket advertising no relay (host public or direct-only) → public.
+        let urls: [RelayUrl; 0] = [];
+        assert_eq!(
+            RelayChoice::for_join_with_env(urls.iter(), None, None),
+            RelayChoice::Public
+        );
+    }
+
+    #[test]
+    fn for_join_mirrors_ticket_relay_confining_off_public() {
+        // The core fix: a custom-relay ticket is joined over that same relay,
+        // never over n0 public — even when the joiner set no env at all.
+        let urls = [relay_url("https://relay.example")];
+        assert_eq!(
+            RelayChoice::for_join_with_env(urls.iter(), None, None),
+            RelayChoice::Custom(vec![RelayEntry::url("https://relay.example")])
+        );
+    }
+
+    #[test]
+    fn for_join_attaches_token_only_for_the_configured_relay() {
+        // Joiner explicitly configured THIS relay → the token is attached.
+        let urls = [relay_url("https://relay.example")];
+        assert_eq!(
+            RelayChoice::for_join_with_env(
+                urls.iter(),
+                Some("https://relay.example".to_owned()),
+                Some("tok3n".to_owned()),
+            ),
+            RelayChoice::Custom(vec![RelayEntry {
+                url: "https://relay.example".to_owned(),
+                token: Some(SecretSource::Literal("tok3n".to_owned())),
+            }])
+        );
+    }
+
+    #[test]
+    fn for_join_never_leaks_token_to_a_relay_the_joiner_did_not_configure() {
+        // Hostile ticket names a relay the joiner never configured: the token
+        // stays home. Confinement to the ticket's relay still applies (so the
+        // join simply fails against a token-gated attacker relay), but the
+        // secret is never sent there.
+        let urls = [relay_url("https://attacker.example")];
+        let choice = RelayChoice::for_join_with_env(
+            urls.iter(),
+            Some("https://relay.example".to_owned()),
+            Some("tok3n".to_owned()),
+        );
+        assert_eq!(
+            choice,
+            RelayChoice::Custom(vec![RelayEntry::url("https://attacker.example")])
+        );
+        // Belt and braces: the token string never appears anywhere in the choice.
+        assert!(!format!("{choice:?}").contains("tok3n"));
+    }
+
+    #[test]
+    fn for_join_mirrors_all_ticket_relays() {
+        let urls = [
+            relay_url("https://a.example"),
+            relay_url("https://b.example"),
+        ];
+        let choice = RelayChoice::for_join_with_env(urls.iter(), None, None);
+        let RelayChoice::Custom(entries) = choice else {
+            panic!("expected custom");
+        };
+        assert_eq!(entries.len(), 2);
+    }
+
+    #[test]
+    fn for_join_attaches_token_to_only_the_matching_relay_among_many() {
+        // The security-critical per-entry case: a ticket lists several relays,
+        // the joiner configured exactly one of them. The token must land on that
+        // one entry and NONE of the others.
+        let urls = [
+            relay_url("https://other.example"),
+            relay_url("https://mine.example"),
+        ];
+        let choice = RelayChoice::for_join_with_env(
+            urls.iter(),
+            Some("https://mine.example".to_owned()),
+            Some("tok3n".to_owned()),
+        );
+        let RelayChoice::Custom(entries) = choice else {
+            panic!("expected custom");
+        };
+        for e in &entries {
+            match e.url.as_str() {
+                "https://mine.example" => {
+                    assert_eq!(e.token, Some(SecretSource::Literal("tok3n".to_owned())))
+                }
+                "https://other.example" => assert_eq!(e.token, None),
+                other => panic!("unexpected relay {other}"),
+            }
+        }
+    }
+
+    #[test]
+    fn for_join_blank_env_is_not_a_token() {
+        // Whitespace-only token env is ignored, not sent as an empty token.
+        let urls = [relay_url("https://relay.example")];
+        assert_eq!(
+            RelayChoice::for_join_with_env(
+                urls.iter(),
+                Some("https://relay.example".to_owned()),
+                Some("   ".to_owned()),
+            ),
+            RelayChoice::Custom(vec![RelayEntry::url("https://relay.example")])
         );
     }
 
