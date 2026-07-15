@@ -49,8 +49,12 @@ pub async fn share(
                     "Sharing {} node(s) over peer-to-peer.",
                     resp.nodes.len()
                 ));
+                // Yellow `!` (matching the join side), not dim grey — one of
+                // these warnings is the DANGER notice that a relay secret is
+                // embedded in the join link, and it must not be the quietest
+                // text on screen right as the link is shared.
                 for w in &resp.warnings {
-                    println!("  {}", output::dim(&format!("note: {w}")));
+                    println!("  {} {}", output::yellow("!"), w);
                 }
                 println!();
                 println!("  Send this link (opens in their browser):");

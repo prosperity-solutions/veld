@@ -154,7 +154,7 @@ veld stop --name dev
 | `veld feedback ask "<msg>"` | Ask the reviewer a question |
 | `veld feedback threads [--name <n>]` | List feedback threads |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
-| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
+| `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved). `--no-remember`: don't cache a relay auth token entered at the prompt |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` | Approve a pending join request |
 | `veld deny <REQ_ID> [--json]` | Deny a pending join request |

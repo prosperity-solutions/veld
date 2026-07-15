@@ -733,7 +733,7 @@ All forms trim trailing whitespace (secret stores commonly append a newline). Pr
 
 There is no `veld.json` path for a joiner's relay token.
 
-**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached (unless you opt out) so future joins to that relay don't re-prompt, and a wrong token re-prompts. `veld join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
+**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached so future joins to that relay don't re-prompt — clear the "remember" checkbox (browser) or pass `veld join --no-remember` to skip caching — and a wrong token re-prompts. `veld join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
 
 #### `sharing.dangerouslyEmbedRelayTokensInTicket`
 

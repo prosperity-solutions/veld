@@ -76,6 +76,21 @@ fn is_relay_auth_denial(err: &str) -> bool {
     e.contains("denied our authentication") || e.contains("not authorized")
 }
 
+/// The supplied tokens worth caching after a successful join: only those keyed
+/// by a relay the ticket actually advertises. Filters out any spurious key a
+/// client tacked onto `supplied_tokens` so a token is never cached for a relay
+/// this join never used. Keys are canonical `RelayUrl` strings on both sides.
+fn tokens_to_cache<'a>(
+    ticket_relay_urls: &[String],
+    supplied: &'a BTreeMap<String, String>,
+) -> Vec<(&'a str, &'a str)> {
+    supplied
+        .iter()
+        .filter(|(url, _)| ticket_relay_urls.iter().any(|t| t == *url))
+        .map(|(u, t)| (u.as_str(), t.as_str()))
+        .collect()
+}
+
 /// Watch an endpoint's home-relay status until it connects, reports an auth
 /// denial, or `budget` elapses. Lets the join distinguish "wrong/missing relay
 /// token" from "host unreachable" and prompt precisely (see
@@ -145,6 +160,11 @@ struct JoinEntry {
     /// Capability of the joined share, so repeat opens of the same link are
     /// idempotent instead of creating duplicate joins.
     capability: Capability,
+    /// The relay policy this join's endpoint is bound on. Recorded so
+    /// `evict_endpoint` never tears down an endpoint a live join still uses —
+    /// e.g. after mid-session token rotation, a *new* denied join can share this
+    /// join's `RelayChoice` while this join survives on a direct path.
+    relay: RelayChoice,
     /// Non-fatal notes from the join (e.g. skipped nodes), preserved so a repeat
     /// open of the same link reports them instead of an empty list.
     warnings: Vec<String>,
@@ -231,10 +251,16 @@ impl ShareManager {
 
     /// Remove and close an endpoint that was bound only to probe relay auth (a
     /// denied join). Closing ends its accept loop (`accept()` returns `None`)
-    /// and drops the permanently-denied relay connection. Skipped if an active
-    /// hosted share is served on the same relay policy — a *denied* join choice
-    /// can't match a working share's (the rejected token differs), but guard
-    /// anyway so a shared endpoint is never torn out from under a live share.
+    /// and drops the permanently-denied relay connection.
+    ///
+    /// Skipped if any live share OR join is on the same relay policy: an
+    /// endpoint is shared by `RelayChoice`, and `close()` tears down *all* its
+    /// connections. A denied probe can share a live join's choice after the
+    /// relay rotates its token (the live join survives on a direct path, a new
+    /// join arrives with the now-stale token → same key → same endpoint), so
+    /// closing here would kill the healthy join. When shared, leave it — it
+    /// isn't leaked (the other party uses it); only an *unshared* probe endpoint
+    /// is the leak this evicts.
     async fn evict_endpoint(&self, choice: &RelayChoice) {
         if self
             .shares
@@ -243,6 +269,9 @@ impl ShareManager {
             .values()
             .any(|s| &s.relay == choice)
         {
+            return;
+        }
+        if self.joins.lock().await.values().any(|j| &j.relay == choice) {
             return;
         }
         let ep = self.endpoints.lock().await.remove(choice);
@@ -513,7 +542,7 @@ impl ShareManager {
         // a custom-relay host refuses to mint such a ticket (see `start_share`).
         //
         // Relay auth tokens (if the relay is token-gated) are resolved by
-        // priority — env < local cache < ticket-embedded < just-supplied —
+        // priority — local cache < env < ticket-embedded < just-supplied —
         // attached only to the matching relay so nothing leaks.
         let stored = token_store::load();
         let tokens = RelayChoice::resolve_join_tokens_from_env(
@@ -678,6 +707,7 @@ impl ShareManager {
                 tasks,
                 conn: conn.clone(),
                 capability: ticket.capability.clone(),
+                relay: choice.clone(),
                 warnings: warnings.clone(),
             },
         );
@@ -693,14 +723,10 @@ impl ShareManager {
 
         // The join authenticated to the relay, so any token the caller supplied
         // this attempt is valid — cache it (per relay URL) if asked, so future
-        // joins to the same relay don't re-prompt. Only cache tokens for relays
-        // this ticket actually advertises (never a spurious key a client tacked
-        // on). Best-effort: a cache write failure must not fail the join.
+        // joins to the same relay don't re-prompt. Best-effort: a cache write
+        // failure must not fail the join.
         if remember {
-            for (url, token) in supplied_tokens {
-                if !ticket_relay_urls.contains(url) {
-                    continue;
-                }
+            for (url, token) in tokens_to_cache(&ticket_relay_urls, supplied_tokens) {
                 if let Err(e) = token_store::save(url, token) {
                     warn!(error = %e, relay = %url, "failed to cache relay token");
                 }
@@ -1050,6 +1076,24 @@ mod tests {
         // real connectivity error instead of wrongly prompting for a token.
         assert!(!is_relay_auth_denial("connection timed out"));
         assert!(!is_relay_auth_denial("dns error: no such host"));
+    }
+
+    #[test]
+    fn tokens_to_cache_keeps_only_ticket_relays() {
+        let ticket = vec!["https://relay.example/".to_string()];
+        let mut supplied = BTreeMap::new();
+        supplied.insert("https://relay.example/".to_string(), "good".to_string());
+        // A key the ticket never advertised (spurious / client-tacked-on).
+        supplied.insert("https://attacker.example/".to_string(), "leak".to_string());
+
+        let cached = tokens_to_cache(&ticket, &supplied);
+        assert_eq!(cached, vec![("https://relay.example/", "good")]);
+        // The non-ticket relay's token is never persisted.
+        assert!(
+            !cached
+                .iter()
+                .any(|(u, _)| *u == "https://attacker.example/")
+        );
     }
 
     fn sample_manifest() -> ShareManifest {

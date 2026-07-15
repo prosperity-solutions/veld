@@ -54,7 +54,10 @@ fn save_to(p: &Path, url: &str, token: &str) -> Result<()> {
     // secret is never briefly world-readable. (A concurrent save can still
     // last-writer-wins a lost update; acceptable for a best-effort cache.)
     let tmp = tmp_path(p);
-    write_private(&tmp, &json).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = write_private(&tmp, &json) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("writing {}", tmp.display()));
+    }
     if let Err(e) = std::fs::rename(&tmp, p) {
         let _ = std::fs::remove_file(&tmp);
         return Err(e).with_context(|| format!("replacing {}", p.display()));

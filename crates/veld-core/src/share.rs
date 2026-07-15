@@ -134,8 +134,9 @@ pub struct ShareTicket {
     /// `sharing.dangerouslyEmbedRelayTokensInTicket` — a deliberate opt-in that
     /// ships the relay secret inside the shareable link. Empty (and omitted from
     /// the encoded token) otherwise, so ordinary tickets are byte-identical to
-    /// before. The join side prefers an embedded token, then a locally cached
-    /// one, then prompts the user.
+    /// before. An embedded token is one layer in the join side's resolution
+    /// (local cache < env < embedded < a token entered at the prompt); see the
+    /// daemon's `RelayChoice::resolve_join_tokens`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_tokens: BTreeMap<String, String>,
 }

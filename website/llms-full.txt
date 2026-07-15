@@ -131,7 +131,7 @@ veld stop --name dev
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command) |
-| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved) |
+| `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved). `--no-remember`: don't cache a relay auth token entered at the prompt |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
@@ -232,7 +232,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 | Command | Description |
 |---------|-------------|
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--json]` | Start sharing a running env; prints a join URL (and `veld join` command) |
-| `veld join <TICKET> [--label <n>] [--json]` | Join a shared env by ticket (blocks until approved) |
+| `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket (blocks until approved). `--no-remember`: don't cache a prompted relay auth token |
 | `veld shares [--json]` | List active shares, joins, and pending join requests |
 | `veld approve <REQ_ID> [--json]` / `veld deny <REQ_ID> [--json]` | Resolve a pending join request |
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |

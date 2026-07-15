@@ -336,16 +336,9 @@ fn build_manifest(
 
     // Loud warning when a relay secret is about to ride inside the join link, so
     // `veld share` / the dashboard surface it (the link is auto-copied) rather
-    // than silently shipping the secret. Only when the opt-in is on AND a relay
-    // actually has a token to embed.
-    if embed_relay_tokens
-        && matches!(&relay, RelayChoice::Custom(entries) if entries.iter().any(|e| e.token.is_some()))
-    {
-        warnings.push(
-            "dangerouslyEmbedRelayTokensInTicket is on: the relay auth token is embedded in \
-             the join link — treat the link as a secret (anyone with it can use your relay)."
-                .to_string(),
-        );
+    // than silently shipping the secret.
+    if let Some(w) = embed_warning(embed_relay_tokens, &relay) {
+        warnings.push(w);
     }
 
     let now = Utc::now().timestamp();
@@ -378,6 +371,20 @@ fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Optio
 /// excluded. `not_opted_in` are `node:variant`s with no (peer) `share`;
 /// `web_only` opted into `web` but not `peer`. Both are sorted+deduped in place
 /// for a deterministic message.
+/// The DANGER warning to surface when a share is about to embed relay token(s)
+/// in the ticket, or `None`. Fires iff the `dangerouslyEmbedRelayTokensInTicket`
+/// opt-in is on AND a custom relay actually carries a token to embed — so it
+/// stays silent for a public/token-less relay (no spurious scary warning).
+fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String> {
+    let embeds = embed_relay_tokens
+        && matches!(relay, RelayChoice::Custom(entries) if entries.iter().any(|e| e.token.is_some()));
+    embeds.then(|| {
+        "dangerouslyEmbedRelayTokensInTicket is on: the relay auth token is embedded in the \
+         join link — treat the link as a secret (anyone with it can use your relay)."
+            .to_string()
+    })
+}
+
 fn share_exclusion_message(
     run_name: &str,
     had_url_bearing: bool,
@@ -449,6 +456,24 @@ pub(crate) fn hostname_of(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use veld_core::config::{RelayEntry, SecretSource};
+
+    #[test]
+    fn embed_warning_only_when_embedding_a_real_token() {
+        let gated = RelayChoice::Custom(vec![RelayEntry {
+            url: "https://relay.example".into(),
+            token: Some(SecretSource::Literal("s3cret".into())),
+        }]);
+        let open = RelayChoice::Custom(vec![RelayEntry::url("https://relay.example")]);
+
+        // On + a relay with a token → warns.
+        assert!(embed_warning(true, &gated).is_some());
+        // On but no token to embed → silent (no spurious scary warning).
+        assert!(embed_warning(true, &open).is_none());
+        assert!(embed_warning(true, &RelayChoice::Public).is_none());
+        // Off → silent regardless.
+        assert!(embed_warning(false, &gated).is_none());
+    }
 
     #[test]
     fn hostname_strips_scheme_and_port() {
