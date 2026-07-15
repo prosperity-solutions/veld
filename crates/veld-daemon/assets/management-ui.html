@@ -610,6 +610,17 @@ function setJoinState(kind,data){
     body.innerHTML='<div class="big">✅</div><h2>Approved — you’re in</h2><p>These URLs now open on this machine:</p><div class="urls">'+linkUrls(data.urls)+'</div>'+warn+'<a class="sbtn" href="/">Open dashboard</a> <button class="sbtn deny" data-join-leave="'+esc(data.join_id)+'">Leave</button>';
   }else if(kind==='ended'){
     body.innerHTML='<div class="big">🔌</div><h2>Share ended</h2><p>The host stopped sharing — these URLs are no longer reachable.</p><a class="sbtn" href="/">Go to dashboard</a>';
+  }else if(kind==='needsToken'){
+    const retryNote=data.retry?'<p style="color:var(--yellow)">That token was rejected. Try again.</p>':'';
+    body.innerHTML='<div class="big">🔑</div><h2>Relay needs a token</h2>'+
+      '<p>The relay <code>'+esc(data.relayUrl)+'</code> is private. Enter its authorization token to join.</p>'+retryNote+
+      '<div style="margin:16px 0;text-align:left">'+
+      '<input id="relay-token-input" type="password" placeholder="Relay auth token" autocomplete="off" spellcheck="false" style="width:100%;padding:10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:var(--mono)">'+
+      '<label style="display:flex;gap:8px;align-items:center;margin-top:10px;color:var(--text2);font-size:13px"><input id="relay-token-remember" type="checkbox" checked> Remember this token for this relay on this machine</label>'+
+      '</div>'+
+      '<button class="sbtn" id="relay-token-submit" data-relay-url="'+esc(data.relayUrl)+'">Join</button>';
+    const inp=document.getElementById('relay-token-input');
+    if(inp){inp.focus();inp.addEventListener('keydown',ev=>{if(ev.key==='Enter')document.getElementById('relay-token-submit').click();});}
   }else{
     body.innerHTML='<div class="big">⛔</div><h2>Join failed</h2><p>'+esc(typeof data==='string'?data:JSON.stringify(data))+'</p><a class="sbtn" href="/">Go to dashboard</a>';
   }
@@ -630,18 +641,31 @@ function watchJoin(joinId){
     }catch(e){}
   },3000);
 }
-async function runJoinFlow(){
+async function runJoinFlow(relayTokens,remember){
   const ticket=decodeURIComponent((location.hash||'').replace(/^#/,'')).trim();
   if(!ticket){setJoinState('error','This join link has no ticket. Ask the host to resend it.');return;}
+  const supplying=relayTokens&&Object.keys(relayTokens).length>0;
   setJoinState('waiting','Connecting to the host and waiting for approval…');
   try{
-    const resp=await fetch('/api/shares/join',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({ticket})});
+    const payload={ticket};
+    if(supplying){payload.relay_tokens=relayTokens;payload.remember=!!remember;}
+    const resp=await fetch('/api/shares/join',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify(payload)});
     if(!resp.ok){setJoinState('error',(await resp.text())||('HTTP '+resp.status));return;}
     const d=await resp.json();
+    // Relay is token-gated and the daemon has no valid token yet → prompt.
+    if(d.needs_relay_token){setJoinState('needsToken',{relayUrl:d.needs_relay_token,retry:supplying});return;}
     setJoinState('ok',d);
     watchJoin(d.join_id);
   }catch(e){setJoinState('error',String(e));}
 }
+document.addEventListener('click',e=>{
+  const b=e.target.closest('#relay-token-submit');if(!b)return;
+  const inp=document.getElementById('relay-token-input');
+  const token=((inp&&inp.value)||'').trim();
+  if(!token){if(inp)inp.focus();return;}
+  const remember=!!((document.getElementById('relay-token-remember')||{}).checked);
+  runJoinFlow({[b.dataset.relayUrl]:token},remember);
+});
 document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-join-leave]');if(!b)return;
   b.disabled=true;

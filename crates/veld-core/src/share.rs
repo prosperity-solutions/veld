@@ -208,6 +208,15 @@ pub struct JoinRequest {
     pub ticket: String,
     /// Untrusted self-label shown to the host.
     pub label: Option<String>,
+    /// Relay auth tokens the joiner is supplying for this attempt, keyed by
+    /// relay URL — e.g. a token just entered at an interactive prompt after a
+    /// prior `needs_relay_token` response. Highest priority in token resolution.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_tokens: BTreeMap<String, String>,
+    /// Persist the supplied `relay_tokens` to the joiner's local token cache on
+    /// a successful join, so future joins to the same relay don't re-prompt.
+    #[serde(default)]
+    pub remember: bool,
 }
 
 /// `POST /api/shares/join` response.
@@ -220,6 +229,12 @@ pub struct JoinResponse {
     /// hostname — the local URL always wins).
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Set when the join could not authenticate to this relay (token-gated relay
+    /// with a missing or wrong token). The caller obtains the token and retries
+    /// with it in `JoinRequest::relay_tokens`. When set, the other fields are
+    /// empty — no join happened.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub needs_relay_token: Option<String>,
 }
 
 /// One entry in `GET /api/shares`.

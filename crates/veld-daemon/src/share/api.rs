@@ -104,7 +104,7 @@ async fn join(
     check_csrf(&headers)?;
     let label = req.label.unwrap_or_default();
     let resp = manager
-        .join(&req.ticket, &label)
+        .join(&req.ticket, &label, &req.relay_tokens, req.remember)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(resp))

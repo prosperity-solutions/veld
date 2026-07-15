@@ -87,40 +87,112 @@ pub async fn share(
 
 /// `veld join <ticket> [--label ...] [--json]`
 pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
-    let req = JoinRequest { ticket, label };
+    use std::collections::BTreeMap;
 
-    match DaemonClient::new().join(&req).await {
-        Ok(resp) => {
+    /// Cap interactive token retries so a persistently-wrong token can't loop.
+    const MAX_TOKEN_PROMPTS: usize = 3;
+
+    let client = DaemonClient::new();
+    let mut relay_tokens: BTreeMap<String, String> = BTreeMap::new();
+    let mut remember = false;
+    let mut prompts = 0usize;
+
+    loop {
+        let req = JoinRequest {
+            ticket: ticket.clone(),
+            label: label.clone(),
+            relay_tokens: relay_tokens.clone(),
+            remember,
+        };
+        let resp = match client.join(&req).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                output::print_error(&e.to_string(), json);
+                return 1;
+            }
+        };
+
+        // The relay is token-gated and the daemon has no valid token yet. In
+        // JSON mode we can't prompt — emit the response so a caller can handle
+        // it. Interactively, prompt and retry (bounded).
+        if let Some(relay_url) = resp.needs_relay_token.clone() {
             if json {
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&resp).unwrap_or_default()
                 );
-            } else {
-                output::print_success(&format!(
-                    "Joined — {} URL(s) now reachable on this machine:",
-                    resp.urls.len()
-                ));
-                println!();
-                for url in &resp.urls {
-                    println!("    {}", output::cyan(url));
-                }
-                for w in &resp.warnings {
-                    println!("  {} {}", output::yellow("!"), w);
-                }
-                println!();
-                println!(
-                    "  Leave with: {}",
-                    output::dim(&format!("veld leave {}", resp.join_id))
-                );
+                return 1;
             }
-            0
+            if prompts >= MAX_TOKEN_PROMPTS {
+                output::print_error(
+                    &format!("relay {relay_url} rejected the token ({MAX_TOKEN_PROMPTS} attempts)"),
+                    false,
+                );
+                return 1;
+            }
+            prompts += 1;
+            match prompt_relay_token(&relay_url, prompts > 1) {
+                Some(token) if !token.is_empty() => {
+                    relay_tokens.insert(relay_url, token);
+                    remember = true;
+                    continue;
+                }
+                _ => {
+                    output::print_error("no relay token entered", false);
+                    return 1;
+                }
+            }
         }
-        Err(e) => {
-            output::print_error(&e.to_string(), json);
-            1
+
+        // Success.
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&resp).unwrap_or_default()
+            );
+        } else {
+            output::print_success(&format!(
+                "Joined — {} URL(s) now reachable on this machine:",
+                resp.urls.len()
+            ));
+            println!();
+            for url in &resp.urls {
+                println!("    {}", output::cyan(url));
+            }
+            for w in &resp.warnings {
+                println!("  {} {}", output::yellow("!"), w);
+            }
+            println!();
+            println!(
+                "  Leave with: {}",
+                output::dim(&format!("veld leave {}", resp.join_id))
+            );
         }
+        return 0;
     }
+}
+
+/// Prompt on the terminal for a relay's auth token. Input is echoed (no hidden
+/// input to avoid a dependency) — the doc note points at `VELD_SHARE_RELAY_TOKEN`
+/// for a non-echoing alternative. Returns `None` on read error.
+fn prompt_relay_token(relay_url: &str, retry: bool) -> Option<String> {
+    use std::io::{BufRead, Write};
+    eprintln!();
+    if retry {
+        eprintln!(
+            "  {}",
+            output::yellow("That token was rejected. Try again.")
+        );
+    }
+    eprintln!("  Relay {relay_url} requires an authorization token to join.");
+    eprint!(
+        "  {} ",
+        output::dim("Enter token (visible; or set VELD_SHARE_RELAY_TOKEN to avoid this):")
+    );
+    std::io::stderr().flush().ok()?;
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).ok()?;
+    Some(line.trim().to_owned())
 }
 
 /// `veld shares [--json]`

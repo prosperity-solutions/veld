@@ -136,21 +136,28 @@ impl RelayChoice {
     }
 
     /// Resolve which relay auth token (if any) to use for each relay the join
-    /// ticket advertises, keyed by canonical [`RelayUrl`] string. Priority, low
-    /// to high:
+    /// ticket advertises, keyed by canonical [`RelayUrl`] string. Each layer is
+    /// keyed by relay URL and only ever attaches to a relay actually in the
+    /// ticket. Priority, low to high — a higher layer overrides a lower one for
+    /// the same relay:
     ///
     /// 1. **env** — the joiner's `VELD_SHARE_RELAY_TOKEN`, attached ONLY to the
     ///    ticket relay whose URL equals `VELD_SHARE_RELAY` (parsed equality), so
     ///    a hostile ticket naming another relay cannot harvest it.
-    /// 2. **embedded** — tokens the host shipped inside the ticket via the
-    ///    `dangerouslyEmbedRelayTokensInTicket` opt-in. Highest priority: the
-    ///    host chose these deliberately for exactly these relays.
+    /// 2. **stored** — the joiner's local token cache (see [`token_store`]),
+    ///    populated by a previous interactive prompt.
+    /// 3. **embedded** — tokens the host shipped inside the ticket via the
+    ///    `dangerouslyEmbedRelayTokensInTicket` opt-in — the host chose these
+    ///    deliberately for exactly these relays.
+    /// 4. **supplied** — a token the joiner just entered at the prompt this
+    ///    attempt; wins so a correction beats a stale stored/embedded value.
     ///
-    /// (A locally-cached token store slots between the two — added with the
-    /// interactive prompt in a later increment.)
+    /// [`token_store`]: super::token_store
     pub fn resolve_join_tokens<'a>(
         ticket_relay_urls: impl IntoIterator<Item = &'a RelayUrl>,
         embedded: &BTreeMap<String, String>,
+        stored: &BTreeMap<String, String>,
+        supplied: &BTreeMap<String, String>,
         env_relay: Option<String>,
         env_token: Option<String>,
     ) -> BTreeMap<String, String> {
@@ -182,11 +189,14 @@ impl RelayChoice {
             }
         }
 
-        // (2) embedded (dangerous opt-in) — highest priority; only for relays
-        // actually in the ticket (defensive against a bogus embedded key).
-        for u in &ticket {
-            if let Some(t) = embedded.get(&u.to_string()) {
-                tokens.insert(u.to_string(), t.clone());
+        // (2) stored, (3) embedded, (4) supplied — each keyed by relay URL, each
+        // attached only for relays actually in the ticket, each overriding the
+        // previous layer for the same relay.
+        for layer in [stored, embedded, supplied] {
+            for u in &ticket {
+                if let Some(t) = layer.get(&u.to_string()) {
+                    tokens.insert(u.to_string(), t.clone());
+                }
             }
         }
 
@@ -199,10 +209,14 @@ impl RelayChoice {
     pub fn resolve_join_tokens_from_env<'a>(
         ticket_relay_urls: impl IntoIterator<Item = &'a RelayUrl>,
         embedded: &BTreeMap<String, String>,
+        stored: &BTreeMap<String, String>,
+        supplied: &BTreeMap<String, String>,
     ) -> BTreeMap<String, String> {
         Self::resolve_join_tokens(
             ticket_relay_urls,
             embedded,
+            stored,
+            supplied,
             std::env::var(RELAY_ENV).ok(),
             std::env::var(RELAY_TOKEN_ENV).ok(),
         )
@@ -671,12 +685,18 @@ mod tests {
 
     // --- resolve_join_tokens: where each token is allowed to come from ---
 
+    fn tokens_for(url: &str, tok: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([(url.to_owned(), tok.to_owned())])
+    }
+
     #[test]
     fn resolve_tokens_env_matches_ticket_relay() {
         // env token attaches only when VELD_SHARE_RELAY equals a ticket relay.
         let urls = [relay_url("https://relay.example")];
         let tokens = RelayChoice::resolve_join_tokens(
             urls.iter(),
+            &no_tokens(),
+            &no_tokens(),
             &no_tokens(),
             Some("https://relay.example".to_owned()),
             Some(" tok3n ".to_owned()),
@@ -696,6 +716,8 @@ mod tests {
         let tokens = RelayChoice::resolve_join_tokens(
             urls.iter(),
             &no_tokens(),
+            &no_tokens(),
+            &no_tokens(),
             Some("https://relay.example".to_owned()),
             Some("tok3n".to_owned()),
         );
@@ -706,31 +728,62 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tokens_embedded_wins_over_env() {
-        // A host-embedded token (dangerous opt-in) takes priority over the
-        // joiner's env token for the same relay.
+    fn resolve_tokens_priority_env_lt_stored_lt_embedded_lt_supplied() {
         let urls = [relay_url("https://relay.example")];
-        let embedded =
-            BTreeMap::from([("https://relay.example/".to_owned(), "embedded".to_owned())]);
-        let tokens = RelayChoice::resolve_join_tokens(
+        let key = "https://relay.example/";
+        // All four layers set a token for the same relay; the highest present wins.
+        let stored = tokens_for(key, "stored");
+        let embedded = tokens_for(key, "embedded");
+        let supplied = tokens_for(key, "supplied");
+
+        // supplied beats everything.
+        let t = RelayChoice::resolve_join_tokens(
             urls.iter(),
             &embedded,
+            &stored,
+            &supplied,
             Some("https://relay.example".to_owned()),
-            Some("from-env".to_owned()),
+            Some("env".to_owned()),
         );
-        assert_eq!(
-            tokens.get("https://relay.example/").map(String::as_str),
-            Some("embedded")
+        assert_eq!(t.get(key).map(String::as_str), Some("supplied"));
+
+        // Without supplied, embedded beats stored + env.
+        let t = RelayChoice::resolve_join_tokens(
+            urls.iter(),
+            &embedded,
+            &stored,
+            &no_tokens(),
+            Some("https://relay.example".to_owned()),
+            Some("env".to_owned()),
         );
+        assert_eq!(t.get(key).map(String::as_str), Some("embedded"));
+
+        // Without embedded, stored beats env.
+        let t = RelayChoice::resolve_join_tokens(
+            urls.iter(),
+            &no_tokens(),
+            &stored,
+            &no_tokens(),
+            Some("https://relay.example".to_owned()),
+            Some("env".to_owned()),
+        );
+        assert_eq!(t.get(key).map(String::as_str), Some("stored"));
     }
 
     #[test]
-    fn resolve_tokens_embedded_only_for_ticket_relays() {
-        // An embedded entry for a relay NOT in the ticket is ignored.
+    fn resolve_tokens_layers_only_apply_to_ticket_relays() {
+        // stored / embedded / supplied entries for a relay NOT in the ticket are
+        // ignored (defensive — never attach a token to an unlisted relay).
         let urls = [relay_url("https://relay.example")];
-        let embedded =
-            BTreeMap::from([("https://elsewhere.example/".to_owned(), "nope".to_owned())]);
-        let tokens = RelayChoice::resolve_join_tokens(urls.iter(), &embedded, None, None);
+        let elsewhere = tokens_for("https://elsewhere.example/", "nope");
+        let tokens = RelayChoice::resolve_join_tokens(
+            urls.iter(),
+            &elsewhere,
+            &elsewhere,
+            &elsewhere,
+            None,
+            None,
+        );
         assert!(tokens.is_empty());
     }
 
@@ -739,6 +792,8 @@ mod tests {
         let urls = [relay_url("https://relay.example")];
         let tokens = RelayChoice::resolve_join_tokens(
             urls.iter(),
+            &no_tokens(),
+            &no_tokens(),
             &no_tokens(),
             Some("https://relay.example".to_owned()),
             Some("   ".to_owned()),

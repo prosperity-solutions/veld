@@ -722,12 +722,16 @@ Give a relay entry a `token` to send one:
 
 All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
 
-**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order, the joiner's token comes from:
+**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order (highest first), the joiner's token comes from:
 
-1. **The ticket itself** — but only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
-2. **The joiner's env** — `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket, so the secret is never sent to a relay the joiner did not name.
+1. **A token entered at the prompt** this attempt (see below).
+2. **The ticket itself** — only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
+3. **The joiner's local cache** — a token entered at a previous prompt, cached per relay URL at `<data_dir>/veld/relay-tokens.json` (`0600`).
+4. **The joiner's env** — `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket, so the secret is never sent to a relay the joiner did not name.
 
 There is no `veld.json` path for a joiner's relay token.
+
+**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached (unless you opt out) so future joins to that relay don't re-prompt, and a wrong token re-prompts. `veld join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
 
 #### `sharing.dangerouslyEmbedRelayTokensInTicket`
 
