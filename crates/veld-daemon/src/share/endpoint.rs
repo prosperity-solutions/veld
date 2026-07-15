@@ -42,10 +42,13 @@ const TOKEN_RESOLVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// `ShareManager`), so each distinct choice gets its own endpoint.
 ///
 /// The `Custom` variant carries the full [`RelayEntry`] list (URL + optional
-/// token *declaration*), sorted by URL for a stable identity. Tokens are held
-/// unresolved here — the command/file/env is only read at `bind_endpoint` time —
-/// so this stays a cheap, hashable map key and no secret value lives in it. Two
-/// configs that differ only in their token declaration key distinct endpoints;
+/// token), sorted by URL for a stable identity. On the **config** path tokens
+/// stay unresolved declarations (`env`/`file`/`command` read only at
+/// `bind_endpoint` time), so the key holds no secret value. The **env-override**
+/// and **join** paths, however, put an already-resolved `SecretSource::Literal`
+/// token into the key — so a secret value *can* live here on those paths (it is
+/// never logged: `SecretSource`/`RelayEntry` Debug redact it and Display shows
+/// URLs only). Two configs differing only in their token key distinct endpoints;
 /// rotating the *underlying* secret behind an unchanged declaration reuses the
 /// already-bound endpoint until the daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -141,11 +144,13 @@ impl RelayChoice {
     /// ticket. Priority, low to high — a higher layer overrides a lower one for
     /// the same relay:
     ///
-    /// 1. **env** — the joiner's `VELD_SHARE_RELAY_TOKEN`, attached ONLY to the
+    /// 1. **stored** — the joiner's local token cache (see [`token_store`]),
+    ///    populated by a previous interactive prompt. Lowest, because it can be
+    ///    stale (e.g. the relay rotated its token since it was cached).
+    /// 2. **env** — the joiner's `VELD_SHARE_RELAY_TOKEN`, attached ONLY to the
     ///    ticket relay whose URL equals `VELD_SHARE_RELAY` (parsed equality), so
-    ///    a hostile ticket naming another relay cannot harvest it.
-    /// 2. **stored** — the joiner's local token cache (see [`token_store`]),
-    ///    populated by a previous interactive prompt.
+    ///    a hostile ticket naming another relay cannot harvest it. Beats the
+    ///    cache: an explicitly-set env token is the joiner's current intent.
     /// 3. **embedded** — tokens the host shipped inside the ticket via the
     ///    `dangerouslyEmbedRelayTokensInTicket` opt-in — the host chose these
     ///    deliberately for exactly these relays.
@@ -164,7 +169,14 @@ impl RelayChoice {
         let ticket: Vec<RelayUrl> = ticket_relay_urls.into_iter().cloned().collect();
         let mut tokens = BTreeMap::new();
 
-        // (1) env, matched to a ticket relay by parsed RelayUrl equality.
+        // (1) stored — lowest, applied first so anything below overrides it.
+        for u in &ticket {
+            if let Some(t) = stored.get(&u.to_string()) {
+                tokens.insert(u.to_string(), t.clone());
+            }
+        }
+
+        // (2) env, matched to a ticket relay by parsed RelayUrl equality.
         let env_url: Option<RelayUrl> = env_relay
             .as_deref()
             .map(str::trim)
@@ -189,10 +201,10 @@ impl RelayChoice {
             }
         }
 
-        // (2) stored, (3) embedded, (4) supplied — each keyed by relay URL, each
-        // attached only for relays actually in the ticket, each overriding the
-        // previous layer for the same relay.
-        for layer in [stored, embedded, supplied] {
+        // (3) embedded, (4) supplied — each keyed by relay URL, each attached
+        // only for relays actually in the ticket, each overriding the previous
+        // layer for the same relay.
+        for layer in [embedded, supplied] {
             for u in &ticket {
                 if let Some(t) = layer.get(&u.to_string()) {
                     tokens.insert(u.to_string(), t.clone());
@@ -728,13 +740,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_tokens_priority_env_lt_stored_lt_embedded_lt_supplied() {
+    fn resolve_tokens_priority_stored_lt_env_lt_embedded_lt_supplied() {
         let urls = [relay_url("https://relay.example")];
         let key = "https://relay.example/";
-        // All four layers set a token for the same relay; the highest present wins.
         let stored = tokens_for(key, "stored");
         let embedded = tokens_for(key, "embedded");
         let supplied = tokens_for(key, "supplied");
+        let env = || Some("https://relay.example".to_owned());
 
         // supplied beats everything.
         let t = RelayChoice::resolve_join_tokens(
@@ -742,30 +754,41 @@ mod tests {
             &embedded,
             &stored,
             &supplied,
-            Some("https://relay.example".to_owned()),
+            env(),
             Some("env".to_owned()),
         );
         assert_eq!(t.get(key).map(String::as_str), Some("supplied"));
 
-        // Without supplied, embedded beats stored + env.
+        // Without supplied, embedded beats env + stored.
         let t = RelayChoice::resolve_join_tokens(
             urls.iter(),
             &embedded,
             &stored,
             &no_tokens(),
-            Some("https://relay.example".to_owned()),
+            env(),
             Some("env".to_owned()),
         );
         assert_eq!(t.get(key).map(String::as_str), Some("embedded"));
 
-        // Without embedded, stored beats env.
+        // Without embedded, an explicit env token beats the (possibly stale) cache.
         let t = RelayChoice::resolve_join_tokens(
             urls.iter(),
             &no_tokens(),
             &stored,
             &no_tokens(),
-            Some("https://relay.example".to_owned()),
+            env(),
             Some("env".to_owned()),
+        );
+        assert_eq!(t.get(key).map(String::as_str), Some("env"));
+
+        // With only the cache, the cached token is used.
+        let t = RelayChoice::resolve_join_tokens(
+            urls.iter(),
+            &no_tokens(),
+            &stored,
+            &no_tokens(),
+            None,
+            None,
         );
         assert_eq!(t.get(key).map(String::as_str), Some("stored"));
     }

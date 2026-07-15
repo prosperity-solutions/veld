@@ -59,11 +59,27 @@ enum RelayAuth {
     Denied(String),
 }
 
-/// Watch an endpoint's home-relay status until it connects, reports an
-/// "unauthorized" error, or `budget` elapses. iroh surfaces a token-gated
-/// relay's rejection as a `last_error` containing "not authorized" (see
-/// `RelayStatus`), which lets the join distinguish "wrong/missing relay token"
-/// from "host unreachable" and prompt precisely.
+/// Whether a home-relay `last_error` string indicates the relay *rejected our
+/// auth* (as opposed to being unreachable or failing some other way).
+///
+/// iroh surfaces this as `iroh_relay`'s `Error::ServerDeniedAuth`, whose Display
+/// is `"The relay denied our authentication (<reason>)"` (iroh-relay 1.0.1
+/// `protos/handshake.rs:159`). `<reason>` is `"not authorized"` only by default
+/// (when the relay's `AccessControl` denies with `reason: None`,
+/// `handshake.rs:543`); a relay that denies with a *custom* reason would not
+/// contain "not authorized". So match the reason-independent wrapper, and keep
+/// "not authorized" as a belt-and-braces fallback. Pinned to iroh 1.0.1; an
+/// upgrade that rewords this must update the string here (guarded by
+/// `is_relay_auth_denial_*` tests).
+fn is_relay_auth_denial(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("denied our authentication") || e.contains("not authorized")
+}
+
+/// Watch an endpoint's home-relay status until it connects, reports an auth
+/// denial, or `budget` elapses. Lets the join distinguish "wrong/missing relay
+/// token" from "host unreachable" and prompt precisely (see
+/// [`is_relay_auth_denial`]).
 async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
     use iroh::Watcher as _;
     let poll = async {
@@ -75,7 +91,7 @@ async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
             }
             if let Some(denied) = relays.iter().find(|r| {
                 r.last_error()
-                    .map(|e| format!("{e:#}").to_lowercase().contains("not authorized"))
+                    .map(|e| is_relay_auth_denial(&format!("{e:#}")))
                     .unwrap_or(false)
             }) {
                 return RelayAuth::Denied(denied.url().to_string());
@@ -211,6 +227,28 @@ impl ShareManager {
             self.clone().spawn_reaper();
         }
         Ok(ep)
+    }
+
+    /// Remove and close an endpoint that was bound only to probe relay auth (a
+    /// denied join). Closing ends its accept loop (`accept()` returns `None`)
+    /// and drops the permanently-denied relay connection. Skipped if an active
+    /// hosted share is served on the same relay policy — a *denied* join choice
+    /// can't match a working share's (the rejected token differs), but guard
+    /// anyway so a shared endpoint is never torn out from under a live share.
+    async fn evict_endpoint(&self, choice: &RelayChoice) {
+        if self
+            .shares
+            .lock()
+            .await
+            .values()
+            .any(|s| &s.relay == choice)
+        {
+            return;
+        }
+        let ep = self.endpoints.lock().await.remove(choice);
+        if let Some(ep) = ep {
+            ep.close().await;
+        }
     }
 
     /// Accept inbound connections and dispatch each to the share whose
@@ -502,6 +540,14 @@ impl ShareManager {
             if let RelayAuth::Denied(relay_url) =
                 relay_auth_status(&endpoint, RELAY_AUTH_TIMEOUT).await
             {
+                // Evict this endpoint: it was bound only to detect the denial
+                // and will never be reused — a retry supplies a token, which is a
+                // *different* `RelayChoice` (the token is part of the key) and
+                // binds a fresh endpoint. Leaving it in the map would leak an
+                // endpoint + a permanently-denied relay connection for the
+                // daemon's life, once per token-gated relay on the default path.
+                drop(endpoint);
+                self.evict_endpoint(&choice).await;
                 return Ok(JoinResponse {
                     join_id: String::new(),
                     urls: Vec::new(),
@@ -985,6 +1031,26 @@ fn open_dashboard() {
 mod tests {
     use super::*;
     use veld_core::share::SharedNode;
+
+    // Pins the relay auth-denial detection to iroh 1.0.1's error wording. If an
+    // iroh upgrade rewords `ServerDeniedAuth`'s Display, this fails loudly rather
+    // than silently routing every token-gated join to "unreachable".
+    #[test]
+    fn detects_relay_auth_denial_regardless_of_reason() {
+        // Default deny reason (relay's AccessControl returns `reason: None`).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (not authorized)"
+        ));
+        // Custom deny reason — must still be detected (the earlier "not
+        // authorized"-only match missed this).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (invalid token)"
+        ));
+        // Unrelated failures are NOT auth denials → the join dials and reports a
+        // real connectivity error instead of wrongly prompting for a token.
+        assert!(!is_relay_auth_denial("connection timed out"));
+        assert!(!is_relay_auth_denial("dns error: no such host"));
+    }
 
     fn sample_manifest() -> ShareManifest {
         ShareManifest {

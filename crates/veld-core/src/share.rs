@@ -140,8 +140,8 @@ pub struct ShareTicket {
     pub relay_tokens: BTreeMap<String, String>,
 }
 
-// `Capability` has no `PartialEq`; derive it structurally for `ShareTicket`
-// tests only, via byte comparison of the encoded form.
+// `Capability` has no derived `PartialEq`; give it one (used wherever
+// `ShareTicket: PartialEq` is) via constant-time comparison of the raw bytes.
 impl PartialEq for Capability {
     fn eq(&self, other: &Self) -> bool {
         self.ct_eq(other)

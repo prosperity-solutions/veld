@@ -334,6 +334,20 @@ fn build_manifest(
         ),
     ))?;
 
+    // Loud warning when a relay secret is about to ride inside the join link, so
+    // `veld share` / the dashboard surface it (the link is auto-copied) rather
+    // than silently shipping the secret. Only when the opt-in is on AND a relay
+    // actually has a token to embed.
+    if embed_relay_tokens
+        && matches!(&relay, RelayChoice::Custom(entries) if entries.iter().any(|e| e.token.is_some()))
+    {
+        warnings.push(
+            "dangerouslyEmbedRelayTokensInTicket is on: the relay auth token is embedded in \
+             the join link — treat the link as a secret (anyone with it can use your relay)."
+                .to_string(),
+        );
+    }
+
     let now = Utc::now().timestamp();
     let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
     Ok(ResolvedShare {

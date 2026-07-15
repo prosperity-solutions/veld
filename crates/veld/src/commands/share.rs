@@ -85,8 +85,11 @@ pub async fn share(
     }
 }
 
-/// `veld join <ticket> [--label ...] [--json]`
-pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
+/// `veld join <ticket> [--label ...] [--no-remember] [--json]`
+///
+/// `remember` (default true; cleared by `--no-remember`) controls whether a
+/// relay token entered at the prompt is cached for next time.
+pub async fn join(ticket: String, label: Option<String>, remember: bool, json: bool) -> i32 {
     use std::collections::BTreeMap;
 
     /// Cap interactive token retries so a persistently-wrong token can't loop.
@@ -94,7 +97,6 @@ pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
 
     let client = DaemonClient::new();
     let mut relay_tokens: BTreeMap<String, String> = BTreeMap::new();
-    let mut remember = false;
     let mut prompts = 0usize;
 
     loop {
@@ -134,7 +136,6 @@ pub async fn join(ticket: String, label: Option<String>, json: bool) -> i32 {
             match prompt_relay_token(&relay_url, prompts > 1) {
                 Some(token) if !token.is_empty() => {
                     relay_tokens.insert(relay_url, token);
-                    remember = true;
                     continue;
                 }
                 _ => {

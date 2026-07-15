@@ -48,8 +48,33 @@ fn save_to(p: &Path, url: &str, token: &str) -> Result<()> {
             .with_context(|| format!("creating {}", parent.display()))?;
     }
     let json = serde_json::to_vec_pretty(&map).context("serializing relay token cache")?;
-    write_private(p, &json).with_context(|| format!("writing {}", p.display()))?;
+    // Write a private (0600) temp file in the same dir, then atomically rename
+    // over the target — so a concurrent `load_from` never reads a half-written
+    // file (it would parse as corrupt → empty → a needless re-prompt), and the
+    // secret is never briefly world-readable. (A concurrent save can still
+    // last-writer-wins a lost update; acceptable for a best-effort cache.)
+    let tmp = tmp_path(p);
+    write_private(&tmp, &json).with_context(|| format!("writing {}", tmp.display()))?;
+    if let Err(e) = std::fs::rename(&tmp, p) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e).with_context(|| format!("replacing {}", p.display()));
+    }
     Ok(())
+}
+
+/// A per-process-unique temp path beside `p` (same dir, so `rename` is atomic).
+fn tmp_path(p: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let name = format!(
+        ".relay-tokens.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    );
+    match p.parent() {
+        Some(dir) => dir.join(name),
+        None => PathBuf::from(name),
+    }
 }
 
 /// Write `bytes` to `p`, creating the file `0600` **up front** so the secret is

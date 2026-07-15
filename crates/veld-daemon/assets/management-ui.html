@@ -658,13 +658,18 @@ async function runJoinFlow(relayTokens,remember){
     watchJoin(d.join_id);
   }catch(e){setJoinState('error',String(e));}
 }
+// Accumulates supplied relay tokens across prompts, so a ticket advertising
+// more than one token-gated relay (each surfaced one at a time) collects every
+// token instead of the latest submit replacing the previous relay's.
+let joinRelayTokens={};
 document.addEventListener('click',e=>{
   const b=e.target.closest('#relay-token-submit');if(!b)return;
   const inp=document.getElementById('relay-token-input');
   const token=((inp&&inp.value)||'').trim();
   if(!token){if(inp)inp.focus();return;}
   const remember=!!((document.getElementById('relay-token-remember')||{}).checked);
-  runJoinFlow({[b.dataset.relayUrl]:token},remember);
+  joinRelayTokens[b.dataset.relayUrl]=token;
+  runJoinFlow(joinRelayTokens,remember);
 });
 document.addEventListener('click',async e=>{
   const b=e.target.closest('[data-join-leave]');if(!b)return;
