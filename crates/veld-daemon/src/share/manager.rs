@@ -40,7 +40,7 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// before returning a clean error instead of hanging the HTTP request.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 
-use super::endpoint::{RelayChoice, bind_endpoint};
+use super::endpoint::{RelayChoice, bind_endpoint, resolve_embedded_tokens};
 use super::host::{self, HostShare};
 use super::join;
 
@@ -297,6 +297,7 @@ impl ShareManager {
         capability: Capability,
         approve_mode: ApprovalMode,
         relay: RelayChoice,
+        embed_relay_tokens: bool,
     ) -> Result<(String, ShareTicket)> {
         let choice = relay;
         let endpoint = self.get_or_bind(&choice).await?;
@@ -324,6 +325,18 @@ impl ShareManager {
             );
         }
 
+        // DANGER opt-in: embed each advertised relay's resolved auth token in the
+        // ticket so joiners need no out-of-band config. This ships the relay
+        // secret inside the shareable link — only reached when the host set
+        // `sharing.dangerouslyEmbedRelayTokensInTicket`.
+        let relay_tokens = if embed_relay_tokens {
+            resolve_embedded_tokens(&choice, addr.relay_urls())
+                .await
+                .context("resolving relay tokens to embed in the ticket")?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
         let iroh_ticket = EndpointTicket::new(addr).to_string();
 
         let upstreams: HashMap<String, u16> = manifest
@@ -341,6 +354,7 @@ impl ShareManager {
         let ticket = ShareTicket {
             iroh_ticket,
             capability,
+            relay_tokens,
         };
         let token = ticket.encode().context("encoding ticket")?;
 
@@ -401,7 +415,13 @@ impl ShareManager {
         // relay — never silently over n0's public relays. Only a relay-less
         // ticket (a direct-address-only host) resolves to the public endpoint;
         // a custom-relay host refuses to mint such a ticket (see `start_share`).
-        let choice = RelayChoice::for_join(addr.relay_urls());
+        //
+        // Relay auth tokens (if the relay is token-gated) come from the ticket's
+        // embedded tokens (the dangerous opt-in) or the joiner's env, resolved by
+        // priority; attached only to the matching relay so nothing leaks.
+        let tokens =
+            RelayChoice::resolve_join_tokens_from_env(addr.relay_urls(), &ticket.relay_tokens);
+        let choice = RelayChoice::for_join(addr.relay_urls(), &tokens);
         let endpoint = self.get_or_bind(&choice).await?;
 
         let label = if label.is_empty() { "veld" } else { label };

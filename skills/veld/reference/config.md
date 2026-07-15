@@ -170,7 +170,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `skip_if` | variant (`command` only) | Idempotency check — skip step if exits 0. Alias: `verify`. |
 | `probes` | variant | `{readiness?: HealthCheck, liveness?: LivenessProbe}`. Available for both node types. |
 | `actions` | node | Named shell commands exposed via `veld action`/dashboard buttons. See [Actions](#actions). |
-| `sharing` | project | `{relays?: "public" \| [url \| {url, token?},...], gateway?: url}`. Relay policy (compliance) + public gateway URL. Relay `token` gates a self-hosted relay. Config wins over `VELD_SHARE_RELAY`. See [Sharing](#sharing). |
+| `sharing` | project | `{relays?: "public" \| [url \| {url, token?},...], gateway?: url, dangerouslyEmbedRelayTokensInTicket?: bool}`. Relay policy (compliance) + public gateway URL. Relay `token` gates a self-hosted relay. Config wins over `VELD_SHARE_RELAY`. See [Sharing](#sharing). |
 | `share` | variant | `{expose: ["peer" \| "web", ...]}`. Per-service opt-in — absent/empty = not shareable. See [Sharing](#sharing). |
 
 ## Sharing
@@ -192,5 +192,7 @@ A service is shareable only if its variant declares `share.expose` — `veld sha
 
 - `sharing.relays` — **must be opted into explicitly (no default):** `"public"` (n0's relays) or an array of self-hosted relay entries (confines share traffic for compliance). `veld share` is refused if unset (and no `VELD_SHARE_RELAY` env). Config wins over the env var. The daemon binds one iroh endpoint per relay policy, so shares on different relays run concurrently (no restart).
   - A relay entry is a bare URL string, or `{ "url": ..., "token": ... }` to send an `Authorization: Bearer` token to a relay that requires one. `token` = a literal string (inline; lands in config), or `{ "env": "VAR" }` / `{ "file": "/path" }` / `{ "command": "op read ..." }` to resolve it on the daemon at share time without storing the secret. A token that fails to resolve fails the share (never connects unauthenticated). `VELD_SHARE_RELAY_TOKEN` pairs a literal token with the `VELD_SHARE_RELAY` env override.
+  - **Join side:** a joiner auto-uses the ticket's relay(s) (a custom-relay share is never joined over public relays). For a token-gated relay it supplies the token via `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay).
+- `sharing.dangerouslyEmbedRelayTokensInTicket` — **DANGER, default false.** Embeds the resolved relay token(s) in the share ticket so joiners need no token setup. Ships the relay secret in every share link (Slack, email, history) — disposable per-project tokens only, never a shared org secret. camelCase (à la React's `dangerouslySetInnerHTML`) to flag the danger.
 - `sharing.gateway` — base URL of the public web gateway (for `web` exposure). **Reserved:** gateway ships later.
 - `share.expose` — `peer` (Veld-to-Veld, verbatim URL; available now) and/or `web` (any browser via gateway; reserved). Empty list or absent = not shareable.

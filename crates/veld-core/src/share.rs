@@ -5,6 +5,8 @@
 //! daemon's control API). Keeping them in `veld-core` avoids duplicating the
 //! wire format. The transport itself (iroh) lives only in the daemon.
 
+use std::collections::BTreeMap;
+
 use base64::prelude::*;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -126,6 +128,16 @@ pub struct ShareTicket {
     pub iroh_ticket: String,
     /// Bearer capability (gate 1).
     pub capability: Capability,
+    /// Relay auth token(s) embedded in the ticket, keyed by relay URL.
+    ///
+    /// **DANGER.** Populated only when the host sets
+    /// `sharing.dangerouslyEmbedRelayTokensInTicket` — a deliberate opt-in that
+    /// ships the relay secret inside the shareable link. Empty (and omitted from
+    /// the encoded token) otherwise, so ordinary tickets are byte-identical to
+    /// before. The join side prefers an embedded token, then a locally cached
+    /// one, then prompts the user.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_tokens: BTreeMap<String, String>,
 }
 
 // `Capability` has no `PartialEq`; derive it structurally for `ShareTicket`
@@ -465,6 +477,7 @@ mod tests {
         let ticket = ShareTicket {
             iroh_ticket: "endpointaaaa".to_string(),
             capability: Capability::generate(),
+            relay_tokens: BTreeMap::new(),
         };
         let encoded = ticket.encode().expect("encode");
         assert!(encoded.starts_with("veldshare_"));
@@ -472,6 +485,40 @@ mod tests {
         assert_eq!(ticket, decoded);
         // sample_manifest still constructs a valid manifest (sent over the wire).
         assert_eq!(sample_manifest().run, "demo");
+    }
+
+    #[test]
+    fn ticket_relay_tokens_omitted_when_empty_and_round_trip_when_set() {
+        // Empty map → the field is omitted from the encoded JSON, so ordinary
+        // tickets stay byte-compatible with the pre-embed format and legacy
+        // tickets (no `relay_tokens` key) decode to an empty map.
+        let bare = ShareTicket {
+            iroh_ticket: "endpointaaaa".to_string(),
+            capability: Capability::generate(),
+            relay_tokens: BTreeMap::new(),
+        };
+        let json = serde_json::to_string(&bare).expect("serialize");
+        assert!(
+            !json.contains("relay_tokens"),
+            "empty relay_tokens must be omitted, got {json}"
+        );
+        assert!(
+            ShareTicket::decode(&bare.encode().unwrap())
+                .unwrap()
+                .relay_tokens
+                .is_empty()
+        );
+
+        // A populated map round-trips through encode/decode.
+        let mut tokens = BTreeMap::new();
+        tokens.insert("https://relay.example/".to_owned(), "s3cret".to_owned());
+        let embedded = ShareTicket {
+            iroh_ticket: "endpointbbbb".to_string(),
+            capability: Capability::generate(),
+            relay_tokens: tokens.clone(),
+        };
+        let back = ShareTicket::decode(&embedded.encode().unwrap()).unwrap();
+        assert_eq!(back.relay_tokens, tokens);
     }
 
     #[test]

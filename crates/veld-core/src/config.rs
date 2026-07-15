@@ -139,6 +139,29 @@ pub struct SharingConfig {
     /// `https://share.acme.internal`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway: Option<String>,
+
+    /// **DANGER.** When true, the resolved relay auth token(s) are embedded in
+    /// the share ticket, so a joiner needs no out-of-band token config. This
+    /// puts the relay secret into every share link (Slack, email, browser
+    /// history, …), defeating the token's purpose for any shared or long-lived
+    /// relay secret. Enable **only** for disposable, per-project tokens you
+    /// rotate freely — never a shared org relay secret. Off by default; the
+    /// join side otherwise prompts for the token and caches it locally.
+    ///
+    /// Named à la React's `dangerouslySetInnerHTML` to force a deliberate
+    /// choice; hence the camelCase JSON key, which stands out against veld's
+    /// otherwise snake_case config.
+    #[serde(
+        default,
+        rename = "dangerouslyEmbedRelayTokensInTicket",
+        skip_serializing_if = "is_false"
+    )]
+    pub dangerously_embed_relay_tokens_in_ticket: bool,
+}
+
+/// `skip_serializing_if` predicate: omit a `bool` field when it is `false`.
+fn is_false(b: &bool) -> bool {
+    !b
 }
 
 /// Which iroh relays to route share traffic through. Serializes as either the
@@ -1566,6 +1589,36 @@ mod tests {
     #[test]
     fn test_relay_policy_rejects_empty_list() {
         assert!(serde_json::from_str::<RelayPolicy>("[]").is_err());
+    }
+
+    #[test]
+    fn test_sharing_embed_flag_defaults_false_and_uses_camelcase_key() {
+        // Absent → false.
+        let s: SharingConfig = serde_json::from_str(r#"{"relays":"public"}"#).unwrap();
+        assert!(!s.dangerously_embed_relay_tokens_in_ticket);
+        // Present via the React-style camelCase key → true.
+        let s: SharingConfig = serde_json::from_str(
+            r#"{"relays":"public","dangerouslyEmbedRelayTokensInTicket":true}"#,
+        )
+        .unwrap();
+        assert!(s.dangerously_embed_relay_tokens_in_ticket);
+        // Serializes back with the camelCase key when true.
+        assert!(
+            serde_json::to_string(&s)
+                .unwrap()
+                .contains("dangerouslyEmbedRelayTokensInTicket")
+        );
+        // Omitted entirely when false (no noise in ordinary configs).
+        let off = SharingConfig {
+            relays: Some(RelayPolicy::Public),
+            gateway: None,
+            dangerously_embed_relay_tokens_in_ticket: false,
+        };
+        assert!(
+            !serde_json::to_string(&off)
+                .unwrap()
+                .contains("dangerouslyEmbed")
+        );
     }
 
     #[test]

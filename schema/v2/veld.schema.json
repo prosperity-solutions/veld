@@ -506,6 +506,11 @@
         "gateway": {
           "type": "string",
           "description": "Base URL of the public web gateway this environment points at (e.g. https://share.acme.internal). Only needed for services that expose \"web\"."
+        },
+        "dangerouslyEmbedRelayTokensInTicket": {
+          "type": "boolean",
+          "default": false,
+          "description": "DANGER. When true, the resolved relay auth token(s) are embedded in the share ticket so a joiner needs no out-of-band token config. This puts the relay secret into every share link (Slack, email, browser history) — only enable for disposable, per-project tokens you rotate freely, never a shared org relay secret. Off by default; the join side otherwise prompts for the token and caches it locally. camelCase (à la React's dangerouslySetInnerHTML) to stand out as a deliberate, dangerous choice."
         }
       }
     },

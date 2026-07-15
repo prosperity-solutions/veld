@@ -722,7 +722,27 @@ Give a relay entry a `token` to send one:
 
 All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
 
-**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it supplies the token via the `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` env vars on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket — so the secret is never sent to a relay the joiner did not name. There is no config path for a joiner's relay token.
+**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order, the joiner's token comes from:
+
+1. **The ticket itself** — but only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
+2. **The joiner's env** — `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket, so the secret is never sent to a relay the joiner did not name.
+
+There is no `veld.json` path for a joiner's relay token.
+
+#### `sharing.dangerouslyEmbedRelayTokensInTicket`
+
+**DANGER — off by default.** When `true`, the host resolves its relay auth token(s) and **embeds them in the share ticket**, so a joiner needs no out-of-band token setup — the ticket alone authenticates. Named à la React's `dangerouslySetInnerHTML` (hence the camelCase key standing out from veld's snake_case config) to force a deliberate choice.
+
+```json
+{
+  "sharing": {
+    "relays": [{ "url": "https://relay.acme.internal", "token": { "command": "op read op://vault/relay/token" } }],
+    "dangerouslyEmbedRelayTokensInTicket": true
+  }
+}
+```
+
+This ships the relay secret **inside every share link** — Slack, email, browser history, anywhere a `veld.localhost/join#…` URL travels. That defeats the token's purpose (keeping the relay from being an open one) for any **shared or long-lived** relay secret. Enable it **only** for a **disposable, per-project token you rotate freely** — never a shared org relay secret. When off (the default), a joiner supplies the token via the env vars above.
 
 Because a token declaration is part of a relay's endpoint identity, changing the *declaration* (e.g. switching the `env` var name) is picked up on the next share, but rotating the *underlying* secret behind an unchanged declaration takes effect only when the daemon next binds that relay — in practice, on daemon restart, since a bound endpoint is cached for the daemon's life.
 

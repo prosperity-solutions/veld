@@ -66,6 +66,7 @@ async fn start(
     let ResolvedShare {
         manifest,
         relay,
+        embed_relay_tokens,
         warnings,
     } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs)?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
@@ -73,7 +74,13 @@ async fn start(
 
     let capability = Capability::generate();
     let (share_id, ticket) = manager
-        .start_share(manifest, capability, req.approve.unwrap_or_default(), relay)
+        .start_share(
+            manifest,
+            capability,
+            req.approve.unwrap_or_default(),
+            relay,
+            embed_relay_tokens,
+        )
         .await
         .map_err(internal)?;
     let token = ticket.encode().map_err(internal)?;
@@ -198,6 +205,10 @@ struct ResolvedShare {
     manifest: ShareManifest,
     /// The relay this share routes over, resolved from an explicit opt-in.
     relay: RelayChoice,
+    /// DANGER opt-in (`sharing.dangerouslyEmbedRelayTokensInTicket`): embed the
+    /// resolved relay token(s) in the ticket so joiners need no out-of-band
+    /// config. Ships the relay secret inside the shareable link.
+    embed_relay_tokens: bool,
     /// URL-bearing services excluded from the share (not opted into `peer`),
     /// surfaced as warnings so a partial share isn't silently under-exposed.
     warnings: Vec<String>,
@@ -308,7 +319,12 @@ fn build_manifest(
 
     // Relays must be opted into explicitly — including public — so share traffic
     // is never routed over n0's public relays by accident.
-    let relay_policy = config.sharing.and_then(|s| s.relays);
+    let sharing = config.sharing;
+    let embed_relay_tokens = sharing
+        .as_ref()
+        .map(|s| s.dangerously_embed_relay_tokens_in_ticket)
+        .unwrap_or(false);
+    let relay_policy = sharing.and_then(|s| s.relays);
     let relay = RelayChoice::resolve(relay_policy.as_ref()).ok_or((
         StatusCode::BAD_REQUEST,
         format!(
@@ -330,6 +346,7 @@ fn build_manifest(
             expires_at: now + ttl,
         },
         relay,
+        embed_relay_tokens,
         warnings,
     })
 }

@@ -170,7 +170,10 @@ where `token` is a literal string or `{ "env": ... }` / `{ "file": ... }` /
 `veld.json` with the non-literal forms). A joiner auto-confines to the relay(s) in
 the ticket (a custom-relay share is never joined over public relays); to reach a
 token-gated relay it sets `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on its
-daemon (token sent only when the URL matches the ticket's relay). `share.expose` also accepts `web` (public browser access via a
+daemon (token sent only when the URL matches the ticket's relay), OR the host sets
+`sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the
+ticket (DANGER: relay secret then rides in every share link — disposable tokens
+only). `share.expose` also accepts `web` (public browser access via a
 `sharing.gateway` server) but that gateway ships later; today only `peer` is
 served. Stopping the run (`veld stop`) auto-unshares its shares, and a consumer's
 join self-tears-down when the tunnel closes.
