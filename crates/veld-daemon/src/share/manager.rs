@@ -94,6 +94,10 @@ struct WebRegistration {
     client: GatewayClient,
     reg_id: String,
     public_urls: Vec<GatewayPublicUrl>,
+    /// Viewer access policy sent with the registration; heartbeats re-send it
+    /// so a restarted gateway re-learns the password with the lease (§6.1).
+    /// Also the source for re-displaying the password in `veld shares`.
+    access: Option<veld_core::share::GatewayAccessPolicy>,
     /// The heartbeat loop; aborted on unshare. It also self-terminates when
     /// the share disappears from the map (belt and braces).
     heartbeat: JoinHandle<()>,
@@ -461,12 +465,14 @@ impl ShareManager {
         reg_id: String,
         lease_secs: u64,
         public_urls: Vec<GatewayPublicUrl>,
+        access: Option<veld_core::share::GatewayAccessPolicy>,
     ) -> Result<()> {
         // Heartbeat well inside the lease window; floor guards a tiny lease.
         let interval = Duration::from_secs((lease_secs / 3).max(5));
         let hb_manager = Arc::clone(self);
         let hb_share_id = share_id.to_string();
         let hb_client = client.clone();
+        let hb_access = access.clone();
 
         let mut shares = self.shares.lock().await;
         let Some(entry) = shares.get_mut(share_id) else {
@@ -481,7 +487,10 @@ impl ShareManager {
                 if !hb_manager.shares.lock().await.contains_key(&hb_share_id) {
                     break;
                 }
-                if let Err(e) = hb_client.register(&ticket).await {
+                // The access policy rides every heartbeat: a restarted
+                // gateway holds no state, so the beat that re-establishes the
+                // share must re-establish its password too.
+                if let Err(e) = hb_client.register(&ticket, hb_access.as_ref()).await {
                     // Transient gateway failures self-heal on a later beat (a
                     // restarted gateway re-joins and mints the same URLs).
                     warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
@@ -493,6 +502,7 @@ impl ShareManager {
             client,
             reg_id,
             public_urls,
+            access,
             heartbeat,
         });
         Ok(())
@@ -785,6 +795,11 @@ impl ShareManager {
                     .as_ref()
                     .map(|w| w.public_urls.clone())
                     .unwrap_or_default(),
+                web_password: s
+                    .web
+                    .as_ref()
+                    .and_then(|w| w.access.as_ref())
+                    .and_then(|a| a.password.clone()),
             })
             .collect();
         let joins = self
@@ -802,6 +817,7 @@ impl ShareManager {
                 join_url: None,
                 joiners: 0,
                 public_urls: Vec::new(),
+                web_password: None,
             })
             .collect();
         let pending = self
@@ -1217,7 +1233,12 @@ mod tests {
                         node: "app".to_string(),
                         hostname: "app.demo.p.localhost".to_string(),
                         public_url: "https://slug.share.example".to_string(),
+                        access: Some(veld_core::config::WebAccessMode::Password),
                     }],
+                    access: Some(veld_core::share::GatewayAccessPolicy {
+                        password: Some("k7dm-q2xp-9fzt".to_string()),
+                        nodes: Default::default(),
+                    }),
                     heartbeat: tokio::spawn(async {}),
                 }),
             },

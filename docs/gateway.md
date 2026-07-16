@@ -54,8 +54,12 @@ point at the gateway:
 ```
 
 ```sh
-veld share --web            # prints https://<slug>.share.acme.internal
+veld share --web            # prints https://<slug>.share.acme.internal + a viewer password
 ```
+
+Web shares are **password-protected by default** — see
+[Viewer access control](#viewer-access-control-passwords). A service can opt
+out with `"share": { "expose": ["web"], "web": { "access": "link" } }`.
 
 **Injecting the token into the daemon.** `{ "env": … }` / `{ "file": … }` /
 `{ "command": … }` are read by the veld **daemon** process (launchd/systemd/the
@@ -97,6 +101,7 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
 | `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
+| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable) |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -108,7 +113,8 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   "auth": { "token": { "file": "/run/secrets/gw-token" } },
   "relays": [{ "url": "https://relay.acme.internal", "token": { "env": "RELAY_TOKEN" } }],
   "lease_secs": 90,
-  "max_registrations": 512
+  "max_registrations": 512,
+  "trust_forwarded_headers": false
 }
 ```
 
@@ -168,6 +174,47 @@ Two consequences to know before sharing a non-trivial app:
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
   safe; in-flight requests finish and heartbeats re-register.
 
+## Viewer access control (passwords)
+
+Web shares are **password-protected by default** (SHARING_V2.md §6.1). The
+developer's daemon sends the access policy — per-hostname mode plus the share
+password — inside the registration call, and re-sends it with every
+heartbeat. The gateway keeps it in memory only: a restart forgets it, the
+next heartbeat restores it, statelessness intact.
+
+How a viewer gets in:
+
+1. First request to a password-mode slug → `401` with a self-contained login
+   page (no share metadata leaked; `noindex`; `no-store`).
+2. The form POSTs to `/__veld_gateway__/auth` on the slug host (a reserved
+   path prefix — `/__veld_gateway__/` never reaches the origin service).
+   A `#veld-key=…` URL fragment auto-fills and submits the form (the
+   "one-link" flow); fragments never reach the gateway or its logs.
+3. Correct password → a session cookie scoped to that slug host
+   (`HttpOnly; Secure; SameSite=Lax`), then a redirect to the originally
+   requested path. The cookie is **stripped before proxying** — the origin
+   service never sees it.
+
+Sessions are stateless signed tokens: the signing key is derived from the
+share's capability, so the gateway needs no session store, restarts don't log
+viewers out, and unsharing (which rotates the capability next time) kills all
+sessions. Lifetime: 12 h, capped at the share's own expiry.
+
+Brute force: password comparison is constant-time, and attempts are throttled
+per client IP (10/min) **and** per slug (60/min, so a distributed guess is
+bounded too). The limiter is in-memory; behind an external LB set
+`VELD_GATEWAY_TRUST_FORWARDED=true` or all viewers share the LB's IP budget.
+
+Nodes with `share.web.access: "link"` in the developer's config skip all of
+this: anyone with the URL is served, the unguessable slug being the only
+gate, and the reserved path prefix is not intercepted (fully transparent
+proxying).
+
+**Version skew**: the gateway acks the applied policy in the registration
+response. A daemon that requested password protection from a gateway too old
+to enforce it (no ack) tears the share down instead of publishing it open —
+upgrade the gateway image to accept password-protected shares.
+
 ## Security model
 
 - The registration API is never open: no token, no start. Token comparison is
@@ -178,10 +225,12 @@ Two consequences to know before sharing a non-trivial app:
 - Share capability + host approval still gate the gateway's join like any
   peer; it appears as `gateway <domain>` in approval flows.
 - The public surface for unknown hosts/slugs is a content-free 404.
-- **What the gateway does NOT provide (yet)**: per-viewer authentication.
-  Anyone with a public URL can use it while the share lives. Treat links as
-  secrets and keep TTLs short. Viewer-facing access controls (passwords,
-  approval) are a planned increment — see SHARING_V2.md §6.
+- Viewer access is password-gated by default (above); the share password
+  lives only in gateway memory and is never logged. Unauthenticated requests
+  are answered before any tunnel stream is opened, so they cost the
+  developer's machine nothing.
+- Link-access slugs (`share.web.access: "link"`) rely on the URL alone: treat
+  those links as secrets and keep TTLs short.
 
 ## Sizing & placement
 

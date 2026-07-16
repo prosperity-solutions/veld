@@ -783,6 +783,23 @@ The audiences a variant may be shared to. A list; an empty list (or an absent `s
 
 The two audiences are independent shares with independent capabilities: `veld share` serves the `peer`-opted services, `veld share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes services with a URL, so `share` is meaningful on `start_server` variants; on a `command` variant it is accepted but inert (nothing to share).
 
+### `share.web.access`
+
+How a browser viewer is admitted to this service's public URL (web shares only):
+
+| Value | Meaning |
+|-------|---------|
+| `password` | **Default (also when absent).** The gateway shows a password page before serving; `veld share --web` generates and prints the share password (`--password` to choose your own). One password per web share, entered once per service — a session cookie (12 h, never outliving the share) keeps the viewer in. |
+| `link` | Anyone with the URL is served. The unguessable 128-bit slug is the only gate — treat the link as a secret. |
+
+```json
+"share": { "expose": ["web"], "web": { "access": "link" } }
+```
+
+An **explicit** value here always wins over the `veld share --web --access …` flag — the flag only sets the mode for services whose config is silent. Config is the reviewable compliance surface; the CLI can never weaken it.
+
+Practical note for multi-service shares: the viewer's session cookie is scoped per public host, so a password-protected API called cross-origin by a shared frontend gets 401s. Give API nodes `"web": { "access": "link" }` — their slug is unguessable and only the app's code ever uses it.
+
 ---
 
 ## Presets

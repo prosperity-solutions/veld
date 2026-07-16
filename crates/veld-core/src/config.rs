@@ -493,6 +493,10 @@ pub struct SharePolicy {
     /// Audiences this service may be exposed to. Empty means not shareable.
     #[serde(default)]
     pub expose: Vec<ExposeMode>,
+    /// Web-audience settings (SHARING_V2.md §6.1). Absent means defaults —
+    /// which for `access` is `password` (never an open URL by default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web: Option<WebSharePolicy>,
 }
 
 impl SharePolicy {
@@ -500,6 +504,32 @@ impl SharePolicy {
     pub fn allows(&self, mode: ExposeMode) -> bool {
         self.expose.contains(&mode)
     }
+
+    /// The explicitly configured web access mode, if any. `None` means the
+    /// config is silent — the daemon then applies the CLI flag or the
+    /// password-by-default posture. An explicit value always wins over
+    /// runtime flags (config is the compliance surface).
+    pub fn web_access(&self) -> Option<WebAccessMode> {
+        self.web.as_ref().and_then(|w| w.access)
+    }
+}
+
+/// Per-variant web-audience settings (`share.web`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WebSharePolicy {
+    /// Viewer access control for this service's public URL.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub access: Option<WebAccessMode>,
+}
+
+/// How a browser viewer is admitted to a public (web) share URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WebAccessMode {
+    /// The gateway requires the share password before serving (default).
+    Password,
+    /// Anyone with the link is served (the unguessable slug is the only gate).
+    Link,
 }
 
 /// A sharing audience.
@@ -1804,6 +1834,24 @@ mod tests {
         let s: SharePolicy = serde_json::from_str(json).unwrap();
         assert!(s.allows(ExposeMode::Peer));
         assert!(s.allows(ExposeMode::Web));
+    }
+
+    #[test]
+    fn test_share_policy_web_access_parses_and_defaults() {
+        // Absent `web` → config silent → daemon applies password-by-default.
+        let s: SharePolicy = serde_json::from_str(r#"{ "expose": ["web"] }"#).unwrap();
+        assert_eq!(s.web_access(), None);
+        // `"web": {}` is also silent (no explicit access chosen).
+        let s: SharePolicy = serde_json::from_str(r#"{ "expose": ["web"], "web": {} }"#).unwrap();
+        assert_eq!(s.web_access(), None);
+        // Explicit values parse and are distinguishable from silence.
+        let s: SharePolicy =
+            serde_json::from_str(r#"{ "expose": ["web"], "web": { "access": "link" } }"#).unwrap();
+        assert_eq!(s.web_access(), Some(WebAccessMode::Link));
+        let s: SharePolicy =
+            serde_json::from_str(r#"{ "expose": ["web"], "web": { "access": "password" } }"#)
+                .unwrap();
+        assert_eq!(s.web_access(), Some(WebAccessMode::Password));
     }
 
     #[test]

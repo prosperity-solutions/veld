@@ -30,6 +30,8 @@ hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 data-encoding = "2"
+hmac = "0.12"
+serde_urlencoded = "0.7"
 
 [dev-dependencies]
 tempfile = "3"

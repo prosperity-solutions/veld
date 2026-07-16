@@ -114,20 +114,47 @@ async fn gateway_proxies_through_daemon_host_half() {
         SecretKey::generate(),
         512,
     );
-    let info = registry.register(&ticket).await.expect("register");
+    // Register with a §6.1 access policy: the node is password-protected.
+    let mut access_nodes = std::collections::BTreeMap::new();
+    access_nodes.insert(hostname.clone(), veld_core::config::WebAccessMode::Password);
+    let policy = veld_core::share::GatewayAccessPolicy {
+        password: Some("k7dm-q2xp-9fzt".into()),
+        nodes: access_nodes,
+    };
+    let info = registry
+        .register(&ticket, Some(&policy))
+        .await
+        .expect("register");
     assert_eq!(info.nodes.len(), 1);
+    assert!(info.password_protected, "ack must reflect the policy");
+    assert_eq!(
+        info.nodes[0].access,
+        veld_core::config::WebAccessMode::Password
+    );
     let slug = info.nodes[0].slug.clone();
     assert_eq!(
         info.nodes[0].public_url,
         format!("https://{slug}.share.example")
     );
 
-    // Registering again (heartbeat) is idempotent: same slug, same URL.
-    let again = registry.register(&ticket).await.expect("heartbeat");
+    // Registering again (heartbeat) is idempotent: same slug, same URL, and
+    // the ack still reports the enforced policy.
+    let again = registry
+        .register(&ticket, Some(&policy))
+        .await
+        .expect("heartbeat");
     assert_eq!(again.nodes[0].slug, slug);
+    assert!(again.password_protected);
+
+    // The slug target carries the access mode + a session key that verifies
+    // gateway-side tokens (the stateless session model end-to-end).
+    let target = registry.lookup(&slug).await.expect("slug routes");
+    assert_eq!(target.access, veld_core::config::WebAccessMode::Password);
+    let key = target.registration.session_key();
+    let token = veld_gateway::auth::mint_token(&key, &slug, i64::MAX - 1);
+    assert!(veld_gateway::auth::verify_token(&key, &slug, 0, &token));
 
     // Proxy a real request through the tunnel via the slug route.
-    let target = registry.lookup(&slug).await.expect("slug routes");
     let mut sender = veld_gateway::tunnel::connect(&target.registration.conn, &hostname)
         .await
         .expect("tunnel connect");

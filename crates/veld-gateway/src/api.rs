@@ -13,7 +13,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use tracing::warn;
 use veld_core::share::{
-    GatewayPublicUrl, GatewayRegisterRequest, GatewayRegisterResponse, ShareTicket,
+    GatewayAccessAck, GatewayPublicUrl, GatewayRegisterRequest, GatewayRegisterResponse,
+    ShareTicket,
 };
 
 use crate::state::AppState;
@@ -67,12 +68,27 @@ async fn register(
     let ticket = ShareTicket::decode(&req.ticket)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid ticket: {e}")))?;
 
-    let info = state.registry.register(&ticket).await.map_err(|e| {
-        // The failure detail is for the origin daemon's logs/CLI; it never
-        // reaches an anonymous browser (this route only answers on the apex).
-        warn!(error = %format!("{e:#}"), "share registration failed");
-        (StatusCode::BAD_GATEWAY, format!("{e:#}"))
-    })?;
+    let info = state
+        .registry
+        .register(&ticket, req.access.as_ref())
+        .await
+        .map_err(|e| {
+            // The failure detail is for the origin daemon's logs/CLI; it never
+            // reaches an anonymous browser (this route only answers on the apex).
+            warn!(error = %format!("{e:#}"), "share registration failed");
+            (StatusCode::BAD_GATEWAY, format!("{e:#}"))
+        })?;
+
+    // Ack what is actually enforced (§6.1 skew guard): a daemon that asked
+    // for protection can verify it, and an old daemon ignores the field.
+    let ack = GatewayAccessAck {
+        password_protected: info.password_protected,
+        nodes: info
+            .nodes
+            .iter()
+            .map(|n| (n.hostname.clone(), n.access))
+            .collect(),
+    };
 
     Ok(Json(GatewayRegisterResponse {
         id: info.id,
@@ -84,8 +100,10 @@ async fn register(
                 node: n.node,
                 hostname: n.hostname,
                 public_url: n.public_url,
+                access: Some(n.access),
             })
             .collect(),
+        access: Some(ack),
     }))
 }
 

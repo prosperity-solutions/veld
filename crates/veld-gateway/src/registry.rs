@@ -18,8 +18,8 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, RelayUrl, SecretKey};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use veld_core::config::RelayPolicy;
-use veld_core::share::{Capability, ShareTicket};
+use veld_core::config::{RelayPolicy, WebAccessMode};
+use veld_core::share::{Capability, GatewayAccessPolicy, ShareTicket};
 use veld_share::endpoint::{
     RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_secret,
 };
@@ -50,6 +50,8 @@ pub struct RegisteredNode {
     pub slug: String,
     /// Minted public URL: `https://<slug>.<domain>`.
     pub public_url: String,
+    /// Viewer access mode the gateway enforces for this slug (§6.1).
+    pub access: WebAccessMode,
 }
 
 /// A live registration: one joined share, its tunnel, and its public slugs.
@@ -65,6 +67,15 @@ pub struct Registration {
     /// The relay policy this registration's endpoint is bound on (never evict
     /// an endpoint a live registration uses).
     relay: RelayChoice,
+    /// The share password gating this registration's password-mode slugs
+    /// (§6.1). Memory-only, never logged; re-supplied by every heartbeat.
+    password: Option<String>,
+    /// Viewer-session signing key, derived from the share capability — so
+    /// sessions verify statelessly, survive gateway restarts, and die with
+    /// share rotation (`auth::session_key`).
+    session_key: [u8; 32],
+    /// Manifest expiry (unix secs); caps viewer-session lifetime.
+    expires_at: i64,
     /// Lease deadline; refreshed by heartbeat re-`POST`s.
     deadline: std::sync::Mutex<Instant>,
     /// The registration slot this occupies. Released when the last
@@ -83,6 +94,21 @@ impl Registration {
     fn refresh(&self, lease: Duration) {
         *self.deadline.lock().expect("deadline lock") = Instant::now() + lease;
     }
+
+    /// The share password, when any slug is password-mode.
+    pub fn password(&self) -> Option<&str> {
+        self.password.as_deref()
+    }
+
+    /// Viewer-session signing key (capability-derived).
+    pub fn session_key(&self) -> [u8; 32] {
+        self.session_key
+    }
+
+    /// Share expiry (unix secs) — the hard cap on viewer sessions.
+    pub fn expires_at(&self) -> i64 {
+        self.expires_at
+    }
 }
 
 /// Where a slug routes: which registration, and which node in it (by origin
@@ -92,6 +118,10 @@ pub struct SlugTarget {
     pub registration: Arc<Registration>,
     pub hostname: String,
     pub origin: String,
+    /// The slug itself (session tokens are slug-bound).
+    pub slug: String,
+    /// Viewer access mode for this slug.
+    pub access: WebAccessMode,
 }
 
 /// The gateway's relay confinement, with any tokens **already resolved once**
@@ -170,6 +200,8 @@ pub struct RegistrationInfo {
     pub id: String,
     pub lease_secs: u64,
     pub nodes: Vec<RegisteredNode>,
+    /// Whether password-mode slugs are gated (the §6.1 skew-guard ack).
+    pub password_protected: bool,
 }
 
 impl Registry {
@@ -197,14 +229,48 @@ impl Registry {
     /// heartbeat). Idempotent per capability: a live registration is refreshed
     /// and returned as-is; a dead one (tunnel closed) is torn down and
     /// re-joined, minting the *same* slugs.
-    pub async fn register(self: &Arc<Self>, ticket: &ShareTicket) -> Result<RegistrationInfo> {
+    ///
+    /// `access` is the viewer access policy (§6.1); `None` (an old daemon)
+    /// means link-access for every slug. The policy is validated up front —
+    /// a password-mode node without a password is refused before any dial.
+    pub async fn register(
+        self: &Arc<Self>,
+        ticket: &ShareTicket,
+        access: Option<&GatewayAccessPolicy>,
+    ) -> Result<RegistrationInfo> {
         let id = registration_id(&ticket.capability);
 
+        if let Some(policy) = access {
+            let needs_password = policy.password.is_some()
+                || policy.nodes.values().any(|m| *m == WebAccessMode::Password);
+            let password_ok = policy
+                .password
+                .as_deref()
+                .is_some_and(|p| !p.trim().is_empty() && p.len() <= 512);
+            if needs_password && !password_ok {
+                bail!(
+                    "access policy requires a password but none (or an invalid one) was supplied"
+                );
+            }
+        }
+
         // Heartbeat fast path: same share, live tunnel → refresh the lease.
+        // The stored policy stays authoritative (same capability ⇒ same share
+        // ⇒ same policy); a differing heartbeat policy is logged, not applied
+        // — the ack below reports what is actually enforced.
         {
             let regs = self.regs.lock().await;
             if let Some(reg) = regs.get(&id) {
                 if reg.conn.close_reason().is_none() {
+                    if access.map(|p| p.password.as_deref()) != Some(reg.password.as_deref())
+                        && !(access.is_none() && reg.password.is_none())
+                    {
+                        warn!(
+                            id = %reg.id,
+                            "heartbeat presented a different access policy; keeping the \
+                             registered one (rotate by re-sharing)"
+                        );
+                    }
                     reg.refresh(self.lease);
                     return Ok(self.info(reg));
                 }
@@ -306,6 +372,7 @@ impl Registry {
                     origin: origin_of(&n.url, &n.hostname),
                     slug: s.clone(),
                     public_url: format!("https://{s}.{}", self.domain),
+                    access: node_access(access, &n.hostname),
                 }
             })
             .collect();
@@ -317,6 +384,9 @@ impl Registry {
             project: manifest.project.clone(),
             nodes: nodes.clone(),
             relay: choice,
+            password: access.and_then(|p| p.password.clone()),
+            session_key: crate::auth::session_key(&ticket.capability),
+            expires_at: manifest.expires_at,
             deadline: std::sync::Mutex::new(Instant::now() + self.lease),
             _permit: permit,
         });
@@ -347,6 +417,8 @@ impl Registry {
                         registration: Arc::clone(&reg),
                         hostname: n.hostname.clone(),
                         origin: n.origin.clone(),
+                        slug: n.slug.clone(),
+                        access: n.access,
                     },
                 );
             }
@@ -426,6 +498,7 @@ impl Registry {
             id: reg.id.clone(),
             lease_secs: self.lease.as_secs(),
             nodes: reg.nodes.clone(),
+            password_protected: reg.password.is_some(),
         }
     }
 
@@ -586,6 +659,24 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Resolve one hostname's viewer access mode from the presented policy.
+/// No policy at all (an old daemon) → link, the pre-access-layer behavior.
+/// A policy that misses this hostname → the STRICT default: password when the
+/// policy carries a password, link otherwise — a manifest/policy mismatch
+/// must never open a slug the daemon meant to protect.
+fn node_access(policy: Option<&GatewayAccessPolicy>, hostname: &str) -> WebAccessMode {
+    let Some(policy) = policy else {
+        return WebAccessMode::Link;
+    };
+    policy.nodes.get(hostname).copied().unwrap_or({
+        if policy.password.is_some() {
+            WebAccessMode::Password
+        } else {
+            WebAccessMode::Link
+        }
+    })
+}
+
 /// The `scheme://authority` origin for a manifest node's URL, used to rewrite
 /// the browser's `Origin`/`Referer` headers. Falls back to `https://<hostname>`
 /// if the URL can't be parsed (manifest URLs are well-formed in practice).
@@ -668,7 +759,7 @@ mod tests {
             capability: Capability::generate(),
             relay_tokens: Default::default(),
         };
-        let Err(err) = reg.register(&ticket).await else {
+        let Err(err) = reg.register(&ticket, None).await else {
             panic!("expected the registration to be refused at the cap");
         };
         assert!(
@@ -677,6 +768,75 @@ mod tests {
         );
 
         drop(held);
+    }
+
+    #[test]
+    fn node_access_resolution_is_strict_on_mismatch() {
+        use std::collections::BTreeMap;
+
+        // No policy (old daemon) → link, the pre-access-layer behavior.
+        assert_eq!(node_access(None, "app.x"), WebAccessMode::Link);
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert("app.x".to_owned(), WebAccessMode::Password);
+        nodes.insert("api.x".to_owned(), WebAccessMode::Link);
+        let policy = GatewayAccessPolicy {
+            password: Some("pw".into()),
+            nodes,
+        };
+        assert_eq!(node_access(Some(&policy), "app.x"), WebAccessMode::Password);
+        assert_eq!(node_access(Some(&policy), "api.x"), WebAccessMode::Link);
+        // A hostname the policy doesn't know, under a password-carrying
+        // policy → password (never accidentally open).
+        assert_eq!(
+            node_access(Some(&policy), "other.x"),
+            WebAccessMode::Password
+        );
+
+        // Password-less policy, unknown hostname → link.
+        let open = GatewayAccessPolicy {
+            password: None,
+            nodes: BTreeMap::new(),
+        };
+        assert_eq!(node_access(Some(&open), "app.x"), WebAccessMode::Link);
+    }
+
+    #[tokio::test]
+    async fn register_refuses_password_mode_without_password() {
+        use std::collections::BTreeMap;
+
+        let reg = Registry::new(
+            "share.example".into(),
+            Duration::from_secs(90),
+            RelayAllowList::Unconfined,
+            SecretKey::generate(),
+            8,
+        );
+        let ticket = ShareTicket {
+            iroh_ticket: "does-not-matter".into(),
+            capability: Capability::generate(),
+            relay_tokens: Default::default(),
+        };
+        let mut nodes = BTreeMap::new();
+        nodes.insert("app.x".to_owned(), WebAccessMode::Password);
+        let policy = GatewayAccessPolicy {
+            password: None,
+            nodes,
+        };
+        let Err(err) = reg.register(&ticket, Some(&policy)).await else {
+            panic!("expected refusal");
+        };
+        assert!(err.to_string().contains("requires a password"), "{err}");
+
+        // Whitespace-only passwords are refused too.
+        let policy = GatewayAccessPolicy {
+            password: Some("   ".into()),
+            nodes: BTreeMap::new(),
+        };
+        let Err(err) = reg.register(&ticket, Some(&policy)).await else {
+            panic!("expected refusal");
+        };
+        assert!(err.to_string().contains("requires a password"), "{err}");
     }
 
     #[test]

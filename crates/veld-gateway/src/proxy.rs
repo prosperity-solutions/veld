@@ -63,10 +63,19 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     // hyper's server half parks the client connection behind this extension;
     // taking it is how we splice after a 101.
     let client_upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
-    let client_addr = parts
+    let socket_ip = parts
         .extensions
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
+    // The X-Forwarded-For value the origin will see: the socket peer alone
+    // (default — inbound chains from an anonymous-reachable edge are spoofable)
+    // or, behind a trusted sanitising LB, the inbound chain with the peer
+    // appended (standard proxy behavior).
+    let client_addr = forwarded_for_value(
+        &parts.headers,
+        socket_ip.as_deref(),
+        state.config.trust_forwarded_headers,
+    );
     let public_host = parts
         .headers
         .get(header::HOST)
@@ -145,6 +154,28 @@ fn is_forwarding_header(name: &HeaderName) -> bool {
         || n.eq_ignore_ascii_case("forwarded")
 }
 
+/// The `X-Forwarded-For` value to send upstream. Untrusted edge (default):
+/// the socket peer alone — an inbound chain is client-controlled and must be
+/// discarded. Behind a trusted sanitising LB (`trust_forwarded_headers`): the
+/// inbound chain with the socket peer appended, so the real client IP
+/// survives the extra hop.
+fn forwarded_for_value(
+    headers: &HeaderMap,
+    socket_ip: Option<&str>,
+    trust_forwarded: bool,
+) -> Option<String> {
+    let inbound = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    match (trust_forwarded, inbound, socket_ip) {
+        (true, Some(chain), Some(ip)) => Some(format!("{chain}, {ip}")),
+        (true, Some(chain), None) => Some(chain.to_owned()),
+        (_, _, ip) => ip.map(str::to_owned),
+    }
+}
+
 /// True when the request asks to switch protocols (WebSockets, HMR).
 fn wants_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(header::UPGRADE)
@@ -190,6 +221,20 @@ fn build_upstream_request(
             // gateway is the public trust boundary; trusting them is
             // host-header injection + client-IP spoofing). Everything else
             // passes through.
+            continue;
+        }
+        if name == header::COOKIE {
+            // The gateway's viewer-session cookie is internal credential
+            // material — the origin service never sees it.
+            if let Some(kept) = value
+                .to_str()
+                .ok()
+                .and_then(crate::auth::strip_session_cookie)
+            {
+                if let Ok(v) = HeaderValue::from_str(&kept) {
+                    headers.append(header::COOKIE, v);
+                }
+            }
             continue;
         }
         headers.append(name.clone(), value.clone());
@@ -480,6 +525,7 @@ mod tests {
                 origin: "https://app.demo.p.localhost".into(),
                 slug: "abcdefabcdefabcdefabcdefab".into(),
                 public_url: "https://abcdefabcdefabcdefabcdefab.share.example".into(),
+                access: veld_core::config::WebAccessMode::Password,
             },
             RegisteredNode {
                 node: "api".into(),
@@ -487,6 +533,7 @@ mod tests {
                 origin: "https://api.demo.p.localhost:18443".into(),
                 slug: "xyzxyzxyzxyzxyzxyzxyzxyzxy".into(),
                 public_url: "https://xyzxyzxyzxyzxyzxyzxyzxyzxy.share.example".into(),
+                access: veld_core::config::WebAccessMode::Link,
             },
         ]
     }
@@ -632,6 +679,74 @@ mod tests {
         // Host rewritten to the origin; Connection: close forces upstream EOF.
         assert_eq!(h.get(header::HOST).unwrap(), "app.demo.p.localhost");
         assert_eq!(h.get(header::CONNECTION).unwrap(), "close");
+    }
+
+    #[test]
+    fn forwarded_for_untrusted_vs_trusted() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        );
+        // Default: the inbound chain is discarded — socket peer only.
+        assert_eq!(
+            forwarded_for_value(&h, Some("9.9.9.9"), false).as_deref(),
+            Some("9.9.9.9")
+        );
+        // Trusted LB: chain preserved, socket peer appended.
+        assert_eq!(
+            forwarded_for_value(&h, Some("9.9.9.9"), true).as_deref(),
+            Some("1.2.3.4, 5.6.7.8, 9.9.9.9")
+        );
+        // Trusted but no inbound chain → socket peer alone.
+        let empty = HeaderMap::new();
+        assert_eq!(
+            forwarded_for_value(&empty, Some("9.9.9.9"), true).as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn session_cookie_is_stripped_from_upstream_request() {
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "abc.share.example")
+            .header("cookie", "sid=app; __veld_gw_sess=secret-token; theme=dark")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            false,
+        )
+        .unwrap();
+        let cookie = out.headers().get(header::COOKIE).unwrap().to_str().unwrap();
+        assert_eq!(cookie, "sid=app; theme=dark");
+
+        // A request whose ONLY cookie is the session cookie sends none upstream.
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "abc.share.example")
+            .header("cookie", "__veld_gw_sess=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(out.headers().get(header::COOKIE).is_none());
     }
 
     #[test]

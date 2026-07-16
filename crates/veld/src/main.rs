@@ -285,7 +285,7 @@ enum Command {
         /// Limit to specific nodes (default: all URL-bearing nodes).
         #[arg(long, value_name = "NODE")]
         node: Vec<String>,
-        /// Share lifetime in seconds (default 7200).
+        /// Share lifetime in seconds (default 7200; 3600 for --web).
         #[arg(long)]
         ttl: Option<i64>,
         /// Approval mode: first | manual | auto (default: manual, or first
@@ -297,6 +297,14 @@ enum Command {
         /// prints real public URLs anyone can open in a browser.
         #[arg(long)]
         web: bool,
+        /// Viewer access for --web nodes whose config is silent on
+        /// `share.web.access`: password (default) | link. An explicit config
+        /// value always wins over this flag.
+        #[arg(long, value_name = "MODE", requires = "web")]
+        access: Option<String>,
+        /// Use this share password for --web instead of a generated one.
+        #[arg(long, value_name = "PASSWORD", requires = "web")]
+        password: Option<String>,
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -530,8 +538,10 @@ async fn main() {
             ttl,
             approve,
             web,
+            access,
+            password,
             json,
-        } => commands::share::share(run, node, ttl, approve, web, json).await,
+        } => commands::share::share(run, node, ttl, approve, web, access, password, json).await,
 
         Command::Join {
             ticket,

@@ -57,6 +57,13 @@ pub struct GatewayConfig {
     pub state_dir: Option<PathBuf>,
     /// Hard cap on concurrently live + in-flight registrations.
     pub max_registrations: usize,
+    /// Trust the immediate upstream (a sanitising TLS-terminating LB) for
+    /// `X-Forwarded-For`: the last entry is taken as the real client IP
+    /// (rate-limit keying) and the inbound chain is forwarded upstream.
+    /// Default **off** — a directly-exposed gateway must overwrite the chain,
+    /// or any viewer could spoof it. Enable ONLY behind an LB that appends
+    /// the true peer address.
+    pub trust_forwarded_headers: bool,
 }
 
 /// Paths to a TLS certificate chain and private key (PEM).
@@ -82,6 +89,8 @@ struct FileConfig {
     state_dir: Option<String>,
     #[serde(rename = "max_registrations")]
     max_registrations: Option<usize>,
+    #[serde(rename = "trust_forwarded_headers")]
+    trust_forwarded_headers: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,6 +214,15 @@ impl GatewayConfig {
             bail!("max_registrations must be between 1 and {MAX_REGISTRATIONS_CEILING}");
         }
 
+        let trust_forwarded_headers = match get("VELD_GATEWAY_TRUST_FORWARDED") {
+            Some(raw) => match raw.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => true,
+                "0" | "false" | "no" => false,
+                other => bail!("invalid VELD_GATEWAY_TRUST_FORWARDED `{other}` (use true/false)"),
+            },
+            None => file.trust_forwarded_headers.unwrap_or(false),
+        };
+
         Ok(Self {
             domain,
             listen,
@@ -214,6 +232,7 @@ impl GatewayConfig {
             lease: Duration::from_secs(lease_secs),
             state_dir,
             max_registrations,
+            trust_forwarded_headers,
         })
     }
 }

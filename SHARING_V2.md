@@ -439,26 +439,137 @@ that to a non-Veld user. So:
 - `web` widens the audience to the open internet, so peer sharing's two gates
   (capability token + host approval of a *Veld peer*) are **not sufficient** —
   the viewer is an anonymous browser, not an authenticated peer. Web sharing
-  needs its own access layer, evaluated in increment 2. Candidate controls,
-  roughly in order of strength/effort:
-  - **Per-share access token in the URL** — the minted public URL carries an
-    unguessable token; no token, no access. Cheapest; leaks if the URL leaks.
-  - **Share password** — gateway prompts for a password the host sets at share
-    time (sent out-of-band). Simple mental model for non-technical viewers.
-  - **Join approval for web viewers** — the gateway holds each new browser
-    session until the host approves it (mirrors peer `manual` mode, surfaced in
-    the overlay toolbar). Strongest; highest UX cost.
-  - **Defaults** — `web` should default to a stricter posture than `peer`:
-    non-`Auto` approval, a shorter TTL, and a token/password required (never an
-    open URL by default).
-  The exact combination is an increment-2 decision; the config must reserve room
-  for it (e.g. a `share.web` sub-object for password/approval settings) so
-  today's `expose: ["web"]` stays forward-compatible.
+  gets its own access layer, designed in §6.1 (increment 3).
 - Gateway-side allow-listing of which shares it will accept, plus explicit
   `expose: web` in config (never implicit), remain prerequisites.
 - Compliance win is structural: with per-service opt-in + self-hosted relays,
   an environment provably cannot leak a service that wasn't declared, over a
   relay the org doesn't run.
+
+### 6.1 Web viewer access layer (increment 3 — decided design)
+
+**Threat model.** The slug is 128-bit unguessable, but it is the *hostname* of
+the public URL — it transits DNS queries, TLS SNI, LB/CDN access logs, browser
+history, and any channel the link is pasted into. That is obscurity (nobody can
+*guess* a URL) but not authentication (everyone who *sees* the URL is served).
+The goal of this increment: a per-viewer secret that does **not** travel in the
+URL's host/path, so possession of the link alone no longer grants access.
+
+**Candidate controls, evaluated:**
+
+| Control | Verdict | Why |
+|---|---|---|
+| Access token in URL/path | **Rejected** | Same channel as the slug — inherits every slug leak (DNS/SNI only for host, but path tokens still hit access logs, history, Referer, forwarding). The slug already *is* a 128-bit URL token; a second one adds nothing. |
+| Share password + session cookie | **Chosen (default)** | The only option that moves the secret out of the URL channel entirely. Familiar, zero-install viewer UX: click link → password prompt → in. |
+| Per-viewer host approval | **Deferred** | (a) Needs a host↔gateway protocol extension (pending-viewer signaling); (b) an anonymous browser is identified only by IP + user-agent, so the host's approve/deny decision is low-information — a password handed out-of-band to a known person authenticates *better*; (c) blocks the viewer on host presence, the worst UX for exactly the stakeholder audience `web` targets. Not blocked by statelessness (see session tokens below — approved sessions could survive restarts with zero storage); deferred on cost/benefit. |
+
+**Viewer UX cost, per option** (viewer = non-technical, no Veld): link-only =
+zero. Password = one familiar prompt per service (zero with the one-link form
+below). Approval = indefinite wait on the host noticing, per browser/device.
+
+#### Mechanics
+
+**Password lives in the registration.** The daemon sends the access policy
+(per-hostname mode + the share password) in `POST /api/v1/shares` — the same
+Bearer-authenticated HTTPS call that is already the heartbeat lease. So the
+password has exactly the lifetime registrations already have: a gateway
+restart loses it along with the registration, and the next heartbeat restores
+both. No new state class, no persistence, statelessness intact.
+
+**Viewer sessions are stateless signed tokens.** On correct password, the
+gateway sets a session cookie the registration alone can verify:
+
+```
+key    = HMAC-SHA256(capability, "veld-gateway-viewer-session/1")
+token  = expiry_unix ‖ HMAC-SHA256(key, slug ‖ expiry_unix)
+```
+
+- No session store: verification needs only the registration (which carries
+  the capability) — restart-proof by construction.
+- Share rotation (new capability) invalidates every outstanding session
+  automatically; session expiry is additionally capped at the share's
+  `expires_at`.
+- No gateway-wide signing secret to provision or rotate.
+- The token is bound to the slug (per-service): a session minted on one slug
+  is not valid on a sibling's.
+
+**Cookie hygiene.** `HttpOnly; Secure; SameSite=Lax`, host-only (per slug
+host). The gateway **strips the session cookie before proxying upstream** —
+the dev server never sees gateway-internal credentials. The auth check runs
+before any tunnel stream is opened (an unauthenticated request costs the
+origin nothing).
+
+**Login flow.** Unauthenticated request → `401` with a minimal, self-contained
+HTML password form (no external assets; no share metadata leaked pre-auth).
+The form POSTs to a reserved path (`/__veld_gateway__/auth`) on the slug host
+with the original path carried along (validated as a same-origin relative path
+— no open redirect); success sets the cookie and redirects. Non-navigation
+requests (fetch/XHR) simply see the 401 status.
+
+**One-link convenience.** `veld share --web` also prints a combined link with
+the password in the URL **fragment**: `https://<slug>.<domain>/#veld-key=…`.
+Fragments never leave the browser — not in DNS, SNI, the request line, access
+logs, or `Referer` — so even the lazy path is strictly better than today. The
+login page reads the fragment, auto-submits, and strips it via
+`history.replaceState`. Printed with an honest label: the link *is* the
+credential in this form; for real secrecy send URL and password over different
+channels.
+
+**Brute force.** Constant-time comparison; per-IP *and* per-slug rate limits
+(in-memory — resets on restart are fine, the limiter is a throttle not a
+ledger). The default generated password (~60 bits) is far beyond any online
+attack at the capped attempt rate; `--password` accepts a custom secret.
+Passwords are never logged.
+
+**Version-skew guard.** `GatewayRegisterResponse` **acks the applied policy**.
+A new daemon registering a password-protected share against an old gateway
+(which would ignore the unknown field and publish the share open) sees the
+missing ack and **aborts the share** with a "gateway too old" error. The other
+direction — old daemon, new gateway — degrades to link-access, which is the
+status quo and the safe direction.
+
+#### Config & defaults
+
+Per-variant `share.web` sub-object (the room reserved in increment 1):
+
+```jsonc
+"share": {
+  "expose": ["web"],
+  "web": { "access": "password" }   // default — may be omitted
+  // "web": { "access": "link" }    // explicit opt-down: anyone with the link
+}
+```
+
+- **Default is `password`** — absent `share.web` means password-protected.
+  Never an open URL by default.
+- **CLI opt-out**: `veld share --web --access link` skips the password for
+  nodes whose config is *silent* on access. An **explicit** config value
+  (`"access": "password"` or `"link"`) always wins over the CLI flag — config
+  is the compliance surface, the flag is convenience for the default case.
+- **One password per web share** (the viewer enters one secret, ever),
+  auto-generated at share time and printed by `veld share --web`
+  (`--password` to choose your own). Enforcement is per-slug: nodes with
+  `access: "link"` stay link-only while their siblings require the password.
+- **Password format**: easily copy/paste-able and typeable — three dash-joined
+  groups from an unambiguous lowercase alphabet (e.g. `k7dm-q2xp-9fzt`,
+  ~60 bits), generated in the daemon. No wordlist dependency.
+- **Web default TTL: 1 hour** (peer stays 2). `--ttl` still overrides.
+
+**Cross-service caveat (honest limit).** The session cookie is host-only per
+slug, so in a multi-service share a browser authenticated on the app's slug
+carries no cookie for the api's slug — the app's cross-origin `fetch` gets a
+401. The v1 answer is `access: "link"` on API nodes (the slug stays
+unguessable and is only ever consumed by the app's JS), or accept the break.
+Cross-slug SSO is a possible later increment; the flagship single-frontend
+case is unaffected.
+
+**Pulled into this increment: `trust_forwarded_headers`.** Per-IP rate
+limiting behind an external TLS terminator would otherwise key every viewer to
+the LB's address — one wrong password would lock out everyone. A gateway
+opt-in (`VELD_GATEWAY_TRUST_FORWARDED`) takes the client IP from the last
+`X-Forwarded-For` hop (the one appended by the trusted immediate LB) and
+forwards the inbound chain upstream instead of overwriting it. Default stays
+off (overwrite everything — the safe posture for a directly-exposed gateway).
 
 ## 7. Browser ↔ browser over iroh (deferred spike)
 
@@ -533,23 +644,27 @@ Three independent increments; ship top-down.
   tunnel (immediate slug drop) with the gateway `DELETE` as courtesy and the
   lease as the crash backstop.
 
+**Decided for increment 3 (design in §6.1)**
+- **Per-viewer access layer**: share password + stateless signed session
+  cookie, password-by-default (`share.web.access`, default `password`), web
+  TTL default 1h, one-link fragment form, version-skew ack. Host approval of
+  web viewers deferred (low-information decision on an anonymous browser;
+  needs a protocol extension).
+- **Trusted-upstream-LB opt-in** (`trust_forwarded_headers`) pulled into this
+  increment — per-IP rate limiting requires the real client IP behind an
+  external terminator.
+
 **Still open (defer to the relevant increment)**
-1. **Per-viewer access layer** (increment 2, §6): the slug is unguessable but
-   travels in the URL (DNS/SNI/logs), so it is obscurity, not authentication —
-   today every viewer with the link is served. A password / per-viewer
-   approval layer is the next security increment; config room is reserved via
-   a `share.web` sub-object.
-2. `host_header: "public" | "origin"` per-registration knob — deferred; the
+1. `host_header: "public" | "origin"` per-registration knob — deferred; the
    origin-Host default fits the flagship dev-server case, and SSR apps that
    need the public host are the operator-config path until a real case forces
    the knob.
-3. **Trusted-upstream-LB opt-in** — the gateway currently overwrites all
-   forwarding headers (safe default); an operator with a sanitising LB that
-   wants the real client IP chain needs a `trust_forwarded_headers` opt-in.
-4. **Direct-address confinement** — relay confinement checks the ticket's
+2. **Direct-address confinement** — relay confinement checks the ticket's
    relay URLs, not its iroh direct addresses; a stolen-token registrant could
    make the gateway UDP-probe internal addresses (bounded: needs a real iroh
    peer proving the node id, no HTTP SSRF). Filter private/link-local direct
    addrs if iroh exposes them.
-5. Heartbeat jitter across many origins on one gateway; human-readable slug
+3. Heartbeat jitter across many origins on one gateway; human-readable slug
    aliases on top of the unguessable default (collision/enumeration surface).
+4. **Cross-slug SSO** for password-protected multi-service shares (§6.1 —
+   today the session cookie is per slug host).
