@@ -288,9 +288,15 @@ enum Command {
         /// Share lifetime in seconds (default 7200).
         #[arg(long)]
         ttl: Option<i64>,
-        /// Approval mode: first | manual | auto (default: manual, or first with --json).
+        /// Approval mode: first | manual | auto (default: manual, or first
+        /// with --json; auto for --web, where the gateway is the only joiner).
         #[arg(long, value_name = "MODE")]
         approve: Option<String>,
+        /// Share to the public web via the configured gateway
+        /// (`sharing.gateway`): only nodes with `web` in `share.expose`;
+        /// prints real public URLs anyone can open in a browser.
+        #[arg(long)]
+        web: bool,
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -523,8 +529,9 @@ async fn main() {
             node,
             ttl,
             approve,
+            web,
             json,
-        } => commands::share::share(run, node, ttl, approve, json).await,
+        } => commands::share::share(run, node, ttl, approve, web, json).await,
 
         Command::Join {
             ticket,

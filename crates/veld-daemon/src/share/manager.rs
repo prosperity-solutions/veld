@@ -23,10 +23,12 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::share::{
-    ApprovalMode, Capability, JoinResponse, PendingInfo, ShareInfo, ShareManifest, ShareTicket,
-    SharesList,
+    ApprovalMode, Capability, GatewayPublicUrl, JoinResponse, PendingInfo, ShareInfo,
+    ShareManifest, ShareTicket, SharesList,
 };
 use veld_core::state::GlobalRegistry;
+
+use super::gateway::GatewayClient;
 
 /// Timeout a manual approval waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -81,6 +83,20 @@ struct ShareEntry {
     /// endpoint — so a custom-relay share is never served over the public
     /// endpoint, keeping relay confinement airtight.
     relay: RelayChoice,
+    /// Set for web shares: the gateway registration this share lives behind.
+    web: Option<WebRegistration>,
+}
+
+/// A web share's registration on the public gateway: the daemon heartbeats it
+/// for the share's lifetime and unregisters on unshare (best-effort — the
+/// gateway's lease expiry covers a lost DELETE).
+struct WebRegistration {
+    client: GatewayClient,
+    reg_id: String,
+    public_urls: Vec<GatewayPublicUrl>,
+    /// The heartbeat loop; aborted on unshare. It also self-terminates when
+    /// the share disappears from the map (belt and braces).
+    heartbeat: JoinHandle<()>,
 }
 
 /// A join parked awaiting the host's manual approval.
@@ -428,10 +444,58 @@ impl ShareManager {
                 ticket: token,
                 expires_at,
                 relay: choice,
+                web: None,
             },
         );
         info!(share_id = %id, ?approve_mode, "share started");
         Ok((id, ticket))
+    }
+
+    /// Attach a gateway registration to a (web) share and start its heartbeat
+    /// loop. Errors if the share vanished in the meantime (the caller then
+    /// unregisters from the gateway).
+    pub async fn attach_web_registration(
+        self: &Arc<Self>,
+        share_id: &str,
+        client: GatewayClient,
+        reg_id: String,
+        lease_secs: u64,
+        public_urls: Vec<GatewayPublicUrl>,
+    ) -> Result<()> {
+        // Heartbeat well inside the lease window; floor guards a tiny lease.
+        let interval = Duration::from_secs((lease_secs / 3).max(5));
+        let hb_manager = Arc::clone(self);
+        let hb_share_id = share_id.to_string();
+        let hb_client = client.clone();
+
+        let mut shares = self.shares.lock().await;
+        let Some(entry) = shares.get_mut(share_id) else {
+            bail!("share {share_id} ended before the gateway registration completed");
+        };
+        let ticket = entry.ticket.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                // Self-terminate once the share is gone (unshare also aborts
+                // this task; this covers any path that missed it).
+                if !hb_manager.shares.lock().await.contains_key(&hb_share_id) {
+                    break;
+                }
+                if let Err(e) = hb_client.register(&ticket).await {
+                    // Transient gateway failures self-heal on a later beat (a
+                    // restarted gateway re-joins and mints the same URLs).
+                    warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
+                        "gateway heartbeat failed; will retry");
+                }
+            }
+        });
+        entry.web = Some(WebRegistration {
+            client,
+            reg_id,
+            public_urls,
+            heartbeat,
+        });
+        Ok(())
     }
 
     /// Join a shared environment: dial the host, then materialise each shared
@@ -711,9 +775,16 @@ impl ShareManager {
                 approve: Some(s.approve_mode),
                 nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
                 urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
-                ticket: Some(s.ticket.clone()),
-                join_url: Some(format!("{base}/join#{}", s.ticket)),
+                // A web share's ticket is a secret held between this daemon
+                // and the gateway — never surfaced for copy/paste.
+                ticket: s.web.is_none().then(|| s.ticket.clone()),
+                join_url: s.web.is_none().then(|| format!("{base}/join#{}", s.ticket)),
                 joiners: counts.get(&s.id).copied().unwrap_or(0),
+                public_urls: s
+                    .web
+                    .as_ref()
+                    .map(|w| w.public_urls.clone())
+                    .unwrap_or_default(),
             })
             .collect();
         let joins = self
@@ -730,6 +801,7 @@ impl ShareManager {
                 ticket: None,
                 join_url: None,
                 joiners: 0,
+                public_urls: Vec::new(),
             })
             .collect();
         let pending = self
@@ -856,8 +928,19 @@ impl ShareManager {
     /// Stop hosting a share. In-flight connections end when their peers
     /// disconnect; no new connection will match the removed capability.
     pub async fn unshare(&self, id: &str) -> Result<()> {
-        if self.shares.lock().await.remove(id).is_none() {
+        let Some(entry) = self.shares.lock().await.remove(id) else {
             bail!("no such share: {id}");
+        };
+        // Web share: stop heartbeating and unregister from the gateway so its
+        // public URLs die now, not at lease expiry. Best-effort — a lost
+        // DELETE is covered by the lease (and by the tunnel closing below).
+        if let Some(web) = entry.web {
+            web.heartbeat.abort();
+            tokio::spawn(async move {
+                if let Err(e) = web.client.unregister(&web.reg_id).await {
+                    debug!(error = %format!("{e:#}"), "gateway unregister failed (lease will expire it)");
+                }
+            });
         }
         self.claims.lock().await.remove(id);
         // Revoke any requests parked awaiting approval for this share so a
@@ -1061,6 +1144,7 @@ mod tests {
                 ticket: "veldshare_x".to_string(),
                 expires_at: i64::MAX,
                 relay: RelayChoice::Public,
+                web: None,
             },
         );
         let (tx, rx) = oneshot::channel();

@@ -11,9 +11,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::{Deserialize, Serialize};
 use tracing::warn;
-use veld_core::share::ShareTicket;
+use veld_core::share::{
+    GatewayPublicUrl, GatewayRegisterRequest, GatewayRegisterResponse, ShareTicket,
+};
 
 use crate::state::AppState;
 
@@ -56,32 +57,11 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
-#[derive(Deserialize)]
-struct RegisterRequest {
-    /// The `veldshare_…` ticket of the web share to expose.
-    ticket: String,
-}
-
-#[derive(Serialize)]
-struct RegisterResponse {
-    id: String,
-    /// Lease duration; the origin heartbeats (re-`POST`s) well inside it.
-    lease_secs: u64,
-    urls: Vec<RegisteredUrl>,
-}
-
-#[derive(Serialize)]
-struct RegisteredUrl {
-    node: String,
-    hostname: String,
-    public_url: String,
-}
-
 async fn register(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<RegisterRequest>,
-) -> Result<Json<RegisterResponse>, ApiError> {
+    Json(req): Json<GatewayRegisterRequest>,
+) -> Result<Json<GatewayRegisterResponse>, ApiError> {
     check_auth(&headers, &state.auth_token)?;
 
     let ticket = ShareTicket::decode(&req.ticket)
@@ -94,13 +74,13 @@ async fn register(
         (StatusCode::BAD_GATEWAY, format!("{e:#}"))
     })?;
 
-    Ok(Json(RegisterResponse {
+    Ok(Json(GatewayRegisterResponse {
         id: info.id,
         lease_secs: info.lease_secs,
         urls: info
             .nodes
             .into_iter()
-            .map(|n| RegisteredUrl {
+            .map(|n| GatewayPublicUrl {
                 node: n.node,
                 hostname: n.hostname,
                 public_url: n.public_url,

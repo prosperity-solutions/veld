@@ -325,12 +325,17 @@ Anatomy — four components in one process:
    - rewrite `Location`/`Refresh` response headers that name the origin's
      fake-TLD hostnames back to the public host.
 
+   **Host header policy (revised while implementing):** the upstream `Host`
+   is rewritten to the **origin hostname**. Dev servers enforce host
+   allow-lists (Vite's `allowedHosts` default admits `*.localhost` but would
+   reject an unknown public host), so origin-Host makes the flagship case —
+   sharing a dev frontend — work zero-config; the public host travels in
+   `X-Forwarded-Host`, and `Set-Cookie` `Domain` attributes scoped to origin
+   hostnames are stripped (host-only cookies work on the public host).
+
    **What it does not do:** rewrite HTML/JS bodies. Absolute URLs baked into
-   the app, cookie domains, CORS allow-lists, OAuth redirect URIs — operator
-   responsibility, per the top of §5. The request's `Host` header is forwarded
-   as the public host by default (apps must allow it, e.g. Vite
-   `allowedHosts`); a per-registration `host_header: "public" | "origin"`
-   knob is reserved for apps that vhost-route on the origin name.
+   the app, CORS allow-lists, OAuth redirect URIs — operator responsibility,
+   per the top of §5.
 
 **Statelessness.** The gateway persists nothing. Registrations are leases: the
 origin daemon heartbeats (re-`POST`s, idempotent) every N seconds; a gateway

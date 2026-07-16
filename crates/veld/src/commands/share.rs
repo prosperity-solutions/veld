@@ -5,16 +5,19 @@
 use crate::output;
 use veld_core::share::{ApprovalMode, DaemonClient, JoinRequest, StartShareRequest};
 
-/// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--json]`
+/// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web] [--json]`
 pub async fn share(
     run: Option<String>,
     nodes: Vec<String>,
     ttl: Option<i64>,
     approve: Option<String>,
+    web: bool,
     json: bool,
 ) -> i32 {
     // Default: interactive humans approve each join (browser/CLI); agents and
     // scripts (`--json`) auto-approve the first joiner so they don't block.
+    // Web shares default to auto — the gateway (which the user just pointed
+    // this share at) is the only joiner, so there is nobody else to vet.
     let approve_mode = match approve.as_deref() {
         Some("first") => ApprovalMode::First,
         Some("manual") => ApprovalMode::Manual,
@@ -26,6 +29,7 @@ pub async fn share(
             );
             return 2;
         }
+        None if web => ApprovalMode::Auto,
         None if json => ApprovalMode::First,
         None => ApprovalMode::Manual,
     };
@@ -35,6 +39,7 @@ pub async fn share(
         nodes: if nodes.is_empty() { None } else { Some(nodes) },
         ttl_secs: ttl,
         approve: Some(approve_mode),
+        web,
     };
 
     match DaemonClient::new().start_share(&req).await {
@@ -43,6 +48,35 @@ pub async fn share(
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&resp).unwrap_or_default()
+                );
+            } else if web {
+                output::print_success(&format!(
+                    "Sharing {} node(s) on the public web.",
+                    resp.nodes.len()
+                ));
+                for w in &resp.warnings {
+                    println!("  {} {}", output::yellow("!"), w);
+                }
+                println!();
+                println!("  Public URL(s) — anyone with the link can open them:");
+                for u in &resp.public_urls {
+                    println!(
+                        "    {}  {}",
+                        output::cyan(&u.public_url),
+                        output::dim(&u.node)
+                    );
+                }
+                println!();
+                println!(
+                    "  Stop:  {}",
+                    output::dim(&format!("veld unshare {}", resp.share_id))
+                );
+                println!();
+                println!(
+                    "  {}",
+                    output::dim(
+                        "(the URL is the access token — share it only with people who should see this)"
+                    )
                 );
             } else {
                 output::print_success(&format!(
@@ -220,7 +254,19 @@ pub async fn list(json: bool) -> i32 {
                 let rows: Vec<Vec<String>> = list
                     .shares
                     .iter()
-                    .map(|s| vec![s.id.clone(), s.nodes.join(", "), s.urls.join(" ")])
+                    .map(|s| {
+                        // For a web share the public URLs are the useful ones.
+                        let urls = if s.public_urls.is_empty() {
+                            s.urls.join(" ")
+                        } else {
+                            s.public_urls
+                                .iter()
+                                .map(|u| u.public_url.as_str())
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        };
+                        vec![s.id.clone(), s.nodes.join(", "), urls]
+                    })
                     .collect();
                 output::print_table(&["SHARE", "NODES", "URLS"], &rows);
             }

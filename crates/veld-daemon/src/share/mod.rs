@@ -14,5 +14,6 @@
 pub use veld_share::{endpoint, host, join};
 
 pub mod api;
+pub mod gateway;
 pub mod manager;
 pub mod token_store;
