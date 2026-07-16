@@ -45,36 +45,11 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 /// (with its own `DIAL_TIMEOUT`) report a real connectivity failure.
 const RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 
-use super::endpoint::{RelayChoice, bind_endpoint, resolve_embedded_tokens};
+use super::endpoint::{
+    RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_embedded_tokens,
+};
 use super::host::{self, HostShare};
 use super::{join, token_store};
-
-/// Outcome of watching a join endpoint's home-relay connection for auth.
-enum RelayAuth {
-    /// The endpoint connected to a home relay (auth, if any, succeeded), or the
-    /// watch timed out with no clear denial — either way, proceed to dial.
-    OkOrUnknown,
-    /// A home relay rejected the connection as unauthorized. Carries the relay
-    /// URL whose token is missing or wrong.
-    Denied(String),
-}
-
-/// Whether a home-relay `last_error` string indicates the relay *rejected our
-/// auth* (as opposed to being unreachable or failing some other way).
-///
-/// iroh surfaces this as `iroh_relay`'s `Error::ServerDeniedAuth`, whose Display
-/// is `"The relay denied our authentication (<reason>)"` (iroh-relay 1.0.1
-/// `protos/handshake.rs:159`). `<reason>` is `"not authorized"` only by default
-/// (when the relay's `AccessControl` denies with `reason: None`,
-/// `handshake.rs:543`); a relay that denies with a *custom* reason would not
-/// contain "not authorized". So match the reason-independent wrapper, and keep
-/// "not authorized" as a belt-and-braces fallback. Pinned to iroh 1.0.1; an
-/// upgrade that rewords this must update the string here (guarded by
-/// `is_relay_auth_denial_*` tests).
-fn is_relay_auth_denial(err: &str) -> bool {
-    let e = err.to_lowercase();
-    e.contains("denied our authentication") || e.contains("not authorized")
-}
 
 /// The supplied tokens worth caching after a successful join: only those keyed
 /// by a relay the ticket actually advertises. Filters out any spurious key a
@@ -89,34 +64,6 @@ fn tokens_to_cache<'a>(
         .filter(|(url, _)| ticket_relay_urls.iter().any(|t| t == *url))
         .map(|(u, t)| (u.as_str(), t.as_str()))
         .collect()
-}
-
-/// Watch an endpoint's home-relay status until it connects, reports an auth
-/// denial, or `budget` elapses. Lets the join distinguish "wrong/missing relay
-/// token" from "host unreachable" and prompt precisely (see
-/// [`is_relay_auth_denial`]).
-async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
-    use iroh::Watcher as _;
-    let poll = async {
-        let mut status = endpoint.home_relay_status();
-        loop {
-            let relays = status.get();
-            if relays.iter().any(|r| r.is_connected()) {
-                return RelayAuth::OkOrUnknown;
-            }
-            if let Some(denied) = relays.iter().find(|r| {
-                r.last_error()
-                    .map(|e| is_relay_auth_denial(&format!("{e:#}")))
-                    .unwrap_or(false)
-            }) {
-                return RelayAuth::Denied(denied.url().to_string());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    };
-    tokio::time::timeout(budget, poll)
-        .await
-        .unwrap_or(RelayAuth::OkOrUnknown)
 }
 
 /// A share this daemon is hosting.
@@ -1057,26 +1004,6 @@ fn open_dashboard() {
 mod tests {
     use super::*;
     use veld_core::share::SharedNode;
-
-    // Pins the relay auth-denial detection to iroh 1.0.1's error wording. If an
-    // iroh upgrade rewords `ServerDeniedAuth`'s Display, this fails loudly rather
-    // than silently routing every token-gated join to "unreachable".
-    #[test]
-    fn detects_relay_auth_denial_regardless_of_reason() {
-        // Default deny reason (relay's AccessControl returns `reason: None`).
-        assert!(is_relay_auth_denial(
-            "The relay denied our authentication (not authorized)"
-        ));
-        // Custom deny reason — must still be detected (the earlier "not
-        // authorized"-only match missed this).
-        assert!(is_relay_auth_denial(
-            "The relay denied our authentication (invalid token)"
-        ));
-        // Unrelated failures are NOT auth denials → the join dials and reports a
-        // real connectivity error instead of wrongly prompting for a token.
-        assert!(!is_relay_auth_denial("connection timed out"));
-        assert!(!is_relay_auth_denial("dns error: no such host"));
-    }
 
     #[test]
     fn tokens_to_cache_keeps_only_ticket_relays() {

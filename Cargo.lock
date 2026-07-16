@@ -4135,7 +4135,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "veld"
-version = "9.1.0"
+version = "9.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4155,7 +4155,7 @@ dependencies = [
 
 [[package]]
 name = "veld-core"
-version = "9.1.0"
+version = "9.2.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4177,7 +4177,7 @@ dependencies = [
 
 [[package]]
 name = "veld-daemon"
-version = "9.1.0"
+version = "9.2.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4196,11 +4196,28 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "veld-core",
+ "veld-share",
+]
+
+[[package]]
+name = "veld-gateway"
+version = "9.2.0"
+dependencies = [
+ "anyhow",
+ "iroh",
+ "iroh-tickets",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "veld-core",
+ "veld-share",
 ]
 
 [[package]]
 name = "veld-helper"
-version = "9.1.0"
+version = "9.2.0"
 dependencies = [
  "anyhow",
  "nix",
@@ -4211,6 +4228,23 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "veld-core",
+]
+
+[[package]]
+name = "veld-share"
+version = "9.2.0"
+dependencies = [
+ "anyhow",
+ "dirs",
+ "iroh",
+ "iroh-tickets",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
  "veld-core",
 ]
 
