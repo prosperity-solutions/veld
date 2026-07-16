@@ -39,7 +39,13 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
         .context("resolving the gateway relay allow-list")?;
 
     let secret_key = node_key(&config)?;
-    let registry = Registry::new(config.domain.clone(), config.lease, relays, secret_key);
+    let registry = Registry::new(
+        config.domain.clone(),
+        config.lease,
+        relays,
+        secret_key,
+        config.max_registrations,
+    );
     tokio::spawn(Arc::clone(&registry).sweep_expired_leases());
 
     let state = AppState {

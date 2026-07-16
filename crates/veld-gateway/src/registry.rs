@@ -32,11 +32,6 @@ use crate::slug;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 /// How long to watch a custom relay for an auth denial before dialing anyway.
 const RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(8);
-/// Cap on concurrently live registrations. Bounds the blast radius of a leaked
-/// gateway token: each distinct capability holds an iroh connection + watcher
-/// task, so an attacker spamming fresh capabilities can't grow state without
-/// limit. Generous — one org's real environments stay far under it.
-const MAX_REGISTRATIONS: usize = 512;
 
 /// One publicly exposed hostname of a registered share.
 #[derive(Debug, Clone)]
@@ -72,6 +67,10 @@ pub struct Registration {
     relay: RelayChoice,
     /// Lease deadline; refreshed by heartbeat re-`POST`s.
     deadline: std::sync::Mutex<Instant>,
+    /// The registration slot this occupies. Held for the registration's whole
+    /// lifetime and released (dropped) when the registration is removed, so the
+    /// semaphore bounds settled + in-flight registrations by one hard count.
+    _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Registration {
@@ -146,6 +145,11 @@ pub struct Registry {
     lease: Duration,
     relays: RelayAllowList,
     secret_key: SecretKey,
+    /// Hard bound on registrations, covering both settled and in-flight
+    /// attempts: a permit is taken before dialing and held until the
+    /// registration is removed. Closes the leaked-token exhaustion vector
+    /// (unbounded concurrent 75s dials) that a `regs.len()` check alone missed.
+    slots: Arc<tokio::sync::Semaphore>,
     endpoints: Mutex<HashMap<RelayChoice, Endpoint>>,
     regs: Mutex<HashMap<String, Arc<Registration>>>,
     slugs: Mutex<HashMap<String, SlugTarget>>,
@@ -164,12 +168,14 @@ impl Registry {
         lease: Duration,
         relays: RelayAllowList,
         secret_key: SecretKey,
+        max_registrations: usize,
     ) -> Arc<Self> {
         Arc::new(Self {
             domain,
             lease,
             relays,
             secret_key,
+            slots: Arc::new(tokio::sync::Semaphore::new(max_registrations)),
             endpoints: Mutex::new(HashMap::new()),
             regs: Mutex::new(HashMap::new()),
             slugs: Mutex::new(HashMap::new()),
@@ -193,15 +199,24 @@ impl Registry {
                 }
             }
         }
-        // Stale entry (tunnel died between sweeps): drop it, then re-join.
+        // Stale entry (tunnel died between sweeps): drop it (releasing its
+        // slot), then re-join.
         self.remove(&id, "re-registering").await;
 
-        // Cap live registrations (a leaked token can't grow state without
-        // bound). Checked after the heartbeat fast path, so an existing share
-        // always refreshes; only genuinely-new registrations are turned away.
-        if self.regs.lock().await.len() >= MAX_REGISTRATIONS {
-            bail!("gateway registration limit reached ({MAX_REGISTRATIONS}); refusing new shares");
-        }
+        // Take a registration slot BEFORE the expensive dial and hold it for
+        // the registration's lifetime. This bounds settled + in-flight
+        // registrations by one hard count: a leaked token can't drive
+        // unbounded concurrent 75s dials (task/fd/QUIC exhaustion), and the
+        // settled count can't overshoot under concurrency. Released when the
+        // permit drops — on any early return below, or when the registration
+        // is removed. Checked after the heartbeat fast path, so a live share
+        // always refreshes even at the cap.
+        let permit = Arc::clone(&self.slots).try_acquire_owned().map_err(|_| {
+            anyhow::anyhow!(
+                "gateway registration limit reached ({} live); refusing new shares",
+                self.slots.available_permits()
+            )
+        })?;
 
         let addr = {
             use std::str::FromStr as _;
@@ -238,17 +253,30 @@ impl Registry {
         }
 
         let label = format!("gateway {}", self.domain);
-        let (conn, manifest) = tokio::time::timeout(
+        let dial = tokio::time::timeout(
             DIAL_TIMEOUT,
             join::dial(&endpoint, addr, &ticket.capability, &label),
         )
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!("timed out connecting to the host (unreachable, or no relay path)")
-        })??;
+        .await;
+        let (conn, manifest) = match dial {
+            Ok(Ok(ok)) => ok,
+            // Any dial failure: evict the endpoint we just bound so a token
+            // holder naming unique-but-unreachable relays can't leak one
+            // endpoint (fresh key + UDP socket + magicsock tasks) per attempt.
+            // evict_endpoint no-ops if a live registration shares the choice.
+            Ok(Err(e)) => {
+                self.evict_endpoint(&choice).await;
+                return Err(e).context("dialing the share host");
+            }
+            Err(_) => {
+                self.evict_endpoint(&choice).await;
+                bail!("timed out connecting to the host (unreachable, or no relay path)");
+            }
+        };
 
         if manifest.nodes.is_empty() {
             conn.close(0u32.into(), b"empty manifest");
+            self.evict_endpoint(&choice).await;
             bail!("share manifest has no nodes to expose");
         }
 
@@ -278,6 +306,7 @@ impl Registry {
             nodes: nodes.clone(),
             relay: choice,
             deadline: std::sync::Mutex::new(Instant::now() + self.lease),
+            _permit: permit,
         });
 
         // Publish registration and slugs atomically enough: regs first, then
@@ -517,6 +546,7 @@ mod tests {
             Duration::from_secs(90),
             relays,
             SecretKey::generate(),
+            512,
         );
 
         let listed: RelayUrl = "https://relay.acme.internal".parse().unwrap();
@@ -539,6 +569,38 @@ mod tests {
         // silent fall back to public/direct dialing).
         let err = reg.allowed_tokens(&[]).unwrap_err();
         assert!(err.to_string().contains("no relay"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn registration_cap_refuses_new_shares_when_slots_exhausted() {
+        // A registry with a single slot, already taken, refuses the next dial
+        // BEFORE attempting it (so a leaked token can't drive parked dials).
+        let reg = Registry::new(
+            "share.example".into(),
+            Duration::from_secs(90),
+            RelayAllowList::Unconfined,
+            SecretKey::generate(),
+            1,
+        );
+        // Hold the only slot, as a live registration would.
+        let held = Arc::clone(&reg.slots).try_acquire_owned().unwrap();
+
+        // A minimal well-formed ticket — register must reject on the slot
+        // check before it ever parses/dials.
+        let ticket = ShareTicket {
+            iroh_ticket: "does-not-matter".into(),
+            capability: Capability::generate(),
+            relay_tokens: Default::default(),
+        };
+        let Err(err) = reg.register(&ticket).await else {
+            panic!("expected the registration to be refused at the cap");
+        };
+        assert!(
+            err.to_string().contains("registration limit reached"),
+            "{err}"
+        );
+
+        drop(held);
     }
 
     #[test]

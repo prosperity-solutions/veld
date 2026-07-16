@@ -8,6 +8,7 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use tracing::warn;
 use veld_core::config::GatewayRef;
 use veld_core::share::{GatewayRegisterRequest, GatewayRegisterResponse};
 use veld_share::endpoint::resolve_secret;
@@ -63,6 +64,21 @@ impl GatewayClient {
         let base_url = url.trim_end_matches('/').to_owned();
         if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
             bail!("gateway URL must start with http(s):// (got `{base_url}`)");
+        }
+        // Over plain http to a non-loopback gateway, the ShareTicket (which
+        // carries the capability — the public-URL bearer secret) and the Bearer
+        // gateway token both transit in cleartext. Fine for localhost testing;
+        // warn otherwise so it isn't a silent downgrade.
+        if let Some(rest) = base_url.strip_prefix("http://") {
+            let host = rest.split([':', '/']).next().unwrap_or(rest);
+            let loopback = host == "localhost" || host == "127.0.0.1" || host == "[::1]";
+            if !loopback {
+                warn!(
+                    gateway = %base_url,
+                    "gateway URL is plain http — the share capability and gateway token \
+                     will transit in cleartext; use https for anything but local testing"
+                );
+            }
         }
 
         Ok(Self {

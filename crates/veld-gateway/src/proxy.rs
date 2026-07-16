@@ -7,11 +7,16 @@
 //! Fidelity policy (SHARING_V2.md §5.3): the upstream `Host` header is
 //! rewritten to the **origin hostname** — dev servers (Vite & friends) enforce
 //! host allow-lists and already accept their own `*.localhost` hostname, so
-//! this makes the flagship case work zero-config. The public host travels in
-//! `X-Forwarded-Host`. On the way back, `Location` redirects naming origin
-//! hostnames are rewritten to public URLs, and `Set-Cookie` `Domain`
-//! attributes scoped to origin hostnames are stripped (making the cookie
-//! host-only, which works on the public host). Bodies are never rewritten.
+//! this makes the flagship case work zero-config. `Origin` and `Referer` are
+//! rewritten to the origin in lockstep with `Host`, so an Origin-checking dev
+//! server sees a coherent same-origin request. The public host travels in
+//! `X-Forwarded-Host` (`X-Forwarded-*`/`Forwarded` from the client are stripped
+//! — the gateway is the public trust boundary). On the way back: `Location`
+//! redirects and `Access-Control-Allow-Origin` values naming origin hostnames
+//! are rewritten to public URLs, `Set-Cookie` `Domain` attributes scoped to an
+//! origin hostname (or a parent of one) are stripped to host-only, and
+//! `Referrer-Policy: no-referrer` is set so the slug doesn't leak. Bodies are
+//! never rewritten.
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -330,8 +335,9 @@ fn splice_upgrade(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-/// Response-side fidelity rewrites: redirects back to public URLs, cookie
-/// domains made host-only. (Bodies are never touched.)
+/// Response-side fidelity rewrites: `Location` + `Access-Control-Allow-Origin`
+/// back to public URLs, cookie `Domain`s made host-only, and
+/// `Referrer-Policy: no-referrer` set. (Bodies are never touched.)
 fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain: &str) {
     for name in hop_by_hop() {
         headers.remove(name);

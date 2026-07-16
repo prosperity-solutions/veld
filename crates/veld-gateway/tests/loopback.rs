@@ -112,6 +112,7 @@ async fn gateway_proxies_through_daemon_host_half() {
         std::time::Duration::from_secs(90),
         veld_gateway::registry::RelayAllowList::Unconfined,
         SecretKey::generate(),
+        512,
     );
     let info = registry.register(&ticket).await.expect("register");
     assert_eq!(info.nodes.len(), 1);
@@ -143,7 +144,8 @@ async fn gateway_proxies_through_daemon_host_half() {
         .expect("body")
         .to_bytes();
     let body = String::from_utf8(bytes.to_vec()).unwrap();
-    // The origin saw its own hostname (origin-Host rewrite policy sends the
-    // origin hostname upstream).
+    // This test drives tunnel::connect/send_request directly (it sends
+    // Host=hostname straight through), exercising the transport round-trip —
+    // NOT proxy::handle's Host rewrite, which is covered by proxy.rs unit tests.
     assert_eq!(body, format!("host={hostname}"));
 }

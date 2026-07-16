@@ -20,6 +20,11 @@ const DEFAULT_LEASE_SECS: u64 = 90;
 
 const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 
+/// Default cap on concurrently live + in-flight registrations. Bounds a leaked
+/// token's blast radius; generous enough that one org's real environments stay
+/// well under it. Raise via `VELD_GATEWAY_MAX_REGISTRATIONS` for a large fleet.
+const DEFAULT_MAX_REGISTRATIONS: usize = 512;
+
 /// Fully resolved gateway configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -45,6 +50,8 @@ pub struct GatewayConfig {
     /// Directory for the persistent node key (stable iroh identity across
     /// restarts when a volume is mounted). `None` = platform data dir.
     pub state_dir: Option<PathBuf>,
+    /// Hard cap on concurrently live + in-flight registrations.
+    pub max_registrations: usize,
 }
 
 /// Paths to a TLS certificate chain and private key (PEM).
@@ -68,6 +75,8 @@ struct FileConfig {
     lease_secs: Option<u64>,
     #[serde(rename = "state_dir")]
     state_dir: Option<String>,
+    #[serde(rename = "max_registrations")]
+    max_registrations: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -179,6 +188,16 @@ impl GatewayConfig {
             .or(file.state_dir)
             .map(PathBuf::from);
 
+        let max_registrations = match get("VELD_GATEWAY_MAX_REGISTRATIONS") {
+            Some(raw) => raw
+                .parse::<usize>()
+                .with_context(|| format!("invalid VELD_GATEWAY_MAX_REGISTRATIONS `{raw}`"))?,
+            None => file.max_registrations.unwrap_or(DEFAULT_MAX_REGISTRATIONS),
+        };
+        if max_registrations == 0 {
+            bail!("max_registrations must be positive");
+        }
+
         Ok(Self {
             domain,
             listen,
@@ -187,6 +206,7 @@ impl GatewayConfig {
             relays,
             lease: Duration::from_secs(lease_secs),
             state_dir,
+            max_registrations,
         })
     }
 }
@@ -300,6 +320,28 @@ mod tests {
         assert_eq!(cfg.listen.to_string(), "127.0.0.1:9999");
         assert_eq!(cfg.lease, Duration::from_secs(30));
         assert_eq!(cfg.auth_token, SecretSource::Literal("envtok".into()));
+    }
+
+    #[test]
+    fn max_registrations_default_env_and_zero_guard() {
+        let base = [
+            ("VELD_GATEWAY_DOMAIN", "share.acme.internal"),
+            ("VELD_GATEWAY_TOKEN", "t"),
+        ];
+        // Default when unset.
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&base)).unwrap();
+        assert_eq!(cfg.max_registrations, DEFAULT_MAX_REGISTRATIONS);
+
+        // Env override parses.
+        let mut with_cap = base.to_vec();
+        with_cap.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "2000"));
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&with_cap)).unwrap();
+        assert_eq!(cfg.max_registrations, 2000);
+
+        // Zero is rejected (a zero-permit semaphore would refuse every share).
+        let mut zero = base.to_vec();
+        zero.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "0"));
+        assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&zero)).is_err());
     }
 
     #[test]

@@ -96,6 +96,7 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_RELAY_TOKEN` | *(per-entry `token` in file)* | unset | Auth token presented to the listed relay(s) |
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
+| `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -106,7 +107,8 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   "tls": { "cert": "/certs/wild.pem", "key": "/certs/wild.key" },
   "auth": { "token": { "file": "/run/secrets/gw-token" } },
   "relays": [{ "url": "https://relay.acme.internal", "token": { "env": "RELAY_TOKEN" } }],
-  "lease_secs": 90
+  "lease_secs": 90,
+  "max_registrations": 512
 }
 ```
 
@@ -153,7 +155,14 @@ Two consequences to know before sharing a non-trivial app:
   rewrites `Set-Cookie Domain` (origin host **or a parent**) to host-only and
   rewrites `Access-Control-Allow-Origin` that echoes an origin host to the
   public origin — but an app that hard-codes a different origin in its CORS
-  allow-list must add the public origin itself.
+  allow-list must add the public origin itself. A `Content-Security-Policy`
+  that names origin hostnames is **not** rewritten (it's a body-adjacent
+  allow-list); relax it or trust the public host if you ship a strict CSP in
+  dev. And because each request's `Host`/`Origin` is rewritten to the *target*
+  service's origin, a service that inspects the calling service's `Origin` for
+  its own CORS/CSRF decisions sees same-origin rather than the caller — fine
+  for the single-service flagship, a fidelity gap for tightly-coupled
+  multi-service shares.
 - **Health**: `GET /healthz` answers `ok` on any Host (container/LB probes
   included). Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
