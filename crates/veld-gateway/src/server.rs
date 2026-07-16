@@ -103,13 +103,10 @@ fn harden<A>(server: &mut axum_server::Server<A>) {
         .header_read_timeout(HEADER_READ_TIMEOUT);
 }
 
-/// Route a request by `Host`: apex → registration API, `<slug>.<domain>` →
-/// proxy, anything else → `/healthz` or a content-free 404.
+/// Route a request by the viewer's host: apex → registration API,
+/// `<slug>.<domain>` → proxy, anything else → `/healthz` or a content-free 404.
 async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
-    let host = req
-        .headers()
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
+    let host = viewer_host(req.headers(), state.config.trust_forwarded_headers)
         .map(host_without_port)
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -141,6 +138,30 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
         return api::healthz().await.into_response();
     }
     api::not_found().await.into_response()
+}
+
+/// The host the viewer actually addressed. Behind a trusted sanitising edge
+/// (`trust_forwarded_headers`) an inbound `X-Forwarded-Host` wins over `Host`:
+/// a CDN (CloudFront and friends) rewrites `Host` to its origin's hostname
+/// when forwarding, so the host the viewer typed only survives the extra hop
+/// in `X-Forwarded-Host`. In a comma-separated chain the **first** entry is
+/// the original viewer host (hops append). Untrusted (default): `Host` alone
+/// — forwarding headers from an anonymous-reachable edge are viewer-supplied.
+pub(crate) fn viewer_host(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> Option<&str> {
+    if trust_forwarded {
+        let forwarded = headers
+            .get("x-forwarded-host")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        if forwarded.is_some() {
+            return forwarded;
+        }
+    }
+    headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
 }
 
 /// The slug label if `host` is exactly `<label>.<domain>` (one label deep).
@@ -227,6 +248,40 @@ mod tests {
         assert_eq!(slug_of(".share.acme.internal", d), None);
         // Suffix-similar but not subdomain-of (no dot boundary).
         assert_eq!(slug_of("evilshare.acme.internal", d), None);
+    }
+
+    #[test]
+    fn viewer_host_honors_forwarded_only_when_trusted() {
+        let headers = |xfh: Option<&str>| {
+            let mut h = axum::http::HeaderMap::new();
+            h.insert(axum::http::header::HOST, "origin.internal".parse().unwrap());
+            if let Some(v) = xfh {
+                h.insert("x-forwarded-host", v.parse().unwrap());
+            }
+            h
+        };
+
+        // Untrusted (default): a viewer-supplied X-Forwarded-Host is ignored.
+        assert_eq!(
+            viewer_host(&headers(Some("slug.share.acme.internal")), false),
+            Some("origin.internal")
+        );
+        // Trusted: the forwarded host wins (CDN rewrote Host to its origin).
+        assert_eq!(
+            viewer_host(&headers(Some("slug.share.acme.internal")), true),
+            Some("slug.share.acme.internal")
+        );
+        // Chain: first entry is the original viewer host.
+        assert_eq!(
+            viewer_host(&headers(Some("a.share.example, cdn.internal")), true),
+            Some("a.share.example")
+        );
+        // Trusted but absent/empty → fall back to Host.
+        assert_eq!(viewer_host(&headers(None), true), Some("origin.internal"));
+        assert_eq!(
+            viewer_host(&headers(Some("")), true),
+            Some("origin.internal")
+        );
     }
 
     #[test]

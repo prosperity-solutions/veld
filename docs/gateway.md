@@ -101,7 +101,7 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
 | `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
-| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable) |
+| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream edge's `X-Forwarded-*`: the last `X-Forwarded-For` entry becomes the client IP (password rate-limit keying, chain forwarded upstream), and `X-Forwarded-Host` (first entry) overrides `Host` for slug routing — required behind a CDN that rewrites `Host` to its origin (see [Behind a CDN](#behind-a-cdn-cloudfront)). **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (inbound forwarding headers would be viewer-spoofable) |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -173,6 +173,41 @@ Two consequences to know before sharing a non-trivial app:
   included). Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
   safe; in-flight requests finish and heartbeats re-register.
+
+## Behind a CDN (CloudFront)
+
+A CDN in front of the platform LB adds a wrinkle: CloudFront (and most CDNs
+with a custom origin) **rewrites `Host` to the origin's hostname** when
+forwarding — and the platform underneath (e.g. an ingress that routes by its
+own hostname) usually *requires* that, so you can't just forward the viewer's
+`Host`. The gateway then sees the platform hostname instead of
+`<slug>.<domain>` and answers 404 for every share.
+
+The fix is two-sided:
+
+1. **Carry the viewer's host in `X-Forwarded-Host`.** On CloudFront, attach a
+   CloudFront Function (viewer request) that copies the viewer `Host` in — this
+   also overwrites anything a viewer sent, keeping the header edge-owned:
+
+   ```js
+   function handler(event) {
+     var request = event.request;
+     request.headers['x-forwarded-host'] = { value: request.headers.host.value };
+     return request;
+   }
+   ```
+
+   Add the distribution's alternate domain names for `<domain>` and
+   `*.<domain>` (with a matching wildcard cert in ACM), and point DNS at the
+   distribution.
+
+2. **Set `VELD_GATEWAY_TRUST_FORWARDED=true`** so the gateway routes by that
+   `X-Forwarded-Host` (and keys rate limits on the real client IP from
+   `X-Forwarded-For`).
+
+Caching note: leave the distribution's default behavior at "no caching" (or
+forward all headers/cookies/query strings) — shares proxy live dev servers and
+password-gated content, which a shared URL-keyed cache must not store.
 
 ## Viewer access control (passwords)
 

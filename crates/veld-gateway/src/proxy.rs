@@ -76,12 +76,14 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         socket_ip.as_deref(),
         state.config.trust_forwarded_headers,
     );
-    let public_host = parts
-        .headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or_default()
-        .to_owned();
+    // The host the viewer addressed — behind a trusted CDN/LB that rewrites
+    // `Host` to its origin, the viewer's host arrives in `X-Forwarded-Host`.
+    // This is what goes upstream as `X-Forwarded-Host` and what Referer
+    // rewriting matches against.
+    let public_host =
+        crate::server::viewer_host(&parts.headers, state.config.trust_forwarded_headers)
+            .unwrap_or_default()
+            .to_owned();
 
     let mut upstream_req = match build_upstream_request(
         &parts,

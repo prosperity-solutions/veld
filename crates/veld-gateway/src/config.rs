@@ -57,12 +57,15 @@ pub struct GatewayConfig {
     pub state_dir: Option<PathBuf>,
     /// Hard cap on concurrently live + in-flight registrations.
     pub max_registrations: usize,
-    /// Trust the immediate upstream (a sanitising TLS-terminating LB) for
-    /// `X-Forwarded-For`: the last entry is taken as the real client IP
-    /// (rate-limit keying) and the inbound chain is forwarded upstream.
-    /// Default **off** — a directly-exposed gateway must overwrite the chain,
-    /// or any viewer could spoof it. Enable ONLY behind an LB that appends
-    /// the true peer address.
+    /// Trust the immediate upstream (a sanitising TLS-terminating LB/CDN)
+    /// for `X-Forwarded-*`: the last `X-Forwarded-For` entry is taken as the
+    /// real client IP (rate-limit keying) and the inbound chain is forwarded
+    /// upstream; `X-Forwarded-Host` (first entry) overrides `Host` for
+    /// routing and the upstream `X-Forwarded-Host` — required behind a CDN
+    /// (CloudFront) that rewrites `Host` to its origin's hostname. Default
+    /// **off** — a directly-exposed gateway must overwrite the chain, or any
+    /// viewer could spoof it. Enable ONLY behind an edge that sets these
+    /// headers itself.
     pub trust_forwarded_headers: bool,
 }
 
