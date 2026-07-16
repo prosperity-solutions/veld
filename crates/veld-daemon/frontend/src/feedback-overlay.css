@@ -907,3 +907,41 @@
 .veld-feedback-confirm-actions {
   display: flex; gap: 8px; justify-content: flex-end;
 }
+
+/* ── Web sharing card ─────────────────────────────────────────────────── */
+/* Fixed near the top center (viewport-aware via max-width) — the arc menu
+   can sit anywhere, so the card doesn't chase it. */
+.veld-feedback-web-share-card {
+  position: fixed;
+  top: 84px; left: 50%;
+  transform: translateX(-50%);
+  animation: veld-feedback-fadeIn .15s ease;
+}
+.veld-feedback-web-share-muted {
+  color: var(--vf-text-muted);
+  font-size: 12px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
+.veld-feedback-web-share-url {
+  font-size: 12px;
+  color: var(--vf-accent);
+  cursor: pointer;
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.veld-feedback-web-share-url:hover { text-decoration: underline; }
+.veld-feedback-web-share-conn {
+  display: flex; align-items: baseline; gap: 7px;
+  font-size: 12px;
+  margin-bottom: 8px;
+}
+.veld-feedback-web-share-conn-text { overflow-wrap: anywhere; }
+.veld-feedback-web-share-dot {
+  flex: none;
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--vf-text-muted);
+  align-self: center;
+}
+.veld-feedback-web-share-dot-direct { background: var(--vf-accent); }
+.veld-feedback-web-share-dot-relayed { background: #eab308; }

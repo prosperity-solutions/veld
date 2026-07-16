@@ -13,6 +13,7 @@ import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead,
 import { sendAllGood } from "./listening";
 import { captureFullScreenshot } from "./screenshot";
 import { copyPublicUrl } from "./public-url";
+import { toggleWebShareCard } from "./web-share";
 
 export function buildDOM(): void {
   initTooltip();
@@ -104,6 +105,7 @@ export function buildDOM(): void {
   const toolBtnTheme = makeToolBtn("theme", THEME_ICONS[getState().theme]);
   const toolBtnDashboard = makeToolBtn("dashboard", ICONS.dashboard);
   const toolBtnPublicUrl = makeToolBtn("copy-public-url", ICONS.copy);
+  const toolBtnWebShare = makeToolBtn("web-share", ICONS.globe);
   refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff);
 
   // Reflect the current theme on the icon + host, and persist it. The theme
@@ -126,7 +128,7 @@ export function buildDOM(): void {
     refs.listeningModule,
     refs.moreBtn,
   ];
-  refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, toolBtnPublicUrl, refs.toolBtnHide];
+  refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, toolBtnWebShare, toolBtnPublicUrl, refs.toolBtnHide];
   refs.toolbarOverflow = refs.toolbarContainer; // test compat
 
   // --- Item model ---------------------------------------------------------
@@ -160,6 +162,12 @@ export function buildDOM(): void {
       el: toolBtnDashboard,
       label: "Management UI",
       onSelect: () => window.open("https://veld.localhost:" + window.location.port, "_blank"),
+    },
+    {
+      id: "web-share",
+      el: toolBtnWebShare,
+      label: "Web sharing",
+      onSelect: () => toggleWebShareCard(),
     },
     {
       id: "copy-public-url",

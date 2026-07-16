@@ -74,6 +74,19 @@ async fn start(
     } else {
         ExposeMode::Peer
     };
+    // A request without a run name falls back to the `X-Veld-Run` header that
+    // Caddy injects on `/__veld__/`-proxied requests — the browser overlay
+    // shares the run its page belongs to without knowing the run's name, even
+    // with several runs active. Direct callers (the CLI) carry no such header
+    // and keep the "only run" resolution.
+    let run = req.run.clone().or_else(|| {
+        headers
+            .get("x-veld-run")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    });
     let ResolvedShare {
         manifest,
         relay,
@@ -81,7 +94,7 @@ async fn start(
         gateway,
         warnings,
         web_access,
-    } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs, mode)?;
+    } = build_manifest(run.as_deref(), req.nodes.as_deref(), req.ttl_secs, mode)?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
 

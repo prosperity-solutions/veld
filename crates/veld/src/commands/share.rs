@@ -356,6 +356,9 @@ pub async fn list(json: bool) -> i32 {
                             output::cyan(pw)
                         );
                     }
+                    for c in &s.connections {
+                        println!("  {}", connection_line(&s.id, c));
+                    }
                 }
             }
             if !list.joins.is_empty() {
@@ -369,6 +372,11 @@ pub async fn list(json: bool) -> i32 {
                     .map(|j| vec![j.id.clone(), j.nodes.join(", "), j.urls.join(" ")])
                     .collect();
                 output::print_table(&["JOIN", "NODES", "URLS"], &rows);
+                for j in &list.joins {
+                    for c in &j.connections {
+                        println!("  {}", connection_line(&j.id, c));
+                    }
+                }
             }
             0
         }
@@ -376,6 +384,38 @@ pub async fn list(json: bool) -> i32 {
             output::print_error(&e.to_string(), json);
             1
         }
+    }
+}
+
+/// One human line describing a tunnel's transport: who is connected and
+/// whether traffic is direct or riding a relay. Relayed tunnels get a hint —
+/// they are the usual answer to "why is my share slow?" (public relays
+/// throttle throughput).
+fn connection_line(id: &str, c: &veld_core::share::ShareConnectionInfo) -> String {
+    use veld_core::share::ShareTransport;
+    let who = if c.label.is_empty() {
+        c.node_id.chars().take(10).collect::<String>()
+    } else {
+        c.label.clone()
+    };
+    let rtt = c
+        .rtt_ms
+        .map(|ms| format!(", rtt {ms}ms"))
+        .unwrap_or_default();
+    match c.transport {
+        ShareTransport::Direct => {
+            let via = c.via.as_deref().unwrap_or("-");
+            output::dim(&format!("{id} {who}: direct ({via}{rtt})"))
+        }
+        ShareTransport::Relayed => format!(
+            "{} {}",
+            output::dim(&format!("{id} {who}:")),
+            output::yellow(&format!(
+                "relayed via {}{rtt} — throughput limited by the relay",
+                c.via.as_deref().unwrap_or("unknown relay")
+            ))
+        ),
+        ShareTransport::None => output::dim(&format!("{id} {who}: no open path")),
     }
 }
 

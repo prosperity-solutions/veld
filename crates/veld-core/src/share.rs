@@ -290,6 +290,58 @@ pub struct ShareInfo {
     /// `veld shares` / the dashboard can re-display it. Local control API only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web_password: Option<String>,
+    /// Live tunnel transport per connected peer (hosted shares: one entry per
+    /// joiner, the gateway included; joins: one entry for the host). Absent
+    /// from daemons that predate connection reporting.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<ShareConnectionInfo>,
+}
+
+/// Live tunnel transport state for one connected peer of a share (or for the
+/// host, seen from a join). Answers the operator question "is my traffic
+/// direct or riding a (possibly throttled) relay?" — the difference between
+/// LAN-speed shares and single-digit-Mbit ones.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareConnectionInfo {
+    /// The peer's iroh node id (its cryptographic identity).
+    pub node_id: String,
+    /// Untrusted self-label the peer provided at join time ("gateway" for the
+    /// public web gateway, a colleague's label for a peer join).
+    #[serde(default)]
+    pub label: String,
+    /// Transport of the currently selected path: `direct`, `relayed`, or
+    /// `none` (no open path right now — e.g. mid-migration).
+    pub transport: ShareTransport,
+    /// The selected path's remote address: an `ip:port` when direct, the
+    /// relay URL when relayed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via: Option<String>,
+    /// Round-trip time estimate of the selected path, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u64>,
+}
+
+/// Transport class of a tunnel's selected path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShareTransport {
+    /// Hole-punched UDP path peer-to-peer — full bandwidth.
+    Direct,
+    /// All traffic rides a relay server — subject to the relay's throughput
+    /// limits (n0's public relays throttle).
+    Relayed,
+    /// No open path in the snapshot (connection migrating or dying).
+    None,
+}
+
+impl std::fmt::Display for ShareTransport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            ShareTransport::Direct => "direct",
+            ShareTransport::Relayed => "relayed",
+            ShareTransport::None => "none",
+        })
+    }
 }
 
 /// A join awaiting the host's approval (manual mode).

@@ -21,6 +21,7 @@ pub mod forward;
 pub mod host;
 pub mod join;
 pub mod proto;
+pub mod status;
 
 pub use endpoint::ALPN;
 

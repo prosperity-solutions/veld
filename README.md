@@ -156,7 +156,7 @@ veld stop --name dev
 | `veld feedback threads [--name <n>]` | List feedback threads |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command). `--web`: publish the `web`-opted services via the configured gateway and print public URLs — password-protected by default (`--access link` to opt config-silent nodes out, `--password` to choose the password) |
 | `veld join <TICKET> [--label <n>] [--no-remember] [--json]` | Join a shared env by ticket; materializes the shared URLs locally (blocks until approved). `--no-remember`: don't cache a relay auth token entered at the prompt |
-| `veld shares [--json]` | List active shares, joins, and pending join requests |
+| `veld shares [--json]` | List active shares, joins, and pending join requests. Each live tunnel shows its transport: `direct` (full bandwidth) or `relayed via <relay>` (throughput limited by the relay) plus RTT |
 | `veld approve <REQ_ID> [--json]` | Approve a pending join request |
 | `veld deny <REQ_ID> [--json]` | Deny a pending join request |
 | `veld unshare [SHARE_ID] [--json]` | Stop hosting a share (defaults to the sole active share) |
@@ -384,7 +384,7 @@ The gateway `token` (and any relay token) is resolved in the **daemon's** enviro
 
 WebSockets (HMR) work through the gateway; redirects to shared sibling services are rewritten to their public URLs. Fidelity is best-effort by design: the app sees its own origin hostname (dev-server host allow-lists pass untouched), the public host arrives in `X-Forwarded-Host`, and response cookies scoped to origin hostnames are made host-only. Apps with hard-coded absolute URLs, strict CORS allow-lists, or OAuth redirect URIs need those configured for the public host — that's the operator's domain setup, not something Veld rewrites. One password caveat for multi-service shares: the session cookie is per public host, so a password-protected API called cross-origin from a shared frontend will get 401s — give API nodes `"web": { "access": "link" }` (their slugs stay unguessable and only the app's code ever uses them).
 
-In the browser, the overlay's arc menu (under **More**) has **Copy public URL** — it swaps the host of your *current* page for the public one, keeping path, query, and hash, so a deep link to the exact screen you're looking at lands on your recipient's screen too.
+In the browser, the overlay's arc menu (under **More**) has two sharing tools. **Web sharing** opens a card that starts (and stops) a web share for the current page's run without touching the terminal, shows the public URL and password, and displays each live tunnel's transport — `direct`, or `relayed via <relay>` with a throughput warning, the usual answer to "why is my share slow?". **Copy public URL** swaps the host of your *current* page for the public one, keeping path, query, and hash, so a deep link to the exact screen you're looking at lands on your recipient's screen too.
 
 Deploying the gateway is one container (`ghcr.io/prosperity-solutions/veld-gateway`) plus a wildcard DNS record — see the [gateway operator guide](docs/gateway.md).
 

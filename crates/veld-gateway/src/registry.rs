@@ -361,6 +361,34 @@ impl Registry {
         // The slug binds to the host's *authenticated* node id (the identity
         // proven by the QUIC handshake), not whatever the ticket claims.
         let host_node_id = conn.remote_id();
+
+        // Operators debugging slow shares need to know whether this tunnel is
+        // direct or rides a relay (public relays throttle throughput). The
+        // path often starts on the relay and upgrades once hole-punching
+        // lands, so log the settled state a little later too.
+        let path = veld_share::status::connection_info(&conn, "host");
+        info!(
+            host = %host_node_id,
+            transport = %path.transport,
+            via = path.via.as_deref().unwrap_or("-"),
+            "share tunnel established"
+        );
+        {
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(Duration::from_secs(15)).await;
+                if conn.close_reason().is_none() {
+                    let path = veld_share::status::connection_info(&conn, "host");
+                    info!(
+                        host = %conn.remote_id(),
+                        transport = %path.transport,
+                        via = path.via.as_deref().unwrap_or("-"),
+                        rtt_ms = path.rtt_ms.unwrap_or(0),
+                        "share tunnel path settled"
+                    );
+                }
+            });
+        }
         let nodes: Vec<RegisteredNode> = manifest
             .nodes
             .iter()

@@ -169,6 +169,13 @@ Two consequences to know before sharing a non-trivial app:
   its own CORS/CSRF decisions sees same-origin rather than the caller — fine
   for the single-service flagship, a fidelity gap for tightly-coupled
   multi-service shares.
+- **Tunnel transport is logged.** On registration the gateway logs
+  `share tunnel established` with `transport=direct|relayed` and `via=<addr>`,
+  and ~15 s later `share tunnel path settled` with the post-hole-punching
+  state plus `rtt_ms`. A tunnel that stays `relayed` is capped by that relay's
+  throughput (n0's public relays throttle) — the first thing to check when a
+  share feels slow. The developer sees the same picture in `veld shares` and
+  the overlay's Web sharing card.
 - **Health**: `GET /healthz` answers `ok` on any Host (container/LB probes
   included). Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
