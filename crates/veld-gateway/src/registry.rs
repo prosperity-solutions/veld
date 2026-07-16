@@ -67,9 +67,11 @@ pub struct Registration {
     relay: RelayChoice,
     /// Lease deadline; refreshed by heartbeat re-`POST`s.
     deadline: std::sync::Mutex<Instant>,
-    /// The registration slot this occupies. Held for the registration's whole
-    /// lifetime and released (dropped) when the registration is removed, so the
-    /// semaphore bounds settled + in-flight registrations by one hard count.
+    /// The registration slot this occupies. Released when the last
+    /// `Arc<Registration>` drops — normally at `remove`, though an in-flight
+    /// proxy request holding a `SlugTarget` clone can pin it briefly longer
+    /// (bounded by the request). Always the safe direction: the count never
+    /// exceeds the cap, at most it under-admits for a moment.
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
@@ -150,7 +152,15 @@ pub struct Registry {
     /// registration is removed. Closes the leaked-token exhaustion vector
     /// (unbounded concurrent 75s dials) that a `regs.len()` check alone missed.
     slots: Arc<tokio::sync::Semaphore>,
-    endpoints: Mutex<HashMap<RelayChoice, Endpoint>>,
+    /// Configured cap, kept for accurate error messages.
+    max_registrations: usize,
+    /// One iroh endpoint per relay policy, **reference-counted** by its actual
+    /// users (in-flight dials + settled registrations). Endpoints are shared:
+    /// every share over the same relay reuses one endpoint, and iroh
+    /// `Endpoint::close()` aborts *all* its connections. So an endpoint is only
+    /// torn down when its user count hits zero — never out from under a
+    /// concurrent registration still mid-dial.
+    endpoints: Mutex<HashMap<RelayChoice, (Endpoint, usize)>>,
     regs: Mutex<HashMap<String, Arc<Registration>>>,
     slugs: Mutex<HashMap<String, SlugTarget>>,
 }
@@ -176,6 +186,7 @@ impl Registry {
             relays,
             secret_key,
             slots: Arc::new(tokio::sync::Semaphore::new(max_registrations)),
+            max_registrations,
             endpoints: Mutex::new(HashMap::new()),
             regs: Mutex::new(HashMap::new()),
             slugs: Mutex::new(HashMap::new()),
@@ -213,8 +224,8 @@ impl Registry {
         // always refreshes even at the cap.
         let permit = Arc::clone(&self.slots).try_acquire_owned().map_err(|_| {
             anyhow::anyhow!(
-                "gateway registration limit reached ({} live); refusing new shares",
-                self.slots.available_permits()
+                "gateway registration limit reached ({} max); refusing new shares",
+                self.max_registrations
             )
         })?;
 
@@ -236,15 +247,20 @@ impl Registry {
         let choice = RelayChoice::for_join(ticket_relays.iter(), &tokens);
         let endpoint = self.get_or_bind(&choice).await?;
 
+        // We now hold one endpoint user ref (get_or_bind incremented it). Every
+        // failure path below must release it so a token holder naming
+        // unique-but-unreachable relays can't leak endpoints — but release only
+        // *closes* the endpoint at zero users, so a concurrent registration
+        // dialing over the same shared relay is never aborted.
+
         // Distinguish "relay rejected our token" from "host unreachable" up
-        // front, with the same eviction discipline as the daemon: a probe
-        // endpoint bound only to discover the denial must not leak.
+        // front (a probe endpoint bound only to discover the denial must not
+        // leak).
         if matches!(choice, RelayChoice::Custom(_)) {
             if let RelayAuth::Denied(relay_url) =
                 relay_auth_status(&endpoint, RELAY_AUTH_TIMEOUT).await
             {
-                drop(endpoint);
-                self.evict_endpoint(&choice).await;
+                self.release_endpoint(&choice).await;
                 bail!(
                     "relay {relay_url} denied the gateway's authentication — the relay token \
                      configured on the gateway is missing or wrong"
@@ -260,23 +276,19 @@ impl Registry {
         .await;
         let (conn, manifest) = match dial {
             Ok(Ok(ok)) => ok,
-            // Any dial failure: evict the endpoint we just bound so a token
-            // holder naming unique-but-unreachable relays can't leak one
-            // endpoint (fresh key + UDP socket + magicsock tasks) per attempt.
-            // evict_endpoint no-ops if a live registration shares the choice.
             Ok(Err(e)) => {
-                self.evict_endpoint(&choice).await;
+                self.release_endpoint(&choice).await;
                 return Err(e).context("dialing the share host");
             }
             Err(_) => {
-                self.evict_endpoint(&choice).await;
+                self.release_endpoint(&choice).await;
                 bail!("timed out connecting to the host (unreachable, or no relay path)");
             }
         };
 
         if manifest.nodes.is_empty() {
             conn.close(0u32.into(), b"empty manifest");
-            self.evict_endpoint(&choice).await;
+            self.release_endpoint(&choice).await;
             bail!("share manifest has no nodes to expose");
         }
 
@@ -417,7 +429,9 @@ impl Registry {
             }
         }
         reg.conn.close(0u32.into(), b"registration removed");
-        self.evict_endpoint(&reg.relay).await;
+        // Release the endpoint user ref this registration held since its
+        // get_or_bind (closes the endpoint only if it was the last user).
+        self.release_endpoint(&reg.relay).await;
         info!(id = %reg.id, run = %reg.run, reason, "registration removed");
     }
 
@@ -465,11 +479,14 @@ impl Registry {
         Ok(tokens)
     }
 
-    /// Get (or bind on demand) the endpoint for `requested` — same
-    /// double-bind-free discipline as the daemon's endpoint map.
+    /// Get (or bind on demand) the endpoint for `requested`, **incrementing its
+    /// user count**. Every successful call must be paired with exactly one
+    /// [`release_endpoint`](Self::release_endpoint) — on any failure that
+    /// abandons the attempt, and (for a settled registration) in `remove`.
     async fn get_or_bind(&self, requested: &RelayChoice) -> Result<Endpoint> {
         let mut endpoints = self.endpoints.lock().await;
-        if let Some(ep) = endpoints.get(requested) {
+        if let Some((ep, users)) = endpoints.get_mut(requested) {
+            *users += 1;
             return Ok(ep.clone());
         }
         let key = match requested {
@@ -478,18 +495,31 @@ impl Registry {
         };
         let ep = bind_endpoint(key, requested).await?;
         info!(node_id = %ep.id(), relays = %requested, "gateway iroh endpoint bound");
-        endpoints.insert(requested.clone(), ep.clone());
+        endpoints.insert(requested.clone(), (ep.clone(), 1));
         Ok(ep)
     }
 
-    /// Close and drop an endpoint no live registration uses (probe endpoints
-    /// bound only to discover a relay auth denial must not leak).
-    async fn evict_endpoint(&self, choice: &RelayChoice) {
-        if self.regs.lock().await.values().any(|r| &r.relay == choice) {
-            return;
-        }
-        let ep = self.endpoints.lock().await.remove(choice);
-        if let Some(ep) = ep {
+    /// Release one user of `choice`'s endpoint; when the last user drops, close
+    /// and remove it. Because endpoints are shared and `close()` aborts *all*
+    /// their connections, this must only fire at zero users — never while a
+    /// concurrent registration is still dialing over the same relay.
+    async fn release_endpoint(&self, choice: &RelayChoice) {
+        let to_close = {
+            let mut endpoints = self.endpoints.lock().await;
+            match endpoints.get_mut(choice) {
+                Some((_, users)) => {
+                    *users = users.saturating_sub(1);
+                    if *users == 0 {
+                        endpoints.remove(choice).map(|(ep, _)| ep)
+                    } else {
+                        None
+                    }
+                }
+                None => None,
+            }
+        };
+        // Close outside the lock (close() awaits).
+        if let Some(ep) = to_close {
             ep.close().await;
         }
     }

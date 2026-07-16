@@ -25,6 +25,11 @@ const DEFAULT_LISTEN: &str = "0.0.0.0:8080";
 /// well under it. Raise via `VELD_GATEWAY_MAX_REGISTRATIONS` for a large fleet.
 const DEFAULT_MAX_REGISTRATIONS: usize = 512;
 
+/// Upper bound on the configured cap — far above any real fleet, but low
+/// enough to keep `tokio::sync::Semaphore::new` well inside its valid range
+/// (it panics near `usize::MAX`).
+const MAX_REGISTRATIONS_CEILING: usize = 1_000_000;
+
 /// Fully resolved gateway configuration.
 #[derive(Debug, Clone)]
 pub struct GatewayConfig {
@@ -194,8 +199,10 @@ impl GatewayConfig {
                 .with_context(|| format!("invalid VELD_GATEWAY_MAX_REGISTRATIONS `{raw}`"))?,
             None => file.max_registrations.unwrap_or(DEFAULT_MAX_REGISTRATIONS),
         };
-        if max_registrations == 0 {
-            bail!("max_registrations must be positive");
+        // Bound both ends: 0 would refuse every share; an absurd value would
+        // overflow `Semaphore::new`'s internal permit representation and panic.
+        if !(1..=MAX_REGISTRATIONS_CEILING).contains(&max_registrations) {
+            bail!("max_registrations must be between 1 and {MAX_REGISTRATIONS_CEILING}");
         }
 
         Ok(Self {
@@ -342,6 +349,11 @@ mod tests {
         let mut zero = base.to_vec();
         zero.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "0"));
         assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&zero)).is_err());
+
+        // An absurd value is rejected (would panic Semaphore::new).
+        let mut huge = base.to_vec();
+        huge.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "99999999999"));
+        assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&huge)).is_err());
     }
 
     #[test]
