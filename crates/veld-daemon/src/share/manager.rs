@@ -306,9 +306,13 @@ impl ShareManager {
                     };
 
                     let node_id = conn.remote_id();
-                    let approved = mgr
-                        .resolve_approval(&share_id, mode, node_id, &req.label)
-                        .await;
+                    // Sanitize the peer's self-label at ingestion: everything
+                    // downstream — approval prompts, log lines (`veld logs`
+                    // ends up on a terminal), the live-connection map, the
+                    // dashboard — then carries a string that can't smuggle
+                    // ANSI escapes or bidi overrides.
+                    let label = veld_share::status::sanitize_label(&req.label);
+                    let approved = mgr.resolve_approval(&share_id, mode, node_id, &label).await;
 
                     if !approved {
                         host::deny(send, "join denied").await;
@@ -322,7 +326,7 @@ impl ShareManager {
                     // observe the share gone here and tear down. Registering after
                     // the re-check would let a conn slip past unshare's close.
                     let sid = conn.stable_id();
-                    mgr.register_conn(&share_id, conn.clone(), &req.label).await;
+                    mgr.register_conn(&share_id, conn.clone(), &label).await;
                     if !mgr.shares.lock().await.contains_key(&share_id) {
                         mgr.unregister_conn(&share_id, sid).await;
                         mgr.clear_claim(&share_id, node_id).await;
@@ -330,7 +334,7 @@ impl ShareManager {
                         return;
                     }
 
-                    debug!(label = %req.label, share = %share_id, "join approved");
+                    debug!(label = %label, share = %share_id, "join approved");
                     let _ = host::accept_and_serve(conn, send, host_share).await;
                     mgr.unregister_conn(&share_id, sid).await;
                     // First-mode: release the claim when the pinned peer's session

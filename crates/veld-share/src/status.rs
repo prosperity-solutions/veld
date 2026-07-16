@@ -54,15 +54,24 @@ pub fn connection_info(conn: &Connection, label: &str) -> ShareConnectionInfo {
 }
 
 /// Neutralize a peer-chosen label for display: control characters (ANSI
-/// escapes, newlines, tabs) are dropped — `veld shares` prints this to the
-/// host's terminal, where `\x1b[…` would otherwise let an approved joiner
-/// rewrite the screen — and the length is capped.
-fn sanitize_label(label: &str) -> String {
+/// escapes, newlines, tabs) and Unicode bidi/isolate overrides (U+202E and
+/// friends — the secondary terminal/reader-spoofing vector) are dropped, and
+/// the length is capped. `veld shares` prints labels to the host's terminal,
+/// where `\x1b[…` would otherwise let an approved joiner rewrite the screen;
+/// daemons also sanitize at ingestion (accept loop) so log lines and the
+/// pending-approval list carry clean labels too.
+pub fn sanitize_label(label: &str) -> String {
     label
         .chars()
-        .filter(|c| !c.is_control())
+        .filter(|c| !c.is_control() && !is_bidi_override(*c))
         .take(MAX_LABEL_CHARS)
         .collect()
+}
+
+/// Unicode directional-override and isolate controls (format chars, so not
+/// caught by `is_control`): LRM/RLM/ALM, LRE..RLO, LRI..PDI.
+fn is_bidi_override(c: char) -> bool {
+    matches!(c, '\u{200E}' | '\u{200F}' | '\u{061C}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// Strip the scheme tag from a `TransportAddr` Display form (`custom:…` for
@@ -103,6 +112,8 @@ mod tests {
             "evil[2J[1;31mFAKElinetab"
         );
         assert_eq!(sanitize_label("alice's laptop"), "alice's laptop");
+        // Bidi overrides (format chars, not control chars) are dropped too.
+        assert_eq!(sanitize_label("abc\u{202E}gpj.exe"), "abcgpj.exe");
         // Length is capped.
         assert_eq!(sanitize_label(&"x".repeat(500)).chars().count(), 120);
     }
