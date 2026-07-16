@@ -243,8 +243,11 @@ jobs:
         run: |
           VERSION="${{ needs.plan.outputs.new_release_version }}"
           mkdir -p dist/amd64 dist/arm64
-          tar -xzf "artifacts/veld-gateway-${VERSION}-linux-amd64.tar.gz" -C dist/amd64 veld-gateway
-          tar -xzf "artifacts/veld-gateway-${VERSION}-linux-arm64.tar.gz" -C dist/arm64 veld-gateway
+          # The tarballs are packed with `-C dist-gateway .`, so the binary is
+          # stored as `./veld-gateway` — extract everything instead of naming
+          # the member, which GNU tar would reject as "Not found in archive".
+          tar -xzf "artifacts/veld-gateway-${VERSION}-linux-amd64.tar.gz" -C dist/amd64
+          tar -xzf "artifacts/veld-gateway-${VERSION}-linux-arm64.tar.gz" -C dist/arm64
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
