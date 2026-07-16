@@ -72,6 +72,10 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .share-bar .share-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
 .share-bar .share-on{color:var(--text2)}
 .share-bar .share-on b{color:var(--text);font-weight:600}
+.share-bar .share-conn{color:var(--text2);display:inline-flex;align-items:center;gap:5px}
+.share-bar .share-conn .conn-dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block;flex-shrink:0}
+.share-bar .share-conn.relayed{color:var(--yellow)}
+.share-bar .share-conn.relayed .conn-dot{background:var(--yellow)}
 .share-bar .share-toggle{display:flex;align-items:center;gap:6px;color:var(--text2);cursor:pointer;margin-left:auto}
 .share-bar .share-toggle input{appearance:none;-webkit-appearance:none;width:15px;height:15px;border:1px solid var(--border);border-radius:4px;background:var(--surface2);cursor:pointer;position:relative;flex-shrink:0}
 .share-bar .share-toggle input:hover{border-color:var(--text2)}
@@ -235,7 +239,9 @@ async function refresh(){
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
     statusText.textContent=running>0?running+' running':(joinCount>0?joinCount+' joined':(total>0?'all stopped':'no environments'));
-    const sf=shares.map(s=>s.run+':'+s.approve+':'+s.id+':'+(s.joiners||0)).sort().join(',');
+    // The fingerprint must cover connection transport too, or a tunnel
+    // upgrading relayed → direct never re-renders its badge.
+    const sf=shares.map(s=>s.run+':'+s.approve+':'+s.id+':'+(s.joiners||0)+':'+(s.connections||[]).map(c=>c.transport+'@'+(c.via||'')).join('+')).sort().join(',');
     const f=fp(data)+'||'+sf+'||j'+joinCount;if(f===lastFP)return;lastFP=f;render(data);
   }catch(e){statusDot.innerHTML='<span class="dot off"></span>';statusText.textContent='disconnected';}
 }
@@ -289,6 +295,9 @@ function render(data){
       }else if(peerShare){
         h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(peerShare.id)+'" title="Stop sharing">Stop sharing</button>';
       }
+      if(run.status==='running'&&!webShares.length){
+        h+='<button class="card-btn" data-action="start-web-share" data-run="'+esc(run.name)+'" title="Publish the web-opted services on the public web (password-protected)">Share to web</button>';
+      }
       h+='</div>';
       // Peer share status strip.
       if(peerShare){
@@ -298,6 +307,7 @@ function render(data){
         h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(peerShare.join_url||'')+'">Copy link</button>';
         h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(peerShare.ticket||'')+'">Copy command</button>';
         h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(peerShare.id)+'"'+(peerShare.approve==='auto'?' checked':'')+'> auto-accept</label>';
+        h+=connSpans(peerShare);
         h+='</div>';
       }
       // Public web share strip(s) — started from the CLI (`veld share --web`);
@@ -320,6 +330,7 @@ function render(data){
           h+='<button class="card-btn" data-action="copy-public" data-url="'+esc(w.web_password)+'" title="Copy the viewer password (send it on a separate channel from the URL)">Copy password</button>';
         }
         h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(w.id)+'" title="Stop public web share">Stop web</button>';
+        h+=connSpans(w);
         h+='</div>';
       }
       // Segmented control
@@ -627,6 +638,25 @@ function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
+// One badge per live tunnel: direct (green, full bandwidth) or relayed
+// (yellow — throughput is capped by the relay, the usual cause of slow
+// shares). `connections` is absent from pre-transport-reporting daemons.
+function connSpans(share){
+  let h='';
+  for(const c of (share.connections||[])){
+    const who=c.label||String(c.node_id||'').slice(0,10);
+    const rtt=(c.rtt_ms!=null)?(', rtt '+c.rtt_ms+'ms'):'';
+    if(c.transport==='direct'){
+      h+='<span class="share-conn" title="'+esc(who+': direct ('+(c.via||'')+rtt+')')+'"><span class="conn-dot"></span>'+esc(who)+': direct'+esc(rtt)+'</span>';
+    }else if(c.transport==='relayed'){
+      h+='<span class="share-conn relayed" title="Throughput is limited by the relay"><span class="conn-dot"></span>'+esc(who)+': relayed via '+esc(c.via||'unknown relay')+esc(rtt)+'</span>';
+    }else{
+      h+='<span class="share-conn"><span class="conn-dot" style="background:var(--dim)"></span>'+esc(who)+': no open path</span>';
+    }
+  }
+  return h;
+}
+
 const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
 function setJoinState(kind,data){
   const ov=document.getElementById('join-overlay'),body=document.getElementById('join-body');
@@ -759,6 +789,21 @@ document.addEventListener('click',async e=>{
     }catch(e){}
     await refresh();refreshShares();
     if(copied){document.querySelectorAll('.card').forEach(c=>{if(c.dataset.run===run){const cb=c.querySelector('[data-action="copy-join"]');if(cb)flashBtn(cb,'Link copied!');}});}
+    return;
+  }
+  if(act==='start-web-share'){
+    b.disabled=true;const run=b.dataset.run;
+    try{
+      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,web:true})});
+      if(!r.ok){
+        // The daemon's error names the fix (no gateway configured, no
+        // web-opted nodes, …) — show it rather than failing silently.
+        const detail=(await r.text()).trim();
+        alert('Web sharing failed: '+(detail||r.status));
+      }
+    }catch(e){alert('Web sharing failed: could not reach the daemon');}
+    b.disabled=false;
+    await refresh();refreshShares();
     return;
   }
   if(act==='stop-share'){try{await fetch('/api/shares/'+encodeURIComponent(b.dataset.share),{method:'DELETE',headers:H});}catch(e){}refresh();refreshShares();return;}

@@ -356,6 +356,9 @@ pub async fn list(json: bool) -> i32 {
                             output::cyan(pw)
                         );
                     }
+                    for c in &s.connections {
+                        println!("  {}", connection_line(&s.id, c));
+                    }
                 }
             }
             if !list.joins.is_empty() {
@@ -369,6 +372,11 @@ pub async fn list(json: bool) -> i32 {
                     .map(|j| vec![j.id.clone(), j.nodes.join(", "), j.urls.join(" ")])
                     .collect();
                 output::print_table(&["JOIN", "NODES", "URLS"], &rows);
+                for j in &list.joins {
+                    for c in &j.connections {
+                        println!("  {}", connection_line(&j.id, c));
+                    }
+                }
             }
             0
         }
@@ -376,6 +384,38 @@ pub async fn list(json: bool) -> i32 {
             output::print_error(&e.to_string(), json);
             1
         }
+    }
+}
+
+/// One human line describing a tunnel's transport: who is connected and
+/// whether traffic is direct or riding a relay. Relayed tunnels get a hint —
+/// they are the usual answer to "why is my share slow?" (public relays
+/// throttle throughput).
+fn connection_line(id: &str, c: &veld_core::share::ShareConnectionInfo) -> String {
+    use veld_core::share::ShareTransport;
+    let who = if c.label.is_empty() {
+        c.node_id.chars().take(10).collect::<String>()
+    } else {
+        c.label.clone()
+    };
+    let rtt = c
+        .rtt_ms
+        .map(|ms| format!(", rtt {ms}ms"))
+        .unwrap_or_default();
+    match c.transport {
+        ShareTransport::Direct => {
+            let via = c.via.as_deref().unwrap_or("-");
+            output::dim(&format!("{id} {who}: direct ({via}{rtt})"))
+        }
+        ShareTransport::Relayed => format!(
+            "{} {}",
+            output::dim(&format!("{id} {who}:")),
+            output::yellow(&format!(
+                "relayed via {}{rtt} — throughput limited by the relay",
+                c.via.as_deref().unwrap_or("unknown relay")
+            ))
+        ),
+        ShareTransport::None => output::dim(&format!("{id} {who}: no open path")),
     }
 }
 
@@ -493,5 +533,57 @@ pub async fn leave(id: Option<String>, json: bool) -> i32 {
             output::print_error(&e.to_string(), json);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::connection_line;
+    use veld_core::share::{ShareConnectionInfo, ShareTransport};
+
+    fn info(transport: ShareTransport, label: &str) -> ShareConnectionInfo {
+        ShareConnectionInfo {
+            node_id: "aaaabbbbccccdddd".into(),
+            label: label.into(),
+            transport,
+            via: Some("203.0.113.7:4711".into()),
+            rtt_ms: Some(12),
+        }
+    }
+
+    // Substring assertions survive the ANSI color wrapping (content is inside
+    // the escape sequences), so these hold with or without NO_COLOR.
+    #[test]
+    fn relayed_line_names_the_relay_and_the_cost() {
+        let mut c = info(ShareTransport::Relayed, "gateway share.example");
+        c.via = Some("https://euw1-1.relay.example./".into());
+        let line = connection_line("sh-1", &c);
+        assert!(line.contains("gateway share.example"), "{line}");
+        assert!(
+            line.contains("relayed via https://euw1-1.relay.example./"),
+            "{line}"
+        );
+        assert!(line.contains("rtt 12ms"), "{line}");
+        assert!(line.contains("throughput limited by the relay"), "{line}");
+    }
+
+    #[test]
+    fn direct_line_shows_the_address_without_the_warning() {
+        let line = connection_line("sh-1", &info(ShareTransport::Direct, ""));
+        // Empty label → shortened node id identifies the peer.
+        assert!(
+            line.contains("aaaabbbbcc: direct (203.0.113.7:4711, rtt 12ms)"),
+            "{line}"
+        );
+        assert!(!line.contains("throughput limited"), "{line}");
+    }
+
+    #[test]
+    fn pathless_snapshot_reports_no_open_path() {
+        let mut c = info(ShareTransport::None, "host");
+        c.via = None;
+        c.rtt_ms = None;
+        let line = connection_line("sh-1", &c);
+        assert!(line.contains("host: no open path"), "{line}");
     }
 }

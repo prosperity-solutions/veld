@@ -101,7 +101,8 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
 | `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
-| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable) |
+| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable). Deliberately does not affect `X-Forwarded-Host` |
+| `VELD_GATEWAY_TRUST_FORWARDED_HOST` | `trust_forwarded_host` | `false` | Trust `X-Forwarded-Host` (first entry) as the host the viewer addressed: it overrides `Host` for slug routing, the upstream `X-Forwarded-Host`, and Referer rewriting. Required behind a CDN that rewrites `Host` to its origin (see [Behind a CDN](#behind-a-cdn-cloudfront)). Enable ONLY behind an edge that **overwrites or strips** inbound `X-Forwarded-Host` — an edge that passes it through lets viewers inject the host your apps see |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -114,7 +115,8 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   "relays": [{ "url": "https://relay.acme.internal", "token": { "env": "RELAY_TOKEN" } }],
   "lease_secs": 90,
   "max_registrations": 512,
-  "trust_forwarded_headers": false
+  "trust_forwarded_headers": false,
+  "trust_forwarded_host": false
 }
 ```
 
@@ -169,10 +171,76 @@ Two consequences to know before sharing a non-trivial app:
   its own CORS/CSRF decisions sees same-origin rather than the caller — fine
   for the single-service flagship, a fidelity gap for tightly-coupled
   multi-service shares.
+- **Tunnel transport is logged.** On registration the gateway logs
+  `share tunnel established` with `transport=direct|relayed` and `via=<addr>`,
+  and ~15 s later `share tunnel path settled` with the post-hole-punching
+  state plus `rtt_ms`. A tunnel that stays `relayed` is capped by that relay's
+  throughput (n0's public relays throttle) — the first thing to check when a
+  share feels slow. The developer sees the same picture in `veld shares` and
+  the overlay's Web sharing card.
 - **Health**: `GET /healthz` answers `ok` on any Host (container/LB probes
   included). Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
   safe; in-flight requests finish and heartbeats re-register.
+
+## Behind a CDN (CloudFront)
+
+A CDN in front of the platform LB adds a wrinkle: CloudFront (and most CDNs
+with a custom origin) **rewrites `Host` to the origin's hostname** when
+forwarding — and the platform underneath (e.g. an ingress that routes by its
+own hostname) usually *requires* that, so you can't just forward the viewer's
+`Host`. The gateway then sees the platform hostname instead of
+`<slug>.<domain>` and answers 404 for every share.
+
+The fix is two-sided:
+
+1. **Carry the viewer's host in `X-Forwarded-Host`.** On CloudFront, attach a
+   CloudFront Function (viewer request) that copies the viewer `Host` in. The
+   assignment **overwrites** anything a viewer sent — that's load-bearing, not
+   cosmetic: the gateway takes the *first* `X-Forwarded-Host` entry, so an
+   edge that appended (or passed a viewer's value through) would let viewers
+   pick the host your apps see. Keep the header edge-owned:
+
+   ```js
+   function handler(event) {
+     var request = event.request;
+     request.headers['x-forwarded-host'] = { value: request.headers.host.value };
+     return request;
+   }
+   ```
+
+   Add the distribution's alternate domain names for `<domain>` and
+   `*.<domain>` (with a matching wildcard cert in ACM), and point DNS at the
+   distribution.
+
+   If the apex `<domain>` rides the distribution too, the **registration API
+   flows through CloudFront**: the behavior must allow **all HTTP methods**
+   (registration is a Bearer-authenticated `POST`/`DELETE`; CloudFront
+   defaults to GET/HEAD, which turns every registration into a silent 403 —
+   viewer proxying works, but no share ever appears). CloudFront forwards the
+   `Authorization` header automatically for non-GET/HEAD methods once they
+   are allowed, so no extra header config is needed. Alternatively, point the
+   apex's DNS straight at the platform LB and route only `*.<domain>` through
+   CloudFront — registrations don't benefit from a CDN anyway.
+
+2. **Set `VELD_GATEWAY_TRUST_FORWARDED_HOST=true`** so the gateway routes by
+   that `X-Forwarded-Host`. It is a separate opt-in from
+   `VELD_GATEWAY_TRUST_FORWARDED` on purpose: each trusts a different header
+   with a different failure mode.
+
+Rate-limiting caveat with a CDN in front: `VELD_GATEWAY_TRUST_FORWARDED`
+keys the password rate limit on the **last** `X-Forwarded-For` entry — the
+one your platform LB appended, which behind a CDN is the CDN's edge IP, not
+the viewer's. Password attempts are then budgeted per CDN edge (all viewers
+behind one PoP share a bucket), and the per-slug limit is the effective
+brute-force bound. That's a coarser key than the LB-only setup, not a
+security hole — but know it before you wonder why two colleagues behind the
+same PoP can rate-limit each other. Per-viewer keying through a CDN needs a
+trust-depth knob the gateway doesn't have yet.
+
+Caching note: leave the distribution's default behavior at "no caching" (or
+forward all headers/cookies/query strings) — shares proxy live dev servers and
+password-gated content, which a shared URL-keyed cache must not store.
 
 ## Viewer access control (passwords)
 

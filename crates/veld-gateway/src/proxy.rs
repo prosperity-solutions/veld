@@ -76,10 +76,11 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         socket_ip.as_deref(),
         state.config.trust_forwarded_headers,
     );
-    let public_host = parts
-        .headers
-        .get(header::HOST)
-        .and_then(|v| v.to_str().ok())
+    // The host the viewer addressed — behind a trusted CDN/LB that rewrites
+    // `Host` to its origin, the viewer's host arrives in `X-Forwarded-Host`.
+    // This is what goes upstream as `X-Forwarded-Host` and what Referer
+    // rewriting matches against.
+    let public_host = crate::server::viewer_host(&parts.headers, state.config.trust_forwarded_host)
         .unwrap_or_default()
         .to_owned();
 
@@ -281,11 +282,11 @@ fn build_upstream_request(
     // Forwarding metadata, set authoritatively (inbound copies were stripped
     // above). The public scheme is always https — the gateway either
     // terminates TLS itself or sits behind an external TLS terminator, and the
-    // minted URLs are always https. X-Forwarded-For is reset to the immediate
-    // peer only: trusting an inbound chain from an anonymous-reachable edge
-    // would let any viewer spoof it. (An operator with a trusted upstream LB
-    // that wants the real client chain is a future `trust_forwarded_headers`
-    // opt-in — the safe default is to overwrite.)
+    // minted URLs are always https. X-Forwarded-For defaults to the immediate
+    // peer only — trusting an inbound chain from an anonymous-reachable edge
+    // would let any viewer spoof it; behind a sanitising LB the
+    // `trust_forwarded_headers` opt-in forwards the chain instead (see
+    // `forwarded_for_value`).
     if let Ok(v) = HeaderValue::from_str(public_host) {
         headers.insert("x-forwarded-host", v);
     }

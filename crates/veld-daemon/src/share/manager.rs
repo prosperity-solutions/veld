@@ -109,6 +109,14 @@ struct WebRegistration {
     heartbeat: JoinHandle<()>,
 }
 
+/// A live inbound connection to a hosted share: the peer's untrusted
+/// self-label plus the QUIC connection (kept for force-close on unshare and
+/// transport introspection in `list`).
+struct PeerConn {
+    label: String,
+    conn: Connection,
+}
+
 /// A join parked awaiting the host's manual approval.
 struct PendingRequest {
     id: String,
@@ -163,8 +171,9 @@ pub struct ShareManager {
     /// For `first` mode: the node id that claimed each share, keyed by share id.
     claims: Mutex<HashMap<String, EndpointId>>,
     /// Live inbound connections per hosted share (keyed by connection stable id),
-    /// so `unshare` can close them and the dashboard can count joiners.
-    conns: Mutex<HashMap<String, HashMap<usize, Connection>>>,
+    /// so `unshare` can close them and the dashboard can count joiners and
+    /// show each tunnel's transport (direct vs relayed).
+    conns: Mutex<HashMap<String, HashMap<usize, PeerConn>>>,
 }
 
 impl ShareManager {
@@ -297,9 +306,13 @@ impl ShareManager {
                     };
 
                     let node_id = conn.remote_id();
-                    let approved = mgr
-                        .resolve_approval(&share_id, mode, node_id, &req.label)
-                        .await;
+                    // Sanitize the peer's self-label at ingestion: everything
+                    // downstream — approval prompts, log lines (`veld logs`
+                    // ends up on a terminal), the live-connection map, the
+                    // dashboard — then carries a string that can't smuggle
+                    // ANSI escapes or bidi overrides.
+                    let label = veld_share::status::sanitize_label(&req.label);
+                    let approved = mgr.resolve_approval(&share_id, mode, node_id, &label).await;
 
                     if !approved {
                         host::deny(send, "join denied").await;
@@ -313,7 +326,7 @@ impl ShareManager {
                     // observe the share gone here and tear down. Registering after
                     // the re-check would let a conn slip past unshare's close.
                     let sid = conn.stable_id();
-                    mgr.register_conn(&share_id, conn.clone()).await;
+                    mgr.register_conn(&share_id, conn.clone(), &label).await;
                     if !mgr.shares.lock().await.contains_key(&share_id) {
                         mgr.unregister_conn(&share_id, sid).await;
                         mgr.clear_claim(&share_id, node_id).await;
@@ -321,7 +334,7 @@ impl ShareManager {
                         return;
                     }
 
-                    debug!(label = %req.label, share = %share_id, "join approved");
+                    debug!(label = %label, share = %share_id, "join approved");
                     let _ = host::accept_and_serve(conn, send, host_share).await;
                     mgr.unregister_conn(&share_id, sid).await;
                     // First-mode: release the claim when the pinned peer's session
@@ -356,14 +369,20 @@ impl ShareManager {
 
     /// Track a live inbound connection so `unshare` can force it closed and the
     /// dashboard can count joiners.
-    async fn register_conn(&self, share_id: &str, conn: Connection) {
+    async fn register_conn(&self, share_id: &str, conn: Connection, label: &str) {
         let sid = conn.stable_id();
         self.conns
             .lock()
             .await
             .entry(share_id.to_string())
             .or_default()
-            .insert(sid, conn);
+            .insert(
+                sid,
+                PeerConn {
+                    label: label.to_owned(),
+                    conn,
+                },
+            );
     }
 
     /// Drop a connection from the live set when its session ends.
@@ -815,13 +834,21 @@ impl ShareManager {
 
     /// List active shares and joins.
     pub async fn list(&self) -> SharesList {
-        // Snapshot joiner counts first (separate lock) to avoid nested locking.
-        let counts: HashMap<String, usize> = self
+        // Snapshot per-share connection state first (separate lock) to avoid
+        // nested locking. Joiner count falls out of the snapshot's length.
+        let peer_info: HashMap<String, Vec<veld_core::share::ShareConnectionInfo>> = self
             .conns
             .lock()
             .await
             .iter()
-            .map(|(k, v)| (k.clone(), v.len()))
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.values()
+                        .map(|p| veld_share::status::connection_info(&p.conn, &p.label))
+                        .collect(),
+                )
+            })
             .collect();
         let base = join_base();
         let shares = self
@@ -839,7 +866,7 @@ impl ShareManager {
                 // and the gateway — never surfaced for copy/paste.
                 ticket: s.web.is_none().then(|| s.ticket.clone()),
                 join_url: s.web.is_none().then(|| format!("{base}/join#{}", s.ticket)),
-                joiners: counts.get(&s.id).copied().unwrap_or(0),
+                joiners: peer_info.get(&s.id).map(|v| v.len()).unwrap_or(0),
                 public_urls: s
                     .web
                     .as_ref()
@@ -850,6 +877,7 @@ impl ShareManager {
                     .as_ref()
                     .and_then(|w| w.access.as_ref())
                     .and_then(|a| a.password.clone()),
+                connections: peer_info.get(&s.id).cloned().unwrap_or_default(),
             })
             .collect();
         let joins = self
@@ -868,6 +896,8 @@ impl ShareManager {
                 joiners: 0,
                 public_urls: Vec::new(),
                 web_password: None,
+                // The join's single tunnel, labeled for what it reaches.
+                connections: vec![veld_share::status::connection_info(&j.conn, "host")],
             })
             .collect();
         let pending = self
@@ -1026,8 +1056,8 @@ impl ShareManager {
         }
         // Close live tunnels so consumers stop being able to reach the host.
         if let Some(conns) = self.conns.lock().await.remove(id) {
-            for conn in conns.into_values() {
-                conn.close(0u32.into(), b"share stopped");
+            for peer in conns.into_values() {
+                peer.conn.close(0u32.into(), b"share stopped");
             }
         }
         info!(share_id = %id, "share stopped");
