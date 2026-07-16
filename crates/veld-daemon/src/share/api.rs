@@ -128,6 +128,13 @@ async fn start_web_share(
 
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
+    let run_id = manifest.run_id;
+
+    // Re-running `veld share --web` for the same run replaces the previous web
+    // share rather than stacking a second one: without this, the stale share
+    // keeps heartbeating and its old public URLs stay live until TTL, so the
+    // user who thinks they "re-shared" has two live URLs, one forgotten.
+    manager.unshare_web_shares_for_run(run_id).await;
 
     // The gateway is the sole intended joiner and the user just asked for
     // this exposure, so `auto` is the default; an explicit --approve still

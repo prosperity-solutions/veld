@@ -18,7 +18,7 @@ use iroh::endpoint::Connection;
 use iroh::{Endpoint, RelayUrl, SecretKey};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
-use veld_core::config::{RelayPolicy, SecretSource};
+use veld_core::config::RelayPolicy;
 use veld_core::share::{Capability, ShareTicket};
 use veld_share::endpoint::{
     RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_secret,
@@ -32,6 +32,11 @@ use crate::slug;
 const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 /// How long to watch a custom relay for an auth denial before dialing anyway.
 const RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Cap on concurrently live registrations. Bounds the blast radius of a leaked
+/// gateway token: each distinct capability holds an iroh connection + watcher
+/// task, so an attacker spamming fresh capabilities can't grow state without
+/// limit. Generous — one org's real environments stay far under it.
+const MAX_REGISTRATIONS: usize = 512;
 
 /// One publicly exposed hostname of a registered share.
 #[derive(Debug, Clone)]
@@ -88,11 +93,58 @@ pub struct SlugTarget {
     pub origin: String,
 }
 
+/// The gateway's relay confinement, with any tokens **already resolved once**
+/// at startup — so a `command`/`file` relay-token source can't be turned into
+/// a per-registration process-spawn / file-read by a stolen-token registrant
+/// spamming fresh capabilities, and a bad token config fails at boot.
+#[derive(Clone)]
+pub enum RelayAllowList {
+    /// No `sharing.relays` configured: join whatever a ticket advertises.
+    Unconfined,
+    /// Explicit `public`: no confinement, no tokens.
+    Public,
+    /// Self-hosted allow-list: parsed URL + resolved token. A ticket relay
+    /// must be one of these, or the registration is refused.
+    Custom(Vec<(RelayUrl, Option<String>)>),
+}
+
+impl RelayAllowList {
+    /// Resolve a config relay policy into an allow-list, running every token
+    /// source exactly once. Invalid URLs are dropped with a warning (matching
+    /// the daemon); a token that fails to resolve is a hard error.
+    pub async fn resolve(policy: Option<&RelayPolicy>) -> Result<Self> {
+        match policy {
+            None => Ok(Self::Unconfined),
+            Some(RelayPolicy::Public) => Ok(Self::Public),
+            Some(RelayPolicy::Custom(entries)) => {
+                let mut out = Vec::new();
+                for e in entries {
+                    let url = match e.url.parse::<RelayUrl>() {
+                        Ok(u) => u,
+                        Err(err) => {
+                            warn!(error = %err, url = %e.url, "ignoring invalid relay URL in gateway config");
+                            continue;
+                        }
+                    };
+                    let token = match &e.token {
+                        Some(src) => Some(resolve_secret(src).await.with_context(|| {
+                            format!("resolving the gateway's relay auth token for {}", e.url)
+                        })?),
+                        None => None,
+                    };
+                    out.push((url, token));
+                }
+                Ok(Self::Custom(out))
+            }
+        }
+    }
+}
+
 /// Owns the gateway's iroh endpoints and all live registrations.
 pub struct Registry {
     domain: String,
     lease: Duration,
-    relays: Option<RelayPolicy>,
+    relays: RelayAllowList,
     secret_key: SecretKey,
     endpoints: Mutex<HashMap<RelayChoice, Endpoint>>,
     regs: Mutex<HashMap<String, Arc<Registration>>>,
@@ -110,7 +162,7 @@ impl Registry {
     pub fn new(
         domain: String,
         lease: Duration,
-        relays: Option<RelayPolicy>,
+        relays: RelayAllowList,
         secret_key: SecretKey,
     ) -> Arc<Self> {
         Arc::new(Self {
@@ -144,6 +196,13 @@ impl Registry {
         // Stale entry (tunnel died between sweeps): drop it, then re-join.
         self.remove(&id, "re-registering").await;
 
+        // Cap live registrations (a leaked token can't grow state without
+        // bound). Checked after the heartbeat fast path, so an existing share
+        // always refreshes; only genuinely-new registrations are turned away.
+        if self.regs.lock().await.len() >= MAX_REGISTRATIONS {
+            bail!("gateway registration limit reached ({MAX_REGISTRATIONS}); refusing new shares");
+        }
+
         let addr = {
             use std::str::FromStr as _;
             iroh_tickets::endpoint::EndpointTicket::from_str(&ticket.iroh_ticket)
@@ -157,7 +216,7 @@ impl Registry {
         // an org gateway must never dial out to arbitrary relays named by a
         // registration.
         let ticket_relays: Vec<RelayUrl> = addr.relay_urls().cloned().collect();
-        let tokens = self.allowed_tokens(&ticket_relays).await?;
+        let tokens = self.allowed_tokens(&ticket_relays)?;
 
         let choice = RelayChoice::for_join(ticket_relays.iter(), &tokens);
         let endpoint = self.get_or_bind(&choice).await?;
@@ -325,24 +384,20 @@ impl Registry {
     }
 
     /// The relay auth tokens to attach for `ticket_relays`, enforcing the
-    /// allow-list when one is configured. Tokens only ever come from the
-    /// gateway's own config — never from the ticket — so a hostile
-    /// registration cannot make the gateway present a secret anywhere the
-    /// operator didn't configure.
-    async fn allowed_tokens(
+    /// allow-list when one is configured. Tokens come only from the gateway's
+    /// own (pre-resolved) config — never from the ticket — so a hostile
+    /// registration can't make the gateway present a secret anywhere the
+    /// operator didn't configure, and resolution never runs on this hot path.
+    fn allowed_tokens(
         &self,
         ticket_relays: &[RelayUrl],
     ) -> Result<std::collections::BTreeMap<String, String>> {
         let mut tokens = std::collections::BTreeMap::new();
-        let Some(policy) = &self.relays else {
-            // No policy configured: join whatever the ticket advertises
-            // (token-less). Fine for open/public relays.
-            return Ok(tokens);
-        };
-        let entries = match policy {
-            // Explicit `public`: no confinement, no tokens.
-            RelayPolicy::Public => return Ok(tokens),
-            RelayPolicy::Custom(entries) => entries,
+        let allowed = match &self.relays {
+            // No confinement (unconfigured, or explicit public): join whatever
+            // the ticket advertises, token-less.
+            RelayAllowList::Unconfined | RelayAllowList::Public => return Ok(tokens),
+            RelayAllowList::Custom(allowed) => allowed,
         };
 
         // Confinement means the gateway reaches the host *over an allow-listed
@@ -357,33 +412,18 @@ impl Registry {
             );
         }
 
-        // Parse the configured allow-list once; compare canonically via
-        // `RelayUrl` so `https://r` and `https://r/` match.
-        let mut allowed: Vec<(RelayUrl, Option<&SecretSource>)> = Vec::new();
-        for e in entries {
-            match e.url.parse::<RelayUrl>() {
-                Ok(url) => allowed.push((url, e.token.as_ref())),
-                Err(err) => {
-                    warn!(error = %err, url = %e.url, "ignoring invalid relay URL in gateway config")
-                }
-            }
-        }
-
         for ticket_url in ticket_relays {
+            // Canonical `RelayUrl` equality: `https://r` and `https://r/` match.
             let Some((_, token)) = allowed.iter().find(|(u, _)| u == ticket_url) else {
                 bail!(
                     "ticket advertises relay {ticket_url}, which is not in this gateway's \
                      relay allow-list — refusing to dial an unlisted relay"
                 );
             };
-            if let Some(source) = token {
-                let value = resolve_secret(source)
-                    .await
-                    .with_context(|| format!("resolving relay auth token for {ticket_url}"))?;
-                tokens.insert(ticket_url.to_string(), value);
+            if let Some(value) = token {
+                tokens.insert(ticket_url.to_string(), value.clone());
             }
         }
-        // A relay-less ticket (direct addresses only) has nothing to confine.
         Ok(tokens)
     }
 
@@ -455,16 +495,18 @@ mod tests {
 
     #[tokio::test]
     async fn allowed_tokens_confines_to_the_allow_list() {
-        use veld_core::config::RelayEntry;
+        use veld_core::config::{RelayEntry, SecretSource};
 
+        // Resolve the allow-list the way startup does (token source → value).
         let policy = RelayPolicy::Custom(vec![RelayEntry {
             url: "https://relay.acme.internal".into(),
             token: Some(SecretSource::Literal("s3cret".into())),
         }]);
+        let relays = RelayAllowList::resolve(Some(&policy)).await.unwrap();
         let reg = Registry::new(
             "share.example".into(),
             Duration::from_secs(90),
-            Some(policy),
+            relays,
             SecretKey::generate(),
         );
 
@@ -472,7 +514,7 @@ mod tests {
         let attacker: RelayUrl = "https://attacker.example".parse().unwrap();
 
         // A listed relay → the token comes from gateway config (never a ticket).
-        let tokens = reg.allowed_tokens(&[listed.clone()]).await.unwrap();
+        let tokens = reg.allowed_tokens(&[listed]).unwrap();
         assert_eq!(
             tokens.values().next().map(String::as_str),
             Some("s3cret"),
@@ -481,12 +523,12 @@ mod tests {
 
         // A ticket naming an unlisted relay is refused — the gateway never
         // dials out to a relay the operator didn't configure.
-        let err = reg.allowed_tokens(&[attacker]).await.unwrap_err();
+        let err = reg.allowed_tokens(&[attacker]).unwrap_err();
         assert!(err.to_string().contains("not in this gateway's"), "{err}");
 
         // A relay-less ticket under a Custom allow-list is refused too (no
         // silent fall back to public/direct dialing).
-        let err = reg.allowed_tokens(&[]).await.unwrap_err();
+        let err = reg.allowed_tokens(&[]).unwrap_err();
         assert!(err.to_string().contains("no relay"), "{err}");
     }
 

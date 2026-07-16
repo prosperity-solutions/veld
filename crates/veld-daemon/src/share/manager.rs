@@ -1028,6 +1028,27 @@ impl ShareManager {
         info!(join_id = %id, "left share");
         Ok(())
     }
+
+    /// Stop every **web** share minted from `run_id` (their gateway
+    /// registrations are unregistered by `unshare`). Used to make a repeat
+    /// `veld share --web` replace rather than stack. Returns how many stopped.
+    pub async fn unshare_web_shares_for_run(&self, run_id: Uuid) -> usize {
+        let ids: Vec<String> = {
+            let shares = self.shares.lock().await;
+            shares
+                .values()
+                .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let mut stopped = 0;
+        for id in ids {
+            if self.unshare(&id).await.is_ok() {
+                stopped += 1;
+            }
+        }
+        stopped
+    }
 }
 
 fn gen_id(prefix: &str) -> String {

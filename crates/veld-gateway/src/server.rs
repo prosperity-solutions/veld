@@ -21,6 +21,9 @@ use crate::registry::Registry;
 use crate::state::AppState;
 use crate::{api, proxy};
 
+/// Max time a client may take to send its request headers (slowloris guard).
+const HEADER_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub async fn run(config: GatewayConfig) -> Result<()> {
     // Resolve the registration auth token once, up front: a misconfigured
     // token source fails the boot, never a request.
@@ -28,13 +31,15 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
         .await
         .context("resolving the gateway registration auth token")?;
 
-    let secret_key = node_key(&config);
-    let registry = Registry::new(
-        config.domain.clone(),
-        config.lease,
-        config.relays.clone(),
-        secret_key,
-    );
+    // Resolve the relay allow-list (and any relay tokens) once, up front — a
+    // bad token source fails the boot, not a registration, and a `command`
+    // source can't be re-triggered per registration.
+    let relays = crate::registry::RelayAllowList::resolve(config.relays.as_ref())
+        .await
+        .context("resolving the gateway relay allow-list")?;
+
+    let secret_key = node_key(&config)?;
+    let registry = Registry::new(config.domain.clone(), config.lease, relays, secret_key);
     tokio::spawn(Arc::clone(&registry).sweep_expired_leases());
 
     let state = AppState {
@@ -58,11 +63,9 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
             let rustls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls.cert, &tls.key)
                 .await
                 .context("loading TLS certificate/key")?;
-            axum_server::bind_rustls(cfg.listen, rustls)
-                .handle(handle)
-                .serve(app)
-                .await
-                .context("serving (TLS)")?;
+            let mut server = axum_server::bind_rustls(cfg.listen, rustls).handle(handle);
+            harden(&mut server);
+            server.serve(app).await.context("serving (TLS)")?;
         }
         None => {
             info!(
@@ -70,14 +73,24 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
                 domain = %cfg.domain,
                 "gateway listening (plain HTTP — expecting an external TLS terminator)"
             );
-            axum_server::bind(cfg.listen)
-                .handle(handle)
-                .serve(app)
-                .await
-                .context("serving")?;
+            let mut server = axum_server::bind(cfg.listen).handle(handle);
+            harden(&mut server);
+            server.serve(app).await.context("serving")?;
         }
     }
     Ok(())
+}
+
+/// Bound how long a connection may take to send its request headers. Closes
+/// the slowloris hole on the built-in-TLS path where the gateway is the direct
+/// internet edge (behind an external terminator the terminator handles it).
+/// This times out only the inbound header read — response streaming and
+/// WebSocket upgrades are unaffected.
+fn harden<A>(server: &mut axum_server::Server<A>) {
+    server
+        .http_builder()
+        .http1()
+        .header_read_timeout(HEADER_READ_TIMEOUT);
 }
 
 /// Route a request by `Host`: apex → registration API, `<slug>.<domain>` →
@@ -129,26 +142,39 @@ fn host_without_port(host: &str) -> &str {
     host.split(':').next().unwrap_or(host)
 }
 
-/// The gateway's persistent iroh identity. Stored under the state dir (or the
-/// platform data dir) so a volume-backed deployment keeps a stable node id;
-/// falls back to an ephemeral key when nothing is writable (stateless
-/// container without a volume — fine, shares are ephemeral anyway).
-fn node_key(config: &GatewayConfig) -> iroh::SecretKey {
-    let dir = config
-        .state_dir
-        .clone()
-        .or_else(|| dirs::data_dir().map(|d| d.join("veld-gateway")));
-    if let Some(dir) = dir {
+/// The gateway's persistent iroh identity. When an operator explicitly
+/// configures a `state_dir` (VELD_GATEWAY_STATE_DIR — the container default),
+/// a key that can't be persisted there is a **hard error**: silently
+/// degrading to an ephemeral key would change `host_node_id` — and therefore
+/// every public slug — on the next restart, quietly defeating the stable-URL
+/// guarantee the volume is there to provide (a root-owned mount is the usual
+/// cause). With no state_dir configured we fall back to the platform data dir
+/// and, if even that isn't writable, an ephemeral key with a warning
+/// (stateless container, no volume — fine, shares die with the process).
+fn node_key(config: &GatewayConfig) -> Result<iroh::SecretKey> {
+    if let Some(dir) = &config.state_dir {
+        let path = dir.join("node.key");
+        return veld_share::endpoint::load_or_create_secret_key(&path).with_context(|| {
+            format!(
+                "persisting the gateway node key at {} (a configured state_dir must be \
+                 writable — a root-owned volume mount is the usual cause; chown it to the \
+                 container user, or unset VELD_GATEWAY_STATE_DIR to run with an ephemeral \
+                 identity)",
+                path.display()
+            )
+        });
+    }
+    if let Some(dir) = dirs::data_dir().map(|d| d.join("veld-gateway")) {
         let path = dir.join("node.key");
         match veld_share::endpoint::load_or_create_secret_key(&path) {
-            Ok(key) => return key,
+            Ok(key) => return Ok(key),
             Err(e) => {
                 warn!(error = %format!("{e:#}"), path = %path.display(),
                     "could not persist node key; using an ephemeral identity");
             }
         }
     }
-    iroh::SecretKey::generate()
+    Ok(iroh::SecretKey::generate())
 }
 
 async fn shutdown_on_signal(handle: axum_server::Handle) {

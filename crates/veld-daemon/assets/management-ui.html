@@ -230,7 +230,7 @@ async function refresh(){
     // Hosted shares fold into their run card; fetch + index by run name.
     let shares=[];
     try{const sr=await fetch('/api/shares');if(sr.ok){const sd=await sr.json();shares=sd.shares||[];joinCount=(sd.joins||[]).length;}}catch(e){}
-    sharesByRun={};for(const s of shares){if(s.run)sharesByRun[s.run]=s;}
+    sharesByRun={};for(const s of shares){if(s.run)(sharesByRun[s.run]||(sharesByRun[s.run]=[])).push(s);}
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
@@ -261,7 +261,11 @@ function render(data){
       const nodes=run.nodes||[];
       const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
 
-      const sh=(run.status==='running')?sharesByRun[run.name]:null;
+      // A run may host a peer share and/or one or more web shares at once
+      // (separate capabilities). Split them: web shares carry public_urls.
+      const runShares=(run.status==='running')?(sharesByRun[run.name]||[]):[];
+      const peerShare=runShares.find(x=>!(x.public_urls&&x.public_urls.length))||null;
+      const webShares=runShares.filter(x=>x.public_urls&&x.public_urls.length);
       const active=run.status==='running'||run.status==='starting';
 
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
@@ -280,21 +284,35 @@ function render(data){
       }
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
       h+='<button class="card-btn" data-action="copy-path" title="Copy path">Copy path</button>';
-      if(run.status==='running'&&!sh){
+      if(run.status==='running'&&!peerShare){
         h+='<button class="card-btn" data-action="start-share" data-run="'+esc(run.name)+'" title="Share over an encrypted P2P tunnel">Share</button>';
-      }else if(sh){
-        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(sh.id)+'" title="Stop sharing">Stop sharing</button>';
+      }else if(peerShare){
+        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(peerShare.id)+'" title="Stop sharing">Stop sharing</button>';
       }
       h+='</div>';
-      // Share status strip — only while a share is active.
-      if(sh){
+      // Peer share status strip.
+      if(peerShare){
         h+='<div class="share-bar">';
         h+='<span class="share-dot"></span>';
-        h+='<span class="share-on">Sharing'+(sh.joiners?(' · <b>'+sh.joiners+'</b> connected'):'')+'</span>';
-        h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(sh.join_url||'')+'">Copy link</button>';
-        h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(sh.ticket||'')+'">Copy command</button>';
-        h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(sh.id)+'"'+(sh.approve==='auto'?' checked':'')+'> auto-accept</label>';
-      h+='</div>';
+        h+='<span class="share-on">Sharing'+(peerShare.joiners?(' · <b>'+peerShare.joiners+'</b> connected'):'')+'</span>';
+        h+='<button class="card-btn" data-action="copy-join" data-joinurl="'+esc(peerShare.join_url||'')+'">Copy link</button>';
+        h+='<button class="card-btn" data-action="copy-join-cmd" data-ticket="'+esc(peerShare.ticket||'')+'">Copy command</button>';
+        h+='<label class="share-toggle" title="Approve every joiner automatically"><input type="checkbox" data-action="toggle-auto" data-share="'+esc(peerShare.id)+'"'+(peerShare.approve==='auto'?' checked':'')+'> auto-accept</label>';
+        h+='</div>';
+      }
+      // Public web share strip(s) — started from the CLI (`veld share --web`);
+      // shows the minted public URLs (the URL is the access token) and a stop
+      // button. No auto-accept toggle: web shares always auto-approve the
+      // gateway.
+      for(const w of webShares){
+        h+='<div class="share-bar">';
+        h+='<span class="share-dot"></span>';
+        h+='<span class="share-on">Public web</span>';
+        for(const u of (w.public_urls||[])){
+          h+='<button class="card-btn" data-action="copy-public" data-url="'+esc(u.public_url)+'" title="'+esc(u.public_url)+'">'+esc(u.node)+' URL</button>';
+        }
+        h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(w.id)+'" title="Stop public web share">Stop web</button>';
+        h+='</div>';
       }
       // Segmented control
       h+='<div class="segmented">';
@@ -552,6 +570,8 @@ document.addEventListener('click',e=>{
   }
   const copyUrl=e.target.closest('[data-action="copy-url"]');
   if(copyUrl){navigator.clipboard.writeText(copyUrl.dataset.url).then(()=>{copyUrl.classList.add('ok');copyUrl.textContent='Copied';setTimeout(()=>{copyUrl.classList.remove('ok');copyUrl.textContent='Copy';},1500);});return;}
+  const copyPublic=e.target.closest('[data-action="copy-public"]');
+  if(copyPublic){const orig=copyPublic.textContent;navigator.clipboard.writeText(copyPublic.dataset.url).then(()=>{copyPublic.classList.add('ok');copyPublic.textContent='Copied';setTimeout(()=>{copyPublic.classList.remove('ok');copyPublic.textContent=orig;},1500);});return;}
   const openUrl=e.target.closest('[data-action="open-url"]');
   if(openUrl){window.open(openUrl.dataset.url,'_blank','noopener');return;}
   const runAction=e.target.closest('[data-action="run-action"]');

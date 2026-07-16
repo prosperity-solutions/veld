@@ -359,7 +359,8 @@ Point the environment at your org's gateway and opt services into the `web` audi
 {
   "sharing": {
     "relays": ["https://relay.acme.internal"],
-    "gateway": { "url": "https://share.acme.internal", "token": { "env": "VELD_GW_TOKEN" } }
+    // token is resolved in the daemon's environment (not your shell) — see the note below
+    "gateway": { "url": "https://share.acme.internal", "token": { "file": "/run/secrets/gw-token" } }
   },
   "nodes": {
     "frontend": {
@@ -374,6 +375,8 @@ Point the environment at your org's gateway and opt services into the `web` audi
 ```sh
 veld share --web            # prints https://<slug>.share.acme.internal per service
 ```
+
+The gateway `token` (and any relay token) is resolved in the **daemon's** environment, not your interactive shell — a bare `export …` won't reach a background daemon, so use a literal (quick start), a `file` secret mount (production), or set the variable in the daemon's service definition. Same rule as [relay auth tokens](docs/configuration.md#relay-auth-tokens).
 
 `veld share --web` mints a **separate** share scoped to the `web`-opted services (its own capability — revoking the web audience never touches peer shares), registers it with the gateway, and prints the public URLs. The gateway joins over iroh like any peer and reverse-proxies the tunneled service onto `https://<slug>.<gateway-domain>`. URLs are **deterministic** (a hash bound to your machine, the service, and the share) and survive gateway restarts; a new share mints new URLs. The daemon keeps the registration alive with heartbeats; `veld unshare` (or the share's TTL) kills the public URLs.
 

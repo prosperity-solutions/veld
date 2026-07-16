@@ -110,7 +110,7 @@ async fn gateway_proxies_through_daemon_host_half() {
     let registry = veld_gateway::registry::Registry::new(
         "share.example".into(),
         std::time::Duration::from_secs(90),
-        None,
+        veld_gateway::registry::RelayAllowList::Unconfined,
         SecretKey::generate(),
     );
     let info = registry.register(&ticket).await.expect("register");

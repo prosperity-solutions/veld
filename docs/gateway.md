@@ -13,24 +13,56 @@ same URLs. No database, no volume required.
 
 ## Quick start (Docker)
 
+The gateway speaks plain HTTP; put TLS in front of it. The two options are a
+TLS-terminating load balancer / ingress (below), or built-in TLS with a
+mounted wildcard cert (`VELD_GATEWAY_TLS_CERT`/`_KEY`, see the reference). The
+minted URLs are always `https://` — a gateway with no TLS in front will hand
+out `https://` links to a plain-HTTP port, which fail to connect.
+
 ```sh
+# Behind a TLS-terminating LB that routes *.share.acme.internal → this container.
 docker run -d --name veld-gateway -p 8080:8080 \
   -e VELD_GATEWAY_DOMAIN=share.acme.internal \
   -e VELD_GATEWAY_TOKEN='<a long random secret>' \
   -e VELD_GATEWAY_RELAYS=https://relay.acme.internal \
+  -e VELD_GATEWAY_RELAY_TOKEN='<relay token, if the relay is token-gated>' \
   ghcr.io/prosperity-solutions/veld-gateway:latest
 ```
 
-Then, per environment (`veld.json`):
+Then, per environment (`veld.json`), opt a service into the `web` audience and
+point at the gateway:
 
 ```jsonc
 {
   "sharing": {
     "relays": ["https://relay.acme.internal"],
-    "gateway": { "url": "https://share.acme.internal", "token": { "env": "VELD_GW_TOKEN" } }
+    // The token is resolved in the DAEMON's environment, not your shell — an
+    // `export … && veld share` won't reach a background daemon. For a quick
+    // start use a literal ("token": "…"); for real deployments prefer
+    // { "file": "/run/secrets/gw-token" }. See "Injecting the token" below.
+    "gateway": { "url": "https://share.acme.internal", "token": { "file": "/run/secrets/gw-token" } }
+  },
+  "nodes": {
+    "frontend": {
+      "variants": {
+        "local": { "type": "start_server", "command": "npm run dev",
+                   "share": { "expose": ["web"] } }
+      }
+    }
   }
 }
 ```
+
+```sh
+veld share --web            # prints https://<slug>.share.acme.internal
+```
+
+**Injecting the token into the daemon.** `{ "env": … }` / `{ "file": … }` /
+`{ "command": … }` are read by the veld **daemon** process (launchd/systemd/the
+foreground `veld` you started), never your interactive shell. A literal token
+in `veld.json` always works but lands in version control; a `file` under
+`/run/secrets` is the usual production choice; for `env`, set the variable in
+the daemon's service definition (not a shell `export`).
 
 ## What you must provide
 
