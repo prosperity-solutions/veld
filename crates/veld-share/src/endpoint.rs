@@ -48,7 +48,8 @@ const TOKEN_RESOLVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// and **join** paths, however, put an already-resolved `SecretSource::Literal`
 /// token into the key — so a secret value *can* live here on those paths (it is
 /// never logged: `SecretSource`/`RelayEntry` Debug redact it and Display shows
-/// URLs only). Two configs differing only in their token key distinct endpoints;
+/// URLs only). Two configs differing only in their token map to distinct
+/// endpoint keys;
 /// rotating the *underlying* secret behind an unchanged declaration reuses the
 /// already-bound endpoint until the daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -11,6 +11,7 @@
 //! - [`tunnel`] — HTTP/1.1 client connections over iroh tunnel streams
 //! - [`slug`] — deterministic, unguessable public-URL slugs
 //! - [`server`] — listener, Host-based dispatch, graceful shutdown
+//! - [`state`] — shared request state (config, registry, resolved auth token)
 
 pub mod api;
 pub mod config;

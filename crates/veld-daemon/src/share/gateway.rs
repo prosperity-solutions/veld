@@ -62,7 +62,7 @@ impl GatewayClient {
 
         let base_url = url.trim_end_matches('/').to_owned();
         if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
-            bail!("gateway URL must start with https:// (got `{base_url}`)");
+            bail!("gateway URL must start with http(s):// (got `{base_url}`)");
         }
 
         Ok(Self {
@@ -153,6 +153,6 @@ mod tests {
         let Err(err) = GatewayClient::resolve(Some(&bad)).await else {
             panic!("expected non-URL gateway to be rejected");
         };
-        assert!(err.to_string().contains("https://"), "{err}");
+        assert!(err.to_string().contains("http(s)://"), "{err}");
     }
 }

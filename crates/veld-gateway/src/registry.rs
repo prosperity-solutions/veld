@@ -41,6 +41,11 @@ pub struct RegisteredNode {
     /// Origin hostname — the tunnel routing key, the upstream `Host` header,
     /// and the match key for response-header rewrites.
     pub hostname: String,
+    /// The service's origin — `scheme://authority` on the sharing machine
+    /// (e.g. `https://app.demo.p.localhost` or `…:18443` in unprivileged
+    /// mode). Used to rewrite the browser's `Origin`/`Referer` headers back to
+    /// what the dev server expects, in lockstep with the `Host` rewrite.
+    pub origin: String,
     /// Deterministic public slug.
     pub slug: String,
     /// Minted public URL: `https://<slug>.<domain>`.
@@ -74,11 +79,13 @@ impl Registration {
     }
 }
 
-/// Where a slug routes: which registration, and which origin hostname in it.
+/// Where a slug routes: which registration, and which node in it (by origin
+/// hostname + origin scheme://authority for header rewrites).
 #[derive(Clone)]
 pub struct SlugTarget {
     pub registration: Arc<Registration>,
     pub hostname: String,
+    pub origin: String,
 }
 
 /// Owns the gateway's iroh endpoints and all live registrations.
@@ -197,6 +204,7 @@ impl Registry {
                 RegisteredNode {
                     node: n.node.clone(),
                     hostname: n.hostname.clone(),
+                    origin: origin_of(&n.url, &n.hostname),
                     slug: s.clone(),
                     public_url: format!("https://{s}.{}", self.domain),
                 }
@@ -225,6 +233,7 @@ impl Registry {
                     SlugTarget {
                         registration: Arc::clone(&reg),
                         hostname: n.hostname.clone(),
+                        origin: n.origin.clone(),
                     },
                 );
             }
@@ -411,9 +420,47 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The `scheme://authority` origin for a manifest node's URL, used to rewrite
+/// the browser's `Origin`/`Referer` headers. Falls back to `https://<hostname>`
+/// if the URL can't be parsed (manifest URLs are well-formed in practice).
+fn origin_of(url: &str, hostname: &str) -> String {
+    if let Some(rest) = url.split_once("://") {
+        let (scheme, after) = rest;
+        // authority ends at the first '/', '?' or '#'.
+        let authority = after
+            .split(['/', '?', '#'])
+            .next()
+            .filter(|a| !a.is_empty())
+            .unwrap_or(hostname);
+        return format!("{scheme}://{authority}");
+    }
+    format!("https://{hostname}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn origin_of_extracts_scheme_authority() {
+        assert_eq!(
+            origin_of("https://app.demo.p.localhost", "app.demo.p.localhost"),
+            "https://app.demo.p.localhost"
+        );
+        // Port preserved (unprivileged mode), path/query stripped.
+        assert_eq!(
+            origin_of(
+                "https://app.demo.p.localhost:18443/path?q=1",
+                "app.demo.p.localhost"
+            ),
+            "https://app.demo.p.localhost:18443"
+        );
+        // Unparseable URL falls back to https://<hostname>.
+        assert_eq!(
+            origin_of("garbage", "app.demo.p.localhost"),
+            "https://app.demo.p.localhost"
+        );
+    }
 
     #[test]
     fn registration_id_is_deterministic_and_opaque() {

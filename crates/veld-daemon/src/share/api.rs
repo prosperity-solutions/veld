@@ -480,10 +480,6 @@ fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Optio
         .and_then(|v| v.share.as_ref())
 }
 
-/// Build the "nothing to share" error from the reasons URL-bearing nodes were
-/// excluded. `not_opted_in` are `node:variant`s with no (peer) `share`;
-/// `web_only` opted into `web` but not `peer`. Both are sorted+deduped in place
-/// for a deterministic message.
 /// The DANGER warning to surface when a share is about to embed relay token(s)
 /// in the ticket, or `None`. Fires iff the `dangerouslyEmbedRelayTokensInTicket`
 /// opt-in is on AND a custom relay actually carries a token to embed — so it
@@ -498,6 +494,10 @@ fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String
     })
 }
 
+/// Build the "nothing to share" error from the reasons URL-bearing nodes were
+/// excluded. `not_opted_in` are `node:variant`s with no `share` opting into the
+/// requested `mode`; `other_only` opted into the *other* audience only. Both are
+/// sorted+deduped in place for a deterministic message.
 fn share_exclusion_message(
     run_name: &str,
     had_url_bearing: bool,

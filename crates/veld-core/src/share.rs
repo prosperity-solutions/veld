@@ -135,8 +135,8 @@ pub struct ShareTicket {
     /// ships the relay secret inside the shareable link. Empty (and omitted from
     /// the encoded token) otherwise, so ordinary tickets are byte-identical to
     /// before. An embedded token is one layer in the join side's resolution
-    /// (local cache < env < embedded < a token entered at the prompt); see the
-    /// daemon's `RelayChoice::resolve_join_tokens`.
+    /// (local cache < env < embedded < a token entered at the prompt); see
+    /// `veld_share::endpoint::RelayChoice::resolve_join_tokens`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_tokens: BTreeMap<String, String>,
 }

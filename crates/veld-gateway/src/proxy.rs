@@ -68,6 +68,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     let mut upstream_req = match build_upstream_request(
         &parts,
         &target.hostname,
+        &target.origin,
         &public_host,
         client_addr.as_deref(),
         &state,
@@ -125,6 +126,7 @@ fn wants_upgrade(headers: &HeaderMap) -> bool {
 fn build_upstream_request(
     parts: &axum::http::request::Parts,
     origin_hostname: &str,
+    origin: &str,
     public_host: &str,
     client_ip: Option<&str>,
     state: &AppState,
@@ -144,18 +146,44 @@ fn build_upstream_request(
     let hop = hop_by_hop();
     let headers = builder.headers_mut().expect("fresh builder");
     for (name, value) in &parts.headers {
-        if hop.contains(name) || name == header::HOST {
+        if hop.contains(name)
+            || name == header::HOST
+            || name == header::ORIGIN
+            || name == header::REFERER
+        {
+            // Host/Origin/Referer are rewritten below in lockstep — see the
+            // note there. Everything else passes through.
             continue;
         }
         headers.append(name.clone(), value.clone());
     }
 
-    // Origin Host so dev-server host allow-lists pass (see module docs).
+    // Rewrite Host, Origin, and Referer to the ORIGIN together (see module
+    // docs). Rewriting Host alone while leaving Origin/Referer at the public
+    // host would manufacture a cross-origin request that Origin-checking dev
+    // servers (Next Server Actions, Vite's DNS-rebinding guard) reject — the
+    // dev server must see a coherent same-origin request.
     headers.insert(
         header::HOST,
         HeaderValue::from_str(origin_hostname)
             .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid origin hostname"))?,
     );
+    if parts.headers.contains_key(header::ORIGIN) {
+        if let Ok(v) = HeaderValue::from_str(origin) {
+            headers.insert(header::ORIGIN, v);
+        }
+    }
+    if let Some(referer) = parts.headers.get(header::REFERER) {
+        // Swap the scheme://authority prefix (the public URL) for the origin's,
+        // preserving the path so a framework that inspects Referer's path still
+        // sees it. If it doesn't parse as our public URL, drop it rather than
+        // forward a public-host Referer that contradicts the rewritten Host.
+        if let Some(rewritten) = rewrite_referer(referer.to_str().ok(), public_host, origin) {
+            if let Ok(v) = HeaderValue::from_str(&rewritten) {
+                headers.insert(header::REFERER, v);
+            }
+        }
+    }
 
     // Forwarding metadata. Existing values (an external LB's) are preserved;
     // we only fill gaps and append our hop to X-Forwarded-For.
@@ -189,11 +217,36 @@ fn build_upstream_request(
             headers.insert(header::UPGRADE, upgrade.clone());
         }
         headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    } else {
+        // One tunnel stream per request, and the host side is a dumb byte
+        // splice that only ends when the upstream TCP closes. Force the dev
+        // server to close after responding — otherwise a keep-alive upstream
+        // never EOFs, the host splice never ends, and the QUIC stream leaks.
+        headers.insert(header::CONNECTION, HeaderValue::from_static("close"));
     }
 
     builder
         .body(Body::empty())
         .map_err(|_| (StatusCode::BAD_GATEWAY, "could not build upstream request"))
+}
+
+/// Rewrite a `Referer` whose scheme://authority is this share's public URL to
+/// the origin's scheme://authority, preserving path + query. Returns `None`
+/// (drop the header) when the value is absent, unparseable, or names some
+/// other host — never forward a public-host Referer alongside the rewritten
+/// origin `Host`.
+fn rewrite_referer(referer: Option<&str>, public_host: &str, origin: &str) -> Option<String> {
+    let referer = referer?;
+    let (scheme, after) = referer.split_once("://")?;
+    let end = after.find(['/', '?', '#']).unwrap_or(after.len());
+    let (authority, rest) = after.split_at(end);
+    // Match on host only (ignore any :port on the public authority).
+    let ref_host = authority.split(':').next().unwrap_or(authority);
+    if !ref_host.eq_ignore_ascii_case(public_host) {
+        return None;
+    }
+    let _ = scheme;
+    Some(format!("{origin}{rest}"))
 }
 
 /// Complete a protocol upgrade: answer 101 to the client and splice the two
@@ -340,12 +393,14 @@ mod tests {
             RegisteredNode {
                 node: "app".into(),
                 hostname: "app.demo.p.localhost".into(),
+                origin: "https://app.demo.p.localhost".into(),
                 slug: "abcdefabcdefabcdefabcdefab".into(),
                 public_url: "https://abcdefabcdefabcdefabcdefab.share.example".into(),
             },
             RegisteredNode {
                 node: "api".into(),
                 hostname: "api.demo.p.localhost".into(),
+                origin: "https://api.demo.p.localhost:18443".into(),
                 slug: "xyzxyzxyzxyzxyzxyzxyzxyzxy".into(),
                 public_url: "https://xyzxyzxyzxyzxyzxyzxyzxyzxy.share.example".into(),
             },
@@ -395,6 +450,47 @@ mod tests {
         // Foreign domains and domain-less cookies are untouched.
         assert!(strip_origin_cookie_domain("sid=abc; Domain=example.com", &n).is_none());
         assert!(strip_origin_cookie_domain("sid=abc; Path=/", &n).is_none());
+    }
+
+    #[test]
+    fn referer_rewrite_swaps_public_host_for_origin_keeping_path() {
+        // A Referer pointing at the public URL is rewritten to the origin,
+        // path + query preserved, so the dev server sees a same-origin ref.
+        assert_eq!(
+            rewrite_referer(
+                Some("https://abc123.share.example/login?next=%2Fx"),
+                "abc123.share.example",
+                "https://app.demo.p.localhost",
+            ),
+            Some("https://app.demo.p.localhost/login?next=%2Fx".to_string())
+        );
+        // Root referer → origin + "/".
+        assert_eq!(
+            rewrite_referer(
+                Some("https://abc123.share.example/"),
+                "abc123.share.example",
+                "https://app.demo.p.localhost:18443",
+            ),
+            Some("https://app.demo.p.localhost:18443/".to_string())
+        );
+        // A Referer naming some OTHER host is dropped, never forwarded as-is.
+        assert_eq!(
+            rewrite_referer(
+                Some("https://evil.example/x"),
+                "abc123.share.example",
+                "https://app.demo.p.localhost",
+            ),
+            None
+        );
+        // Absent / unparseable → dropped.
+        assert_eq!(
+            rewrite_referer(None, "abc123.share.example", "https://x"),
+            None
+        );
+        assert_eq!(
+            rewrite_referer(Some("not-a-url"), "abc123.share.example", "https://x"),
+            None
+        );
     }
 
     #[test]
