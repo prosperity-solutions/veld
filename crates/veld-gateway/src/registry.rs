@@ -329,22 +329,31 @@ impl Registry {
     }
 
     /// Run the lease sweeper until the process exits.
+    ///
+    /// The **live iroh connection is authoritative** for whether a share is
+    /// up; the `conn.closed()` watcher (in `register`) is what normally reaps a
+    /// share the instant its tunnel dies. The lease is only a belt-and-braces
+    /// backstop for a registration whose connection is *already dead* but whose
+    /// watcher didn't run (e.g. lost during a crash). So the sweep reaps only
+    /// entries that are **both** past their lease **and** have a closed
+    /// connection — it must never tear down a healthy tunnel just because a
+    /// heartbeat was missed. (The heartbeat rides HTTPS and the tunnel rides
+    /// iroh/relay: independent failure domains. A transient HTTPS blip must not
+    /// 404 a live share and force a 75s re-dial + host re-approval.)
     pub async fn sweep_expired_leases(self: Arc<Self>) {
-        // Sweep well inside the lease window so an expired registration
-        // lingers at most a fraction of a lease past its deadline.
         let interval = (self.lease / 3).max(Duration::from_secs(1));
         loop {
             tokio::time::sleep(interval).await;
             let now = Instant::now();
-            let expired: Vec<String> = {
+            let reapable: Vec<String> = {
                 let regs = self.regs.lock().await;
                 regs.values()
-                    .filter(|r| r.expired(now))
+                    .filter(|r| r.expired(now) && r.conn.close_reason().is_some())
                     .map(|r| r.id.clone())
                     .collect()
             };
-            for id in expired {
-                self.remove(&id, "lease expired (origin stopped heartbeating)")
+            for id in reapable {
+                self.remove(&id, "lease expired and tunnel already closed")
                     .await;
             }
         }

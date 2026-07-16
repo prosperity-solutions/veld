@@ -25,6 +25,10 @@ use crate::registry::{RegisteredNode, Registration, SlugTarget};
 use crate::state::AppState;
 use crate::tunnel;
 
+/// How long to wait for the upstream's response *head* before giving up with a
+/// 504 (body streaming afterward is unbounded — SSE/downloads must work).
+const UPSTREAM_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Hop-by-hop headers that must not cross the proxy (RFC 9110 §7.6.1).
 /// `Upgrade`/`Connection` are re-added deliberately on the upgrade path.
 fn hop_by_hop() -> [HeaderName; 8] {
@@ -90,17 +94,32 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         }
     };
 
-    let upstream_resp = match sender.send_request(upstream_req).await {
-        Ok(r) => r,
-        Err(e) => {
-            debug!(error = %e, hostname = %target.hostname, "upstream request failed");
-            return (
-                StatusCode::BAD_GATEWAY,
-                "the shared service did not respond",
-            )
-                .into_response();
-        }
-    };
+    // Bound the wait for response *headers* (not the body) so a dev server
+    // that accepts the tunnel stream but never replies can't pin the stream +
+    // driver task forever. Body streaming (SSE, large downloads) is unbounded
+    // by design — only the initial response is deadlined.
+    let upstream_resp =
+        match tokio::time::timeout(UPSTREAM_RESPONSE_TIMEOUT, sender.send_request(upstream_req))
+            .await
+        {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                debug!(error = %e, hostname = %target.hostname, "upstream request failed");
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    "the shared service did not respond",
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                debug!(hostname = %target.hostname, "upstream response timed out");
+                return (
+                    StatusCode::GATEWAY_TIMEOUT,
+                    "the shared service did not respond in time",
+                )
+                    .into_response();
+            }
+        };
 
     if upstream_resp.status() == StatusCode::SWITCHING_PROTOCOLS {
         return splice_upgrade(upstream_resp, client_upgrade, &target.hostname);
@@ -336,6 +355,22 @@ fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain:
         }
     }
 
+    // Access-Control-Allow-Origin: per-node slugs make an app-slug → api-slug
+    // call cross-origin, so an API that echoes an origin-host allow-list would
+    // fail CORS on the public host. Rewrite a matching origin to its public
+    // origin (no path — ACAO is an origin, not a URL). `*` and unrelated
+    // values pass through untouched.
+    if let Some(acao) = headers
+        .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(rewritten) = rewrite_origin_value(acao, &reg.nodes, domain) {
+            if let Ok(v) = HeaderValue::from_str(&rewritten) {
+                headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
+            }
+        }
+    }
+
     // Set-Cookie: a Domain attribute scoped to an origin hostname would make
     // the browser reject the cookie on the public host — strip it so the
     // cookie falls back to host-only (correct for the slug host).
@@ -372,8 +407,28 @@ fn rewrite_absolute_url(value: &str, nodes: &[RegisteredNode], domain: &str) -> 
     Some(format!("https://{}.{domain}{path_and_query}", node.slug))
 }
 
-/// Remove a `Domain=<origin hostname>` attribute from one Set-Cookie value.
-/// Returns `None` when nothing needs stripping.
+/// Rewrite an `Origin`-shaped header value (`scheme://authority`, no path) that
+/// names one of the share's origin hostnames to its public origin. Returns
+/// `None` for `*`, relative, or foreign values (leave them untouched).
+fn rewrite_origin_value(value: &str, nodes: &[RegisteredNode], domain: &str) -> Option<String> {
+    let v = value.trim();
+    if v == "*" || v.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    let uri: Uri = v.parse().ok()?;
+    let host = uri.authority()?.host().to_ascii_lowercase();
+    let node = nodes
+        .iter()
+        .find(|n| n.hostname.eq_ignore_ascii_case(&host))?;
+    Some(format!("https://{}.{domain}", node.slug))
+}
+
+/// Remove a `Domain` attribute from one Set-Cookie value when it is scoped to
+/// an origin hostname **or a parent of one** — either way the browser on the
+/// public `<slug>.<domain>` host would reject the cookie. Stripping it makes
+/// the cookie host-only, which works on the slug host. Returns `None` when
+/// nothing needs stripping. (Cross-service cookies scoped to a shared parent
+/// can't survive per-node slugs at all — a documented `web` fidelity limit.)
 fn strip_origin_cookie_domain(cookie: &str, nodes: &[RegisteredNode]) -> Option<String> {
     let mut changed = false;
     let parts: Vec<&str> = cookie
@@ -386,14 +441,21 @@ fn strip_origin_cookie_domain(cookie: &str, nodes: &[RegisteredNode]) -> Option<
             else {
                 return true;
             };
-            let domain_value = domain_value.trim().trim_start_matches('.');
-            let matches_origin = nodes
-                .iter()
-                .any(|n| n.hostname.eq_ignore_ascii_case(domain_value));
-            if matches_origin {
+            let d = domain_value
+                .trim()
+                .trim_start_matches('.')
+                .to_ascii_lowercase();
+            // Strip if `d` is an origin hostname, or a parent domain of one
+            // (an origin hostname ends with ".d").
+            let dot_suffix = format!(".{d}");
+            let scoped_to_origin = nodes.iter().any(|n| {
+                let h = n.hostname.to_ascii_lowercase();
+                h == d || h.ends_with(&dot_suffix)
+            });
+            if scoped_to_origin {
                 changed = true;
             }
-            !matches_origin
+            !scoped_to_origin
         })
         .collect();
     changed.then(|| parts.join(";"))
@@ -466,6 +528,28 @@ mod tests {
         // Foreign domains and domain-less cookies are untouched.
         assert!(strip_origin_cookie_domain("sid=abc; Domain=example.com", &n).is_none());
         assert!(strip_origin_cookie_domain("sid=abc; Path=/", &n).is_none());
+        // A PARENT domain of an origin hostname is stripped too — otherwise a
+        // shared-session cookie (Domain=.demo.p.localhost) is rejected on the
+        // slug host and the session silently drops.
+        assert!(strip_origin_cookie_domain("sid=abc; Domain=.demo.p.localhost", &n).is_some());
+        assert!(strip_origin_cookie_domain("sid=abc; Domain=localhost", &n).is_some());
+    }
+
+    #[test]
+    fn acao_rewrite_maps_origin_to_public_origin_only() {
+        let n = nodes();
+        // An origin-host ACAO becomes the public origin (no trailing path).
+        assert_eq!(
+            rewrite_origin_value("https://app.demo.p.localhost", &n, "share.example"),
+            Some("https://abcdefabcdefabcdefabcdefab.share.example".to_string())
+        );
+        // Wildcard, null, foreign, and relative values are left untouched.
+        assert_eq!(rewrite_origin_value("*", &n, "share.example"), None);
+        assert_eq!(rewrite_origin_value("null", &n, "share.example"), None);
+        assert_eq!(
+            rewrite_origin_value("https://evil.example", &n, "share.example"),
+            None
+        );
     }
 
     #[test]
