@@ -50,6 +50,11 @@ let card: HTMLElement | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 /** Guards the start/stop buttons against double-submit across refreshes. */
 let busy = false;
+/** A message that must survive the interval refresh (a failed start's
+ * actionable error, or "shared but this page isn't exposed") — without the
+ * latch, the 3s refresh would wipe it before the user can read it. Cleared
+ * when the user acts (retry) or closes the card. */
+let notice: string | null = null;
 
 /** Arc-menu entry point: toggle the card. */
 export function toggleWebShareCard(): void {
@@ -69,6 +74,7 @@ export function closeWebShareCard(): void {
     card.remove();
     card = null;
   }
+  notice = null;
 }
 
 function openCard(): void {
@@ -93,7 +99,9 @@ export function findShare(list: SharesList, hostname: string): ShareInfo | null 
 }
 
 async function refresh(): Promise<void> {
-  if (!card || busy) return;
+  // While a latched notice is on screen, the periodic refresh must not
+  // repaint over it — the user hasn't acknowledged it yet.
+  if (!card || busy || notice) return;
   let list: SharesList;
   try {
     const r = await fetch("/__veld__/api/shares");
@@ -131,6 +139,9 @@ function render(share: ShareInfo | null): void {
 // ── not shared ──────────────────────────────────────────────────────────────
 
 function renderNotShared(b: HTMLElement): void {
+  if (notice) {
+    b.appendChild(mkEl("div", "web-share-notice", notice));
+  }
   b.appendChild(
     mkEl(
       "div",
@@ -142,9 +153,12 @@ function renderNotShared(b: HTMLElement): void {
   const shareBtn = mkEl(
     "button",
     "btn btn-primary btn-sm",
-    "Share to web",
+    notice ? "Retry" : "Share to web",
   ) as HTMLButtonElement;
-  shareBtn.addEventListener("click", () => void startShare(shareBtn));
+  shareBtn.addEventListener("click", () => {
+    notice = null;
+    void startShare(shareBtn);
+  });
   actions.appendChild(shareBtn);
   b.appendChild(actions);
 }
@@ -167,15 +181,34 @@ async function startShare(btn: HTMLButtonElement): Promise<void> {
       body: JSON.stringify({ run: null, nodes: null, ttl_secs: null, web: true }),
     });
     if (!r.ok) {
+      // The daemon's plain-text error names the fix (no gateway configured,
+      // no web-opted nodes, …) — latch it so the refresh can't wipe it.
       const detail = (await r.text()).trim();
-      renderError(detail || "Sharing failed (" + r.status + ")");
+      notice = detail || "Sharing failed (" + r.status + ")";
+      render(null);
       toast("Sharing failed", true);
+      return;
+    }
+    const resp = (await r.json()) as {
+      public_urls?: { hostname: string }[];
+    };
+    const covered = (resp.public_urls ?? []).some(
+      (u) => u.hostname === window.location.hostname,
+    );
+    if (!covered) {
+      // The share started, but for OTHER nodes — without this the card
+      // snaps back to "not shared" and the click looks like a no-op.
+      notice =
+        "Share started, but this page's service isn't web-exposed — add \"web\" to its share.expose in veld.json.";
+      render(null);
+      toast("Shared to the web (other services)");
       return;
     }
     toast("Shared to the web");
     await forceRefresh();
   } catch (_) {
-    renderError("Could not reach Veld");
+    notice = "Could not reach Veld";
+    render(null);
   } finally {
     busy = false;
   }

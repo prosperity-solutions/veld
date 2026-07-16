@@ -214,10 +214,19 @@ The fix is two-sided:
    distribution.
 
 2. **Set `VELD_GATEWAY_TRUST_FORWARDED_HOST=true`** so the gateway routes by
-   that `X-Forwarded-Host` (and `VELD_GATEWAY_TRUST_FORWARDED=true` to key
-   rate limits on the real client IP from `X-Forwarded-For`). They are
-   separate opt-ins on purpose: each trusts a different header with a
-   different failure mode.
+   that `X-Forwarded-Host`. It is a separate opt-in from
+   `VELD_GATEWAY_TRUST_FORWARDED` on purpose: each trusts a different header
+   with a different failure mode.
+
+Rate-limiting caveat with a CDN in front: `VELD_GATEWAY_TRUST_FORWARDED`
+keys the password rate limit on the **last** `X-Forwarded-For` entry — the
+one your platform LB appended, which behind a CDN is the CDN's edge IP, not
+the viewer's. Password attempts are then budgeted per CDN edge (all viewers
+behind one PoP share a bucket), and the per-slug limit is the effective
+brute-force bound. That's a coarser key than the LB-only setup, not a
+security hole — but know it before you wonder why two colleagues behind the
+same PoP can rate-limit each other. Per-viewer keying through a CDN needs a
+trust-depth knob the gateway doesn't have yet.
 
 Caching note: leave the distribution's default behavior at "no caching" (or
 forward all headers/cookies/query strings) — shares proxy live dev servers and

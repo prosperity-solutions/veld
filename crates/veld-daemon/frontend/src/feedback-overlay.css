@@ -945,3 +945,9 @@
 }
 .veld-feedback-web-share-dot-direct { background: var(--vf-accent); }
 .veld-feedback-web-share-dot-relayed { background: #eab308; }
+.veld-feedback-web-share-notice {
+  color: var(--vf-danger);
+  font-size: 12px;
+  margin-bottom: 10px;
+  overflow-wrap: anywhere;
+}
