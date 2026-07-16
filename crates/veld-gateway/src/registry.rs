@@ -354,11 +354,19 @@ impl Registry {
 
         // Self-heal: the moment the host closes the tunnel (unshare, expiry,
         // daemon stop/crash) the registration and its public URLs vanish.
+        // Guarded to THIS instance: a superseding re-registration closes the
+        // old connection (see the replaced-insert above), which wakes this
+        // watcher — but by then `regs[id]` is the winner, so an id-based remove
+        // would tear down the live registration. `remove_instance` only removes
+        // if this exact `Arc` is still the registered one. `Weak` so the
+        // watcher never pins the registration alive.
         let watcher = Arc::clone(self);
-        let watch_id = id.clone();
+        let weak = Arc::downgrade(&reg);
         tokio::spawn(async move {
             conn.closed().await;
-            watcher.remove(&watch_id, "tunnel closed").await;
+            if let Some(reg) = weak.upgrade() {
+                watcher.remove_instance(&reg, "tunnel closed").await;
+            }
         });
 
         info!(
@@ -421,12 +429,39 @@ impl Registry {
         }
     }
 
-    /// Tear down one registration: unpublish its slugs, close its tunnel, and
-    /// release its endpoint if nothing else uses that relay policy.
+    /// Tear down whatever registration is currently at `id` (used by the API
+    /// DELETE, the lease sweep, and the stale-entry cleanup — all of which
+    /// legitimately target "the current registration for this id").
     async fn remove(&self, id: &str, reason: &str) {
         let Some(reg) = self.regs.lock().await.remove(id) else {
             return;
         };
+        self.teardown(reg, reason).await;
+    }
+
+    /// Tear down a registration only if `reg` is *still the instance* at its id.
+    /// Used by the per-registration tunnel watcher: a superseding
+    /// re-registration replaces `regs[id]` and closes the old connection, which
+    /// wakes the old watcher — this guard stops it from tearing down the
+    /// winner. Mirrors the per-slug `Arc::ptr_eq` guard in `teardown`.
+    async fn remove_instance(&self, reg: &Arc<Registration>, reason: &str) {
+        let removed = {
+            let mut regs = self.regs.lock().await;
+            if regs.get(&reg.id).is_some_and(|cur| Arc::ptr_eq(cur, reg)) {
+                regs.remove(&reg.id)
+            } else {
+                None
+            }
+        };
+        if let Some(reg) = removed {
+            self.teardown(reg, reason).await;
+        }
+    }
+
+    /// Shared teardown for an already-removed registration: unpublish its slugs,
+    /// close its tunnel, and release its endpoint ref (closing the endpoint only
+    /// if it was the last user).
+    async fn teardown(&self, reg: Arc<Registration>, reason: &str) {
         {
             let mut slugs = self.slugs.lock().await;
             for n in &reg.nodes {
@@ -442,8 +477,6 @@ impl Registry {
             }
         }
         reg.conn.close(0u32.into(), b"registration removed");
-        // Release the endpoint user ref this registration held since its
-        // get_or_bind (closes the endpoint only if it was the last user).
         self.release_endpoint(&reg.relay).await;
         info!(id = %reg.id, run = %reg.run, reason, "registration removed");
     }
