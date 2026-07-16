@@ -135,8 +135,8 @@ pub struct ShareTicket {
     /// ships the relay secret inside the shareable link. Empty (and omitted from
     /// the encoded token) otherwise, so ordinary tickets are byte-identical to
     /// before. An embedded token is one layer in the join side's resolution
-    /// (local cache < env < embedded < a token entered at the prompt); see the
-    /// daemon's `RelayChoice::resolve_join_tokens`.
+    /// (local cache < env < embedded < a token entered at the prompt); see
+    /// `veld_share::endpoint::RelayChoice::resolve_join_tokens`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_tokens: BTreeMap<String, String>,
 }
@@ -182,6 +182,11 @@ pub struct StartShareRequest {
     pub ttl_secs: Option<i64>,
     /// Approval mode; defaults to the caller's context-appropriate mode.
     pub approve: Option<ApprovalMode>,
+    /// Share to the **web** audience: mint a share scoped to the `web`-opted
+    /// nodes and register it with the configured public gateway instead of
+    /// handing the ticket to a human (SHARING_V2.md §5.4).
+    #[serde(default)]
+    pub web: bool,
 }
 
 /// `POST /api/shares` response.
@@ -200,6 +205,9 @@ pub struct StartShareResponse {
     /// partial share doesn't silently under-expose.
     #[serde(default)]
     pub warnings: Vec<String>,
+    /// Public URLs minted by the gateway (web shares only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_urls: Vec<GatewayPublicUrl>,
 }
 
 /// `POST /api/shares/join` — join a shared environment.
@@ -261,6 +269,10 @@ pub struct ShareInfo {
     /// Number of consumers currently connected (hosted shares only).
     #[serde(default)]
     pub joiners: usize,
+    /// Public URLs minted by the gateway (hosted web shares only). The overlay
+    /// uses this hostname → public-URL map for "Copy public URL".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub public_urls: Vec<GatewayPublicUrl>,
 }
 
 /// A join awaiting the host's approval (manual mode).
@@ -285,6 +297,37 @@ pub struct SharesList {
     pub joins: Vec<ShareInfo>,
     /// Join requests awaiting this host's approval.
     pub pending: Vec<PendingInfo>,
+}
+
+// ---------------------------------------------------------------------------
+// Gateway registration DTOs (daemon ⇄ veld-gateway HTTPS API). Shared here so
+// the two binaries compile against one wire contract and cannot drift.
+// ---------------------------------------------------------------------------
+
+/// `POST <gateway>/api/v1/shares` — register a web share (also the heartbeat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRegisterRequest {
+    /// The `veldshare_…` ticket of the web share to expose.
+    pub ticket: String,
+}
+
+/// `POST <gateway>/api/v1/shares` response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayRegisterResponse {
+    /// Registration id (deterministic per capability); used for `DELETE`.
+    pub id: String,
+    /// Lease duration; the origin re-`POST`s (heartbeats) well inside it.
+    pub lease_secs: u64,
+    pub urls: Vec<GatewayPublicUrl>,
+}
+
+/// One public URL minted by the gateway for a shared service.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GatewayPublicUrl {
+    pub node: String,
+    /// The service's origin hostname (what a local browser URL bar shows).
+    pub hostname: String,
+    pub public_url: String,
 }
 
 /// Errors from ticket encoding/decoding.

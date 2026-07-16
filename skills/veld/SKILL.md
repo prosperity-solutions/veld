@@ -175,10 +175,23 @@ token re-prompts; `--json` returns `needs_relay_token`). The token can also come
 from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when the URL matches
 the ticket's relay), or the host sets `sharing.dangerouslyEmbedRelayTokensInTicket:
 true` to embed it in the ticket (DANGER: relay secret then rides in every share
-link — disposable tokens only). `share.expose` also accepts `web` (public browser access via a
-`sharing.gateway` server) but that gateway ships later; today only `peer` is
-served. Stopping the run (`veld stop`) auto-unshares its shares, and a consumer's
-join self-tears-down when the tunnel closes.
+link — disposable tokens only). Stopping the run (`veld stop`) auto-unshares its
+shares, and a consumer's join self-tears-down when the tunnel closes.
+
+**Public web sharing** (`veld share --web`): exposes services whose variant has
+`web` in `share.expose` to anyone with a browser — no Veld on the viewer's side.
+Requires `sharing.gateway` in config (a URL, or `{ "url", "token" }` where
+`token` is a secret source like relay tokens; the org's self-hosted
+`veld-gateway` container serves the public URLs — see docs/gateway.md). The
+command prints deterministic `https://<slug>.<gateway-domain>` URLs (unguessable;
+**the URL is the access token** — treat links as secrets). Web and peer are
+separate shares with separate capabilities: `veld unshare` on one never affects
+the other. The overlay arc menu (under More) has **Copy public URL** to turn the
+current page into its public deep link (path + query + hash preserved). Fidelity
+is best-effort: the app sees its own origin `Host` (Vite allowedHosts pass),
+public host rides in `X-Forwarded-Host`, redirects between shared services are
+rewritten, WebSockets/HMR work; hard-coded absolute URLs / CORS / OAuth redirect
+URIs are the operator's domain setup.
 
 ## Editing veld.json
 

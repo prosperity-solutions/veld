@@ -48,7 +48,8 @@ const TOKEN_RESOLVE_TIMEOUT: Duration = Duration::from_secs(20);
 /// and **join** paths, however, put an already-resolved `SecretSource::Literal`
 /// token into the key — so a secret value *can* live here on those paths (it is
 /// never logged: `SecretSource`/`RelayEntry` Debug redact it and Display shows
-/// URLs only). Two configs differing only in their token key distinct endpoints;
+/// URLs only). Two configs differing only in their token map to distinct
+/// endpoint keys;
 /// rotating the *underlying* secret behind an unchanged declaration reuses the
 /// already-bound endpoint until the daemon restarts.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -144,9 +145,10 @@ impl RelayChoice {
     /// ticket. Priority, low to high — a higher layer overrides a lower one for
     /// the same relay:
     ///
-    /// 1. **stored** — the joiner's local token cache (see [`token_store`]),
-    ///    populated by a previous interactive prompt. Lowest, because it can be
-    ///    stale (e.g. the relay rotated its token since it was cached).
+    /// 1. **stored** — the joiner's local token cache (the daemon's
+    ///    `share::token_store`), populated by a previous interactive prompt.
+    ///    Lowest, because it can be stale (e.g. the relay rotated its token
+    ///    since it was cached).
     /// 2. **env** — the joiner's `VELD_SHARE_RELAY_TOKEN`, attached ONLY to the
     ///    ticket relay whose URL equals `VELD_SHARE_RELAY` (parsed equality), so
     ///    a hostile ticket naming another relay cannot harvest it. Beats the
@@ -157,7 +159,7 @@ impl RelayChoice {
     /// 4. **supplied** — a token the joiner just entered at the prompt this
     ///    attempt; wins so a correction beats a stale stored/embedded value.
     ///
-    /// [`token_store`]: super::token_store
+    /// ("token cache" is the daemon's `share::token_store` module.)
     pub fn resolve_join_tokens<'a>(
         ticket_relay_urls: impl IntoIterator<Item = &'a RelayUrl>,
         embedded: &BTreeMap<String, String>,
@@ -266,6 +268,61 @@ impl fmt::Display for RelayChoice {
     }
 }
 
+/// Outcome of watching a join endpoint's home-relay connection for auth.
+pub enum RelayAuth {
+    /// The endpoint connected to a home relay (auth, if any, succeeded), or the
+    /// watch timed out with no clear denial — either way, proceed to dial.
+    OkOrUnknown,
+    /// A home relay rejected the connection as unauthorized. Carries the relay
+    /// URL whose token is missing or wrong.
+    Denied(String),
+}
+
+/// Whether a home-relay `last_error` string indicates the relay *rejected our
+/// auth* (as opposed to being unreachable or failing some other way).
+///
+/// iroh surfaces this as `iroh_relay`'s `Error::ServerDeniedAuth`, whose Display
+/// is `"The relay denied our authentication (<reason>)"` (iroh-relay 1.0.1
+/// `protos/handshake.rs:159`). `<reason>` is `"not authorized"` only by default
+/// (when the relay's `AccessControl` denies with `reason: None`,
+/// `handshake.rs:543`); a relay that denies with a *custom* reason would not
+/// contain "not authorized". So match the reason-independent wrapper, and keep
+/// "not authorized" as a belt-and-braces fallback. Pinned to iroh 1.0.1; an
+/// upgrade that rewords this must update the string here (guarded by
+/// `is_relay_auth_denial_*` tests).
+pub fn is_relay_auth_denial(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("denied our authentication") || e.contains("not authorized")
+}
+
+/// Watch an endpoint's home-relay status until it connects, reports an auth
+/// denial, or `budget` elapses. Lets a joiner distinguish "wrong/missing relay
+/// token" from "host unreachable" and prompt/report precisely (see
+/// [`is_relay_auth_denial`]).
+pub async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
+    use iroh::Watcher as _;
+    let poll = async {
+        let mut status = endpoint.home_relay_status();
+        loop {
+            let relays = status.get();
+            if relays.iter().any(|r| r.is_connected()) {
+                return RelayAuth::OkOrUnknown;
+            }
+            if let Some(denied) = relays.iter().find(|r| {
+                r.last_error()
+                    .map(|e| is_relay_auth_denial(&format!("{e:#}")))
+                    .unwrap_or(false)
+            }) {
+                return RelayAuth::Denied(denied.url().to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(budget, poll)
+        .await
+        .unwrap_or(RelayAuth::OkOrUnknown)
+}
+
 /// Path to the persistent node key: `<data_dir>/veld/node.key`.
 pub fn key_path() -> Option<PathBuf> {
     dirs::data_dir().map(|d| d.join("veld").join("node.key"))
@@ -369,7 +426,7 @@ pub async fn bind_endpoint(secret_key: SecretKey, choice: &RelayChoice) -> Resul
 ///
 /// DANGER: the returned tokens are written into the ticket verbatim (a shareable
 /// link). Only called when the host opted into `dangerouslyEmbedRelayTokensInTicket`.
-pub(crate) async fn resolve_embedded_tokens<'a>(
+pub async fn resolve_embedded_tokens<'a>(
     choice: &RelayChoice,
     advertised: impl IntoIterator<Item = &'a RelayUrl>,
 ) -> Result<BTreeMap<String, String>> {
@@ -409,7 +466,12 @@ pub(crate) async fn resolve_embedded_tokens<'a>(
 ///
 /// A resolved-but-empty secret is treated as a misconfiguration and errors,
 /// rather than silently sending an empty `Authorization: Bearer` header.
-async fn resolve_secret(source: &SecretSource) -> Result<String> {
+///
+/// Public because it is the single resolution path for *every* `SecretSource`
+/// in the sharing stack — relay auth tokens here, and the gateway's
+/// registration auth token in `veld-gateway` — so trimming/timeout/empty-value
+/// semantics can never diverge between them.
+pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
     let value = match source {
         SecretSource::Literal(v) => v.trim_end().to_owned(),
         SecretSource::Env(name) => std::env::var(name)
@@ -472,6 +534,26 @@ async fn resolve_secret(source: &SecretSource) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Pins the relay auth-denial detection to iroh 1.0.1's error wording. If an
+    // iroh upgrade rewords `ServerDeniedAuth`'s Display, this fails loudly rather
+    // than silently routing every token-gated join to "unreachable".
+    #[test]
+    fn detects_relay_auth_denial_regardless_of_reason() {
+        // Default deny reason (relay's AccessControl returns `reason: None`).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (not authorized)"
+        ));
+        // Custom deny reason — must still be detected (the earlier "not
+        // authorized"-only match missed this).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (invalid token)"
+        ));
+        // Unrelated failures are NOT auth denials → the join dials and reports a
+        // real connectivity error instead of wrongly prompting for a token.
+        assert!(!is_relay_auth_denial("connection timed out"));
+        assert!(!is_relay_auth_denial("dns error: no such host"));
+    }
 
     #[test]
     fn resolve_public_policy() {

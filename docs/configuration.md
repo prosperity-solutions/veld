@@ -754,22 +754,34 @@ Because a token declaration is part of a relay's endpoint identity, changing the
 
 ### `sharing.gateway`
 
-Base URL of the public web gateway this environment points at, e.g. `"https://share.acme.internal"`. Only needed by services that `expose` `web`. The gateway is a self-hosted server that joins the share and reverse-proxies it onto a public URL. **Reserved:** the gateway ships in a later release; today only `peer` sharing is served.
+The public web gateway this environment registers `web` shares with (used by `veld share --web`). A bare URL string, or an object carrying the gateway's registration auth token:
+
+```json
+{
+  "sharing": {
+    "gateway": { "url": "https://share.acme.internal", "token": { "env": "VELD_GW_TOKEN" } }
+  }
+}
+```
+
+`token` is a secret source exactly like [relay auth tokens](#relay-auth-tokens) — a literal string, `{ "env": … }`, `{ "file": … }`, or `{ "command": … }` — resolved on the daemon when the share starts, Debug-redacted, and required (the gateway never accepts unauthenticated registrations). Without config, the `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` env vars (on the **daemon's** environment) work as an ad-hoc override; config wins when both are present.
+
+The gateway itself is one self-hosted container — see the [gateway operator guide](gateway.md) for deployment (DNS, TLS, env vars).
 
 ### `share.expose`
 
 The audiences a variant may be shared to. A list; an empty list (or an absent `share` block) means the service is never shareable.
 
-| Value  | Audience          | URL fidelity                       | Status         |
-|--------|-------------------|------------------------------------|----------------|
-| `peer` | Other Veld users  | Verbatim — exact origin URL reproduced | Available      |
-| `web`  | Any browser       | Best-effort (rewritten host, operator-configured domain) | Reserved (gateway ships later) |
+| Value  | Audience          | URL fidelity                       | Command |
+|--------|-------------------|------------------------------------|---------|
+| `peer` | Other Veld users  | Verbatim — exact origin URL reproduced | `veld share` |
+| `web`  | Any browser (no Veld needed) | Best-effort — real public URL minted by the gateway, origin `Host` preserved toward the app, redirects/cookies adapted (see the [operator guide](gateway.md)) | `veld share --web` |
 
 ```json
 "share": { "expose": ["peer", "web"] }
 ```
 
-Sharing only ever exposes services with a URL, so `share` is meaningful on `start_server` variants; on a `command` variant it is accepted but inert (nothing to share). A `web`-only opt-in (no `peer`) is not yet shareable — `veld share` reports it distinctly and points you at `peer`.
+The two audiences are independent shares with independent capabilities: `veld share` serves the `peer`-opted services, `veld share --web` mints a separate share of the `web`-opted ones and registers it with the gateway — revoking one never touches the other. Sharing only ever exposes services with a URL, so `share` is meaningful on `start_server` variants; on a `command` variant it is accepted but inert (nothing to share).
 
 ---
 

@@ -134,11 +134,11 @@ pub struct SharingConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relays: Option<RelayPolicy>,
 
-    /// Base URL of the public web gateway this environment points at. Only
-    /// needed for services that `expose` `web`. Example:
-    /// `https://share.acme.internal`.
+    /// The public web gateway this environment points at. Only needed for
+    /// services that `expose` `web`. A bare URL string, or `{ "url", "token" }`
+    /// carrying the gateway's registration auth token as a [`SecretSource`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gateway: Option<String>,
+    pub gateway: Option<GatewayRef>,
 
     /// **DANGER.** When true, the resolved relay auth token(s) are embedded in
     /// the share ticket, so a joiner needs no out-of-band token config. This
@@ -374,6 +374,77 @@ fn relay_entry_from_value(value: serde_json::Value) -> Result<RelayEntry, String
             Ok(RelayEntry { url, token })
         }
         _ => Err("relay entry must be a URL string or a { url, token } object".to_owned()),
+    }
+}
+
+/// A reference to the public web gateway an environment registers `web`
+/// shares with (SHARING_V2.md §5). Mirrors [`RelayEntry`]'s serde shape: a
+/// bare URL string round-trips, and the object form adds the registration
+/// auth token the gateway requires.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GatewayRef {
+    /// Gateway base URL, e.g. `https://share.acme.internal`.
+    pub url: String,
+    /// Registration auth token source. The gateway always requires one; it may
+    /// alternatively come from the `VELD_SHARE_GATEWAY_TOKEN` env override.
+    pub token: Option<SecretSource>,
+}
+
+impl std::fmt::Debug for GatewayRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegates the token field to `SecretSource`'s redacting Debug.
+        f.debug_struct("GatewayRef")
+            .field("url", &self.url)
+            .field("token", &self.token)
+            .finish()
+    }
+}
+
+impl Serialize for GatewayRef {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        match &self.token {
+            None => s.serialize_str(&self.url),
+            Some(token) => {
+                let mut m = s.serialize_map(Some(2))?;
+                m.serialize_entry("url", &self.url)?;
+                m.serialize_entry("token", token)?;
+                m.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for GatewayRef {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::String(url) => Ok(GatewayRef { url, token: None }),
+            serde_json::Value::Object(mut map) => {
+                let url = map
+                    .remove("url")
+                    .ok_or_else(|| D::Error::custom("gateway object must have a \"url\""))?;
+                let url = url
+                    .as_str()
+                    .ok_or_else(|| D::Error::custom("gateway \"url\" must be a string"))?
+                    .to_owned();
+                let token = match map.remove("token") {
+                    Some(t) => Some(secret_source_from_value(t).map_err(D::Error::custom)?),
+                    None => None,
+                };
+                if !map.is_empty() {
+                    let unknown: Vec<&str> = map.keys().map(String::as_str).collect();
+                    return Err(D::Error::custom(format!(
+                        "unknown key(s) in gateway: {}; expected \"url\" and optional \"token\"",
+                        unknown.join(", ")
+                    )));
+                }
+                Ok(GatewayRef { url, token })
+            }
+            _ => Err(D::Error::custom(
+                "gateway must be a URL string or a { url, token } object",
+            )),
+        }
     }
 }
 
@@ -1778,12 +1849,41 @@ mod tests {
                 "https://relay.acme.internal"
             )]))
         );
-        assert_eq!(
-            sharing.gateway.as_deref(),
-            Some("https://share.acme.internal")
-        );
+        let gateway = sharing.gateway.expect("gateway parsed");
+        assert_eq!(gateway.url, "https://share.acme.internal");
+        assert_eq!(gateway.token, None);
         let share = cfg.nodes["web"].variants["local"].share.as_ref().unwrap();
         assert!(share.allows(ExposeMode::Peer));
         assert!(!share.allows(ExposeMode::Web));
+    }
+
+    #[test]
+    fn gateway_ref_object_form_carries_token_and_round_trips() {
+        // Object form with a token source.
+        let gw: GatewayRef = serde_json::from_str(
+            r#"{ "url": "https://share.acme.internal", "token": { "env": "GW_TOKEN" } }"#,
+        )
+        .unwrap();
+        assert_eq!(gw.url, "https://share.acme.internal");
+        assert_eq!(gw.token, Some(SecretSource::Env("GW_TOKEN".into())));
+
+        // String shorthand round-trips as a bare string.
+        let bare: GatewayRef = serde_json::from_str(r#""https://share.acme.internal""#).unwrap();
+        assert_eq!(
+            serde_json::to_value(&bare).unwrap(),
+            serde_json::json!("https://share.acme.internal")
+        );
+
+        // Unknown keys are rejected (typo protection, matching relay entries).
+        assert!(
+            serde_json::from_str::<GatewayRef>(r#"{ "url": "https://x", "tokn": "oops" }"#)
+                .is_err()
+        );
+        // A literal token never appears in Debug output.
+        let lit = GatewayRef {
+            url: "https://x".into(),
+            token: Some(SecretSource::Literal("s3cret".into())),
+        };
+        assert!(!format!("{lit:?}").contains("s3cret"));
     }
 }

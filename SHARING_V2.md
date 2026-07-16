@@ -217,20 +217,212 @@ domain to match. Veld's job is to make host rewriting predictable and to documen
 what the operator must own — not to magically preserve verbatim fidelity (that's
 the `peer` mode's job). This is *why* the config uses a different word (`web`).
 
-### 5.1 Gateway server (new binary)
+### 5.1 One binary or two?
 
-- Config: base public domain, TLS (ACME wildcard), which shares to accept
-  (capability/allow-list), relay policy (shares the same `sharing.relays`
-  contract).
-- On accepting a share: `join` over iroh → mint slug → publish
-  `https://<slug>.share.<domain>` → reverse-proxy with host rewriting → return
-  the public URL to the origin.
-- Runs anywhere reachable: one per org, self-hosted, same Docker-friendly story
-  as the relay.
-- Reuses the browser join-URL scaffolding already present
-  (`manager.rs:737-746`).
+**Decision: a fourth workspace binary, `veld-gateway` (new crate
+`crates/veld-gateway`).** Alternatives considered and rejected:
 
-### 5.2 Copy-URL UX
+| Option | Why not |
+|---|---|
+| Subcommand of the `veld` CLI (`veld gateway serve`) | The CLI is deliberately thin — it has **no iroh, no HTTP-server deps** today (`crates/veld/Cargo.toml`); it talks to the daemon over IPC. Embedding the gateway drags iroh + hyper + TLS into every developer install for code that only ever runs on a server. |
+| Mode of `veld-daemon` (`veld-daemon --gateway`) | The daemon assumes its habitat: a privileged `veld-helper` peer (DNS/Caddy IPC), local run state, feedback, GC, macOS conventions. None of that exists on a Linux host. Running it public-facing means shipping all that dead machinery as attack surface, and every daemon refactor risks the server path. |
+| Separate repo | Guarantees protocol drift. The whole point of §5.2 is that host and gateway compile against the same transport crate in one workspace, versioned in lockstep. |
+
+The marginal cost is low: the release pipeline already builds three binaries
+for four targets (macOS + Linux, x86_64 + aarch64), so a fourth binary is
+mechanical. Operationally it mirrors the self-hosted iroh relay: **one more
+container in the org's stack**, and the compliance boundary stays auditable —
+"the thing that exposes services publicly" is a distinct, small artifact, not a
+flag on the dev tool.
+
+### 5.2 Shared transport crate — killing duplication and drift
+
+The gateway is "a headless peer that joins" — so it must speak *exactly* the
+protocol the daemon speaks, forever. We get that structurally, not by
+discipline: extract the transport layer out of `veld-daemon` into a new
+library crate **`crates/veld-share`**.
+
+**Layering after the extraction:**
+
+| Crate | Contains | iroh dep |
+|---|---|---|
+| `veld-core` (unchanged role) | Pure wire/config types: `Capability`, `ShareManifest`, `ShareTicket`, `SharingConfig`, `RelayPolicy`, `SecretSource`, DTOs | no |
+| `veld-share` (**new**) | `ALPN`, `proto` (control/open-stream frames), `forward::splice`, `join::{dial, forward_local}`, `host::{HostShare, read_control, accept_and_serve, deny}`, `RelayChoice` + `bind_endpoint` + relay-token resolution + `relay_auth_status`, secret-key persistence | yes |
+| `veld-daemon` | What is genuinely daemon-shaped: `ShareManager` lifecycle (Caddy/helper routes, approval UX, reaper, join watcher), HTTP API, interactive relay-token cache (`token_store`) | via `veld-share` |
+| `veld-gateway` (**new**) | Registration API, slug router, HTTP front + rewrites (§5.3) | via `veld-share` |
+
+Both *halves* of the protocol (host and join) live in `veld-share` even though
+the gateway only joins — keeping them in one crate means the loopback tunnel
+test (today in `share/mod.rs`) moves there and exercises both sides against
+each other on every build.
+
+**Drift guards, concretely:**
+- One `ALPN` constant (`veld/share/1`) in one crate; a protocol change is a
+  version bump in exactly one place, and both binaries pick it up or neither.
+- Wire types stay serde structs in `veld-core` with the existing
+  compat conventions (`#[serde(default)]`, skip-if-empty).
+- A cross-crate integration test in `veld-gateway`: spin up an in-process
+  `HostShare` (daemon's host half), register it with a gateway instance, drive
+  an HTTP request through the public front, assert the bytes round-trip. The
+  gateway can't drift from the daemon without this failing.
+- Workspace lockstep versioning: all four binaries release together; a
+  host/gateway version skew across orgs is handled by the versioned ALPN
+  (connect fails loudly, never mis-speaks).
+
+### 5.3 How the gateway binary works
+
+Anatomy — four components in one process:
+
+```
+                 ┌───────────────────────── veld-gateway ─────────────────────────┐
+ origin daemon ──► 1. Registration API      2. Join engine        3. Slug router  │
+ (HTTPS + token)  │   POST /api/v1/shares ──► veld-share::dial ──► slug → (conn,  │
+                  │   DELETE /api/v1/…         over iroh             hostname)    │
+                  │                                                      ▲        │
+ browser ─────────► 4. HTTP front: TLS for *.share.<domain> ─────────────┘        │
+                  │    Host: <slug>.share.<domain> → OpenStream{hostname}         │
+                  └────────────────────────────────────────────────────────────────┘
+```
+
+1. **Registration API.** The origin daemon (not the gateway) initiates: it
+   `POST`s the share ticket plus a gateway auth token. The gateway validates
+   the token, decodes the ticket, and joins over iroh **as an ordinary peer**
+   — same relay-confinement rules (it dials the relays the ticket advertises,
+   never falls back to public), same capability gate, same approval flow on
+   the host (it shows up labeled `gateway <domain>`, so `manual` mode lets the
+   user see and approve the gateway like any joiner).
+2. **Join engine.** `veld-share::join::dial` verbatim. Holds the live
+   `Connection`; when it closes (host unshared/stopped/crashed), all slugs for
+   that share are dropped — the exact mirror of the daemon's join watcher.
+3. **Slug router.** Per manifest node, mint `https://<slug>.share.<domain>`.
+   Slugs are **deterministic and unguessable**:
+
+   ```
+   slug = base32( SHA-256("veld-gateway-slug/1" ‖ host_node_id ‖ hostname ‖ capability)[..16] )
+   ```
+
+   - *Stateless*: the gateway recomputes the same slug from the registration
+     alone — a gateway restart followed by the origin's heartbeat re-register
+     yields the **same public URL**; no database needed for URL stability.
+   - *Machine-bound*: `host_node_id` (the iroh node id from the ticket) ties
+     the slug to the sharing machine; the same service shared from a different
+     machine gets a different URL.
+   - *Unguessable*: the capability (32-byte secret) is a hash input, so the
+     slug inherits its entropy; the hash is one-way, so the slug leaks nothing.
+     128 bits → 26 base32 chars, comfortably inside the 63-char DNS label
+     limit. The URL itself is the baseline bearer secret (§6).
+   - *Ephemeral by construction*: a new share (new capability — e.g. after a
+     daemon restart, since shares die with the daemon) mints a new slug. Slug
+     lifetime = share TTL.
+4. **HTTP front.** Terminates TLS, resolves the slug from `Host`, opens a
+   fresh bi-stream (`OpenStream{hostname}`), and speaks HTTP/1.1 over it to
+   the origin's **plain-HTTP upstream port** — the same bytes the peer path
+   produces (`host.rs` splices to `127.0.0.1:<port>` either way; in peer mode
+   it's the consumer's Caddy that adds TLS, here it's the gateway). This front
+   is an HTTP-aware proxy (hyper), *not* a raw TCP splice, because it must:
+   - support `Upgrade`/WebSocket (splice raw after the 101 — HMR works),
+   - set `X-Forwarded-For/Proto/Host`,
+   - rewrite `Location`/`Refresh` response headers that name the origin's
+     fake-TLD hostnames back to the public host.
+
+   **Host header policy (revised while implementing):** the upstream `Host`
+   is rewritten to the **origin hostname**. Dev servers enforce host
+   allow-lists (Vite's `allowedHosts` default admits `*.localhost` but would
+   reject an unknown public host), so origin-Host makes the flagship case —
+   sharing a dev frontend — work zero-config; the public host travels in
+   `X-Forwarded-Host`, and `Set-Cookie` `Domain` attributes scoped to origin
+   hostnames are stripped (host-only cookies work on the public host).
+
+   **What it does not do:** rewrite HTML/JS bodies. Absolute URLs baked into
+   the app, CORS allow-lists, OAuth redirect URIs — operator responsibility,
+   per the top of §5.
+
+**Statelessness.** The gateway persists nothing. Registrations are leases: the
+origin daemon heartbeats (re-`POST`s, idempotent) every N seconds; a gateway
+restart loses all state and the next heartbeat re-establishes each share.
+Unshare/expiry → the daemon `DELETE`s (best-effort; the lease expiring covers
+the crash case). No database, no volume — restart-safe by construction.
+
+### 5.4 Host-side flow and audience separation
+
+`expose: ["web"]` in config is *permission*; distribution to the gateway is a
+runtime act:
+
+```
+veld share --web          # requires ≥1 node with expose containing "web"
+```
+
+**Web sharing mints a separate share** (own capability, manifest = the
+web-opted nodes only), whose ticket goes to the gateway — it is never pasted
+to a human. The peer share (if any) stays its own share with its own
+capability. Rationale: the alternative — one share whose manifest is filtered
+per joiner type — needs the host to *trust* the joiner's self-declared type,
+i.e. a protocol change and a new trust decision. Two shares keep the protocol
+untouched and give capability isolation for free: revoking the web audience
+(`veld unshare --web`) kills the gateway's capability without touching peers.
+
+The registration response maps `origin hostname → public URL`; the daemon
+stores this map for the share's lifetime. That map is what powers §5.6 and the
+`veld share` output (the user immediately sees the public URLs).
+
+### 5.5 Deployment & configuration (operator story)
+
+One container, no privileges, mirrors the self-hosted relay's story. The
+gateway is **env-var-first**: every setting has a `VELD_GATEWAY_*` variable,
+and a config file is optional (for operators who prefer mounted config).
+Env wins over file. A containerized deployment needs zero files:
+
+| Env var | Config key | Meaning |
+|---|---|---|
+| `VELD_GATEWAY_DOMAIN` | `domain` | Public base domain; URLs are `https://<slug>.<domain>` |
+| `VELD_GATEWAY_LISTEN` | `listen` | Bind address (default `0.0.0.0:8080`) |
+| `VELD_GATEWAY_TLS_CERT` / `_KEY` | `tls.cert` / `tls.key` | Wildcard cert paths; unset = plain HTTP behind an external TLS terminator |
+| `VELD_GATEWAY_TOKEN` | `auth.token` (SecretSource) | Registration auth token origins must present |
+| `VELD_GATEWAY_RELAYS` | `relays` | Comma-separated relay URLs, or `public` |
+| `VELD_GATEWAY_RELAY_TOKEN` | — | Auth token for the (single) custom relay, env form |
+
+```jsonc
+// gateway.json — optional file form (SecretSource reused for secrets)
+{
+  "domain": "share.acme.internal",     // public URLs: https://<slug>.share.acme.internal
+  "listen": "0.0.0.0:8080",
+  "tls": { "cert": "/certs/wild.pem", "key": "/certs/wild.key" },  // omit → external TLS
+  "auth": { "token": { "env": "VELD_GATEWAY_TOKEN" } },  // what origins must present
+  "relays": ["https://relay.acme.internal"]              // same contract as veld.json
+}
+```
+
+**Container image.** The release pipeline builds and publishes a multi-arch
+(amd64 + arm64) image to `ghcr.io/prosperity-solutions/veld-gateway` on every
+release (i.e. every merge to `main` that produces one), tagged `<semver>` and
+`latest`. The image reuses the already-built Linux release binaries (no second
+compile), runs as non-root on a minimal base, and is configured entirely via
+the env vars above.
+
+```sh
+docker run -p 8080:8080 \
+  -e VELD_GATEWAY_DOMAIN=share.acme.internal \
+  -e VELD_GATEWAY_TOKEN=…  \
+  -e VELD_GATEWAY_RELAYS=https://relay.acme.internal \
+  ghcr.io/prosperity-solutions/veld-gateway:latest
+```
+
+- **DNS:** one wildcard record, `*.share.acme.internal → gateway`.
+- **TLS, two modes at v1:** (a) `external` — the platform's L7 load
+  balancer/ingress terminates TLS and the gateway speaks plain HTTP behind it;
+  (b) bring-your-own wildcard cert files (mounted secret). Built-in ACME
+  DNS-01 is deferred — wildcard issuance needs DNS-provider credentials and
+  drags a lego-sized dependency in; operators who want it run a cert-manager
+  sidecar. Note the contrast with the iroh relay: the relay needs raw
+  L4/TCP and breaks behind L7 gateways, but the **gateway is ordinary HTTP(S)
+  and is explicitly L7-platform-friendly** — the only platform requirements
+  are wildcard host routing and a wildcard cert.
+- **Origin side:** `sharing.gateway` grows the same shape as relay entries —
+  a bare URL string, or `{ "url": …, "token": <SecretSource> }` for the
+  gateway auth token. String form stays valid (shorthand, like relays).
+- **Health:** `/healthz` for the platform's checks; structured logs to stdout.
+
+### 5.6 Copy-URL UX
 
 The origin Veld user is looking at the app on its fake-TLD URL and cannot paste
 that to a non-Veld user. So:
@@ -290,10 +482,14 @@ Three independent increments; ship top-down.
    - one endpoint per relay policy → concurrent different-relay shares.
    - per-variant `share.expose` opt-in; `veld share` enforces it.
    - Docs checklist (README, `docs/configuration.md`, skills, schema).
-2. **Public web gateway** (new binary)
-   - headless peer + reverse proxy + slug minting + host rewriting.
-   - overlay toolbar "Copy public URL".
-   - honest fidelity docs.
+2. **Public web gateway** (new binary) — design in §5.1–5.6; ship in slices:
+   - a. `veld-share` extraction (pure refactor, no behavior change) — its own PR.
+   - b. `veld-gateway` binary: registration API + join engine + slug router +
+     HTTP front (incl. WebSocket upgrade); container image + release wiring.
+   - c. Host side: `veld share --web` (separate web share), `sharing.gateway`
+     token form, heartbeat lease, public-URL output.
+   - d. Overlay toolbar "Copy public URL".
+   - e. Honest fidelity docs + operator guide (DNS/TLS/platform).
 3. **Browser-native viewer** — spike only.
 
 ## 9. Decisions & remaining questions
@@ -305,11 +501,55 @@ Three independent increments; ship top-down.
   shared gateway instance).
 - Config relay policy **wins** over `VELD_SHARE_RELAY`; env stays as an ad-hoc
   override only when config is silent, §3.1/§4.
+- Gateway is a **fourth workspace binary** (`veld-gateway`), not a CLI
+  subcommand or daemon mode, §5.1.
+- Duplication/drift solved structurally: transport extracted to a shared
+  `veld-share` crate; one ALPN constant; cross-crate integration test, §5.2.
+- Gateway ↔ share trust: a **gateway auth token** (SecretSource) the origin
+  presents on registration; the gateway then joins as an ordinary peer through
+  the existing capability + approval gates, §5.3.
+- Web audience gets a **separate share** (own capability, web-opted nodes
+  only) whose ticket goes only to the gateway — independent revocation, no
+  protocol change, §5.4.
+- Slugs: **deterministic** hash (host node id ‖ hostname ‖ capability →
+  128-bit base32) — stateless URL stability across gateway restarts,
+  machine-bound, unguessable. Lifetime = share TTL. Gateway holds no
+  persistent state; registrations are heartbeat leases, §5.3.
+- Gateway is **env-var-first** for containerized hosting; config file
+  optional. Release pipeline publishes a multi-arch image to
+  `ghcr.io/prosperity-solutions/veld-gateway` on each release, §5.5.
+
+**Settled while implementing (review-driven)**
+- Upstream `Host` is rewritten to the **origin** hostname, and `Origin` +
+  `Referer` are rewritten in lockstep, so an Origin-checking dev server sees a
+  coherent same-origin request. `X-Forwarded-*`/`Forwarded` are stripped
+  inbound and set authoritatively (the gateway is the public trust boundary);
+  `Referrer-Policy: no-referrer` is emitted so the slug doesn't leak.
+- Relay confinement on the gateway is an **allow-list** with tokens resolved
+  once at startup; a ticket naming an unlisted relay — or advertising no relay
+  at all — is refused (never a silent public/direct fallback).
+- Web share defaults to **auto** approval (the gateway is the only joiner, so
+  a gateway restart re-joins without a human gate), and unshare closes the
+  tunnel (immediate slug drop) with the gateway `DELETE` as courtesy and the
+  lease as the crash backstop.
 
 **Still open (defer to the relevant increment)**
-1. Should `web` enforce stricter defaults (approval mode, shorter TTL) than
-   `peer`? — settle in increment 2.
-2. Wildcard slug scheme + collision/expiry semantics for public URLs. —
-   increment 2.
-3. Gateway ↔ share trust: how the gateway is allow-listed to accept a share
-   (reuse capability? separate gateway token?). — increment 2.
+1. **Per-viewer access layer** (increment 2, §6): the slug is unguessable but
+   travels in the URL (DNS/SNI/logs), so it is obscurity, not authentication —
+   today every viewer with the link is served. A password / per-viewer
+   approval layer is the next security increment; config room is reserved via
+   a `share.web` sub-object.
+2. `host_header: "public" | "origin"` per-registration knob — deferred; the
+   origin-Host default fits the flagship dev-server case, and SSR apps that
+   need the public host are the operator-config path until a real case forces
+   the knob.
+3. **Trusted-upstream-LB opt-in** — the gateway currently overwrites all
+   forwarding headers (safe default); an operator with a sanitising LB that
+   wants the real client IP chain needs a `trust_forwarded_headers` opt-in.
+4. **Direct-address confinement** — relay confinement checks the ticket's
+   relay URLs, not its iroh direct addresses; a stolen-token registrant could
+   make the gateway UDP-probe internal addresses (bounded: needs a real iroh
+   peer proving the node id, no HTTP SSRF). Filter private/link-local direct
+   addrs if iroh exposes them.
+5. Heartbeat jitter across many origins on one gateway; human-readable slug
+   aliases on top of the unguessable default (collision/enumeration surface).

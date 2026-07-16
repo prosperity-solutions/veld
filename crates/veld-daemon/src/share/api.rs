@@ -13,7 +13,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
-use veld_core::config::{ExposeMode, SharePolicy, VeldConfig, load_config};
+use veld_core::config::{ExposeMode, GatewayRef, SharePolicy, VeldConfig, load_config};
 use veld_core::share::{
     ApprovalMode, Capability, JoinRequest, JoinResponse, ShareManifest, SharedNode, SharesList,
     StartShareRequest, StartShareResponse,
@@ -21,6 +21,7 @@ use veld_core::share::{
 use veld_core::state::{GlobalRegistry, ProjectState};
 
 use super::endpoint::RelayChoice;
+use super::gateway::GatewayClient;
 use super::manager::ShareManager;
 
 const DEFAULT_TTL_SECS: i64 = 2 * 60 * 60;
@@ -63,14 +64,24 @@ async fn start(
 ) -> Result<Json<StartShareResponse>, ApiError> {
     check_csrf(&headers)?;
 
+    let mode = if req.web {
+        ExposeMode::Web
+    } else {
+        ExposeMode::Peer
+    };
     let ResolvedShare {
         manifest,
         relay,
         embed_relay_tokens,
+        gateway,
         warnings,
-    } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs)?;
+    } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs, mode)?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
+
+    if req.web {
+        return start_web_share(&manager, req, manifest, relay, gateway, warnings).await;
+    }
 
     let capability = Capability::generate();
     let (share_id, ticket) = manager
@@ -93,6 +104,90 @@ async fn start(
         nodes: node_names,
         expires_at,
         warnings,
+        public_urls: Vec::new(),
+    }))
+}
+
+/// The web path of `start`: mint a share scoped to the `web`-opted nodes,
+/// hand its ticket to the configured gateway (the ticket is never surfaced to
+/// a human — the capability stays between this daemon and the gateway), and
+/// keep the registration alive via heartbeats until unshare.
+async fn start_web_share(
+    manager: &Arc<ShareManager>,
+    req: StartShareRequest,
+    manifest: ShareManifest,
+    relay: RelayChoice,
+    gateway: Option<GatewayRef>,
+    warnings: Vec<String>,
+) -> Result<Json<StartShareResponse>, ApiError> {
+    // Resolve the gateway BEFORE minting the share, so a missing gateway
+    // config fails cleanly with nothing to tear down.
+    let client = GatewayClient::resolve(gateway.as_ref())
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
+
+    let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
+    let expires_at = manifest.expires_at;
+    let run_id = manifest.run_id;
+
+    // Re-running `veld share --web` for the same run replaces the previous web
+    // share rather than stacking a second one: without this, the stale share
+    // keeps heartbeating and its old public URLs stay live until TTL, so the
+    // user who thinks they "re-shared" has two live URLs, one forgotten.
+    manager.unshare_web_shares_for_run(run_id).await;
+
+    // The gateway is the sole intended joiner and the user just asked for
+    // this exposure, so `auto` is the default; an explicit --approve still
+    // wins (e.g. `manual` to eyeball the gateway's join in the dashboard).
+    // Relay tokens are never embedded in a web ticket: the gateway
+    // authenticates to relays from its *own* config, and the ticket should
+    // carry no secrets beyond the capability.
+    let capability = Capability::generate();
+    let (share_id, ticket) = manager
+        .start_share(
+            manifest,
+            capability,
+            req.approve.unwrap_or(ApprovalMode::Auto),
+            relay,
+            false,
+        )
+        .await
+        .map_err(internal)?;
+    let token = ticket.encode().map_err(internal)?;
+
+    let registration = match client.register(&token).await {
+        Ok(r) => r,
+        Err(e) => {
+            // No orphaned share: if the gateway won't take it, unshare.
+            let _ = manager.unshare(&share_id).await;
+            return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")));
+        }
+    };
+
+    if let Err(e) = manager
+        .attach_web_registration(
+            &share_id,
+            client.clone(),
+            registration.id.clone(),
+            registration.lease_secs,
+            registration.urls.clone(),
+        )
+        .await
+    {
+        // The share vanished mid-flight; withdraw the gateway registration.
+        let _ = client.unregister(&registration.id).await;
+        return Err(internal(e));
+    }
+
+    Ok(Json(StartShareResponse {
+        share_id,
+        // The web ticket is a secret between daemon and gateway — not returned.
+        ticket: String::new(),
+        join_url: String::new(),
+        nodes: node_names,
+        expires_at,
+        warnings,
+        public_urls: registration.urls,
     }))
 }
 
@@ -209,20 +304,25 @@ struct ResolvedShare {
     /// resolved relay token(s) in the ticket so joiners need no out-of-band
     /// config. Ships the relay secret inside the shareable link.
     embed_relay_tokens: bool,
-    /// URL-bearing services excluded from the share (not opted into `peer`),
-    /// surfaced as warnings so a partial share isn't silently under-exposed.
+    /// The web gateway declared in config (`sharing.gateway`), if any — used
+    /// by the web share path.
+    gateway: Option<GatewayRef>,
+    /// URL-bearing services excluded from the share (not opted into the
+    /// requested mode), surfaced as warnings so a partial share isn't silently
+    /// under-exposed.
     warnings: Vec<String>,
 }
 
 /// Resolve a run to a shareable manifest by reading persisted state and the
-/// project's config. Only services whose active variant opts into `peer`
-/// sharing (`share.expose` contains `peer`) are included; this is the explicit
-/// consent gate. The runtime `--node` filter narrows *within* the opted-in set
-/// — it can never widen it.
+/// project's config. Only services whose active variant opts into the
+/// requested `mode` (`share.expose` contains it) are included; this is the
+/// explicit consent gate. The runtime `--node` filter narrows *within* the
+/// opted-in set — it can never widen it.
 fn build_manifest(
     run: Option<&str>,
     nodes_filter: Option<&[String]>,
     ttl_secs: Option<i64>,
+    mode: ExposeMode,
 ) -> Result<ResolvedShare, ApiError> {
     let registry = GlobalRegistry::load().map_err(internal)?;
 
@@ -253,11 +353,15 @@ fn build_manifest(
 
     // Track why URL-bearing nodes were excluded, so the error can point the user
     // at the opt-in they are missing rather than a bare "nothing to share".
-    // `node:variant` labels because `peer_opt_in` checks the *live* variant, and a
-    // multi-variant node needs the opt-in on the running one specifically.
+    // `node:variant` labels because the opt-in check uses the *live* variant, and
+    // a multi-variant node needs the opt-in on the running one specifically.
+    let other_mode = match mode {
+        ExposeMode::Peer => ExposeMode::Web,
+        ExposeMode::Web => ExposeMode::Peer,
+    };
     let mut had_url_bearing = false;
     let mut not_opted_in: Vec<String> = Vec::new();
-    let mut web_only: Vec<String> = Vec::new();
+    let mut other_only: Vec<String> = Vec::new();
     let mut nodes = Vec::new();
     for ns in run_state.nodes.values() {
         let (Some(url), Some(port)) = (ns.url.as_ref(), ns.port) else {
@@ -270,12 +374,12 @@ fn build_manifest(
             }
         }
         let share = variant_share(&config, &ns.node_name, &ns.variant);
-        if !share.is_some_and(|s| s.allows(ExposeMode::Peer)) {
+        if !share.is_some_and(|s| s.allows(mode)) {
             let label = format!("{}:{}", ns.node_name, ns.variant);
-            // A `web`-only opt-in is a deliberate choice, not a missing one — call
-            // it out distinctly instead of telling the user to "add peer".
-            if share.is_some_and(|s| s.allows(ExposeMode::Web)) {
-                web_only.push(label);
+            // An other-audience-only opt-in is a deliberate choice, not a
+            // missing one — call it out distinctly.
+            if share.is_some_and(|s| s.allows(other_mode)) {
+                other_only.push(label);
             } else {
                 not_opted_in.push(label);
             }
@@ -293,7 +397,13 @@ fn build_manifest(
     if nodes.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            share_exclusion_message(&run_name, had_url_bearing, &mut not_opted_in, &mut web_only),
+            share_exclusion_message(
+                &run_name,
+                had_url_bearing,
+                &mut not_opted_in,
+                &mut other_only,
+                mode,
+            ),
         ));
     }
 
@@ -301,20 +411,28 @@ fn build_manifest(
     // silently under-expose (the excluded set is otherwise invisible to the user).
     not_opted_in.sort();
     not_opted_in.dedup();
-    web_only.sort();
-    web_only.dedup();
+    other_only.sort();
+    other_only.dedup();
     let mut warnings = Vec::new();
     if !not_opted_in.is_empty() {
         warnings.push(format!(
-            "not shared (no `peer` opt-in): {}",
+            "not shared (no `{}` opt-in): {}",
+            mode_name(mode),
             not_opted_in.join(", ")
         ));
     }
-    if !web_only.is_empty() {
-        warnings.push(format!(
-            "not shared (`web` is reserved until the gateway ships): {}",
-            web_only.join(", ")
-        ));
+    if !other_only.is_empty() {
+        warnings.push(match mode {
+            ExposeMode::Peer => format!(
+                "not shared here (opted into `web` only — use `veld share --web`): {}",
+                other_only.join(", ")
+            ),
+            ExposeMode::Web => format!(
+                "not shared (opted into `peer` only — add \"web\" to their `share.expose` \
+                 to expose them publicly): {}",
+                other_only.join(", ")
+            ),
+        });
     }
 
     // Relays must be opted into explicitly — including public — so share traffic
@@ -324,6 +442,7 @@ fn build_manifest(
         .as_ref()
         .map(|s| s.dangerously_embed_relay_tokens_in_ticket)
         .unwrap_or(false);
+    let gateway = sharing.as_ref().and_then(|s| s.gateway.clone());
     let relay_policy = sharing.and_then(|s| s.relays);
     let relay = RelayChoice::resolve(relay_policy.as_ref()).ok_or((
         StatusCode::BAD_REQUEST,
@@ -354,6 +473,7 @@ fn build_manifest(
         },
         relay,
         embed_relay_tokens,
+        gateway,
         warnings,
     })
 }
@@ -367,10 +487,6 @@ fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Optio
         .and_then(|v| v.share.as_ref())
 }
 
-/// Build the "nothing to share" error from the reasons URL-bearing nodes were
-/// excluded. `not_opted_in` are `node:variant`s with no (peer) `share`;
-/// `web_only` opted into `web` but not `peer`. Both are sorted+deduped in place
-/// for a deterministic message.
 /// The DANGER warning to surface when a share is about to embed relay token(s)
 /// in the ticket, or `None`. Fires iff the `dangerouslyEmbedRelayTokensInTicket`
 /// opt-in is on AND a custom relay actually carries a token to embed — so it
@@ -385,43 +501,64 @@ fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String
     })
 }
 
+/// Build the "nothing to share" error from the reasons URL-bearing nodes were
+/// excluded. `not_opted_in` are `node:variant`s with no `share` opting into the
+/// requested `mode`; `other_only` opted into the *other* audience only. Both are
+/// sorted+deduped in place for a deterministic message.
 fn share_exclusion_message(
     run_name: &str,
     had_url_bearing: bool,
     not_opted_in: &mut Vec<String>,
-    web_only: &mut Vec<String>,
+    other_only: &mut Vec<String>,
+    mode: ExposeMode,
 ) -> String {
     if !had_url_bearing {
         return format!("run '{run_name}' has no shareable (URL-bearing) nodes");
     }
     not_opted_in.sort();
     not_opted_in.dedup();
-    web_only.sort();
-    web_only.dedup();
+    other_only.sort();
+    other_only.dedup();
 
+    let mode_str = mode_name(mode);
     let mut parts: Vec<String> = Vec::new();
     if !not_opted_in.is_empty() {
         parts.push(format!(
-            "Add `\"share\": {{ \"expose\": [\"peer\"] }}` to the variant(s) you want to \
+            "Add `\"share\": {{ \"expose\": [\"{mode_str}\"] }}` to the variant(s) you want to \
              share (candidates: {}).",
             not_opted_in.join(", ")
         ));
     }
-    if !web_only.is_empty() {
-        parts.push(format!(
-            "These opt into `web` only, which is reserved until the public gateway ships — \
-             add `peer` to share Veld-to-Veld today: {}.",
-            web_only.join(", ")
-        ));
+    if !other_only.is_empty() {
+        parts.push(match mode {
+            ExposeMode::Peer => format!(
+                "These opt into `web` only — use `veld share --web`, or add `peer` to share \
+                 Veld-to-Veld: {}.",
+                other_only.join(", ")
+            ),
+            ExposeMode::Web => format!(
+                "These opt into `peer` only — add `web` to their `share.expose` to expose \
+                 them publicly: {}.",
+                other_only.join(", ")
+            ),
+        });
     }
     if parts.is_empty() {
         // URL-bearing nodes existed but the --node filter excluded them all.
         return format!("run '{run_name}' has no shareable services matching the requested nodes");
     }
     format!(
-        "run '{run_name}' has no services opted into peer sharing. {}",
+        "run '{run_name}' has no services opted into {mode_str} sharing. {}",
         parts.join(" ")
     )
+}
+
+/// The config-facing name of an expose mode (matches the JSON values).
+fn mode_name(mode: ExposeMode) -> &'static str {
+    match mode {
+        ExposeMode::Peer => "peer",
+        ExposeMode::Web => "web",
+    }
 }
 
 /// When no run is named, use the only running one; error if ambiguous.
@@ -533,32 +670,65 @@ mod tests {
 
     #[test]
     fn exclusion_message_no_url_bearing() {
-        let msg = share_exclusion_message("r", false, &mut vec![], &mut vec![]);
+        let msg = share_exclusion_message("r", false, &mut vec![], &mut vec![], ExposeMode::Peer);
         assert!(msg.contains("no shareable (URL-bearing) nodes"), "{msg}");
     }
 
     #[test]
     fn exclusion_message_not_opted_in_lists_node_variant() {
-        let msg = share_exclusion_message("r", true, &mut vec!["web:local".into()], &mut vec![]);
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec!["web:local".into()],
+            &mut vec![],
+            ExposeMode::Peer,
+        );
         assert!(msg.contains("no services opted into peer sharing"), "{msg}");
         assert!(msg.contains("web:local"), "{msg}");
         assert!(msg.contains("expose"), "{msg}");
     }
 
     #[test]
-    fn exclusion_message_web_only_is_called_out_distinctly() {
-        let msg = share_exclusion_message("r", true, &mut vec![], &mut vec!["api:local".into()]);
-        assert!(
-            msg.contains("reserved until the public gateway ships"),
-            "{msg}"
+    fn exclusion_message_other_audience_is_called_out_distinctly() {
+        // Peer share, web-only nodes → point at `veld share --web`.
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec!["api:local".into()],
+            ExposeMode::Peer,
         );
+        assert!(msg.contains("veld share --web"), "{msg}");
         assert!(msg.contains("api:local"), "{msg}");
+
+        // Web share, peer-only nodes → point at adding `web` to expose.
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec![],
+            &mut vec!["api:local".into()],
+            ExposeMode::Web,
+        );
+        assert!(msg.contains("opt into `peer` only"), "{msg}");
+        assert!(msg.contains("no services opted into web sharing"), "{msg}");
+    }
+
+    #[test]
+    fn exclusion_message_web_mode_names_the_web_opt_in() {
+        let msg = share_exclusion_message(
+            "r",
+            true,
+            &mut vec!["web:local".into()],
+            &mut vec![],
+            ExposeMode::Web,
+        );
+        assert!(msg.contains(r#""expose": ["web"]"#), "{msg}");
     }
 
     #[test]
     fn exclusion_message_filtered_out_all() {
         // URL-bearing nodes existed but the --node filter excluded every one.
-        let msg = share_exclusion_message("r", true, &mut vec![], &mut vec![]);
+        let msg = share_exclusion_message("r", true, &mut vec![], &mut vec![], ExposeMode::Peer);
         assert!(msg.contains("matching the requested nodes"), "{msg}");
     }
 
@@ -569,6 +739,7 @@ mod tests {
             true,
             &mut vec!["z:local".into(), "a:local".into(), "a:local".into()],
             &mut vec![],
+            ExposeMode::Peer,
         );
         // sorted + deduped
         assert!(msg.contains("a:local, z:local"), "{msg}");

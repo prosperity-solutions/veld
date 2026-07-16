@@ -12,6 +12,7 @@ import type { ArcItem } from "./arc-menu";
 import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead, applyPanelLayout, togglePanelMode, initPanelResize } from "./panel";
 import { sendAllGood } from "./listening";
 import { captureFullScreenshot } from "./screenshot";
+import { copyPublicUrl } from "./public-url";
 
 export function buildDOM(): void {
   initTooltip();
@@ -102,6 +103,7 @@ export function buildDOM(): void {
   const THEME_ORDER: ThemeMode[] = ["auto", "dark", "light"];
   const toolBtnTheme = makeToolBtn("theme", THEME_ICONS[getState().theme]);
   const toolBtnDashboard = makeToolBtn("dashboard", ICONS.dashboard);
+  const toolBtnPublicUrl = makeToolBtn("copy-public-url", ICONS.copy);
   refs.toolBtnHide = makeToolBtn("hide", ICONS.eyeOff);
 
   // Reflect the current theme on the icon + host, and persist it. The theme
@@ -124,7 +126,7 @@ export function buildDOM(): void {
     refs.listeningModule,
     refs.moreBtn,
   ];
-  refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, refs.toolBtnHide];
+  refs.overflowButtons = [toolBtnShortcuts, toolBtnTheme, toolBtnDashboard, toolBtnPublicUrl, refs.toolBtnHide];
   refs.toolbarOverflow = refs.toolbarContainer; // test compat
 
   // --- Item model ---------------------------------------------------------
@@ -158,6 +160,12 @@ export function buildDOM(): void {
       el: toolBtnDashboard,
       label: "Management UI",
       onSelect: () => window.open("https://veld.localhost:" + window.location.port, "_blank"),
+    },
+    {
+      id: "copy-public-url",
+      el: toolBtnPublicUrl,
+      label: "Copy public URL",
+      onSelect: () => { void copyPublicUrl(); },
     },
     {
       id: "hide",

@@ -504,8 +504,28 @@
           ]
         },
         "gateway": {
-          "type": "string",
-          "description": "Base URL of the public web gateway this environment points at (e.g. https://share.acme.internal). Only needed for services that expose \"web\"."
+          "description": "The public web gateway this environment registers web shares with (used by `veld share --web`). Either a bare base-URL string (e.g. https://share.acme.internal), or an object carrying the gateway's registration auth token. Only needed for services that expose \"web\".",
+          "oneOf": [
+            {
+              "type": "string",
+              "description": "Gateway base URL (auth token supplied via the VELD_SHARE_GATEWAY_TOKEN env var on the daemon)."
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["url"],
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "description": "Gateway base URL (e.g. https://share.acme.internal)."
+                },
+                "token": {
+                  "$ref": "#/$defs/SecretSource",
+                  "description": "Registration auth token presented to the gateway as an Authorization: Bearer header. Resolved on the daemon when the web share starts; a token that fails to resolve fails the share."
+                }
+              }
+            }
+          ]
         },
         "dangerouslyEmbedRelayTokensInTicket": {
           "type": "boolean",
@@ -587,7 +607,7 @@
       "properties": {
         "expose": {
           "type": "array",
-          "description": "Audiences this service may be exposed to. Empty means not shareable. \"peer\" = other Veld users (verbatim URL). \"web\" = any browser via the public gateway (reserved; ships in a later release).",
+          "description": "Audiences this service may be exposed to. Empty means not shareable. \"peer\" = other Veld users via `veld share` (verbatim URL). \"web\" = any browser, no Veld needed, via `veld share --web` and the sharing.gateway (real public URL, best-effort fidelity).",
           "items": {
             "type": "string",
             "enum": [

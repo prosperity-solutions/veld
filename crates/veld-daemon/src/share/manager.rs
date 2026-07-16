@@ -23,10 +23,12 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::share::{
-    ApprovalMode, Capability, JoinResponse, PendingInfo, ShareInfo, ShareManifest, ShareTicket,
-    SharesList,
+    ApprovalMode, Capability, GatewayPublicUrl, JoinResponse, PendingInfo, ShareInfo,
+    ShareManifest, ShareTicket, SharesList,
 };
 use veld_core::state::GlobalRegistry;
+
+use super::gateway::GatewayClient;
 
 /// Timeout a manual approval waits before auto-denying.
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -45,36 +47,11 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
 /// (with its own `DIAL_TIMEOUT`) report a real connectivity failure.
 const RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 
-use super::endpoint::{RelayChoice, bind_endpoint, resolve_embedded_tokens};
+use super::endpoint::{
+    RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_embedded_tokens,
+};
 use super::host::{self, HostShare};
 use super::{join, token_store};
-
-/// Outcome of watching a join endpoint's home-relay connection for auth.
-enum RelayAuth {
-    /// The endpoint connected to a home relay (auth, if any, succeeded), or the
-    /// watch timed out with no clear denial — either way, proceed to dial.
-    OkOrUnknown,
-    /// A home relay rejected the connection as unauthorized. Carries the relay
-    /// URL whose token is missing or wrong.
-    Denied(String),
-}
-
-/// Whether a home-relay `last_error` string indicates the relay *rejected our
-/// auth* (as opposed to being unreachable or failing some other way).
-///
-/// iroh surfaces this as `iroh_relay`'s `Error::ServerDeniedAuth`, whose Display
-/// is `"The relay denied our authentication (<reason>)"` (iroh-relay 1.0.1
-/// `protos/handshake.rs:159`). `<reason>` is `"not authorized"` only by default
-/// (when the relay's `AccessControl` denies with `reason: None`,
-/// `handshake.rs:543`); a relay that denies with a *custom* reason would not
-/// contain "not authorized". So match the reason-independent wrapper, and keep
-/// "not authorized" as a belt-and-braces fallback. Pinned to iroh 1.0.1; an
-/// upgrade that rewords this must update the string here (guarded by
-/// `is_relay_auth_denial_*` tests).
-fn is_relay_auth_denial(err: &str) -> bool {
-    let e = err.to_lowercase();
-    e.contains("denied our authentication") || e.contains("not authorized")
-}
 
 /// The supplied tokens worth caching after a successful join: only those keyed
 /// by a relay the ticket actually advertises. Filters out any spurious key a
@@ -89,34 +66,6 @@ fn tokens_to_cache<'a>(
         .filter(|(url, _)| ticket_relay_urls.iter().any(|t| t == *url))
         .map(|(u, t)| (u.as_str(), t.as_str()))
         .collect()
-}
-
-/// Watch an endpoint's home-relay status until it connects, reports an auth
-/// denial, or `budget` elapses. Lets the join distinguish "wrong/missing relay
-/// token" from "host unreachable" and prompt precisely (see
-/// [`is_relay_auth_denial`]).
-async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
-    use iroh::Watcher as _;
-    let poll = async {
-        let mut status = endpoint.home_relay_status();
-        loop {
-            let relays = status.get();
-            if relays.iter().any(|r| r.is_connected()) {
-                return RelayAuth::OkOrUnknown;
-            }
-            if let Some(denied) = relays.iter().find(|r| {
-                r.last_error()
-                    .map(|e| is_relay_auth_denial(&format!("{e:#}")))
-                    .unwrap_or(false)
-            }) {
-                return RelayAuth::Denied(denied.url().to_string());
-            }
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-    };
-    tokio::time::timeout(budget, poll)
-        .await
-        .unwrap_or(RelayAuth::OkOrUnknown)
 }
 
 /// A share this daemon is hosting.
@@ -134,6 +83,20 @@ struct ShareEntry {
     /// endpoint — so a custom-relay share is never served over the public
     /// endpoint, keeping relay confinement airtight.
     relay: RelayChoice,
+    /// Set for web shares: the gateway registration this share lives behind.
+    web: Option<WebRegistration>,
+}
+
+/// A web share's registration on the public gateway: the daemon heartbeats it
+/// for the share's lifetime and unregisters on unshare (best-effort — the
+/// gateway's lease expiry covers a lost DELETE).
+struct WebRegistration {
+    client: GatewayClient,
+    reg_id: String,
+    public_urls: Vec<GatewayPublicUrl>,
+    /// The heartbeat loop; aborted on unshare. It also self-terminates when
+    /// the share disappears from the map (belt and braces).
+    heartbeat: JoinHandle<()>,
 }
 
 /// A join parked awaiting the host's manual approval.
@@ -481,10 +444,58 @@ impl ShareManager {
                 ticket: token,
                 expires_at,
                 relay: choice,
+                web: None,
             },
         );
         info!(share_id = %id, ?approve_mode, "share started");
         Ok((id, ticket))
+    }
+
+    /// Attach a gateway registration to a (web) share and start its heartbeat
+    /// loop. Errors if the share vanished in the meantime (the caller then
+    /// unregisters from the gateway).
+    pub async fn attach_web_registration(
+        self: &Arc<Self>,
+        share_id: &str,
+        client: GatewayClient,
+        reg_id: String,
+        lease_secs: u64,
+        public_urls: Vec<GatewayPublicUrl>,
+    ) -> Result<()> {
+        // Heartbeat well inside the lease window; floor guards a tiny lease.
+        let interval = Duration::from_secs((lease_secs / 3).max(5));
+        let hb_manager = Arc::clone(self);
+        let hb_share_id = share_id.to_string();
+        let hb_client = client.clone();
+
+        let mut shares = self.shares.lock().await;
+        let Some(entry) = shares.get_mut(share_id) else {
+            bail!("share {share_id} ended before the gateway registration completed");
+        };
+        let ticket = entry.ticket.clone();
+        let heartbeat = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                // Self-terminate once the share is gone (unshare also aborts
+                // this task; this covers any path that missed it).
+                if !hb_manager.shares.lock().await.contains_key(&hb_share_id) {
+                    break;
+                }
+                if let Err(e) = hb_client.register(&ticket).await {
+                    // Transient gateway failures self-heal on a later beat (a
+                    // restarted gateway re-joins and mints the same URLs).
+                    warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
+                        "gateway heartbeat failed; will retry");
+                }
+            }
+        });
+        entry.web = Some(WebRegistration {
+            client,
+            reg_id,
+            public_urls,
+            heartbeat,
+        });
+        Ok(())
     }
 
     /// Join a shared environment: dial the host, then materialise each shared
@@ -764,9 +775,16 @@ impl ShareManager {
                 approve: Some(s.approve_mode),
                 nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
                 urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
-                ticket: Some(s.ticket.clone()),
-                join_url: Some(format!("{base}/join#{}", s.ticket)),
+                // A web share's ticket is a secret held between this daemon
+                // and the gateway — never surfaced for copy/paste.
+                ticket: s.web.is_none().then(|| s.ticket.clone()),
+                join_url: s.web.is_none().then(|| format!("{base}/join#{}", s.ticket)),
                 joiners: counts.get(&s.id).copied().unwrap_or(0),
+                public_urls: s
+                    .web
+                    .as_ref()
+                    .map(|w| w.public_urls.clone())
+                    .unwrap_or_default(),
             })
             .collect();
         let joins = self
@@ -783,6 +801,7 @@ impl ShareManager {
                 ticket: None,
                 join_url: None,
                 joiners: 0,
+                public_urls: Vec::new(),
             })
             .collect();
         let pending = self
@@ -909,8 +928,19 @@ impl ShareManager {
     /// Stop hosting a share. In-flight connections end when their peers
     /// disconnect; no new connection will match the removed capability.
     pub async fn unshare(&self, id: &str) -> Result<()> {
-        if self.shares.lock().await.remove(id).is_none() {
+        let Some(entry) = self.shares.lock().await.remove(id) else {
             bail!("no such share: {id}");
+        };
+        // Web share: stop heartbeating and unregister from the gateway so its
+        // public URLs die now, not at lease expiry. Best-effort — a lost
+        // DELETE is covered by the lease (and by the tunnel closing below).
+        if let Some(web) = entry.web {
+            web.heartbeat.abort();
+            tokio::spawn(async move {
+                if let Err(e) = web.client.unregister(&web.reg_id).await {
+                    debug!(error = %format!("{e:#}"), "gateway unregister failed (lease will expire it)");
+                }
+            });
         }
         self.claims.lock().await.remove(id);
         // Revoke any requests parked awaiting approval for this share so a
@@ -998,6 +1028,27 @@ impl ShareManager {
         info!(join_id = %id, "left share");
         Ok(())
     }
+
+    /// Stop every **web** share minted from `run_id` (their gateway
+    /// registrations are unregistered by `unshare`). Used to make a repeat
+    /// `veld share --web` replace rather than stack. Returns how many stopped.
+    pub async fn unshare_web_shares_for_run(&self, run_id: Uuid) -> usize {
+        let ids: Vec<String> = {
+            let shares = self.shares.lock().await;
+            shares
+                .values()
+                .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
+                .map(|s| s.id.clone())
+                .collect()
+        };
+        let mut stopped = 0;
+        for id in ids {
+            if self.unshare(&id).await.is_ok() {
+                stopped += 1;
+            }
+        }
+        stopped
+    }
 }
 
 fn gen_id(prefix: &str) -> String {
@@ -1058,26 +1109,6 @@ mod tests {
     use super::*;
     use veld_core::share::SharedNode;
 
-    // Pins the relay auth-denial detection to iroh 1.0.1's error wording. If an
-    // iroh upgrade rewords `ServerDeniedAuth`'s Display, this fails loudly rather
-    // than silently routing every token-gated join to "unreachable".
-    #[test]
-    fn detects_relay_auth_denial_regardless_of_reason() {
-        // Default deny reason (relay's AccessControl returns `reason: None`).
-        assert!(is_relay_auth_denial(
-            "The relay denied our authentication (not authorized)"
-        ));
-        // Custom deny reason — must still be detected (the earlier "not
-        // authorized"-only match missed this).
-        assert!(is_relay_auth_denial(
-            "The relay denied our authentication (invalid token)"
-        ));
-        // Unrelated failures are NOT auth denials → the join dials and reports a
-        // real connectivity error instead of wrongly prompting for a token.
-        assert!(!is_relay_auth_denial("connection timed out"));
-        assert!(!is_relay_auth_denial("dns error: no such host"));
-    }
-
     #[test]
     fn tokens_to_cache_keeps_only_ticket_relays() {
         let ticket = vec!["https://relay.example/".to_string()];
@@ -1134,6 +1165,7 @@ mod tests {
                 ticket: "veldshare_x".to_string(),
                 expires_at: i64::MAX,
                 relay: RelayChoice::Public,
+                web: None,
             },
         );
         let (tx, rx) = oneshot::channel();
@@ -1153,5 +1185,55 @@ mod tests {
         assert!(mgr.shares.lock().await.is_empty(), "share removed");
         assert!(mgr.pending.lock().await.is_empty(), "pending drained");
         assert_eq!(rx.await, Ok(false), "parked request denied");
+    }
+
+    // A web share's ticket embeds the capability that IS the public-URL bearer
+    // secret — `list()` must never surface it (no ticket, no join_url), and it
+    // must surface the public URLs instead. Guards against a refactor of
+    // `list()` re-leaking the web capability to any local `veld shares` caller.
+    #[tokio::test]
+    async fn list_never_surfaces_a_web_share_ticket() {
+        let mgr = std::sync::Arc::new(ShareManager::new(SecretKey::generate()));
+        let manifest = sample_manifest();
+        let host_share = Arc::new(HostShare {
+            capability: Capability::generate(),
+            upstreams: HashMap::new(),
+            manifest: manifest.clone(),
+        });
+        mgr.shares.lock().await.insert(
+            "shr_web".to_string(),
+            ShareEntry {
+                id: "shr_web".to_string(),
+                manifest,
+                host_share,
+                approve_mode: ApprovalMode::Auto,
+                ticket: "veldshare_SECRET".to_string(),
+                expires_at: i64::MAX,
+                relay: RelayChoice::Public,
+                web: Some(WebRegistration {
+                    client: super::super::gateway::GatewayClient::for_test(),
+                    reg_id: "reg_1".to_string(),
+                    public_urls: vec![GatewayPublicUrl {
+                        node: "app".to_string(),
+                        hostname: "app.demo.p.localhost".to_string(),
+                        public_url: "https://slug.share.example".to_string(),
+                    }],
+                    heartbeat: tokio::spawn(async {}),
+                }),
+            },
+        );
+
+        let list = mgr.list().await;
+        let info = &list.shares[0];
+        assert_eq!(info.ticket, None, "web ticket must not be surfaced");
+        assert_eq!(info.join_url, None, "web join_url must not be surfaced");
+        assert_eq!(info.public_urls.len(), 1, "public URLs surfaced instead");
+        assert_eq!(info.public_urls[0].public_url, "https://slug.share.example");
+        // The raw ticket string appears nowhere in the serialized listing.
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(
+            !json.contains("veldshare_SECRET"),
+            "ticket leaked into list: {json}"
+        );
     }
 }
