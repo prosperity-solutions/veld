@@ -302,7 +302,9 @@ enum Command {
         /// value always wins over this flag.
         #[arg(long, value_name = "MODE", requires = "web")]
         access: Option<String>,
-        /// Use this share password for --web instead of a generated one.
+        /// Use this share password for --web instead of a generated one
+        /// (min 8 chars). Note: CLI args land in shell history and process
+        /// listings — prefer the generated default for anything sensitive.
         #[arg(long, value_name = "PASSWORD", requires = "web")]
         password: Option<String>,
         /// Output JSON.

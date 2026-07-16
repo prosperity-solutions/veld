@@ -140,7 +140,12 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     }
 
     let (mut resp_parts, resp_body) = upstream_resp.into_parts();
-    rewrite_response_headers(&mut resp_parts.headers, reg, &state.config.domain);
+    rewrite_response_headers(
+        &mut resp_parts.headers,
+        reg,
+        &state.config.domain,
+        target.access == veld_core::config::WebAccessMode::Password,
+    );
     Response::from_parts(resp_parts, Body::new(resp_body))
 }
 
@@ -225,14 +230,19 @@ fn build_upstream_request(
         }
         if name == header::COOKIE {
             // The gateway's viewer-session cookie is internal credential
-            // material — the origin service never sees it.
-            if let Some(kept) = value
-                .to_str()
-                .ok()
-                .and_then(crate::auth::strip_session_cookie)
-            {
-                if let Ok(v) = HeaderValue::from_str(&kept) {
-                    headers.append(header::COOKIE, v);
+            // material — the origin service never sees it. A value that isn't
+            // visible ASCII (`to_str` fails) can't contain our cookie name;
+            // forward it untouched rather than silently dropping the header.
+            match value.to_str() {
+                Ok(s) => {
+                    if let Some(kept) = crate::auth::strip_session_cookie(s) {
+                        if let Ok(v) = HeaderValue::from_str(&kept) {
+                            headers.append(header::COOKIE, v);
+                        }
+                    }
+                }
+                Err(_) => {
+                    headers.append(header::COOKIE, value.clone());
                 }
             }
             continue;
@@ -383,16 +393,30 @@ fn splice_upgrade(
 /// Response-side fidelity rewrites: `Location` + `Access-Control-Allow-Origin`
 /// back to public URLs, cookie `Domain`s made host-only, and
 /// `Referrer-Policy: no-referrer` set. (Bodies are never touched.)
-fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain: &str) {
+fn rewrite_response_headers(
+    headers: &mut HeaderMap,
+    reg: &Registration,
+    domain: &str,
+    password_mode: bool,
+) {
     for name in hop_by_hop() {
         headers.remove(name);
     }
 
-    // The slug in the public URL is the share's only bearer credential, so it
-    // must not leak to third-party origins the app links to. Force
-    // `Referrer-Policy: no-referrer` (overriding any weaker app value) — cheap,
-    // and it closes the most common slug-leak channel. Documented as defence in
-    // depth, not a substitute for the "URL is the access token" model.
+    // Password-gated content must not be re-served by a URL-keyed shared
+    // cache to viewers who never authenticated. When the app states its own
+    // caching policy we respect it (operator responsibility); when it says
+    // nothing, default closed.
+    if password_mode && !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+
+    // The slug must not leak to third-party origins the app links to: on a
+    // link-access node it is the only bearer credential, and even on a
+    // password-mode node it names the target. Force
+    // `Referrer-Policy: no-referrer` (overriding any weaker app value) —
+    // cheap, and it closes the most common slug-leak channel. Defence in
+    // depth alongside the §6.1 password gate.
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
@@ -433,6 +457,17 @@ fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain:
     if !cookies.is_empty() {
         headers.remove(header::SET_COOKIE);
         for cookie in cookies {
+            // The upstream app must never (re)set the gateway's own session
+            // cookie — a hostile co-tenant's Set-Cookie could otherwise shadow
+            // or clear other slugs' sessions. (Belt-and-braces: the __Host-
+            // prefix already makes browsers reject Domain-scoped variants.)
+            if cookie.to_str().is_ok_and(|s| {
+                s.trim_start()
+                    .strip_prefix(crate::auth::SESSION_COOKIE)
+                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+            }) {
+                continue;
+            }
             let value = match cookie.to_str() {
                 Ok(s) => match strip_origin_cookie_domain(s, &reg.nodes) {
                     Some(stripped) => HeaderValue::from_str(&stripped).unwrap_or(cookie),
@@ -712,7 +747,10 @@ mod tests {
             .method("GET")
             .uri("/")
             .header("host", "abc.share.example")
-            .header("cookie", "sid=app; __veld_gw_sess=secret-token; theme=dark")
+            .header(
+                "cookie",
+                "sid=app; __Host-veld_gw_sess=secret-token; theme=dark",
+            )
             .body(Body::empty())
             .unwrap();
         let (parts, _) = req.into_parts();
@@ -733,7 +771,7 @@ mod tests {
             .method("GET")
             .uri("/")
             .header("host", "abc.share.example")
-            .header("cookie", "__veld_gw_sess=secret-token")
+            .header("cookie", "__Host-veld_gw_sess=secret-token")
             .body(Body::empty())
             .unwrap();
         let (parts, _) = req.into_parts();

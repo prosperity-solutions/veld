@@ -515,7 +515,12 @@ impl SharePolicy {
 }
 
 /// Per-variant web-audience settings (`share.web`).
+///
+/// `deny_unknown_fields`: the natural-but-wrong config (e.g. a `"password":
+/// "…"` key — the password is generated or `--password`, never config) must
+/// fail loudly instead of being silently dropped.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WebSharePolicy {
     /// Viewer access control for this service's public URL.
     #[serde(default, skip_serializing_if = "Option::is_none")]

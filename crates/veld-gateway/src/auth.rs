@@ -36,19 +36,27 @@ use crate::state::AppState;
 pub const RESERVED_PREFIX: &str = "/__veld_gateway__/";
 /// The login form target (under the reserved prefix).
 const AUTH_PATH: &str = "/__veld_gateway__/auth";
-/// Session cookie name (host-only per slug; never forwarded upstream).
-pub const SESSION_COOKIE: &str = "__veld_gw_sess";
+/// Session cookie name. The `__Host-` prefix makes the browser itself reject
+/// any variant carrying a `Domain` attribute — so a hostile co-tenant's
+/// upstream on the same gateway domain cannot set a domain-scoped cookie that
+/// shadows other slugs' host-only sessions. (Requires `Secure` + `Path=/` +
+/// no `Domain`, all of which the mint below sets.)
+pub const SESSION_COOKIE: &str = "__Host-veld_gw_sess";
 
 /// Cap on a viewer session's lifetime; the share's own expiry caps it further.
 const SESSION_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 /// Max password attempts per client IP per window.
 const IP_LIMIT: u32 = 10;
-/// Max password attempts per slug per window (all IPs — bounds a distributed
-/// guess even when each bot stays under the per-IP limit).
-const SLUG_LIMIT: u32 = 60;
+/// Max password attempts per slug per window, across all IPs. This bounds a
+/// distributed guess (botnet under the per-IP limit) — but any global cap is
+/// also a lockout lever for a flooder, so it sits well above human login
+/// rates: at ~59-bit generated passwords, 300/min of guessing is still
+/// nothing, while accidental lockouts need a sustained deliberate flood.
+const SLUG_LIMIT: u32 = 300;
 /// Rate-limit window.
 const LIMIT_WINDOW: Duration = Duration::from_secs(60);
-/// Bound on limiter map size (evicts stale windows when exceeded).
+/// Hard bound on the per-IP limiter map (the per-slug map is naturally
+/// bounded by the number of live slugs).
 const LIMITER_MAX_KEYS: usize = 10_000;
 /// Bound on the login form body (password + path — anything bigger is abuse).
 const MAX_FORM_BYTES: usize = 8 * 1024;
@@ -61,12 +69,38 @@ pub enum Gate {
     Respond(Response),
 }
 
+/// The slice of a [`SlugTarget`] the gate needs — no live tunnel, so the auth
+/// decisions are testable at the request level without an iroh `Connection`.
+pub struct SlugAuth {
+    pub slug: String,
+    pub access: veld_core::config::WebAccessMode,
+    pub password: Option<String>,
+    pub session_key: [u8; 32],
+    pub expires_at: i64,
+}
+
+impl SlugAuth {
+    pub fn of(target: &SlugTarget) -> Self {
+        Self {
+            slug: target.slug.clone(),
+            access: target.access,
+            password: target.registration.password().map(str::to_owned),
+            session_key: target.registration.session_key(),
+            expires_at: target.registration.expires_at(),
+        }
+    }
+}
+
 /// Decide whether `req` may reach the tunnel.
-pub async fn gate(state: &AppState, target: &SlugTarget, req: Request) -> Gate {
+pub async fn gate(state: &AppState, target: &SlugAuth, req: Request) -> Gate {
     use veld_core::config::WebAccessMode;
-    if target.access == WebAccessMode::Link {
+    // Exhaustive on purpose: a future access mode (e.g. per-viewer approval,
+    // parked in SHARING_V2.md §6.1) must force a conscious decision here
+    // rather than silently inheriting the password flow.
+    match target.access {
         // Fully transparent for link-access nodes — no reserved paths either.
-        return Gate::Allow(req);
+        WebAccessMode::Link => return Gate::Allow(req),
+        WebAccessMode::Password => {}
     }
 
     let path = req.uri().path().to_owned();
@@ -77,10 +111,9 @@ pub async fn gate(state: &AppState, target: &SlugTarget, req: Request) -> Gate {
         return Gate::Respond((StatusCode::NOT_FOUND, "not found").into_response());
     }
 
-    let reg = &target.registration;
     let now = chrono::Utc::now().timestamp();
     if let Some(token) = session_cookie(req.headers()) {
-        if verify_token(&reg.session_key(), &target.slug, now, &token) {
+        if verify_token(&target.session_key, &target.slug, now, &token) {
             return Gate::Allow(req);
         }
     }
@@ -95,20 +128,30 @@ pub async fn gate(state: &AppState, target: &SlugTarget, req: Request) -> Gate {
 }
 
 /// Handle `POST /__veld_gateway__/auth` (and render the form for GET).
-async fn handle_auth(state: &AppState, target: &SlugTarget, req: Request) -> Response {
+async fn handle_auth(state: &AppState, target: &SlugAuth, req: Request) -> Response {
     if req.method() == axum::http::Method::GET {
+        // An already-authenticated viewer who lands on the login URL (e.g. a
+        // pasted link) goes straight in instead of being re-prompted.
+        let now = chrono::Utc::now().timestamp();
+        if let Some(token) = session_cookie(req.headers()) {
+            if verify_token(&target.session_key, &target.slug, now, &token) {
+                return Response::builder()
+                    .status(StatusCode::SEE_OTHER)
+                    .header(header::LOCATION, "/")
+                    .body(Body::empty())
+                    .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            }
+        }
         return login_page(StatusCode::OK, "/", None);
     }
     if req.method() != axum::http::Method::POST {
         return (StatusCode::METHOD_NOT_ALLOWED, "method not allowed").into_response();
     }
 
-    let reg = &target.registration;
-    let Some(expected) = reg.password() else {
+    let Some(expected) = target.password.clone() else {
         // Password-mode slug without a password never registers; belt-and-braces.
         return (StatusCode::UNAUTHORIZED, "not accepting logins").into_response();
     };
-    let expected = expected.to_owned();
 
     let client_ip = client_ip(&req, state.config.trust_forwarded_headers);
 
@@ -140,17 +183,17 @@ async fn handle_auth(state: &AppState, target: &SlugTarget, req: Request) -> Res
         );
     }
 
-    // Session expiry: bounded by both the TTL cap and the share's own expiry.
+    // Session expiry: bounded by the TTL cap and the share's own expiry.
+    // `expires_at` was stamped by the DAEMON's clock and `now` is the
+    // gateway's — under clock skew (or a share in its final seconds) the min
+    // could land in the past. Floor it to a short grace session instead of
+    // refusing: share liveness is governed by the registration (an expired
+    // share is torn down and its slug 404s), not by the cookie.
     let now = chrono::Utc::now().timestamp();
-    let expiry = (now + SESSION_TTL.as_secs() as i64).min(reg.expires_at());
-    if expiry <= now {
-        return login_page(
-            StatusCode::UNAUTHORIZED,
-            &next,
-            Some("This share has expired."),
-        );
-    }
-    let token = mint_token(&reg.session_key(), &target.slug, expiry);
+    let expiry = (now + SESSION_TTL.as_secs() as i64)
+        .min(target.expires_at)
+        .max(now + 300);
+    let token = mint_token(&target.session_key, &target.slug, expiry);
     let cookie = format!(
         "{SESSION_COOKIE}={token}; Path=/; Max-Age={}; Secure; HttpOnly; SameSite=Lax",
         expiry - now
@@ -202,10 +245,19 @@ fn client_ip(req: &Request, trust_forwarded: bool) -> Option<String> {
 }
 
 /// Validate the post-login redirect target: a same-origin relative path only
-/// (no `//host`, no backslash tricks) — never an open redirect.
+/// (no `//host`, no backslash tricks, no control characters — belt-and-braces
+/// against header injection should this value ever reach a sink without the
+/// http crate's own validation) — never an open redirect.
 fn safe_next(next: Option<&str>) -> String {
     match next {
-        Some(n) if n.starts_with('/') && !n.starts_with("//") && !n.contains('\\') => n.to_owned(),
+        Some(n)
+            if n.starts_with('/')
+                && !n.starts_with("//")
+                && !n.contains('\\')
+                && !n.chars().any(|c| c.is_control()) =>
+        {
+            n.to_owned()
+        }
         _ => "/".to_owned(),
     }
 }
@@ -305,44 +357,72 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 // Rate limiting — an in-memory throttle, not a ledger (resets on restart)
 // ---------------------------------------------------------------------------
 
-/// Fixed-window attempt counters keyed by client IP and by slug.
+/// Fixed-window attempt counters, split into two maps so their bounds are
+/// independent: the slug map's key count is naturally bounded by the number
+/// of live slugs, and the IP map is hard-bounded — so a flood of distinct
+/// fresh IPs can never grow memory without limit, and clearing the IP map
+/// under such a flood never resets the (guessing-relevant) slug budget.
 pub struct RateLimiter {
-    windows: Mutex<HashMap<String, (Instant, u32)>>,
+    ips: Mutex<HashMap<String, (Instant, u32)>>,
+    slugs: Mutex<HashMap<String, (Instant, u32)>>,
 }
 
 impl Default for RateLimiter {
     fn default() -> Self {
         Self {
-            windows: Mutex::new(HashMap::new()),
+            ips: Mutex::new(HashMap::new()),
+            slugs: Mutex::new(HashMap::new()),
         }
     }
 }
 
+/// Bump one fixed-window counter and return its post-increment count.
+fn bump(map: &mut HashMap<String, (Instant, u32)>, key: &str, now: Instant) -> u32 {
+    let entry = map.entry(key.to_owned()).or_insert((now, 0));
+    if now.duration_since(entry.0) >= LIMIT_WINDOW {
+        *entry = (now, 0);
+    }
+    entry.1 += 1;
+    entry.1
+}
+
 impl RateLimiter {
-    /// Record one attempt; `false` when either the per-IP or per-slug budget
-    /// for the current window is exhausted. A missing client IP (no socket
-    /// info — shouldn't happen) still counts against the slug budget.
+    /// Record one attempt; `false` when either budget for the current window
+    /// is exhausted. The slug budget is checked FIRST: once a slug is locked,
+    /// further attempts are refused without inserting IP keys — a slug-lockout
+    /// flood cannot grow the IP map. A missing client IP (no socket info —
+    /// shouldn't happen) still counts against the slug budget.
     pub fn allow(&self, client_ip: Option<&str>, slug: &str) -> bool {
         let now = Instant::now();
-        let mut windows = self.windows.lock().expect("limiter lock");
-        if windows.len() > LIMITER_MAX_KEYS {
-            windows.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
-        }
-        let mut check = |key: String, limit: u32| -> bool {
-            let entry = windows.entry(key).or_insert((now, 0));
-            if now.duration_since(entry.0) >= LIMIT_WINDOW {
-                *entry = (now, 0);
+        let slug_ok = {
+            let mut slugs = self.slugs.lock().expect("limiter lock");
+            // Paranoia sweep; live slugs already bound this map.
+            if slugs.len() > LIMITER_MAX_KEYS {
+                slugs.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
             }
-            entry.1 += 1;
-            entry.1 <= limit
+            bump(&mut slugs, slug, now) <= SLUG_LIMIT
         };
-        // Evaluate BOTH (an attempt always counts against both budgets).
-        let ip_ok = match client_ip {
-            Some(ip) => check(format!("ip:{ip}"), IP_LIMIT),
+        if !slug_ok {
+            return false;
+        }
+        match client_ip {
             None => true,
-        };
-        let slug_ok = check(format!("slug:{slug}"), SLUG_LIMIT);
-        ip_ok && slug_ok
+            Some(ip) => {
+                let mut ips = self.ips.lock().expect("limiter lock");
+                if ips.len() >= LIMITER_MAX_KEYS {
+                    ips.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
+                    // Still at the cap after dropping stale windows means a
+                    // distinct-fresh-IP flood: drop the map rather than grow
+                    // unbounded. Losing one window of per-IP history is the
+                    // lesser harm — the slug budget above still bounds
+                    // guessing.
+                    if ips.len() >= LIMITER_MAX_KEYS {
+                        ips.clear();
+                    }
+                }
+                bump(&mut ips, ip, now) <= IP_LIMIT
+            }
+        }
     }
 }
 
@@ -372,11 +452,17 @@ fn login_page(status: StatusCode, next: &str, error: Option<&str>) -> Response {
         .into_response()
 }
 
+/// Escape for HTML text/attribute contexts. `{`/`}` are escaped too: the page
+/// is assembled by ordered `{next}`/`{error}` string replacement, so braces
+/// surviving into an earlier substitution's VALUE (e.g. a viewer-supplied
+/// `next` of literally `/{error}`) must never be re-expanded by a later pass.
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+        .replace('{', "&#123;")
+        .replace('}', "&#125;")
 }
 
 /// Self-contained (CSP-friendly, no external assets). The inline script
@@ -398,6 +484,7 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
   h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
   p { color: #555; font-size: .9rem; margin: 0 0 1rem; }
   .err { color: #b91c1c; }
+  .hint { color: #999; font-size: .78rem; margin: .9rem 0 0; }
   input[type=password] { width: 100%; box-sizing: border-box; padding: .5rem .75rem;
          font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 1rem; }
   button { width: 100%; padding: .55rem; font-size: 1rem; border: 0; border-radius: 8px;
@@ -412,16 +499,26 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
   <input type="hidden" name="next" value="{next}">
   <input id="pw" type="password" name="password" autofocus aria-label="Password">
   <button type="submit">Open</button>
+  <p class="hint">Your browser must allow cookies for this site.</p>
 </form>
 <script>
 (function () {
   var m = location.hash.match(/[#&]veld-key=([^&]+)/);
   if (!m) return;
-  document.getElementById('pw').value = decodeURIComponent(m[1]);
+  var key;
+  try { key = decodeURIComponent(m[1]); } catch (e) { return; }
+  document.getElementById('pw').value = key;
+  // Everything in the fragment except the key survives: it is stripped from
+  // the visible URL and forwarded through `next` so the app's own hash (e.g.
+  // a deep-link anchor) still arrives after the redirect.
+  var rest = location.hash.slice(1).split('&').filter(function (p) {
+    return p.indexOf('veld-key=') !== 0;
+  }).join('&');
   var next = document.querySelector('input[name=next]');
   if (next.value === '/' && (location.pathname !== '/' || location.search))
     next.value = location.pathname + location.search;
-  history.replaceState(null, '', location.pathname + location.search);
+  if (rest) next.value += '#' + rest;
+  history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
   document.getElementById('f').submit();
 })();
 </script>
@@ -480,6 +577,11 @@ mod tests {
         assert_eq!(safe_next(Some("/\\evil")), "/");
         assert_eq!(safe_next(Some("relative")), "/");
         assert_eq!(safe_next(None), "/");
+        // Control chars are rejected: browsers strip tab/newline during URL
+        // parsing, so "/\t/evil.com" would become "//evil.com" — an open
+        // redirect laundered through a header-legal value.
+        assert_eq!(safe_next(Some("/\t/evil.com")), "/");
+        assert_eq!(safe_next(Some("/x\r\ny")), "/");
     }
 
     #[test]
@@ -487,20 +589,18 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            HeaderValue::from_static("a=1; __veld_gw_sess=tok; b=2"),
+            HeaderValue::from_str(&format!("a=1; {SESSION_COOKIE}=tok; b=2")).unwrap(),
         );
         assert_eq!(session_cookie(&headers).as_deref(), Some("tok"));
 
         assert_eq!(
-            strip_session_cookie("a=1; __veld_gw_sess=tok; b=2").as_deref(),
+            strip_session_cookie(&format!("a=1; {SESSION_COOKIE}=tok; b=2")).as_deref(),
             Some("a=1; b=2")
         );
-        assert_eq!(strip_session_cookie("__veld_gw_sess=tok"), None);
+        assert_eq!(strip_session_cookie(&format!("{SESSION_COOKIE}=tok")), None);
         // A cookie whose name merely starts with ours is NOT stripped.
-        assert_eq!(
-            strip_session_cookie("__veld_gw_sess2=x").as_deref(),
-            Some("__veld_gw_sess2=x")
-        );
+        let similar = format!("{SESSION_COOKIE}2=x");
+        assert_eq!(strip_session_cookie(&similar).as_deref(), Some(&*similar));
     }
 
     #[test]
@@ -526,6 +626,317 @@ mod tests {
             }
         }
         assert_eq!(allowed, SLUG_LIMIT);
+    }
+
+    // -- Request-level gate()/handle_auth() coverage -------------------------
+
+    use veld_core::config::WebAccessMode;
+
+    fn test_state(trust_forwarded: bool) -> AppState {
+        use crate::config::GatewayConfig;
+        use crate::registry::{Registry, RelayAllowList};
+        AppState {
+            config: std::sync::Arc::new(GatewayConfig {
+                domain: "share.example".into(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                tls: None,
+                auth_token: veld_core::config::SecretSource::Literal("t".into()),
+                relays: None,
+                lease: Duration::from_secs(90),
+                state_dir: None,
+                max_registrations: 8,
+                trust_forwarded_headers: trust_forwarded,
+            }),
+            registry: Registry::new(
+                "share.example".into(),
+                Duration::from_secs(90),
+                RelayAllowList::Unconfined,
+                iroh::SecretKey::generate(),
+                8,
+            ),
+            auth_token: "t".into(),
+            limiter: std::sync::Arc::new(RateLimiter::default()),
+        }
+    }
+
+    fn slug_auth(access: WebAccessMode, password: Option<&str>) -> SlugAuth {
+        SlugAuth {
+            slug: "abc123abc123abc123abc123ab".into(),
+            access,
+            password: password.map(str::to_owned),
+            session_key: session_key(&Capability::generate()),
+            expires_at: chrono::Utc::now().timestamp() + 3600,
+        }
+    }
+
+    fn get(path: &str) -> Request {
+        Request::builder()
+            .method("GET")
+            .uri(path)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    fn post_form(body: &str) -> Request {
+        Request::builder()
+            .method("POST")
+            .uri(AUTH_PATH)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(axum::body::Body::from(body.to_owned()))
+            .unwrap()
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn gate_link_access_is_fully_transparent() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Link, None);
+        // Ordinary path AND the reserved prefix both pass straight through.
+        assert!(matches!(
+            gate(&state, &target, get("/x")).await,
+            Gate::Allow(_)
+        ));
+        assert!(matches!(
+            gate(&state, &target, get(AUTH_PATH)).await,
+            Gate::Allow(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_password_without_cookie_gets_login_page_with_next() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        let Gate::Respond(resp) = gate(&state, &target, get("/deep/path?q=1")).await else {
+            panic!("expected a login page, not a proxied request");
+        };
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("value=\"/deep/path?q=1\""), "{body}");
+        assert!(body.contains(AUTH_PATH), "{body}");
+    }
+
+    #[tokio::test]
+    async fn gate_valid_session_cookie_allows_and_bad_ones_do_not() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        let expiry = chrono::Utc::now().timestamp() + 600;
+        let token = mint_token(&target.session_key, &target.slug, expiry);
+
+        let with_cookie = |t: &str| {
+            Request::builder()
+                .method("GET")
+                .uri("/")
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={t}"))
+                .body(axum::body::Body::empty())
+                .unwrap()
+        };
+        assert!(matches!(
+            gate(&state, &target, with_cookie(&token)).await,
+            Gate::Allow(_)
+        ));
+        // A token minted for a DIFFERENT slug (same key) is refused.
+        let foreign = mint_token(&target.session_key, "othersl", expiry);
+        assert!(matches!(
+            gate(&state, &target, with_cookie(&foreign)).await,
+            Gate::Respond(_)
+        ));
+        // Garbage is refused.
+        assert!(matches!(
+            gate(&state, &target, with_cookie("garbage")).await,
+            Gate::Respond(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn gate_reserved_non_auth_path_is_404() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        let Gate::Respond(resp) = gate(&state, &target, get("/__veld_gateway__/other")).await
+        else {
+            panic!("reserved path must not be proxied on a password slug");
+        };
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn auth_post_correct_password_sets_verifiable_cookie_and_redirects() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("k7dm-q2xp-9fzt"));
+        let Gate::Respond(resp) = gate(
+            &state,
+            &target,
+            post_form("password=k7dm-q2xp-9fzt&next=%2Fdeep%3Fq%3D1"),
+        )
+        .await
+        else {
+            panic!("auth POST must be answered by the gate");
+        };
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/deep?q=1");
+        let cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(cookie.contains("HttpOnly"), "{cookie}");
+        assert!(cookie.contains("Secure"), "{cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "{cookie}");
+        // The minted cookie actually authorizes a follow-up request.
+        let token = cookie
+            .strip_prefix(&format!("{SESSION_COOKIE}="))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert!(verify_token(&target.session_key, &target.slug, now, token));
+    }
+
+    #[tokio::test]
+    async fn auth_post_wrong_password_or_open_redirect_is_refused() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("right"));
+
+        let Gate::Respond(resp) = gate(&state, &target, post_form("password=wrong")).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+
+        // Correct password + hostile `next` → redirect sanitized to "/".
+        let Gate::Respond(resp) = gate(
+            &state,
+            &target,
+            post_form("password=right&next=%2F%2Fevil.example"),
+        )
+        .await
+        else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/");
+    }
+
+    #[tokio::test]
+    async fn auth_post_near_or_past_share_expiry_mints_only_a_grace_session() {
+        // Daemon/gateway clock skew (or a share in its last seconds) must not
+        // brick logins: the session floors at a short grace window. The share
+        // itself dies with its registration, so the cookie outliving
+        // `expires_at` by minutes grants nothing once the slug is gone.
+        let state = test_state(false);
+        let mut target = slug_auth(WebAccessMode::Password, Some("pw"));
+        target.expires_at = chrono::Utc::now().timestamp() - 1;
+        let Gate::Respond(resp) = gate(&state, &target, post_form("password=pw")).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        let cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        let max_age: i64 = cookie
+            .split("Max-Age=")
+            .nth(1)
+            .and_then(|s| s.split(';').next())
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=300).contains(&max_age), "grace-capped, got {max_age}");
+    }
+
+    #[tokio::test]
+    async fn login_page_is_immune_to_brace_template_injection_via_next() {
+        // `next` may legally contain the literal token `{error}`. The page is
+        // built by ordered string replacement, so unescaped braces in the
+        // first substitution's value would be re-expanded by the second —
+        // html_escape must neutralize them.
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("right"));
+        let Gate::Respond(resp) = gate(
+            &state,
+            &target,
+            post_form("password=wrong&next=%2F%7Berror%7D"),
+        )
+        .await
+        else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let body = body_string(resp).await;
+        // Exactly one error paragraph (the real one), and the value attribute
+        // holds the escaped braces — no second expansion.
+        assert_eq!(body.matches("class=\"err\"").count(), 1, "{body}");
+        assert!(body.contains("value=\"/&#123;error&#125;\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn auth_get_with_valid_session_redirects_instead_of_reprompting() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        let expiry = chrono::Utc::now().timestamp() + 600;
+        let token = mint_token(&target.session_key, &target.slug, expiry);
+        let req = Request::builder()
+            .method("GET")
+            .uri(AUTH_PATH)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={token}"))
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Gate::Respond(resp) = gate(&state, &target, req).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+        assert_eq!(resp.headers().get(header::LOCATION).unwrap(), "/");
+    }
+
+    #[tokio::test]
+    async fn auth_post_is_rate_limited_before_password_comparison() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        // Exhaust the anonymous (no ConnectInfo → slug-budget) window.
+        for _ in 0..SLUG_LIMIT {
+            let _ = gate(&state, &target, post_form("password=wrong")).await;
+        }
+        // Even the CORRECT password is now throttled — the limiter runs first.
+        let Gate::Respond(resp) = gate(&state, &target, post_form("password=pw")).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(resp.headers().get(header::SET_COOKIE).is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_get_renders_the_form_and_other_methods_are_rejected() {
+        let state = test_state(false);
+        let target = slug_auth(WebAccessMode::Password, Some("pw"));
+        let Gate::Respond(resp) = gate(&state, &target, get(AUTH_PATH)).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(body_string(resp).await.contains("<form"));
+
+        let del = Request::builder()
+            .method("DELETE")
+            .uri(AUTH_PATH)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let Gate::Respond(resp) = gate(&state, &target, del).await else {
+            panic!("expected a response");
+        };
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
     }
 
     #[test]

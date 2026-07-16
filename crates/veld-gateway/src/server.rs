@@ -126,7 +126,8 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
         if let Some(target) = state.registry.lookup(slug).await {
             // Viewer access gate (§6.1) — runs BEFORE any tunnel stream is
             // opened, so an unauthenticated request costs the origin nothing.
-            return match crate::auth::gate(&state, &target, req).await {
+            let slug_auth = crate::auth::SlugAuth::of(&target);
+            return match crate::auth::gate(&state, &slug_auth, req).await {
                 crate::auth::Gate::Allow(req) => proxy::handle(state, target, req).await,
                 crate::auth::Gate::Respond(resp) => resp,
             };

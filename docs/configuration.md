@@ -798,6 +798,11 @@ How a browser viewer is admitted to this service's public URL (web shares only):
 
 An **explicit** value here always wins over the `veld share --web --access …` flag — the flag only sets the mode for services whose config is silent. Config is the reviewable compliance surface; the CLI can never weaken it.
 
+Two things `share.web` deliberately does **not** hold:
+
+- **The password value.** It is generated per share (or set with `--password`, min 8 chars) — never stored in `veld.json`, where it would land in version control. A `"password"` key under `share.web` is rejected at config load.
+- **Live-share edits.** The policy is captured when the share starts; editing `share.web.access` (or wanting a new password) while a web share is live has no effect on it. Re-run `veld share --web` — this replaces the share and **rotates the public URLs and the password** (old links die; the CLI warns when a replacement happened).
+
 Practical note for multi-service shares: the viewer's session cookie is scoped per public host, so a password-protected API called cross-origin by a shared frontend gets 401s. Give API nodes `"web": { "access": "link" }` — their slug is unguessable and only the app's code ever uses it.
 
 ---

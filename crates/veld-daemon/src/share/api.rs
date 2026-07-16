@@ -158,7 +158,17 @@ async fn start_web_share(
     // share rather than stacking a second one: without this, the stale share
     // keeps heartbeating and its old public URLs stay live until TTL, so the
     // user who thinks they "re-shared" has two live URLs, one forgotten.
-    manager.unshare_web_shares_for_run(run_id).await;
+    // Replacement mints a fresh capability, so the slugs — and therefore the
+    // public URLs and the password — all rotate; anything already handed out
+    // just died. Say so, or the user re-sharing "to refresh" silently strands
+    // their recipients.
+    if manager.unshare_web_shares_for_run(run_id).await > 0 {
+        warnings.push(
+            "replaced the previous web share for this run — its public URLs, one-links, and \
+             password are now invalid; send the new ones"
+                .to_string(),
+        );
+    }
 
     // The gateway is the sole intended joiner and the user just asked for
     // this exposure, so `auto` is the default; an explicit --approve still
@@ -242,17 +252,37 @@ fn resolve_web_access(
     for (hostname, configured) in explicit {
         let mode = configured.unwrap_or(silent_default);
         needs_password |= mode == WebAccessMode::Password;
-        nodes.insert(hostname.clone(), mode);
+        // The wire policy is keyed by hostname; two nodes CAN share one (same
+        // host, different ports — already ambiguous at the tunnel level,
+        // which also routes by hostname). Strictest wins so a duplicate can
+        // never silently downgrade password → link, and the outcome doesn't
+        // depend on map iteration order.
+        nodes
+            .entry(hostname.clone())
+            .and_modify(|existing| {
+                if mode == WebAccessMode::Password {
+                    *existing = WebAccessMode::Password;
+                }
+            })
+            .or_insert(mode);
     }
 
     let password = if needs_password {
         Some(match custom_password {
             Some(p) => {
                 let p = p.trim();
-                if p.is_empty() {
+                let chars = p.chars().count();
+                if chars == 0 {
                     return Err("--password must not be empty".to_string());
                 }
-                if p.len() > 128 {
+                if chars < 8 {
+                    return Err(
+                        "--password must be at least 8 characters (or omit it for a strong \
+                         generated one)"
+                            .to_string(),
+                    );
+                }
+                if chars > 128 {
                     return Err("--password must be at most 128 characters".to_string());
                 }
                 p.to_owned()
@@ -269,7 +299,11 @@ fn resolve_web_access(
 /// Enforce the §6.1 skew guard: the gateway must ack exactly the policy we
 /// asked for. Exception: an all-link policy against an ack-less (old) gateway
 /// is allowed — link-access is precisely what an old gateway enforces.
-fn verify_access_ack(
+///
+/// `pub(crate)`: also re-checked on every heartbeat (`manager.rs`) — a
+/// gateway ROLLBACK mid-share would otherwise re-register the same slugs
+/// unprotected without the daemon ever noticing.
+pub(crate) fn verify_access_ack(
     sent: &GatewayAccessPolicy,
     ack: Option<&veld_core::share::GatewayAccessAck>,
 ) -> Result<(), String> {
@@ -793,6 +827,27 @@ mod tests {
         assert_eq!(p.password.as_deref(), Some("hunter2secret"));
         assert!(resolve_web_access(&explicit, None, Some("   ")).is_err());
         assert!(resolve_web_access(&explicit, None, Some(&"x".repeat(200))).is_err());
+    }
+
+    #[test]
+    fn resolve_web_access_duplicate_hostnames_take_the_strictest_mode() {
+        // Two nodes can legally share one hostname (same host, different
+        // ports). The wire policy is hostname-keyed, so the pair collapses to
+        // one entry — which must never downgrade to link by iteration order.
+        for order in [
+            vec![
+                ("app.x".to_string(), Some(WebAccessMode::Password)),
+                ("app.x".to_string(), Some(WebAccessMode::Link)),
+            ],
+            vec![
+                ("app.x".to_string(), Some(WebAccessMode::Link)),
+                ("app.x".to_string(), Some(WebAccessMode::Password)),
+            ],
+        ] {
+            let p = resolve_web_access(&order, None, None).unwrap();
+            assert_eq!(p.nodes["app.x"], WebAccessMode::Password);
+            assert!(p.password.is_some());
+        }
     }
 
     #[test]

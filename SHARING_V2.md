@@ -517,7 +517,7 @@ channels.
 
 **Brute force.** Constant-time comparison; per-IP *and* per-slug rate limits
 (in-memory — resets on restart are fine, the limiter is a throttle not a
-ledger). The default generated password (~60 bits) is far beyond any online
+ledger). The default generated password (~59 bits) is far beyond any online
 attack at the capped attempt rate; `--password` accepts a custom secret.
 Passwords are never logged.
 
@@ -552,7 +552,7 @@ Per-variant `share.web` sub-object (the room reserved in increment 1):
   `access: "link"` stay link-only while their siblings require the password.
 - **Password format**: easily copy/paste-able and typeable — three dash-joined
   groups from an unambiguous lowercase alphabet (e.g. `k7dm-q2xp-9fzt`,
-  ~60 bits), generated in the daemon. No wordlist dependency.
+  ~59 bits), generated in the daemon. No wordlist dependency.
 - **Web default TTL: 1 hour** (peer stays 2). `--ttl` still overrides.
 
 **Cross-service caveat (honest limit).** The session cookie is host-only per

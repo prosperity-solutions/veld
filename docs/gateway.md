@@ -201,9 +201,22 @@ viewers out, and unsharing (which rotates the capability next time) kills all
 sessions. Lifetime: 12 h, capped at the share's own expiry.
 
 Brute force: password comparison is constant-time, and attempts are throttled
-per client IP (10/min) **and** per slug (60/min, so a distributed guess is
-bounded too). The limiter is in-memory; behind an external LB set
+per client IP (10/min) **and** per slug (300/min across all IPs, so a
+distributed guess is bounded without making viewer lockout trivial). The
+limiter is in-memory; behind an external LB set
 `VELD_GATEWAY_TRUST_FORWARDED=true` or all viewers share the LB's IP budget.
+
+Two operational requirements for the password flow:
+
+- **Viewers must reach the gateway over HTTPS.** The session cookie is
+  `__Host-`-prefixed and `Secure`; a plain-HTTP viewer path (no TLS terminator
+  in front of a plain-HTTP gateway) makes the browser drop it — the viewer
+  enters the correct password and lands back on the login page, forever. The
+  minted URLs are always `https://`, so this only bites broken deployments.
+- **No URL-keyed shared cache in front of password slugs.** The gateway
+  defaults password-mode responses to `Cache-Control: no-store` when the app
+  doesn't set its own caching policy, but an app that says `public` is taken
+  at its word — don't put a shared cache in front of protected content.
 
 Nodes with `share.web.access: "link"` in the developer's config skip all of
 this: anyone with the URL is served, the unguessable slug being the only

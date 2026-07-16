@@ -83,9 +83,13 @@ pub async fn share(
                 println!();
                 println!("  Public URL(s):");
                 for u in &resp.public_urls {
+                    // `access: None` = a pre-access-layer gateway. The daemon
+                    // aborts password shares against those (skew guard), so
+                    // None can only reach here for link-access behavior —
+                    // label it honestly as link-only, never "protected".
                     let mode = match u.access {
-                        Some(WebAccessMode::Link) => "link only — anyone with the URL",
-                        _ => "password protected",
+                        Some(WebAccessMode::Password) => "password protected",
+                        Some(WebAccessMode::Link) | None => "link only — anyone with the URL",
                     };
                     println!(
                         "    {}  {}",

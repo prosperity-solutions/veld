@@ -19,7 +19,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, OnceCell, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::share::{
@@ -490,11 +490,32 @@ impl ShareManager {
                 // The access policy rides every heartbeat: a restarted
                 // gateway holds no state, so the beat that re-establishes the
                 // share must re-establish its password too.
-                if let Err(e) = hb_client.register(&ticket, hb_access.as_ref()).await {
-                    // Transient gateway failures self-heal on a later beat (a
-                    // restarted gateway re-joins and mints the same URLs).
-                    warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
-                        "gateway heartbeat failed; will retry");
+                match hb_client.register(&ticket, hb_access.as_ref()).await {
+                    Ok(resp) => {
+                        // Re-verify the ack on EVERY beat, not just at share
+                        // start: a gateway rollback to a pre-access-layer (or
+                        // non-enforcing) build would re-register the same
+                        // deterministic slugs served wide open. Fail closed —
+                        // kill the share rather than leave it exposed.
+                        if let Some(access) = &hb_access {
+                            if let Err(msg) =
+                                super::api::verify_access_ack(access, resp.access.as_ref())
+                            {
+                                error!(share_id = %hb_share_id, %msg,
+                                    "gateway stopped enforcing this share's access policy \
+                                     (rolled back?); unsharing to fail closed");
+                                let _ = hb_manager.unshare(&hb_share_id).await;
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Transient gateway failures self-heal on a later beat
+                        // (a restarted gateway re-joins and mints the same
+                        // URLs).
+                        warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
+                            "gateway heartbeat failed; will retry");
+                    }
                 }
             }
         });

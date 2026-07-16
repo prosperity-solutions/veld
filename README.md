@@ -388,7 +388,7 @@ In the browser, the overlay's arc menu (under **More**) has **Copy public URL** 
 
 Deploying the gateway is one container (`ghcr.io/prosperity-solutions/veld-gateway`) plus a wildcard DNS record — see the [gateway operator guide](docs/gateway.md).
 
-> **Upgrading:** opt-in is a behavior change. Before, `veld share` exposed every URL-bearing service in a run; now it shares only services whose variant declares `share.expose`, and errors (naming the candidates) if none have opted in. Add `"share": { "expose": ["peer"] }` to the variants you previously relied on sharing.
+> **Upgrading:** opt-in is a behavior change. Before, `veld share` exposed every URL-bearing service in a run; now it shares only services whose variant declares `share.expose`, and errors (naming the candidates) if none have opted in. Add `"share": { "expose": ["peer"] }` to the variants you previously relied on sharing. Password-by-default is a second behavior change: existing web shares gain a password on upgrade, and a freshly-upgraded daemon refuses `veld share --web` against a gateway too old to enforce it (clear error) — upgrade the gateway image, or share with `--access link`.
 
 If the consumer already runs the same environment, the local URL wins — that node is skipped and reported as a warning. Shares live in the daemon's memory: if the daemon stops, shares stop (fail-closed). Stopping the run (`veld stop`) also auto-unshares its shares, and the consumer's join self-tears-down when the tunnel closes. `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted. Default TTL is 7200s (3600s for `--web` — the audience is the open internet, so idle web shares die sooner).
 
