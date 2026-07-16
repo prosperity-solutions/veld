@@ -1,6 +1,6 @@
 # Agents Guide — veld
 
-veld is a Rust-based local development environment orchestrator for monorepos. This repo contains the CLI tool, the helper daemon, the user-space daemon, and the marketing website.
+veld is a Rust-based local development environment orchestrator for monorepos. This repo contains the CLI tool, the helper daemon, the user-space daemon, the public web gateway, and the marketing website.
 
 ## Workspace Structure
 
@@ -10,7 +10,9 @@ veld/
 │   ├── veld/              # CLI binary
 │   ├── veld-core/         # Shared types, feedback protocol
 │   ├── veld-daemon/       # User-space daemon (health, GC, state)
-│   └── veld-helper/       # Privileged daemon (DNS, Caddy routes)
+│   ├── veld-helper/       # Privileged daemon (DNS, Caddy routes)
+│   ├── veld-share/        # Shared P2P transport (iroh) — used by daemon + gateway
+│   └── veld-gateway/      # Public web gateway server (veld share --web)
 ├── website/               # Marketing website (3 static HTML pages)
 │   ├── index.html         # Agents view (/, structured for LLMs)
 │   ├── humans.html        # Humans view (/humans, docs + demos)
@@ -28,7 +30,7 @@ veld/
 
 ```sh
 cargo build --release
-# Binaries: target/release/veld, target/release/veld-helper, target/release/veld-daemon
+# Binaries: target/release/{veld, veld-helper, veld-daemon, veld-gateway}
 ```
 
 ## Serving the Website Locally
