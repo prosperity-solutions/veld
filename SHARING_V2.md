@@ -568,11 +568,14 @@ limiting behind an external TLS terminator would otherwise key every viewer to
 the LB's address — one wrong password would lock out everyone. A gateway
 opt-in (`VELD_GATEWAY_TRUST_FORWARDED`) takes the client IP from the last
 `X-Forwarded-For` hop (the one appended by the trusted immediate LB) and
-forwards the inbound chain upstream instead of overwriting it. The same
-opt-in makes the gateway route by `X-Forwarded-Host` (first hop — the host
-the viewer addressed) when present — required behind a CDN like CloudFront
-that rewrites `Host` to its origin's hostname, which would otherwise 404
-every slug (see the operator guide's "Behind a CDN"). Default stays
+forwards the inbound chain upstream instead of overwriting it. A **separate**
+opt-in (`VELD_GATEWAY_TRUST_FORWARDED_HOST`) makes the gateway route by
+`X-Forwarded-Host` (first hop — the host the viewer addressed) — required
+behind a CDN like CloudFront that rewrites `Host` to its origin's hostname,
+which would otherwise 404 every slug (see the operator guide's "Behind a
+CDN"). Separate because the two headers have different trusted positions
+(last-appended vs first-set) and different failure modes; enabling IP trust
+must never silently start routing by a viewer-suppliable host. Defaults stay
 off (overwrite everything — the safe posture for a directly-exposed gateway).
 
 ## 7. Browser ↔ browser over iroh (deferred spike)

@@ -106,7 +106,7 @@ fn harden<A>(server: &mut axum_server::Server<A>) {
 /// Route a request by the viewer's host: apex → registration API,
 /// `<slug>.<domain>` → proxy, anything else → `/healthz` or a content-free 404.
 async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
-    let host = viewer_host(req.headers(), state.config.trust_forwarded_headers)
+    let host = viewer_host(req.headers(), state.config.trust_forwarded_host)
         .map(host_without_port)
         .unwrap_or_default()
         .to_ascii_lowercase();
@@ -140,13 +140,20 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     api::not_found().await.into_response()
 }
 
-/// The host the viewer actually addressed. Behind a trusted sanitising edge
-/// (`trust_forwarded_headers`) an inbound `X-Forwarded-Host` wins over `Host`:
+/// The host the viewer actually addressed. Behind a trusted edge
+/// (`trust_forwarded_host`) an inbound `X-Forwarded-Host` wins over `Host`:
 /// a CDN (CloudFront and friends) rewrites `Host` to its origin's hostname
 /// when forwarding, so the host the viewer typed only survives the extra hop
-/// in `X-Forwarded-Host`. In a comma-separated chain the **first** entry is
-/// the original viewer host (hops append). Untrusted (default): `Host` alone
-/// — forwarding headers from an anonymous-reachable edge are viewer-supplied.
+/// in `X-Forwarded-Host`. Untrusted (default): `Host` alone — forwarding
+/// headers from an anonymous-reachable edge are viewer-supplied.
+///
+/// In a comma-separated chain the **first** entry is taken (the host the
+/// original client requested; hops append). Note the asymmetry with
+/// `X-Forwarded-For`, where the trusted position is the LAST entry (the one
+/// the trusted edge appended): first-is-original only holds if the edge
+/// **overwrites or strips** any inbound `X-Forwarded-Host` — which is why the
+/// flag's contract (config.rs) demands exactly that, and the documented
+/// CloudFront function assigns (never appends) the header.
 pub(crate) fn viewer_host(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> Option<&str> {
     if trust_forwarded {
         let forwarded = headers

@@ -101,7 +101,8 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
 | `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
-| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream edge's `X-Forwarded-*`: the last `X-Forwarded-For` entry becomes the client IP (password rate-limit keying, chain forwarded upstream), and `X-Forwarded-Host` (first entry) overrides `Host` for slug routing — required behind a CDN that rewrites `Host` to its origin (see [Behind a CDN](#behind-a-cdn-cloudfront)). **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (inbound forwarding headers would be viewer-spoofable) |
+| `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable). Deliberately does not affect `X-Forwarded-Host` |
+| `VELD_GATEWAY_TRUST_FORWARDED_HOST` | `trust_forwarded_host` | `false` | Trust `X-Forwarded-Host` (first entry) as the host the viewer addressed: it overrides `Host` for slug routing, the upstream `X-Forwarded-Host`, and Referer rewriting. Required behind a CDN that rewrites `Host` to its origin (see [Behind a CDN](#behind-a-cdn-cloudfront)). Enable ONLY behind an edge that **overwrites or strips** inbound `X-Forwarded-Host` — an edge that passes it through lets viewers inject the host your apps see |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -114,7 +115,8 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   "relays": [{ "url": "https://relay.acme.internal", "token": { "env": "RELAY_TOKEN" } }],
   "lease_secs": 90,
   "max_registrations": 512,
-  "trust_forwarded_headers": false
+  "trust_forwarded_headers": false,
+  "trust_forwarded_host": false
 }
 ```
 
@@ -193,8 +195,11 @@ own hostname) usually *requires* that, so you can't just forward the viewer's
 The fix is two-sided:
 
 1. **Carry the viewer's host in `X-Forwarded-Host`.** On CloudFront, attach a
-   CloudFront Function (viewer request) that copies the viewer `Host` in — this
-   also overwrites anything a viewer sent, keeping the header edge-owned:
+   CloudFront Function (viewer request) that copies the viewer `Host` in. The
+   assignment **overwrites** anything a viewer sent — that's load-bearing, not
+   cosmetic: the gateway takes the *first* `X-Forwarded-Host` entry, so an
+   edge that appended (or passed a viewer's value through) would let viewers
+   pick the host your apps see. Keep the header edge-owned:
 
    ```js
    function handler(event) {
@@ -208,9 +213,11 @@ The fix is two-sided:
    `*.<domain>` (with a matching wildcard cert in ACM), and point DNS at the
    distribution.
 
-2. **Set `VELD_GATEWAY_TRUST_FORWARDED=true`** so the gateway routes by that
-   `X-Forwarded-Host` (and keys rate limits on the real client IP from
-   `X-Forwarded-For`).
+2. **Set `VELD_GATEWAY_TRUST_FORWARDED_HOST=true`** so the gateway routes by
+   that `X-Forwarded-Host` (and `VELD_GATEWAY_TRUST_FORWARDED=true` to key
+   rate limits on the real client IP from `X-Forwarded-For`). They are
+   separate opt-ins on purpose: each trusts a different header with a
+   different failure mode.
 
 Caching note: leave the distribution's default behavior at "no caching" (or
 forward all headers/cookies/query strings) — shares proxy live dev servers and

@@ -25,13 +25,7 @@ pub fn connection_info(conn: &Connection, label: &str) -> ShareConnectionInfo {
             } else {
                 ShareTransport::Direct
             };
-            // Display forms are `relay:https://…` / `ip:1.2.3.4:5` — strip the
-            // scheme tag; the transport field already carries it.
-            let addr = path.remote_addr().to_string();
-            let via = addr
-                .split_once(':')
-                .map(|(_, rest)| rest.to_owned())
-                .unwrap_or(addr);
+            let via = strip_scheme(path.remote_addr().to_string());
             let rtt = u64::try_from(path.rtt().as_millis()).unwrap_or(u64::MAX);
             (transport, Some(via), Some(rtt))
         }
@@ -46,5 +40,37 @@ pub fn connection_info(conn: &Connection, label: &str) -> ShareConnectionInfo {
         transport,
         via,
         rtt_ms,
+    }
+}
+
+/// Strip the scheme tag from a `TransportAddr` Display form: iroh renders
+/// `relay:https://…`, `ip:1.2.3.4:5678`, `ip:[::1]:5678`, `custom:…` — the
+/// tag duplicates what `transport` already says, so `via` carries only the
+/// address. A value with no colon (not produced by iroh 1.x, kept as a
+/// defensive fallback) passes through unchanged.
+fn strip_scheme(addr: String) -> String {
+    addr.split_once(':')
+        .map(|(_, rest)| rest.to_owned())
+        .unwrap_or(addr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_scheme;
+
+    #[test]
+    fn scheme_stripping_keeps_the_address_intact() {
+        assert_eq!(
+            strip_scheme("relay:https://euw1-1.relay.iroh.network./".into()),
+            "https://euw1-1.relay.iroh.network./"
+        );
+        assert_eq!(
+            strip_scheme("ip:203.0.113.7:4711".into()),
+            "203.0.113.7:4711"
+        );
+        // IPv6: the bracketed address survives with its inner colons.
+        assert_eq!(strip_scheme("ip:[::1]:4711".into()), "[::1]:4711");
+        // No scheme tag → unchanged (defensive; iroh always tags).
+        assert_eq!(strip_scheme("bare-value".into()), "bare-value");
     }
 }

@@ -239,8 +239,16 @@ export function connectionRow(c: ShareConnectionInfo): HTMLElement {
   const rtt = c.rtt_ms != null ? ", rtt " + c.rtt_ms + "ms" : "";
   if (c.transport === "direct") {
     row.appendChild(mkEl("span", "web-share-dot web-share-dot-direct"));
+    // Same shape as the CLI's line: `direct (<addr>, rtt Xms)`.
+    const detail = [c.via, c.rtt_ms != null ? "rtt " + c.rtt_ms + "ms" : null]
+      .filter(Boolean)
+      .join(", ");
     row.appendChild(
-      mkEl("span", "web-share-conn-text", who + ": direct" + rtt),
+      mkEl(
+        "span",
+        "web-share-conn-text",
+        who + ": direct" + (detail ? " (" + detail + ")" : ""),
+      ),
     );
   } else if (c.transport === "relayed") {
     row.appendChild(mkEl("span", "web-share-dot web-share-dot-relayed"));

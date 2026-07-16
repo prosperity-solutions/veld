@@ -63,8 +63,9 @@ describe("connectionRow", () => {
       via: "203.0.113.7:4711",
       rtt_ms: 12,
     });
-    // No label → the node id (shortened) identifies the peer.
-    expect(row.textContent).toContain("aaaabbbbcc: direct");
+    // No label → the node id (shortened) identifies the peer; the direct
+    // path shows its address like the CLI does.
+    expect(row.textContent).toContain("aaaabbbbcc: direct (203.0.113.7:4711, rtt 12ms)");
     expect(row.textContent).not.toContain("throughput limited");
     expect(row.querySelector(".veld-feedback-web-share-dot-direct")).not.toBeNull();
   });

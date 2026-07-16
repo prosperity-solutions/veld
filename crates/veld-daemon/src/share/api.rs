@@ -74,19 +74,7 @@ async fn start(
     } else {
         ExposeMode::Peer
     };
-    // A request without a run name falls back to the `X-Veld-Run` header that
-    // Caddy injects on `/__veld__/`-proxied requests — the browser overlay
-    // shares the run its page belongs to without knowing the run's name, even
-    // with several runs active. Direct callers (the CLI) carry no such header
-    // and keep the "only run" resolution.
-    let run = req.run.clone().or_else(|| {
-        headers
-            .get("x-veld-run")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-    });
+    let run = resolve_run(req.run.clone(), &headers);
     let ResolvedShare {
         manifest,
         relay,
@@ -129,6 +117,23 @@ async fn start(
         public_urls: Vec::new(),
         web_password: None,
     }))
+}
+
+/// The run a share request targets. An explicit run in the body always wins;
+/// without one, fall back to the `X-Veld-Run` header that Caddy injects on
+/// `/__veld__/`-proxied requests — the browser overlay shares the run its
+/// page belongs to without knowing the run's name, even with several runs
+/// active. Direct callers (the CLI) carry no such header and keep the
+/// "only run" resolution downstream.
+fn resolve_run(explicit: Option<String>, headers: &HeaderMap) -> Option<String> {
+    explicit.or_else(|| {
+        headers
+            .get("x-veld-run")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    })
 }
 
 /// The web path of `start`: mint a share scoped to the `web`-opted nodes,
@@ -788,6 +793,28 @@ pub(crate) fn hostname_of(url: &str) -> String {
 mod tests {
     use super::*;
     use veld_core::config::{RelayEntry, SecretSource};
+
+    #[test]
+    fn resolve_run_prefers_body_then_caddy_header() {
+        let hdr = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-veld-run", v.parse().unwrap());
+            h
+        };
+        // Explicit run always wins, even with a header present.
+        assert_eq!(
+            resolve_run(Some("cli-run".into()), &hdr("page-run")),
+            Some("cli-run".into())
+        );
+        // No explicit run → the Caddy-injected header (trimmed).
+        assert_eq!(
+            resolve_run(None, &hdr("  page-run ")),
+            Some("page-run".into())
+        );
+        // Empty/whitespace header is ignored (falls through to "only run").
+        assert_eq!(resolve_run(None, &hdr("   ")), None);
+        assert_eq!(resolve_run(None, &HeaderMap::new()), None);
+    }
 
     #[test]
     fn embed_warning_only_when_embedding_a_real_token() {

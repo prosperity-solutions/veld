@@ -295,6 +295,7 @@ Veld includes a browser-based dashboard at `https://veld.localhost` (or `https:/
 - **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID
 - **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter, source filter (server/client/all)
 - **Stop/Restart** — control environments directly from the browser
+- **Sharing** — start/stop peer shares and public web shares per run; each live tunnel shows its transport (`direct`, or `relayed via <relay>` — throughput capped by the relay) so slow shares are diagnosable at a glance
 
 Open it with `veld ui` or visit the URL directly.
 

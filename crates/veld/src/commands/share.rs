@@ -535,3 +535,55 @@ pub async fn leave(id: Option<String>, json: bool) -> i32 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::connection_line;
+    use veld_core::share::{ShareConnectionInfo, ShareTransport};
+
+    fn info(transport: ShareTransport, label: &str) -> ShareConnectionInfo {
+        ShareConnectionInfo {
+            node_id: "aaaabbbbccccdddd".into(),
+            label: label.into(),
+            transport,
+            via: Some("203.0.113.7:4711".into()),
+            rtt_ms: Some(12),
+        }
+    }
+
+    // Substring assertions survive the ANSI color wrapping (content is inside
+    // the escape sequences), so these hold with or without NO_COLOR.
+    #[test]
+    fn relayed_line_names_the_relay_and_the_cost() {
+        let mut c = info(ShareTransport::Relayed, "gateway share.example");
+        c.via = Some("https://euw1-1.relay.example./".into());
+        let line = connection_line("sh-1", &c);
+        assert!(line.contains("gateway share.example"), "{line}");
+        assert!(
+            line.contains("relayed via https://euw1-1.relay.example./"),
+            "{line}"
+        );
+        assert!(line.contains("rtt 12ms"), "{line}");
+        assert!(line.contains("throughput limited by the relay"), "{line}");
+    }
+
+    #[test]
+    fn direct_line_shows_the_address_without_the_warning() {
+        let line = connection_line("sh-1", &info(ShareTransport::Direct, ""));
+        // Empty label → shortened node id identifies the peer.
+        assert!(
+            line.contains("aaaabbbbcc: direct (203.0.113.7:4711, rtt 12ms)"),
+            "{line}"
+        );
+        assert!(!line.contains("throughput limited"), "{line}");
+    }
+
+    #[test]
+    fn pathless_snapshot_reports_no_open_path() {
+        let mut c = info(ShareTransport::None, "host");
+        c.via = None;
+        c.rtt_ms = None;
+        let line = connection_line("sh-1", &c);
+        assert!(line.contains("host: no open path"), "{line}");
+    }
+}

@@ -761,6 +761,7 @@ mod tests {
                 state_dir: None,
                 max_registrations: 8,
                 trust_forwarded_headers: trust_forwarded,
+                trust_forwarded_host: trust_forwarded,
             }),
             registry: Registry::new(
                 "share.example".into(),

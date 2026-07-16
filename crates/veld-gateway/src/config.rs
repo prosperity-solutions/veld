@@ -57,16 +57,24 @@ pub struct GatewayConfig {
     pub state_dir: Option<PathBuf>,
     /// Hard cap on concurrently live + in-flight registrations.
     pub max_registrations: usize,
-    /// Trust the immediate upstream (a sanitising TLS-terminating LB/CDN)
-    /// for `X-Forwarded-*`: the last `X-Forwarded-For` entry is taken as the
-    /// real client IP (rate-limit keying) and the inbound chain is forwarded
-    /// upstream; `X-Forwarded-Host` (first entry) overrides `Host` for
-    /// routing and the upstream `X-Forwarded-Host` — required behind a CDN
-    /// (CloudFront) that rewrites `Host` to its origin's hostname. Default
-    /// **off** — a directly-exposed gateway must overwrite the chain, or any
-    /// viewer could spoof it. Enable ONLY behind an edge that sets these
-    /// headers itself.
+    /// Trust the immediate upstream (a sanitising TLS-terminating LB) for
+    /// `X-Forwarded-For`: the last entry is taken as the real client IP
+    /// (rate-limit keying) and the inbound chain is forwarded upstream.
+    /// Default **off** — a directly-exposed gateway must overwrite the chain,
+    /// or any viewer could spoof it. Enable ONLY behind an LB that appends
+    /// the true peer address. Deliberately does NOT extend to
+    /// `X-Forwarded-Host` — that is [`Self::trust_forwarded_host`]'s own
+    /// opt-in, so enabling IP trust never silently starts routing (and
+    /// forwarding to origin apps) by a viewer-suppliable host header.
     pub trust_forwarded_headers: bool,
+    /// Trust the edge's `X-Forwarded-Host` (first entry) as the host the
+    /// viewer addressed: it overrides `Host` for slug routing, the upstream
+    /// `X-Forwarded-Host`, and `Referer` rewriting. Required behind a CDN
+    /// (CloudFront) that rewrites `Host` to its origin's hostname. Default
+    /// **off**. Enable ONLY behind an edge that **overwrites or strips** any
+    /// inbound `X-Forwarded-Host` — an edge that merely passes it through
+    /// lets a viewer inject the value that origin apps then see.
+    pub trust_forwarded_host: bool,
 }
 
 /// Paths to a TLS certificate chain and private key (PEM).
@@ -94,6 +102,8 @@ struct FileConfig {
     max_registrations: Option<usize>,
     #[serde(rename = "trust_forwarded_headers")]
     trust_forwarded_headers: Option<bool>,
+    #[serde(rename = "trust_forwarded_host")]
+    trust_forwarded_host: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -217,13 +227,20 @@ impl GatewayConfig {
             bail!("max_registrations must be between 1 and {MAX_REGISTRATIONS_CEILING}");
         }
 
+        let parse_bool = |key: &str, raw: &str| -> Result<bool> {
+            match raw.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => Ok(true),
+                "0" | "false" | "no" => Ok(false),
+                other => bail!("invalid {key} `{other}` (use true/false)"),
+            }
+        };
         let trust_forwarded_headers = match get("VELD_GATEWAY_TRUST_FORWARDED") {
-            Some(raw) => match raw.to_ascii_lowercase().as_str() {
-                "1" | "true" | "yes" => true,
-                "0" | "false" | "no" => false,
-                other => bail!("invalid VELD_GATEWAY_TRUST_FORWARDED `{other}` (use true/false)"),
-            },
+            Some(raw) => parse_bool("VELD_GATEWAY_TRUST_FORWARDED", raw)?,
             None => file.trust_forwarded_headers.unwrap_or(false),
+        };
+        let trust_forwarded_host = match get("VELD_GATEWAY_TRUST_FORWARDED_HOST") {
+            Some(raw) => parse_bool("VELD_GATEWAY_TRUST_FORWARDED_HOST", raw)?,
+            None => file.trust_forwarded_host.unwrap_or(false),
         };
 
         Ok(Self {
@@ -236,6 +253,7 @@ impl GatewayConfig {
             state_dir,
             max_registrations,
             trust_forwarded_headers,
+            trust_forwarded_host,
         })
     }
 }
@@ -376,6 +394,39 @@ mod tests {
         let mut huge = base.to_vec();
         huge.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "99999999999"));
         assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&huge)).is_err());
+    }
+
+    #[test]
+    fn forwarded_trust_flags_are_independent() {
+        let base = [
+            ("VELD_GATEWAY_DOMAIN", "share.acme.internal"),
+            ("VELD_GATEWAY_TOKEN", "t"),
+        ];
+        // Both default off.
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&base)).unwrap();
+        assert!(!cfg.trust_forwarded_headers);
+        assert!(!cfg.trust_forwarded_host);
+
+        // Enabling X-Forwarded-For trust must NOT enable X-Forwarded-Host
+        // routing — that silent expansion is exactly what the separate flag
+        // exists to prevent.
+        let mut xff = base.to_vec();
+        xff.push(("VELD_GATEWAY_TRUST_FORWARDED", "true"));
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&xff)).unwrap();
+        assert!(cfg.trust_forwarded_headers);
+        assert!(!cfg.trust_forwarded_host);
+
+        // And vice versa; also covers the env parse of the new flag.
+        let mut xfh = base.to_vec();
+        xfh.push(("VELD_GATEWAY_TRUST_FORWARDED_HOST", "yes"));
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&xfh)).unwrap();
+        assert!(!cfg.trust_forwarded_headers);
+        assert!(cfg.trust_forwarded_host);
+
+        // Bad value is a boot error, not a silent default.
+        let mut bad = base.to_vec();
+        bad.push(("VELD_GATEWAY_TRUST_FORWARDED_HOST", "maybe"));
+        assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&bad)).is_err());
     }
 
     #[test]
