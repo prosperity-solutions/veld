@@ -519,13 +519,37 @@ Three independent increments; ship top-down.
   optional. Release pipeline publishes a multi-arch image to
   `ghcr.io/prosperity-solutions/veld-gateway` on each release, §5.5.
 
-**Still open (defer to the relevant slice)**
-1. Should `web` enforce stricter defaults (approval mode, shorter TTL) than
-   `peer`? Password / per-viewer approval layer — config room reserved via
-   `share.web` sub-object, §6.
-2. Heartbeat/lease interval and jitter; `DELETE` vs pure lease-expiry
-   semantics on unshare.
-3. `host_header: "public" | "origin"` per-registration knob — ship in v1 or
-   wait for a real vhost-routing case?
-4. Human-readable slug aliases (e.g. `frontend-demo.share.…`) on top of the
-   unguessable default — worth the collision/enumeration surface?
+**Settled while implementing (review-driven)**
+- Upstream `Host` is rewritten to the **origin** hostname, and `Origin` +
+  `Referer` are rewritten in lockstep, so an Origin-checking dev server sees a
+  coherent same-origin request. `X-Forwarded-*`/`Forwarded` are stripped
+  inbound and set authoritatively (the gateway is the public trust boundary);
+  `Referrer-Policy: no-referrer` is emitted so the slug doesn't leak.
+- Relay confinement on the gateway is an **allow-list** with tokens resolved
+  once at startup; a ticket naming an unlisted relay — or advertising no relay
+  at all — is refused (never a silent public/direct fallback).
+- Web share defaults to **auto** approval (the gateway is the only joiner, so
+  a gateway restart re-joins without a human gate), and unshare closes the
+  tunnel (immediate slug drop) with the gateway `DELETE` as courtesy and the
+  lease as the crash backstop.
+
+**Still open (defer to the relevant increment)**
+1. **Per-viewer access layer** (increment 2, §6): the slug is unguessable but
+   travels in the URL (DNS/SNI/logs), so it is obscurity, not authentication —
+   today every viewer with the link is served. A password / per-viewer
+   approval layer is the next security increment; config room is reserved via
+   a `share.web` sub-object.
+2. `host_header: "public" | "origin"` per-registration knob — deferred; the
+   origin-Host default fits the flagship dev-server case, and SSR apps that
+   need the public host are the operator-config path until a real case forces
+   the knob.
+3. **Trusted-upstream-LB opt-in** — the gateway currently overwrites all
+   forwarding headers (safe default); an operator with a sanitising LB that
+   wants the real client IP chain needs a `trust_forwarded_headers` opt-in.
+4. **Direct-address confinement** — relay confinement checks the ticket's
+   relay URLs, not its iroh direct addresses; a stolen-token registrant could
+   make the gateway UDP-probe internal addresses (bounded: needs a real iroh
+   peer proving the node id, no HTTP SSRF). Filter private/link-local direct
+   addrs if iroh exposes them.
+5. Heartbeat jitter across many origins on one gateway; human-readable slug
+   aliases on top of the unguessable default (collision/enumeration surface).
