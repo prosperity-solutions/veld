@@ -285,11 +285,7 @@ pub fn strip_session_cookie(cookie_header: &str) -> Option<String> {
     let kept: Vec<&str> = cookie_header
         .split(';')
         .map(str::trim)
-        .filter(|pair| {
-            !pair
-                .strip_prefix(SESSION_COOKIE)
-                .is_some_and(|rest| rest.trim_start().starts_with('='))
-        })
+        .filter(|pair| !is_session_pair(pair.as_bytes()))
         .filter(|p| !p.is_empty())
         .collect();
     if kept.is_empty() {
@@ -297,6 +293,64 @@ pub fn strip_session_cookie(cookie_header: &str) -> Option<String> {
     } else {
         Some(kept.join("; "))
     }
+}
+
+/// True if `pair` (already `;`-split) is our session cookie: `<name>=<value>`.
+/// Byte-level so a Cookie header that mixes an ASCII session pair with a
+/// non-UTF-8 pair still matches — the session token must never reach the
+/// origin just because some *other* cookie value isn't str-able.
+fn is_session_pair(pair: &[u8]) -> bool {
+    let pair = trim_ascii_ws(pair);
+    pair.strip_prefix(SESSION_COOKIE.as_bytes())
+        .is_some_and(|rest| trim_ascii_ws_start(rest).first() == Some(&b'='))
+}
+
+/// Strip the gateway session cookie from raw `Cookie` header bytes (for the
+/// path where the whole value isn't valid UTF-8). Returns the surviving
+/// pairs as bytes, `Some(vec![])` when only the session cookie was present
+/// (send no Cookie header), or `None` when our cookie wasn't there at all
+/// (caller forwards the original value untouched).
+pub fn strip_session_cookie_bytes(cookie_header: &[u8]) -> Option<Vec<u8>> {
+    let mut found = false;
+    let mut kept: Vec<&[u8]> = Vec::new();
+    for pair in cookie_header.split(|&b| b == b';') {
+        if is_session_pair(pair) {
+            found = true;
+            continue;
+        }
+        let trimmed = trim_ascii_ws(pair);
+        if !trimmed.is_empty() {
+            kept.push(trimmed);
+        }
+    }
+    if !found {
+        return None;
+    }
+    Some(kept.join(&b"; "[..]))
+}
+
+fn trim_ascii_ws(b: &[u8]) -> &[u8] {
+    trim_ascii_ws_end(trim_ascii_ws_start(b))
+}
+fn trim_ascii_ws_start(mut b: &[u8]) -> &[u8] {
+    while let [first, rest @ ..] = b {
+        if first.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    b
+}
+fn trim_ascii_ws_end(mut b: &[u8]) -> &[u8] {
+    while let [rest @ .., last] = b {
+        if last.is_ascii_whitespace() {
+            b = rest;
+        } else {
+            break;
+        }
+    }
+    b
 }
 
 // ---------------------------------------------------------------------------
@@ -388,41 +442,41 @@ fn bump(map: &mut HashMap<String, (Instant, u32)>, key: &str, now: Instant) -> u
 
 impl RateLimiter {
     /// Record one attempt; `false` when either budget for the current window
-    /// is exhausted. The slug budget is checked FIRST: once a slug is locked,
-    /// further attempts are refused without inserting IP keys — a slug-lockout
-    /// flood cannot grow the IP map. A missing client IP (no socket info —
-    /// shouldn't happen) still counts against the slug budget.
+    /// is exhausted.
+    ///
+    /// The per-IP budget is checked FIRST, and the shared per-slug counter is
+    /// bumped **only for an IP within its budget**. So a single flooding IP
+    /// contributes at most `IP_LIMIT` to the slug counter and can never lock
+    /// every viewer out of a slug; a distributed flood still reaches the slug
+    /// cap through many within-budget IPs (the intended bound). A missing
+    /// client IP (no socket info — shouldn't happen) skips the IP gate and
+    /// counts only against the slug budget.
     pub fn allow(&self, client_ip: Option<&str>, slug: &str) -> bool {
         let now = Instant::now();
-        let slug_ok = {
-            let mut slugs = self.slugs.lock().expect("limiter lock");
-            // Paranoia sweep; live slugs already bound this map.
-            if slugs.len() > LIMITER_MAX_KEYS {
-                slugs.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
-            }
-            bump(&mut slugs, slug, now) <= SLUG_LIMIT
-        };
-        if !slug_ok {
-            return false;
-        }
-        match client_ip {
-            None => true,
-            Some(ip) => {
-                let mut ips = self.ips.lock().expect("limiter lock");
+        if let Some(ip) = client_ip {
+            let mut ips = self.ips.lock().expect("limiter lock");
+            if ips.len() >= LIMITER_MAX_KEYS {
+                ips.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
+                // Still at the cap after dropping stale windows means a
+                // distinct-fresh-IP flood: drop the map rather than grow
+                // unbounded. Losing one window of per-IP history is the lesser
+                // harm — the slug budget below still bounds guessing.
                 if ips.len() >= LIMITER_MAX_KEYS {
-                    ips.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
-                    // Still at the cap after dropping stale windows means a
-                    // distinct-fresh-IP flood: drop the map rather than grow
-                    // unbounded. Losing one window of per-IP history is the
-                    // lesser harm — the slug budget above still bounds
-                    // guessing.
-                    if ips.len() >= LIMITER_MAX_KEYS {
-                        ips.clear();
-                    }
+                    ips.clear();
                 }
-                bump(&mut ips, ip, now) <= IP_LIMIT
+            }
+            if bump(&mut ips, ip, now) > IP_LIMIT {
+                // Over IP budget → refused WITHOUT touching the shared slug
+                // counter, so this IP can't inflate the slug lockout.
+                return false;
             }
         }
+        let mut slugs = self.slugs.lock().expect("limiter lock");
+        // Paranoia sweep; live slugs already bound this map.
+        if slugs.len() > LIMITER_MAX_KEYS {
+            slugs.retain(|_, (start, _)| now.duration_since(*start) < LIMIT_WINDOW);
+        }
+        bump(&mut slugs, slug, now) <= SLUG_LIMIT
     }
 }
 
@@ -570,6 +624,42 @@ mod tests {
     }
 
     #[test]
+    fn client_ip_selection_honors_trust_and_last_hop() {
+        let with_peer_and_xff = |xff: Option<&str>| {
+            let mut b = Request::builder().method("GET").uri("/");
+            if let Some(v) = xff {
+                b = b.header("x-forwarded-for", v);
+            }
+            let mut req = b.body(axum::body::Body::empty()).unwrap();
+            req.extensions_mut().insert(ConnectInfo(
+                "9.9.9.9:5000".parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            req
+        };
+
+        // Untrusted edge: always the socket peer, XFF ignored.
+        assert_eq!(
+            client_ip(&with_peer_and_xff(Some("1.2.3.4, 5.6.7.8")), false).as_deref(),
+            Some("9.9.9.9")
+        );
+        // Trusted LB: the LAST XFF hop (appended by the trusted immediate LB).
+        assert_eq!(
+            client_ip(&with_peer_and_xff(Some("1.2.3.4, 5.6.7.8")), true).as_deref(),
+            Some("5.6.7.8")
+        );
+        // Trusted but a malformed last hop → fall back to the socket peer.
+        assert_eq!(
+            client_ip(&with_peer_and_xff(Some("1.2.3.4, not-an-ip")), true).as_deref(),
+            Some("9.9.9.9")
+        );
+        // Trusted but no XFF at all → socket peer.
+        assert_eq!(
+            client_ip(&with_peer_and_xff(None), true).as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
     fn safe_next_blocks_open_redirects() {
         assert_eq!(safe_next(Some("/x/y?z=1")), "/x/y?z=1");
         assert_eq!(safe_next(Some("//evil.example")), "/");
@@ -601,6 +691,31 @@ mod tests {
         // A cookie whose name merely starts with ours is NOT stripped.
         let similar = format!("{SESSION_COOKIE}2=x");
         assert_eq!(strip_session_cookie(&similar).as_deref(), Some(&*similar));
+    }
+
+    #[test]
+    fn strip_session_cookie_bytes_handles_mixed_non_utf8_pairs() {
+        // The load-bearing case: an ASCII session pair mixed with a non-UTF-8
+        // pair. A str-first strip would fail wholesale and leak the token;
+        // the byte-level strip removes only the session pair.
+        let mut raw = format!("a=1; {SESSION_COOKIE}=tok; b=").into_bytes();
+        raw.push(0xff); // invalid UTF-8 in the `b` value
+        let out = strip_session_cookie_bytes(&raw).expect("our cookie was present");
+        assert_eq!(&out[..out.len() - 1], b"a=1; b=");
+        assert_eq!(out.last(), Some(&0xff));
+
+        // Our cookie absent → None (caller forwards verbatim), even with a
+        // non-UTF-8 byte present.
+        assert!(strip_session_cookie_bytes(&[b'x', b'=', 0xff]).is_none());
+
+        // Only the session cookie present → Some(empty) (send no Cookie).
+        assert_eq!(
+            strip_session_cookie_bytes(format!("{SESSION_COOKIE}=tok").as_bytes()),
+            Some(Vec::new())
+        );
+        // A name that merely starts with ours is preserved.
+        let similar = format!("{SESSION_COOKIE}2=x");
+        assert!(strip_session_cookie_bytes(similar.as_bytes()).is_none());
     }
 
     #[test]

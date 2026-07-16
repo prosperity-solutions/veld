@@ -186,7 +186,7 @@ Requires `sharing.gateway` in config (a URL, or `{ "url", "token" }` where
 command prints deterministic `https://<slug>.<gateway-domain>` URLs and —
 **by default — a viewer password**: the gateway shows a password page before
 serving, a session cookie (12 h, capped at the share TTL) keeps the viewer in.
-`--password <pw>` chooses the password; the printed one-link
+`--password <pw>` chooses the password (min 8 chars); the printed one-link
 (`https://…/#veld-key=…`) carries it in the URL fragment (never hits DNS/logs).
 Opt a service out with `"web": { "access": "link" }` in its `share` block (or
 `--access link` for config-silent services; explicit config always wins over

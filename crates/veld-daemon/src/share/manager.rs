@@ -34,6 +34,12 @@ use super::gateway::GatewayClient;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the reaper scans for expired shares.
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
+/// Consecutive heartbeat acks that must fail to confirm a web share's access
+/// policy before the daemon fails closed and unshares. >1 so a single
+/// anomalous ack (or a lone stale replica during a rolling gateway upgrade)
+/// can't strand a healthy password share, while a genuine rollback still
+/// closes within a few beats.
+const ACK_FAILURE_LIMIT: u32 = 3;
 /// Max time to wait for an inbound peer to send its control frame before the
 /// per-connection task gives up (pre-auth, so a leaked link can't pile up
 /// stalled tasks holding a connection).
@@ -480,6 +486,12 @@ impl ShareManager {
         };
         let ticket = entry.ticket.clone();
         let heartbeat = tokio::spawn(async move {
+            // Consecutive heartbeats whose ack didn't confirm the access
+            // policy. We only fail closed after several in a row so one
+            // anomalous ack (or a single stale replica seen during a rolling
+            // gateway upgrade) can't strand a healthy password share — while a
+            // genuine rollback still closes within a few beats.
+            let mut bad_acks = 0u32;
             loop {
                 tokio::time::sleep(interval).await;
                 // Self-terminate once the share is gone (unshare also aborts
@@ -498,21 +510,38 @@ impl ShareManager {
                         // deterministic slugs served wide open. Fail closed —
                         // kill the share rather than leave it exposed.
                         if let Some(access) = &hb_access {
-                            if let Err(msg) =
-                                super::api::verify_access_ack(access, resp.access.as_ref())
-                            {
-                                error!(share_id = %hb_share_id, %msg,
-                                    "gateway stopped enforcing this share's access policy \
-                                     (rolled back?); unsharing to fail closed");
-                                let _ = hb_manager.unshare(&hb_share_id).await;
-                                break;
+                            match super::api::verify_access_ack(access, resp.access.as_ref()) {
+                                Ok(()) => bad_acks = 0,
+                                Err(msg) => {
+                                    bad_acks += 1;
+                                    warn!(share_id = %hb_share_id, bad_acks, %msg,
+                                        "gateway heartbeat ack did not confirm the access policy");
+                                    if bad_acks >= ACK_FAILURE_LIMIT {
+                                        error!(share_id = %hb_share_id,
+                                            "gateway stopped enforcing this share's access \
+                                             policy across {ACK_FAILURE_LIMIT} beats (rolled \
+                                             back?); unsharing to fail closed");
+                                        // Detached: unshare() aborts THIS task,
+                                        // so run it off-task to guarantee the
+                                        // teardown completes rather than
+                                        // cancelling itself mid-way.
+                                        let m = Arc::clone(&hb_manager);
+                                        let id = hb_share_id.clone();
+                                        tokio::spawn(async move {
+                                            let _ = m.unshare(&id).await;
+                                        });
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
                     Err(e) => {
                         // Transient gateway failures self-heal on a later beat
                         // (a restarted gateway re-joins and mints the same
-                        // URLs).
+                        // URLs). A network failure is not evidence the policy
+                        // stopped being enforced, so it does not count toward
+                        // the fail-closed threshold.
                         warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
                             "gateway heartbeat failed; will retry");
                     }
@@ -1066,21 +1095,27 @@ impl ShareManager {
         Ok(())
     }
 
-    /// Stop every **web** share minted from `run_id` (their gateway
-    /// registrations are unregistered by `unshare`). Used to make a repeat
-    /// `veld share --web` replace rather than stack. Returns how many stopped.
-    pub async fn unshare_web_shares_for_run(&self, run_id: Uuid) -> usize {
-        let ids: Vec<String> = {
-            let shares = self.shares.lock().await;
-            shares
-                .values()
-                .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
-                .map(|s| s.id.clone())
-                .collect()
-        };
+    /// The ids of every live **web** share minted from `run_id`. Snapshotted
+    /// so a repeat `veld share --web` can register its replacement first and
+    /// only then tear these down — a failed re-share must not destroy the
+    /// share it was replacing.
+    pub async fn web_share_ids_for_run(&self, run_id: Uuid) -> Vec<String> {
+        self.shares
+            .lock()
+            .await
+            .values()
+            .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Stop specific shares by id (their gateway registrations are unregistered
+    /// by `unshare`). Returns how many stopped. Used to replace prior web
+    /// shares once a fresh one is live.
+    pub async fn unshare_ids(&self, ids: &[String]) -> usize {
         let mut stopped = 0;
         for id in ids {
-            if self.unshare(&id).await.is_ok() {
+            if self.unshare(id).await.is_ok() {
                 stopped += 1;
             }
         }

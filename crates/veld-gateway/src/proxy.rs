@@ -142,7 +142,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     let (mut resp_parts, resp_body) = upstream_resp.into_parts();
     rewrite_response_headers(
         &mut resp_parts.headers,
-        reg,
+        &reg.nodes,
         &state.config.domain,
         target.access == veld_core::config::WebAccessMode::Password,
     );
@@ -230,20 +230,21 @@ fn build_upstream_request(
         }
         if name == header::COOKIE {
             // The gateway's viewer-session cookie is internal credential
-            // material — the origin service never sees it. A value that isn't
-            // visible ASCII (`to_str` fails) can't contain our cookie name;
-            // forward it untouched rather than silently dropping the header.
-            match value.to_str() {
-                Ok(s) => {
-                    if let Some(kept) = crate::auth::strip_session_cookie(s) {
-                        if let Ok(v) = HeaderValue::from_str(&kept) {
-                            headers.append(header::COOKIE, v);
-                        }
-                    }
-                }
-                Err(_) => {
+            // material — the origin service never sees it. Strip on the raw
+            // bytes: a Cookie header can mix an ASCII session pair with a
+            // non-UTF-8 pair, and dropping to `str` first would fail wholesale
+            // and leak the session token. `None` = our cookie wasn't present,
+            // forward the value verbatim; otherwise forward only the survivors.
+            match crate::auth::strip_session_cookie_bytes(value.as_bytes()) {
+                None => {
                     headers.append(header::COOKIE, value.clone());
                 }
+                Some(kept) if !kept.is_empty() => {
+                    if let Ok(v) = HeaderValue::from_bytes(&kept) {
+                        headers.append(header::COOKIE, v);
+                    }
+                }
+                Some(_) => {} // only the session cookie was present → send none
             }
             continue;
         }
@@ -395,7 +396,7 @@ fn splice_upgrade(
 /// `Referrer-Policy: no-referrer` set. (Bodies are never touched.)
 fn rewrite_response_headers(
     headers: &mut HeaderMap,
-    reg: &Registration,
+    nodes: &[RegisteredNode],
     domain: &str,
     password_mode: bool,
 ) {
@@ -423,7 +424,7 @@ fn rewrite_response_headers(
     );
 
     if let Some(location) = headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) {
-        if let Some(rewritten) = rewrite_absolute_url(location, &reg.nodes, domain) {
+        if let Some(rewritten) = rewrite_absolute_url(location, nodes, domain) {
             if let Ok(v) = HeaderValue::from_str(&rewritten) {
                 headers.insert(header::LOCATION, v);
             }
@@ -439,7 +440,7 @@ fn rewrite_response_headers(
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
         .and_then(|v| v.to_str().ok())
     {
-        if let Some(rewritten) = rewrite_origin_value(acao, &reg.nodes, domain) {
+        if let Some(rewritten) = rewrite_origin_value(acao, nodes, domain) {
             if let Ok(v) = HeaderValue::from_str(&rewritten) {
                 headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
             }
@@ -469,7 +470,7 @@ fn rewrite_response_headers(
                 continue;
             }
             let value = match cookie.to_str() {
-                Ok(s) => match strip_origin_cookie_domain(s, &reg.nodes) {
+                Ok(s) => match strip_origin_cookie_domain(s, nodes) {
                     Some(stripped) => HeaderValue::from_str(&stripped).unwrap_or(cookie),
                     None => cookie,
                 },
@@ -575,6 +576,50 @@ mod tests {
 
     fn rewrite(value: &str) -> Option<String> {
         rewrite_absolute_url(value, &nodes(), "share.example")
+    }
+
+    #[test]
+    fn password_mode_defaults_no_store_only_when_app_is_silent() {
+        // Password node + no app cache policy → default closed.
+        let mut h = HeaderMap::new();
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "no-store");
+
+        // Password node + app states its own policy → respected, not overridden.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60"),
+        );
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "public, max-age=60");
+
+        // Link node → the gateway never injects no-store.
+        let mut h = HeaderMap::new();
+        rewrite_response_headers(&mut h, &nodes(), "share.example", false);
+        assert!(h.get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[test]
+    fn upstream_cannot_set_the_gateway_session_cookie() {
+        // A hostile upstream trying to (re)set our __Host- session cookie is
+        // dropped; its other Set-Cookies pass through.
+        let mut h = HeaderMap::new();
+        h.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("__Host-veld_gw_sess=forged; Path=/"),
+        );
+        h.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("app_sid=legit; Path=/"),
+        );
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        let cookies: Vec<&str> = h
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies, vec!["app_sid=legit; Path=/"]);
     }
 
     #[test]

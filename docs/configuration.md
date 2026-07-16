@@ -800,7 +800,7 @@ An **explicit** value here always wins over the `veld share --web --access …` 
 
 Two things `share.web` deliberately does **not** hold:
 
-- **The password value.** It is generated per share (or set with `--password`, min 8 chars) — never stored in `veld.json`, where it would land in version control. A `"password"` key under `share.web` is rejected at config load.
+- **The password value.** It is generated per share (or set with `--password`, min 8 chars) — never stored in `veld.json`, where it would land in version control. A `"password"` key under `share.web` is rejected at config load: unlike most config blocks, `share.web` rejects unknown keys outright, so a typo'd or unsupported key fails loudly instead of being silently ignored. (One consequence: a `veld.json` using a `share.web` key added by a *newer* Veld won't load on an older daemon — keep the toolchain aligned when you adopt a new `share.web` field.)
 - **Live-share edits.** The policy is captured when the share starts; editing `share.web.access` (or wanting a new password) while a web share is live has no effect on it. Re-run `veld share --web` — this replaces the share and **rotates the public URLs and the password** (old links die; the CLI warns when a replacement happened).
 
 Practical note for multi-service shares: the viewer's session cookie is scoped per public host, so a password-protected API called cross-origin by a shared frontend gets 401s. Give API nodes `"web": { "access": "link" }` — their slug is unguessable and only the app's code ever uses it.

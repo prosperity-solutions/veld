@@ -155,20 +155,12 @@ async fn start_web_share(
     let run_id = manifest.run_id;
 
     // Re-running `veld share --web` for the same run replaces the previous web
-    // share rather than stacking a second one: without this, the stale share
-    // keeps heartbeating and its old public URLs stay live until TTL, so the
-    // user who thinks they "re-shared" has two live URLs, one forgotten.
-    // Replacement mints a fresh capability, so the slugs — and therefore the
-    // public URLs and the password — all rotate; anything already handed out
-    // just died. Say so, or the user re-sharing "to refresh" silently strands
-    // their recipients.
-    if manager.unshare_web_shares_for_run(run_id).await > 0 {
-        warnings.push(
-            "replaced the previous web share for this run — its public URLs, one-links, and \
-             password are now invalid; send the new ones"
-                .to_string(),
-        );
-    }
+    // share rather than stacking a second one. Snapshot the prior web shares
+    // now but DON'T tear them down yet: the new share has a fresh capability
+    // (hence fresh slugs), so both can coexist momentarily — and if the new
+    // registration fails (gateway unreachable / rollback), the old share must
+    // survive rather than being destroyed by a re-share that never completed.
+    let prior_web = manager.web_share_ids_for_run(run_id).await;
 
     // The gateway is the sole intended joiner and the user just asked for
     // this exposure, so `auto` is the default; an explicit --approve still
@@ -192,7 +184,8 @@ async fn start_web_share(
     let registration = match client.register(&token, Some(&access)).await {
         Ok(r) => r,
         Err(e) => {
-            // No orphaned share: if the gateway won't take it, unshare.
+            // No orphaned share: if the gateway won't take it, unshare the
+            // new one. The prior share is untouched and still live.
             let _ = manager.unshare(&share_id).await;
             return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")));
         }
@@ -200,7 +193,7 @@ async fn start_web_share(
 
     // Version-skew guard (§6.1): a gateway that predates the access layer
     // ignores the policy and omits the ack — it would serve a share the user
-    // asked to protect wide open. Tear everything down instead.
+    // asked to protect wide open. Tear the new one down; keep the prior one.
     if let Err(msg) = verify_access_ack(&access, registration.access.as_ref()) {
         let _ = client.unregister(&registration.id).await;
         let _ = manager.unshare(&share_id).await;
@@ -221,6 +214,17 @@ async fn start_web_share(
         // The share vanished mid-flight; withdraw the gateway registration.
         let _ = client.unregister(&registration.id).await;
         return Err(internal(e));
+    }
+
+    // The new share is fully live — NOW retire the ones it replaces. Their
+    // fresh-capability successor means the slugs, public URLs, and password
+    // all rotated; anything already handed out just died, so say so.
+    if !prior_web.is_empty() && manager.unshare_ids(&prior_web).await > 0 {
+        warnings.push(
+            "replaced the previous web share for this run — its public URLs, one-links, and \
+             password are now invalid; send the new ones"
+                .to_string(),
+        );
     }
 
     Ok(Json(StartShareResponse {
