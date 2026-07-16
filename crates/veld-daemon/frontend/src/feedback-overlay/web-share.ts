@@ -65,7 +65,10 @@ export function toggleWebShareCard(): void {
   }
 }
 
-export function closeWebShareCard(): void {
+/** Close the card (idempotent). Returns true when a card was actually open —
+ * the Escape cascade uses that to consume the keypress. */
+export function closeWebShareCard(): boolean {
+  const wasOpen = card !== null;
   if (refreshTimer) {
     clearInterval(refreshTimer);
     refreshTimer = null;
@@ -75,6 +78,7 @@ export function closeWebShareCard(): void {
     card = null;
   }
   notice = null;
+  return wasOpen;
 }
 
 function openCard(): void {

@@ -213,6 +213,16 @@ The fix is two-sided:
    `*.<domain>` (with a matching wildcard cert in ACM), and point DNS at the
    distribution.
 
+   If the apex `<domain>` rides the distribution too, the **registration API
+   flows through CloudFront**: the behavior must allow **all HTTP methods**
+   (registration is a Bearer-authenticated `POST`/`DELETE`; CloudFront
+   defaults to GET/HEAD, which turns every registration into a silent 403 —
+   viewer proxying works, but no share ever appears). CloudFront forwards the
+   `Authorization` header automatically for non-GET/HEAD methods once they
+   are allowed, so no extra header config is needed. Alternatively, point the
+   apex's DNS straight at the platform LB and route only `*.<domain>` through
+   CloudFront — registrations don't benefit from a CDN anyway.
+
 2. **Set `VELD_GATEWAY_TRUST_FORWARDED_HOST=true`** so the gateway routes by
    that `X-Forwarded-Host`. It is a separate opt-in from
    `VELD_GATEWAY_TRUST_FORWARDED` on purpose: each trusts a different header

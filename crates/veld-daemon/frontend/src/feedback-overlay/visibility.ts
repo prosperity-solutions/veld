@@ -3,6 +3,7 @@ import { getState, dispatch } from "./store";
 import { PREFIX } from "./constants";
 import { deps } from "../shared/registry";
 import { closeToolbar } from "./toolbar";
+import { closeWebShareCard } from "./web-share";
 
 export function hideOverlay(): void {
   dispatch({ type: "SET_HIDDEN", hidden: true });
@@ -16,6 +17,7 @@ export function hideOverlay(): void {
   refs.componentTraceEl.style.display = "none";
   deps().setMode(null);
   closeToolbar(); // collapse the arc so it doesn't tick behind the hidden overlay
+  closeWebShareCard(); // it floats outside the toolbar container and polls — must not outlive the overlay
   if (getState().panelOpen) deps().togglePanel();
 }
 
