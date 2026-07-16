@@ -71,7 +71,6 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         &target.origin,
         &public_host,
         client_addr.as_deref(),
-        &state,
         is_upgrade,
     ) {
         Ok(r) => r,
@@ -112,6 +111,16 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     Response::from_parts(resp_parts, Body::new(resp_body))
 }
 
+/// Client-supplied forwarding headers the public edge must not trust — they
+/// are stripped on the way in and set authoritatively by the gateway.
+fn is_forwarding_header(name: &HeaderName) -> bool {
+    let n = name.as_str();
+    n.eq_ignore_ascii_case("x-forwarded-for")
+        || n.eq_ignore_ascii_case("x-forwarded-host")
+        || n.eq_ignore_ascii_case("x-forwarded-proto")
+        || n.eq_ignore_ascii_case("forwarded")
+}
+
 /// True when the request asks to switch protocols (WebSockets, HMR).
 fn wants_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(header::UPGRADE)
@@ -129,7 +138,6 @@ fn build_upstream_request(
     origin: &str,
     public_host: &str,
     client_ip: Option<&str>,
-    state: &AppState,
     is_upgrade: bool,
 ) -> Result<axum::http::Request<Body>, (StatusCode, &'static str)> {
     let path_and_query = parts
@@ -150,9 +158,14 @@ fn build_upstream_request(
             || name == header::HOST
             || name == header::ORIGIN
             || name == header::REFERER
+            || is_forwarding_header(name)
         {
-            // Host/Origin/Referer are rewritten below in lockstep — see the
-            // note there. Everything else passes through.
+            // Host/Origin/Referer are rewritten below in lockstep, and the
+            // forwarding headers are set authoritatively below — a viewer's
+            // own X-Forwarded-* / Forwarded must never pass through (the
+            // gateway is the public trust boundary; trusting them is
+            // host-header injection + client-IP spoofing). Everything else
+            // passes through.
             continue;
         }
         headers.append(name.clone(), value.clone());
@@ -185,27 +198,20 @@ fn build_upstream_request(
         }
     }
 
-    // Forwarding metadata. Existing values (an external LB's) are preserved;
-    // we only fill gaps and append our hop to X-Forwarded-For.
-    if !headers.contains_key("x-forwarded-host") {
-        if let Ok(v) = HeaderValue::from_str(public_host) {
-            headers.insert("x-forwarded-host", v);
-        }
+    // Forwarding metadata, set authoritatively (inbound copies were stripped
+    // above). The public scheme is always https — the gateway either
+    // terminates TLS itself or sits behind an external TLS terminator, and the
+    // minted URLs are always https. X-Forwarded-For is reset to the immediate
+    // peer only: trusting an inbound chain from an anonymous-reachable edge
+    // would let any viewer spoof it. (An operator with a trusted upstream LB
+    // that wants the real client chain is a future `trust_forwarded_headers`
+    // opt-in — the safe default is to overwrite.)
+    if let Ok(v) = HeaderValue::from_str(public_host) {
+        headers.insert("x-forwarded-host", v);
     }
-    if !headers.contains_key("x-forwarded-proto") {
-        let proto = if state.config.tls.is_some() {
-            "https"
-        } else {
-            "http"
-        };
-        headers.insert("x-forwarded-proto", HeaderValue::from_static(proto));
-    }
+    headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
     if let Some(ip) = client_ip {
-        let xff = match headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-            Some(existing) => format!("{existing}, {ip}"),
-            None => ip.to_owned(),
-        };
-        if let Ok(v) = HeaderValue::from_str(&xff) {
+        if let Ok(v) = HeaderValue::from_str(ip) {
             headers.insert("x-forwarded-for", v);
         }
     }
@@ -311,6 +317,16 @@ fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain:
     for name in hop_by_hop() {
         headers.remove(name);
     }
+
+    // The slug in the public URL is the share's only bearer credential, so it
+    // must not leak to third-party origins the app links to. Force
+    // `Referrer-Policy: no-referrer` (overriding any weaker app value) — cheap,
+    // and it closes the most common slug-leak channel. Documented as defence in
+    // depth, not a substitute for the "URL is the access token" model.
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
 
     if let Some(location) = headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) {
         if let Some(rewritten) = rewrite_absolute_url(location, &reg.nodes, domain) {
@@ -491,6 +507,41 @@ mod tests {
             rewrite_referer(Some("not-a-url"), "abc123.share.example", "https://x"),
             None
         );
+    }
+
+    #[test]
+    fn client_forwarding_headers_are_overwritten_not_trusted() {
+        // A viewer spoofing X-Forwarded-* must not have them reach the origin.
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "abc.share.example")
+            .header("x-forwarded-host", "evil.example")
+            .header("x-forwarded-proto", "http")
+            .header("x-forwarded-for", "1.2.3.4")
+            .header("forwarded", "for=6.6.6.6;host=evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            Some("9.9.9.9"),
+            false,
+        )
+        .unwrap();
+        let h = out.headers();
+        assert_eq!(h.get("x-forwarded-host").unwrap(), "abc.share.example");
+        assert_eq!(h.get("x-forwarded-proto").unwrap(), "https");
+        // Reset to the immediate peer — the spoofed chain is gone.
+        assert_eq!(h.get("x-forwarded-for").unwrap(), "9.9.9.9");
+        // The raw `Forwarded` header is stripped entirely (never set by us).
+        assert!(h.get("forwarded").is_none());
+        // Host rewritten to the origin; Connection: close forces upstream EOF.
+        assert_eq!(h.get(header::HOST).unwrap(), "app.demo.p.localhost");
+        assert_eq!(h.get(header::CONNECTION).unwrap(), "close");
     }
 
     #[test]

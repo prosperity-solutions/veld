@@ -1165,4 +1165,54 @@ mod tests {
         assert!(mgr.pending.lock().await.is_empty(), "pending drained");
         assert_eq!(rx.await, Ok(false), "parked request denied");
     }
+
+    // A web share's ticket embeds the capability that IS the public-URL bearer
+    // secret — `list()` must never surface it (no ticket, no join_url), and it
+    // must surface the public URLs instead. Guards against a refactor of
+    // `list()` re-leaking the web capability to any local `veld shares` caller.
+    #[tokio::test]
+    async fn list_never_surfaces_a_web_share_ticket() {
+        let mgr = std::sync::Arc::new(ShareManager::new(SecretKey::generate()));
+        let manifest = sample_manifest();
+        let host_share = Arc::new(HostShare {
+            capability: Capability::generate(),
+            upstreams: HashMap::new(),
+            manifest: manifest.clone(),
+        });
+        mgr.shares.lock().await.insert(
+            "shr_web".to_string(),
+            ShareEntry {
+                id: "shr_web".to_string(),
+                manifest,
+                host_share,
+                approve_mode: ApprovalMode::Auto,
+                ticket: "veldshare_SECRET".to_string(),
+                expires_at: i64::MAX,
+                relay: RelayChoice::Public,
+                web: Some(WebRegistration {
+                    client: super::super::gateway::GatewayClient::for_test(),
+                    reg_id: "reg_1".to_string(),
+                    public_urls: vec![GatewayPublicUrl {
+                        node: "app".to_string(),
+                        hostname: "app.demo.p.localhost".to_string(),
+                        public_url: "https://slug.share.example".to_string(),
+                    }],
+                    heartbeat: tokio::spawn(async {}),
+                }),
+            },
+        );
+
+        let list = mgr.list().await;
+        let info = &list.shares[0];
+        assert_eq!(info.ticket, None, "web ticket must not be surfaced");
+        assert_eq!(info.join_url, None, "web join_url must not be surfaced");
+        assert_eq!(info.public_urls.len(), 1, "public URLs surfaced instead");
+        assert_eq!(info.public_urls[0].public_url, "https://slug.share.example");
+        // The raw ticket string appears nowhere in the serialized listing.
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(
+            !json.contains("veldshare_SECRET"),
+            "ticket leaked into list: {json}"
+        );
+    }
 }

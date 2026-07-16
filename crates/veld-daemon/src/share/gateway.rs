@@ -118,6 +118,19 @@ impl GatewayClient {
 }
 
 #[cfg(test)]
+impl GatewayClient {
+    /// A client pointed at a dummy URL for tests that need a `WebRegistration`
+    /// without a live gateway (no request is ever sent).
+    pub(crate) fn for_test() -> Self {
+        Self {
+            base_url: "https://gateway.test".into(),
+            token: "test-token".into(),
+            http: reqwest::Client::new(),
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use veld_core::config::SecretSource;

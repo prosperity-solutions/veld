@@ -345,6 +345,18 @@ impl Registry {
             RelayPolicy::Custom(entries) => entries,
         };
 
+        // Confinement means the gateway reaches the host *over an allow-listed
+        // relay*. A relay-less ticket (direct addresses only) would otherwise
+        // bind a public endpoint and hole-punch out — bypassing the allow-list
+        // entirely. Refuse it: a Custom allow-list gateway only ever joins over
+        // its listed relays.
+        if ticket_relays.is_empty() {
+            bail!(
+                "ticket advertises no relay, but this gateway is confined to an explicit relay \
+                 allow-list — refusing to fall back to public/direct dialing"
+            );
+        }
+
         // Parse the configured allow-list once; compare canonically via
         // `RelayUrl` so `https://r` and `https://r/` match.
         let mut allowed: Vec<(RelayUrl, Option<&SecretSource>)> = Vec::new();
@@ -440,6 +452,43 @@ fn origin_of(url: &str, hostname: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn allowed_tokens_confines_to_the_allow_list() {
+        use veld_core::config::RelayEntry;
+
+        let policy = RelayPolicy::Custom(vec![RelayEntry {
+            url: "https://relay.acme.internal".into(),
+            token: Some(SecretSource::Literal("s3cret".into())),
+        }]);
+        let reg = Registry::new(
+            "share.example".into(),
+            Duration::from_secs(90),
+            Some(policy),
+            SecretKey::generate(),
+        );
+
+        let listed: RelayUrl = "https://relay.acme.internal".parse().unwrap();
+        let attacker: RelayUrl = "https://attacker.example".parse().unwrap();
+
+        // A listed relay → the token comes from gateway config (never a ticket).
+        let tokens = reg.allowed_tokens(&[listed.clone()]).await.unwrap();
+        assert_eq!(
+            tokens.values().next().map(String::as_str),
+            Some("s3cret"),
+            "the allow-listed relay's configured token is attached"
+        );
+
+        // A ticket naming an unlisted relay is refused — the gateway never
+        // dials out to a relay the operator didn't configure.
+        let err = reg.allowed_tokens(&[attacker]).await.unwrap_err();
+        assert!(err.to_string().contains("not in this gateway's"), "{err}");
+
+        // A relay-less ticket under a Custom allow-list is refused too (no
+        // silent fall back to public/direct dialing).
+        let err = reg.allowed_tokens(&[]).await.unwrap_err();
+        assert!(err.to_string().contains("no relay"), "{err}");
+    }
 
     #[test]
     fn origin_of_extracts_scheme_authority() {
