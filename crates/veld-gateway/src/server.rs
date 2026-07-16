@@ -96,6 +96,9 @@ fn harden<A>(server: &mut axum_server::Server<A>) {
     server
         .http_builder()
         .http1()
+        // hyper panics on every connection if a timeout is configured without
+        // a timer ("timeout `header_read_timeout` set, but no timer set").
+        .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(HEADER_READ_TIMEOUT);
 }
 
@@ -224,5 +227,28 @@ mod tests {
         assert_eq!(host_without_port("a.example:8443"), "a.example");
         assert_eq!(host_without_port("a.example"), "a.example");
         assert_eq!(host_without_port("[::1]:8080"), "::1");
+    }
+
+    /// Regression: `header_read_timeout` without an explicit timer makes hyper
+    /// panic on every connection ("timeout `header_read_timeout` set, but no
+    /// timer set"), so a hardened server answered nothing. A request through
+    /// the hardened listener must succeed.
+    #[tokio::test]
+    async fn hardened_server_answers_requests() {
+        let app = axum::Router::new()
+            .route("/healthz", axum::routing::get(|| async { "ok" }))
+            .into_make_service();
+
+        let handle = axum_server::Handle::new();
+        let mut server = axum_server::bind("127.0.0.1:0".parse().unwrap()).handle(handle.clone());
+        harden(&mut server);
+        tokio::spawn(server.serve(app));
+
+        let addr = handle.listening().await.expect("server bound");
+        let resp = reqwest::get(format!("http://{addr}/healthz"))
+            .await
+            .expect("hardened server must answer, not panic the connection task");
+        assert_eq!(resp.status(), 200);
+        handle.shutdown();
     }
 }
