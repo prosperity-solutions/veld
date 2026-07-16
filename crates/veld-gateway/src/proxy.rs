@@ -26,7 +26,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use tracing::{debug, warn};
 
-use crate::registry::{RegisteredNode, Registration, SlugTarget};
+use crate::registry::{RegisteredNode, SlugTarget};
 use crate::state::AppState;
 use crate::tunnel;
 
