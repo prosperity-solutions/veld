@@ -7,7 +7,7 @@
 //! persistent node keypair backs the public endpoint (stable identity);
 //! custom-relay endpoints get a fresh per-run identity.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -39,10 +39,85 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Max time a consumer's `join` waits to dial the host (hole-punch + approval)
 /// before returning a clean error instead of hanging the HTTP request.
 const DIAL_TIMEOUT: Duration = Duration::from_secs(75);
+/// How long the join side watches the endpoint's home-relay status to tell a
+/// token-gated relay's auth denial apart from a slow/unreachable relay. Kept
+/// short: a denial surfaces fast, and on timeout we proceed and let the dial
+/// (with its own `DIAL_TIMEOUT`) report a real connectivity failure.
+const RELAY_AUTH_TIMEOUT: Duration = Duration::from_secs(8);
 
-use super::endpoint::{RelayChoice, bind_endpoint};
+use super::endpoint::{RelayChoice, bind_endpoint, resolve_embedded_tokens};
 use super::host::{self, HostShare};
-use super::join;
+use super::{join, token_store};
+
+/// Outcome of watching a join endpoint's home-relay connection for auth.
+enum RelayAuth {
+    /// The endpoint connected to a home relay (auth, if any, succeeded), or the
+    /// watch timed out with no clear denial — either way, proceed to dial.
+    OkOrUnknown,
+    /// A home relay rejected the connection as unauthorized. Carries the relay
+    /// URL whose token is missing or wrong.
+    Denied(String),
+}
+
+/// Whether a home-relay `last_error` string indicates the relay *rejected our
+/// auth* (as opposed to being unreachable or failing some other way).
+///
+/// iroh surfaces this as `iroh_relay`'s `Error::ServerDeniedAuth`, whose Display
+/// is `"The relay denied our authentication (<reason>)"` (iroh-relay 1.0.1
+/// `protos/handshake.rs:159`). `<reason>` is `"not authorized"` only by default
+/// (when the relay's `AccessControl` denies with `reason: None`,
+/// `handshake.rs:543`); a relay that denies with a *custom* reason would not
+/// contain "not authorized". So match the reason-independent wrapper, and keep
+/// "not authorized" as a belt-and-braces fallback. Pinned to iroh 1.0.1; an
+/// upgrade that rewords this must update the string here (guarded by
+/// `is_relay_auth_denial_*` tests).
+fn is_relay_auth_denial(err: &str) -> bool {
+    let e = err.to_lowercase();
+    e.contains("denied our authentication") || e.contains("not authorized")
+}
+
+/// The supplied tokens worth caching after a successful join: only those keyed
+/// by a relay the ticket actually advertises. Filters out any spurious key a
+/// client tacked onto `supplied_tokens` so a token is never cached for a relay
+/// this join never used. Keys are canonical `RelayUrl` strings on both sides.
+fn tokens_to_cache<'a>(
+    ticket_relay_urls: &[String],
+    supplied: &'a BTreeMap<String, String>,
+) -> Vec<(&'a str, &'a str)> {
+    supplied
+        .iter()
+        .filter(|(url, _)| ticket_relay_urls.iter().any(|t| t == *url))
+        .map(|(u, t)| (u.as_str(), t.as_str()))
+        .collect()
+}
+
+/// Watch an endpoint's home-relay status until it connects, reports an auth
+/// denial, or `budget` elapses. Lets the join distinguish "wrong/missing relay
+/// token" from "host unreachable" and prompt precisely (see
+/// [`is_relay_auth_denial`]).
+async fn relay_auth_status(endpoint: &Endpoint, budget: Duration) -> RelayAuth {
+    use iroh::Watcher as _;
+    let poll = async {
+        let mut status = endpoint.home_relay_status();
+        loop {
+            let relays = status.get();
+            if relays.iter().any(|r| r.is_connected()) {
+                return RelayAuth::OkOrUnknown;
+            }
+            if let Some(denied) = relays.iter().find(|r| {
+                r.last_error()
+                    .map(|e| is_relay_auth_denial(&format!("{e:#}")))
+                    .unwrap_or(false)
+            }) {
+                return RelayAuth::Denied(denied.url().to_string());
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    };
+    tokio::time::timeout(budget, poll)
+        .await
+        .unwrap_or(RelayAuth::OkOrUnknown)
+}
 
 /// A share this daemon is hosting.
 struct ShareEntry {
@@ -85,6 +160,11 @@ struct JoinEntry {
     /// Capability of the joined share, so repeat opens of the same link are
     /// idempotent instead of creating duplicate joins.
     capability: Capability,
+    /// The relay policy this join's endpoint is bound on. Recorded so
+    /// `evict_endpoint` never tears down an endpoint a live join still uses —
+    /// e.g. after mid-session token rotation, a *new* denied join can share this
+    /// join's `RelayChoice` while this join survives on a direct path.
+    relay: RelayChoice,
     /// Non-fatal notes from the join (e.g. skipped nodes), preserved so a repeat
     /// open of the same link reports them instead of an empty list.
     warnings: Vec<String>,
@@ -128,16 +208,6 @@ impl ShareManager {
         }
     }
 
-    /// Endpoint for the join (consumer) side. Joining is *consuming*, not
-    /// exposing, and the join path has no project config — so unlike hosting
-    /// (which requires an explicit relay opt-in), a join uses `VELD_SHARE_RELAY`
-    /// if set and otherwise falls back to public relays so a bare
-    /// `veld join <ticket>` keeps working.
-    async fn endpoint_join(self: &Arc<Self>) -> Result<Endpoint> {
-        let choice = RelayChoice::resolve(None).unwrap_or(RelayChoice::Public);
-        self.get_or_bind(&choice).await
-    }
-
     /// The secret key (node identity) for an endpoint on `choice`. The public
     /// endpoint reuses the daemon's persistent key; each custom-relay endpoint
     /// gets its own fresh key so no two live endpoints share a node id (iroh
@@ -177,6 +247,37 @@ impl ShareManager {
             self.clone().spawn_reaper();
         }
         Ok(ep)
+    }
+
+    /// Remove and close an endpoint that was bound only to probe relay auth (a
+    /// denied join). Closing ends its accept loop (`accept()` returns `None`)
+    /// and drops the permanently-denied relay connection.
+    ///
+    /// Skipped if any live share OR join is on the same relay policy: an
+    /// endpoint is shared by `RelayChoice`, and `close()` tears down *all* its
+    /// connections. A denied probe can share a live join's choice after the
+    /// relay rotates its token (the live join survives on a direct path, a new
+    /// join arrives with the now-stale token → same key → same endpoint), so
+    /// closing here would kill the healthy join. When shared, leave it — it
+    /// isn't leaked (the other party uses it); only an *unshared* probe endpoint
+    /// is the leak this evicts.
+    async fn evict_endpoint(&self, choice: &RelayChoice) {
+        if self
+            .shares
+            .lock()
+            .await
+            .values()
+            .any(|s| &s.relay == choice)
+        {
+            return;
+        }
+        if self.joins.lock().await.values().any(|j| &j.relay == choice) {
+            return;
+        }
+        let ep = self.endpoints.lock().await.remove(choice);
+        if let Some(ep) = ep {
+            ep.close().await;
+        }
     }
 
     /// Accept inbound connections and dispatch each to the share whose
@@ -307,6 +408,7 @@ impl ShareManager {
         capability: Capability,
         approve_mode: ApprovalMode,
         relay: RelayChoice,
+        embed_relay_tokens: bool,
     ) -> Result<(String, ShareTicket)> {
         let choice = relay;
         let endpoint = self.get_or_bind(&choice).await?;
@@ -315,7 +417,38 @@ impl ShareManager {
         // ticket is dialable; proceed with whatever we have on timeout.
         let _ = tokio::time::timeout(Duration::from_secs(10), endpoint.online()).await;
 
-        let iroh_ticket = EndpointTicket::new(endpoint.addr()).to_string();
+        let addr = endpoint.addr();
+
+        // Fail closed for a custom-relay policy: the ticket MUST advertise the
+        // relay, or the consumer's `RelayChoice::for_join` sees no relay in the
+        // ticket and silently falls back to n0's public relays — breaking the
+        // custom-relay compliance guarantee. This happens when the configured
+        // relay is unreachable at mint time (the `online()` wait above times out
+        // without a home relay). Refuse to mint a relay-less ticket instead —
+        // consistent with `bind_endpoint`'s refusal to fall back to public. (An
+        // endpoint bound `RelayMode::Custom` only ever advertises the configured
+        // relays, so a non-empty `relay_urls()` here is one of them.)
+        if matches!(choice, RelayChoice::Custom(_)) && addr.relay_urls().next().is_none() {
+            bail!(
+                "relay not ready: the share endpoint has no relay address to put \
+                 in the ticket (the configured relay may be unreachable). Refusing \
+                 to mint a ticket that would let joiners fall back to public relays."
+            );
+        }
+
+        // DANGER opt-in: embed each advertised relay's resolved auth token in the
+        // ticket so joiners need no out-of-band config. This ships the relay
+        // secret inside the shareable link — only reached when the host set
+        // `sharing.dangerouslyEmbedRelayTokensInTicket`.
+        let relay_tokens = if embed_relay_tokens {
+            resolve_embedded_tokens(&choice, addr.relay_urls())
+                .await
+                .context("resolving relay tokens to embed in the ticket")?
+        } else {
+            std::collections::BTreeMap::new()
+        };
+
+        let iroh_ticket = EndpointTicket::new(addr).to_string();
 
         let upstreams: HashMap<String, u16> = manifest
             .nodes
@@ -332,6 +465,7 @@ impl ShareManager {
         let ticket = ShareTicket {
             iroh_ticket,
             capability,
+            relay_tokens,
         };
         let token = ticket.encode().context("encoding ticket")?;
 
@@ -355,8 +489,20 @@ impl ShareManager {
 
     /// Join a shared environment: dial the host, then materialise each shared
     /// URL locally as a Caddy route tunnelled over the connection.
-    pub async fn join(self: &Arc<Self>, ticket_str: &str, label: &str) -> Result<JoinResponse> {
-        let endpoint = self.endpoint_join().await?;
+    ///
+    /// `supplied_tokens` are relay auth tokens the caller is providing this
+    /// attempt (relay URL → token), typically from an interactive prompt after a
+    /// prior `needs_relay_token` response. When `remember` is set they are
+    /// cached locally on success. If the ticket's relay is token-gated and no
+    /// valid token is available, returns a `JoinResponse` with `needs_relay_token`
+    /// set (no join performed) so the caller can prompt and retry.
+    pub async fn join(
+        self: &Arc<Self>,
+        ticket_str: &str,
+        label: &str,
+        supplied_tokens: &BTreeMap<String, String>,
+        remember: bool,
+    ) -> Result<JoinResponse> {
         let ticket = ShareTicket::decode(ticket_str).context("decoding ticket")?;
 
         // Idempotent for a *successful* join: opening the same link again returns
@@ -377,6 +523,7 @@ impl ShareManager {
                         join_id: id,
                         urls,
                         warnings,
+                        needs_relay_token: None,
                     });
                 }
                 let _ = self.leave(&id).await;
@@ -387,6 +534,57 @@ impl ShareManager {
             .context("parsing iroh ticket")?
             .endpoint_addr()
             .clone();
+
+        // Bind the join endpoint on the SAME relay(s) the host advertised in
+        // the ticket. A share minted on a custom relay must be joined over that
+        // relay — never silently over n0's public relays. Only a relay-less
+        // ticket (a direct-address-only host) resolves to the public endpoint;
+        // a custom-relay host refuses to mint such a ticket (see `start_share`).
+        //
+        // Relay auth tokens (if the relay is token-gated) are resolved by
+        // priority — local cache < env < ticket-embedded < just-supplied —
+        // attached only to the matching relay so nothing leaks.
+        let stored = token_store::load();
+        let tokens = RelayChoice::resolve_join_tokens_from_env(
+            addr.relay_urls(),
+            &ticket.relay_tokens,
+            &stored,
+            supplied_tokens,
+        );
+        // The canonical URLs of the relays this ticket actually advertises —
+        // used below to cache only tokens for these relays (never a bogus key a
+        // client might have tacked onto `supplied_tokens`).
+        let ticket_relay_urls: Vec<String> = addr.relay_urls().map(|u| u.to_string()).collect();
+        let choice = RelayChoice::for_join(addr.relay_urls(), &tokens);
+        let endpoint = self.get_or_bind(&choice).await?;
+
+        // If the ticket's relay is token-gated, the endpoint's home-relay
+        // connection is denied ("not authorized") when the token is missing or
+        // wrong. Detect that up front and ask the caller for a token rather than
+        // letting the dial time out with a vague "unreachable". A public-relay
+        // join is also `Custom` here (the ticket advertises the relay URL), but
+        // an open relay just connects → `OkOrUnknown`, so this only prompts when
+        // a relay genuinely rejects auth.
+        if matches!(choice, RelayChoice::Custom(_)) {
+            if let RelayAuth::Denied(relay_url) =
+                relay_auth_status(&endpoint, RELAY_AUTH_TIMEOUT).await
+            {
+                // Evict this endpoint: it was bound only to detect the denial
+                // and will never be reused — a retry supplies a token, which is a
+                // *different* `RelayChoice` (the token is part of the key) and
+                // binds a fresh endpoint. Leaving it in the map would leak an
+                // endpoint + a permanently-denied relay connection for the
+                // daemon's life, once per token-gated relay on the default path.
+                drop(endpoint);
+                self.evict_endpoint(&choice).await;
+                return Ok(JoinResponse {
+                    join_id: String::new(),
+                    urls: Vec::new(),
+                    warnings: Vec::new(),
+                    needs_relay_token: Some(relay_url),
+                });
+            }
+        }
 
         let label = if label.is_empty() { "veld" } else { label };
         // The host sends the manifest over the tunnel after approving — the
@@ -509,6 +707,7 @@ impl ShareManager {
                 tasks,
                 conn: conn.clone(),
                 capability: ticket.capability.clone(),
+                relay: choice.clone(),
                 warnings: warnings.clone(),
             },
         );
@@ -522,11 +721,24 @@ impl ShareManager {
             let _ = watcher.leave(&watcher_id).await;
         });
 
+        // The join authenticated to the relay, so any token the caller supplied
+        // this attempt is valid — cache it (per relay URL) if asked, so future
+        // joins to the same relay don't re-prompt. Best-effort: a cache write
+        // failure must not fail the join.
+        if remember {
+            for (url, token) in tokens_to_cache(&ticket_relay_urls, supplied_tokens) {
+                if let Err(e) = token_store::save(url, token) {
+                    warn!(error = %e, relay = %url, "failed to cache relay token");
+                }
+            }
+        }
+
         info!(join_id = %join_id, count = urls.len(), "joined share");
         Ok(JoinResponse {
             join_id,
             urls,
             warnings,
+            needs_relay_token: None,
         })
     }
 
@@ -845,6 +1057,44 @@ fn open_dashboard() {
 mod tests {
     use super::*;
     use veld_core::share::SharedNode;
+
+    // Pins the relay auth-denial detection to iroh 1.0.1's error wording. If an
+    // iroh upgrade rewords `ServerDeniedAuth`'s Display, this fails loudly rather
+    // than silently routing every token-gated join to "unreachable".
+    #[test]
+    fn detects_relay_auth_denial_regardless_of_reason() {
+        // Default deny reason (relay's AccessControl returns `reason: None`).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (not authorized)"
+        ));
+        // Custom deny reason — must still be detected (the earlier "not
+        // authorized"-only match missed this).
+        assert!(is_relay_auth_denial(
+            "The relay denied our authentication (invalid token)"
+        ));
+        // Unrelated failures are NOT auth denials → the join dials and reports a
+        // real connectivity error instead of wrongly prompting for a token.
+        assert!(!is_relay_auth_denial("connection timed out"));
+        assert!(!is_relay_auth_denial("dns error: no such host"));
+    }
+
+    #[test]
+    fn tokens_to_cache_keeps_only_ticket_relays() {
+        let ticket = vec!["https://relay.example/".to_string()];
+        let mut supplied = BTreeMap::new();
+        supplied.insert("https://relay.example/".to_string(), "good".to_string());
+        // A key the ticket never advertised (spurious / client-tacked-on).
+        supplied.insert("https://attacker.example/".to_string(), "leak".to_string());
+
+        let cached = tokens_to_cache(&ticket, &supplied);
+        assert_eq!(cached, vec![("https://relay.example/", "good")]);
+        // The non-ticket relay's token is never persisted.
+        assert!(
+            !cached
+                .iter()
+                .any(|(u, _)| *u == "https://attacker.example/")
+        );
+    }
 
     fn sample_manifest() -> ShareManifest {
         ShareManifest {

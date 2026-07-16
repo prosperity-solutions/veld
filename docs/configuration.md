@@ -689,7 +689,7 @@ Which iroh relays share traffic routes through — a compliance control. Relays 
 - `"public"` — n0's public relays (an explicit opt-in, not a default).
 - An array of relay entries — confine traffic to relays you self-host (a single Docker container). Must be non-empty; use `"public"` for public relays. Each entry is either a bare URL string or an object `{ "url": ..., "token": ... }` (see [Relay auth tokens](#relay-auth-tokens)).
 
-When set here, config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor — `"relays": "public"` overrides it). The custom-relay guarantee covers the host's outbound leg; a consumer joining over the same self-hosted relays should configure them on their side too. The daemon binds **one iroh endpoint per relay policy** on demand, each with its own node identity (the public endpoint reuses the daemon's persistent identity; custom-relay endpoints get a fresh per-run one), so shares on different relays run concurrently without conflict.
+When set here, config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor — `"relays": "public"` overrides it). The custom-relay guarantee covers **both legs**: the join side automatically confines to the relay(s) advertised in the ticket, so a share minted on a self-hosted relay is never joined over n0's public relays. A joiner only needs env config to supply a *token* for a token-gated relay (see [Relay auth tokens](#relay-auth-tokens)). The daemon binds **one iroh endpoint per relay policy** on demand, each with its own node identity (the public endpoint reuses the daemon's persistent identity; custom-relay endpoints get a fresh per-run one), so shares on different relays run concurrently without conflict.
 
 #### Relay auth tokens
 
@@ -722,7 +722,33 @@ Give a relay entry a `token` to send one:
 
 All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
 
-**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config, so a colleague joining a share routed over a token-gated relay supplies the token via the `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` env vars on **their** daemon (the same way they point at the relay in the first place) — there is no config path for a joiner's relay token.
+**Running a token-gated relay.** The `token` here is only the *client* half — Veld sends it as an `Authorization: Bearer <token>` header. Your relay must be configured to *require* it, or it stays an open relay regardless. Veld's relays are [iroh relays](https://iroh.computer); a self-hosted `iroh-relay` enforces a shared token via its `access.shared_token` config (a list of accepted tokens). Deploy it with its own TLS on a reachable host — see iroh-relay's docs for the relay-side config; Veld only speaks the client side.
+
+**Joining a token-gated relay.** A per-relay `token` in `veld.json` applies only to **hosting** (`veld share`). The join side has no project config: a joiner learns *which* relay to use from the ticket automatically (so a custom-relay share is always joined over that relay, never public), but to authenticate to a **token-gated** relay it needs the token. In precedence order (highest first), the joiner's token comes from:
+
+1. **A token entered at the prompt** this attempt (see below).
+2. **The ticket itself** — only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
+3. **The joiner's local cache** — a token entered at a previous prompt, cached per relay URL at `<data_dir>/veld/relay-tokens.json` (`0600`).
+4. **The joiner's env** — `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket, so the secret is never sent to a relay the joiner did not name.
+
+There is no `veld.json` path for a joiner's relay token.
+
+**The prompt.** If none of the above produces a working token, the join detects the relay's auth denial (iroh reports the relay connection as *not authorized*, distinct from an unreachable host) and **asks for the token**: the browser join overlay shows a token field (with a "remember for this relay" checkbox, on by default), and `veld join` prompts on the terminal. A supplied token is verified against the relay; on success it's cached so future joins to that relay don't re-prompt — clear the "remember" checkbox (browser) or pass `veld join --no-remember` to skip caching — and a wrong token re-prompts. `veld join --json` does not prompt — it returns `{ "needs_relay_token": "<relay-url>" }` so a caller can supply `relay_tokens` on a retry.
+
+#### `sharing.dangerouslyEmbedRelayTokensInTicket`
+
+**DANGER — off by default.** When `true`, the host resolves its relay auth token(s) and **embeds them in the share ticket**, so a joiner needs no out-of-band token setup — the ticket alone authenticates. Named à la React's `dangerouslySetInnerHTML` (hence the camelCase key standing out from veld's snake_case config) to force a deliberate choice.
+
+```json
+{
+  "sharing": {
+    "relays": [{ "url": "https://relay.acme.internal", "token": { "command": "op read op://vault/relay/token" } }],
+    "dangerouslyEmbedRelayTokensInTicket": true
+  }
+}
+```
+
+This ships the relay secret **inside every share link** — Slack, email, browser history, anywhere a `veld.localhost/join#…` URL travels. That defeats the token's purpose (keeping the relay from being an open one) for any **shared or long-lived** relay secret. Enable it **only** for a **disposable, per-project token you rotate freely** — never a shared org relay secret. When off (the default), a joiner supplies the token via the env vars above.
 
 Because a token declaration is part of a relay's endpoint identity, changing the *declaration* (e.g. switching the `env` var name) is picked up on the next share, but rotating the *underlying* secret behind an unchanged declaration takes effect only when the daemon next binds that relay — in practice, on daemon restart, since a bound endpoint is cached for the daemon's life.
 

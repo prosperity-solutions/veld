@@ -303,6 +303,10 @@ enum Command {
         /// A label the host sees on approval (e.g. your name).
         #[arg(long)]
         label: Option<String>,
+        /// Don't cache a relay auth token entered at the prompt (by default a
+        /// working token is remembered per relay so future joins don't re-ask).
+        #[arg(long)]
+        no_remember: bool,
         /// Output JSON.
         #[arg(long)]
         json: bool,
@@ -525,8 +529,9 @@ async fn main() {
         Command::Join {
             ticket,
             label,
+            no_remember,
             json,
-        } => commands::share::join(ticket, label, json).await,
+        } => commands::share::join(ticket, label, !no_remember, json).await,
 
         Command::Shares { json } => commands::share::list(json).await,
 

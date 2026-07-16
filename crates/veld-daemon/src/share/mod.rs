@@ -12,6 +12,7 @@ pub mod host;
 pub mod join;
 pub mod manager;
 pub mod proto;
+pub mod token_store;
 
 #[cfg(test)]
 mod tests {

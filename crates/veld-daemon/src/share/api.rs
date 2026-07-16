@@ -66,6 +66,7 @@ async fn start(
     let ResolvedShare {
         manifest,
         relay,
+        embed_relay_tokens,
         warnings,
     } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs)?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
@@ -73,7 +74,13 @@ async fn start(
 
     let capability = Capability::generate();
     let (share_id, ticket) = manager
-        .start_share(manifest, capability, req.approve.unwrap_or_default(), relay)
+        .start_share(
+            manifest,
+            capability,
+            req.approve.unwrap_or_default(),
+            relay,
+            embed_relay_tokens,
+        )
         .await
         .map_err(internal)?;
     let token = ticket.encode().map_err(internal)?;
@@ -97,7 +104,7 @@ async fn join(
     check_csrf(&headers)?;
     let label = req.label.unwrap_or_default();
     let resp = manager
-        .join(&req.ticket, &label)
+        .join(&req.ticket, &label, &req.relay_tokens, req.remember)
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, e.to_string()))?;
     Ok(Json(resp))
@@ -198,6 +205,10 @@ struct ResolvedShare {
     manifest: ShareManifest,
     /// The relay this share routes over, resolved from an explicit opt-in.
     relay: RelayChoice,
+    /// DANGER opt-in (`sharing.dangerouslyEmbedRelayTokensInTicket`): embed the
+    /// resolved relay token(s) in the ticket so joiners need no out-of-band
+    /// config. Ships the relay secret inside the shareable link.
+    embed_relay_tokens: bool,
     /// URL-bearing services excluded from the share (not opted into `peer`),
     /// surfaced as warnings so a partial share isn't silently under-exposed.
     warnings: Vec<String>,
@@ -308,7 +319,12 @@ fn build_manifest(
 
     // Relays must be opted into explicitly — including public — so share traffic
     // is never routed over n0's public relays by accident.
-    let relay_policy = config.sharing.and_then(|s| s.relays);
+    let sharing = config.sharing;
+    let embed_relay_tokens = sharing
+        .as_ref()
+        .map(|s| s.dangerously_embed_relay_tokens_in_ticket)
+        .unwrap_or(false);
+    let relay_policy = sharing.and_then(|s| s.relays);
     let relay = RelayChoice::resolve(relay_policy.as_ref()).ok_or((
         StatusCode::BAD_REQUEST,
         format!(
@@ -317,6 +333,13 @@ fn build_manifest(
              opted into explicitly."
         ),
     ))?;
+
+    // Loud warning when a relay secret is about to ride inside the join link, so
+    // `veld share` / the dashboard surface it (the link is auto-copied) rather
+    // than silently shipping the secret.
+    if let Some(w) = embed_warning(embed_relay_tokens, &relay) {
+        warnings.push(w);
+    }
 
     let now = Utc::now().timestamp();
     let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
@@ -330,6 +353,7 @@ fn build_manifest(
             expires_at: now + ttl,
         },
         relay,
+        embed_relay_tokens,
         warnings,
     })
 }
@@ -347,6 +371,20 @@ fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Optio
 /// excluded. `not_opted_in` are `node:variant`s with no (peer) `share`;
 /// `web_only` opted into `web` but not `peer`. Both are sorted+deduped in place
 /// for a deterministic message.
+/// The DANGER warning to surface when a share is about to embed relay token(s)
+/// in the ticket, or `None`. Fires iff the `dangerouslyEmbedRelayTokensInTicket`
+/// opt-in is on AND a custom relay actually carries a token to embed — so it
+/// stays silent for a public/token-less relay (no spurious scary warning).
+fn embed_warning(embed_relay_tokens: bool, relay: &RelayChoice) -> Option<String> {
+    let embeds = embed_relay_tokens
+        && matches!(relay, RelayChoice::Custom(entries) if entries.iter().any(|e| e.token.is_some()));
+    embeds.then(|| {
+        "dangerouslyEmbedRelayTokensInTicket is on: the relay auth token is embedded in the \
+         join link — treat the link as a secret (anyone with it can use your relay)."
+            .to_string()
+    })
+}
+
 fn share_exclusion_message(
     run_name: &str,
     had_url_bearing: bool,
@@ -418,6 +456,24 @@ pub(crate) fn hostname_of(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use veld_core::config::{RelayEntry, SecretSource};
+
+    #[test]
+    fn embed_warning_only_when_embedding_a_real_token() {
+        let gated = RelayChoice::Custom(vec![RelayEntry {
+            url: "https://relay.example".into(),
+            token: Some(SecretSource::Literal("s3cret".into())),
+        }]);
+        let open = RelayChoice::Custom(vec![RelayEntry::url("https://relay.example")]);
+
+        // On + a relay with a token → warns.
+        assert!(embed_warning(true, &gated).is_some());
+        // On but no token to embed → silent (no spurious scary warning).
+        assert!(embed_warning(true, &open).is_none());
+        assert!(embed_warning(true, &RelayChoice::Public).is_none());
+        // Off → silent regardless.
+        assert!(embed_warning(false, &gated).is_none());
+    }
 
     #[test]
     fn hostname_strips_scheme_and_port() {
