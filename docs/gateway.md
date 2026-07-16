@@ -128,8 +128,32 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   origin hostnames are stripped (host-only cookies work publicly). Bodies are
   never rewritten.
 - **Cleanup is layered**: the moment a developer unshares / stops the run /
-  loses the daemon, the tunnel closes and the URLs die; a lost DELETE is
-  covered by the lease expiring; an idle zombie is reaped by the sweeper.
+  loses the daemon, the tunnel closes and the URLs die (the live connection is
+  authoritative). The lease is a backstop that only reaps a registration whose
+  tunnel is *already* closed — a missed heartbeat over a transient HTTPS blip
+  never tears down a healthy share.
+
+### Fidelity limits (what the operator owns)
+
+`web` is best-effort by design — the gateway rewrites headers, never bodies.
+Two consequences to know before sharing a non-trivial app:
+
+- **Absolute URLs built from `Host` (SSR/OAuth).** The origin service sees its
+  own hostname in `Host` (so dev-server host allow-lists pass zero-config), and
+  the public host is in `X-Forwarded-Host` / `X-Forwarded-Proto: https`. An app
+  that builds absolute URLs from `Host` — SSR canonical/asset links, OAuth
+  `redirect_uri`, `build_absolute_uri` — will emit `*.localhost` URLs that a
+  public viewer can't reach unless it honours `X-Forwarded-*`. Configure the
+  framework to trust forwarded headers (most have a one-liner), and register
+  OAuth redirect URIs against the public host. A relative-URL SPA needs none of
+  this.
+- **Cookies and CORS across services.** Each shared service gets its own
+  unrelated slug host, so a session cookie scoped to a shared parent domain
+  can't span them, and cross-service calls are cross-origin. The gateway
+  rewrites `Set-Cookie Domain` (origin host **or a parent**) to host-only and
+  rewrites `Access-Control-Allow-Origin` that echoes an origin host to the
+  public origin — but an app that hard-codes a different origin in its CORS
+  allow-list must add the public origin itself.
 - **Health**: `GET /healthz` answers `ok` on any Host (container/LB probes
   included). Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
