@@ -1,0 +1,5 @@
+# The gateway Dockerfile only copies staged binaries from dist/ — keep the
+# build context minimal (and never ship sources, targets, or secrets into it).
+*
+!dist/
+!crates/veld-gateway/Dockerfile

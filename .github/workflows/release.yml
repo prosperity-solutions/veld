@@ -131,7 +131,7 @@ jobs:
       - name: Package binaries
         run: |
           mkdir -p dist
-          for bin in veld veld-helper veld-daemon; do
+          for bin in veld veld-helper veld-daemon veld-gateway; do
             cp target/${{ matrix.target }}/release/$bin dist/
           done
           tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
@@ -203,3 +203,50 @@ jobs:
           name: ${{ needs.release.outputs.new_release_git_tag }}
           body_path: release-notes.md
           files: artifacts/*
+
+  # ── Gateway container image (multi-arch, from the built binaries) ──
+  docker-gateway:
+    name: Publish veld-gateway image
+    permissions:
+      contents: read
+      packages: write
+    needs: [plan, release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # Stage the per-arch veld-gateway binaries where the Dockerfile's
+      # TARGETARCH COPY expects them — no second compile.
+      - name: Stage gateway binaries
+        run: |
+          VERSION="${{ needs.plan.outputs.new_release_version }}"
+          mkdir -p dist/amd64 dist/arm64
+          tar -xzf "artifacts/veld-${VERSION}-linux-amd64.tar.gz" -C dist/amd64 veld-gateway
+          tar -xzf "artifacts/veld-${VERSION}-linux-arm64.tar.gz" -C dist/arm64 veld-gateway
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: crates/veld-gateway/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/veld-gateway:${{ needs.plan.outputs.new_release_version }}
+            ghcr.io/${{ github.repository_owner }}/veld-gateway:latest
