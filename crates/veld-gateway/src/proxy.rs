@@ -74,7 +74,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         is_upgrade,
     ) {
         Ok(r) => r,
-        Err(resp) => return resp,
+        Err(err) => return err.into_response(),
     };
     *upstream_req.body_mut() = if is_upgrade { Body::empty() } else { body };
 
@@ -129,7 +129,7 @@ fn build_upstream_request(
     client_ip: Option<&str>,
     state: &AppState,
     is_upgrade: bool,
-) -> Result<axum::http::Request<Body>, Response> {
+) -> Result<axum::http::Request<Body>, (StatusCode, &'static str)> {
     let path_and_query = parts
         .uri
         .path_and_query()
@@ -154,7 +154,7 @@ fn build_upstream_request(
     headers.insert(
         header::HOST,
         HeaderValue::from_str(origin_hostname)
-            .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid origin hostname").into_response())?,
+            .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid origin hostname"))?,
     );
 
     // Forwarding metadata. Existing values (an external LB's) are preserved;
@@ -193,7 +193,7 @@ fn build_upstream_request(
 
     builder
         .body(Body::empty())
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "could not build upstream request").into_response())
+        .map_err(|_| (StatusCode::BAD_GATEWAY, "could not build upstream request"))
 }
 
 /// Complete a protocol upgrade: answer 101 to the client and splice the two
