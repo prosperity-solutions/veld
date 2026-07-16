@@ -324,7 +324,20 @@ impl Registry {
         // Publish registration and slugs atomically enough: regs first, then
         // slugs, then the drop-watcher (which removes via `remove`, taking the
         // same locks in the same order).
-        self.regs.lock().await.insert(id.clone(), Arc::clone(&reg));
+        //
+        // If a concurrent register for the SAME id (same capability) raced us
+        // and settled first, our insert replaces it. That prior registration
+        // never goes through `remove()` (it's no longer in `regs` under its
+        // id), so we must release its endpoint ref and close its now-orphaned
+        // tunnel here — otherwise both leak. (Reachable only by a client
+        // POSTing the same ticket concurrently; a well-behaved origin
+        // heartbeats sequentially.)
+        let replaced = self.regs.lock().await.insert(id.clone(), Arc::clone(&reg));
+        if let Some(old) = replaced {
+            old.conn
+                .close(0u32.into(), b"superseded by re-registration");
+            self.release_endpoint(&old.relay).await;
+        }
         {
             let mut slugs = self.slugs.lock().await;
             for n in &nodes {
