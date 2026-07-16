@@ -3,15 +3,20 @@
 //! the daemon holds the iroh endpoint and does the real work.
 
 use crate::output;
+use veld_core::config::WebAccessMode;
 use veld_core::share::{ApprovalMode, DaemonClient, JoinRequest, StartShareRequest};
 
-/// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web] [--json]`
+/// `veld share [run] [--node ...] [--ttl secs] [--approve MODE] [--web]
+/// [--access MODE] [--password PW] [--json]`
+#[allow(clippy::too_many_arguments)]
 pub async fn share(
     run: Option<String>,
     nodes: Vec<String>,
     ttl: Option<i64>,
     approve: Option<String>,
     web: bool,
+    access: Option<String>,
+    password: Option<String>,
     json: bool,
 ) -> i32 {
     // Default: interactive humans approve each join (browser/CLI); agents and
@@ -34,12 +39,30 @@ pub async fn share(
         None => ApprovalMode::Manual,
     };
 
+    // --access sets the default for nodes whose config is SILENT on
+    // `share.web.access`; an explicit config value always wins (the daemon
+    // enforces that — this flag can never weaken configured policy).
+    let web_access = match access.as_deref() {
+        Some("password") => Some(WebAccessMode::Password),
+        Some("link") => Some(WebAccessMode::Link),
+        Some(other) => {
+            output::print_error(
+                &format!("invalid --access '{other}' (expected password|link)"),
+                json,
+            );
+            return 2;
+        }
+        None => None,
+    };
+
     let req = StartShareRequest {
         run,
         nodes: if nodes.is_empty() { None } else { Some(nodes) },
         ttl_secs: ttl,
         approve: Some(approve_mode),
         web,
+        web_access,
+        web_password: password,
     };
 
     match DaemonClient::new().start_share(&req).await {
@@ -58,26 +81,66 @@ pub async fn share(
                     println!("  {} {}", output::yellow("!"), w);
                 }
                 println!();
-                println!("  Public URL(s) — anyone with the link can open them:");
+                println!("  Public URL(s):");
                 for u in &resp.public_urls {
+                    // `access: None` = a pre-access-layer gateway. The daemon
+                    // aborts password shares against those (skew guard), so
+                    // None can only reach here for link-access behavior —
+                    // label it honestly as link-only, never "protected".
+                    let mode = match u.access {
+                        Some(WebAccessMode::Password) => "password protected",
+                        Some(WebAccessMode::Link) | None => "link only — anyone with the URL",
+                    };
                     println!(
                         "    {}  {}",
                         output::cyan(&u.public_url),
-                        output::dim(&u.node)
+                        output::dim(&format!("{} ({mode})", u.node))
                     );
+                }
+                if let Some(pw) = &resp.web_password {
+                    println!();
+                    println!("  Password:  {}", output::cyan(pw));
+                    println!(
+                        "  {}",
+                        output::dim(
+                            "send URL and password separately (two channels) for real secrecy,"
+                        )
+                    );
+                    println!(
+                        "  {}",
+                        output::dim("or use a one-link that carries the key:")
+                    );
+                    for u in &resp.public_urls {
+                        if u.access != Some(WebAccessMode::Link) {
+                            println!(
+                                "    {}",
+                                output::cyan(&format!(
+                                    "{}/#veld-key={}",
+                                    u.public_url,
+                                    fragment_encode(pw)
+                                ))
+                            );
+                        }
+                    }
                 }
                 println!();
                 println!(
                     "  Stop:  {}",
                     output::dim(&format!("veld unshare {}", resp.share_id))
                 );
-                println!();
-                println!(
-                    "  {}",
-                    output::dim(
-                        "(the URL is the access token — share it only with people who should see this)"
-                    )
-                );
+                if resp
+                    .public_urls
+                    .iter()
+                    .any(|u| u.access == Some(WebAccessMode::Link) || u.access.is_none())
+                {
+                    println!();
+                    println!(
+                        "  {}",
+                        output::dim(
+                            "(link-only URLs are the access token — share them only with people who should see this)"
+                        )
+                    );
+                }
             } else {
                 output::print_success(&format!(
                     "Sharing {} node(s) over peer-to-peer.",
@@ -234,6 +297,22 @@ fn prompt_relay_token(relay_url: &str, retry: bool) -> Option<String> {
     Some(line.trim().to_owned())
 }
 
+/// Percent-encode a password for the `#veld-key=…` URL fragment (the login
+/// page decodes with `decodeURIComponent`). Generated passwords are already
+/// fragment-safe; this covers custom ones with `&`, `#`, spaces, etc.
+fn fragment_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
 /// `veld shares [--json]`
 pub async fn list(json: bool) -> i32 {
     match DaemonClient::new().list().await {
@@ -269,6 +348,15 @@ pub async fn list(json: bool) -> i32 {
                     })
                     .collect();
                 output::print_table(&["SHARE", "NODES", "URLS"], &rows);
+                for s in &list.shares {
+                    if let Some(pw) = &s.web_password {
+                        println!(
+                            "  {} {}",
+                            output::dim(&format!("{} password:", s.id)),
+                            output::cyan(pw)
+                        );
+                    }
+                }
             }
             if !list.joins.is_empty() {
                 if !list.shares.is_empty() {

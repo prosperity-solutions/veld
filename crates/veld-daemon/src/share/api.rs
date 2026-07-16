@@ -13,10 +13,12 @@ use axum::routing::{delete, get, post};
 use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
-use veld_core::config::{ExposeMode, GatewayRef, SharePolicy, VeldConfig, load_config};
+use veld_core::config::{
+    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, load_config,
+};
 use veld_core::share::{
-    ApprovalMode, Capability, JoinRequest, JoinResponse, ShareManifest, SharedNode, SharesList,
-    StartShareRequest, StartShareResponse,
+    ApprovalMode, Capability, GatewayAccessPolicy, JoinRequest, JoinResponse, ShareManifest,
+    SharedNode, SharesList, StartShareRequest, StartShareResponse,
 };
 use veld_core::state::{GlobalRegistry, ProjectState};
 
@@ -25,6 +27,9 @@ use super::gateway::GatewayClient;
 use super::manager::ShareManager;
 
 const DEFAULT_TTL_SECS: i64 = 2 * 60 * 60;
+/// Web shares default to a shorter life than peer shares (§6.1): the audience
+/// is the open internet, so an idle share should die sooner.
+const WEB_DEFAULT_TTL_SECS: i64 = 60 * 60;
 
 /// Share routes with the manager baked in as state, ready to `.merge()`.
 pub fn routes(manager: Arc<ShareManager>) -> Router {
@@ -75,12 +80,16 @@ async fn start(
         embed_relay_tokens,
         gateway,
         warnings,
+        web_access,
     } = build_manifest(req.run.as_deref(), req.nodes.as_deref(), req.ttl_secs, mode)?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
 
     if req.web {
-        return start_web_share(&manager, req, manifest, relay, gateway, warnings).await;
+        return start_web_share(
+            &manager, req, manifest, relay, gateway, warnings, web_access,
+        )
+        .await;
     }
 
     let capability = Capability::generate();
@@ -105,6 +114,7 @@ async fn start(
         expires_at,
         warnings,
         public_urls: Vec::new(),
+        web_password: None,
     }))
 }
 
@@ -118,7 +128,8 @@ async fn start_web_share(
     manifest: ShareManifest,
     relay: RelayChoice,
     gateway: Option<GatewayRef>,
-    warnings: Vec<String>,
+    mut warnings: Vec<String>,
+    web_access: Vec<(String, Option<WebAccessMode>)>,
 ) -> Result<Json<StartShareResponse>, ApiError> {
     // Resolve the gateway BEFORE minting the share, so a missing gateway
     // config fails cleanly with nothing to tear down.
@@ -126,15 +137,30 @@ async fn start_web_share(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("{e:#}")))?;
 
+    // Viewer access policy (§6.1): explicit config wins; the CLI flag covers
+    // config-silent nodes; the default is password — never an open URL
+    // without someone having said "link" somewhere.
+    let access = resolve_web_access(&web_access, req.web_access, req.web_password.as_deref())
+        .map_err(|msg| (StatusCode::BAD_REQUEST, msg))?;
+    if req.web_password.is_some() && access.password.is_none() {
+        warnings.push(
+            "password ignored: every shared node is link-access (config `share.web.access` \
+             or --access link)"
+                .to_string(),
+        );
+    }
+
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
     let run_id = manifest.run_id;
 
     // Re-running `veld share --web` for the same run replaces the previous web
-    // share rather than stacking a second one: without this, the stale share
-    // keeps heartbeating and its old public URLs stay live until TTL, so the
-    // user who thinks they "re-shared" has two live URLs, one forgotten.
-    manager.unshare_web_shares_for_run(run_id).await;
+    // share rather than stacking a second one. Snapshot the prior web shares
+    // now but DON'T tear them down yet: the new share has a fresh capability
+    // (hence fresh slugs), so both can coexist momentarily — and if the new
+    // registration fails (gateway unreachable / rollback), the old share must
+    // survive rather than being destroyed by a re-share that never completed.
+    let prior_web = manager.web_share_ids_for_run(run_id).await;
 
     // The gateway is the sole intended joiner and the user just asked for
     // this exposure, so `auto` is the default; an explicit --approve still
@@ -155,14 +181,24 @@ async fn start_web_share(
         .map_err(internal)?;
     let token = ticket.encode().map_err(internal)?;
 
-    let registration = match client.register(&token).await {
+    let registration = match client.register(&token, Some(&access)).await {
         Ok(r) => r,
         Err(e) => {
-            // No orphaned share: if the gateway won't take it, unshare.
+            // No orphaned share: if the gateway won't take it, unshare the
+            // new one. The prior share is untouched and still live.
             let _ = manager.unshare(&share_id).await;
             return Err((StatusCode::BAD_GATEWAY, format!("{e:#}")));
         }
     };
+
+    // Version-skew guard (§6.1): a gateway that predates the access layer
+    // ignores the policy and omits the ack — it would serve a share the user
+    // asked to protect wide open. Tear the new one down; keep the prior one.
+    if let Err(msg) = verify_access_ack(&access, registration.access.as_ref()) {
+        let _ = client.unregister(&registration.id).await;
+        let _ = manager.unshare(&share_id).await;
+        return Err((StatusCode::BAD_GATEWAY, msg));
+    }
 
     if let Err(e) = manager
         .attach_web_registration(
@@ -171,12 +207,24 @@ async fn start_web_share(
             registration.id.clone(),
             registration.lease_secs,
             registration.urls.clone(),
+            Some(access.clone()),
         )
         .await
     {
         // The share vanished mid-flight; withdraw the gateway registration.
         let _ = client.unregister(&registration.id).await;
         return Err(internal(e));
+    }
+
+    // The new share is fully live — NOW retire the ones it replaces. Their
+    // fresh-capability successor means the slugs, public URLs, and password
+    // all rotated; anything already handed out just died, so say so.
+    if !prior_web.is_empty() && manager.unshare_ids(&prior_web).await > 0 {
+        warnings.push(
+            "replaced the previous web share for this run — its public URLs, one-links, and \
+             password are now invalid; send the new ones"
+                .to_string(),
+        );
     }
 
     Ok(Json(StartShareResponse {
@@ -188,7 +236,126 @@ async fn start_web_share(
         expires_at,
         warnings,
         public_urls: registration.urls,
+        web_password: access.password,
     }))
+}
+
+/// Build the §6.1 access policy for a web share. `explicit` carries each
+/// hostname's configured `share.web.access` (`None` = config silent);
+/// `cli_default` (the `--access` flag) applies only to the silent ones; the
+/// final fallback is password. Generates the share password when any node
+/// needs one and the caller didn't supply a valid one.
+fn resolve_web_access(
+    explicit: &[(String, Option<WebAccessMode>)],
+    cli_default: Option<WebAccessMode>,
+    custom_password: Option<&str>,
+) -> Result<GatewayAccessPolicy, String> {
+    let silent_default = cli_default.unwrap_or(WebAccessMode::Password);
+    let mut nodes = std::collections::BTreeMap::new();
+    let mut needs_password = false;
+    for (hostname, configured) in explicit {
+        let mode = configured.unwrap_or(silent_default);
+        needs_password |= mode == WebAccessMode::Password;
+        // The wire policy is keyed by hostname; two nodes CAN share one (same
+        // host, different ports — already ambiguous at the tunnel level,
+        // which also routes by hostname). Strictest wins so a duplicate can
+        // never silently downgrade password → link, and the outcome doesn't
+        // depend on map iteration order.
+        nodes
+            .entry(hostname.clone())
+            .and_modify(|existing| {
+                if mode == WebAccessMode::Password {
+                    *existing = WebAccessMode::Password;
+                }
+            })
+            .or_insert(mode);
+    }
+
+    let password = if needs_password {
+        Some(match custom_password {
+            Some(p) => {
+                let p = p.trim();
+                let chars = p.chars().count();
+                if chars == 0 {
+                    return Err("--password must not be empty".to_string());
+                }
+                if chars < 8 {
+                    return Err(
+                        "--password must be at least 8 characters (or omit it for a strong \
+                         generated one)"
+                            .to_string(),
+                    );
+                }
+                if chars > 128 {
+                    return Err("--password must be at most 128 characters".to_string());
+                }
+                p.to_owned()
+            }
+            None => generate_password(),
+        })
+    } else {
+        None
+    };
+
+    Ok(GatewayAccessPolicy { password, nodes })
+}
+
+/// Enforce the §6.1 skew guard: the gateway must ack exactly the policy we
+/// asked for. Exception: an all-link policy against an ack-less (old) gateway
+/// is allowed — link-access is precisely what an old gateway enforces.
+///
+/// `pub(crate)`: also re-checked on every heartbeat (`manager.rs`) — a
+/// gateway ROLLBACK mid-share would otherwise re-register the same slugs
+/// unprotected without the daemon ever noticing.
+pub(crate) fn verify_access_ack(
+    sent: &GatewayAccessPolicy,
+    ack: Option<&veld_core::share::GatewayAccessAck>,
+) -> Result<(), String> {
+    let all_link = sent.nodes.values().all(|m| *m == WebAccessMode::Link);
+    match ack {
+        None if all_link && sent.password.is_none() => Ok(()),
+        None => Err(
+            "the gateway is too old to enforce viewer access control and would serve this \
+             share without the password. Upgrade veld-gateway, or share link-only with \
+             `--access link`."
+                .to_string(),
+        ),
+        Some(ack) => {
+            if ack.password_protected != sent.password.is_some() || ack.nodes != sent.nodes {
+                return Err(format!(
+                    "the gateway did not apply the requested access policy (asked \
+                     password_protected={}, got {}). Not exposing the share.",
+                    sent.password.is_some(),
+                    ack.password_protected
+                ));
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Generate the share password: three dash-joined groups of four characters
+/// from an unambiguous lowercase alphabet (no i/l/o/0/1) — ~59 bits, easy to
+/// read out, type, copy and paste. Entropy comes from v4 UUIDs (the same
+/// source capabilities use), mapped by rejection sampling (no modulo bias).
+fn generate_password() -> String {
+    const ALPHABET: &[u8] = b"abcdefghjkmnpqrstuvwxyz23456789"; // 31 chars
+    const LEN: usize = 12;
+    let mut chars = Vec::with_capacity(LEN);
+    while chars.len() < LEN {
+        for b in Uuid::new_v4().as_bytes() {
+            if chars.len() == LEN {
+                break;
+            }
+            // Rejection sampling: accept only bytes below the largest
+            // multiple of 31 (248), so each symbol is uniform.
+            if *b < 248 {
+                chars.push(ALPHABET[(b % 31) as usize] as char);
+            }
+        }
+    }
+    let s: String = chars.into_iter().collect();
+    format!("{}-{}-{}", &s[0..4], &s[4..8], &s[8..12])
 }
 
 async fn join(
@@ -311,6 +478,11 @@ struct ResolvedShare {
     /// requested mode), surfaced as warnings so a partial share isn't silently
     /// under-exposed.
     warnings: Vec<String>,
+    /// Web shares only: each shared hostname's **explicitly configured**
+    /// access mode (`share.web.access`), `None` where the config is silent —
+    /// the CLI flag / password default applies only to the silent ones
+    /// (config is the compliance surface, §6.1).
+    web_access: Vec<(String, Option<WebAccessMode>)>,
 }
 
 /// Resolve a run to a shareable manifest by reading persisted state and the
@@ -363,6 +535,7 @@ fn build_manifest(
     let mut not_opted_in: Vec<String> = Vec::new();
     let mut other_only: Vec<String> = Vec::new();
     let mut nodes = Vec::new();
+    let mut web_access: Vec<(String, Option<WebAccessMode>)> = Vec::new();
     for ns in run_state.nodes.values() {
         let (Some(url), Some(port)) = (ns.url.as_ref(), ns.port) else {
             continue;
@@ -385,10 +558,14 @@ fn build_manifest(
             }
             continue;
         }
+        let hostname = hostname_of(url);
+        if mode == ExposeMode::Web {
+            web_access.push((hostname.clone(), share.and_then(|s| s.web_access())));
+        }
         nodes.push(SharedNode {
             node: ns.node_name.clone(),
             variant: ns.variant.clone(),
-            hostname: hostname_of(url),
+            hostname,
             url: url.clone(),
             upstream_port: port,
         });
@@ -461,7 +638,10 @@ fn build_manifest(
     }
 
     let now = Utc::now().timestamp();
-    let ttl = ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
+    let ttl = ttl_secs.unwrap_or(match mode {
+        ExposeMode::Peer => DEFAULT_TTL_SECS,
+        ExposeMode::Web => WEB_DEFAULT_TTL_SECS,
+    });
     Ok(ResolvedShare {
         manifest: ShareManifest {
             run_id: run_state.run_id,
@@ -475,6 +655,7 @@ fn build_manifest(
         embed_relay_tokens,
         gateway,
         warnings,
+        web_access,
     })
 }
 
@@ -610,6 +791,124 @@ mod tests {
         assert!(embed_warning(true, &RelayChoice::Public).is_none());
         // Off → silent regardless.
         assert!(embed_warning(false, &gated).is_none());
+    }
+
+    #[test]
+    fn resolve_web_access_config_wins_cli_covers_silence() {
+        let explicit = vec![
+            ("app.x".to_string(), None),                            // silent
+            ("api.x".to_string(), Some(WebAccessMode::Link)),       // explicit link
+            ("admin.x".to_string(), Some(WebAccessMode::Password)), // explicit password
+        ];
+
+        // No CLI flag: silent → password; a password is minted.
+        let p = resolve_web_access(&explicit, None, None).unwrap();
+        assert_eq!(p.nodes["app.x"], WebAccessMode::Password);
+        assert_eq!(p.nodes["api.x"], WebAccessMode::Link);
+        assert_eq!(p.nodes["admin.x"], WebAccessMode::Password);
+        assert!(p.password.is_some());
+
+        // `--access link` weakens ONLY the silent node; explicit password
+        // config still forces a password.
+        let p = resolve_web_access(&explicit, Some(WebAccessMode::Link), None).unwrap();
+        assert_eq!(p.nodes["app.x"], WebAccessMode::Link);
+        assert_eq!(p.nodes["admin.x"], WebAccessMode::Password);
+        assert!(
+            p.password.is_some(),
+            "explicit password node still needs one"
+        );
+
+        // All link (explicit + CLI) → no password minted.
+        let all_link = vec![
+            ("app.x".to_string(), None),
+            ("api.x".to_string(), Some(WebAccessMode::Link)),
+        ];
+        let p = resolve_web_access(&all_link, Some(WebAccessMode::Link), None).unwrap();
+        assert!(p.password.is_none());
+
+        // A custom password is used verbatim (trimmed); empty is refused.
+        let p = resolve_web_access(&explicit, None, Some("  hunter2secret  ")).unwrap();
+        assert_eq!(p.password.as_deref(), Some("hunter2secret"));
+        assert!(resolve_web_access(&explicit, None, Some("   ")).is_err());
+        assert!(resolve_web_access(&explicit, None, Some(&"x".repeat(200))).is_err());
+    }
+
+    #[test]
+    fn resolve_web_access_duplicate_hostnames_take_the_strictest_mode() {
+        // Two nodes can legally share one hostname (same host, different
+        // ports). The wire policy is hostname-keyed, so the pair collapses to
+        // one entry — which must never downgrade to link by iteration order.
+        for order in [
+            vec![
+                ("app.x".to_string(), Some(WebAccessMode::Password)),
+                ("app.x".to_string(), Some(WebAccessMode::Link)),
+            ],
+            vec![
+                ("app.x".to_string(), Some(WebAccessMode::Link)),
+                ("app.x".to_string(), Some(WebAccessMode::Password)),
+            ],
+        ] {
+            let p = resolve_web_access(&order, None, None).unwrap();
+            assert_eq!(p.nodes["app.x"], WebAccessMode::Password);
+            assert!(p.password.is_some());
+        }
+    }
+
+    #[test]
+    fn generated_passwords_are_well_formed_and_distinct() {
+        let a = generate_password();
+        let b = generate_password();
+        assert_ne!(a, b);
+        for pw in [&a, &b] {
+            let groups: Vec<&str> = pw.split('-').collect();
+            assert_eq!(groups.len(), 3, "{pw}");
+            for g in groups {
+                assert_eq!(g.len(), 4, "{pw}");
+                assert!(
+                    g.bytes()
+                        .all(|c| b"abcdefghjkmnpqrstuvwxyz23456789".contains(&c)),
+                    "{pw}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn access_ack_guard_blocks_old_gateways_for_protected_shares() {
+        use std::collections::BTreeMap;
+        use veld_core::share::GatewayAccessAck;
+
+        let mut nodes = BTreeMap::new();
+        nodes.insert("app.x".to_string(), WebAccessMode::Password);
+        let protected = GatewayAccessPolicy {
+            password: Some("pw".into()),
+            nodes: nodes.clone(),
+        };
+
+        // Old gateway (no ack) + protected share → refuse.
+        assert!(verify_access_ack(&protected, None).is_err());
+        // Matching ack → ok.
+        let ack = GatewayAccessAck {
+            password_protected: true,
+            nodes: nodes.clone(),
+        };
+        assert!(verify_access_ack(&protected, Some(&ack)).is_ok());
+        // Ack claiming no protection → refuse.
+        let bad = GatewayAccessAck {
+            password_protected: false,
+            nodes,
+        };
+        assert!(verify_access_ack(&protected, Some(&bad)).is_err());
+
+        // All-link policy against an old gateway is fine — link-access is
+        // exactly what an old gateway enforces.
+        let mut link_nodes = BTreeMap::new();
+        link_nodes.insert("app.x".to_string(), WebAccessMode::Link);
+        let open = GatewayAccessPolicy {
+            password: None,
+            nodes: link_nodes,
+        };
+        assert!(verify_access_ack(&open, None).is_ok());
     }
 
     #[test]

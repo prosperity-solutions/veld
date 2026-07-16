@@ -615,6 +615,21 @@
               "web"
             ]
           }
+        },
+        "web": {
+          "type": "object",
+          "description": "Web-audience settings for this service's public URL.",
+          "additionalProperties": false,
+          "properties": {
+            "access": {
+              "type": "string",
+              "description": "Viewer access control. \"password\" (the default, also when absent): the gateway requires the share password — generated and printed by `veld share --web` — before serving. \"link\": anyone with the URL is served; the unguessable slug is the only gate. An explicit value here always wins over the `--access` CLI flag.",
+              "enum": [
+                "password",
+                "link"
+              ]
+            }
+          }
         }
       }
     },

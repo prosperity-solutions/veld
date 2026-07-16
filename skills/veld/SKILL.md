@@ -183,15 +183,25 @@ shares, and a consumer's join self-tears-down when the tunnel closes.
 Requires `sharing.gateway` in config (a URL, or `{ "url", "token" }` where
 `token` is a secret source like relay tokens; the org's self-hosted
 `veld-gateway` container serves the public URLs — see docs/gateway.md). The
-command prints deterministic `https://<slug>.<gateway-domain>` URLs (unguessable;
-**the URL is the access token** — treat links as secrets). Web and peer are
-separate shares with separate capabilities: `veld unshare` on one never affects
-the other. The overlay arc menu (under More) has **Copy public URL** to turn the
-current page into its public deep link (path + query + hash preserved). Fidelity
-is best-effort: the app sees its own origin `Host` (Vite allowedHosts pass),
-public host rides in `X-Forwarded-Host`, redirects between shared services are
-rewritten, WebSockets/HMR work; hard-coded absolute URLs / CORS / OAuth redirect
-URIs are the operator's domain setup.
+command prints deterministic `https://<slug>.<gateway-domain>` URLs and —
+**by default — a viewer password**: the gateway shows a password page before
+serving, a session cookie (12 h, capped at the share TTL) keeps the viewer in.
+`--password <pw>` chooses the password (min 8 chars); the printed one-link
+(`https://…/#veld-key=…`) carries it in the URL fragment (never hits DNS/logs).
+Opt a service out with `"web": { "access": "link" }` in its `share` block (or
+`--access link` for config-silent services; explicit config always wins over
+the flag) — then the unguessable slug is the only gate, treat the link as a
+secret. Multi-service caveat: the session cookie is per public host, so a
+password-protected API called cross-origin from the shared frontend gets 401s
+— give API nodes `"web": { "access": "link" }`. Web shares default to a 3600s
+TTL (peer: 7200s). Web and peer are separate shares with separate
+capabilities: `veld unshare` on one never affects the other. The overlay arc
+menu (under More) has **Copy public URL** to turn the current page into its
+public deep link (path + query + hash preserved). Fidelity is best-effort:
+the app sees its own origin `Host` (Vite allowedHosts pass), public host
+rides in `X-Forwarded-Host`, redirects between shared services are rewritten,
+WebSockets/HMR work; hard-coded absolute URLs / CORS / OAuth redirect URIs
+are the operator's domain setup.
 
 ## Editing veld.json
 

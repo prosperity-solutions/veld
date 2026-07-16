@@ -4,6 +4,7 @@
 //! tunneled services onto real public URLs (`https://<slug>.<domain>`).
 //! Library layout (the binary in `main.rs` is a thin wrapper):
 //!
+//! - [`auth`] — viewer access control (passwords, stateless sessions)
 //! - [`config`] — env-var-first configuration
 //! - [`registry`] — join engine, slug routing table, lease bookkeeping
 //! - [`api`] — Bearer-gated registration API (apex domain)
@@ -14,6 +15,7 @@
 //! - [`state`] — shared request state (config, registry, resolved auth token)
 
 pub mod api;
+pub mod auth;
 pub mod config;
 pub mod proxy;
 pub mod registry;

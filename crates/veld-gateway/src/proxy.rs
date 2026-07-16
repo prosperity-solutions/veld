@@ -26,7 +26,7 @@ use axum::http::{StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use tracing::{debug, warn};
 
-use crate::registry::{RegisteredNode, Registration, SlugTarget};
+use crate::registry::{RegisteredNode, SlugTarget};
 use crate::state::AppState;
 use crate::tunnel;
 
@@ -63,10 +63,19 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     // hyper's server half parks the client connection behind this extension;
     // taking it is how we splice after a 101.
     let client_upgrade = parts.extensions.remove::<hyper::upgrade::OnUpgrade>();
-    let client_addr = parts
+    let socket_ip = parts
         .extensions
         .get::<ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
+    // The X-Forwarded-For value the origin will see: the socket peer alone
+    // (default — inbound chains from an anonymous-reachable edge are spoofable)
+    // or, behind a trusted sanitising LB, the inbound chain with the peer
+    // appended (standard proxy behavior).
+    let client_addr = forwarded_for_value(
+        &parts.headers,
+        socket_ip.as_deref(),
+        state.config.trust_forwarded_headers,
+    );
     let public_host = parts
         .headers
         .get(header::HOST)
@@ -131,7 +140,12 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     }
 
     let (mut resp_parts, resp_body) = upstream_resp.into_parts();
-    rewrite_response_headers(&mut resp_parts.headers, reg, &state.config.domain);
+    rewrite_response_headers(
+        &mut resp_parts.headers,
+        &reg.nodes,
+        &state.config.domain,
+        target.access == veld_core::config::WebAccessMode::Password,
+    );
     Response::from_parts(resp_parts, Body::new(resp_body))
 }
 
@@ -143,6 +157,28 @@ fn is_forwarding_header(name: &HeaderName) -> bool {
         || n.eq_ignore_ascii_case("x-forwarded-host")
         || n.eq_ignore_ascii_case("x-forwarded-proto")
         || n.eq_ignore_ascii_case("forwarded")
+}
+
+/// The `X-Forwarded-For` value to send upstream. Untrusted edge (default):
+/// the socket peer alone — an inbound chain is client-controlled and must be
+/// discarded. Behind a trusted sanitising LB (`trust_forwarded_headers`): the
+/// inbound chain with the socket peer appended, so the real client IP
+/// survives the extra hop.
+fn forwarded_for_value(
+    headers: &HeaderMap,
+    socket_ip: Option<&str>,
+    trust_forwarded: bool,
+) -> Option<String> {
+    let inbound = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    match (trust_forwarded, inbound, socket_ip) {
+        (true, Some(chain), Some(ip)) => Some(format!("{chain}, {ip}")),
+        (true, Some(chain), None) => Some(chain.to_owned()),
+        (_, _, ip) => ip.map(str::to_owned),
+    }
 }
 
 /// True when the request asks to switch protocols (WebSockets, HMR).
@@ -190,6 +226,26 @@ fn build_upstream_request(
             // gateway is the public trust boundary; trusting them is
             // host-header injection + client-IP spoofing). Everything else
             // passes through.
+            continue;
+        }
+        if name == header::COOKIE {
+            // The gateway's viewer-session cookie is internal credential
+            // material — the origin service never sees it. Strip on the raw
+            // bytes: a Cookie header can mix an ASCII session pair with a
+            // non-UTF-8 pair, and dropping to `str` first would fail wholesale
+            // and leak the session token. `None` = our cookie wasn't present,
+            // forward the value verbatim; otherwise forward only the survivors.
+            match crate::auth::strip_session_cookie_bytes(value.as_bytes()) {
+                None => {
+                    headers.append(header::COOKIE, value.clone());
+                }
+                Some(kept) if !kept.is_empty() => {
+                    if let Ok(v) = HeaderValue::from_bytes(&kept) {
+                        headers.append(header::COOKIE, v);
+                    }
+                }
+                Some(_) => {} // only the session cookie was present → send none
+            }
             continue;
         }
         headers.append(name.clone(), value.clone());
@@ -338,23 +394,37 @@ fn splice_upgrade(
 /// Response-side fidelity rewrites: `Location` + `Access-Control-Allow-Origin`
 /// back to public URLs, cookie `Domain`s made host-only, and
 /// `Referrer-Policy: no-referrer` set. (Bodies are never touched.)
-fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain: &str) {
+fn rewrite_response_headers(
+    headers: &mut HeaderMap,
+    nodes: &[RegisteredNode],
+    domain: &str,
+    password_mode: bool,
+) {
     for name in hop_by_hop() {
         headers.remove(name);
     }
 
-    // The slug in the public URL is the share's only bearer credential, so it
-    // must not leak to third-party origins the app links to. Force
-    // `Referrer-Policy: no-referrer` (overriding any weaker app value) — cheap,
-    // and it closes the most common slug-leak channel. Documented as defence in
-    // depth, not a substitute for the "URL is the access token" model.
+    // Password-gated content must not be re-served by a URL-keyed shared
+    // cache to viewers who never authenticated. When the app states its own
+    // caching policy we respect it (operator responsibility); when it says
+    // nothing, default closed.
+    if password_mode && !headers.contains_key(header::CACHE_CONTROL) {
+        headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    }
+
+    // The slug must not leak to third-party origins the app links to: on a
+    // link-access node it is the only bearer credential, and even on a
+    // password-mode node it names the target. Force
+    // `Referrer-Policy: no-referrer` (overriding any weaker app value) —
+    // cheap, and it closes the most common slug-leak channel. Defence in
+    // depth alongside the §6.1 password gate.
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
     );
 
     if let Some(location) = headers.get(header::LOCATION).and_then(|v| v.to_str().ok()) {
-        if let Some(rewritten) = rewrite_absolute_url(location, &reg.nodes, domain) {
+        if let Some(rewritten) = rewrite_absolute_url(location, nodes, domain) {
             if let Ok(v) = HeaderValue::from_str(&rewritten) {
                 headers.insert(header::LOCATION, v);
             }
@@ -370,7 +440,7 @@ fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain:
         .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
         .and_then(|v| v.to_str().ok())
     {
-        if let Some(rewritten) = rewrite_origin_value(acao, &reg.nodes, domain) {
+        if let Some(rewritten) = rewrite_origin_value(acao, nodes, domain) {
             if let Ok(v) = HeaderValue::from_str(&rewritten) {
                 headers.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, v);
             }
@@ -388,8 +458,19 @@ fn rewrite_response_headers(headers: &mut HeaderMap, reg: &Registration, domain:
     if !cookies.is_empty() {
         headers.remove(header::SET_COOKIE);
         for cookie in cookies {
+            // The upstream app must never (re)set the gateway's own session
+            // cookie — a hostile co-tenant's Set-Cookie could otherwise shadow
+            // or clear other slugs' sessions. (Belt-and-braces: the __Host-
+            // prefix already makes browsers reject Domain-scoped variants.)
+            if cookie.to_str().is_ok_and(|s| {
+                s.trim_start()
+                    .strip_prefix(crate::auth::SESSION_COOKIE)
+                    .is_some_and(|rest| rest.trim_start().starts_with('='))
+            }) {
+                continue;
+            }
             let value = match cookie.to_str() {
-                Ok(s) => match strip_origin_cookie_domain(s, &reg.nodes) {
+                Ok(s) => match strip_origin_cookie_domain(s, nodes) {
                     Some(stripped) => HeaderValue::from_str(&stripped).unwrap_or(cookie),
                     None => cookie,
                 },
@@ -480,6 +561,7 @@ mod tests {
                 origin: "https://app.demo.p.localhost".into(),
                 slug: "abcdefabcdefabcdefabcdefab".into(),
                 public_url: "https://abcdefabcdefabcdefabcdefab.share.example".into(),
+                access: veld_core::config::WebAccessMode::Password,
             },
             RegisteredNode {
                 node: "api".into(),
@@ -487,12 +569,57 @@ mod tests {
                 origin: "https://api.demo.p.localhost:18443".into(),
                 slug: "xyzxyzxyzxyzxyzxyzxyzxyzxy".into(),
                 public_url: "https://xyzxyzxyzxyzxyzxyzxyzxyzxy.share.example".into(),
+                access: veld_core::config::WebAccessMode::Link,
             },
         ]
     }
 
     fn rewrite(value: &str) -> Option<String> {
         rewrite_absolute_url(value, &nodes(), "share.example")
+    }
+
+    #[test]
+    fn password_mode_defaults_no_store_only_when_app_is_silent() {
+        // Password node + no app cache policy → default closed.
+        let mut h = HeaderMap::new();
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "no-store");
+
+        // Password node + app states its own policy → respected, not overridden.
+        let mut h = HeaderMap::new();
+        h.insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("public, max-age=60"),
+        );
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "public, max-age=60");
+
+        // Link node → the gateway never injects no-store.
+        let mut h = HeaderMap::new();
+        rewrite_response_headers(&mut h, &nodes(), "share.example", false);
+        assert!(h.get(header::CACHE_CONTROL).is_none());
+    }
+
+    #[test]
+    fn upstream_cannot_set_the_gateway_session_cookie() {
+        // A hostile upstream trying to (re)set our __Host- session cookie is
+        // dropped; its other Set-Cookies pass through.
+        let mut h = HeaderMap::new();
+        h.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("__Host-veld_gw_sess=forged; Path=/"),
+        );
+        h.append(
+            header::SET_COOKIE,
+            HeaderValue::from_static("app_sid=legit; Path=/"),
+        );
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        let cookies: Vec<&str> = h
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(cookies, vec!["app_sid=legit; Path=/"]);
     }
 
     #[test]
@@ -632,6 +759,77 @@ mod tests {
         // Host rewritten to the origin; Connection: close forces upstream EOF.
         assert_eq!(h.get(header::HOST).unwrap(), "app.demo.p.localhost");
         assert_eq!(h.get(header::CONNECTION).unwrap(), "close");
+    }
+
+    #[test]
+    fn forwarded_for_untrusted_vs_trusted() {
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 5.6.7.8"),
+        );
+        // Default: the inbound chain is discarded — socket peer only.
+        assert_eq!(
+            forwarded_for_value(&h, Some("9.9.9.9"), false).as_deref(),
+            Some("9.9.9.9")
+        );
+        // Trusted LB: chain preserved, socket peer appended.
+        assert_eq!(
+            forwarded_for_value(&h, Some("9.9.9.9"), true).as_deref(),
+            Some("1.2.3.4, 5.6.7.8, 9.9.9.9")
+        );
+        // Trusted but no inbound chain → socket peer alone.
+        let empty = HeaderMap::new();
+        assert_eq!(
+            forwarded_for_value(&empty, Some("9.9.9.9"), true).as_deref(),
+            Some("9.9.9.9")
+        );
+    }
+
+    #[test]
+    fn session_cookie_is_stripped_from_upstream_request() {
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "abc.share.example")
+            .header(
+                "cookie",
+                "sid=app; __Host-veld_gw_sess=secret-token; theme=dark",
+            )
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            false,
+        )
+        .unwrap();
+        let cookie = out.headers().get(header::COOKIE).unwrap().to_str().unwrap();
+        assert_eq!(cookie, "sid=app; theme=dark");
+
+        // A request whose ONLY cookie is the session cookie sends none upstream.
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/")
+            .header("host", "abc.share.example")
+            .header("cookie", "__Host-veld_gw_sess=secret-token")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            false,
+        )
+        .unwrap();
+        assert!(out.headers().get(header::COOKIE).is_none());
     }
 
     #[test]

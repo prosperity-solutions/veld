@@ -19,7 +19,7 @@ use iroh_tickets::endpoint::EndpointTicket;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, OnceCell, oneshot};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 use veld_core::helper::HelperClient;
 use veld_core::share::{
@@ -34,6 +34,12 @@ use super::gateway::GatewayClient;
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often the reaper scans for expired shares.
 const REAPER_INTERVAL: Duration = Duration::from_secs(60);
+/// Consecutive heartbeat acks that must fail to confirm a web share's access
+/// policy before the daemon fails closed and unshares. >1 so a single
+/// anomalous ack (or a lone stale replica during a rolling gateway upgrade)
+/// can't strand a healthy password share, while a genuine rollback still
+/// closes within a few beats.
+const ACK_FAILURE_LIMIT: u32 = 3;
 /// Max time to wait for an inbound peer to send its control frame before the
 /// per-connection task gives up (pre-auth, so a leaked link can't pile up
 /// stalled tasks holding a connection).
@@ -94,6 +100,10 @@ struct WebRegistration {
     client: GatewayClient,
     reg_id: String,
     public_urls: Vec<GatewayPublicUrl>,
+    /// Viewer access policy sent with the registration; heartbeats re-send it
+    /// so a restarted gateway re-learns the password with the lease (§6.1).
+    /// Also the source for re-displaying the password in `veld shares`.
+    access: Option<veld_core::share::GatewayAccessPolicy>,
     /// The heartbeat loop; aborted on unshare. It also self-terminates when
     /// the share disappears from the map (belt and braces).
     heartbeat: JoinHandle<()>,
@@ -461,12 +471,14 @@ impl ShareManager {
         reg_id: String,
         lease_secs: u64,
         public_urls: Vec<GatewayPublicUrl>,
+        access: Option<veld_core::share::GatewayAccessPolicy>,
     ) -> Result<()> {
         // Heartbeat well inside the lease window; floor guards a tiny lease.
         let interval = Duration::from_secs((lease_secs / 3).max(5));
         let hb_manager = Arc::clone(self);
         let hb_share_id = share_id.to_string();
         let hb_client = client.clone();
+        let hb_access = access.clone();
 
         let mut shares = self.shares.lock().await;
         let Some(entry) = shares.get_mut(share_id) else {
@@ -474,6 +486,12 @@ impl ShareManager {
         };
         let ticket = entry.ticket.clone();
         let heartbeat = tokio::spawn(async move {
+            // Consecutive heartbeats whose ack didn't confirm the access
+            // policy. We only fail closed after several in a row so one
+            // anomalous ack (or a single stale replica seen during a rolling
+            // gateway upgrade) can't strand a healthy password share — while a
+            // genuine rollback still closes within a few beats.
+            let mut bad_acks = 0u32;
             loop {
                 tokio::time::sleep(interval).await;
                 // Self-terminate once the share is gone (unshare also aborts
@@ -481,11 +499,52 @@ impl ShareManager {
                 if !hb_manager.shares.lock().await.contains_key(&hb_share_id) {
                     break;
                 }
-                if let Err(e) = hb_client.register(&ticket).await {
-                    // Transient gateway failures self-heal on a later beat (a
-                    // restarted gateway re-joins and mints the same URLs).
-                    warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
-                        "gateway heartbeat failed; will retry");
+                // The access policy rides every heartbeat: a restarted
+                // gateway holds no state, so the beat that re-establishes the
+                // share must re-establish its password too.
+                match hb_client.register(&ticket, hb_access.as_ref()).await {
+                    Ok(resp) => {
+                        // Re-verify the ack on EVERY beat, not just at share
+                        // start: a gateway rollback to a pre-access-layer (or
+                        // non-enforcing) build would re-register the same
+                        // deterministic slugs served wide open. Fail closed —
+                        // kill the share rather than leave it exposed.
+                        if let Some(access) = &hb_access {
+                            match super::api::verify_access_ack(access, resp.access.as_ref()) {
+                                Ok(()) => bad_acks = 0,
+                                Err(msg) => {
+                                    bad_acks += 1;
+                                    warn!(share_id = %hb_share_id, bad_acks, %msg,
+                                        "gateway heartbeat ack did not confirm the access policy");
+                                    if bad_acks >= ACK_FAILURE_LIMIT {
+                                        error!(share_id = %hb_share_id,
+                                            "gateway stopped enforcing this share's access \
+                                             policy across {ACK_FAILURE_LIMIT} beats (rolled \
+                                             back?); unsharing to fail closed");
+                                        // Detached: unshare() aborts THIS task,
+                                        // so run it off-task to guarantee the
+                                        // teardown completes rather than
+                                        // cancelling itself mid-way.
+                                        let m = Arc::clone(&hb_manager);
+                                        let id = hb_share_id.clone();
+                                        tokio::spawn(async move {
+                                            let _ = m.unshare(&id).await;
+                                        });
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        // Transient gateway failures self-heal on a later beat
+                        // (a restarted gateway re-joins and mints the same
+                        // URLs). A network failure is not evidence the policy
+                        // stopped being enforced, so it does not count toward
+                        // the fail-closed threshold.
+                        warn!(share_id = %hb_share_id, error = %format!("{e:#}"),
+                            "gateway heartbeat failed; will retry");
+                    }
                 }
             }
         });
@@ -493,6 +552,7 @@ impl ShareManager {
             client,
             reg_id,
             public_urls,
+            access,
             heartbeat,
         });
         Ok(())
@@ -785,6 +845,11 @@ impl ShareManager {
                     .as_ref()
                     .map(|w| w.public_urls.clone())
                     .unwrap_or_default(),
+                web_password: s
+                    .web
+                    .as_ref()
+                    .and_then(|w| w.access.as_ref())
+                    .and_then(|a| a.password.clone()),
             })
             .collect();
         let joins = self
@@ -802,6 +867,7 @@ impl ShareManager {
                 join_url: None,
                 joiners: 0,
                 public_urls: Vec::new(),
+                web_password: None,
             })
             .collect();
         let pending = self
@@ -1029,21 +1095,27 @@ impl ShareManager {
         Ok(())
     }
 
-    /// Stop every **web** share minted from `run_id` (their gateway
-    /// registrations are unregistered by `unshare`). Used to make a repeat
-    /// `veld share --web` replace rather than stack. Returns how many stopped.
-    pub async fn unshare_web_shares_for_run(&self, run_id: Uuid) -> usize {
-        let ids: Vec<String> = {
-            let shares = self.shares.lock().await;
-            shares
-                .values()
-                .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
-                .map(|s| s.id.clone())
-                .collect()
-        };
+    /// The ids of every live **web** share minted from `run_id`. Snapshotted
+    /// so a repeat `veld share --web` can register its replacement first and
+    /// only then tear these down — a failed re-share must not destroy the
+    /// share it was replacing.
+    pub async fn web_share_ids_for_run(&self, run_id: Uuid) -> Vec<String> {
+        self.shares
+            .lock()
+            .await
+            .values()
+            .filter(|s| s.web.is_some() && s.manifest.run_id == run_id)
+            .map(|s| s.id.clone())
+            .collect()
+    }
+
+    /// Stop specific shares by id (their gateway registrations are unregistered
+    /// by `unshare`). Returns how many stopped. Used to replace prior web
+    /// shares once a fresh one is live.
+    pub async fn unshare_ids(&self, ids: &[String]) -> usize {
         let mut stopped = 0;
         for id in ids {
-            if self.unshare(&id).await.is_ok() {
+            if self.unshare(id).await.is_ok() {
                 stopped += 1;
             }
         }
@@ -1217,7 +1289,12 @@ mod tests {
                         node: "app".to_string(),
                         hostname: "app.demo.p.localhost".to_string(),
                         public_url: "https://slug.share.example".to_string(),
+                        access: Some(veld_core::config::WebAccessMode::Password),
                     }],
+                    access: Some(veld_core::share::GatewayAccessPolicy {
+                        password: Some("k7dm-q2xp-9fzt".to_string()),
+                        nodes: Default::default(),
+                    }),
                     heartbeat: tokio::spawn(async {}),
                 }),
             },

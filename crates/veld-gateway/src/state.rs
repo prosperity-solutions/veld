@@ -2,6 +2,7 @@
 
 use std::sync::Arc;
 
+use crate::auth::RateLimiter;
 use crate::config::GatewayConfig;
 use crate::registry::Registry;
 
@@ -14,4 +15,6 @@ pub struct AppState {
     /// request-amplified process spawner. Rotation requires a restart
     /// (documented).
     pub auth_token: Arc<str>,
+    /// Password-attempt throttle (per client IP and per slug).
+    pub limiter: Arc<RateLimiter>,
 }

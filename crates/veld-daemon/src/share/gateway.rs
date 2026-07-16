@@ -10,7 +10,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use tracing::warn;
 use veld_core::config::GatewayRef;
-use veld_core::share::{GatewayRegisterRequest, GatewayRegisterResponse};
+use veld_core::share::{GatewayAccessPolicy, GatewayRegisterRequest, GatewayRegisterResponse};
 use veld_share::endpoint::resolve_secret;
 
 /// Env overrides pairing with the relay ones: point web shares at a gateway
@@ -91,15 +91,22 @@ impl GatewayClient {
         })
     }
 
-    /// Register `ticket` (idempotent — also the heartbeat). Returns the minted
+    /// Register `ticket` (idempotent — also the heartbeat). `access` is the
+    /// viewer access policy (§6.1); it rides every call so a restarted
+    /// gateway re-learns the password with the lease. Returns the minted
     /// public URLs and the lease the origin must heartbeat inside.
-    pub async fn register(&self, ticket: &str) -> Result<GatewayRegisterResponse> {
+    pub async fn register(
+        &self,
+        ticket: &str,
+        access: Option<&GatewayAccessPolicy>,
+    ) -> Result<GatewayRegisterResponse> {
         let resp = self
             .http
             .post(format!("{}/api/v1/shares", self.base_url))
             .bearer_auth(&self.token)
             .json(&GatewayRegisterRequest {
                 ticket: ticket.to_owned(),
+                access: access.cloned(),
             })
             .send()
             .await

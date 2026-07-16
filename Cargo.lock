@@ -865,6 +865,7 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer 0.10.4",
  "crypto-common 0.1.7",
+ "subtle",
 ]
 
 [[package]]
@@ -1430,6 +1431,15 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -4240,7 +4250,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "veld"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4260,7 +4270,7 @@ dependencies = [
 
 [[package]]
 name = "veld-core"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -4282,7 +4292,7 @@ dependencies = [
 
 [[package]]
 name = "veld-daemon"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4306,7 +4316,7 @@ dependencies = [
 
 [[package]]
 name = "veld-gateway"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -4314,6 +4324,7 @@ dependencies = [
  "chrono",
  "data-encoding",
  "dirs",
+ "hmac",
  "http-body-util",
  "hyper",
  "hyper-util",
@@ -4322,6 +4333,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sha2 0.10.9",
  "tempfile",
  "tokio",
@@ -4335,7 +4347,7 @@ dependencies = [
 
 [[package]]
 name = "veld-helper"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "nix",
@@ -4351,7 +4363,7 @@ dependencies = [
 
 [[package]]
 name = "veld-share"
-version = "9.3.1"
+version = "9.3.2"
 dependencies = [
  "anyhow",
  "dirs",

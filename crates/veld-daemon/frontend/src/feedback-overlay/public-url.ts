@@ -1,7 +1,11 @@
 // "Copy public URL" — translate the current browser location to its public
 // gateway URL (SHARING_V2.md §5.6): swap the host for the share's minted
 // public host, keep path + query + hash so a deep link to the current screen
-// survives the copy.
+// survives the copy. For a password-protected share (the default, §6.1) the
+// copied link is the ONE-LINK form — the share password rides in a
+// `veld-key` URL fragment, which never reaches DNS/TLS/server logs, and the
+// gateway's login page auto-submits it — so the recipient gets a link that
+// just opens.
 //
 // The daemon's share list is fetched on demand (no polling): the overlay is
 // served same-origin under /__veld__/, which Caddy proxies to the daemon.
@@ -11,35 +15,61 @@ interface GatewayPublicUrl {
   node: string;
   hostname: string;
   public_url: string;
+  /** "password" | "link"; absent from pre-access-layer daemons. */
+  access?: string;
 }
 
 interface ShareInfo {
   public_urls?: GatewayPublicUrl[];
+  /** The share password (password-protected web shares only). */
+  web_password?: string;
 }
 
 interface SharesList {
   shares?: ShareInfo[];
 }
 
-/** The public URL for `hostname` among the daemon's active web shares. */
+/** A hostname's public target: minted URL + the password gating it (if any). */
+export interface PublicTarget {
+  publicUrl: string;
+  /** Set when the slug is password-mode and the share carries a password. */
+  password: string | null;
+}
+
+/** The public target for `hostname` among the daemon's active web shares. */
 export function findPublicUrl(
   list: SharesList,
   hostname: string,
-): string | null {
+): PublicTarget | null {
   for (const share of list.shares ?? []) {
     for (const u of share.public_urls ?? []) {
-      if (u.hostname === hostname) return u.public_url;
+      if (u.hostname === hostname) {
+        const password =
+          u.access !== "link" && share.web_password ? share.web_password : null;
+        return { publicUrl: u.public_url, password };
+      }
     }
   }
   return null;
 }
 
-/** `public_url` + the location's path, query, and hash. */
+/**
+ * `public_url` + the location's path, query, and hash. When `password` is
+ * set, a `veld-key` fragment is appended (joined with `&` if the page already
+ * has a hash — the gateway's login page strips only the key and forwards the
+ * rest of the fragment).
+ */
 export function toPublicLocation(
   publicUrl: string,
   loc: { pathname: string; search: string; hash: string },
+  password: string | null = null,
 ): string {
-  return publicUrl + loc.pathname + loc.search + loc.hash;
+  let url = publicUrl + loc.pathname + loc.search + loc.hash;
+  if (password) {
+    const key = "veld-key=" + encodeURIComponent(password);
+    url += (loc.hash ? "&" : "#") + key;
+  }
+  return url;
 }
 
 /** Toolbar action: copy this page's public URL, or explain how to get one. */
@@ -54,16 +84,23 @@ export async function copyPublicUrl(): Promise<void> {
     return;
   }
 
-  const publicUrl = findPublicUrl(list, window.location.hostname);
-  if (!publicUrl) {
+  const target = findPublicUrl(list, window.location.hostname);
+  if (!target) {
     toast("Not shared to the web yet — run: veld share --web");
     return;
   }
 
-  const url = toPublicLocation(publicUrl, window.location);
+  const url = toPublicLocation(
+    target.publicUrl,
+    window.location,
+    target.password,
+  );
+  const label = target.password
+    ? "Public one-link copied (carries the viewer password)"
+    : "Public URL copied";
   try {
     await navigator.clipboard.writeText(url);
-    toast("Public URL copied");
+    toast(label);
   } catch (_) {
     // Clipboard can be denied (permissions policy); still give the user the
     // URL rather than a dead end.

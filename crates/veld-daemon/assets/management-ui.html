@@ -301,15 +301,23 @@ function render(data){
         h+='</div>';
       }
       // Public web share strip(s) — started from the CLI (`veld share --web`);
-      // shows the minted public URLs (the URL is the access token) and a stop
-      // button. No auto-accept toggle: web shares always auto-approve the
-      // gateway.
+      // shows the minted public URLs and a stop button. Password-protected by
+      // default: the share password is shown with a copy button, and
+      // password-mode URLs get a one-link copy (URL + `#veld-key=…` fragment)
+      // so a recipient can be sent a single working link. No auto-accept
+      // toggle: web shares always auto-approve the gateway.
       for(const w of webShares){
         h+='<div class="share-bar">';
         h+='<span class="share-dot"></span>';
         h+='<span class="share-on">Public web</span>';
         for(const u of (w.public_urls||[])){
-          h+='<button class="card-btn" data-action="copy-public" data-url="'+esc(u.public_url)+'" title="'+esc(u.public_url)+'">'+esc(u.node)+' URL</button>';
+          const pwProtected=w.web_password&&u.access!=='link';
+          const oneLink=pwProtected?(u.public_url+'/#veld-key='+encodeURIComponent(w.web_password)):u.public_url;
+          const label=pwProtected?(u.node+' link (with password)'):(u.node+' URL');
+          h+='<button class="card-btn" data-action="copy-public" data-url="'+esc(oneLink)+'" title="'+esc(pwProtected?(u.public_url+' — copies a one-link that opens with the password already filled in'):u.public_url)+'">'+esc(label)+'</button>';
+        }
+        if(w.web_password){
+          h+='<button class="card-btn" data-action="copy-public" data-url="'+esc(w.web_password)+'" title="Copy the viewer password (send it on a separate channel from the URL)">Copy password</button>';
         }
         h+='<button class="card-btn danger" data-action="stop-share" data-share="'+esc(w.id)+'" title="Stop public web share">Stop web</button>';
         h+='</div>';
