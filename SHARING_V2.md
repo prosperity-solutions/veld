@@ -640,7 +640,12 @@ Three independent increments; ship top-down.
 **Settled while implementing (review-driven)**
 - Upstream `Host` is rewritten to the **origin** hostname, and `Origin` +
   `Referer` are rewritten in lockstep, so an Origin-checking dev server sees a
-  coherent same-origin request. `X-Forwarded-*`/`Forwarded` are stripped
+  coherent same-origin request. Exception: on **upgrade requests** (WebSocket
+  HMR) `Origin` is dropped, not rewritten — Next's dev server allow-lists WS
+  origins against `localhost`/`allowedDevOrigins` only (its own hostname
+  doesn't pass) and destroys the socket on mismatch, while an absent Origin is
+  accepted; the local helper Caddy strips Origin for the same reason.
+  `X-Forwarded-*`/`Forwarded` are stripped
   inbound and set authoritatively (the gateway is the public trust boundary);
   `Referrer-Policy: no-referrer` is emitted so the slug doesn't leak.
 - Relay confinement on the gateway is an **allow-list** with tokens resolved

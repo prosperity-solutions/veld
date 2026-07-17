@@ -55,10 +55,7 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
         limiter: Arc::new(crate::auth::RateLimiter::default()),
     };
 
-    let app = Router::new()
-        .fallback(dispatch)
-        .with_state(state.clone())
-        .into_make_service_with_connect_info::<std::net::SocketAddr>();
+    let app = router(state.clone()).into_make_service_with_connect_info::<std::net::SocketAddr>();
 
     let handle = axum_server::Handle::new();
     tokio::spawn(shutdown_on_signal(handle.clone()));
@@ -101,6 +98,12 @@ fn harden<A>(server: &mut axum_server::Server<A>) {
         // a timer ("timeout `header_read_timeout` set, but no timer set").
         .timer(hyper_util::rt::TokioTimer::new())
         .header_read_timeout(HEADER_READ_TIMEOUT);
+}
+
+/// The gateway's routing service: every request (any host, any path) enters
+/// [`dispatch`]. Public so integration tests can serve the real router.
+pub fn router(state: AppState) -> Router {
+    Router::new().fallback(dispatch).with_state(state)
 }
 
 /// Route a request by the viewer's host: apex → registration API,
