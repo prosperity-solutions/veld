@@ -9,7 +9,11 @@
 //! host allow-lists and already accept their own `*.localhost` hostname, so
 //! this makes the flagship case work zero-config. `Origin` and `Referer` are
 //! rewritten to the origin in lockstep with `Host`, so an Origin-checking dev
-//! server sees a coherent same-origin request. The public host travels in
+//! server sees a coherent same-origin request — except on **upgrade requests**,
+//! where `Origin` is dropped instead: Next's HMR WebSocket allow-lists origins
+//! against `localhost`/`allowedDevOrigins` (its own hostname doesn't pass) and
+//! destroys the socket on mismatch, while an absent Origin is accepted. The
+//! public host travels in
 //! `X-Forwarded-Host` (`X-Forwarded-*`/`Forwarded` from the client are stripped
 //! — the gateway is the public trust boundary). On the way back: `Location`
 //! redirects and `Access-Control-Allow-Origin` values naming origin hostnames
@@ -257,12 +261,21 @@ fn build_upstream_request(
     // host would manufacture a cross-origin request that Origin-checking dev
     // servers (Next Server Actions, Vite's DNS-rebinding guard) reject — the
     // dev server must see a coherent same-origin request.
+    //
+    // EXCEPT on upgrade requests: Origin is DROPPED there, never rewritten.
+    // Next's dev server (webpack/turbopack HMR) allow-lists WS origins against
+    // `localhost` + `allowedDevOrigins` — its own serving hostname does NOT
+    // pass, so a rewritten Origin gets the socket destroyed without a response
+    // (surfacing as a 502 and dead HMR). Dev servers accept an absent Origin
+    // (non-browser clients), and the local helper Caddy has stripped Origin
+    // for exactly this reason since `aed79c9` — this mirrors that proven
+    // behavior on the gateway's upgrade path.
     headers.insert(
         header::HOST,
         HeaderValue::from_str(origin_hostname)
             .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid origin hostname"))?,
     );
-    if parts.headers.contains_key(header::ORIGIN) {
+    if !is_upgrade && parts.headers.contains_key(header::ORIGIN) {
         if let Ok(v) = HeaderValue::from_str(origin) {
             headers.insert(header::ORIGIN, v);
         }
@@ -831,6 +844,59 @@ mod tests {
         )
         .unwrap();
         assert!(out.headers().get(header::COOKIE).is_none());
+    }
+
+    #[test]
+    fn upgrade_requests_drop_origin_instead_of_rewriting() {
+        // Regression (Next.js HMR): the dev server allow-lists WS origins
+        // against localhost/allowedDevOrigins — its own hostname does NOT
+        // pass — and destroys the socket on mismatch. The upgrade path must
+        // send NO Origin at all; the non-upgrade path keeps the rewrite.
+        let req = axum::http::Request::builder()
+            .method("GET")
+            .uri("/_next/webpack-hmr?id=abc")
+            .header("host", "abc.share.example")
+            .header("origin", "https://abc.share.example")
+            .header("connection", "keep-alive, Upgrade")
+            .header("upgrade", "websocket")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            true,
+        )
+        .unwrap();
+        assert!(out.headers().get(header::ORIGIN).is_none());
+        assert_eq!(out.headers().get(header::UPGRADE).unwrap(), "websocket");
+        assert_eq!(out.headers().get(header::CONNECTION).unwrap(), "upgrade");
+
+        // Same request, non-upgrade: Origin is rewritten to the origin.
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/action")
+            .header("host", "abc.share.example")
+            .header("origin", "https://abc.share.example")
+            .body(Body::empty())
+            .unwrap();
+        let (parts, _) = req.into_parts();
+        let out = build_upstream_request(
+            &parts,
+            "app.demo.p.localhost",
+            "https://app.demo.p.localhost",
+            "abc.share.example",
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(
+            out.headers().get(header::ORIGIN).unwrap(),
+            "https://app.demo.p.localhost"
+        );
     }
 
     #[test]

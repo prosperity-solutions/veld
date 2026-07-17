@@ -131,7 +131,10 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   share capability)` — 26 lowercase base32 chars, unguessable (the URL is the
   baseline access control), stable across gateway restarts, new per share.
 - **Proxying**: one tunnel stream per HTTP request; WebSocket upgrades
-  (dev-server HMR) are spliced through. The origin service sees its own
+  (dev-server HMR) are spliced through, with the `Origin` header dropped on
+  the upgrade — dev servers (Next.js HMR) only accept `localhost`-ish origins
+  on WebSockets and kill the socket otherwise, while an absent Origin passes.
+  The origin service sees its own
   hostname in `Host` (dev-server allow-lists pass); the public host is in
   `X-Forwarded-Host`. `Location` redirects to shared sibling hostnames are
   rewritten to their public URLs; `Set-Cookie` `Domain` attributes naming
