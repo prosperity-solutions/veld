@@ -169,11 +169,12 @@ Two consequences to know before sharing a non-trivial app:
   allow-list must add the public origin itself. A `Content-Security-Policy`
   that names origin hostnames is **not** rewritten (it's a body-adjacent
   allow-list); relax it or trust the public host if you ship a strict CSP in
-  dev. And because each request's `Host`/`Origin` is rewritten to the *target*
-  service's origin, a service that inspects the calling service's `Origin` for
-  its own CORS/CSRF decisions sees same-origin rather than the caller — fine
-  for the single-service flagship, a fidelity gap for tightly-coupled
-  multi-service shares.
+  dev. And because each non-upgrade request's `Host`/`Origin` is rewritten to
+  the *target* service's origin (upgrade requests drop `Origin` entirely, see
+  above), a service that inspects the calling service's `Origin` for its own
+  CORS/CSRF decisions sees same-origin — or, on WebSockets, no origin — rather
+  than the caller — fine for the single-service flagship, a fidelity gap for
+  tightly-coupled multi-service shares.
 - **Tunnel transport is logged.** On registration the gateway logs
   `share tunnel established` with `transport=direct|relayed` and `via=<addr>`,
   and ~15 s later `share tunnel path settled` with the post-hole-punching

@@ -74,18 +74,26 @@ async fn spawn_ws_echo_origin() -> u16 {
                         .await;
                     return;
                 }
-                // Mimic Next's dev-origin gate: an upgrade carrying ANY
-                // Origin header (the gateway must drop it) gets the socket
-                // destroyed without an HTTP response — exactly what Next 15+/16
-                // does when the origin isn't localhost/allowedDevOrigins.
+                // Mimic Next's dev-origin gate, tightened to a strict
+                // superset: destroy the socket on ANY Origin header without
+                // an HTTP response. (Real Next 15+/16 kills only origins
+                // outside localhost/allowedDevOrigins — rejecting all origins
+                // here pins the gateway's chosen strategy, dropping the
+                // header, rather than any rewrite.)
                 if req.contains("\r\norigin:") {
                     return;
                 }
+                // The forged Set-Cookie mimics a hostile upstream trying to
+                // (re)set the gateway's own session cookie on the 101 — the
+                // splice path must strip it (it bypasses
+                // rewrite_response_headers).
                 let _ = sock
                     .write_all(
                         b"HTTP/1.1 101 Switching Protocols\r\n\
                           upgrade: websocket\r\n\
                           connection: Upgrade\r\n\
+                          set-cookie: __Host-veld_gw_sess=forged; Path=/\r\n\
+                          set-cookie: app_ws=legit; Path=/\r\n\
                           sec-websocket-accept: test-not-validated\r\n\r\n",
                     )
                     .await;
@@ -385,6 +393,17 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
     );
     let lower = head_str.to_ascii_lowercase();
     assert!(lower.contains("upgrade: websocket"), "got:\n{head_str}");
+    // The 101 path bypasses rewrite_response_headers, but must still strip an
+    // upstream attempt to (re)set the gateway's own session cookie — while
+    // passing the app's own cookies through.
+    assert!(
+        !lower.contains("__host-veld_gw_sess"),
+        "gateway session cookie must not cross the splice path:\n{head_str}"
+    );
+    assert!(
+        lower.contains("set-cookie: app_ws=legit"),
+        "app cookies must pass through on the 101:\n{head_str}"
+    );
 
     // Bidirectional bytes over the spliced connection (echo origin).
     let mut echoed: Vec<u8> = head[head_end..].to_vec();
