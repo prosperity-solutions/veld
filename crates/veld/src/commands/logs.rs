@@ -1,5 +1,5 @@
 use veld_core::config;
-use veld_core::db::{Db, LogFilter, LogRow, LogStream};
+use veld_core::db::{Db, LogFilter, LogRow, LogStream, stream_is_per_node};
 use veld_core::logging;
 
 use crate::output;
@@ -99,20 +99,37 @@ pub async fn run(opts: LogsOptions) -> i32 {
         return 1;
     };
 
-    // Combined filter used by follow mode (and to scope each per-source read).
-    let filter = LogFilter {
-        node: node.clone(),
-        variant: None,
-        streams: Some(source.streams()),
-    };
+    // Follow mode polls these: per-node streams honor `--node`, run-level
+    // streams (internal/debug/setup) never do — internal/debug rows have
+    // `node = NULL`, so a node filter would silently drop them live even
+    // though the snapshot shows them. The stream sets are disjoint, so no
+    // row is polled twice.
+    let (per_node_streams, run_level_streams): (Vec<&'static str>, Vec<&'static str>) = source
+        .streams()
+        .into_iter()
+        .partition(|s| stream_is_per_node(s));
+    let mut follow_filters: Vec<LogFilter> = Vec::new();
+    if !per_node_streams.is_empty() {
+        follow_filters.push(LogFilter {
+            node: node.clone(),
+            variant: None,
+            streams: Some(per_node_streams),
+        });
+    }
+    if !run_level_streams.is_empty() {
+        follow_filters.push(LogFilter {
+            node: None,
+            variant: None,
+            streams: Some(run_level_streams),
+        });
+    }
 
     // Build the per-source list, mirroring the old one-file-per-source layout:
     // `--lines N` means N lines per source (per node+stream), not N total —
     // otherwise one chatty node pushes every other node out of the window.
     let mut source_filters: Vec<LogFilter> = Vec::new();
     for stream in source.streams() {
-        let per_node = stream == LogStream::Server.as_str() || stream == LogStream::Client.as_str();
-        if per_node {
+        if stream_is_per_node(stream) {
             // Per-node streams: one source per (node, variant).
             let mut targets: Vec<(&str, &str)> = run_state
                 .nodes
@@ -233,7 +250,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
             &db,
             &project_root,
             run_name,
-            &filter,
+            &follow_filters,
             last_id,
             json,
             &search_lower,
@@ -260,11 +277,13 @@ fn format_row(row: &LogRow) -> String {
 }
 
 /// Poll the database for new rows, printing them as they appear, until Ctrl+C.
+/// The filters' stream sets are disjoint, so no row matches twice; rows from
+/// all filters are merged in id order per tick.
 async fn follow_logs(
     db: &Db,
     project_root: &std::path::Path,
     run_name: &str,
-    filter: &LogFilter,
+    filters: &[LogFilter],
     mut last_id: i64,
     json: bool,
     search: &Option<String>,
@@ -274,12 +293,16 @@ async fn follow_logs(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                let rows = match db.logs_after_id(project_root, run_name, filter, last_id) {
-                    Ok(rows) => rows,
-                    Err(_) => continue,
-                };
+                let mut rows: Vec<LogRow> = Vec::new();
+                for filter in filters {
+                    match db.logs_after_id(project_root, run_name, filter, last_id) {
+                        Ok(mut r) => rows.append(&mut r),
+                        Err(_) => continue,
+                    }
+                }
+                rows.sort_by_key(|r| r.id);
                 for row in rows {
-                    last_id = row.id;
+                    last_id = last_id.max(row.id);
                     if let Some(needle) = search {
                         if !row.line.to_lowercase().contains(needle.as_str()) {
                             continue;

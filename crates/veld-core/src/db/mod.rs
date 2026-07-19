@@ -21,7 +21,7 @@ mod kv;
 mod logs;
 pub(crate) mod state;
 
-pub use logs::{LogFilter, LogRow, LogStream};
+pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};

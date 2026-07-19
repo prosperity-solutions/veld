@@ -40,6 +40,14 @@ impl LogStream {
     }
 }
 
+/// Whether a stored stream name is scoped per node (rows carry node/variant
+/// and readers window/filter by node) as opposed to run-level (internal/debug
+/// rows have `node = NULL`; setup rows carry a node but are read run-level).
+/// Single source of truth for readers that split sources by kind.
+pub fn stream_is_per_node(stream: &str) -> bool {
+    stream == LogStream::Server.as_str() || stream == LogStream::Client.as_str()
+}
+
 /// One stored log line.
 #[derive(Debug, Clone)]
 pub struct LogRow {

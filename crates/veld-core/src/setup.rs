@@ -1511,6 +1511,9 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
             .join("Library")
             .join("Application Support")
             .join("veld");
+        // Limitation: under sudo, env_reset strips XDG_DATA_HOME, so a user
+        // with a custom data home falls back to the default path here and
+        // their veld data dir survives a privileged uninstall.
         #[cfg(not(target_os = "macos"))]
         let veld_data = std::env::var("XDG_DATA_HOME")
             .map(PathBuf::from)
