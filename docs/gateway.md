@@ -139,7 +139,8 @@ File form (all fields optional, `SecretSource` accepted for secrets):
 - **Browser-facing pages are branded**: the apex `/` serves a small index
   page identifying the server as a Veld gateway; unknown slugs answer a
   branded "Share not found" 404 (unknown hosts and unmatched apex paths get a
-  generic branded 404); password-protected slugs show a branded login. All
+  generic branded 404); password-protected slugs show a branded login; a dead
+  tunnel or unresponsive upstream gets a branded 502/504. All
   pages follow [docs/branding.md](branding.md), are fully self-contained
   (inline CSS, no external assets), `noindex`, and deliberately static — no
   share metadata, counts, or hostnames are exposed to anonymous viewers.
@@ -204,7 +205,10 @@ Two consequences to know before sharing a non-trivial app:
   `readinessProbe` and Docker `HEALTHCHECK` work without knowing the domain.
   The gateway has no warm-up phase or external dependency, so today readiness
   equals liveness — the endpoints are split so probe configs have stable,
-  distinct targets if that ever changes. `GET /healthz` remains as a legacy
+  distinct targets if that ever changes. Readiness also stays `ok` through
+  the SIGTERM drain: traffic shedding during a rolling restart is handled by
+  the listener refusing new connections and the orchestrator removing the
+  endpoint, not by the probe flipping. `GET /healthz` remains as a legacy
   alias for liveness. Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
   safe; in-flight requests finish and heartbeats re-register.

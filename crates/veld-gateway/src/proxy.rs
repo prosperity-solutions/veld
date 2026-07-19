@@ -58,7 +58,12 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     let reg = &target.registration;
     if reg.conn.close_reason().is_some() {
         // The watcher will unpublish this slug momentarily; answer honestly.
-        return (StatusCode::BAD_GATEWAY, "share is no longer connected").into_response();
+        return crate::pages::error(
+            StatusCode::BAD_GATEWAY,
+            "Share disconnected",
+            "This share is no longer connected. The developer may have stopped \
+             sharing &mdash; ask them for a fresh link.",
+        );
     }
 
     let is_upgrade = wants_upgrade(req.headers());
@@ -105,11 +110,11 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         Ok(s) => s,
         Err(e) => {
             warn!(error = %format!("{e:#}"), hostname = %target.hostname, "tunnel stream failed");
-            return (
+            return crate::pages::error(
                 StatusCode::BAD_GATEWAY,
-                "could not reach the shared service",
-            )
-                .into_response();
+                "Could not reach the shared service",
+                "The tunnel to the shared service failed. Try again in a moment.",
+            );
         }
     };
 
@@ -134,19 +139,21 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
                 } else {
                     debug!(error = %e, hostname = %target.hostname, "upstream request failed");
                 }
-                return (
+                return crate::pages::error(
                     StatusCode::BAD_GATEWAY,
-                    "the shared service did not respond",
-                )
-                    .into_response();
+                    "The shared service did not respond",
+                    "The service behind this share closed the connection without \
+                     answering. Try again in a moment.",
+                );
             }
             Err(_) => {
                 debug!(hostname = %target.hostname, is_upgrade, "upstream response timed out");
-                return (
+                return crate::pages::error(
                     StatusCode::GATEWAY_TIMEOUT,
-                    "the shared service did not respond in time",
-                )
-                    .into_response();
+                    "The shared service timed out",
+                    "The service behind this share did not respond in time. \
+                     Try again in a moment.",
+                );
             }
         };
 

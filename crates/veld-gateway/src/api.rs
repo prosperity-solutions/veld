@@ -22,9 +22,6 @@ use crate::state::AppState;
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/", get(index))
-        .route("/healthz", get(livez))
-        .route("/livez", get(livez))
-        .route("/readyz", get(readyz))
         .route("/api/v1/shares", post(register))
         .route("/api/v1/shares/{id}", delete(unregister))
         .fallback(fallback_not_found)
@@ -38,19 +35,27 @@ async fn fallback_not_found() -> impl IntoResponse {
     crate::pages::not_found(crate::pages::NotFound::Generic)
 }
 
-/// Liveness (also the legacy `/healthz` alias): the process is up and the
-/// listener answers. A failing liveness probe should restart the container.
-pub async fn livez() -> &'static str {
-    "ok"
-}
-
-/// Readiness: safe to route traffic here. The gateway has no warm-up phase or
-/// external dependency to await — the registry is in-memory and tunnels are
-/// dialed per registration — so readiness equals liveness today. Kept as a
-/// distinct endpoint so orchestrators (Kubernetes `readinessProbe`) have a
-/// stable target if that ever changes.
-pub async fn readyz() -> &'static str {
-    "ok"
+/// Answer container/LB health probes — the single source of truth for the
+/// probe paths. `server::dispatch` consults this for the apex domain and for
+/// unknown hosts alike (probes address the pod by IP or an internal name, so
+/// the paths must answer on any Host); slug hosts never reach it — their
+/// paths belong to the proxied app. Add or retire a probe path HERE, nowhere
+/// else.
+///
+/// - `/livez` (and its legacy alias `/healthz`): liveness — the process is up
+///   and answering. A failing liveness probe should restart the container.
+/// - `/readyz`: readiness — safe to route traffic here. The gateway has no
+///   warm-up phase or external dependency to await (the registry is
+///   in-memory, tunnels are dialed per registration), so readiness equals
+///   liveness today; it stays `ok` through the SIGTERM drain as well, where
+///   traffic shedding is handled by the listener refusing new connections.
+///   Kept as a distinct endpoint so orchestrator probe configs have a stable
+///   target if that ever changes.
+pub fn health_response(path: &str) -> Option<axum::response::Response> {
+    match path {
+        "/healthz" | "/livez" | "/readyz" => Some("ok".into_response()),
+        _ => None,
+    }
 }
 
 type ApiError = (StatusCode, String);

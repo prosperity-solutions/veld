@@ -27,6 +27,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use veld_core::share::Capability;
 
+use crate::pages::html_escape;
 use crate::registry::SlugTarget;
 use crate::state::AppState;
 
@@ -507,19 +508,6 @@ fn login_page(status: StatusCode, next: &str, error: Option<&str>) -> Response {
         page,
     )
         .into_response()
-}
-
-/// Escape for HTML text/attribute contexts. `{`/`}` are escaped too: the page
-/// is assembled by ordered `{next}`/`{error}` string replacement, so braces
-/// surviving into an earlier substitution's VALUE (e.g. a viewer-supplied
-/// `next` of literally `/{error}`) must never be re-expanded by a later pass.
-fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('{', "&#123;")
-        .replace('}', "&#125;")
 }
 
 /// The login form + one-link script, rendered inside the branded page shell
@@ -1020,7 +1008,10 @@ mod tests {
             panic!("expected a response");
         };
         assert_eq!(resp.status(), StatusCode::OK);
-        assert!(body_string(resp).await.contains("<form"));
+        let body = body_string(resp).await;
+        assert!(body.contains("<form"), "{body}");
+        // The login page must carry the brand (rendered via pages::shell).
+        assert!(body.contains("class=\"wordmark\""), "{body}");
 
         let del = Request::builder()
             .method("DELETE")

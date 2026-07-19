@@ -13,7 +13,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use axum::Router;
 use axum::extract::{Request, State};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use tower::util::ServiceExt as _;
 use tracing::{info, warn};
 
@@ -117,6 +117,11 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
 
     let domain = &state.config.domain;
     if host == *domain {
+        // Health probes answer before the API router — same single source of
+        // truth as the unknown-host branch below.
+        if let Some(resp) = api::health_response(req.uri().path()) {
+            return resp;
+        }
         return match api::router().with_state(state.clone()).oneshot(req).await {
             Ok(resp) => resp,
             Err(never) => match never {},
@@ -137,11 +142,12 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     }
 
     // Unknown host: answer health probes (containers/LBs probe by IP or an
-    // internal name, not the public domain); everything else is a 404.
-    match req.uri().path() {
-        "/healthz" | "/livez" => api::livez().await.into_response(),
-        "/readyz" => api::readyz().await.into_response(),
-        _ => crate::pages::not_found(crate::pages::NotFound::Generic),
+    // internal name, not the public domain); everything else is a 404. The
+    // probe paths live in `api::health_response` — the one place to add or
+    // retire them.
+    match api::health_response(req.uri().path()) {
+        Some(resp) => resp,
+        None => crate::pages::not_found(crate::pages::NotFound::Generic),
     }
 }
 

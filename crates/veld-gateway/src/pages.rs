@@ -23,7 +23,8 @@ const WORDMARK_SVG: &str = r#"<svg class="wordmark" viewBox="0 0 3837 1463" fill
 </svg>"#;
 
 /// Page skeleton. Assembled by ordered literal replacement (`{title}`, then
-/// `{body}`) rather than `format!` so the CSS braces need no escaping. Both
+/// `{wordmark}`, then `{body}`) rather than `format!` so the CSS braces need
+/// no escaping. Both
 /// substituted values are trusted constants at every call site; anything
 /// viewer-controlled is escaped (braces included) before it can reach a page
 /// — see `html_escape` in `auth.rs`.
@@ -74,12 +75,27 @@ button:hover{filter:brightness(1.06)}
 "#;
 
 /// Wrap `body` in the branded page shell. Both arguments must be trusted
-/// HTML/text — no escaping happens here.
+/// HTML/text — no escaping happens here. Run anything viewer-controlled
+/// through [`html_escape`] before it gets anywhere near a page.
 pub fn shell(title: &str, body: &str) -> String {
     SHELL
         .replace("{title}", title)
         .replace("{wordmark}", WORDMARK_SVG)
         .replace("{body}", body)
+}
+
+/// Escape for HTML text/attribute contexts. `{`/`}` are escaped too: pages
+/// are assembled by ordered string replacement (see [`shell`] and the login
+/// page's `{next}`/`{error}` passes in `auth.rs`), so braces surviving into
+/// an earlier substitution's VALUE (e.g. a viewer-supplied `next` of
+/// literally `/{error}`) must never be re-expanded by a later pass.
+pub fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('{', "&#123;")
+        .replace('}', "&#125;")
 }
 
 /// Which flavor of 404 to render — a slug host whose share is gone reads
@@ -123,6 +139,16 @@ pub fn not_found(kind: NotFound) -> Response {
         ),
     };
     html_response(StatusCode::NOT_FOUND, shell(title, body))
+}
+
+/// A branded error page for viewer-facing failures (dead tunnel, upstream
+/// timeout…). `title` and `message` must be trusted constants — never echo
+/// request data here. Machine-facing responses (the registration API, abuse
+/// guards like 405/413, upgrade-path failures) stay plain text by design;
+/// see docs/branding.md.
+pub fn error(status: StatusCode, title: &str, message: &str) -> Response {
+    let body = format!("<h1>{title}</h1><p>{message}</p>");
+    html_response(status, shell(title, &body))
 }
 
 /// Assemble an HTML response with the headers every gateway page shares.
