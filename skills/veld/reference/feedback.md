@@ -80,7 +80,7 @@ usually enough.
     "viewport_width": 1440,
     "viewport_height": 900,
     "messages": [
-      { "author": "human", "body": "This button is too small", "screenshot": "/abs/path/.veld/feedback/dev/screenshots/ss_….png", "created_at": "…" },
+      { "author": "human", "body": "This button is too small", "screenshot": "/abs/path/.veld/tmp/screenshots/dev/ss_….png", "created_at": "…" },
       { "author": "agent", "body": "Bumped it to 40px", "created_at": "…" },
       { "author": "human", "body": "still too small", "created_at": "…" }
     ]

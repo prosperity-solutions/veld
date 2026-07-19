@@ -286,6 +286,10 @@ Three binaries work together:
 
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
+### Storage
+
+All CLI/daemon state — run state, the project registry, service logs, feedback threads and screenshots, relay auth tokens — lives in one SQLite database at `<data_dir>/veld/veld.db` (macOS: `~/Library/Application Support/veld/veld.db`; Linux: `~/.local/share/veld/veld.db`; override with `VELD_DB_PATH`). The file is `0600` (it holds secrets) and runs in WAL mode, so the CLI, daemon, and detached log writers read and write concurrently without file locking. The schema is versioned (`PRAGMA user_version`) and migrates forward automatically on upgrade — a CLI update never orphans or stops running environments because the data shape changed. A database created by a *newer* veld is refused with an error instead of being modified.
+
 ## Extensions
 
 ### Management UI
