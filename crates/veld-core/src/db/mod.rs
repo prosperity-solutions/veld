@@ -188,49 +188,60 @@ impl Db {
         let supported = MIGRATIONS.last().map(|m| m.version).unwrap_or(0);
         let conn = self.lock();
 
-        loop {
-            let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-            if version > supported {
-                return Err(DbError::NewerSchema {
-                    found: version,
-                    supported,
-                });
-            }
-            let Some(migration) = MIGRATIONS.iter().find(|m| m.version == version + 1) else {
-                return Ok(()); // up to date
-            };
+        // A future data-rewriting migration may hold the write lock longer
+        // than the normal 10s budget — give concurrent openers more patience
+        // while migrations might be running (reset after the loop).
+        conn.busy_timeout(std::time::Duration::from_secs(60))?;
 
-            // BEGIN IMMEDIATE serializes concurrent migrators (two processes
-            // upgrading at once); the version is re-checked inside the
-            // transaction so the loser of the race becomes a no-op.
-            conn.execute_batch("BEGIN IMMEDIATE")?;
-            let result = (|| -> Result<bool, rusqlite::Error> {
-                let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-                if v != version {
-                    return Ok(false); // someone else migrated first
+        let outcome = (|| -> Result<(), DbError> {
+            loop {
+                let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                if version > supported {
+                    return Err(DbError::NewerSchema {
+                        found: version,
+                        supported,
+                    });
                 }
-                (migration.apply)(&conn)?;
-                conn.pragma_update(None, "user_version", migration.version)?;
-                Ok(true)
-            })();
+                let Some(migration) = MIGRATIONS.iter().find(|m| m.version == version + 1) else {
+                    return Ok(()); // up to date
+                };
 
-            match result {
-                Ok(applied) => {
-                    conn.execute_batch("COMMIT")?;
-                    if applied {
-                        tracing::info!(
-                            version = migration.version,
-                            name = migration.name,
-                            "applied veld database migration"
-                        );
+                // BEGIN IMMEDIATE serializes concurrent migrators (two processes
+                // upgrading at once); the version is re-checked inside the
+                // transaction so the loser of the race becomes a no-op.
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                let result = (|| -> Result<bool, rusqlite::Error> {
+                    let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+                    if v != version {
+                        return Ok(false); // someone else migrated first
+                    }
+                    (migration.apply)(&conn)?;
+                    conn.pragma_update(None, "user_version", migration.version)?;
+                    Ok(true)
+                })();
+
+                match result {
+                    Ok(applied) => {
+                        conn.execute_batch("COMMIT")?;
+                        if applied {
+                            tracing::info!(
+                                version = migration.version,
+                                name = migration.name,
+                                "applied veld database migration"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK");
+                        return Err(e.into());
                     }
                 }
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK");
-                    return Err(e.into());
-                }
             }
-        }
+        })();
+
+        // Back to the normal per-operation budget.
+        conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        outcome
     }
 }
 

@@ -278,8 +278,10 @@ impl Db {
     }
 
     /// Remove a run. Also removes the project row when it has no runs left
-    /// (mirrors the old registry behavior). Logs and feedback are kept and
-    /// cleaned up separately (GC by age, stale-run cleanup on name reuse).
+    /// (mirrors the old registry behavior). Logs and feedback are kept:
+    /// feedback is cleared on run-name reuse (`FeedbackStore::clear`), logs
+    /// are only age-pruned by GC — a reused run name shows the previous
+    /// run's log lines until then, matching the old per-name log files.
     pub fn remove_run(&self, project_root: &Path, run_name: &str) -> Result<(), DbError> {
         let root = root_key(project_root);
         let mut conn = self.lock();

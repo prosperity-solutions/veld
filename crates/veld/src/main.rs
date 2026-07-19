@@ -394,7 +394,10 @@ enum Command {
     /// Internal (legacy): read stdin, prepend timestamps, append to a log
     /// file. Kept so detached pipelines started by a pre-SQLite veld keep
     /// working after an upgrade — if this subcommand disappeared, the running
-    /// server would die of SIGPIPE on its next write.
+    /// server would die of SIGPIPE on its next write. Note: those legacy
+    /// pipelines keep writing FILES, which the DB-backed `veld logs` does not
+    /// read — a pre-upgrade run stays visible and stoppable but its ongoing
+    /// output is only in `.veld/logs/` until the run is restarted.
     #[command(name = "_timestamp", hide = true)]
     InternalTimestamp {
         /// Path to the log file to append to.
