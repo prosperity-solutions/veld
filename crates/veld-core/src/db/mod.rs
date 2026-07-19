@@ -253,8 +253,11 @@ fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX idx_nodes_run ON nodes(run_row);
 
+        -- AUTOINCREMENT (not plain rowid) so ids stay strictly monotonic even
+        -- after pruning deletes the highest rows — follow mode uses the id as
+        -- a watermark across processes and must never see an id reused.
         CREATE TABLE log_lines (
-            id INTEGER PRIMARY KEY,
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_root TEXT NOT NULL,
             run_name TEXT NOT NULL,
             node TEXT,

@@ -39,16 +39,6 @@ impl LogStream {
         }
     }
 
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "server" => Some(Self::Server),
-            "client" => Some(Self::Client),
-            "setup" => Some(Self::Setup),
-            "debug" => Some(Self::Debug),
-            "internal" => Some(Self::Internal),
-            _ => None,
-        }
-    }
 }
 
 /// One stored log line.
@@ -259,15 +249,6 @@ impl Db {
         Ok(n)
     }
 
-    /// Delete all log lines for a run (stale-run cleanup on name reuse).
-    pub fn delete_logs(&self, project_root: &Path, run_name: &str) -> Result<(), DbError> {
-        let conn = self.lock();
-        conn.execute(
-            "DELETE FROM log_lines WHERE project_root = ?1 AND run_name = ?2",
-            params![root_key(project_root), run_name],
-        )?;
-        Ok(())
-    }
 }
 
 #[cfg(test)]
@@ -355,30 +336,25 @@ mod tests {
     }
 
     #[test]
-    fn delete_logs_scoped_to_run() {
+    fn ids_stay_monotonic_after_full_prune() {
+        // Follow mode uses the max id as a watermark; AUTOINCREMENT guarantees
+        // a fresh insert after pruning everything still gets a larger id.
         let (_dir, db) = test_db();
-        append(&db, Some("web"), LogStream::Server, "keep me? no");
-        db.append_log(
-            Path::new("/tmp/p"),
-            "other",
-            Some("web"),
-            Some("local"),
-            LogStream::Server,
-            chrono::Utc::now(),
-            "keep me",
-        )
-        .unwrap();
-        db.delete_logs(Path::new("/tmp/p"), "dev").unwrap();
-        assert!(
-            db.tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 10)
-                .unwrap()
-                .is_empty()
-        );
-        assert_eq!(
-            db.tail_logs(Path::new("/tmp/p"), "other", &LogFilter::default(), 10)
-                .unwrap()
-                .len(),
-            1
-        );
+        append(&db, Some("web"), LogStream::Server, "old");
+        let watermark = db.max_log_id().unwrap();
+        db.prune_logs_older_than(chrono::Utc::now() + chrono::Duration::hours(1))
+            .unwrap();
+        append(&db, Some("web"), LogStream::Server, "new");
+        let rows = db
+            .logs_after_id(
+                Path::new("/tmp/p"),
+                "dev",
+                &LogFilter::default(),
+                watermark,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "new");
+        assert!(rows[0].id > watermark);
     }
 }
