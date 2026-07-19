@@ -12,6 +12,7 @@
 //! age-pruned anyway.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use crate::state::{GlobalRegistry, RunState};
 
@@ -22,24 +23,45 @@ const IMPORT_FLAG: &str = "legacy.imported_at";
 impl Db {
     /// Run the legacy import once. Never fails — logs and moves on.
     pub(super) fn import_legacy_files_once(&self) {
-        match self.kv_get(IMPORT_FLAG) {
-            Ok(None) => {}
-            _ => return, // already imported (or kv unreadable — don't loop)
+        let legacy_data_dir = dirs::data_dir().map(|d| d.join("veld"));
+        let legacy_home_dir = dirs::home_dir().map(|h| h.join(".veld"));
+        self.import_legacy_from(legacy_data_dir.as_deref(), legacy_home_dir.as_deref());
+    }
+
+    /// The import body, with explicit source directories so it is testable.
+    /// `data_dir` held `registry.json` + `relay-tokens.json`; `home_dir`
+    /// held `hints.json`.
+    fn import_legacy_from(&self, data_dir: Option<&Path>, home_dir: Option<&Path>) {
+        // Claim the flag atomically: right after an upgrade the CLI and the
+        // daemon can open the database at the same time, and only one of them
+        // should run the import (it would be idempotent, but why race).
+        let claimed = {
+            let conn = self.lock();
+            conn.execute(
+                "INSERT INTO kv (key, value, updated_at) VALUES (?1, '', ?2)
+                 ON CONFLICT(key) DO NOTHING",
+                rusqlite::params![IMPORT_FLAG, super::now_str()],
+            )
+            .map(|n| n == 1)
+            .unwrap_or(false)
+        };
+        if !claimed {
+            return; // already imported (or kv unwritable — don't loop)
         }
 
-        self.import_registry_and_runs();
-        self.import_relay_tokens();
-        self.import_hints();
+        if let Some(data_dir) = data_dir {
+            self.import_registry_and_runs(&data_dir.join("registry.json"));
+            self.import_relay_tokens(&data_dir.join("relay-tokens.json"));
+        }
+        if let Some(home_dir) = home_dir {
+            self.import_hints(&home_dir.join("hints.json"));
+        }
 
         let _ = self.kv_set(IMPORT_FLAG, &super::now_str());
     }
 
-    fn import_registry_and_runs(&self) {
-        let Some(registry_path) = dirs::data_dir().map(|d| d.join("veld").join("registry.json"))
-        else {
-            return;
-        };
-        let Ok(data) = std::fs::read_to_string(&registry_path) else {
+    fn import_registry_and_runs(&self, registry_path: &Path) {
+        let Ok(data) = std::fs::read_to_string(registry_path) else {
             return; // nothing to import
         };
         let Ok(registry) = serde_json::from_str::<GlobalRegistry>(&data) else {
@@ -84,11 +106,8 @@ impl Db {
         }
     }
 
-    fn import_relay_tokens(&self) {
-        let Some(path) = dirs::data_dir().map(|d| d.join("veld").join("relay-tokens.json")) else {
-            return;
-        };
-        let Ok(bytes) = std::fs::read(&path) else {
+    fn import_relay_tokens(&self, path: &Path) {
+        let Ok(bytes) = std::fs::read(path) else {
             return;
         };
         let Ok(map) = serde_json::from_slice::<std::collections::BTreeMap<String, String>>(&bytes)
@@ -100,11 +119,8 @@ impl Db {
         }
     }
 
-    fn import_hints(&self) {
-        let Some(path) = dirs::home_dir().map(|h| h.join(".veld").join("hints.json")) else {
-            return;
-        };
-        let Ok(data) = std::fs::read_to_string(&path) else {
+    fn import_hints(&self, path: &Path) {
+        let Ok(data) = std::fs::read_to_string(path) else {
             return;
         };
         let count = serde_json::from_str::<serde_json::Value>(&data)
@@ -113,5 +129,106 @@ impl Db {
         if let Some(count) = count {
             let _ = self.kv_set("hints.privileged_hint_count", &count.to_string());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::test_db;
+    use crate::state::{NodeState, RegistryEntry, RunStatus};
+
+    /// Seed a legacy layout: registry.json + per-project state.json +
+    /// relay-tokens.json in `data`, hints.json in `home`.
+    fn seed_legacy(dir: &Path) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+        let data = dir.join("data");
+        let home = dir.join("home");
+        let project = dir.join("projA");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(".veld")).unwrap();
+
+        let mut run = RunState::new("dev", "proj");
+        run.status = RunStatus::Running;
+        let mut node = NodeState::new("web", "local");
+        node.pid = Some(1234);
+        node.outputs
+            .insert("token".into(), crate::sensitive::encrypt_value("s3cret"));
+        node.sensitive_keys = vec!["token".into()];
+        run.nodes.insert("web:local".into(), node);
+
+        let state = serde_json::json!({ "runs": { "dev": run } });
+        std::fs::write(
+            project.join(".veld").join("state.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = GlobalRegistry::default();
+        registry.projects.insert(
+            project.to_string_lossy().into_owned(),
+            RegistryEntry {
+                project_root: project.clone(),
+                project_name: "proj".into(),
+                runs: HashMap::new(),
+            },
+        );
+        std::fs::write(
+            data.join("registry.json"),
+            serde_json::to_string(&registry).unwrap(),
+        )
+        .unwrap();
+
+        std::fs::write(
+            data.join("relay-tokens.json"),
+            r#"{"https://relay.example/":"tok-1"}"#,
+        )
+        .unwrap();
+        std::fs::write(home.join("hints.json"), r#"{"privileged_hint_count":3}"#).unwrap();
+
+        (data, home, project)
+    }
+
+    #[test]
+    fn imports_runs_tokens_and_hints_once() {
+        let (dir, db) = test_db();
+        let (data, home, project) = seed_legacy(dir.path());
+
+        db.import_legacy_from(Some(&data), Some(&home));
+
+        // Run state landed, sensitive value decrypts on load.
+        let run = db.get_run(&project, "dev").unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Running);
+        let node = &run.nodes["web:local"];
+        assert_eq!(node.pid, Some(1234));
+        assert_eq!(node.outputs["token"], "s3cret");
+
+        // Tokens + hints landed.
+        assert_eq!(db.relay_tokens()["https://relay.example/"], "tok-1");
+        assert_eq!(
+            db.kv_get("hints.privileged_hint_count").unwrap().as_deref(),
+            Some("3")
+        );
+        assert!(db.kv_get(IMPORT_FLAG).unwrap().is_some());
+
+        // Second call is a no-op: mutate the DB, re-import, nothing reverts.
+        db.remove_run(&project, "dev").unwrap();
+        db.import_legacy_from(Some(&data), Some(&home));
+        assert!(db.get_run(&project, "dev").unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_or_missing_files_are_skipped() {
+        let (dir, db) = test_db();
+        let data = dir.path().join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("registry.json"), "{ not json").unwrap();
+        std::fs::write(data.join("relay-tokens.json"), "also not json").unwrap();
+
+        // Must not panic; flag still set so it never loops.
+        db.import_legacy_from(Some(&data), None);
+        assert!(db.registry().unwrap().projects.is_empty());
+        assert!(db.relay_tokens().is_empty());
+        assert!(db.kv_get(IMPORT_FLAG).unwrap().is_some());
     }
 }

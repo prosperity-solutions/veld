@@ -83,10 +83,12 @@ pub async fn run() -> i32 {
         }
     }
 
-    // Prune old log lines and orphaned feedback data (older than 7 days).
+    // Prune old log lines and orphaned feedback data (older than 7 days),
+    // then reclaim the freed pages.
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     let logs_pruned = db.prune_logs_older_than(cutoff).unwrap_or(0);
     let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
+    let _ = db.vacuum();
 
     // Print summary.
     let mut parts = Vec::new();

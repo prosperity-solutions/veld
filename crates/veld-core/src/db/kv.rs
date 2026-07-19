@@ -66,10 +66,15 @@ impl Db {
             })
             .optional()?;
         let now = chrono::Utc::now();
-        let fresh_enough = last
-            .as_deref()
-            .and_then(parse_ts)
-            .is_some_and(|t| (now - t).to_std().unwrap_or_default() < interval);
+        // A future-dated stamp (clock moved backward) counts as claimable —
+        // otherwise auto-GC/update checks would stall until wall-clock
+        // catches up.
+        let fresh_enough = last.as_deref().and_then(parse_ts).is_some_and(|t| {
+            (now - t)
+                .to_std()
+                .map(|age| age < interval)
+                .unwrap_or(false)
+        });
         if fresh_enough {
             tx.commit()?;
             return Ok(false);

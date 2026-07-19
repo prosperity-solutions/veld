@@ -37,14 +37,16 @@ impl FeedbackStore {
         &self.run_name
     }
 
-    /// Check whether any feedback data exists for this run.
+    /// Check whether any feedback data exists for this run (any of the four
+    /// feedback tables — a screenshots-only scope still counts).
     pub fn has_data(&self) -> bool {
         let conn = self.db.lock();
         let n: i64 = conn
             .query_row(
                 "SELECT (SELECT COUNT(*) FROM feedback_threads WHERE project_root=?1 AND run_name=?2)
                       + (SELECT COUNT(*) FROM feedback_events  WHERE project_root=?1 AND run_name=?2)
-                      + (SELECT COUNT(*) FROM feedback_sessions WHERE project_root=?1 AND run_name=?2)",
+                      + (SELECT COUNT(*) FROM feedback_sessions WHERE project_root=?1 AND run_name=?2)
+                      + (SELECT COUNT(*) FROM feedback_screenshots WHERE project_root=?1 AND run_name=?2)",
                 params![self.root, self.run_name],
                 |r| r.get(0),
             )
@@ -545,15 +547,25 @@ impl Db {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let cutoff = ts_to_str(cutoff);
-        // Scopes with no matching run and no thread updated since the cutoff.
+        // Scopes (from any feedback table — a screenshots- or session-only
+        // scope still counts) with no matching run and no activity since the
+        // cutoff.
         let scopes: Vec<(String, String)> = {
             let mut stmt = tx.prepare(
-                "SELECT DISTINCT f.project_root, f.run_name
-                 FROM feedback_threads f
+                "SELECT f.project_root, f.run_name
+                 FROM (
+                     SELECT project_root, run_name, updated_at AS ts FROM feedback_threads
+                     UNION ALL
+                     SELECT project_root, run_name, ts FROM feedback_events
+                     UNION ALL
+                     SELECT project_root, run_name, last_heartbeat AS ts FROM feedback_sessions
+                     UNION ALL
+                     SELECT project_root, run_name, created_at AS ts FROM feedback_screenshots
+                 ) f
                  LEFT JOIN runs r ON r.project_root = f.project_root AND r.name = f.run_name
                  WHERE r.id IS NULL
                  GROUP BY f.project_root, f.run_name
-                 HAVING MAX(f.updated_at) < ?1",
+                 HAVING MAX(f.ts) < ?1",
             )?;
             stmt.query_map([&cutoff], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<Result<_, _>>()?

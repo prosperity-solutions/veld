@@ -1432,17 +1432,18 @@ async fn execute_start_server_isolated(
     // checks still allows `veld stop` to find and kill this process.
     {
         let key = RunState::node_key(&sel.node, &sel.variant);
-        // Lock briefly for in-memory update only (no .await = cancellation-safe).
-        let (run_snapshot, project_root) = {
-            let mut checkpoint = ctx.checkpoint.lock().expect("checkpoint mutex poisoned");
-            checkpoint.run.execution_order.push(key.clone());
-            checkpoint.run.nodes.insert(key, node_state.clone());
-            (checkpoint.run.clone(), checkpoint.project_root.clone())
-        };
-        // Write outside the lock to avoid blocking parallel node tasks.
+        // The DB write happens INSIDE the checkpoint lock: `save_run` replaces
+        // the whole run (all nodes), so two parallel node tasks snapshotting
+        // and writing outside the lock could interleave and the older snapshot
+        // would clobber the newer one — dropping a just-spawned PID from the
+        // DB right when Ctrl+C needs it. The write is a few ms of blocking
+        // I/O; the lock has no `.await` inside, so it stays cancellation-safe.
+        let mut checkpoint = ctx.checkpoint.lock().expect("checkpoint mutex poisoned");
+        checkpoint.run.execution_order.push(key.clone());
+        checkpoint.run.nodes.insert(key, node_state.clone());
         let _ = ctx
             .db
-            .save_run(&project_root, &ctx.config.name, &run_snapshot);
+            .save_run(&checkpoint.project_root, &ctx.config.name, &checkpoint.run);
     }
 
     // Readiness probe — inlined to emit progress events between phases.

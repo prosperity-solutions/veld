@@ -71,12 +71,18 @@ pub struct Db {
 }
 
 impl Db {
+    /// The `VELD_DB_PATH` override, if set to a non-empty value.
+    fn path_override() -> Option<PathBuf> {
+        std::env::var("VELD_DB_PATH")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
+    }
+
     /// The default database path: `$VELD_DB_PATH` or `<data_dir>/veld/veld.db`.
     pub fn default_path() -> Result<PathBuf, DbError> {
-        if let Ok(p) = std::env::var("VELD_DB_PATH") {
-            if !p.is_empty() {
-                return Ok(PathBuf::from(p));
-            }
+        if let Some(p) = Self::path_override() {
+            return Ok(p);
         }
         dirs::data_dir()
             .map(|d| d.join("veld").join("veld.db"))
@@ -93,7 +99,9 @@ impl Db {
     pub fn open() -> Result<Self, DbError> {
         let path = Self::default_path()?;
         let db = Self::open_at(&path)?;
-        if std::env::var("VELD_DB_PATH").is_err() {
+        // Same predicate as `default_path`: only the real default database
+        // gets the import (an empty VELD_DB_PATH counts as unset there too).
+        if Self::path_override().is_none() {
             db.import_legacy_files_once();
         }
         Ok(db)
@@ -127,6 +135,11 @@ impl Db {
         })?;
 
         conn.busy_timeout(std::time::Duration::from_secs(10))?;
+        // auto_vacuum must be decided before the first table is created — it
+        // cannot be enabled later without a full VACUUM. INCREMENTAL lets GC
+        // reclaim pages freed by log/screenshot pruning (see `Db::vacuum`).
+        // On an existing database this pragma is a no-op, which is fine.
+        conn.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
         // journal_mode returns the resulting mode as a row — use query_row.
         let _: String = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0))?;
         conn.execute_batch("PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON;")?;
@@ -139,8 +152,32 @@ impl Db {
     }
 
     /// Lock the shared connection. Panics only if a previous holder panicked.
+    ///
+    /// The mutex is NOT reentrant: while the guard is alive, calling any other
+    /// `Db` method on the same thread deadlocks silently. Do all your SQL
+    /// through the one guard, then drop it before calling other methods.
     pub(crate) fn lock(&self) -> MutexGuard<'_, Connection> {
         self.conn.lock().expect("veld db mutex poisoned")
+    }
+
+    /// The current schema version (`PRAGMA user_version`). For diagnostics.
+    pub fn schema_version(&self) -> Result<i64, DbError> {
+        let conn = self.lock();
+        let v: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        Ok(v)
+    }
+
+    /// Reclaim disk space after large deletes: move freed pages out of the
+    /// file (incremental vacuum) and truncate the WAL. Called by GC after
+    /// pruning; best-effort.
+    pub fn vacuum(&self) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        // wal_checkpoint returns a result row — use query_row.
+        let _: (i64, i64, i64) = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -198,7 +235,14 @@ impl Db {
 }
 
 /// A single schema migration step. `version` is the `user_version` the
-/// database has *after* applying it; steps must be consecutive from 1.
+/// database has *after* applying it; steps must be consecutive from 1
+/// (enforced by the `migrations_are_consecutive` test).
+///
+/// NEVER modify a migration that has shipped in a release: existing databases
+/// are already past it and will never re-run it — your change would apply
+/// only to fresh databases and every upgraded user would be missing it
+/// (e.g. "no such column" at runtime). Schema changes are always a NEW
+/// migration appended to `MIGRATIONS`.
 struct Migration {
     version: i64,
     name: &'static str,
@@ -351,6 +395,35 @@ pub(crate) fn test_db() -> (tempfile::TempDir, Db) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrations_are_consecutive() {
+        // `migrate()` walks version+1 steps and would silently stop at a gap;
+        // `supported` assumes the list is sorted. Enforce both.
+        for (i, m) in MIGRATIONS.iter().enumerate() {
+            assert_eq!(
+                m.version,
+                (i + 1) as i64,
+                "MIGRATIONS[{i}] ('{}') must have version {} — steps are consecutive from 1",
+                m.name,
+                i + 1
+            );
+        }
+    }
+
+    #[test]
+    fn timestamps_sort_lexicographically() {
+        // `logs_since` (ts >= ?) and GC pruning compare timestamp TEXT
+        // columns as strings — ts_to_str must keep lexicographic order equal
+        // to chronological order (fixed width, UTC, Z suffix).
+        let base = chrono::Utc::now();
+        let mut prev = ts_to_str(base - chrono::Duration::microseconds(10));
+        for us in [-5i64, -1, 0, 1, 999, 1_000_000, 60_000_000] {
+            let next = ts_to_str(base + chrono::Duration::microseconds(us));
+            assert!(prev < next, "{prev} !< {next}");
+            prev = next;
+        }
+    }
 
     #[test]
     fn open_creates_schema_and_reopens() {

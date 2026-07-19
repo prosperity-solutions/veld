@@ -161,10 +161,45 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         }
     }
 
-    // Phase 2: Prune old log lines and orphaned feedback data.
+    // Phase 2: Prune old log lines and orphaned feedback data, then reclaim
+    // the freed pages (screenshot BLOBs and log rows add up).
     let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
     let _ = db.prune_orphaned_feedback(log_cutoff);
+    let _ = db.vacuum();
+
+    // Phase 3: Prune leftover pre-SQLite log files from each project's
+    // .veld/logs/ directory (written by old veld versions and by legacy
+    // `_timestamp` pipelines that survive the upgrade). Same age policy.
+    for reg_entry in registry.projects.values() {
+        let logs_dir = reg_entry.project_root.join(".veld").join("logs");
+        if logs_dir.exists() {
+            let mut entries = match tokio::fs::read_dir(&logs_dir).await {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            while let Some(entry) = entries.next_entry().await.unwrap_or(None) {
+                let path = entry.path();
+                if let Ok(meta) = tokio::fs::metadata(&path).await {
+                    if let Ok(modified) = meta.modified() {
+                        let age = std::time::SystemTime::now()
+                            .duration_since(modified)
+                            .unwrap_or_default();
+                        let age_hours = age.as_secs() as i64 / 3600;
+
+                        if age_hours > MAX_LOG_AGE_HOURS {
+                            debug!("pruning old log file: {}", path.display());
+                            if meta.is_dir() {
+                                let _ = tokio::fs::remove_dir_all(&path).await;
+                            } else {
+                                let _ = tokio::fs::remove_file(&path).await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(summary)
 }

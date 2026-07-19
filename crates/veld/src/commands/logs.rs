@@ -25,6 +25,10 @@ impl SourceFilter {
     }
 
     /// Which stored streams this filter includes.
+    ///
+    /// NOTE: this is a hand-maintained mapping onto `veld_core::db::LogStream`
+    /// — when a new stream variant is added there, list it here (under `All`
+    /// at minimum) or `veld logs` will never show it.
     fn streams(&self) -> Vec<&'static str> {
         match self {
             // "all" intentionally includes the setup/debug streams too — they
@@ -90,39 +94,78 @@ pub async fn run(opts: LogsOptions) -> i32 {
     };
     let run_name = run_name.as_str();
 
-    if project_state.get_run(run_name).is_none() {
+    let Some(run_state) = project_state.get_run(run_name) else {
         output::print_error(&format!("Run '{run_name}' not found."), json);
         return 1;
-    }
+    };
 
+    // Combined filter used by follow mode (and to scope each per-source read).
     let filter = LogFilter {
         node: node.clone(),
         variant: None,
         streams: Some(source.streams()),
     };
 
-    // Historical snapshot.
-    let since_duration = since.as_deref().and_then(parse_duration);
-    let rows = if let Some(secs) = since_duration {
-        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs as i64);
-        db.logs_since(&project_root, run_name, &filter, cutoff)
-    } else {
-        db.tail_logs(&project_root, run_name, &filter, lines)
-    };
-    let rows = match rows {
-        Ok(rows) => rows,
-        Err(e) => {
-            output::print_error(&format!("Failed to read logs: {e}"), json);
-            return 1;
+    // Build the per-source list, mirroring the old one-file-per-source layout:
+    // `--lines N` means N lines per source (per node+stream), not N total —
+    // otherwise one chatty node pushes every other node out of the window.
+    let mut source_filters: Vec<LogFilter> = Vec::new();
+    for stream in source.streams() {
+        let per_node = stream == LogStream::Server.as_str() || stream == LogStream::Client.as_str();
+        if per_node {
+            // Per-node streams: one source per (node, variant).
+            let mut targets: Vec<(&str, &str)> = run_state
+                .nodes
+                .values()
+                .filter(|ns| node.as_deref().is_none_or(|f| ns.node_name == f))
+                .map(|ns| (ns.node_name.as_str(), ns.variant.as_str()))
+                .collect();
+            targets.sort();
+            for (node_name, variant) in targets {
+                source_filters.push(LogFilter {
+                    node: Some(node_name.to_owned()),
+                    variant: Some(variant.to_owned()),
+                    streams: Some(vec![stream]),
+                });
+            }
+        } else {
+            // Run-level streams (internal/debug; setup rows carry a node but
+            // the node: None filter matches them too).
+            source_filters.push(LogFilter {
+                node: None,
+                variant: None,
+                streams: Some(vec![stream]),
+            });
         }
-    };
+    }
 
-    // Snapshot point for follow mode: continue exactly after the last row we
-    // showed (no gap, no duplicates). When nothing matched yet, start at the
-    // current global maximum instead of dumping the entire history.
+    // Historical snapshot: read each source, then interleave by timestamp.
+    let since_duration = since.as_deref().and_then(parse_duration);
+    let mut rows: Vec<LogRow> = Vec::new();
+    for sf in &source_filters {
+        let result = if let Some(secs) = since_duration {
+            let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs as i64);
+            db.logs_since(&project_root, run_name, sf, cutoff)
+        } else {
+            db.tail_logs(&project_root, run_name, sf, lines)
+        };
+        match result {
+            Ok(mut r) => rows.append(&mut r),
+            Err(e) => {
+                output::print_error(&format!("Failed to read logs: {e}"), json);
+                return 1;
+            }
+        }
+    }
+    rows.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
+
+    // Snapshot point for follow mode: continue after the highest row id we
+    // showed (no duplicates). When nothing matched yet, start at the current
+    // global maximum instead of dumping the entire history.
     let last_id = rows
-        .last()
+        .iter()
         .map(|r| r.id)
+        .max()
         .unwrap_or_else(|| db.max_log_id().unwrap_or(0));
 
     let search_lower = search.as_deref().map(|s| s.to_lowercase());

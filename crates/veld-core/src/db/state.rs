@@ -376,11 +376,21 @@ mod tests {
         let mut run = RunState::new(name, "proj");
         run.status = RunStatus::Running;
         let mut node = NodeState::new("web", "local");
+        node.status = NodeStatus::Healthy;
         node.pid = Some(4242);
         node.port = Some(3000);
         node.url = Some("https://web.test.veld.localhost".into());
         node.outputs.insert("token".into(), "secret-value".into());
         node.sensitive_keys = vec!["token".into()];
+        node.readiness_phases.push(ReadinessPhase {
+            phase: 1,
+            passed: true,
+            last_error: None,
+            passed_at: Some(chrono::Utc::now()),
+        });
+        node.recovery_count = 2;
+        node.consecutive_failures = 1;
+        node.last_liveness_error = Some("probe timed out".into());
         run.execution_order.push("web:local".into());
         run.nodes.insert("web:local".into(), node);
         run
@@ -398,8 +408,21 @@ mod tests {
         assert_eq!(loaded.run_id, run.run_id);
         assert_eq!(loaded.status, RunStatus::Running);
         assert_eq!(loaded.execution_order, vec!["web:local".to_string()]);
+        // Assert EVERY NodeState field so an unwired or misaligned column
+        // fails here instead of silently dropping data.
         let node = &loaded.nodes["web:local"];
+        assert_eq!(node.node_name, "web");
+        assert_eq!(node.variant, "local");
+        assert_eq!(node.status, NodeStatus::Healthy);
         assert_eq!(node.pid, Some(4242));
+        assert_eq!(node.port, Some(3000));
+        assert_eq!(node.url.as_deref(), Some("https://web.test.veld.localhost"));
+        assert_eq!(node.readiness_phases.len(), 1);
+        assert!(node.readiness_phases[0].passed);
+        assert_eq!(node.recovery_count, 2);
+        assert_eq!(node.consecutive_failures, 1);
+        assert_eq!(node.last_liveness_error.as_deref(), Some("probe timed out"));
+        assert_eq!(node.sensitive_keys, vec!["token".to_string()]);
         // Sensitive outputs come back decrypted.
         assert_eq!(node.outputs["token"], "secret-value");
 

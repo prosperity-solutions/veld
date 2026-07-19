@@ -349,6 +349,36 @@ impl Diagnostics {
     }
 
     async fn gather_checks(&mut self) {
+        // 0. Central database opens and is at a supported schema version.
+        // Everything (run state, logs, feedback, tokens) lives here now, so a
+        // corrupt/locked/newer-than-supported database must be visible in the
+        // one diagnostic command.
+        {
+            let path = veld_core::db::Db::default_path()
+                .map(|p| tilde_path(&p))
+                .unwrap_or_else(|_| "unknown".into());
+            match veld_core::db::Db::open() {
+                Ok(db) => {
+                    let version = db.schema_version().unwrap_or(0);
+                    let size = veld_core::db::Db::default_path()
+                        .ok()
+                        .and_then(|p| std::fs::metadata(p).ok())
+                        .map(|m| format!("{:.1} MB", m.len() as f64 / 1_048_576.0))
+                        .unwrap_or_else(|| "?".into());
+                    self.checks.push(Check {
+                        pass: true,
+                        label: format!("Database OK ({path}, schema v{version}, {size})"),
+                    });
+                }
+                Err(e) => {
+                    self.checks.push(Check {
+                        pass: false,
+                        label: format!("Database not usable at {path}: {e}"),
+                    });
+                }
+            }
+        }
+
         // 1. Helper socket reachable
         let helper_ok = veld_core::helper::HelperClient::connect().await.is_ok();
         self.checks.push(Check {

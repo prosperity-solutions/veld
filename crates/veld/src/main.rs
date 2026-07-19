@@ -170,7 +170,7 @@ enum Command {
         #[arg(long)]
         node: Option<String>,
 
-        /// Number of lines to show.
+        /// Number of lines to show per node/stream.
         #[arg(long, default_value = "50")]
         lines: usize,
 
@@ -595,14 +595,17 @@ async fn main() {
             // Fast path: no config loading, no network — stdin → database.
             // Used internally by detached server mode; this process outlives
             // the CLI and keeps writing as long as the server produces output.
+            //
+            // This process is the read end of the server's stdout pipe: if it
+            // ever exits while the server is running, the server takes
+            // SIGPIPE on its next write and dies. So NOTHING here is fatal —
+            // if the database can't be opened (downgrade, transient lock) we
+            // keep draining stdin and drop the lines rather than kill the
+            // environment.
             use std::io::BufRead;
-            let db = match veld_core::db::Db::open() {
-                Ok(db) => db,
-                Err(e) => {
-                    eprintln!("veld _log: failed to open database: {e}");
-                    std::process::exit(1);
-                }
-            };
+            let db = veld_core::db::Db::open()
+                .map_err(|e| eprintln!("veld _log: failed to open database, dropping logs: {e}"))
+                .ok();
             let stdin = std::io::stdin();
             let mut reader = stdin.lock();
             let mut buf = String::new();
@@ -612,6 +615,7 @@ async fn main() {
                 match reader.read_line(&mut buf) {
                     Ok(0) => break, // EOF
                     Ok(_) => {
+                        let Some(ref db) = db else { continue };
                         let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
                         let _ = db.append_log(
                             &project_root,

@@ -38,7 +38,6 @@ impl LogStream {
             LogStream::Internal => "internal",
         }
     }
-
 }
 
 /// One stored log line.
@@ -74,16 +73,20 @@ impl LogFilter {
             sql.push_str(" AND variant = ?");
             params.push(Box::new(variant.clone()));
         }
+        // An empty stream list is treated like `None` (match all) — emitting
+        // `IN ()` would be a SQL syntax error.
         if let Some(ref streams) = self.streams {
-            sql.push_str(" AND stream IN (");
-            for (i, s) in streams.iter().enumerate() {
-                if i > 0 {
-                    sql.push(',');
+            if !streams.is_empty() {
+                sql.push_str(" AND stream IN (");
+                for (i, s) in streams.iter().enumerate() {
+                    if i > 0 {
+                        sql.push(',');
+                    }
+                    sql.push('?');
+                    params.push(Box::new(s.to_string()));
                 }
-                sql.push('?');
-                params.push(Box::new(s.to_string()));
+                sql.push(')');
             }
-            sql.push(')');
         }
         (sql, params)
     }
@@ -248,7 +251,6 @@ impl Db {
         let n = conn.execute("DELETE FROM log_lines WHERE ts < ?1", [ts_to_str(cutoff)])?;
         Ok(n)
     }
-
 }
 
 #[cfg(test)]
@@ -346,12 +348,7 @@ mod tests {
             .unwrap();
         append(&db, Some("web"), LogStream::Server, "new");
         let rows = db
-            .logs_after_id(
-                Path::new("/tmp/p"),
-                "dev",
-                &LogFilter::default(),
-                watermark,
-            )
+            .logs_after_id(Path::new("/tmp/p"), "dev", &LogFilter::default(), watermark)
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].line, "new");
