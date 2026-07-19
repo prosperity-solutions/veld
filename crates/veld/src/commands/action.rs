@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use veld_core::config::{self, ActionConfig, VeldConfig};
-use veld_core::state::{NodeState, ProjectState, RunState};
+use veld_core::state::{NodeState, RunState};
 use veld_core::variables::{self, VariableContext};
 
 use crate::output;
@@ -26,7 +26,10 @@ pub async fn run(
     };
     let project_root = config::project_root(&config_path);
 
-    let project_state = match ProjectState::load(&project_root) {
+    let Some(db) = super::open_db(json) else {
+        return 1;
+    };
+    let project_state = match db.load_project_state(&project_root) {
         Ok(s) => s,
         Err(e) => {
             output::print_error(&format!("Failed to load state: {e}"), json);

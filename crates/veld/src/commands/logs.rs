@@ -1,11 +1,6 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
-
 use veld_core::config;
+use veld_core::db::{Db, LogFilter, LogRow, LogStream};
 use veld_core::logging;
-use veld_core::state::ProjectState;
 
 use crate::output;
 
@@ -26,6 +21,24 @@ impl SourceFilter {
             "client" => Some(Self::Client),
             "internal" | "veld" => Some(Self::Internal),
             _ => None,
+        }
+    }
+
+    /// Which stored streams this filter includes.
+    fn streams(&self) -> Vec<&'static str> {
+        match self {
+            // "all" intentionally includes the setup/debug streams too — they
+            // were separate files before and are part of the run's story.
+            Self::All => vec![
+                LogStream::Server.as_str(),
+                LogStream::Client.as_str(),
+                LogStream::Setup.as_str(),
+                LogStream::Debug.as_str(),
+                LogStream::Internal.as_str(),
+            ],
+            Self::Server => vec![LogStream::Server.as_str(), LogStream::Setup.as_str()],
+            Self::Client => vec![LogStream::Client.as_str()],
+            Self::Internal => vec![LogStream::Internal.as_str()],
         }
     }
 }
@@ -60,7 +73,10 @@ pub async fn run(opts: LogsOptions) -> i32 {
     };
     let project_root = config::project_root(&config_path);
 
-    let project_state = match ProjectState::load(&project_root) {
+    let Some(db) = super::open_db(json) else {
+        return 1;
+    };
+    let project_state = match db.load_project_state(&project_root) {
         Ok(s) => s,
         Err(e) => {
             output::print_error(&format!("Failed to load state: {e}"), json);
@@ -74,162 +90,65 @@ pub async fn run(opts: LogsOptions) -> i32 {
     };
     let run_name = run_name.as_str();
 
-    let run_state = match project_state.get_run(run_name) {
-        Some(r) => r,
-        None => {
-            output::print_error(&format!("Run '{run_name}' not found."), json);
+    if project_state.get_run(run_name).is_none() {
+        output::print_error(&format!("Run '{run_name}' not found."), json);
+        return 1;
+    }
+
+    let filter = LogFilter {
+        node: node.clone(),
+        variant: None,
+        streams: Some(source.streams()),
+    };
+
+    // Historical snapshot.
+    let since_duration = since.as_deref().and_then(parse_duration);
+    let rows = if let Some(secs) = since_duration {
+        let cutoff = chrono::Utc::now() - chrono::Duration::seconds(secs as i64);
+        db.logs_since(&project_root, run_name, &filter, cutoff)
+    } else {
+        db.tail_logs(&project_root, run_name, &filter, lines)
+    };
+    let rows = match rows {
+        Ok(rows) => rows,
+        Err(e) => {
+            output::print_error(&format!("Failed to read logs: {e}"), json);
             return 1;
         }
     };
 
-    // Determine which nodes to show logs for.
-    let mut targets: Vec<(&str, &str)> = Vec::new();
-    for ns in run_state.nodes.values() {
-        if let Some(ref filter_node) = node {
-            if ns.node_name != *filter_node {
-                continue;
-            }
-        }
-        targets.push((&ns.node_name, &ns.variant));
-    }
-    targets.sort();
-
-    if targets.is_empty() {
-        output::print_info("No matching nodes found.");
-        return 0;
-    }
-
-    let since_duration = since.as_deref().and_then(parse_duration);
-
-    // Track file positions after historical read so follow mode can continue
-    // exactly where the snapshot left off (no gap, no duplicates).
-    let mut positions: HashMap<PathBuf, u64> = HashMap::new();
-    let mut all_output: Vec<serde_json::Value> = Vec::new();
-
-    // Build list of (path, node, variant, source_label) for each log file to read.
-    let mut log_sources: Vec<(PathBuf, &str, &str, &str)> = Vec::new();
-
-    // Internal (veld daemon) log — not per-node, shown when source is "all" or "internal".
-    if source == SourceFilter::All || source == SourceFilter::Internal {
-        let internal_path = logging::internal_log_file(&project_root, run_name);
-        log_sources.push((internal_path, "_veld", "internal", "internal"));
-    }
-
-    if source != SourceFilter::Internal {
-        for (node_name, variant) in &targets {
-            if source != SourceFilter::Client {
-                log_sources.push((
-                    logging::log_file(&project_root, run_name, node_name, variant),
-                    node_name,
-                    variant,
-                    "server",
-                ));
-            }
-            if source != SourceFilter::Server {
-                log_sources.push((
-                    logging::client_log_file(&project_root, run_name, node_name, variant),
-                    node_name,
-                    variant,
-                    "client",
-                ));
-            }
-        }
-    }
-
-    // Collect all lines with metadata for interleaved sorting.
-    struct LogEntry {
-        line: String,
-        node: String,
-        variant: String,
-        source: String,
-    }
-    let mut all_entries: Vec<LogEntry> = Vec::new();
-
-    for (log_path, node_name, variant, src) in &log_sources {
-        if !log_path.exists() {
-            positions.insert(log_path.clone(), 0);
-            continue;
-        }
-
-        let log_lines = if let Some(secs) = since_duration {
-            let dur = chrono::Duration::seconds(secs as i64);
-            match logging::lines_since(log_path, dur).await {
-                Ok(l) => logging::merge_continuation_lines(l),
-                Err(e) => {
-                    output::print_error(
-                        &format!("Failed to read log for {node_name}:{variant} ({src}): {e}"),
-                        json,
-                    );
-                    continue;
-                }
-            }
-        } else {
-            match logging::tail_lines(log_path, lines).await {
-                Ok(l) => logging::merge_continuation_lines(l),
-                Err(e) => {
-                    output::print_error(
-                        &format!("Failed to read log for {node_name}:{variant} ({src}): {e}"),
-                        json,
-                    );
-                    continue;
-                }
-            }
-        };
-
-        for line in log_lines {
-            all_entries.push(LogEntry {
-                line,
-                node: node_name.to_string(),
-                variant: variant.to_string(),
-                source: src.to_string(),
-            });
-        }
-
-        // Record current file size so follow mode starts right after.
-        if let Ok(metadata) = tokio::fs::metadata(log_path).await {
-            positions.insert(log_path.clone(), metadata.len());
-        }
-    }
-
-    // Sort all entries by parsed timestamp for correct interleaving.
-    // Server logs use +00:00 suffix, client logs use Z suffix with different
-    // fractional-second precision — lexicographic sort would be wrong.
-    all_entries.sort_by(|a, b| {
-        let ts_a = logging::extract_timestamp(&a.line)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-        let ts_b = logging::extract_timestamp(&b.line)
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
-        match (ts_a, ts_b) {
-            (Some(a), Some(b)) => a.cmp(&b),
-            (Some(_), None) => std::cmp::Ordering::Less,
-            (None, Some(_)) => std::cmp::Ordering::Greater,
-            (None, None) => std::cmp::Ordering::Equal,
-        }
-    });
+    // Snapshot point for follow mode: continue exactly after the last row we
+    // showed (no gap, no duplicates). When nothing matched yet, start at the
+    // current global maximum instead of dumping the entire history.
+    let last_id = rows
+        .last()
+        .map(|r| r.id)
+        .unwrap_or_else(|| db.max_log_id().unwrap_or(0));
 
     let search_lower = search.as_deref().map(|s| s.to_lowercase());
 
-    // When searching, filter entries to matches + surrounding context lines.
+    // When searching, filter rows to matches + surrounding context lines.
     let visible_indices: Vec<usize> = if let Some(ref needle) = search_lower {
-        let match_indices: Vec<usize> = all_entries
+        let match_indices: Vec<usize> = rows
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.line.to_lowercase().contains(needle.as_str()))
+            .filter(|(_, r)| r.line.to_lowercase().contains(needle.as_str()))
             .map(|(i, _)| i)
             .collect();
-        let mut visible = vec![false; all_entries.len()];
+        let mut visible = vec![false; rows.len()];
         for &idx in &match_indices {
             let start = idx.saturating_sub(context_lines);
-            let end = (idx + context_lines + 1).min(all_entries.len());
+            let end = (idx + context_lines + 1).min(rows.len());
             for v in &mut visible[start..end] {
                 *v = true;
             }
         }
-        (0..all_entries.len()).filter(|i| visible[*i]).collect()
+        (0..rows.len()).filter(|i| visible[*i]).collect()
     } else {
-        (0..all_entries.len()).collect()
+        (0..rows.len()).collect()
     };
 
+    let mut all_output: Vec<serde_json::Value> = Vec::new();
     let mut prev_idx: Option<usize> = None;
     for &idx in &visible_indices {
         // Print separator when there's a gap between visible lines.
@@ -240,33 +159,23 @@ pub async fn run(opts: LogsOptions) -> i32 {
         }
         prev_idx = Some(idx);
 
-        let entry = &all_entries[idx];
+        let row = &rows[idx];
         if json {
-            let j = logging::line_to_json(
-                &entry.line,
-                run_name,
-                &entry.node,
-                &entry.variant,
-                &entry.source,
-            );
+            let j = logging::row_to_json(row, run_name);
             if follow {
                 println!("{}", serde_json::to_string(&j).unwrap());
             } else {
                 all_output.push(j);
             }
         } else {
-            let label = if entry.source == "client" {
-                output::cyan(&format!("{}:{}:client", entry.node, entry.variant))
-            } else {
-                output::cyan(&format!("{}:{}", entry.node, entry.variant))
-            };
             let is_match = search_lower
                 .as_ref()
-                .is_none_or(|n| entry.line.to_lowercase().contains(n.as_str()));
+                .is_none_or(|n| row.line.to_lowercase().contains(n.as_str()));
+            let text = format_row(row);
             if is_match {
-                println!("{label} {}", entry.line);
+                println!("{text}");
             } else {
-                println!("{label} {}", output::dim(&entry.line));
+                println!("{}", output::dim(&text));
             }
         }
     }
@@ -275,147 +184,74 @@ pub async fn run(opts: LogsOptions) -> i32 {
         println!("{}", serde_json::to_string_pretty(&all_output).unwrap());
     }
 
-    // Follow mode: tail all log files continuously.
+    // Follow mode: poll for new rows continuously.
     if follow {
-        if let Err(e) = follow_logs(
-            &targets,
+        follow_logs(
+            &db,
             &project_root,
             run_name,
+            &filter,
+            last_id,
             json,
-            source,
-            positions,
             &search_lower,
         )
-        .await
-        {
-            output::print_error(&format!("Follow error: {e}"), json);
-            return 1;
-        }
+        .await;
     }
 
     0
 }
 
-/// Tail log files continuously, printing new lines as they appear.
+/// Human-readable label + line for one log row.
+fn format_row(row: &LogRow) -> String {
+    let label = match (&row.node, row.stream.as_str()) {
+        (Some(node), "client") => output::cyan(&format!(
+            "{node}:{}:client",
+            row.variant.as_deref().unwrap_or("?")
+        )),
+        (Some(node), _) => {
+            output::cyan(&format!("{node}:{}", row.variant.as_deref().unwrap_or("?")))
+        }
+        (None, stream) => output::cyan(&format!("_veld:{stream}")),
+    };
+    format!("{label} [{}] {}", row.ts, row.line)
+}
+
+/// Poll the database for new rows, printing them as they appear, until Ctrl+C.
 async fn follow_logs(
-    targets: &[(&str, &str)],
+    db: &Db,
     project_root: &std::path::Path,
     run_name: &str,
+    filter: &LogFilter,
+    mut last_id: i64,
     json: bool,
-    source: SourceFilter,
-    mut positions: HashMap<PathBuf, u64>,
     search: &Option<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
-
-    // Build list of (path, node, variant, source_label) to follow.
-    let mut follow_sources: Vec<(PathBuf, String, String, String)> = Vec::new();
-
-    // Internal log.
-    if source == SourceFilter::All || source == SourceFilter::Internal {
-        follow_sources.push((
-            logging::internal_log_file(project_root, run_name),
-            "_veld".to_string(),
-            "internal".to_string(),
-            "internal".to_string(),
-        ));
-    }
-
-    if source != SourceFilter::Internal {
-        for (node_name, variant) in targets {
-            if source != SourceFilter::Client {
-                follow_sources.push((
-                    logging::log_file(project_root, run_name, node_name, variant),
-                    node_name.to_string(),
-                    variant.to_string(),
-                    "server".to_string(),
-                ));
-            }
-            if source != SourceFilter::Server {
-                follow_sources.push((
-                    logging::client_log_file(project_root, run_name, node_name, variant),
-                    node_name.to_string(),
-                    variant.to_string(),
-                    "client".to_string(),
-                ));
-            }
-        }
-    }
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                for (log_path, node_name, variant, src) in &follow_sources {
-                    let pos = positions.get(log_path).copied().unwrap_or(0);
-
-                    let metadata = match tokio::fs::metadata(log_path).await {
-                        Ok(m) => m,
-                        Err(_) => continue,
-                    };
-
-                    let file_len = metadata.len();
-
-                    if file_len < pos {
-                        positions.insert(log_path.clone(), 0);
-                        continue;
-                    }
-
-                    if file_len == pos {
-                        continue;
-                    }
-
-                    let mut file = match tokio::fs::File::open(log_path).await {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    file.seek(std::io::SeekFrom::Start(pos)).await?;
-
-                    let mut reader = BufReader::new(file);
-                    let mut new_pos = pos;
-                    let mut line = String::new();
-
-                    loop {
-                        line.clear();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                new_pos += n as u64;
-                                let trimmed = line.trim_end();
-                                if !trimmed.is_empty() {
-                                    // Skip lines that don't match search filter.
-                                    if let Some(needle) = search {
-                                        if !trimmed.to_lowercase().contains(needle.as_str()) {
-                                            continue;
-                                        }
-                                    }
-                                    if json {
-                                        let entry = logging::line_to_json(
-                                            trimmed, run_name, node_name, variant, src,
-                                        );
-                                        println!("{}", serde_json::to_string(&entry).unwrap());
-                                    } else {
-                                        let label = if src == "client" {
-                                            output::cyan(
-                                                &format!("{node_name}:{variant}:client"),
-                                            )
-                                        } else {
-                                            output::cyan(
-                                                &format!("{node_name}:{variant}"),
-                                            )
-                                        };
-                                        println!("{label} {trimmed}");
-                                    }
-                                }
-                            }
-                            Err(_) => break,
+                let rows = match db.logs_after_id(project_root, run_name, filter, last_id) {
+                    Ok(rows) => rows,
+                    Err(_) => continue,
+                };
+                for row in rows {
+                    last_id = row.id;
+                    if let Some(needle) = search {
+                        if !row.line.to_lowercase().contains(needle.as_str()) {
+                            continue;
                         }
                     }
-
-                    positions.insert(log_path.clone(), new_pos);
+                    if json {
+                        let entry = logging::row_to_json(&row, run_name);
+                        println!("{}", serde_json::to_string(&entry).unwrap());
+                    } else {
+                        println!("{}", format_row(&row));
+                    }
                 }
             }
             _ = tokio::signal::ctrl_c() => {
-                return Ok(());
+                return;
             }
         }
     }

@@ -26,7 +26,6 @@ use veld_core::share::{
     ApprovalMode, Capability, GatewayPublicUrl, JoinResponse, PendingInfo, ShareInfo,
     ShareManifest, ShareTicket, SharesList,
 };
-use veld_core::state::GlobalRegistry;
 
 use super::gateway::GatewayClient;
 
@@ -1174,7 +1173,7 @@ pub(crate) fn join_base() -> String {
 
 /// True if any of this machine's own runs already serves `hostname`.
 fn hostname_in_use_locally(hostname: &str) -> bool {
-    match GlobalRegistry::load() {
+    match veld_core::db::Db::open().and_then(|db| db.registry()) {
         Ok(reg) => reg.projects.values().any(|entry| {
             entry.runs.values().any(|run| {
                 run.urls

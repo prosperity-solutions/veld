@@ -2,7 +2,7 @@ use std::io::Write;
 
 use veld_core::config;
 use veld_core::orchestrator::Orchestrator;
-use veld_core::state::{GlobalRegistry, ProjectState, RunStatus};
+use veld_core::state::RunStatus;
 
 use crate::output;
 
@@ -105,7 +105,7 @@ pub async fn run() -> i32 {
 /// Find all running environments across all projects.
 /// Returns (project_root, run_name) pairs.
 fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
-    let registry = match GlobalRegistry::load() {
+    let registry = match veld_core::db::Db::open().and_then(|db| db.registry()) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
@@ -139,7 +139,14 @@ async fn stop_all_environments(envs: &[(std::path::PathBuf, String)]) -> usize {
             }
         };
 
-        let mut orchestrator = Orchestrator::new(config_path, cfg);
+        let mut orchestrator = match Orchestrator::new(config_path, cfg) {
+            Ok(o) => o,
+            Err(e) => {
+                output::print_error(&format!("Failed to initialize: {e}"), false);
+                cleanup_state(project_root, run_name);
+                continue;
+            }
+        };
         match orchestrator.stop(run_name).await {
             Ok(_) => {
                 output::print_info(&format!("  Stopped '{run_name}'"));
@@ -155,9 +162,8 @@ async fn stop_all_environments(envs: &[(std::path::PathBuf, String)]) -> usize {
 
 /// Best-effort cleanup of state for a run when config can't be loaded.
 fn cleanup_state(project_root: &std::path::Path, run_name: &str) {
-    if let Ok(mut state) = ProjectState::load(project_root) {
-        state.runs.remove(run_name);
-        let _ = state.save(project_root);
+    if let Ok(db) = veld_core::db::Db::open() {
+        let _ = db.remove_run(project_root, run_name);
     }
 }
 

@@ -2,8 +2,9 @@ use std::sync::Arc;
 
 use tracing::{debug, info, warn};
 use uuid::Uuid;
+use veld_core::db::Db;
 use veld_core::helper::HelperClient;
-use veld_core::state::{GlobalRegistry, ProjectState, RunState, RunStatus};
+use veld_core::state::{RunState, RunStatus};
 
 use crate::share::manager::ShareManager;
 
@@ -68,14 +69,16 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
     let helper = HelperClient::default_client();
 
-    let mut registry = GlobalRegistry::load()?;
-    let mut registry_changed = false;
+    // Open per pass so the daemon self-heals across CLI upgrades that migrate
+    // the schema.
+    let db = Db::open()?;
+    let registry = db.registry()?;
 
     // Phase 1: Process each project's runs -- remove stale entries and kill orphans.
-    for reg_entry in registry.projects.values_mut() {
+    for reg_entry in registry.projects.values() {
         let project_root = reg_entry.project_root.clone();
 
-        let mut project_state = match ProjectState::load(&project_root) {
+        let project_state = match db.load_project_state(&project_root) {
             Ok(ps) => ps,
             Err(e) => {
                 debug!(
@@ -85,148 +88,83 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                 continue;
             }
         };
-        let mut project_changed = false;
 
-        // Collect run names to avoid borrow issues.
-        let run_names: Vec<String> = reg_entry.runs.keys().cloned().collect();
-
-        for run_name in &run_names {
-            let run_info = &reg_entry.runs[run_name];
-
-            match run_info.status {
+        for (run_name, run_state) in &project_state.runs {
+            match run_state.status {
                 RunStatus::Running | RunStatus::Starting => {
                     // Check if processes are actually alive.
-                    if let Some(run_state) = project_state.get_run(run_name) {
-                        let mut any_alive = false;
-                        let mut dead_pids = Vec::new();
+                    let mut any_alive = false;
+                    let mut dead_pids = Vec::new();
 
-                        for node_state in run_state.nodes.values() {
-                            if let Some(pid) = node_state.pid {
-                                if is_process_alive(pid) {
-                                    any_alive = true;
+                    for node_state in run_state.nodes.values() {
+                        if let Some(pid) = node_state.pid {
+                            if is_process_alive(pid) {
+                                any_alive = true;
+                            } else {
+                                dead_pids.push(pid);
+                            }
+                        }
+                    }
+
+                    if !any_alive && !dead_pids.is_empty() {
+                        // All processes dead -- mark as stopped (orphan cleanup).
+                        info!(
+                            "killing orphan run '{}' with dead PIDs: {:?}",
+                            run_name, dead_pids
+                        );
+
+                        let mut run = run_state.clone();
+                        run.status = RunStatus::Stopped;
+                        run.stopped_at = Some(chrono::Utc::now());
+                        summary.orphaned_runs.push(run.run_id);
+                        for node in run.nodes.values_mut() {
+                            if let Some(pid) = node.pid {
+                                if !is_process_alive(pid) {
+                                    node.status = veld_core::state::NodeStatus::Stopped;
                                 } else {
-                                    dead_pids.push(pid);
+                                    // Still alive -- kill it.
+                                    kill_process(pid);
+                                    node.status = veld_core::state::NodeStatus::Stopped;
                                 }
                             }
                         }
 
-                        if !any_alive && !dead_pids.is_empty() {
-                            // All processes dead -- mark as stopped (orphan cleanup).
-                            info!(
-                                "killing orphan run '{}' with dead PIDs: {:?}",
-                                run_name, dead_pids
-                            );
+                        // Clean up Caddy routes and DNS entries.
+                        summary.routes_cleaned +=
+                            cleanup_routes_and_dns(&run, run_name, &helper).await;
 
-                            if let Some(run) = project_state.get_run_mut(run_name) {
-                                run.status = RunStatus::Stopped;
-                                run.stopped_at = Some(chrono::Utc::now());
-                                summary.orphaned_runs.push(run.run_id);
-                                for node in run.nodes.values_mut() {
-                                    if let Some(pid) = node.pid {
-                                        if !is_process_alive(pid) {
-                                            node.status = veld_core::state::NodeStatus::Stopped;
-                                        } else {
-                                            // Still alive -- kill it.
-                                            kill_process(pid);
-                                            node.status = veld_core::state::NodeStatus::Stopped;
-                                        }
-                                    }
-                                }
-
-                                // Clean up Caddy routes and DNS entries.
-                                summary.routes_cleaned +=
-                                    cleanup_routes_and_dns(run, run_name, &helper).await;
-
-                                project_changed = true;
-                            }
-
-                            if let Some(info) = reg_entry.runs.get_mut(run_name) {
-                                info.status = RunStatus::Stopped;
-                                info.urls.clear();
-                                registry_changed = true;
-                            }
-
-                            summary.orphans_killed += 1;
-                        }
+                        let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
+                        summary.orphans_killed += 1;
                     }
                 }
                 RunStatus::Stopped | RunStatus::Failed => {
                     // Check age -- remove if older than threshold.
-                    if let Some(run_state) = project_state.get_run(run_name) {
-                        if let Some(stopped_at) = run_state.stopped_at {
-                            let age = chrono::Utc::now().signed_duration_since(stopped_at);
-                            if age.num_hours() > MAX_ENTRY_AGE_HOURS {
-                                debug!(
-                                    "removing stale run '{}' from project {}",
-                                    run_name,
-                                    project_root.display()
-                                );
-                                // Best-effort route/DNS cleanup before removing state.
-                                summary.routes_cleaned +=
-                                    cleanup_routes_and_dns(run_state, run_name, &helper).await;
+                    if let Some(stopped_at) = run_state.stopped_at {
+                        let age = chrono::Utc::now().signed_duration_since(stopped_at);
+                        if age.num_hours() > MAX_ENTRY_AGE_HOURS {
+                            debug!(
+                                "removing stale run '{}' from project {}",
+                                run_name,
+                                project_root.display()
+                            );
+                            // Best-effort route/DNS cleanup before removing state.
+                            summary.routes_cleaned +=
+                                cleanup_routes_and_dns(run_state, run_name, &helper).await;
 
-                                project_state.runs.remove(run_name);
-                                project_changed = true;
-                                // Will remove from registry below.
-                                summary.stale_removed += 1;
-                            }
+                            let _ = db.remove_run(&project_root, run_name);
+                            summary.stale_removed += 1;
                         }
                     }
                 }
                 _ => {}
             }
         }
-
-        // Remove stale runs from registry entry.
-        reg_entry
-            .runs
-            .retain(|name, _| project_state.runs.contains_key(name));
-        if reg_entry.runs.len() != run_names.len() {
-            registry_changed = true;
-        }
-
-        if project_changed {
-            let _ = project_state.save(&project_root);
-        }
     }
 
-    if registry_changed {
-        let _ = registry.save();
-    }
-
-    // Phase 2: Prune old log files from each project's .veld/logs/ directory.
-    let registry = GlobalRegistry::load().unwrap_or_default();
-    for reg_entry in registry.projects.values() {
-        let logs_dir = reg_entry.project_root.join(".veld").join("logs");
-        if logs_dir.exists() {
-            let mut entries = match tokio::fs::read_dir(&logs_dir).await {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            while let Some(entry) = entries.next_entry().await.unwrap_or(None) {
-                let path = entry.path();
-                if let Ok(meta) = tokio::fs::metadata(&path).await {
-                    if let Ok(modified) = meta.modified() {
-                        let age = std::time::SystemTime::now()
-                            .duration_since(modified)
-                            .unwrap_or_default();
-                        let age_hours = age.as_secs() as i64 / 3600;
-
-                        if age_hours > MAX_LOG_AGE_HOURS {
-                            debug!("pruning old log: {}", path.display());
-                            // Log entries can be files or per-run directories.
-                            if meta.is_dir() {
-                                let _ = tokio::fs::remove_dir_all(&path).await;
-                            } else {
-                                let _ = tokio::fs::remove_file(&path).await;
-                            }
-                            summary.logs_pruned += 1;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // Phase 2: Prune old log lines and orphaned feedback data.
+    let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+    summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
+    let _ = db.prune_orphaned_feedback(log_cutoff);
 
     Ok(summary)
 }

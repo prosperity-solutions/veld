@@ -1,7 +1,10 @@
 use veld_core::helper::HelperClient;
-use veld_core::state::{GlobalRegistry, NodeStatus, ProjectState, RunStatus};
+use veld_core::state::{NodeStatus, RunStatus};
 
 use crate::output;
+
+/// Maximum age for log lines before pruning (hours). Matches the daemon GC.
+const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 
 /// `veld gc` -- garbage-collect stale state, logs, orphaned processes, and routes.
 pub async fn run() -> i32 {
@@ -9,7 +12,10 @@ pub async fn run() -> i32 {
 
     let helper = HelperClient::default_client();
 
-    let mut registry = match GlobalRegistry::load() {
+    let Some(db) = super::open_db(false) else {
+        return 1;
+    };
+    let registry = match db.registry() {
         Ok(r) => r,
         Err(e) => {
             output::print_error(&format!("Failed to load registry: {e}"), false);
@@ -17,127 +23,70 @@ pub async fn run() -> i32 {
         }
     };
 
-    let mut registry_changed = false;
+    let mut projects_removed = 0usize;
     let mut orphans_cleaned = 0usize;
     let mut routes_cleaned = 0usize;
-    let mut feedback_cleaned = 0usize;
 
-    // Remove entries whose project root no longer exists.
-    let before = registry.projects.len();
-    registry
-        .projects
-        .retain(|_, entry| entry.project_root.exists());
-    let projects_removed = before - registry.projects.len();
-    if projects_removed > 0 {
-        registry_changed = true;
-    }
-
-    // Process each project: find orphaned runs and clean them up.
-    for reg_entry in registry.projects.values_mut() {
+    for reg_entry in registry.projects.values() {
         let project_root = reg_entry.project_root.clone();
-        let mut project_state = match ProjectState::load(&project_root) {
+
+        // Remove projects whose root no longer exists.
+        if !project_root.exists() {
+            if db.remove_project(&project_root).is_ok() {
+                projects_removed += 1;
+            }
+            continue;
+        }
+
+        let project_state = match db.load_project_state(&project_root) {
             Ok(ps) => ps,
             Err(_) => continue,
         };
-        let mut project_changed = false;
 
-        let run_names: Vec<String> = project_state.runs.keys().cloned().collect();
-
-        for run_name in &run_names {
-            let is_orphan = {
-                let run = match project_state.get_run(run_name) {
-                    Some(r) => r,
-                    None => continue,
-                };
-                match run.status {
-                    RunStatus::Running | RunStatus::Starting => {
-                        // Check if all processes are dead.
-                        let has_pids = run.nodes.values().any(|n| n.pid.is_some());
-                        let all_dead = run
-                            .nodes
-                            .values()
-                            .filter_map(|n| n.pid)
-                            .all(|pid| unsafe { libc::kill(pid as libc::pid_t, 0) != 0 });
-                        has_pids && all_dead
-                    }
-                    _ => false,
+        for (run_name, run) in &project_state.runs {
+            let is_orphan = match run.status {
+                RunStatus::Running | RunStatus::Starting => {
+                    // Check if all processes are dead.
+                    let has_pids = run.nodes.values().any(|n| n.pid.is_some());
+                    let all_dead = run
+                        .nodes
+                        .values()
+                        .filter_map(|n| n.pid)
+                        .all(|pid| unsafe { libc::kill(pid as libc::pid_t, 0) != 0 });
+                    has_pids && all_dead
                 }
+                _ => false,
             };
 
             if is_orphan {
-                if let Some(run) = project_state.get_run_mut(run_name) {
-                    // Clean up Caddy routes and DNS entries.
-                    for ns in run.nodes.values() {
-                        let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
-                        if helper.remove_route(&route_id).await.is_ok() {
-                            routes_cleaned += 1;
-                        }
-                        if let Some(ref url_str) = ns.url {
-                            let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                            let _ = helper.remove_host(hostname).await;
-                        }
+                let mut run = run.clone();
+                // Clean up Caddy routes and DNS entries.
+                for ns in run.nodes.values() {
+                    let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+                    if helper.remove_route(&route_id).await.is_ok() {
+                        routes_cleaned += 1;
                     }
-
-                    run.status = RunStatus::Stopped;
-                    run.stopped_at = Some(chrono::Utc::now());
-                    for node in run.nodes.values_mut() {
-                        node.status = NodeStatus::Stopped;
-                    }
-                    project_changed = true;
-                    orphans_cleaned += 1;
-                }
-
-                if let Some(info) = reg_entry.runs.get_mut(run_name) {
-                    info.status = RunStatus::Stopped;
-                    info.urls.clear();
-                    registry_changed = true;
-                }
-            }
-        }
-
-        if project_changed {
-            let _ = project_state.save(&project_root);
-        }
-
-        // Clean up stale feedback directories for runs that no longer exist
-        // in project state and whose data is older than 7 days.
-        let feedback_dir = project_root.join(".veld").join("feedback");
-        if feedback_dir.is_dir() {
-            if let Ok(entries) = std::fs::read_dir(&feedback_dir) {
-                for entry in entries.flatten() {
-                    let run_dir = entry.path();
-                    if !run_dir.is_dir() {
-                        continue;
-                    }
-                    let dir_name = entry.file_name().to_string_lossy().to_string();
-                    // Skip if this run is still active.
-                    if project_state.runs.contains_key(&dir_name) {
-                        continue;
-                    }
-                    // Skip if the run is in the registry (active elsewhere).
-                    if reg_entry.runs.contains_key(&dir_name) {
-                        continue;
-                    }
-                    // Only remove if last modified > 7 days ago.
-                    let stale = entry
-                        .metadata()
-                        .and_then(|m| m.modified())
-                        .map(|t| {
-                            t.elapsed().unwrap_or_default()
-                                > std::time::Duration::from_secs(7 * 24 * 3600)
-                        })
-                        .unwrap_or(false);
-                    if stale && std::fs::remove_dir_all(&run_dir).is_ok() {
-                        feedback_cleaned += 1;
+                    if let Some(ref url_str) = ns.url {
+                        let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+                        let _ = helper.remove_host(hostname).await;
                     }
                 }
+
+                run.status = RunStatus::Stopped;
+                run.stopped_at = Some(chrono::Utc::now());
+                for node in run.nodes.values_mut() {
+                    node.status = NodeStatus::Stopped;
+                }
+                let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
+                orphans_cleaned += 1;
             }
         }
     }
 
-    if registry_changed {
-        let _ = registry.save();
-    }
+    // Prune old log lines and orphaned feedback data (older than 7 days).
+    let cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+    let logs_pruned = db.prune_logs_older_than(cutoff).unwrap_or(0);
+    let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
 
     // Print summary.
     let mut parts = Vec::new();
@@ -150,8 +99,11 @@ pub async fn run() -> i32 {
     if routes_cleaned > 0 {
         parts.push(format!("{routes_cleaned} route(s) removed"));
     }
+    if logs_pruned > 0 {
+        parts.push(format!("{logs_pruned} old log line(s) pruned"));
+    }
     if feedback_cleaned > 0 {
-        parts.push(format!("{feedback_cleaned} stale feedback dir(s) removed"));
+        parts.push(format!("{feedback_cleaned} stale feedback run(s) removed"));
     }
 
     if parts.is_empty() {

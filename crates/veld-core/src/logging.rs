@@ -1,74 +1,28 @@
+//! Log writing helpers on top of the central database (see [`crate::db`]).
+//!
+//! Every log line is one `log_lines` row, timestamped at write time. The old
+//! `.veld/logs/{run}/*.log` files are gone; `veld logs` and the management UI
+//! query the database instead.
+
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use thiserror::Error;
-use tokio::fs::{self, OpenOptions};
-use tokio::io::AsyncWriteExt;
 
-// ---------------------------------------------------------------------------
-// Errors
-// ---------------------------------------------------------------------------
+use crate::db::{Db, DbError, LogStream};
 
 #[derive(Debug, Error)]
 pub enum LogError {
-    #[error("failed to create log directory {path}: {source}")]
-    CreateDirFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-
-    #[error("failed to write log {path}: {source}")]
-    WriteFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-
-    #[error("failed to read log {path}: {source}")]
-    ReadFailed {
-        path: PathBuf,
-        source: std::io::Error,
-    },
-}
-
-// ---------------------------------------------------------------------------
-// Log paths
-// ---------------------------------------------------------------------------
-
-/// Return the log directory for a run: `.veld/logs/{run_name}/`.
-pub fn log_dir(project_root: &Path, run_name: &str) -> PathBuf {
-    project_root.join(".veld").join("logs").join(run_name)
-}
-
-/// Return the log file path for a node+variant.
-pub fn log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
-    log_dir(project_root, run_name).join(format!("{node}-{variant}.log"))
-}
-
-/// Return the client-side log file path for a node+variant.
-pub fn client_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
-    log_dir(project_root, run_name).join(format!("{node}-{variant}-client.log"))
-}
-
-/// Return the setup (command step) log file path.
-pub fn setup_log_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
-    log_dir(project_root, run_name).join(format!("{node}-{variant}-setup.log"))
-}
-
-/// Return the debug log file path for a run.
-pub fn debug_log_file(project_root: &Path, run_name: &str) -> PathBuf {
-    log_dir(project_root, run_name).join("veld-debug.log")
-}
-
-/// Return the internal (veld daemon/orchestrator) log file for a run.
-/// Contains liveness probe outcomes, recovery decisions, health transitions.
-pub fn internal_log_file(project_root: &Path, run_name: &str) -> PathBuf {
-    log_dir(project_root, run_name).join("_veld.log")
+    #[error("failed to write log: {0}")]
+    WriteFailed(#[from] DbError),
 }
 
 /// Return a temporary output file path for a command node.
 ///
 /// Scripts write `key=value` lines to this file instead of emitting
 /// `VELD_OUTPUT` on stdout, keeping sensitive values off the terminal.
+/// This stays a file (not the database) because it is the IPC contract with
+/// user scripts via `$VELD_OUTPUT_FILE`.
 pub fn output_file(project_root: &Path, run_name: &str, node: &str, variant: &str) -> PathBuf {
     project_root
         .join(".veld")
@@ -80,49 +34,53 @@ pub fn output_file(project_root: &Path, run_name: &str, node: &str, variant: &st
 // Log writer
 // ---------------------------------------------------------------------------
 
-/// A writer that timestamps each line and appends to a log file.
+/// A writer that timestamps each line and stores it in the database, scoped
+/// to one (run, node, stream).
 #[derive(Clone)]
 pub struct LogWriter {
-    path: PathBuf,
+    db: Db,
+    project_root: PathBuf,
+    run_name: String,
+    node: Option<String>,
+    variant: Option<String>,
+    stream: LogStream,
 }
 
 impl LogWriter {
-    /// Create a new log writer. Ensures the parent directory exists.
-    pub async fn new(path: PathBuf) -> Result<Self, LogError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(|e| LogError::CreateDirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                })?;
+    /// Create a writer for a per-node stream (server/client/setup).
+    pub fn for_node(
+        db: Db,
+        project_root: &Path,
+        run_name: &str,
+        node: &str,
+        variant: &str,
+        stream: LogStream,
+    ) -> Self {
+        Self {
+            db,
+            project_root: project_root.to_path_buf(),
+            run_name: run_name.to_owned(),
+            node: Some(node.to_owned()),
+            variant: Some(variant.to_owned()),
+            stream,
         }
-        Ok(Self { path })
     }
 
-    /// Write a single line with a timestamp prefix.
+    /// Create a writer for a run-level stream (debug/internal).
+    pub fn for_run(db: Db, project_root: &Path, run_name: &str, stream: LogStream) -> Self {
+        Self {
+            db,
+            project_root: project_root.to_path_buf(),
+            run_name: run_name.to_owned(),
+            node: None,
+            variant: None,
+            stream,
+        }
+    }
+
+    /// Write a single line, timestamped now.
     pub async fn write_line(&self, line: &str) -> Result<(), LogError> {
-        let timestamp = Utc::now().to_rfc3339();
-        let formatted = format!("[{timestamp}] {line}\n");
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| LogError::WriteFailed {
-                path: self.path.clone(),
-                source: e,
-            })?;
-
-        file.write_all(formatted.as_bytes())
-            .await
-            .map_err(|e| LogError::WriteFailed {
-                path: self.path.clone(),
-                source: e,
-            })?;
-
-        Ok(())
+        self.write_with_ts(Utc::now(), line)
     }
 
     /// Write a Veld-internal annotation (e.g. process exit).
@@ -130,133 +88,33 @@ impl LogWriter {
         self.write_line(&format!("[VELD] {message}")).await
     }
 
-    /// Write a pre-formatted line (with timestamp already included).
-    /// Used for client logs where the client provides its own timestamp.
-    pub async fn write_raw(&self, formatted: &str) -> Result<(), LogError> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| LogError::WriteFailed {
-                path: self.path.clone(),
-                source: e,
-            })?;
-
-        file.write_all(formatted.as_bytes())
-            .await
-            .map_err(|e| LogError::WriteFailed {
-                path: self.path.clone(),
-                source: e,
-            })?;
-
+    /// Write a line with an explicit timestamp (client logs carry their own).
+    pub fn write_with_ts(&self, ts: chrono::DateTime<Utc>, line: &str) -> Result<(), LogError> {
+        self.db.append_log(
+            &self.project_root,
+            &self.run_name,
+            self.node.as_deref(),
+            self.variant.as_deref(),
+            self.stream,
+            ts,
+            line,
+        )?;
         Ok(())
     }
 }
 
 // ---------------------------------------------------------------------------
-// Log reader
+// Formatting helpers
 // ---------------------------------------------------------------------------
 
-/// Read the last `n` lines from a log file.
-pub async fn tail_lines(path: &Path, n: usize) -> Result<Vec<String>, LogError> {
-    let content = fs::read_to_string(path)
-        .await
-        .map_err(|e| LogError::ReadFailed {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-    let lines: Vec<String> = content.lines().map(|l| l.to_owned()).collect();
-    let start = lines.len().saturating_sub(n);
-    Ok(lines[start..].to_vec())
-}
-
-/// Read lines since a given duration ago (based on the ISO 8601 timestamps in the log).
-pub async fn lines_since(path: &Path, since: chrono::Duration) -> Result<Vec<String>, LogError> {
-    let cutoff = Utc::now() - since;
-    let content = fs::read_to_string(path)
-        .await
-        .map_err(|e| LogError::ReadFailed {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-    let mut result = Vec::new();
-    for line in content.lines() {
-        // Lines are formatted as `[2026-03-11T14:23:01.123456Z] ...`.
-        if let Some(ts_str) = extract_timestamp(line) {
-            if let Ok(ts) = chrono::DateTime::parse_from_rfc3339(ts_str) {
-                if ts >= cutoff {
-                    result.push(line.to_owned());
-                }
-                continue;
-            }
-        }
-        // If we can't parse the timestamp, include the line if we've already
-        // started collecting (continuation lines).
-        if !result.is_empty() {
-            result.push(line.to_owned());
-        }
-    }
-
-    Ok(result)
-}
-
-/// Merge continuation lines (those starting with whitespace) with their parent.
-///
-/// Log entries can span multiple lines — the primary line starts with
-/// `[timestamp]` and continuation lines (e.g. stack traces) start with
-/// whitespace. This function joins them into single strings so that each
-/// returned entry is a complete logical log entry that sorts correctly.
-pub fn merge_continuation_lines(lines: Vec<String>) -> Vec<String> {
-    let mut merged: Vec<String> = Vec::new();
-    for line in lines {
-        let is_continuation = !line.is_empty()
-            && (line.starts_with(' ') || line.starts_with('\t'))
-            && !merged.is_empty();
-        if is_continuation {
-            let last = merged.last_mut().unwrap();
-            last.push('\n');
-            last.push_str(&line);
-        } else {
-            merged.push(line);
-        }
-    }
-    merged
-}
-
-/// Extract the timestamp string from a log line (between first `[` and `]`).
-pub fn extract_timestamp(line: &str) -> Option<&str> {
-    let start = line.find('[')? + 1;
-    let end = line[start..].find(']')? + start;
-    Some(&line[start..end])
-}
-
-/// Format a log line as JSON for `--json` output.
-pub fn line_to_json(
-    line: &str,
-    run: &str,
-    node: &str,
-    variant: &str,
-    source: &str,
-) -> serde_json::Value {
-    let (timestamp, content) = if let Some(ts) = extract_timestamp(line) {
-        let after_bracket = line.find(']').map(|i| i + 2).unwrap_or(0);
-        (
-            ts.to_owned(),
-            line.get(after_bracket..).unwrap_or("").to_owned(),
-        )
-    } else {
-        (String::new(), line.to_owned())
-    };
-
+/// Format a stored log row as JSON for `--json` output.
+pub fn row_to_json(row: &crate::db::LogRow, run: &str) -> serde_json::Value {
     serde_json::json!({
-        "timestamp": timestamp,
+        "timestamp": row.ts,
         "run": run,
-        "node": node,
-        "variant": variant,
-        "source": source,
-        "line": content,
+        "node": row.node.as_deref().unwrap_or("_veld"),
+        "variant": row.variant.as_deref().unwrap_or(&row.stream),
+        "source": row.stream,
+        "line": row.line,
     })
 }

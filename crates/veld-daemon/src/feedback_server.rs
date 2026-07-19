@@ -10,12 +10,12 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use tokio::sync::Notify;
 use tracing::{info, warn};
+use veld_core::db::Db;
 use veld_core::feedback::{
     Author, EventType, FeedbackStore, Message, Thread, ThreadOrigin, ThreadScope, ThreadStatus,
     new_message, new_thread,
 };
-use veld_core::logging;
-use veld_core::state::GlobalRegistry;
+use veld_core::logging::LogWriter;
 
 #[path = "feedback_assets.rs"]
 mod feedback_assets;
@@ -141,26 +141,34 @@ fn resolve_store(
         .or_else(|| headers.get("x-veld-run").and_then(|v| v.to_str().ok()))
         .ok_or(StatusCode::BAD_REQUEST)?;
 
-    // Reject run names containing path separators to prevent path traversal.
+    // Reject run names containing path separators — they can't be valid run
+    // names and would otherwise leak into scope keys.
     if run_name.contains('/') || run_name.contains('\\') || run_name.contains("..") {
         return Err(StatusCode::BAD_REQUEST);
     }
+
+    // Open per request: cheap for a local server, and it self-heals across
+    // CLI upgrades that migrate the schema.
+    let db = Db::open().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Try explicit project path first, then header, then search registry.
     if let Some(project_path) =
         project.or_else(|| headers.get("x-veld-project").and_then(|v| v.to_str().ok()))
     {
         return Ok(FeedbackStore::new(
+            db,
             std::path::Path::new(project_path),
             run_name,
         ));
     }
 
     // Fallback: search the global registry for a project with this run.
-    let registry = GlobalRegistry::load().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let registry = db
+        .registry()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     for entry in registry.projects.values() {
         if entry.runs.contains_key(run_name) {
-            return Ok(FeedbackStore::new(&entry.project_root, run_name));
+            return Ok(FeedbackStore::new(db, &entry.project_root, run_name));
         }
     }
 
@@ -272,8 +280,15 @@ async fn ingest_client_logs(
     };
 
     // Look up the project root from the registry instead of trusting the header.
-    // This prevents path traversal via crafted X-Veld-Project values.
-    let registry = match GlobalRegistry::load() {
+    // This prevents spoofed scope keys via crafted X-Veld-Project values.
+    let db = match Db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            warn!("failed to open database for client logs: {e}");
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+    };
+    let registry = match db.registry() {
         Ok(r) => r,
         Err(e) => {
             warn!("failed to load registry for client logs: {e}");
@@ -290,17 +305,14 @@ async fn ingest_client_logs(
         Some(p) => p,
         None => return StatusCode::NOT_FOUND,
     };
-    let project_state = match veld_core::state::ProjectState::load(&project_path) {
-        Ok(s) => s,
+
+    let run_state = match db.get_run(&project_path, run_name) {
+        Ok(Some(r)) => r,
+        Ok(None) => return StatusCode::NOT_FOUND,
         Err(e) => {
-            warn!("failed to load project state for client logs: {e}");
+            warn!("failed to load run state for client logs: {e}");
             return StatusCode::INTERNAL_SERVER_ERROR;
         }
-    };
-
-    let run_state = match project_state.get_run(run_name) {
-        Some(r) => r,
-        None => return StatusCode::NOT_FOUND,
     };
 
     // Find the node whose URL matches this host.
@@ -331,31 +343,23 @@ async fn ingest_client_logs(
         }
     };
 
-    // Write entries to the client log file.
-    // Build the entire batch as a single string, then write it in one call
-    // to avoid interleaving with concurrent requests from other tabs.
-    let log_path = logging::client_log_file(&project_path, run_name, &node, &variant);
-    let writer = match logging::LogWriter::new(log_path).await {
-        Ok(w) => w,
-        Err(e) => {
-            warn!("failed to create client log writer: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
-    };
+    // Write entries to the client log stream. Each entry becomes one row,
+    // timestamped with the client-provided timestamp (falling back to the
+    // ingest time when it doesn't parse).
+    let writer = LogWriter::for_node(
+        db,
+        &project_path,
+        run_name,
+        &node,
+        &variant,
+        veld_core::db::LogStream::Client,
+    );
 
-    let mut batch_buf = String::new();
     for entry in &batch.entries {
-        // Sanitize timestamp: strip characters that could break log line parsing.
-        let sanitized_ts = entry
-            .ts
-            .chars()
-            .filter(|c| !matches!(c, '\n' | '\r' | '[' | ']'))
-            .take(40) // ISO 8601 is at most ~30 chars
-            .collect::<String>();
-        if sanitized_ts.is_empty() {
-            continue;
-        }
-        // Sanitize the message: replace newlines to preserve log line format.
+        let ts = chrono::DateTime::parse_from_rfc3339(entry.ts.trim())
+            .map(|t| t.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        // Sanitize the message: replace newlines to keep one entry per row.
         // Truncate to 32KB to prevent abuse from forged requests.
         // Use a char boundary to avoid panicking on multi-byte UTF-8.
         let msg_truncated = if entry.msg.len() > 32_768 {
@@ -370,8 +374,8 @@ async fn ingest_client_logs(
             "log" | "warn" | "error" | "info" | "debug" | "exception" => &entry.level,
             _ => continue,
         };
-        // Format: [client_timestamp] [level] message\n    stack_line\n...
-        let mut line = format!("[{}] [{}] {}", sanitized_ts, level, sanitized_msg);
+        // Format: [level] message\n    stack_line\n...
+        let mut line = format!("[{}] {}", level, sanitized_msg);
         if let Some(ref stack) = entry.stack {
             // Limit stack trace to first 50 frames / 16KB to prevent abuse.
             let stack_end = safe_truncate_boundary(stack, 16_384);
@@ -390,13 +394,9 @@ async fn ingest_client_logs(
                 }
             }
         }
-        line.push('\n');
-        batch_buf.push_str(&line);
-    }
-
-    if !batch_buf.is_empty() {
-        if let Err(e) = writer.write_raw(&batch_buf).await {
-            warn!("failed to write client log batch: {e}");
+        if let Err(e) = writer.write_with_ts(ts, &line) {
+            warn!("failed to write client log entry: {e}");
+            break;
         }
     }
 
@@ -706,9 +706,11 @@ async fn get_screenshot(
 
     let store = resolve_store(q.run.as_deref(), q.project.as_deref(), &headers)?;
     let filename = format!("{id}.png");
-    let path = store.screenshot_path(&filename);
 
-    let data = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+    let data = store
+        .get_screenshot(&filename)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     Ok((
         [

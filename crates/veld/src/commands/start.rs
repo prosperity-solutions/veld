@@ -1,14 +1,9 @@
-use std::collections::HashMap;
-use std::path::PathBuf;
-
 use veld_core::config::VeldConfig;
 use veld_core::graph::{self, NodeSelection};
-use veld_core::logging;
 use veld_core::orchestrator::Orchestrator;
 use veld_core::progress::ProgressEvent;
 use veld_core::url::generate_run_name;
 
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::output::{self, is_tty};
@@ -97,7 +92,13 @@ pub async fn run(
 
     // Build the orchestrator.
     let foreground = attach && is_tty();
-    let mut orchestrator = Orchestrator::new(config_path.clone(), config);
+    let mut orchestrator = match Orchestrator::new(config_path.clone(), config) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&format!("Failed to initialize: {e}"), false);
+            return 1;
+        }
+    };
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
 
@@ -157,7 +158,13 @@ pub async fn run(
                     .collect();
 
                 // Stream logs until Ctrl+C.
-                follow_logs_until_interrupt(&targets, &project_root, run_name_str).await;
+                follow_logs_until_interrupt(
+                    &orchestrator.db,
+                    &targets,
+                    &project_root,
+                    run_name_str,
+                )
+                .await;
 
                 // Ctrl+C received — stop the environment.
                 println!();
@@ -189,27 +196,32 @@ pub async fn run(
                     ..
                 } = e
                 {
-                    let log_path = logging::log_file(&project_root, run_name_str, node, variant);
-                    if let Ok(raw_lines) = logging::tail_lines(&log_path, 40).await {
-                        let merged = logging::merge_continuation_lines(raw_lines);
-                        let start = merged.len().saturating_sub(20);
-                        let tail = &merged[start..];
-                        if !tail.is_empty() {
+                    let filter = veld_core::db::LogFilter {
+                        node: Some(node.clone()),
+                        variant: Some(variant.clone()),
+                        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+                    };
+                    if let Ok(rows) =
+                        orchestrator
+                            .db
+                            .tail_logs(&project_root, run_name_str, &filter, 20)
+                    {
+                        if !rows.is_empty() {
                             eprintln!();
                             eprintln!(
                                 "  {}",
                                 output::dim(&format!("Last log lines from {node}:{variant}:"))
                             );
                             eprintln!();
-                            for line in tail {
-                                let content =
-                                    line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line);
-                                eprintln!("    {}", output::dim(content));
+                            for row in &rows {
+                                eprintln!("    {}", output::dim(&row.line));
                             }
                             eprintln!();
                             eprintln!(
                                 "  {}",
-                                output::dim(&format!("Full log: {}", log_path.display()))
+                                output::dim(&format!(
+                                    "Full log: veld logs --name {run_name_str} --node {node}"
+                                ))
                             );
                         }
                     }
@@ -580,76 +592,43 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
     }
 }
 
-/// Tail all log files, printing timestamped lines with node labels, until Ctrl+C.
+/// Tail server logs from the database, printing timestamped lines with node
+/// labels, until Ctrl+C.
 async fn follow_logs_until_interrupt(
+    db: &veld_core::db::Db,
     targets: &[(String, String)],
     project_root: &std::path::Path,
     run_name: &str,
 ) {
-    let mut positions: HashMap<PathBuf, u64> = HashMap::new();
-
-    // Initialize positions to current file sizes (skip historical output).
-    for (node_name, variant) in targets {
-        let log_path = logging::log_file(project_root, run_name, node_name, variant);
-        if let Ok(metadata) = tokio::fs::metadata(&log_path).await {
-            positions.insert(log_path, metadata.len());
-        }
-    }
+    // Skip historical output: start after the current newest row.
+    let mut last_id = db.max_log_id().unwrap_or(0);
+    let target_set: std::collections::HashSet<(String, String)> = targets.iter().cloned().collect();
+    let filter = veld_core::db::LogFilter {
+        node: None,
+        variant: None,
+        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+    };
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                for (node_name, variant) in targets {
-                    let log_path = logging::log_file(project_root, run_name, node_name, variant);
-                    let pos = positions.get(&log_path).copied().unwrap_or(0);
-
-                    let metadata = match tokio::fs::metadata(&log_path).await {
-                        Ok(m) => m,
-                        Err(_) => continue,
+                let rows = match db.logs_after_id(project_root, run_name, &filter, last_id) {
+                    Ok(rows) => rows,
+                    Err(_) => continue,
+                };
+                for row in rows {
+                    last_id = row.id;
+                    let (Some(node), Some(variant)) = (row.node.as_deref(), row.variant.as_deref())
+                    else {
+                        continue;
                     };
-
-                    let file_len = metadata.len();
-
-                    // Handle file truncation/rotation.
-                    if file_len < pos {
-                        positions.insert(log_path.clone(), 0);
+                    if !target_set.contains(&(node.to_owned(), variant.to_owned())) {
                         continue;
                     }
-                    if file_len == pos {
-                        continue;
-                    }
-
-                    let mut file = match tokio::fs::File::open(&log_path).await {
-                        Ok(f) => f,
-                        Err(_) => continue,
-                    };
-                    file.seek(std::io::SeekFrom::Start(pos)).await.ok();
-
-                    let mut reader = BufReader::new(file);
-                    let mut new_pos = pos;
-                    let mut line = String::new();
-
-                    loop {
-                        line.clear();
-                        match reader.read_line(&mut line).await {
-                            Ok(0) => break,
-                            Ok(n) => {
-                                new_pos += n as u64;
-                                let trimmed = line.trim_end();
-                                if !trimmed.is_empty() {
-                                    let label = output::cyan(
-                                        &format!("{node_name}:{variant}"),
-                                    );
-                                    println!("{label} {trimmed}");
-                                }
-                            }
-                            Err(_) => break,
-                        }
-                    }
-
-                    positions.insert(log_path, new_pos);
+                    let label = output::cyan(&format!("{node}:{variant}"));
+                    println!("{label} [{}] {}", row.ts, row.line);
                 }
             }
             _ = tokio::signal::ctrl_c() => {

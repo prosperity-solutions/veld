@@ -1,10 +1,13 @@
-use veld_core::state::{GlobalRegistry, RunStatus};
+use veld_core::state::RunStatus;
 
 use crate::output;
 
 /// `veld list [--urls] [--json]`
 pub async fn run(urls: bool, json: bool) -> i32 {
-    let registry = match GlobalRegistry::load() {
+    let Some(db) = super::open_db(json) else {
+        return 1;
+    };
+    let registry = match db.registry() {
         Ok(r) => r,
         Err(e) => {
             output::print_error(&format!("Failed to load registry: {e}"), json);

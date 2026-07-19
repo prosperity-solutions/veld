@@ -20,7 +20,7 @@ use veld_core::share::{
     ApprovalMode, Capability, GatewayAccessPolicy, JoinRequest, JoinResponse, ShareManifest,
     SharedNode, SharesList, StartShareRequest, StartShareResponse,
 };
-use veld_core::state::{GlobalRegistry, ProjectState};
+use veld_core::state::GlobalRegistry;
 
 use super::endpoint::RelayChoice;
 use super::gateway::GatewayClient;
@@ -514,7 +514,8 @@ fn build_manifest(
     ttl_secs: Option<i64>,
     mode: ExposeMode,
 ) -> Result<ResolvedShare, ApiError> {
-    let registry = GlobalRegistry::load().map_err(internal)?;
+    let db = veld_core::db::Db::open().map_err(internal)?;
+    let registry = db.registry().map_err(internal)?;
 
     let run_name = match run {
         Some(r) => r.to_string(),
@@ -528,11 +529,11 @@ fn build_manifest(
         .map(|e| e.project_root.clone())
         .ok_or((StatusCode::NOT_FOUND, format!("run '{run_name}' not found")))?;
 
-    let project_state = ProjectState::load(&project_root).map_err(internal)?;
-    let run_state = project_state
-        .runs
-        .get(&run_name)
+    let run_state = db
+        .get_run(&project_root, &run_name)
+        .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, format!("run '{run_name}' not found")))?;
+    let run_state = &run_state;
 
     let config = load_config(&project_root.join("veld.json")).map_err(|e| {
         (
