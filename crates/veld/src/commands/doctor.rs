@@ -353,7 +353,17 @@ impl Diagnostics {
         // Everything (run state, logs, feedback, tokens) lives here now, so a
         // corrupt/locked/newer-than-supported database must be visible in the
         // one diagnostic command.
-        {
+        //
+        // Skipped under sudo: `Db::open()` creates the file (and -wal/-shm)
+        // if missing, and root's data dir is not the user's — running it as
+        // root would either check the wrong database or leave root-owned
+        // files that break every later non-sudo `veld` command.
+        if std::env::var("SUDO_UID").is_ok_and(|u| !u.is_empty()) {
+            self.checks.push(Check {
+                pass: true,
+                label: "Database check skipped under sudo (run `veld doctor` without sudo)".into(),
+            });
+        } else {
             let path = veld_core::db::Db::default_path()
                 .map(|p| tilde_path(&p))
                 .unwrap_or_else(|_| "unknown".into());

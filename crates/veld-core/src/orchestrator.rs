@@ -1438,7 +1438,13 @@ async fn execute_start_server_isolated(
         // would clobber the newer one — dropping a just-spawned PID from the
         // DB right when Ctrl+C needs it. The write is a few ms of blocking
         // I/O; the lock has no `.await` inside, so it stays cancellation-safe.
-        let mut checkpoint = ctx.checkpoint.lock().expect("checkpoint mutex poisoned");
+        // Recover from a poisoned mutex (a sibling task panicked mid-
+        // checkpoint): losing that task's partial update is fine, but
+        // panicking here too would leak this task's just-spawned process.
+        let mut checkpoint = ctx
+            .checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         checkpoint.run.execution_order.push(key.clone());
         checkpoint.run.nodes.insert(key, node_state.clone());
         let _ = ctx

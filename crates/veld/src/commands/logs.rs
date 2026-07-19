@@ -157,6 +157,12 @@ pub async fn run(opts: LogsOptions) -> i32 {
     }
 
     // Historical snapshot: read each source, then interleave by timestamp.
+    // The follow watermark is taken BEFORE the reads: a line written to an
+    // already-read source while later sources are still being read would
+    // otherwise fall between snapshot and follow and be lost. Rows the
+    // snapshot shows beyond this watermark are remembered so follow skips
+    // them (no duplicates either).
+    let follow_from = db.max_log_id().unwrap_or(0);
     let since_duration = since.as_deref().and_then(parse_duration);
     let mut rows: Vec<LogRow> = Vec::new();
     for sf in &source_filters {
@@ -176,14 +182,13 @@ pub async fn run(opts: LogsOptions) -> i32 {
     }
     rows.sort_by(|a, b| a.ts.cmp(&b.ts).then(a.id.cmp(&b.id)));
 
-    // Snapshot point for follow mode: continue after the highest row id we
-    // showed (no duplicates). When nothing matched yet, start at the current
-    // global maximum instead of dumping the entire history.
-    let last_id = rows
+    // Ids the snapshot already showed past the follow watermark — follow
+    // skips exactly these.
+    let already_shown: std::collections::HashSet<i64> = rows
         .iter()
         .map(|r| r.id)
-        .max()
-        .unwrap_or_else(|| db.max_log_id().unwrap_or(0));
+        .filter(|id| *id > follow_from)
+        .collect();
 
     let search_lower = search.as_deref().map(|s| s.to_lowercase());
 
@@ -251,7 +256,8 @@ pub async fn run(opts: LogsOptions) -> i32 {
             &project_root,
             run_name,
             &follow_filters,
-            last_id,
+            follow_from,
+            already_shown,
             json,
             &search_lower,
         )
@@ -278,13 +284,16 @@ fn format_row(row: &LogRow) -> String {
 
 /// Poll the database for new rows, printing them as they appear, until Ctrl+C.
 /// The filters' stream sets are disjoint, so no row matches twice; rows from
-/// all filters are merged in id order per tick.
+/// all filters are merged in id order per tick. `already_shown` holds ids past
+/// the watermark that the historical snapshot already printed.
+#[allow(clippy::too_many_arguments)]
 async fn follow_logs(
     db: &Db,
     project_root: &std::path::Path,
     run_name: &str,
     filters: &[LogFilter],
     mut last_id: i64,
+    mut already_shown: std::collections::HashSet<i64>,
     json: bool,
     search: &Option<String>,
 ) {
@@ -303,6 +312,9 @@ async fn follow_logs(
                 rows.sort_by_key(|r| r.id);
                 for row in rows {
                     last_id = last_id.max(row.id);
+                    if already_shown.remove(&row.id) {
+                        continue; // the snapshot already printed this line
+                    }
                     if let Some(needle) = search {
                         if !row.line.to_lowercase().contains(needle.as_str()) {
                             continue;

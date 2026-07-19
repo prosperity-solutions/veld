@@ -31,22 +31,17 @@ impl Db {
     /// The import body, with explicit source directories so it is testable.
     /// `data_dir` held `registry.json` + `relay-tokens.json`; `home_dir`
     /// held `hints.json`.
+    ///
+    /// The flag is deliberately set only AFTER a completed pass, not claimed
+    /// up front: every step is an idempotent upsert, so the worst outcome of
+    /// two processes racing right after an upgrade is a harmless double
+    /// import — whereas claim-first would let a crash mid-import abandon it
+    /// half-done forever, stranding pre-upgrade environments (the exact
+    /// invariant this import protects).
     fn import_legacy_from(&self, data_dir: Option<&Path>, home_dir: Option<&Path>) {
-        // Claim the flag atomically: right after an upgrade the CLI and the
-        // daemon can open the database at the same time, and only one of them
-        // should run the import (it would be idempotent, but why race).
-        let claimed = {
-            let conn = self.lock();
-            conn.execute(
-                "INSERT INTO kv (key, value, updated_at) VALUES (?1, '', ?2)
-                 ON CONFLICT(key) DO NOTHING",
-                rusqlite::params![IMPORT_FLAG, super::now_str()],
-            )
-            .map(|n| n == 1)
-            .unwrap_or(false)
-        };
-        if !claimed {
-            return; // already imported (or kv unwritable — don't loop)
+        match self.kv_get(IMPORT_FLAG) {
+            Ok(None) => {}
+            _ => return, // already imported (or kv unreadable — don't loop)
         }
 
         if let Some(data_dir) = data_dir {
