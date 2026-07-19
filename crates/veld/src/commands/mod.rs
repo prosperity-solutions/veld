@@ -24,6 +24,18 @@ pub mod version;
 
 use crate::output;
 
+/// Open the central veld database. On failure prints an error and returns
+/// `None`.
+pub fn open_db(json: bool) -> Option<veld_core::db::Db> {
+    match veld_core::db::Db::open() {
+        Ok(db) => Some(db),
+        Err(e) => {
+            output::print_error(&format!("Failed to open veld database: {e}"), json);
+            None
+        }
+    }
+}
+
 /// Read the setup mode from `~/.veld/setup.json`.
 /// Delegates to the shared implementation in `veld-core` so the two never drift.
 pub fn read_setup_mode() -> Option<String> {

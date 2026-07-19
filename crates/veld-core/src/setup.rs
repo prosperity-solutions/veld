@@ -1501,6 +1501,31 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
         }
     }
 
+    // Remove the veld data directory: the central database (veld.db +
+    // -wal/-shm — it holds secrets: relay tokens, encrypted node outputs),
+    // node.key, and any legacy pre-SQLite state files. Derive it from the
+    // real user's home (not dirs::data_dir()) so sudo cleans the right one.
+    if let Some(home) = resolve_real_user_home() {
+        #[cfg(target_os = "macos")]
+        let veld_data = home
+            .join("Library")
+            .join("Application Support")
+            .join("veld");
+        // Limitation: under sudo, env_reset strips XDG_DATA_HOME, so a user
+        // with a custom data home falls back to the default path here and
+        // their veld data dir survives a privileged uninstall.
+        #[cfg(not(target_os = "macos"))]
+        let veld_data = std::env::var("XDG_DATA_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| home.join(".local").join("share"))
+            .join("veld");
+        if veld_data.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&veld_data) {
+                tracing::warn!(path = %veld_data.display(), error = %e, "failed to remove data dir");
+            }
+        }
+    }
+
     // Remove Hammerspoon Spoon (best-effort).
     uninstall_hammerspoon().await;
 

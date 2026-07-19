@@ -9,6 +9,7 @@ use thiserror::Error;
 use tracing;
 
 use crate::config::{self, Outputs, StepType, VeldConfig};
+use crate::db::{Db, LogFilter, LogStream};
 use crate::graph::{self, NodeSelection};
 use crate::health;
 use crate::helper::HelperClient;
@@ -16,10 +17,7 @@ use crate::logging::{self, LogWriter};
 use crate::port::PortAllocator;
 use crate::process;
 use crate::progress::ProgressEvent;
-use crate::state::{
-    GlobalRegistry, NodeState, NodeStatus, ProjectState, ReadinessPhase, RegistryEntry,
-    RegistryRunInfo, RunState, RunStatus,
-};
+use crate::state::{NodeState, NodeStatus, ReadinessPhase, RunState, RunStatus};
 use crate::url;
 use crate::variables::VariableContext;
 
@@ -47,7 +45,7 @@ pub enum OrchestratorError {
     Health(#[from] health::HealthError),
 
     #[error(transparent)]
-    State(#[from] crate::state::StateError),
+    Db(#[from] crate::db::DbError),
 
     #[error(transparent)]
     Variable(#[from] crate::variables::VariableError),
@@ -106,6 +104,7 @@ struct PrecomputedServer {
 #[derive(Clone)]
 struct NodeExecutionContext {
     config: Arc<VeldConfig>,
+    db: Db,
     project_root: Arc<PathBuf>,
     https_port: u16,
     foreground: bool,
@@ -144,6 +143,7 @@ pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
     pub project_root: PathBuf,
+    pub db: Db,
     pub port_allocator: PortAllocator,
     pub helper_client: HelperClient,
     /// The HTTPS port that the helper's Caddy listens on (queried at start).
@@ -169,13 +169,16 @@ pub struct Orchestrator {
 }
 
 impl Orchestrator {
-    /// Create an orchestrator from a discovered config.
-    pub fn new(config_path: PathBuf, config: VeldConfig) -> Self {
+    /// Create an orchestrator from a discovered config. Opens (and migrates)
+    /// the central veld database.
+    pub fn new(config_path: PathBuf, config: VeldConfig) -> Result<Self, OrchestratorError> {
         let project_root = config::project_root(&config_path);
-        Self {
+        let db = Db::open()?;
+        Ok(Self {
             config,
             config_path,
             project_root,
+            db,
             port_allocator: PortAllocator::new(),
             helper_client: HelperClient::default_client(),
             https_port: 443,
@@ -186,7 +189,7 @@ impl Orchestrator {
             foreground: false,
             progress_tx: None,
             internal_log: None,
-        }
+        })
     }
 
     /// Enable foreground mode (timestamped pipe for server output).
@@ -233,7 +236,7 @@ impl Orchestrator {
     /// Convenience: discover config from CWD and build the orchestrator.
     pub fn from_cwd() -> Result<Self, OrchestratorError> {
         let (path, cfg) = config::load_config_from_cwd()?;
-        Ok(Self::new(path, cfg))
+        Self::new(path, cfg)
     }
 
     // -----------------------------------------------------------------------
@@ -271,28 +274,28 @@ impl Orchestrator {
         }
 
         // Create internal log writer for this run.
-        let log_path = logging::internal_log_file(&self.project_root, run_name);
-        if let Ok(writer) = LogWriter::new(log_path).await {
-            self.internal_log = Some(writer);
-        }
+        self.internal_log = Some(LogWriter::for_run(
+            self.db.clone(),
+            &self.project_root,
+            run_name,
+            LogStream::Internal,
+        ));
 
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
 
         // Set up debug log writer if debug mode is enabled.
         if self.debug {
-            let debug_path = logging::debug_log_file(&self.project_root, run_name);
-            match LogWriter::new(debug_path).await {
-                Ok(writer) => {
-                    let _ = writer
-                        .write_line("[VELD] Debug logging enabled — orchestration trace")
-                        .await;
-                    self.debug_writer = Some(writer);
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to create debug log writer");
-                }
-            }
+            let writer = LogWriter::for_run(
+                self.db.clone(),
+                &self.project_root,
+                run_name,
+                LogStream::Debug,
+            );
+            let _ = writer
+                .write_line("[VELD] Debug logging enabled — orchestration trace")
+                .await;
+            self.debug_writer = Some(writer);
         }
 
         // Ensure Caddy is running before we add routes.
@@ -504,6 +507,7 @@ impl Orchestrator {
         // Build shared context (cloned once per stage).
         let ctx = NodeExecutionContext {
             config: Arc::clone(shared_config),
+            db: self.db.clone(),
             project_root: Arc::clone(shared_project_root),
             https_port: self.https_port,
             foreground: self.foreground,
@@ -623,10 +627,12 @@ impl Orchestrator {
     pub async fn stop(&mut self, run_name: &str) -> Result<StopResult, OrchestratorError> {
         // Create internal log writer for this run (may already exist from start).
         if self.internal_log.is_none() {
-            let log_path = logging::internal_log_file(&self.project_root, run_name);
-            if let Ok(writer) = LogWriter::new(log_path).await {
-                self.internal_log = Some(writer);
-            }
+            self.internal_log = Some(LogWriter::for_run(
+                self.db.clone(),
+                &self.project_root,
+                run_name,
+                LogStream::Internal,
+            ));
         }
         self.internal_log(&format!("[stop] stopping environment '{run_name}'"))
             .await;
@@ -636,18 +642,9 @@ impl Orchestrator {
             self.helper_client = client;
         }
 
-        let mut project_state = match ProjectState::load(&self.project_root) {
-            Ok(s) => s,
-            Err(_) => {
-                // State not loadable — still run teardown steps.
-                self.run_teardown_steps(run_name).await;
-                return Ok(StopResult::AlreadyStopped);
-            }
-        };
-
-        let run = match project_state.get_run_mut(run_name) {
-            Some(r) => r,
-            None => {
+        let mut run = match self.db.get_run(&self.project_root, run_name) {
+            Ok(Some(r)) => r,
+            _ => {
                 // Run not found in state (e.g., setup failed before state was saved).
                 // Still run teardown steps to clean up anything setup may have created.
                 self.run_teardown_steps(run_name).await;
@@ -658,9 +655,7 @@ impl Orchestrator {
         if run.status == RunStatus::Stopped {
             // Already stopped — clean up state, run teardown, and return.
             self.run_teardown_steps(run_name).await;
-            project_state.runs.remove(run_name);
-            project_state.save(&self.project_root)?;
-            self.remove_from_registry(run_name);
+            self.db.remove_run(&self.project_root, run_name)?;
             return Ok(StopResult::AlreadyStopped);
         }
 
@@ -720,12 +715,8 @@ impl Orchestrator {
         // Run project-level teardown steps after all per-node on_stop hooks.
         self.run_teardown_steps(run_name).await;
 
-        // Remove the run from project state entirely (no lingering stopped state).
-        project_state.runs.remove(run_name);
-        project_state.save(&self.project_root)?;
-
-        // Remove from global registry.
-        self.remove_from_registry(run_name);
+        // Remove the run from state entirely (no lingering stopped state).
+        self.db.remove_run(&self.project_root, run_name)?;
 
         self.internal_log(&format!("[stop] environment '{run_name}' stopped"))
             .await;
@@ -739,24 +730,16 @@ impl Orchestrator {
     async fn cleanup_stale_run(&mut self, run_name: &str) {
         // Always clear stale feedback data so a reused run name starts fresh,
         // even if the run was already removed from state.
-        let feedback_dir = self
-            .project_root
-            .join(".veld")
-            .join("feedback")
-            .join(run_name);
-        if feedback_dir.exists() {
+        let feedback =
+            crate::feedback::FeedbackStore::new(self.db.clone(), &self.project_root, run_name);
+        if feedback.has_data() {
             tracing::info!(run_name, "clearing stale feedback data");
-            let _ = std::fs::remove_dir_all(&feedback_dir);
+            let _ = feedback.clear();
         }
 
-        let project_state = match ProjectState::load(&self.project_root) {
-            Ok(s) => s,
-            Err(_) => return,
-        };
-
-        let run = match project_state.get_run(run_name) {
-            Some(r) => r,
-            None => return,
+        let run = match self.db.get_run(&self.project_root, run_name) {
+            Ok(Some(r)) => r,
+            _ => return,
         };
 
         tracing::info!(run_name, "cleaning up stale run before starting");
@@ -779,18 +762,15 @@ impl Orchestrator {
             }
         }
 
-        // Remove from state and registry.
-        let mut project_state = project_state;
-        project_state.runs.remove(run_name);
-        let _ = project_state.save(&self.project_root);
-        self.remove_from_registry(run_name);
+        // Remove from state (registry rows derive from the same tables).
+        let _ = self.db.remove_run(&self.project_root, run_name);
     }
 
     /// Clean up ALL runs in the project whose processes have died.
     /// This catches orphaned runs from previous sessions that were not
     /// properly stopped (e.g., due to a crash or `kill -9`).
     async fn cleanup_dead_runs(&mut self) {
-        let project_state = match ProjectState::load(&self.project_root) {
+        let project_state = match self.db.load_project_state(&self.project_root) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -836,13 +816,8 @@ impl Orchestrator {
         }
 
         // Persist the cleanup.
-        if !dead_run_names.is_empty() {
-            let mut project_state = project_state;
-            for run_name in &dead_run_names {
-                project_state.runs.remove(run_name);
-                self.remove_from_registry(run_name);
-            }
-            let _ = project_state.save(&self.project_root);
+        for run_name in &dead_run_names {
+            let _ = self.db.remove_run(&self.project_root, run_name);
         }
     }
 
@@ -1107,60 +1082,13 @@ impl Orchestrator {
         }
     }
 
-    /// Remove a run from the global registry.
-    fn remove_from_registry(&self, run_name: &str) {
-        if let Ok(mut registry) = GlobalRegistry::load() {
-            let key = self.project_root.to_string_lossy().into_owned();
-            if let Some(entry) = registry.projects.get_mut(&key) {
-                entry.runs.remove(run_name);
-                if entry.runs.is_empty() {
-                    registry.projects.remove(&key);
-                }
-                let _ = registry.save();
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------
     // State persistence
     // -----------------------------------------------------------------------
 
     fn save_state(&self, run: &RunState) -> Result<(), OrchestratorError> {
-        let mut project_state = ProjectState::load(&self.project_root)?;
-        project_state.runs.insert(run.name.clone(), run.clone());
-        project_state.save(&self.project_root)?;
-
-        // Update global registry.
-        if let Ok(mut registry) = GlobalRegistry::load() {
-            let mut urls = HashMap::new();
-            for ns in run.nodes.values() {
-                if let Some(ref u) = ns.url {
-                    urls.insert(RunState::node_key(&ns.node_name, &ns.variant), u.clone());
-                }
-            }
-
-            let entry = registry
-                .projects
-                .entry(self.project_root.to_string_lossy().into_owned())
-                .or_insert_with(|| RegistryEntry {
-                    project_root: self.project_root.clone(),
-                    project_name: self.config.name.clone(),
-                    runs: HashMap::new(),
-                });
-
-            entry.runs.insert(
-                run.name.clone(),
-                RegistryRunInfo {
-                    run_id: run.run_id,
-                    name: run.name.clone(),
-                    status: run.status.clone(),
-                    urls,
-                },
-            );
-
-            let _ = registry.save();
-        }
-
+        self.db
+            .save_run(&self.project_root, &self.config.name, run)?;
         Ok(())
     }
 }
@@ -1478,13 +1406,25 @@ async fn execute_start_server_isolated(
     }
 
     // Start the process.
-    let log_path = logging::log_file(&ctx.project_root, &ctx.run_name, &sel.node, &sel.variant);
+    let log_target = process::LogTarget {
+        db: ctx.db.clone(),
+        project_root: ctx.project_root.as_ref().clone(),
+        run_name: ctx.run_name.clone(),
+        node: sel.node.clone(),
+        variant: sel.variant.clone(),
+    };
 
     // Release the port reservation immediately before spawning.
     port_reservation.release();
 
-    let handle =
-        process::start_server(&resolved_cmd, &working_dir, &env, &log_path, ctx.foreground).await?;
+    let handle = process::start_server(
+        &resolved_cmd,
+        &working_dir,
+        &env,
+        log_target,
+        ctx.foreground,
+    )
+    .await?;
     let pid = handle.pid();
     node_state.pid = Some(pid);
 
@@ -1492,20 +1432,24 @@ async fn execute_start_server_isolated(
     // checks still allows `veld stop` to find and kill this process.
     {
         let key = RunState::node_key(&sel.node, &sel.variant);
-        // Lock briefly for in-memory update only (no .await = cancellation-safe).
-        let (run_snapshot, project_root) = {
-            let mut checkpoint = ctx.checkpoint.lock().expect("checkpoint mutex poisoned");
-            checkpoint.run.execution_order.push(key.clone());
-            checkpoint.run.nodes.insert(key, node_state.clone());
-            (checkpoint.run.clone(), checkpoint.project_root.clone())
-        };
-        // File I/O outside the lock to avoid blocking the tokio runtime.
-        let mut project_state =
-            ProjectState::load(&project_root).unwrap_or_else(|_| ProjectState::default());
-        project_state
-            .runs
-            .insert(run_snapshot.name.clone(), run_snapshot);
-        let _ = project_state.save(&project_root);
+        // The DB write happens INSIDE the checkpoint lock: `save_run` replaces
+        // the whole run (all nodes), so two parallel node tasks snapshotting
+        // and writing outside the lock could interleave and the older snapshot
+        // would clobber the newer one — dropping a just-spawned PID from the
+        // DB right when Ctrl+C needs it. The write is a few ms of blocking
+        // I/O; the lock has no `.await` inside, so it stays cancellation-safe.
+        // Recover from a poisoned mutex (a sibling task panicked mid-
+        // checkpoint): losing that task's partial update is fine, but
+        // panicking here too would leak this task's just-spawned process.
+        let mut checkpoint = ctx
+            .checkpoint
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        checkpoint.run.execution_order.push(key.clone());
+        checkpoint.run.nodes.insert(key, node_state.clone());
+        let _ = ctx
+            .db
+            .save_run(&checkpoint.project_root, &ctx.config.name, &checkpoint.run);
     }
 
     // Readiness probe — inlined to emit progress events between phases.
@@ -1541,39 +1485,38 @@ async fn execute_start_server_isolated(
         // (i.e. when the health check completes, whether success or failure).
         let _log_watcher = {
             let tx = ctx.progress_tx.clone();
-            let path = log_path.clone();
+            let db = ctx.db.clone();
+            let project_root = ctx.project_root.as_ref().clone();
+            let run_name = ctx.run_name.clone();
             let node = sel.node.clone();
             let variant = sel.variant.clone();
             AbortOnDrop(tokio::spawn(async move {
                 // Give the service time to start normally before showing logs.
                 tokio::time::sleep(std::time::Duration::from_secs(10)).await;
 
-                let mut last_pos: u64 = 0;
+                let filter = LogFilter {
+                    node: Some(node.clone()),
+                    variant: Some(variant.clone()),
+                    streams: Some(vec![LogStream::Server.as_str()]),
+                };
+                let mut last_id: i64 = 0;
                 loop {
-                    if let Ok(metadata) = tokio::fs::metadata(&path).await {
-                        let len = metadata.len();
-                        if len > last_pos {
-                            if let Ok(mut file) = tokio::fs::File::open(&path).await {
-                                use tokio::io::{AsyncReadExt, AsyncSeekExt};
-                                let _ = file.seek(std::io::SeekFrom::Start(last_pos)).await;
-                                let mut buf = String::new();
-                                if file.read_to_string(&mut buf).await.is_ok() {
-                                    let lines: Vec<String> = buf
-                                        .lines()
-                                        .filter(|l| !l.is_empty())
-                                        .map(|l| l.to_owned())
-                                        .collect();
-                                    if !lines.is_empty() {
-                                        if let Some(ref tx) = tx {
-                                            let _ = tx.send(ProgressEvent::NodeLogLines {
-                                                node: node.clone(),
-                                                variant: variant.clone(),
-                                                lines,
-                                            });
-                                        }
-                                    }
-                                }
-                                last_pos = len;
+                    if let Ok(rows) = db.logs_after_id(&project_root, &run_name, &filter, last_id) {
+                        if let Some(max) = rows.last().map(|r| r.id) {
+                            last_id = max;
+                        }
+                        let lines: Vec<String> = rows
+                            .into_iter()
+                            .map(|r| format!("[{}] {}", r.ts, r.line))
+                            .filter(|l| !l.is_empty())
+                            .collect();
+                        if !lines.is_empty() {
+                            if let Some(ref tx) = tx {
+                                let _ = tx.send(ProgressEvent::NodeLogLines {
+                                    node: node.clone(),
+                                    variant: variant.clone(),
+                                    lines,
+                                });
                             }
                         }
                     }

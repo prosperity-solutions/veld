@@ -5,7 +5,6 @@ use veld_core::feedback::{
     Author, EventType, FeedbackStore, Thread, ThreadOrigin, ThreadScope, ThreadStatus, new_message,
     new_thread,
 };
-use veld_core::state::ProjectState;
 
 use crate::output;
 
@@ -49,18 +48,19 @@ struct NextMessage {
 }
 
 impl NextThread {
-    fn from_thread(thread: &Thread, store: &FeedbackStore) -> Self {
+    fn from_thread(thread: &Thread, store: &FeedbackStore, project_root: &std::path::Path) -> Self {
         let messages = thread
             .messages
             .iter()
             .map(|m| NextMessage {
                 author: m.author,
                 body: m.body.clone(),
-                screenshot: m.screenshot.as_deref().and_then(|s| {
-                    // Only hand the agent a path it can actually read.
-                    let p = screenshot_abs_path(s, store);
-                    std::path::Path::new(&p).exists().then_some(p)
-                }),
+                // Screenshots live in the database — export to a temp file so
+                // the agent gets an absolute path it can actually read.
+                screenshot: m
+                    .screenshot
+                    .as_deref()
+                    .and_then(|s| export_screenshot(s, store, project_root)),
                 created_at: m.created_at,
             })
             .collect();
@@ -75,16 +75,29 @@ impl NextThread {
     }
 }
 
-fn screenshot_abs_path(screenshot: &str, store: &FeedbackStore) -> String {
+/// Export a stored screenshot to `.veld/tmp/screenshots/{run}/{file}` and
+/// return the absolute path, or `None` when the screenshot doesn't exist.
+fn export_screenshot(
+    screenshot: &str,
+    store: &FeedbackStore,
+    project_root: &std::path::Path,
+) -> Option<String> {
     let id = screenshot
         .trim_end_matches(".png")
         .rsplit('/')
         .next()
         .unwrap_or(screenshot);
-    store
-        .screenshot_path(&format!("{id}.png"))
-        .display()
-        .to_string()
+    let filename = format!("{id}.png");
+    let data = store.get_screenshot(&filename).ok().flatten()?;
+    let dir = project_root
+        .join(".veld")
+        .join("tmp")
+        .join("screenshots")
+        .join(store.run_name());
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(&filename);
+    std::fs::write(&path, &data).ok()?;
+    Some(path.display().to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -231,11 +244,15 @@ pub async fn run(command: FeedbackCommand) -> i32 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn resolve(name: Option<String>, json: bool) -> Option<(std::path::PathBuf, String)> {
+fn resolve(
+    name: Option<String>,
+    json: bool,
+) -> Option<(veld_core::db::Db, std::path::PathBuf, String)> {
     let (config_path, _config) = super::load_config(json)?;
     let project_root = veld_core::config::project_root(&config_path);
 
-    let project_state = match ProjectState::load(&project_root) {
+    let db = super::open_db(json)?;
+    let project_state = match db.load_project_state(&project_root) {
         Ok(ps) => ps,
         Err(e) => {
             output::print_error(&format!("Failed to load project state: {e}"), json);
@@ -245,12 +262,12 @@ fn resolve(name: Option<String>, json: bool) -> Option<(std::path::PathBuf, Stri
 
     let run_name = match name {
         // Validate an explicit --name so a typo doesn't read an empty feedback
-        // dir and make `next` time out forever. Accept a run that is either
-        // active OR has feedback data on disk — a stopped run keeps its
-        // `.veld/feedback/{run}/` directory, and `threads`/`events` still work.
+        // store and make `next` time out forever. Accept a run that is either
+        // active OR has feedback data — a stopped run keeps its feedback rows,
+        // and `threads`/`events` still work.
         Some(n) => {
             let active = project_state.get_run(&n).is_some();
-            let has_feedback = FeedbackStore::new(&project_root, &n).has_data();
+            let has_feedback = FeedbackStore::new(db.clone(), &project_root, &n).has_data();
             if !active && !has_feedback {
                 output::print_error(
                     &format!("No such run '{n}'. Run `veld runs` to list active runs."),
@@ -263,7 +280,7 @@ fn resolve(name: Option<String>, json: bool) -> Option<(std::path::PathBuf, Stri
         None => super::resolve_run_name(None, &project_state, true, json)?,
     };
 
-    Some((project_root, run_name))
+    Some((db, project_root, run_name))
 }
 
 // ---------------------------------------------------------------------------
@@ -271,12 +288,12 @@ fn resolve(name: Option<String>, json: bool) -> Option<(std::path::PathBuf, Stri
 // ---------------------------------------------------------------------------
 
 async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) -> i32 {
-    let (project_root, run_name) = match resolve(name, json) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, json) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     // Announce listening only on transition (browser toast + pulsing FAB).
     if !store.is_listening(60).unwrap_or(false) {
@@ -289,7 +306,7 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
     loop {
         match store.next_waiting_thread() {
             Ok(Some(thread)) => {
-                emit_next("item", Some(&thread), &store, json);
+                emit_next("item", Some(&thread), &store, &project_root, json);
                 let _ = store.heartbeat();
                 return 0;
             }
@@ -302,7 +319,7 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
                 if store.is_ended().unwrap_or(false) {
                     let _ = store.mark_stopped();
                     let _ = store.append_event(EventType::AgentStopped);
-                    emit_next("ended", None, &store, json);
+                    emit_next("ended", None, &store, &project_root, json);
                     return 0;
                 }
             }
@@ -314,7 +331,7 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
 
         // Nothing waiting and not ended.
         if !wait || tokio::time::Instant::now() >= deadline {
-            emit_next("timeout", None, &store, json);
+            emit_next("timeout", None, &store, &project_root, json);
             return 0;
         }
 
@@ -324,11 +341,17 @@ async fn run_next(name: Option<String>, wait: bool, timeout: u64, json: bool) ->
 }
 
 /// Print a `next` outcome as JSON (for agents) or human-readable text.
-fn emit_next(result: &'static str, thread: Option<&Thread>, store: &FeedbackStore, json: bool) {
+fn emit_next(
+    result: &'static str,
+    thread: Option<&Thread>,
+    store: &FeedbackStore,
+    project_root: &std::path::Path,
+    json: bool,
+) {
     if json {
         let out = NextOutput {
             result,
-            thread: thread.map(|t| NextThread::from_thread(t, store)),
+            thread: thread.map(|t| NextThread::from_thread(t, store, project_root)),
         };
         println!("{}", serde_json::to_string_pretty(&out).unwrap());
         return;
@@ -337,7 +360,7 @@ fn emit_next(result: &'static str, thread: Option<&Thread>, store: &FeedbackStor
         "item" => {
             if let Some(t) = thread {
                 println!("{} next feedback item", output::bold("Feedback"));
-                print_thread_context(t, store);
+                print_thread_context(t, store, project_root);
             }
         }
         "ended" => output::print_info("Feedback session ended — the reviewer clicked \"Done\"."),
@@ -352,12 +375,12 @@ fn emit_next(result: &'static str, thread: Option<&Thread>, store: &FeedbackStor
 // ---------------------------------------------------------------------------
 
 async fn run_reply(name: Option<String>, thread_id: &str, body: &str) -> i32 {
-    let (project_root, run_name) = match resolve(name, false) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, false) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     let thread_id = match store.resolve_thread_id(thread_id) {
         Ok(id) => id,
@@ -403,12 +426,12 @@ async fn run_reply(name: Option<String>, thread_id: &str, body: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 async fn run_resolve(name: Option<String>, thread_id: &str) -> i32 {
-    let (project_root, run_name) = match resolve(name, false) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, false) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     let thread_id = match store.resolve_thread_id(thread_id) {
         Ok(id) => id,
@@ -440,12 +463,12 @@ async fn run_resolve(name: Option<String>, thread_id: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 async fn run_ask(name: Option<String>, page: Option<&str>, body: &str) -> i32 {
-    let (project_root, run_name) = match resolve(name, false) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, false) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     let scope = match page {
         Some(url) => ThreadScope::Page {
@@ -479,12 +502,12 @@ async fn run_ask(name: Option<String>, page: Option<&str>, body: &str) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn run_threads(name: Option<String>, json: bool, open: bool, resolved: bool) -> i32 {
-    let (project_root, run_name) = match resolve(name, json) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, json) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     let filter = if open {
         Some(ThreadStatus::Open)
@@ -519,12 +542,12 @@ fn run_threads(name: Option<String>, json: bool, open: bool, resolved: bool) -> 
 // ---------------------------------------------------------------------------
 
 fn run_events(name: Option<String>, after: u64, json: bool) -> i32 {
-    let (project_root, run_name) = match resolve(name, json) {
-        Some(pair) => pair,
+    let (db, project_root, run_name) = match resolve(name, json) {
+        Some(t) => t,
         None => return 1,
     };
 
-    let store = FeedbackStore::new(&project_root, &run_name);
+    let store = FeedbackStore::new(db, &project_root, &run_name);
 
     match store.get_events_after(after) {
         Ok(events) => {
@@ -599,7 +622,7 @@ fn strip_shell_escapes(s: &str) -> String {
 // Display helpers
 // ---------------------------------------------------------------------------
 
-fn print_thread_context(thread: &Thread, store: &FeedbackStore) {
+fn print_thread_context(thread: &Thread, store: &FeedbackStore, project_root: &std::path::Path) {
     print_scope(&thread.scope);
     if let Some(ref trace) = thread.component_trace {
         if !trace.is_empty() {
@@ -626,10 +649,9 @@ fn print_thread_context(thread: &Thread, store: &FeedbackStore) {
         };
         println!("    [{}] {}", output::dim(author), msg.body);
         if let Some(ref screenshot) = msg.screenshot {
-            println!(
-                "    Screenshot: {}",
-                output::dim(&screenshot_abs_path(screenshot, store))
-            );
+            if let Some(path) = export_screenshot(screenshot, store, project_root) {
+                println!("    Screenshot: {}", output::dim(&path));
+            }
         }
     }
 }
@@ -713,10 +735,15 @@ mod tests {
         assert_eq!(strip_shell_escapes(r"path\to"), r"path\to");
     }
 
+    fn test_store(tmp: &TempDir) -> FeedbackStore {
+        let db = veld_core::db::Db::open_at(&tmp.path().join("veld.db")).unwrap();
+        FeedbackStore::new(db, tmp.path(), "test-run")
+    }
+
     #[test]
     fn test_next_thread_resolves_screenshot_abs_path() {
         let tmp = TempDir::new().unwrap();
-        let store = FeedbackStore::new(tmp.path(), "test-run");
+        let store = test_store(&tmp);
         store.save_screenshot("ss_1", b"PNG").unwrap();
 
         let msg = new_message(Author::Human, "look here", Some("ss_1.png".into()), None);
@@ -729,17 +756,18 @@ mod tests {
             msg,
         );
 
-        let nt = NextThread::from_thread(&thread, &store);
+        let nt = NextThread::from_thread(&thread, &store, tmp.path());
         let ss = nt.messages[0].screenshot.as_deref().unwrap();
         assert!(ss.ends_with("ss_1.png"));
         assert!(std::path::Path::new(ss).is_absolute());
+        assert_eq!(std::fs::read(ss).unwrap(), b"PNG");
     }
 
     #[test]
     fn test_next_thread_omits_missing_screenshot() {
         let tmp = TempDir::new().unwrap();
-        let store = FeedbackStore::new(tmp.path(), "test-run");
-        // Referenced screenshot file was never saved (or was pruned) — don't
+        let store = test_store(&tmp);
+        // Referenced screenshot was never saved (or was pruned) — don't
         // hand the agent a dangling path it can't read.
         let msg = new_message(Author::Human, "look here", Some("gone.png".into()), None);
         let thread = new_thread(
@@ -751,7 +779,7 @@ mod tests {
             msg,
         );
 
-        let nt = NextThread::from_thread(&thread, &store);
+        let nt = NextThread::from_thread(&thread, &store, tmp.path());
         assert!(nt.messages[0].screenshot.is_none());
     }
 

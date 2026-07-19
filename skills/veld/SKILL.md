@@ -170,7 +170,7 @@ where `token` is a literal string or `{ "env": ... }` / `{ "file": ... }` /
 `veld.json` with the non-literal forms). A joiner auto-confines to the relay(s) in
 the ticket (a custom-relay share is never joined over public relays); to reach a
 token-gated relay it is prompted for the token (browser overlay / `veld join`
-terminal; cached per relay at `<data_dir>/veld/relay-tokens.json`, 0600; wrong
+terminal; cached per relay in the veld database (`<data_dir>/veld/veld.db`, 0600); wrong
 token re-prompts; `--json` returns `needs_relay_token`). The token can also come
 from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when the URL matches
 the ticket's relay), or the host sets `sharing.dangerouslyEmbedRelayTokensInTicket:

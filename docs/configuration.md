@@ -728,7 +728,7 @@ All forms trim trailing whitespace (secret stores commonly append a newline). Pr
 
 1. **A token entered at the prompt** this attempt (see below).
 2. **The ticket itself** — only if the host opted into `dangerouslyEmbedRelayTokensInTicket` (see below).
-3. **The joiner's local cache** — a token entered at a previous prompt, cached per relay URL at `<data_dir>/veld/relay-tokens.json` (`0600`).
+3. **The joiner's local cache** — a token entered at a previous prompt, cached per relay URL in the central veld database (`<data_dir>/veld/veld.db`, `0600`).
 4. **The joiner's env** — `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` on **their** daemon. Veld attaches that token only when `VELD_SHARE_RELAY` matches the relay URL in the ticket, so the secret is never sent to a relay the joiner did not name.
 
 There is no `veld.json` path for a joiner's relay token.

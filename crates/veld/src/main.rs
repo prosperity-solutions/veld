@@ -2,8 +2,7 @@ mod commands;
 mod hints;
 mod output;
 
-use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -171,7 +170,7 @@ enum Command {
         #[arg(long)]
         node: Option<String>,
 
-        /// Number of lines to show.
+        /// Number of lines to show per node/stream.
         #[arg(long, default_value = "50")]
         lines: usize,
 
@@ -374,8 +373,31 @@ enum Command {
     /// Print version information for all Veld binaries.
     Version,
 
-    /// Internal: read stdin, prepend timestamps, write to log file.
-    /// Used by detached server mode to timestamp process output.
+    /// Internal: read stdin, timestamp each line, store it in the central
+    /// database. Used by detached server mode to capture process output.
+    #[command(name = "_log", hide = true)]
+    InternalLog {
+        /// Project root the run belongs to.
+        #[arg(long)]
+        project_root: std::path::PathBuf,
+        /// Run name.
+        #[arg(long)]
+        run: String,
+        /// Node name.
+        #[arg(long)]
+        node: String,
+        /// Variant name.
+        #[arg(long)]
+        variant: String,
+    },
+
+    /// Internal (legacy): read stdin, prepend timestamps, append to a log
+    /// file. Kept so detached pipelines started by a pre-SQLite veld keep
+    /// working after an upgrade — if this subcommand disappeared, the running
+    /// server would die of SIGPIPE on its next write. Note: those legacy
+    /// pipelines keep writing FILES, which the DB-backed `veld logs` does not
+    /// read — a pre-upgrade run stays visible and stoppable but its ongoing
+    /// output is only in `.veld/logs/` until the run is restarted.
     #[command(name = "_timestamp", hide = true)]
     InternalTimestamp {
         /// Path to the log file to append to.
@@ -567,6 +589,57 @@ async fn main() {
             0
         }
 
+        Command::InternalLog {
+            project_root,
+            run,
+            node,
+            variant,
+        } => {
+            // Fast path: no config loading, no network — stdin → database.
+            // Used internally by detached server mode; this process outlives
+            // the CLI and keeps writing as long as the server produces output.
+            //
+            // This process is the read end of the server's stdout pipe: if it
+            // ever exits while the server is running, the server takes
+            // SIGPIPE on its next write and dies. So NOTHING here is fatal —
+            // if the database can't be opened (downgrade, transient lock) we
+            // keep draining stdin and drop the lines rather than kill the
+            // environment.
+            use std::io::BufRead;
+            let db = veld_core::db::Db::open()
+                .map_err(|e| eprintln!("veld _log: failed to open database, dropping logs: {e}"))
+                .ok();
+            let stdin = std::io::stdin();
+            let mut reader = stdin.lock();
+            let mut buf = String::new();
+
+            loop {
+                buf.clear();
+                match reader.read_line(&mut buf) {
+                    Ok(0) => break, // EOF
+                    Ok(_) => {
+                        let Some(ref db) = db else { continue };
+                        let trimmed = buf.trim_end_matches('\n').trim_end_matches('\r');
+                        let _ = db.append_log(
+                            &project_root,
+                            &run,
+                            Some(&node),
+                            Some(&variant),
+                            veld_core::db::LogStream::Server,
+                            chrono::Utc::now(),
+                            trimmed,
+                        );
+                    }
+                    Err(_) => {
+                        // Invalid UTF-8 line — skip it rather than terminating.
+                        // This handles binary output from misbehaving processes.
+                        continue;
+                    }
+                }
+            }
+            0
+        }
+
         Command::InternalTimestamp { log } => {
             // Fast path: no config loading, no network, just stdin → timestamped log file.
             // Used internally by detached server mode.
@@ -575,8 +648,9 @@ async fn main() {
             let mut reader = stdin.lock();
             let mut buf = String::new();
 
-            // Keep file handle open for performance; flush after each line
-            // so `veld logs -f` can see data immediately.
+            // Keep file handle open for performance; write per line so any
+            // file tailer sees data immediately. (The DB-backed `veld logs`
+            // does not read this file — see the subcommand doc above.)
             let mut file = match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -621,40 +695,24 @@ async fn main() {
 // Auto-GC
 // ---------------------------------------------------------------------------
 
-/// Path to the timestamp file that records the last auto-GC run.
-fn auto_gc_stamp_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("veld").join(".last-gc"))
-}
-
 /// Minimum interval between auto-GC runs.
 const AUTO_GC_INTERVAL: Duration = Duration::from_secs(30 * 60); // 30 minutes
 
 /// Trigger a detached `veld gc` subprocess if the last run was more than
-/// AUTO_GC_INTERVAL ago. Using a subprocess avoids race conditions with
-/// the foreground command on state files and survives `process::exit`.
+/// AUTO_GC_INTERVAL ago. The interval stamp lives in the database and is
+/// claimed atomically, so concurrent CLI invocations don't all trigger GC.
+/// Using a subprocess keeps GC off the foreground command's critical path
+/// and survives `process::exit`.
 fn maybe_auto_gc() {
-    let stamp = match auto_gc_stamp_path() {
-        Some(p) => p,
-        None => return,
+    let Ok(db) = veld_core::db::Db::open() else {
+        return;
     };
-
-    if let Ok(meta) = std::fs::metadata(&stamp) {
-        if let Ok(modified) = meta.modified() {
-            if SystemTime::now()
-                .duration_since(modified)
-                .unwrap_or_default()
-                < AUTO_GC_INTERVAL
-            {
-                return; // Recent enough, skip.
-            }
-        }
+    if !matches!(
+        db.kv_try_claim_interval("gc.last_auto_run", AUTO_GC_INTERVAL),
+        Ok(true)
+    ) {
+        return; // Recent enough (or unreadable) — skip.
     }
-
-    // Touch the stamp so concurrent CLI invocations don't all trigger GC.
-    if let Some(parent) = stamp.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let _ = std::fs::write(&stamp, "");
 
     // Spawn a detached `veld gc` subprocess. It runs independently and
     // won't be killed when this process exits.
@@ -672,44 +730,27 @@ fn maybe_auto_gc() {
 // Update check banner
 // ---------------------------------------------------------------------------
 
-/// Path to the timestamp file that records the last update check.
-fn update_check_stamp_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("veld").join(".last-update-check"))
-}
-
-/// Path to a file caching the latest known version.
-fn update_cache_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("veld").join(".latest-version"))
-}
-
 /// Minimum interval between update checks.
 const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60); // 24 hours
 
+const KV_UPDATE_LAST_CHECK: &str = "update.last_check";
+const KV_UPDATE_LATEST: &str = "update.latest_version";
+
 /// Check for a new version and print a banner if one is available.
 /// When a fetch is needed, it runs inline with the `check_update` timeout
-/// (which is capped at a few seconds). Results are cached to disk so
+/// (which is capped at a few seconds). Results are cached in the database so
 /// subsequent invocations within UPDATE_CHECK_INTERVAL are instant.
 async fn maybe_show_update_banner() {
-    let stamp = match update_check_stamp_path() {
-        Some(p) => p,
-        None => return,
-    };
-    let cache = match update_cache_path() {
-        Some(p) => p,
-        None => return,
+    let Ok(db) = veld_core::db::Db::open() else {
+        return;
     };
 
-    let needs_fetch = match std::fs::metadata(&stamp) {
-        Ok(meta) => match meta.modified() {
-            Ok(modified) => {
-                SystemTime::now()
-                    .duration_since(modified)
-                    .unwrap_or_default()
-                    >= UPDATE_CHECK_INTERVAL
-            }
-            Err(_) => true,
-        },
-        Err(_) => true,
+    let needs_fetch = match db.kv_updated_at(KV_UPDATE_LAST_CHECK) {
+        Ok(Some(t)) => {
+            let age = chrono::Utc::now() - t;
+            age.to_std().unwrap_or_default() >= UPDATE_CHECK_INTERVAL
+        }
+        _ => true,
     };
 
     if needs_fetch {
@@ -718,18 +759,13 @@ async fn maybe_show_update_banner() {
         let result =
             tokio::time::timeout(Duration::from_secs(5), veld_core::setup::check_update()).await;
 
-        // Ensure parent directory exists for stamp and cache files.
-        if let Some(parent) = stamp.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-
         match result {
             Ok(Ok(Some(version))) => {
-                let _ = std::fs::write(&cache, &version);
+                let _ = db.kv_set(KV_UPDATE_LATEST, &version);
             }
             Ok(Ok(None)) => {
                 // Up to date — clear stale cache.
-                let _ = std::fs::remove_file(&cache);
+                let _ = db.kv_delete(KV_UPDATE_LATEST);
             }
             _ => {
                 // Timeout or error — leave cache as-is, don't update stamp
@@ -738,12 +774,12 @@ async fn maybe_show_update_banner() {
             }
         }
 
-        // Only touch stamp after successful fetch.
-        let _ = std::fs::write(&stamp, "");
+        // Only touch the stamp after a successful fetch.
+        let _ = db.kv_set(KV_UPDATE_LAST_CHECK, "");
     }
 
     // Show banner from cache.
-    if let Ok(latest) = std::fs::read_to_string(&cache) {
+    if let Ok(Some(latest)) = db.kv_get(KV_UPDATE_LATEST) {
         let latest = latest.trim();
         let current = env!("CARGO_PKG_VERSION");
         if !latest.is_empty() && veld_core::setup::is_newer(latest, current) {

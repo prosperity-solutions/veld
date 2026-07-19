@@ -4,8 +4,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 use veld_core::config::{self, LivenessProbe, VeldConfig};
-use veld_core::logging::{self, LogWriter};
-use veld_core::state::{GlobalRegistry, NodeStatus, ProjectState, RunStatus};
+use veld_core::db::{Db, LogStream};
+use veld_core::logging::LogWriter;
+use veld_core::state::{NodeStatus, RunStatus};
 // Shared login-shell PATH helper — see `veld_core::user_path` for why (bare
 // launchd/systemd service PATH) and the timeout/fallback semantics.
 use veld_core::user_path::resolve_user_path;
@@ -63,7 +64,11 @@ async fn scan_and_update(
     last_checks: &mut LastCheckMap,
     user_path: &str,
 ) -> anyhow::Result<usize> {
-    let registry = GlobalRegistry::load()?;
+    // Open per scan so the daemon self-heals across CLI upgrades that migrate
+    // the schema (a long-lived handle would keep working, but a fresh open
+    // also surfaces a NewerSchema error as a log line instead of a crash).
+    let db = Db::open()?;
+    let registry = db.registry()?;
 
     let mut changes = 0;
 
@@ -75,21 +80,17 @@ async fn scan_and_update(
                 continue;
             }
 
-            // Load the actual project state to get full RunState with node PIDs.
-            let project_state = match ProjectState::load(project_root) {
-                Ok(ps) => ps,
+            // Load the full RunState with node PIDs.
+            let run_state = match db.get_run(project_root, run_name) {
+                Ok(Some(rs)) => rs,
+                Ok(None) => continue,
                 Err(e) => {
                     debug!(
-                        "could not load project state for {}: {e}",
+                        "could not load run state for {}: {e}",
                         project_root.display()
                     );
                     continue;
                 }
-            };
-
-            let run_state = match project_state.get_run(run_name) {
-                Some(rs) => rs,
-                None => continue,
             };
 
             // Check if any node with a PID has died.
@@ -107,39 +108,22 @@ async fn scan_and_update(
             }
 
             if any_dead {
-                // Update the project state: mark the run as stopped.
-                let mut project_state = match ProjectState::load(project_root) {
-                    Ok(ps) => ps,
-                    Err(_) => continue,
-                };
+                // Mark the run as stopped (the registry view derives from the
+                // same tables, so there is no second store to update).
+                let mut run = run_state;
+                run.status = RunStatus::Stopped;
+                run.stopped_at = Some(chrono::Utc::now());
 
-                if let Some(run) = project_state.get_run_mut(run_name) {
-                    run.status = RunStatus::Stopped;
-                    run.stopped_at = Some(chrono::Utc::now());
-
-                    // Mark dead nodes as stopped.
-                    for node in run.nodes.values_mut() {
-                        if let Some(pid) = node.pid {
-                            if !is_process_alive(pid) {
-                                node.status = veld_core::state::NodeStatus::Stopped;
-                            }
+                // Mark dead nodes as stopped.
+                for node in run.nodes.values_mut() {
+                    if let Some(pid) = node.pid {
+                        if !is_process_alive(pid) {
+                            node.status = veld_core::state::NodeStatus::Stopped;
                         }
                     }
                 }
 
-                let _ = project_state.save(project_root);
-
-                // Update the global registry.
-                let mut registry = GlobalRegistry::load().unwrap_or_default();
-                if let Some(entry) = registry
-                    .projects
-                    .get_mut(&project_root.to_string_lossy().into_owned())
-                {
-                    if let Some(info) = entry.runs.get_mut(run_name) {
-                        info.status = RunStatus::Stopped;
-                    }
-                }
-                let _ = registry.save();
+                let _ = db.save_run(project_root, &reg_entry.project_name, &run);
 
                 // Broadcast the change.
                 let event = serde_json::json!({
@@ -164,16 +148,18 @@ async fn scan_and_update(
             };
 
             // Create internal log writer for this run.
-            let log_path = logging::internal_log_file(project_root, run_name);
-            let internal_log = LogWriter::new(log_path).await.ok();
+            let internal_log =
+                LogWriter::for_run(db.clone(), project_root, run_name, LogStream::Internal);
 
             changes += run_liveness_checks(
+                &db,
                 project_root,
+                &reg_entry.project_name,
                 run_name,
                 &config,
                 broadcaster,
                 last_checks,
-                internal_log.as_ref(),
+                Some(&internal_log),
                 user_path,
             )
             .await;
@@ -184,8 +170,11 @@ async fn scan_and_update(
 }
 
 /// Run liveness probes for all healthy nodes in a run. Returns number of state changes.
+#[allow(clippy::too_many_arguments)]
 async fn run_liveness_checks(
+    db: &Db,
     project_root: &Path,
+    project_name: &str,
     run_name: &str,
     config: &VeldConfig,
     broadcaster: &Broadcaster,
@@ -194,15 +183,11 @@ async fn run_liveness_checks(
     user_path: &str,
 ) -> usize {
     // Reload state fresh for liveness checks.
-    let mut project_state = match ProjectState::load(project_root) {
-        Ok(ps) => ps,
-        Err(_) => return 0,
+    let mut run_owned = match db.get_run(project_root, run_name) {
+        Ok(Some(r)) => r,
+        _ => return 0,
     };
-
-    let run = match project_state.get_run_mut(run_name) {
-        Some(r) => r,
-        None => return 0,
-    };
+    let run = &mut run_owned;
 
     let mut changes = 0;
 
@@ -388,7 +373,7 @@ async fn run_liveness_checks(
                         // fresh Healthy state. We only need recovery_count to survive.
                         node_state.recovery_count = new_recovery_count;
                         node_state.consecutive_failures = 0;
-                        let _ = project_state.save(project_root);
+                        let _ = db.save_run(project_root, project_name, run);
 
                         // Run the restart. This stops+starts the entire environment,
                         // creating fresh node state with recovery_count: 0.
@@ -396,13 +381,11 @@ async fn run_liveness_checks(
 
                         // Restore recovery_count on the fresh state so it accumulates
                         // across restarts and eventually hits max_recoveries.
-                        if let Ok(mut fresh_state) = ProjectState::load(project_root) {
-                            if let Some(fresh_run) = fresh_state.get_run_mut(run_name) {
-                                if let Some(fresh_node) = fresh_run.nodes.get_mut(key) {
-                                    fresh_node.recovery_count = new_recovery_count;
-                                }
+                        if let Ok(Some(mut fresh_run)) = db.get_run(project_root, run_name) {
+                            if let Some(fresh_node) = fresh_run.nodes.get_mut(key) {
+                                fresh_node.recovery_count = new_recovery_count;
                             }
-                            let _ = fresh_state.save(project_root);
+                            let _ = db.save_run(project_root, project_name, &fresh_run);
                         }
 
                         // Return early — don't save stale in-memory state over
@@ -416,7 +399,7 @@ async fn run_liveness_checks(
 
     // Persist any state changes (failure counts, etc.).
     if changes > 0 {
-        let _ = project_state.save(project_root);
+        let _ = db.save_run(project_root, project_name, run);
     }
 
     changes

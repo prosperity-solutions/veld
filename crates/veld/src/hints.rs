@@ -1,8 +1,4 @@
-use std::path::PathBuf;
-
-fn hints_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".veld").join("hints.json"))
-}
+const KV_HINT_COUNT: &str = "hints.privileged_hint_count";
 
 /// Show the "setup privileged" hint if appropriate.
 /// Returns true if a hint was shown.
@@ -16,20 +12,15 @@ pub fn maybe_show_privileged_hint(https_port: u16) -> bool {
         return false;
     }
 
-    let path = match hints_path() {
-        Some(p) => p,
-        None => return false,
+    let Ok(db) = veld_core::db::Db::open() else {
+        return false;
     };
 
-    // Read current hint state
-    let state: serde_json::Value = std::fs::read_to_string(&path)
+    let count: u64 = db
+        .kv_get(KV_HINT_COUNT)
         .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-
-    let count = state
-        .get("privileged_hint_count")
-        .and_then(|v| v.as_u64())
+        .flatten()
+        .and_then(|v| v.parse().ok())
         .unwrap_or(0);
 
     // Show hint based on count
@@ -53,11 +44,7 @@ pub fn maybe_show_privileged_hint(https_port: u16) -> bool {
 
     // Update count
     if shown {
-        let new_state = serde_json::json!({"privileged_hint_count": count + 1});
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let _ = std::fs::write(&path, serde_json::to_string(&new_state).unwrap_or_default());
+        let _ = db.kv_set(KV_HINT_COUNT, &(count + 1).to_string());
     }
 
     shown

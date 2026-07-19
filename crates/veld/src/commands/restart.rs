@@ -1,6 +1,5 @@
 use veld_core::graph;
 use veld_core::orchestrator::Orchestrator;
-use veld_core::state::ProjectState;
 
 use crate::output;
 
@@ -10,9 +9,18 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         return 1;
     };
 
-    let mut orchestrator = Orchestrator::new(config_path.clone(), config.clone());
+    let mut orchestrator = match Orchestrator::new(config_path.clone(), config.clone()) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&format!("Failed to initialize: {e}"), false);
+            return 1;
+        }
+    };
 
-    let project_state = match ProjectState::load(&orchestrator.project_root) {
+    let project_state = match orchestrator
+        .db
+        .load_project_state(&orchestrator.project_root)
+    {
         Ok(s) => s,
         Err(e) => {
             output::print_error(&format!("Failed to load state: {e}"), false);
@@ -51,7 +59,13 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     }
 
     // Start again with a fresh orchestrator.
-    let mut orchestrator = Orchestrator::new(config_path, config);
+    let mut orchestrator = match Orchestrator::new(config_path, config) {
+        Ok(o) => o,
+        Err(e) => {
+            output::print_error(&format!("Failed to initialize: {e}"), false);
+            return 1;
+        }
+    };
     orchestrator.set_debug(debug);
 
     match orchestrator.start(&selections, run_name).await {

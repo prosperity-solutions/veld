@@ -1,5 +1,4 @@
 use veld_core::config;
-use veld_core::state::ProjectState;
 
 use crate::output;
 
@@ -10,7 +9,10 @@ pub async fn list(name: Option<&str>, json: bool) -> i32 {
     };
     let project_root = config::project_root(&config_path);
 
-    let project_state = match ProjectState::load(&project_root) {
+    let Some(db) = super::open_db(json) else {
+        return 1;
+    };
+    let project_state = match db.load_project_state(&project_root) {
         Ok(s) => s,
         Err(e) => {
             output::print_error(&format!("Failed to load state: {e}"), json);

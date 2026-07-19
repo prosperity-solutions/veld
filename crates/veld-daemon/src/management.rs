@@ -12,10 +12,19 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
-use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, ProjectState, RunStatus};
-use veld_core::{config, logging};
+use veld_core::config;
+use veld_core::db::{Db, LogFilter, LogStream};
+use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
+
+/// Open the central database, mapping failures to a 500.
+fn open_db() -> Result<Db, StatusCode> {
+    Db::open().map_err(|e| {
+        warn!("failed to open veld database: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })
+}
 
 /// Build an axum [`Router`] for the management UI (mounted into the daemon's
 /// HTTP server).
@@ -140,7 +149,8 @@ fn available_actions(cfg: Option<&config::VeldConfig>, ns: &NodeState) -> Vec<Ac
 }
 
 async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
-    let registry = GlobalRegistry::load().map_err(|e| {
+    let db = open_db()?;
+    let registry = db.registry().map_err(|e| {
         warn!("failed to load global registry: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
@@ -150,7 +160,7 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         .values()
         .map(|entry| {
             // Load full project state for node-level detail.
-            let project_state = ProjectState::load(&entry.project_root).ok();
+            let project_state = db.load_project_state(&entry.project_root).ok();
             // Load config so we know which actions each node exposes.
             let project_config = load_project_config(&entry.project_root);
 
@@ -253,20 +263,20 @@ async fn get_logs(
 ) -> Result<Json<LogResponse>, StatusCode> {
     validate_run_name(&run_name)?;
 
-    let registry = GlobalRegistry::load().map_err(|e| {
+    let db = open_db()?;
+    let registry = db.registry().map_err(|e| {
         warn!("failed to load registry for logs: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
     let project_root = find_project_for_run(&registry, &run_name).ok_or(StatusCode::NOT_FOUND)?;
 
-    let project_state = ProjectState::load(&project_root).map_err(|e| {
-        warn!("failed to load project state for logs: {e}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-
-    let run_state = project_state
-        .get_run(&run_name)
+    let run_state = db
+        .get_run(&project_root, &run_name)
+        .map_err(|e| {
+            warn!("failed to load run state for logs: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
     let lines_limit = q.lines.clamp(1, 5000);
@@ -275,17 +285,24 @@ async fn get_logs(
     let include_internal = q.source == "all" || q.source == "internal" || q.source == "veld";
     let mut nodes = Vec::new();
 
+    let tail = |node: Option<&str>, variant: Option<&str>, stream: LogStream| {
+        let filter = LogFilter {
+            node: node.map(str::to_owned),
+            variant: variant.map(str::to_owned),
+            streams: Some(vec![stream.as_str()]),
+        };
+        db.tail_logs(&project_root, &run_name, &filter, lines_limit)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| format!("[{}] {}", r.ts, r.line))
+                    .collect::<Vec<String>>()
+            })
+            .unwrap_or_default()
+    };
+
     // Internal (veld daemon) log — not per-node, shown as _veld:internal.
     if include_internal {
-        let log_path = logging::internal_log_file(&project_root, &run_name);
-        let lines = if log_path.exists() {
-            let raw = logging::tail_lines(&log_path, lines_limit)
-                .await
-                .unwrap_or_default();
-            logging::merge_continuation_lines(raw)
-        } else {
-            Vec::new()
-        };
+        let lines = tail(None, None, LogStream::Internal);
         if !lines.is_empty() {
             nodes.push(NodeLogs {
                 node: "_veld".to_owned(),
@@ -304,39 +321,20 @@ async fn get_logs(
         }
 
         if include_server {
-            let log_path = logging::log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
-            let lines = if log_path.exists() {
-                let raw = logging::tail_lines(&log_path, lines_limit)
-                    .await
-                    .unwrap_or_default();
-                logging::merge_continuation_lines(raw)
-            } else {
-                Vec::new()
-            };
             nodes.push(NodeLogs {
                 node: ns.node_name.clone(),
                 variant: ns.variant.clone(),
                 source: "server".to_owned(),
-                lines,
+                lines: tail(Some(&ns.node_name), Some(&ns.variant), LogStream::Server),
             });
         }
 
         if include_client {
-            let log_path =
-                logging::client_log_file(&project_root, &run_name, &ns.node_name, &ns.variant);
-            let lines = if log_path.exists() {
-                let raw = logging::tail_lines(&log_path, lines_limit)
-                    .await
-                    .unwrap_or_default();
-                logging::merge_continuation_lines(raw)
-            } else {
-                Vec::new()
-            };
             nodes.push(NodeLogs {
                 node: ns.node_name.clone(),
                 variant: ns.variant.clone(),
                 source: "client".to_owned(),
-                lines,
+                lines: tail(Some(&ns.node_name), Some(&ns.variant), LogStream::Client),
             });
         }
     }
@@ -393,9 +391,14 @@ async fn open_terminal(
     }
 
     // Validate the path belongs to a registered project.
-    let registry = match GlobalRegistry::load() {
+    let registry = match open_db().and_then(|db| {
+        db.registry().map_err(|e| {
+            warn!("failed to load registry: {e}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    }) {
         Ok(r) => r,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+        Err(code) => return code,
     };
     let path = std::path::Path::new(&body.path);
     if !registry.projects.values().any(|e| e.project_root == path) {
@@ -508,12 +511,14 @@ async fn run_action(
         }
     }
 
-    let registry = match GlobalRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
+    let registry = match open_db().and_then(|db| {
+        db.registry().map_err(|e| {
             warn!("failed to load registry for action: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    }) {
+        Ok(r) => r,
+        Err(code) => return code,
     };
     let project_root = match find_project_for_run(&registry, &run_name) {
         Some(p) => p,
@@ -552,12 +557,14 @@ async fn run_action(
 
 /// Stop / restart helper: spawn `veld <action> --name <run>`.
 fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
-    let registry = match GlobalRegistry::load() {
-        Ok(r) => r,
-        Err(e) => {
+    let registry = match open_db().and_then(|db| {
+        db.registry().map_err(|e| {
             warn!("failed to load registry for {action}: {e}");
-            return StatusCode::INTERNAL_SERVER_ERROR;
-        }
+            StatusCode::INTERNAL_SERVER_ERROR
+        })
+    }) {
+        Ok(r) => r,
+        Err(code) => return code,
     };
     let project_root = match find_project_for_run(&registry, run_name) {
         Some(p) => p,

@@ -3,9 +3,11 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing;
+
+use crate::db::{Db, LogStream};
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -80,32 +82,52 @@ impl ServerHandle {
 // Start a long-running server process
 // ---------------------------------------------------------------------------
 
+/// Where a server process's output goes: the `server` log stream of one
+/// node in the central database.
+#[derive(Clone)]
+pub struct LogTarget {
+    pub db: Db,
+    pub project_root: PathBuf,
+    pub run_name: String,
+    pub node: String,
+    pub variant: String,
+}
+
+impl LogTarget {
+    fn append(&self, line: &str) {
+        let _ = self.db.append_log(
+            &self.project_root,
+            &self.run_name,
+            Some(&self.node),
+            Some(&self.variant),
+            LogStream::Server,
+            chrono::Utc::now(),
+            line,
+        );
+    }
+}
+
 /// Spawn a long-running server process.
 ///
 /// When `foreground` is true, stdout/stderr are piped through background
-/// tasks that prepend ISO 8601 timestamps to each line. The process will
+/// tasks that timestamp each line into the database. The process will
 /// die when the CLI exits (pipes close).
 ///
 /// When `foreground` is false (detached mode), the process is spawned via
 /// `std::process::Command` in its own process group so it is fully
 /// independent of the CLI process and the tokio runtime. stdout/stderr are
-/// redirected directly to the log file.
+/// piped through a detached `veld _log` writer that outlives the CLI.
 pub async fn start_server(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
-    log_file: &Path,
+    log_target: LogTarget,
     foreground: bool,
 ) -> Result<ServerHandle, ProcessError> {
-    // Ensure log directory exists.
-    if let Some(parent) = log_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
     if foreground {
-        start_server_foreground(command, working_dir, env, log_file).await
+        start_server_foreground(command, working_dir, env, log_target).await
     } else {
-        start_server_detached(command, working_dir, env, log_file)
+        start_server_detached(command, working_dir, env, &log_target)
     }
 }
 
@@ -114,7 +136,7 @@ async fn start_server_foreground(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
-    log_file: &Path,
+    log_target: LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
     let mut child = Command::new("sh")
         .arg("-c")
@@ -134,19 +156,17 @@ async fn start_server_foreground(
         "started server process (foreground)"
     );
 
-    let log_path = log_file.to_path_buf();
-
     if let Some(stdout) = child.stdout.take() {
-        let path = log_path.clone();
+        let target = log_target.clone();
         tokio::spawn(async move {
-            timestamp_pipe(stdout, &path).await;
+            log_pipe(stdout, target).await;
         });
     }
 
     if let Some(stderr) = child.stderr.take() {
-        let path = log_path.clone();
+        let target = log_target.clone();
         tokio::spawn(async move {
-            timestamp_pipe(stderr, &path).await;
+            log_pipe(stderr, target).await;
         });
     }
 
@@ -162,34 +182,29 @@ async fn start_server_foreground(
 ///
 /// The process survives after the CLI exits and is reparented to init/launchd.
 ///
-/// stdout/stderr are piped through `veld _timestamp` which prepends ISO 8601
-/// timestamps with millisecond precision (pure Rust, no external deps). The
-/// entire pipeline (server + timestamper) runs in the same process group and
-/// survives CLI exit.
+/// stdout/stderr are piped through `veld _log`, which timestamps each line
+/// into the central database. The entire pipeline (server + log writer) runs
+/// in the same process group and survives CLI exit.
 fn start_server_detached(
     command: &str,
     working_dir: &Path,
     env: &HashMap<String, String>,
-    log_file: &Path,
+    log_target: &LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    // Ensure log directory exists and log file is created.
-    if let Some(parent) = log_file.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-
-    // Wrap the command in a pipeline that timestamps each line via `veld _timestamp`.
-    // This is a pure Rust timestamper (no perl/python dependency) with millisecond
-    // precision. The entire pipeline runs in its own process group (process_group(0))
-    // so it survives CLI exit.
-    let log_path_escaped = log_file.to_string_lossy().replace('\'', "'\\''");
+    let sq = |s: &str| s.replace('\'', "'\\''");
     let veld_bin = std::env::current_exe()
         .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
         .to_string_lossy()
         .replace('\'', "'\\''");
-    let wrapper =
-        format!("{{ {command} ; }} 2>&1 | '{veld_bin}' _timestamp --log '{log_path_escaped}'");
+    let wrapper = format!(
+        "{{ {command} ; }} 2>&1 | '{veld_bin}' _log --project-root '{root}' --run '{run}' --node '{node}' --variant '{variant}'",
+        root = sq(&log_target.project_root.to_string_lossy()),
+        run = sq(&log_target.run_name),
+        node = sq(&log_target.node),
+        variant = sq(&log_target.variant),
+    );
 
     let child = std::process::Command::new("sh")
         .arg("-c")
@@ -219,23 +234,12 @@ fn start_server_detached(
     Ok(ServerHandle::Detached { pid })
 }
 
-/// Read lines from an async reader, prepend timestamps, and append to the log file.
-async fn timestamp_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, log_path: &Path) {
+/// Read lines from an async reader and store them in the database.
+async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget) {
     let mut lines = BufReader::new(reader).lines();
     loop {
         match lines.next_line().await {
-            Ok(Some(line)) => {
-                let timestamp = chrono::Utc::now().to_rfc3339();
-                let formatted = format!("[{timestamp}] {line}\n");
-                if let Ok(mut file) = tokio::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(log_path)
-                    .await
-                {
-                    let _ = file.write_all(formatted.as_bytes()).await;
-                }
-            }
+            Ok(Some(line)) => target.append(&line),
             Ok(None) => break,
             Err(_) => break,
         }

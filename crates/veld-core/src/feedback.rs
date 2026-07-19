@@ -1,9 +1,15 @@
-use std::io::{Read as _, Seek as _, Write as _};
-use std::path::{Path, PathBuf};
+//! Feedback thread data types and queue semantics.
+//!
+//! Storage lives in the central database — see [`crate::db`]. The
+//! [`FeedbackStore`] (re-exported here) replaces the old flock-guarded
+//! `.veld/feedback/{run}/` file tree; SQLite transactions provide the
+//! cross-process safety the advisory locks used to.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+pub use crate::db::feedback::FeedbackStore;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -165,504 +171,7 @@ pub struct Session {
 }
 
 // ---------------------------------------------------------------------------
-// Store
-// ---------------------------------------------------------------------------
-
-/// File-based feedback store.
-///
-/// Layout:
-/// ```text
-///   .veld/feedback/{run_name}/threads/{uuid}.json
-///   .veld/feedback/{run_name}/events/000001.json
-///   .veld/feedback/{run_name}/screenshots/
-///   .veld/feedback/{run_name}/session.json
-///   .veld/feedback/{run_name}/seq
-/// ```
-pub struct FeedbackStore {
-    base: PathBuf,
-    threads_dir: PathBuf,
-    events_dir: PathBuf,
-    screenshots_dir: PathBuf,
-    session_path: PathBuf,
-    seq_path: PathBuf,
-    run_name: String,
-}
-
-impl FeedbackStore {
-    pub fn new(project_root: &Path, run_name: &str) -> Self {
-        let base = project_root.join(".veld").join("feedback").join(run_name);
-        Self {
-            threads_dir: base.join("threads"),
-            events_dir: base.join("events"),
-            screenshots_dir: base.join("screenshots"),
-            session_path: base.join("session.json"),
-            seq_path: base.join("seq"),
-            base,
-            run_name: run_name.to_owned(),
-        }
-    }
-
-    /// The run name this store is scoped to.
-    pub fn run_name(&self) -> &str {
-        &self.run_name
-    }
-
-    /// Check whether any feedback data exists for this run.
-    pub fn has_data(&self) -> bool {
-        self.base.exists()
-    }
-
-    fn ensure_dirs(&self) -> anyhow::Result<()> {
-        std::fs::create_dir_all(&self.threads_dir)?;
-        std::fs::create_dir_all(&self.events_dir)?;
-        Ok(())
-    }
-
-    // -- Threads --------------------------------------------------------------
-
-    /// Save (create or overwrite) a thread.
-    pub fn save_thread(&self, thread: &Thread) -> anyhow::Result<()> {
-        self.ensure_dirs()?;
-        let path = self.threads_dir.join(format!("{}.json", thread.id));
-        std::fs::write(&path, serde_json::to_string_pretty(thread)?)?;
-        Ok(())
-    }
-
-    /// Get a single thread by ID.
-    ///
-    /// Supports prefix matching: if `id` is shorter than a full UUID and no
-    /// exact match exists, scans the threads directory for a unique prefix
-    /// match (like git's short commit hashes).
-    pub fn get_thread(&self, id: &str) -> anyhow::Result<Option<Thread>> {
-        // Try exact match first (fast path).
-        let path = self.threads_dir.join(format!("{id}.json"));
-        if path.exists() {
-            let data = std::fs::read_to_string(&path)?;
-            return Ok(Some(serde_json::from_str(&data)?));
-        }
-
-        // Prefix match: scan directory for files starting with the prefix.
-        self.resolve_prefix(id)
-    }
-
-    /// Resolve a short thread ID prefix to a full thread.
-    /// Returns Ok(None) if no match, Ok(Some) if exactly one match,
-    /// or Err if the prefix is ambiguous (matches multiple threads).
-    fn resolve_prefix(&self, prefix: &str) -> anyhow::Result<Option<Thread>> {
-        if !self.threads_dir.exists() || prefix.is_empty() {
-            return Ok(None);
-        }
-        let mut matches: Vec<std::path::PathBuf> = Vec::new();
-        for entry in std::fs::read_dir(&self.threads_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(prefix) && name_str.ends_with(".json") {
-                matches.push(entry.path());
-            }
-        }
-        match matches.len() {
-            0 => Ok(None),
-            1 => {
-                let data = std::fs::read_to_string(&matches[0])?;
-                Ok(Some(serde_json::from_str(&data)?))
-            }
-            n => anyhow::bail!("ambiguous thread prefix '{prefix}' matches {n} threads"),
-        }
-    }
-
-    /// Resolve a short thread ID prefix to the full UUID.
-    /// Returns the input unchanged if it's already a full UUID or exact match.
-    pub fn resolve_thread_id(&self, id: &str) -> anyhow::Result<String> {
-        // Exact match?
-        let path = self.threads_dir.join(format!("{id}.json"));
-        if path.exists() {
-            return Ok(id.to_owned());
-        }
-        // Prefix scan.
-        if !self.threads_dir.exists() || id.is_empty() {
-            anyhow::bail!("thread {id} not found");
-        }
-        let mut matches: Vec<String> = Vec::new();
-        for entry in std::fs::read_dir(&self.threads_dir)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            let name_str = name.to_string_lossy();
-            if name_str.starts_with(id) && name_str.ends_with(".json") {
-                matches.push(name_str.trim_end_matches(".json").to_owned());
-            }
-        }
-        match matches.len() {
-            0 => anyhow::bail!("thread {id} not found"),
-            1 => Ok(matches.into_iter().next().unwrap()),
-            n => anyhow::bail!("ambiguous thread prefix '{id}' matches {n} threads"),
-        }
-    }
-
-    /// List all threads, optionally filtered by status.
-    pub fn list_threads(&self, filter: Option<ThreadStatus>) -> anyhow::Result<Vec<Thread>> {
-        if !self.threads_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let mut threads = Vec::new();
-        for entry in std::fs::read_dir(&self.threads_dir)? {
-            let entry = entry?;
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json") {
-                let data = std::fs::read_to_string(&path)?;
-                if let Ok(thread) = serde_json::from_str::<Thread>(&data) {
-                    if filter.is_none_or(|f| thread.status == f) {
-                        threads.push(thread);
-                    }
-                }
-            }
-        }
-        threads.sort_by_key(|a| a.created_at);
-        Ok(threads)
-    }
-
-    /// Read-modify-write a thread file under an exclusive file lock.
-    /// Reads and writes through the locked fd to ensure atomicity.
-    /// Supports prefix matching for short thread IDs.
-    fn modify_thread(
-        &self,
-        thread_id: &str,
-        mutate: impl FnOnce(&mut Thread),
-    ) -> anyhow::Result<Thread> {
-        self.ensure_dirs()?;
-        let resolved_id = self.resolve_thread_id(thread_id)?;
-        let path = self.threads_dir.join(format!("{resolved_id}.json"));
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&path)
-            .map_err(|_| anyhow::anyhow!("thread {resolved_id} not found"))?;
-
-        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_file, errno)| errno)?;
-
-        // Read through the locked fd.
-        let mut data = String::new();
-        locked.read_to_string(&mut data)?;
-        let mut thread: Thread = serde_json::from_str(&data)?;
-        mutate(&mut thread);
-        thread.updated_at = Utc::now();
-
-        // Write through the locked fd.
-        let new_data = serde_json::to_string_pretty(&thread)?;
-        locked.seek(std::io::SeekFrom::Start(0))?;
-        locked.set_len(0)?;
-        locked.write_all(new_data.as_bytes())?;
-
-        // Lock released when Flock is dropped.
-        Ok(thread)
-    }
-
-    /// Add a message to an existing thread. Returns the updated thread.
-    pub fn add_message(&self, thread_id: &str, message: &Message) -> anyhow::Result<Thread> {
-        let msg = message.clone();
-        self.modify_thread(thread_id, move |thread| {
-            thread.messages.push(msg);
-        })
-    }
-
-    /// Set thread status (resolve / reopen). Returns the updated thread.
-    pub fn set_thread_status(
-        &self,
-        thread_id: &str,
-        status: ThreadStatus,
-    ) -> anyhow::Result<Thread> {
-        self.modify_thread(thread_id, move |thread| {
-            thread.status = status;
-        })
-    }
-
-    /// Update `last_human_seen_seq` for a thread.
-    pub fn mark_thread_seen(&self, thread_id: &str, seq: u64) -> anyhow::Result<()> {
-        self.modify_thread(thread_id, move |thread| {
-            // Never lower the seen count: a stale/racing write (multi-tab, or a
-            // late `markAllRead` after a per-thread PUT) must not resurrect unread.
-            let seen = seq.max(thread.last_human_seen_seq.unwrap_or(0));
-            thread.last_human_seen_seq = Some(seen);
-        })?;
-        Ok(())
-    }
-
-    /// Return the head of the agent's linear queue: the oldest *waiting* thread.
-    ///
-    /// A thread is "waiting" when it is Open and its most recent message came
-    /// from a human (see [`thread_is_waiting`]). Agent replies flip a thread to
-    /// blocked (hidden); a new human message flips it back.
-    ///
-    /// This is a **pure read** — it never mutates state, so calling it
-    /// repeatedly returns the same thread until a `reply`/`resolve` moves the
-    /// head. Ordering is FIFO by last-activity: the thread whose last message
-    /// is oldest comes first, so a fresh human comment naturally moves its
-    /// thread to the back of the queue.
-    pub fn next_waiting_thread(&self) -> anyhow::Result<Option<Thread>> {
-        let mut waiting: Vec<Thread> = self
-            .list_threads(Some(ThreadStatus::Open))?
-            .into_iter()
-            .filter(thread_is_waiting)
-            .collect();
-        waiting.sort_by_key(|t| {
-            t.messages
-                .last()
-                .map(|m| m.created_at)
-                .unwrap_or(t.created_at)
-        });
-        Ok(waiting.into_iter().next())
-    }
-
-    // -- Event log ------------------------------------------------------------
-
-    /// Atomically increment the sequence counter and return the new value.
-    /// Uses an advisory file lock (flock) for cross-process safety.
-    fn next_seq(&self) -> anyhow::Result<u64> {
-        self.ensure_dirs()?;
-
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.seq_path)?;
-
-        // Exclusive advisory lock — blocks if another process holds it.
-        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_file, errno)| errno)?;
-
-        // Read current value.
-        let mut contents = String::new();
-        locked.read_to_string(&mut contents)?;
-        let current: u64 = contents.trim().parse().unwrap_or(0);
-        let next = current + 1;
-
-        // Seek to start, truncate, write new value.
-        locked.seek(std::io::SeekFrom::Start(0))?;
-        locked.set_len(0)?;
-        locked.write_all(next.to_string().as_bytes())?;
-
-        // Lock released when Flock is dropped.
-        Ok(next)
-    }
-
-    /// Append an event to the log. Returns the created event with its seq.
-    pub fn append_event(&self, event_type: EventType) -> anyhow::Result<Event> {
-        let seq = self.next_seq()?;
-        let event = Event {
-            seq,
-            event_type,
-            timestamp: Utc::now(),
-        };
-        let path = self.events_dir.join(format!("{seq:06}.json"));
-        std::fs::write(&path, serde_json::to_string_pretty(&event)?)?;
-        Ok(event)
-    }
-
-    /// Get a single event by sequence number.
-    pub fn get_event(&self, seq: u64) -> anyhow::Result<Option<Event>> {
-        let path = self.events_dir.join(format!("{seq:06}.json"));
-        if !path.exists() {
-            return Ok(None);
-        }
-        let data = std::fs::read_to_string(&path)?;
-        Ok(Some(serde_json::from_str(&data)?))
-    }
-
-    /// Get all events with `seq > after`, sorted ascending.
-    /// Probes sequential filenames instead of scanning the directory.
-    /// Skips corrupted event files instead of failing.
-    pub fn get_events_after(&self, after: u64) -> anyhow::Result<Vec<Event>> {
-        if !self.events_dir.exists() {
-            return Ok(Vec::new());
-        }
-        let max_seq = self.current_seq()?;
-        let mut events = Vec::new();
-        let mut seq = after + 1;
-        while seq <= max_seq {
-            let path = self.events_dir.join(format!("{seq:06}.json"));
-            match std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|data| serde_json::from_str::<Event>(&data).ok())
-            {
-                Some(event) => events.push(event),
-                None => {
-                    // File missing or corrupted — skip (gaps from failed writes).
-                }
-            }
-            seq += 1;
-        }
-        Ok(events)
-    }
-
-    /// Get the current (latest) sequence number. Returns 0 if no events.
-    pub fn current_seq(&self) -> anyhow::Result<u64> {
-        if !self.seq_path.exists() {
-            return Ok(0);
-        }
-        let contents = std::fs::read_to_string(&self.seq_path)?;
-        Ok(contents.trim().parse().unwrap_or(0))
-    }
-
-    // -- Session / heartbeat --------------------------------------------------
-
-    /// Read-modify-write `session.json` under an exclusive file lock.
-    ///
-    /// The agent process heartbeats once per second while the daemon handles the
-    /// human's "Done" click in a *different* process. Without locking, a
-    /// heartbeat's blind write can clobber the `ended_at` flag `end_session` just
-    /// set — losing the stop signal so the agent loops forever. This serializes
-    /// all session mutations (mirrors `next_seq` / `modify_thread`).
-    fn modify_session(&self, mutate: impl FnOnce(&mut Session)) -> anyhow::Result<()> {
-        self.ensure_dirs()?;
-        let file = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&self.session_path)?;
-
-        let mut locked = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive)
-            .map_err(|(_file, errno)| errno)?;
-
-        let mut data = String::new();
-        locked.read_to_string(&mut data)?;
-        let mut session = serde_json::from_str::<Session>(&data).unwrap_or(Session {
-            status: SessionStatus::Idle,
-            last_heartbeat: Utc::now(),
-            ended_at: None,
-        });
-        mutate(&mut session);
-
-        let new_data = serde_json::to_string_pretty(&session)?;
-        locked.seek(std::io::SeekFrom::Start(0))?;
-        locked.set_len(0)?;
-        locked.write_all(new_data.as_bytes())?;
-        Ok(())
-    }
-
-    /// Write a heartbeat — marks session as listening with current timestamp.
-    /// Preserves the `ended_at` flag: agent liveness and the human's "Done"
-    /// signal are independent.
-    pub fn heartbeat(&self) -> anyhow::Result<()> {
-        self.modify_session(|s| {
-            s.status = SessionStatus::Listening;
-            s.last_heartbeat = Utc::now();
-        })
-    }
-
-    /// Read the current session state.
-    pub fn get_session(&self) -> anyhow::Result<Option<Session>> {
-        if !self.session_path.exists() {
-            return Ok(None);
-        }
-        // A concurrent writer may briefly truncate the file mid-update (see
-        // `modify_session`); treat an empty/partial read as "no session yet"
-        // rather than erroring, matching how `current_seq` / `list_threads`
-        // tolerate torn reads. Readers self-heal on the next poll.
-        let data = std::fs::read_to_string(&self.session_path)?;
-        Ok(serde_json::from_str(&data).ok())
-    }
-
-    /// Check if an agent is actively listening (heartbeat within threshold).
-    pub fn is_listening(&self, threshold_secs: u64) -> anyhow::Result<bool> {
-        match self.get_session()? {
-            Some(session) if session.status == SessionStatus::Listening => {
-                let elapsed = Utc::now()
-                    .signed_duration_since(session.last_heartbeat)
-                    .num_seconds();
-                Ok(elapsed >= 0 && (elapsed as u64) < threshold_secs)
-            }
-            _ => Ok(false),
-        }
-    }
-
-    /// Explicitly end the session — the human clicked "Done".
-    ///
-    /// Sets `ended_at`, which `is_ended` reads. When the agent's queue drains,
-    /// an ended session tells it to stop; the agent then calls
-    /// [`mark_stopped`](Self::mark_stopped) as it exits. A human message newer
-    /// than `ended_at` also supersedes it, so a post-Done comment revives the
-    /// loop.
-    pub fn end_session(&self) -> anyhow::Result<()> {
-        let now = Utc::now();
-        self.modify_session(move |s| {
-            s.status = SessionStatus::Idle;
-            s.last_heartbeat = now;
-            s.ended_at = Some(now);
-        })
-    }
-
-    /// Mark the agent as no longer listening — called as it reports the `ended`
-    /// stop and exits. Sets status to Idle (so `is_listening` → false and the
-    /// browser stops showing "listening" and won't re-announce the exited agent)
-    /// and consumes `ended_at` (so a freshly-launched loop starts clean rather
-    /// than re-stopping on the same Done). Called only by the agent process, so
-    /// it doesn't race `end_session`.
-    pub fn mark_stopped(&self) -> anyhow::Result<()> {
-        self.modify_session(|s| {
-            s.status = SessionStatus::Idle;
-            s.ended_at = None;
-        })
-    }
-
-    /// Whether the human has ended the session (clicked "Done") and has not
-    /// since sent new feedback.
-    ///
-    /// Timestamp-based rather than a mutable flag: if any open thread carries a
-    /// human message newer than `ended_at`, the reviewer re-engaged after
-    /// clicking Done, so the session is not ended. This is derived purely from
-    /// timestamps, so there is no race between "Done" and a near-simultaneous
-    /// new comment arriving on a separate HTTP request — whichever the human
-    /// actually did last (by message time) wins.
-    pub fn is_ended(&self) -> anyhow::Result<bool> {
-        let ended_at = match self.get_session()?.and_then(|s| s.ended_at) {
-            Some(t) => t,
-            None => return Ok(false),
-        };
-        for thread in self.list_threads(Some(ThreadStatus::Open))? {
-            if thread
-                .messages
-                .iter()
-                .any(|m| matches!(m.author, Author::Human) && m.created_at > ended_at)
-            {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    // -- Screenshots (unchanged) ----------------------------------------------
-
-    /// Save a screenshot PNG and return its filename.
-    ///
-    /// The `id` must not contain path separators or `..` sequences.
-    pub fn save_screenshot(&self, id: &str, data: &[u8]) -> anyhow::Result<String> {
-        anyhow::ensure!(
-            !id.contains('/') && !id.contains('\\') && !id.contains(".."),
-            "invalid screenshot id"
-        );
-        std::fs::create_dir_all(&self.screenshots_dir)?;
-        let filename = format!("{id}.png");
-        let path = self.screenshots_dir.join(&filename);
-        std::fs::write(&path, data)?;
-        Ok(filename)
-    }
-
-    /// Get the absolute path to a screenshot file.
-    ///
-    /// The `filename` must not contain path separators or `..` sequences.
-    pub fn screenshot_path(&self, filename: &str) -> PathBuf {
-        let safe = filename.rsplit('/').next().unwrap_or(filename);
-        let safe = safe.rsplit('\\').next().unwrap_or(safe);
-        let safe = safe.replace("..", "");
-        self.screenshots_dir.join(safe)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Helper: create a new message.
+// Helpers
 // ---------------------------------------------------------------------------
 
 /// A thread is "waiting" (actionable by the agent) when it is Open and its most
@@ -725,10 +234,15 @@ pub fn new_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Db;
     use tempfile::TempDir;
 
+    fn make_db(tmp: &TempDir) -> Db {
+        Db::open_at(&tmp.path().join("veld.db")).unwrap()
+    }
+
     fn make_store(tmp: &TempDir) -> FeedbackStore {
-        FeedbackStore::new(tmp.path(), "test-run")
+        FeedbackStore::new(make_db(tmp), tmp.path(), "test-run")
     }
 
     fn make_thread(body: &str) -> Thread {
@@ -757,10 +271,12 @@ mod tests {
 
         // No threads initially.
         assert!(store.list_threads(None).unwrap().is_empty());
+        assert!(!store.has_data());
 
         // Create and save a thread.
         let t = make_thread("Font is too big");
         store.save_thread(&t).unwrap();
+        assert!(store.has_data());
 
         // Retrieve by ID.
         let fetched = store.get_thread(&t.id).unwrap().unwrap();
@@ -788,6 +304,20 @@ mod tests {
 
         // Non-existent thread.
         assert!(store.get_thread("nonexistent").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_thread_prefix_matching() {
+        let tmp = TempDir::new().unwrap();
+        let store = make_store(&tmp);
+
+        let t = make_thread("Prefix me");
+        store.save_thread(&t).unwrap();
+
+        let prefix = &t.id[..8];
+        assert_eq!(store.get_thread(prefix).unwrap().unwrap().id, t.id);
+        assert_eq!(store.resolve_thread_id(prefix).unwrap(), t.id);
+        assert!(store.resolve_thread_id("zzzz").is_err());
     }
 
     #[test]
@@ -962,19 +492,32 @@ mod tests {
                 .last_human_seen_seq,
             Some(5)
         );
+
+        // A racing lower value never lowers the seen count.
+        store.mark_thread_seen(&t.id, 3).unwrap();
+        assert_eq!(
+            store
+                .get_thread(&t.id)
+                .unwrap()
+                .unwrap()
+                .last_human_seen_seq,
+            Some(5)
+        );
     }
 
     #[test]
-    fn test_screenshot_unchanged() {
+    fn test_screenshot_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let store = make_store(&tmp);
 
         let filename = store.save_screenshot("ss_test_001", b"PNG_DATA").unwrap();
         assert_eq!(filename, "ss_test_001.png");
-
-        let path = store.screenshot_path(&filename);
-        assert!(path.exists());
-        assert_eq!(std::fs::read(&path).unwrap(), b"PNG_DATA");
+        assert_eq!(
+            store.get_screenshot(&filename).unwrap().unwrap(),
+            b"PNG_DATA"
+        );
+        assert!(store.get_screenshot("missing.png").unwrap().is_none());
+        assert!(store.save_screenshot("../evil", b"x").is_err());
     }
 
     #[test]
@@ -1076,13 +619,15 @@ mod tests {
     #[test]
     fn test_concurrent_seq() {
         let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
         let store_path = tmp.path().to_owned();
 
         let mut handles = Vec::new();
         for _ in 0..4 {
             let p = store_path.clone();
+            let db = db.clone();
             handles.push(std::thread::spawn(move || {
-                let s = FeedbackStore::new(&p, "test-run");
+                let s = FeedbackStore::new(db, &p, "test-run");
                 let mut seqs = Vec::new();
                 for _ in 0..25 {
                     let t = make_thread("concurrent");
@@ -1264,17 +809,19 @@ mod tests {
     #[test]
     fn test_ended_flag_survives_concurrent_heartbeats() {
         // Regression: the agent process heartbeats every second while the daemon
-        // sets `ended_at` on "Done". Without a lock on session.json a heartbeat's
-        // write clobbers the flag and the agent never stops. With the lock, no
-        // interleaving of concurrent heartbeats can lose an end_session.
+        // sets `ended_at` on "Done". The IMMEDIATE transaction in
+        // `modify_session` guarantees no interleaving of concurrent heartbeats
+        // can lose an end_session.
         let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
         let path = tmp.path().to_owned();
 
         let mut handles = Vec::new();
         for _ in 0..4 {
             let p = path.clone();
+            let db = db.clone();
             handles.push(std::thread::spawn(move || {
-                let s = FeedbackStore::new(&p, "test-run");
+                let s = FeedbackStore::new(db, &p, "test-run");
                 for _ in 0..50 {
                     s.heartbeat().unwrap();
                 }
@@ -1282,33 +829,61 @@ mod tests {
         }
 
         // End the session while the heartbeats are in flight.
-        FeedbackStore::new(&path, "test-run").end_session().unwrap();
+        FeedbackStore::new(db.clone(), &path, "test-run")
+            .end_session()
+            .unwrap();
 
         for h in handles {
             h.join().unwrap();
         }
 
         // A heartbeat must never have clobbered the Done flag.
-        assert!(FeedbackStore::new(&path, "test-run").is_ended().unwrap());
+        assert!(
+            FeedbackStore::new(db, &path, "test-run")
+                .is_ended()
+                .unwrap()
+        );
     }
 
     #[test]
-    fn test_skip_dont_crash_on_bad_thread_file() {
+    fn test_clear_removes_everything() {
         let tmp = TempDir::new().unwrap();
         let store = make_store(&tmp);
+
+        let t = waiting_thread(&store, "Real feedback", 10);
+        store
+            .append_event(EventType::ThreadCreated { thread: t })
+            .unwrap();
+        store.heartbeat().unwrap();
+        store.save_screenshot("ss1", b"png").unwrap();
+        assert!(store.has_data());
+
+        store.clear().unwrap();
+        assert!(!store.has_data());
+        assert!(store.list_threads(None).unwrap().is_empty());
+        assert_eq!(store.current_seq().unwrap(), 0);
+        assert!(store.get_screenshot("ss1.png").unwrap().is_none());
+    }
+
+    #[test]
+    fn test_skip_dont_crash_on_bad_thread_payload() {
+        let tmp = TempDir::new().unwrap();
+        let db = make_db(&tmp);
+        let store = FeedbackStore::new(db.clone(), tmp.path(), "test-run");
 
         // A valid, waiting thread.
         let good = waiting_thread(&store, "Real feedback", 10);
 
-        // A garbage / old-format file sitting alongside it.
-        store.ensure_dirs().unwrap();
-        std::fs::write(
-            store.threads_dir.join("deadbeef.json"),
-            b"{ not valid json, from an old version",
-        )
-        .unwrap();
+        // A garbage / old-format payload sitting alongside it.
+        db.lock()
+            .execute(
+                "INSERT INTO feedback_threads (project_root, run_name, id, payload, created_at, updated_at)
+                 VALUES (?1, 'test-run', 'deadbeef', '{ not valid json', '2020-01-01T00:00:00Z', '2020-01-01T00:00:00Z')",
+                [tmp.path().to_string_lossy()],
+            )
+            .unwrap();
 
-        // list / next must skip the bad file, not panic.
+        // list / next must skip the bad payload, not panic.
         let listed = store.list_threads(None).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(store.next_waiting_thread().unwrap().unwrap().id, good.id);
