@@ -6,8 +6,10 @@
 //! palette and embedded wordmark of the daemon's management UI
 //! (`crates/veld-daemon/assets/management-ui.html`), fully self-contained
 //! (inline CSS, data-URI favicon, no external assets) so they render under
-//! any CSP and leak no requests. Deliberately static: no share metadata, no
-//! counts, nothing an anonymous viewer can enumerate.
+//! any CSP and leak no requests. The served bytes carry no share metadata,
+//! no counts — nothing an anonymous viewer can enumerate; the only dynamic
+//! behavior is client-side, from tab-local state the viewer's own tab minted
+//! earlier (see [`SHARE_SEEN_KEY`]).
 
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
@@ -210,11 +212,11 @@ try {{
 ///
 /// These pages are only reachable while a share is registered on the slug —
 /// proxy.rs is the sole caller, and `share_` in the name is the contract:
-/// they stamp [`SHARE_SEEN_KEY`], so calling this for a failure that is NOT
-/// scoped to a live share (an apex/unknown-host error, say) would mint a
-/// false "Sharing has stopped" — add a separate unstamped helper instead.
-/// The stamp means a viewer who only ever saw "share disconnected" still
-/// gets the honest "sharing has stopped" copy once the registration is gone.
+/// they stamp [`SHARE_SEEN_KEY`]. The hazard to respect: any error served on
+/// a SLUG origin whose registration is missing or already gone would stamp
+/// the very origin the share 404 later reads, minting a false "Sharing has
+/// stopped" — so only call this after a successful registry lookup (a live
+/// `SlugTarget` in hand); for anything else add a separate unstamped helper.
 pub fn share_error(status: StatusCode, title: &'static str, message: &'static str) -> Response {
     let body = format!(
         "<h1>{title}</h1><p>{message}</p>{}",

@@ -82,5 +82,5 @@ with JetBrains Mono / Playfair Display / Space Grotesk. Marketing pages follow
       Client-side, tab-scoped reveals are the one vetted exception: a page may
       swap its copy from browser-local state the viewer's own tab minted
       earlier (see `SHARE_SEEN_KEY` in `crates/veld-gateway/src/pages.rs`),
-      as long as the served bytes stay identical for every viewer
+      as long as the served bytes stay identical for every viewer.
 - [ ] Reuse an existing shell where one exists (`crates/veld-gateway/src/pages.rs::shell` for gateway pages) instead of a new bespoke page
