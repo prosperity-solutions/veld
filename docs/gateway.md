@@ -144,6 +144,14 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   pages follow [docs/branding.md](branding.md), are fully self-contained
   (inline CSS, no external assets), `noindex`, and deliberately static — no
   share metadata, counts, or hostnames are exposed to anonymous viewers.
+- **A tab that saw a share alive gets an honest goodbye**: gateway pages that
+  only render while a share is registered (the login page, the 502/504 error
+  pages) stamp a per-tab `sessionStorage` marker on the slug's origin. When
+  the share is later stopped, a reload in that same tab shows "Sharing has
+  stopped" instead of the anonymous "Share not found"; a fresh tab (or anyone
+  who never saw the share) still gets the plain 404. The swap is purely
+  client-side — the HTTP response is identical for every viewer, so 404s
+  still confirm nothing about whether a share ever existed.
 - **Public URLs are deterministic**: `slug = hash(host machine ‖ hostname ‖
   share capability)` — 26 lowercase base32 chars, unguessable (the URL is the
   baseline access control), stable across gateway restarts, new per share.

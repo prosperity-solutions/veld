@@ -84,6 +84,30 @@ pub fn shell(title: &str, body: &str) -> String {
         .replace("{body}", body)
 }
 
+/// sessionStorage key marking "this tab saw this share alive". Set by every
+/// page the gateway serves *while a share is registered* on its slug host
+/// (login page, viewer-facing error pages) and read by the share 404, which
+/// then swaps its copy from "Share not found" to "Sharing has stopped".
+///
+/// Why sessionStorage: each slug is its own subdomain, hence its own web
+/// origin — the browser scopes the key to that share automatically — and
+/// sessionStorage lives exactly as long as the tab, which is the requested
+/// semantics (a fresh tab on a dead slug sees the plain 404). Slugs are
+/// capability-derived (slug.rs), so a different share can never inherit the
+/// origin and a re-registered share maps back to it.
+///
+/// Privacy: this does NOT weaken the "404s never confirm a share existed"
+/// stance — the server response is byte-identical for every viewer; the swap
+/// happens client-side from state only a tab that itself witnessed the live
+/// share can hold.
+pub(crate) const SHARE_SEEN_KEY: &str = "veld-gw-share-seen";
+
+/// Inline snippet that stamps [`SHARE_SEEN_KEY`]. Appended to gateway pages
+/// that are only ever served while the slug's share is registered.
+pub(crate) fn mark_share_seen_script() -> String {
+    format!("<script>try{{sessionStorage.setItem('{SHARE_SEEN_KEY}','1')}}catch(e){{}}</script>")
+}
+
 /// Escape for HTML text/attribute contexts. `{`/`}` are escaped too: pages
 /// are assembled by ordered string replacement (see [`shell`] and the login
 /// page's `{next}`/`{error}` passes in `auth.rs`), so braces surviving into
@@ -121,24 +145,49 @@ pub fn index() -> Response {
     html_response(StatusCode::OK, shell("Veld Gateway", body))
 }
 
-/// A branded 404. Still deliberately vague: neither variant confirms whether
-/// a share ever existed at the address.
+/// A branded 404. Still deliberately vague **as served**: neither variant's
+/// HTTP response confirms whether a share ever existed at the address. The
+/// share variant additionally carries a hidden "Sharing has stopped" block
+/// that an inline script reveals only when the tab itself saw the share
+/// alive earlier ([`SHARE_SEEN_KEY`]) — no server state, no new information
+/// for anyone else.
 pub fn not_found(kind: NotFound) -> Response {
     let (title, body) = match kind {
-        NotFound::Share => (
-            "Share not found",
-            "<h1>Share not found</h1>\
-             <p>There is no active share at this address. The preview may have expired \
-             or been stopped by its owner.</p>\
-             <p>Ask whoever sent you the link for a fresh one.</p>",
-        ),
+        NotFound::Share => ("Share not found", share_not_found_body()),
         NotFound::Generic => (
             "Not found",
             "<h1>Not found</h1>\
-             <p>Nothing lives at this address.</p>",
+             <p>Nothing lives at this address.</p>"
+                .to_owned(),
         ),
     };
-    html_response(StatusCode::NOT_FOUND, shell(title, body))
+    html_response(StatusCode::NOT_FOUND, shell(title, &body))
+}
+
+/// The share-404 body: the default "not found" copy, plus the tab-local
+/// "sharing stopped" alternative revealed by the [`SHARE_SEEN_KEY`] check.
+fn share_not_found_body() -> String {
+    format!(
+        r#"<div id="nf">
+<h1>Share not found</h1>
+<p>There is no active share at this address. The preview may have expired or been stopped by its owner.</p>
+<p>Ask whoever sent you the link for a fresh one.</p>
+</div>
+<div id="stopped" hidden>
+<h1>Sharing has stopped</h1>
+<p>This preview was live in this tab earlier, but its owner has since stopped sharing it (or the share expired).</p>
+<p>If you still need access, ask whoever sent you the link to share again.</p>
+</div>
+<script>
+try {{
+  if (sessionStorage.getItem('{SHARE_SEEN_KEY}')) {{
+    document.getElementById('nf').hidden = true;
+    document.getElementById('stopped').hidden = false;
+    document.title = 'Sharing has stopped';
+  }}
+}} catch (e) {{}}
+</script>"#
+    )
 }
 
 /// A branded error page for viewer-facing failures (dead tunnel,
@@ -149,8 +198,16 @@ pub fn not_found(kind: NotFound) -> Response {
 /// compile). Machine-facing responses (the registration API, abuse guards
 /// like 405/413, the pre-101 splice guard) stay plain text by design; see
 /// docs/branding.md.
+///
+/// These pages are only reachable while a share is registered on the slug
+/// (proxy.rs is the sole caller), so they also stamp [`SHARE_SEEN_KEY`] —
+/// a viewer who only ever saw "share disconnected" still gets the honest
+/// "sharing has stopped" copy once the registration is gone.
 pub fn error(status: StatusCode, title: &'static str, message: &'static str) -> Response {
-    let body = format!("<h1>{title}</h1><p>{message}</p>");
+    let body = format!(
+        "<h1>{title}</h1><p>{message}</p>{}",
+        mark_share_seen_script()
+    );
     html_response(status, shell(title, &body))
 }
 
@@ -203,6 +260,43 @@ mod tests {
             assert!(body.contains(marker), "{body}");
             assert!(body.contains("class=\"wordmark\""), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn share_not_found_swaps_to_stopped_copy_only_client_side() {
+        let resp = not_found(NotFound::Share);
+        let body = body_string(resp).await;
+        // Both copies ship, the stopped one hidden by default.
+        assert!(body.contains("<div id=\"nf\">"), "{body}");
+        assert!(body.contains("<div id=\"stopped\" hidden>"), "{body}");
+        assert!(body.contains("Sharing has stopped"), "{body}");
+        // The swap reads the tab-local marker…
+        assert!(
+            body.contains(&format!("sessionStorage.getItem('{SHARE_SEEN_KEY}')")),
+            "{body}"
+        );
+        // …and the 404 itself must never SET it: a viewer bouncing off dead
+        // slugs twice would otherwise mint the "stopped" copy from nothing.
+        assert!(!body.contains("setItem"), "{body}");
+
+        // The generic 404 has neither copy-swap nor marker.
+        let generic = body_string(not_found(NotFound::Generic)).await;
+        assert!(!generic.contains("sessionStorage"), "{generic}");
+        assert!(!generic.contains("Sharing has stopped"), "{generic}");
+    }
+
+    #[tokio::test]
+    async fn error_pages_stamp_the_share_seen_marker() {
+        let resp = error(
+            StatusCode::BAD_GATEWAY,
+            "Share disconnected",
+            "This share is no longer connected.",
+        );
+        let body = body_string(resp).await;
+        assert!(
+            body.contains(&format!("sessionStorage.setItem('{SHARE_SEEN_KEY}'")),
+            "{body}"
+        );
     }
 
     #[tokio::test]
