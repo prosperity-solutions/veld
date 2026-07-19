@@ -462,7 +462,13 @@ pub async fn resolve_embedded_tokens<'a>(
 ///   resolves against the *daemon's* working directory, not the project — prefer
 ///   an absolute path (the doc examples use `/run/secrets/…`).
 /// - `Command` runs the string through `sh -c` and takes its stdout, bounded by
-///   [`TOKEN_RESOLVE_TIMEOUT`]. The child is killed if that bound elapses.
+///   [`TOKEN_RESOLVE_TIMEOUT`]. The child is killed if that bound elapses. The
+///   command runs with the user's login-shell `PATH`
+///   ([`veld_core::user_path::resolve_user_path`]) so secret-manager CLIs like
+///   `op` or `vault` are found even though the daemon/gateway itself runs
+///   with a bare service `PATH` (launchd/systemd). PATH resolution carries its
+///   own 10s bound *outside* [`TOKEN_RESOLVE_TIMEOUT`], so the worst case for
+///   one `Command` resolution is the sum of both bounds, not 20s.
 ///
 /// A resolved-but-empty secret is treated as a misconfiguration and errors,
 /// rather than silently sending an empty `Authorization: Bearer` header.
@@ -492,43 +498,59 @@ pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
                 .to_owned()
         }
         SecretSource::Command(cmd) => {
-            let output = tokio::time::timeout(
-                TOKEN_RESOLVE_TIMEOUT,
-                // kill_on_drop so a command that outlives the timeout (a hung
-                // CLI, a vault stall) is reaped when the timed-out future drops,
-                // rather than orphaned and left running on the daemon.
-                tokio::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(cmd)
-                    .kill_on_drop(true)
-                    .output(),
-            )
-            .await
-            .with_context(|| {
-                format!(
-                    "token command `{cmd}` timed out after {}s",
-                    TOKEN_RESOLVE_TIMEOUT.as_secs()
-                )
-            })?
-            .with_context(|| format!("running token command `{cmd}`"))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!(
-                    "token command `{cmd}` failed ({}): {}",
-                    output.status,
-                    stderr.trim()
-                );
-            }
-            String::from_utf8(output.stdout)
-                .with_context(|| format!("token command `{cmd}` produced non-UTF-8 output"))?
-                .trim_end()
-                .to_owned()
+            // The daemon/gateway runs with a bare service PATH (launchd,
+            // systemd), so a command that works in the user's terminal (`op
+            // read …`) would otherwise fail with "command not found". Same
+            // precedent as the daemon's liveness probes. Resolved outside the
+            // timeout below — PATH resolution carries its own bound.
+            let user_path = veld_core::user_path::resolve_user_path().await;
+            run_token_command(cmd, &user_path).await?
         }
     };
     if value.is_empty() {
         bail!("resolved relay auth token is empty");
     }
     Ok(value)
+}
+
+/// Run a `SecretSource::Command` string through `sh -c` with the given `PATH`
+/// and return its trimmed stdout. Split from [`resolve_secret`] so tests can
+/// pin the PATH injection with an explicit value instead of mutating the
+/// process environment (which would be a data race under multithreaded
+/// `cargo test`).
+async fn run_token_command(cmd: &str, user_path: &str) -> Result<String> {
+    let output = tokio::time::timeout(
+        TOKEN_RESOLVE_TIMEOUT,
+        // kill_on_drop so a command that outlives the timeout (a hung
+        // CLI, a vault stall) is reaped when the timed-out future drops,
+        // rather than orphaned and left running on the daemon.
+        tokio::process::Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("PATH", user_path)
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "token command `{cmd}` timed out after {}s",
+            TOKEN_RESOLVE_TIMEOUT.as_secs()
+        )
+    })?
+    .with_context(|| format!("running token command `{cmd}`"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "token command `{cmd}` failed ({}): {}",
+            output.status,
+            stderr.trim()
+        );
+    }
+    Ok(String::from_utf8(output.stdout)
+        .with_context(|| format!("token command `{cmd}` produced non-UTF-8 output"))?
+        .trim_end()
+        .to_owned())
 }
 
 #[cfg(test)]
@@ -990,6 +1012,39 @@ mod tests {
                 .unwrap(),
             "tok3n"
         );
+    }
+
+    // Pins the load-bearing `.env("PATH", user_path)` in run_token_command: a
+    // fake secret-manager CLI lives in a directory that exists nowhere on the
+    // process PATH and is reachable only through the injected value. If the
+    // PATH injection is ever dropped, `sh -c` falls back to the process PATH,
+    // the CLI is not found, and this test fails with exit 127 — the exact
+    // "sh: op: command not found" bug this fix addresses. The PATH is passed
+    // as an explicit argument (rather than stubbing $SHELL via set_var, which
+    // would be an env data race under multithreaded cargo test).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn token_command_runs_with_injected_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+
+        let cli = dir.path().join("veld-fake-secret-cli");
+        std::fs::write(&cli, "#!/bin/sh\nprintf 'from-login-path\\n'\n").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let injected = format!("{}:/usr/bin:/bin", dir.path().display());
+        let token = run_token_command("veld-fake-secret-cli", &injected)
+            .await
+            .unwrap();
+        assert_eq!(token, "from-login-path");
+
+        // Without the fake CLI's directory on PATH the same command must fail
+        // with "command not found" — proving the injected PATH, not the
+        // process PATH, is what resolved the CLI above.
+        let err = run_token_command("veld-fake-secret-cli", "/usr/bin:/bin")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("failed"), "{err}");
     }
 
     #[tokio::test]

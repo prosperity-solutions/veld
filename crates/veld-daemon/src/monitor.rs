@@ -6,6 +6,9 @@ use tracing::{debug, info, warn};
 use veld_core::config::{self, LivenessProbe, VeldConfig};
 use veld_core::logging::{self, LogWriter};
 use veld_core::state::{GlobalRegistry, NodeStatus, ProjectState, RunStatus};
+// Shared login-shell PATH helper — see `veld_core::user_path` for why (bare
+// launchd/systemd service PATH) and the timeout/fallback semantics.
+use veld_core::user_path::resolve_user_path;
 
 /// Interval between health-check scans (seconds).
 const SCAN_INTERVAL_SECS: u64 = 5;
@@ -13,59 +16,6 @@ const SCAN_INTERVAL_SECS: u64 = 5;
 /// Tracks when each node's liveness probe was last executed.
 /// Key: `"project_root:run_name:node:variant"`.
 type LastCheckMap = HashMap<String, Instant>;
-
-/// Bound on how long the login-shell PATH resolution may take.
-const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Resolve the user's full PATH by spawning an interactive login shell.
-/// Falls back to the current process PATH if resolution fails.
-///
-/// Async + timeout-bounded: the previous version ran a *blocking* interactive
-/// login shell (`$SHELL -l -i`) directly on a tokio worker thread every 60s. A
-/// `.zshrc` that stalls right after a macOS wake (version managers, network
-/// init) could freeze the whole health monitor. Now it runs via `tokio::process`
-/// and is abandoned after [`PATH_RESOLVE_TIMEOUT`].
-async fn resolve_user_path() -> String {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
-    // Use -l -i -c to get a fully initialized interactive login shell.
-    // This captures PATH after .zprofile/.bash_profile/brew shellenv etc.
-    let output = tokio::process::Command::new(&shell)
-        .arg("-l")
-        .arg("-i")
-        .arg("-c")
-        .arg("echo $PATH")
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        // Kill the shell if we abandon it on timeout, so a hung `.zshrc`
-        // (common right after a macOS wake) doesn't leak a live process every
-        // 60s.
-        .kill_on_drop(true)
-        .output();
-
-    match tokio::time::timeout(PATH_RESOLVE_TIMEOUT, output).await {
-        Ok(Ok(o)) if o.status.success() => {
-            let path = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if !path.is_empty() {
-                info!(path = %path, "resolved user PATH from login shell");
-                return path;
-            }
-        }
-        Ok(Ok(o)) => {
-            debug!(
-                exit_code = o.status.code(),
-                "login shell PATH resolution exited non-zero, using fallback"
-            );
-        }
-        Ok(Err(e)) => {
-            debug!(error = %e, "failed to resolve user PATH, using fallback");
-        }
-        Err(_) => {
-            warn!("login shell PATH resolution timed out, using fallback");
-        }
-    }
-
-    std::env::var("PATH").unwrap_or_default()
-}
 
 /// Periodically scan all runs from the global registry and check process health.
 /// When a status change is detected, update the registry and broadcast the event.

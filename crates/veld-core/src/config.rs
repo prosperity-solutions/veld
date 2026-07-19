@@ -223,7 +223,9 @@ impl std::fmt::Debug for RelayEntry {
 /// - `{ "env": "VAR" }` — read from the daemon's environment (12-factor).
 /// - `{ "file": "/path" }` — read from a file (Docker/Kubernetes secret mounts).
 /// - `{ "command": "op read op://vault/relay/token" }` — run a shell command and
-///   use its stdout (1Password / Vault / any secret-manager CLI).
+///   use its stdout (1Password / Vault / any secret-manager CLI). Runs with the
+///   user's login-shell `PATH` ([`crate::user_path`]) so those CLIs are found
+///   even though resolution happens on a daemon with a bare service `PATH`.
 ///
 /// Resolution (running the command, reading the file/env) happens in the daemon
 /// at share time, not in this crate — this type only carries the declaration.
@@ -231,8 +233,9 @@ impl std::fmt::Debug for RelayEntry {
 /// Adding a variant here means updating, in lockstep: `Serialize` /
 /// `secret_source_from_value` below (deserialize is a catch-all `Err`, so a new
 /// variant compiles + serializes but *silently fails to parse* until added),
-/// the `Debug` redaction below, `resolve_secret` in the daemon
-/// (`share/endpoint.rs`), and the `SecretSource` `$def` in
+/// the `Debug` redaction below, `resolve_secret` in `veld-share`
+/// (`endpoint.rs`, which resolves `Command` via [`crate::user_path`]), and the
+/// `SecretSource` `$def` in
 /// `schema/v2/veld.schema.json` (hand-maintained — no compiler check ties it to
 /// this enum).
 #[derive(Clone, PartialEq, Eq, Hash)]

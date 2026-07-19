@@ -66,7 +66,16 @@ out with `"share": { "expose": ["web"], "web": { "access": "link" } }`.
 foreground `veld` you started), never your interactive shell. A literal token
 in `veld.json` always works but lands in version control; a `file` under
 `/run/secrets` is the usual production choice; for `env`, set the variable in
-the daemon's service definition (not a shell `export`).
+the daemon's service definition (not a shell `export`). `command` partially
+excepts itself from the bare-daemon-environment rule: it runs with your
+login-shell `PATH` (resolved the same way liveness probes do), so a
+secret-manager CLI like `op` is *found* just as in your terminal — but only
+`PATH` is inherited, not the rest of your shell environment. A command that
+needs an exported variable (`OP_SERVICE_ACCOUNT_TOKEN`, `VAULT_ADDR`) or an
+alias will still not see it; inject those via the daemon's service
+definition. On a headless gateway container there is no user shell config —
+resolution falls back to the container's `PATH`, so bake required CLIs into
+the image and set `PATH` there.
 
 ## What you must provide
 

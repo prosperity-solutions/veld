@@ -594,7 +594,7 @@
           "properties": {
             "command": {
               "type": "string",
-              "description": "Shell command (run via sh -c) whose stdout (trailing whitespace trimmed) is the secret."
+              "description": "Shell command (run via sh -c, with the user's login-shell PATH so CLIs like `op` are found) whose stdout (trailing whitespace trimmed) is the secret."
             }
           }
         }
