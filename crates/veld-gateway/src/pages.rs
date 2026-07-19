@@ -84,10 +84,19 @@ pub fn shell(title: &str, body: &str) -> String {
         .replace("{body}", body)
 }
 
-/// sessionStorage key marking "this tab saw this share alive". Set by every
-/// page the gateway serves *while a share is registered* on its slug host
-/// (login page, viewer-facing error pages) and read by the share 404, which
-/// then swaps its copy from "Share not found" to "Sharing has stopped".
+/// sessionStorage key marking "this tab saw this share's gateway pages while
+/// it was registered". Set by the gateway-GENERATED pages that only render
+/// with a live registration (the login page, the viewer-facing error pages)
+/// and read by the share 404, which then swaps its copy from "Share not
+/// found" to "Sharing has stopped".
+///
+/// Scope, honestly: proxied upstream responses are never touched (bodies are
+/// never rewritten — docs/gateway.md), so a tab that only ever saw the app
+/// itself (a link-access share, or a password share entered via an existing
+/// session cookie) carries no marker and gets the plain 404. The marker also
+/// lives on the same origin as the proxied app, whose own JS may legally
+/// clear it (`sessionStorage.clear()`); every such miss degrades to the
+/// anonymous copy — never to a false "stopped" claim.
 ///
 /// Why sessionStorage: each slug is its own subdomain, hence its own web
 /// origin — the browser scopes the key to that share automatically — and
@@ -175,7 +184,7 @@ fn share_not_found_body() -> String {
 </div>
 <div id="stopped" hidden>
 <h1>Sharing has stopped</h1>
-<p>This preview was live in this tab earlier, but its owner has since stopped sharing it (or the share expired).</p>
+<p>The owner of this preview has stopped sharing it (or the share expired), so it is no longer available.</p>
 <p>If you still need access, ask whoever sent you the link to share again.</p>
 </div>
 <script>
@@ -199,11 +208,14 @@ try {{
 /// like 405/413, the pre-101 splice guard) stay plain text by design; see
 /// docs/branding.md.
 ///
-/// These pages are only reachable while a share is registered on the slug
-/// (proxy.rs is the sole caller), so they also stamp [`SHARE_SEEN_KEY`] —
-/// a viewer who only ever saw "share disconnected" still gets the honest
-/// "sharing has stopped" copy once the registration is gone.
-pub fn error(status: StatusCode, title: &'static str, message: &'static str) -> Response {
+/// These pages are only reachable while a share is registered on the slug —
+/// proxy.rs is the sole caller, and `share_` in the name is the contract:
+/// they stamp [`SHARE_SEEN_KEY`], so calling this for a failure that is NOT
+/// scoped to a live share (an apex/unknown-host error, say) would mint a
+/// false "Sharing has stopped" — add a separate unstamped helper instead.
+/// The stamp means a viewer who only ever saw "share disconnected" still
+/// gets the honest "sharing has stopped" copy once the registration is gone.
+pub fn share_error(status: StatusCode, title: &'static str, message: &'static str) -> Response {
     let body = format!(
         "<h1>{title}</h1><p>{message}</p>{}",
         mark_share_seen_script()
@@ -270,11 +282,15 @@ mod tests {
         assert!(body.contains("<div id=\"nf\">"), "{body}");
         assert!(body.contains("<div id=\"stopped\" hidden>"), "{body}");
         assert!(body.contains("Sharing has stopped"), "{body}");
-        // The swap reads the tab-local marker…
+        // The swap reads the tab-local marker and targets exactly the two
+        // shipped ids — a drift between the divs and the script would leave
+        // the page stuck on the default copy with every other assert green.
         assert!(
             body.contains(&format!("sessionStorage.getItem('{SHARE_SEEN_KEY}')")),
             "{body}"
         );
+        assert!(body.contains("getElementById('nf')"), "{body}");
+        assert!(body.contains("getElementById('stopped')"), "{body}");
         // …and the 404 itself must never SET it: a viewer bouncing off dead
         // slugs twice would otherwise mint the "stopped" copy from nothing.
         assert!(!body.contains("setItem"), "{body}");
@@ -287,7 +303,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_pages_stamp_the_share_seen_marker() {
-        let resp = error(
+        let resp = share_error(
             StatusCode::BAD_GATEWAY,
             "Share disconnected",
             "This share is no longer connected.",
@@ -301,7 +317,7 @@ mod tests {
 
     #[tokio::test]
     async fn error_pages_are_branded_with_matching_status() {
-        let resp = error(
+        let resp = share_error(
             StatusCode::BAD_GATEWAY,
             "Share disconnected",
             "This share is no longer connected.",

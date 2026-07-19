@@ -78,5 +78,9 @@ with JetBrains Mono / Playfair Display / Space Grotesk. Marketing pages follow
 - [ ] Self-contained: inline CSS, no external fonts/scripts/images
 - [ ] `<meta name="viewport">` and (for non-indexable surfaces) `<meta name="robots" content="noindex">`
 - [ ] Data-URI favicon
-- [ ] No sensitive/enumerable data on anonymous pages (share names, hostnames, counts)
+- [ ] No sensitive/enumerable data on anonymous pages (share names, hostnames, counts).
+      Client-side, tab-scoped reveals are the one vetted exception: a page may
+      swap its copy from browser-local state the viewer's own tab minted
+      earlier (see `SHARE_SEEN_KEY` in `crates/veld-gateway/src/pages.rs`),
+      as long as the served bytes stay identical for every viewer
 - [ ] Reuse an existing shell where one exists (`crates/veld-gateway/src/pages.rs::shell` for gateway pages) instead of a new bespoke page
