@@ -90,6 +90,33 @@ pub async fn run() -> i32 {
     let feedback_cleaned = db.prune_orphaned_feedback(cutoff).unwrap_or(0);
     let _ = db.vacuum();
 
+    // Prune leftover pre-SQLite log files from each project's .veld/logs/
+    // (same age policy as the daemon GC, so a daemon-less setup cleans up too).
+    for reg_entry in registry.projects.values() {
+        let logs_dir = reg_entry.project_root.join(".veld").join("logs");
+        let Ok(entries) = std::fs::read_dir(&logs_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let stale = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(|t| {
+                    t.elapsed().unwrap_or_default()
+                        > std::time::Duration::from_secs(MAX_LOG_AGE_HOURS as u64 * 3600)
+                })
+                .unwrap_or(false);
+            if stale {
+                if path.is_dir() {
+                    let _ = std::fs::remove_dir_all(&path);
+                } else {
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        }
+    }
+
     // Print summary.
     let mut parts = Vec::new();
     if projects_removed > 0 {

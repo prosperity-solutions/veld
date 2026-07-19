@@ -520,6 +520,12 @@ Outputs declared in `sensitive_outputs` are:
 
 ## State
 
+> **Superseded:** the file-based storage described in this section (per-project
+> `state.json`, `.veld/logs/` files, the JSON global registry) was replaced by
+> one central SQLite database per user (`<data_dir>/veld/veld.db`) with
+> schema migrations. See the Storage section in `README.md`. The `.veld/`
+> directory remains only for ephemeral script outputs (`.veld/tmp/`).
+
 ### Local State
 `.veld/` directory per project, gitignored:
 ```

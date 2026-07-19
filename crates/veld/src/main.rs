@@ -648,8 +648,9 @@ async fn main() {
             let mut reader = stdin.lock();
             let mut buf = String::new();
 
-            // Keep file handle open for performance; flush after each line
-            // so `veld logs -f` can see data immediately.
+            // Keep file handle open for performance; write per line so any
+            // file tailer sees data immediately. (The DB-backed `veld logs`
+            // does not read this file — see the subcommand doc above.)
             let mut file = match std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

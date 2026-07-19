@@ -346,6 +346,24 @@ mod tests {
     }
 
     #[test]
+    fn vacuum_after_prune_keeps_db_usable() {
+        let (_dir, db) = test_db();
+        for i in 0..50 {
+            append(&db, Some("web"), LogStream::Server, &format!("line {i}"));
+        }
+        db.prune_logs_older_than(chrono::Utc::now() + chrono::Duration::hours(1))
+            .unwrap();
+        db.vacuum().unwrap();
+        append(&db, Some("web"), LogStream::Server, "after vacuum");
+        assert_eq!(
+            db.tail_logs(Path::new("/tmp/p"), "dev", &LogFilter::default(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn ids_stay_monotonic_after_full_prune() {
         // Follow mode uses the max id as a watermark; AUTOINCREMENT guarantees
         // a fresh insert after pruning everything still gets a larger id.

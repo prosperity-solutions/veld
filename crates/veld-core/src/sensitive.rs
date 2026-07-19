@@ -2,16 +2,17 @@
 //!
 //! Values marked as sensitive outputs are:
 //! - Masked as `[REDACTED]` in all terminal output, debug logs, and run logs
-//! - Stored encrypted at rest in `state.json` using a machine-local key
+//! - Stored encrypted at rest in the central veld database using a
+//!   machine-local key
 //! - Never visible in `veld graph` output
 //!
 //! V1 uses XOR-based obfuscation with a SHA-256 key derived from the machine's
-//! hardware UUID. This protects against casual inspection of state files.
+//! hardware UUID. This protects against casual inspection of stored state.
 
 use base64::prelude::*;
 use sha2::{Digest, Sha256};
 
-/// Prefix added to encrypted values in state.json so we can identify them.
+/// Prefix added to encrypted values at rest so we can identify them.
 const ENCRYPTED_PREFIX: &str = "veld:enc:";
 
 /// The display string for redacted sensitive values.
