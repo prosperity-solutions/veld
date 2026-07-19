@@ -58,7 +58,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
     let reg = &target.registration;
     if reg.conn.close_reason().is_some() {
         // The watcher will unpublish this slug momentarily; answer honestly.
-        return crate::pages::error(
+        return crate::pages::share_error(
             StatusCode::BAD_GATEWAY,
             "Share disconnected",
             "This share is no longer connected. The developer may have stopped \
@@ -110,7 +110,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         Ok(s) => s,
         Err(e) => {
             warn!(error = %format!("{e:#}"), hostname = %target.hostname, "tunnel stream failed");
-            return crate::pages::error(
+            return crate::pages::share_error(
                 StatusCode::BAD_GATEWAY,
                 "Could not reach the shared service",
                 "The tunnel to the shared service failed. Try again in a moment.",
@@ -139,7 +139,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
                 } else {
                     debug!(error = %e, hostname = %target.hostname, "upstream request failed");
                 }
-                return crate::pages::error(
+                return crate::pages::share_error(
                     StatusCode::BAD_GATEWAY,
                     "The shared service did not respond",
                     "The service behind this share closed the connection without \
@@ -148,7 +148,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
             }
             Err(_) => {
                 debug!(hostname = %target.hostname, is_upgrade, "upstream response timed out");
-                return crate::pages::error(
+                return crate::pages::share_error(
                     StatusCode::GATEWAY_TIMEOUT,
                     "The shared service timed out",
                     "The service behind this share did not respond in time. \

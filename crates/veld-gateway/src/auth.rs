@@ -493,9 +493,12 @@ fn login_page(status: StatusCode, next: &str, error: Option<&str>) -> Response {
     let error_html = error
         .map(|e| format!("<p class=\"err\">{}</p>", html_escape(e)))
         .unwrap_or_default();
+    // The login page only renders while the share is registered, so it stamps
+    // the tab-local "seen alive" marker the share 404 reads (pages.rs).
+    let body = format!("{LOGIN_BODY}{}", crate::pages::mark_share_seen_script());
     // Shell placeholders expand first; the viewer-influenced values go in
     // last and are brace-escaped, so they can never re-trigger a placeholder.
-    let page = crate::pages::shell("Password required", LOGIN_BODY)
+    let page = crate::pages::shell("Password required", &body)
         .replace("{next}", &next_attr)
         .replace("{error}", &error_html);
     (
@@ -1012,6 +1015,15 @@ mod tests {
         assert!(body.contains("<form"), "{body}");
         // The login page must carry the brand (rendered via pages::shell).
         assert!(body.contains("class=\"wordmark\""), "{body}");
+        // It renders only while the share is registered, so it stamps the
+        // tab-local marker the share 404 reads to show "Sharing has stopped".
+        assert!(
+            body.contains(&format!(
+                "sessionStorage.setItem('{}'",
+                crate::pages::SHARE_SEEN_KEY
+            )),
+            "{body}"
+        );
 
         let del = Request::builder()
             .method("DELETE")
