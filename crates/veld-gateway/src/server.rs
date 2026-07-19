@@ -2,10 +2,11 @@
 //! two audiences, split by `Host`:
 //!
 //! - the **apex domain** answers the Bearer-gated registration API that origin
-//!   daemons drive;
+//!   daemons drive, plus a branded index page on `/`;
 //! - **slug subdomains** are proxied to the registered share over its tunnel;
-//! - anything else is a content-free 404 (except `/healthz`, answered for any
-//!   host so container/LB probes work without knowing the domain).
+//! - anything else is a branded 404 (except the health endpoints `/healthz`,
+//!   `/livez`, and `/readyz`, answered for any host so container/LB probes
+//!   work without knowing the domain).
 
 use std::sync::Arc;
 
@@ -106,8 +107,8 @@ pub fn router(state: AppState) -> Router {
     Router::new().fallback(dispatch).with_state(state)
 }
 
-/// Route a request by the viewer's host: apex → registration API,
-/// `<slug>.<domain>` → proxy, anything else → `/healthz` or a content-free 404.
+/// Route a request by the viewer's host: apex → registration API + index page,
+/// `<slug>.<domain>` → proxy, anything else → health endpoints or a branded 404.
 async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
     let host = viewer_host(req.headers(), state.config.trust_forwarded_host)
         .map(host_without_port)
@@ -132,15 +133,16 @@ async fn dispatch(State(state): State<AppState>, req: Request) -> Response {
                 crate::auth::Gate::Respond(resp) => resp,
             };
         }
-        return api::not_found().await.into_response();
+        return crate::pages::not_found(crate::pages::NotFound::Share);
     }
 
     // Unknown host: answer health probes (containers/LBs probe by IP or an
     // internal name, not the public domain); everything else is a 404.
-    if req.uri().path() == "/healthz" {
-        return api::healthz().await.into_response();
+    match req.uri().path() {
+        "/healthz" | "/livez" => api::livez().await.into_response(),
+        "/readyz" => api::readyz().await.into_response(),
+        _ => crate::pages::not_found(crate::pages::NotFound::Generic),
     }
-    api::not_found().await.into_response()
 }
 
 /// The host the viewer actually addressed. Behind a trusted edge
@@ -246,6 +248,100 @@ async fn shutdown_on_signal(handle: axum_server::Handle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode, header};
+
+    fn test_state() -> AppState {
+        AppState {
+            config: Arc::new(GatewayConfig {
+                domain: "share.example".into(),
+                listen: "127.0.0.1:0".parse().unwrap(),
+                tls: None,
+                auth_token: veld_core::config::SecretSource::Literal("t".into()),
+                relays: None,
+                lease: std::time::Duration::from_secs(90),
+                state_dir: None,
+                max_registrations: 8,
+                trust_forwarded_headers: false,
+                trust_forwarded_host: false,
+            }),
+            registry: Registry::new(
+                "share.example".into(),
+                std::time::Duration::from_secs(90),
+                crate::registry::RelayAllowList::Unconfined,
+                iroh::SecretKey::generate(),
+                8,
+            ),
+            auth_token: "t".into(),
+            limiter: Arc::new(crate::auth::RateLimiter::default()),
+        }
+    }
+
+    async fn dispatch_to(host: &str, path: &str) -> Response {
+        let req = Request::builder()
+            .method("GET")
+            .uri(path)
+            .header(header::HOST, host)
+            .body(Body::empty())
+            .unwrap();
+        match router(test_state()).oneshot(req).await {
+            Ok(resp) => resp,
+            Err(never) => match never {},
+        }
+    }
+
+    async fn body_string(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn apex_root_serves_the_branded_index() {
+        let resp = dispatch_to("share.example", "/").await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("Veld gateway"), "{body}");
+        assert!(body.contains("class=\"wordmark\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn health_endpoints_answer_on_apex_and_unknown_hosts() {
+        for host in ["share.example", "10.0.0.7", "gateway.internal:8080"] {
+            for path in ["/healthz", "/livez", "/readyz"] {
+                let resp = dispatch_to(host, path).await;
+                assert_eq!(resp.status(), StatusCode::OK, "{host}{path}");
+                assert_eq!(body_string(resp).await, "ok", "{host}{path}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_slug_gets_the_branded_share_not_found() {
+        let resp = dispatch_to("nosuchslug.share.example", "/").await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let body = body_string(resp).await;
+        assert!(body.contains("Share not found"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn apex_unmatched_path_and_unknown_host_get_the_generic_404() {
+        for (host, path) in [
+            ("share.example", "/nope"),
+            ("evil.example", "/"),
+            ("10.0.0.7", "/index.html"),
+        ] {
+            let resp = dispatch_to(host, path).await;
+            assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{host}{path}");
+            let body = body_string(resp).await;
+            assert!(body.contains("Nothing lives at this address"), "{body}");
+        }
+    }
 
     #[test]
     fn slug_extraction_is_exactly_one_label() {

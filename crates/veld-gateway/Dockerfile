@@ -15,7 +15,9 @@
 #     -e VELD_GATEWAY_RELAYS=https://relay.acme.internal \
 #     ghcr.io/prosperity-solutions/veld-gateway:latest
 #
-# Health endpoint: GET /healthz (any Host). Runs as a non-root user. The image
+# Health endpoints: GET /livez (liveness) and GET /readyz (readiness), both
+# answering on any Host; /healthz remains as a legacy liveness alias.
+# Runs as a non-root user. The image
 # sets VELD_GATEWAY_STATE_DIR, so a mounted volume there gives a stable iroh
 # identity (and public URLs) across restarts — but the volume must be writable
 # by the `veld` user or startup fails loudly (a root-owned mount is the usual

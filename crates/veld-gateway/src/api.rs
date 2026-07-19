@@ -21,12 +21,35 @@ use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/healthz", get(healthz))
+        .route("/", get(index))
+        .route("/healthz", get(livez))
+        .route("/livez", get(livez))
+        .route("/readyz", get(readyz))
         .route("/api/v1/shares", post(register))
         .route("/api/v1/shares/{id}", delete(unregister))
+        .fallback(fallback_not_found)
 }
 
-pub async fn healthz() -> &'static str {
+async fn index() -> impl IntoResponse {
+    crate::pages::index()
+}
+
+async fn fallback_not_found() -> impl IntoResponse {
+    crate::pages::not_found(crate::pages::NotFound::Generic)
+}
+
+/// Liveness (also the legacy `/healthz` alias): the process is up and the
+/// listener answers. A failing liveness probe should restart the container.
+pub async fn livez() -> &'static str {
+    "ok"
+}
+
+/// Readiness: safe to route traffic here. The gateway has no warm-up phase or
+/// external dependency to await — the registry is in-memory and tunnels are
+/// dialed per registration — so readiness equals liveness today. Kept as a
+/// distinct endpoint so orchestrators (Kubernetes `readinessProbe`) have a
+/// stable target if that ever changes.
+pub async fn readyz() -> &'static str {
     "ok"
 }
 
@@ -117,12 +140,6 @@ async fn unregister(
     // may have expired before the origin's DELETE arrived).
     state.registry.unregister(&id).await;
     Ok(StatusCode::NO_CONTENT)
-}
-
-/// Shared 404 for unmatched hosts/paths — deliberately content-free so probes
-/// of the public surface learn nothing.
-pub async fn not_found() -> impl IntoResponse {
-    (StatusCode::NOT_FOUND, "not found")
 }
 
 #[cfg(test)]

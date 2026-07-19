@@ -108,7 +108,7 @@ pub async fn gate(state: &AppState, target: &SlugAuth, req: Request) -> Gate {
         if path == AUTH_PATH {
             return Gate::Respond(handle_auth(state, target, req).await);
         }
-        return Gate::Respond((StatusCode::NOT_FOUND, "not found").into_response());
+        return Gate::Respond(crate::pages::not_found(crate::pages::NotFound::Generic));
     }
 
     let now = chrono::Utc::now().timestamp();
@@ -484,14 +484,17 @@ impl RateLimiter {
 // Login page
 // ---------------------------------------------------------------------------
 
-/// Render the self-contained login page. Deliberately generic: no share
-/// metadata (project/run/hostnames) is leaked to an unauthenticated viewer.
+/// Render the self-contained login page (branded via [`crate::pages::shell`]).
+/// Deliberately generic: no share metadata (project/run/hostnames) is leaked
+/// to an unauthenticated viewer.
 fn login_page(status: StatusCode, next: &str, error: Option<&str>) -> Response {
     let next_attr = html_escape(&safe_next(Some(next)));
     let error_html = error
         .map(|e| format!("<p class=\"err\">{}</p>", html_escape(e)))
         .unwrap_or_default();
-    let page = LOGIN_PAGE
+    // Shell placeholders expand first; the viewer-influenced values go in
+    // last and are brace-escaped, so they can never re-trigger a placeholder.
+    let page = crate::pages::shell("Password required", LOGIN_BODY)
         .replace("{next}", &next_attr)
         .replace("{error}", &error_html);
     (
@@ -519,34 +522,12 @@ fn html_escape(s: &str) -> String {
         .replace('}', "&#125;")
 }
 
-/// Self-contained (CSP-friendly, no external assets). The inline script
+/// The login form + one-link script, rendered inside the branded page shell
+/// (self-contained, CSP-friendly, no external assets). The inline script
 /// implements the one-link flow: a `#veld-key=…` fragment auto-fills and
 /// submits the form, then strips itself from the URL — the fragment never
 /// reaches the server or its logs.
-const LOGIN_PAGE: &str = r#"<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
-<title>Password required</title>
-<style>
-  body { font-family: system-ui, sans-serif; display: flex; min-height: 100vh;
-         margin: 0; align-items: center; justify-content: center; background: #f5f5f4; }
-  form { background: #fff; padding: 2rem 2.5rem; border-radius: 12px;
-         box-shadow: 0 1px 4px rgba(0,0,0,.12); max-width: 22rem; }
-  h1 { font-size: 1.1rem; margin: 0 0 .5rem; }
-  p { color: #555; font-size: .9rem; margin: 0 0 1rem; }
-  .err { color: #b91c1c; }
-  .hint { color: #999; font-size: .78rem; margin: .9rem 0 0; }
-  input[type=password] { width: 100%; box-sizing: border-box; padding: .5rem .75rem;
-         font-size: 1rem; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 1rem; }
-  button { width: 100%; padding: .55rem; font-size: 1rem; border: 0; border-radius: 8px;
-         background: #1d4ed8; color: #fff; cursor: pointer; }
-</style>
-</head>
-<body>
-<form id="f" method="post" action="/__veld_gateway__/auth" autocomplete="off">
+const LOGIN_BODY: &str = r#"<form id="f" method="post" action="/__veld_gateway__/auth" autocomplete="off">
   <h1>Password required</h1>
   <p>This preview is protected. Enter the password you were given.</p>
   {error}
@@ -575,10 +556,7 @@ const LOGIN_PAGE: &str = r#"<!doctype html>
   history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
   document.getElementById('f').submit();
 })();
-</script>
-</body>
-</html>
-"#;
+</script>"#;
 
 #[cfg(test)]
 mod tests {

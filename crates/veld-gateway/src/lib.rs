@@ -8,6 +8,7 @@
 //! - [`config`] — env-var-first configuration
 //! - [`registry`] — join engine, slug routing table, lease bookkeeping
 //! - [`api`] — Bearer-gated registration API (apex domain)
+//! - [`pages`] — branded HTML pages (index, not-found, login shell)
 //! - [`proxy`] — the HTTP front for slug hosts (incl. WebSocket upgrades)
 //! - [`tunnel`] — HTTP/1.1 client connections over iroh tunnel streams
 //! - [`slug`] — deterministic, unguessable public-URL slugs
@@ -17,6 +18,7 @@
 pub mod api;
 pub mod auth;
 pub mod config;
+pub mod pages;
 pub mod proxy;
 pub mod registry;
 pub mod server;
