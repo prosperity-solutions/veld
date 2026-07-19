@@ -84,6 +84,7 @@ If the change is purely internal (refactor, bugfix with no new surface area), th
 
 ## Key Conventions
 
+- **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Resolve the PATH with `veld_core::user_path::resolve_user_path()` and pass it via `.env("PATH", …)` — as liveness probes (`veld-daemon/src/monitor.rs`) and `SecretSource::Command` token resolution (`veld-share/src/endpoint.rs`) already do. Never spawn a config-declared command on a daemon without this. Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`start_server` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment.
 - Domain: `veld.oss.life.li` (not `veld.dev`)
 - Install URL: `https://veld.oss.life.li/get`
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`
