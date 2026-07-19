@@ -141,12 +141,15 @@ pub fn not_found(kind: NotFound) -> Response {
     html_response(StatusCode::NOT_FOUND, shell(title, body))
 }
 
-/// A branded error page for viewer-facing failures (dead tunnel, upstream
-/// timeout…). `title` and `message` must be trusted constants — never echo
-/// request data here. Machine-facing responses (the registration API, abuse
-/// guards like 405/413, upgrade-path failures) stay plain text by design;
-/// see docs/branding.md.
-pub fn error(status: StatusCode, title: &str, message: &str) -> Response {
+/// A branded error page for viewer-facing failures (dead tunnel,
+/// unresponsive or timed-out upstream — upgrade requests included).
+/// `title` and `message` are `&'static str` ON PURPOSE: it makes "trusted
+/// constants only — never echo request data" a compile-time guarantee
+/// instead of a doc-comment plea (a `&format!(…{host}…)` caller does not
+/// compile). Machine-facing responses (the registration API, abuse guards
+/// like 405/413, the pre-101 splice guard) stay plain text by design; see
+/// docs/branding.md.
+pub fn error(status: StatusCode, title: &'static str, message: &'static str) -> Response {
     let body = format!("<h1>{title}</h1><p>{message}</p>");
     html_response(status, shell(title, &body))
 }
@@ -200,6 +203,27 @@ mod tests {
             assert!(body.contains(marker), "{body}");
             assert!(body.contains("class=\"wordmark\""), "{body}");
         }
+    }
+
+    #[tokio::test]
+    async fn error_pages_are_branded_with_matching_status() {
+        let resp = error(
+            StatusCode::BAD_GATEWAY,
+            "Share disconnected",
+            "This share is no longer connected.",
+        );
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+        let body = body_string(resp).await;
+        assert!(body.contains("<h1>Share disconnected</h1>"), "{body}");
+        assert!(body.contains("class=\"wordmark\""), "{body}");
     }
 
     #[test]

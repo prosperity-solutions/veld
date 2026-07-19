@@ -325,6 +325,19 @@ mod tests {
                 assert_eq!(body_string(resp).await, "ok", "{host}{path}");
             }
         }
+        // Deliberately method-agnostic (probes are GET/HEAD, but the paths
+        // are reserved wholesale — pinned so a change is a conscious one).
+        let post = Request::builder()
+            .method("POST")
+            .uri("/livez")
+            .header(header::HOST, "share.example")
+            .body(Body::empty())
+            .unwrap();
+        let resp = match router(test_state()).oneshot(post).await {
+            Ok(resp) => resp,
+            Err(never) => match never {},
+        };
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -208,7 +208,11 @@ Two consequences to know before sharing a non-trivial app:
   distinct targets if that ever changes. Readiness also stays `ok` through
   the SIGTERM drain: traffic shedding during a rolling restart is handled by
   the listener refusing new connections and the orchestrator removing the
-  endpoint, not by the probe flipping. `GET /healthz` remains as a legacy
+  endpoint, not by the probe flipping. On Kubernetes, endpoint removal
+  propagates asynchronously, so pair the probe with a short `preStop` sleep
+  (a few seconds) to keep the listener accepting until the pod has left the
+  Service endpoints — otherwise a rollout can surface brief connection
+  resets. `GET /healthz` remains as a legacy
   alias for liveness. Logs go to stdout (`RUST_LOG` controls verbosity).
 - **Shutdown**: SIGTERM drains gracefully (10s budget) — rolling restarts are
   safe; in-flight requests finish and heartbeats re-register.

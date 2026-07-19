@@ -13,9 +13,12 @@ white.
 
 **Scope:** the rule covers pages a human is meant to read in a browser —
 index, login, 404s, viewer-facing error pages (dead tunnel, upstream
-timeout). Machine-facing responses stay plain text by design: API errors
-(Bearer-gated registration), health probe bodies, abuse-path guards
-(405/413/oversized form), and WebSocket upgrade failures. Responses an
+unresponsive or timed out — whether the request was a plain fetch or a
+WebSocket upgrade attempt). Machine-facing responses stay plain text by
+design: API errors (Bearer-gated registration), health probe bodies,
+abuse-path guards (405/413/oversized form), and belt-and-braces guards on
+practically-unreachable paths (e.g. a password-mode slug without a
+password, a non-upgradable client connection at splice time). Responses an
 origin app produces and the gateway merely proxies are the app's own.
 
 ## Brand assets
