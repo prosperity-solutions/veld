@@ -118,7 +118,7 @@ veld stop --name dev
 | `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached) |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
-| `veld status [--name <n>] [--json]` | Show run status |
+| `veld status [--name <n>] [--json]` | Show run status, including per-node CPU and memory usage |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
 | `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
 | `veld actions [--json]` | List the actions defined across the project's nodes |
@@ -211,6 +211,8 @@ Both people must have veld installed and be in the **same setup mode** — both 
 ### Dashboard controls
 
 Sharing can be driven entirely from the dashboard: each running run's card has a **Share** button; once shared it shows **Copy link** / **Copy command** buttons, an **auto-accept** toggle, and **Stop sharing**. Pending join requests (Approve/Deny) and joined shares appear in a panel.
+
+Each run card's Services tab also shows live resource usage per node — memory and CPU summed across the node's whole process tree, refreshed every ~5s, with a memory sparkline. The same figures are available from the CLI via `veld status` (a `stats` map in `--json`).
 
 ### Security
 

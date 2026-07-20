@@ -20,6 +20,7 @@ mod import;
 mod kv;
 mod logs;
 pub(crate) mod state;
+mod stats;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
 
@@ -262,11 +263,18 @@ struct Migration {
     apply: fn(&Connection) -> rusqlite::Result<()>,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "initial-schema",
-    apply: migrate_v1_initial,
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "initial-schema",
+        apply: migrate_v1_initial,
+    },
+    Migration {
+        version: 2,
+        name: "node-process-stats",
+        apply: migrate_v2_node_stats,
+    },
+];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch(
@@ -372,6 +380,33 @@ fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
             value TEXT NOT NULL,
             updated_at TEXT NOT NULL
         );
+        "#,
+    )
+}
+
+/// v2: per-node process resource stats (CPU/memory/process-count time series).
+///
+/// Kept in its own table, not as columns on `nodes`: `save_run` rewrites every
+/// node row on each state change, which would clobber volatile samples, and a
+/// separate table lets samples accumulate as a time series that GC prunes by
+/// age. Rows cascade-delete with their run (same `run_row` FK as `nodes`).
+fn migrate_v2_node_stats(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE node_stats (
+            id INTEGER PRIMARY KEY,
+            run_row INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            node_key TEXT NOT NULL,
+            cpu_percent REAL NOT NULL,
+            memory_bytes INTEGER NOT NULL,
+            process_count INTEGER NOT NULL,
+            sampled_at TEXT NOT NULL
+        );
+        -- Serves per-node latest/history lookups (run_row + node_key, newest
+        -- first via the trailing sampled_at).
+        CREATE INDEX idx_node_stats_lookup ON node_stats(run_row, node_key, sampled_at);
+        -- Serves the age-based GC prune that scans across all runs.
+        CREATE INDEX idx_node_stats_sampled ON node_stats(sampled_at);
         "#,
     )
 }

@@ -23,6 +23,7 @@ tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 libc = "0.2"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 axum = "0.8"
 reqwest = { workspace = true }
 uuid = { workspace = true }

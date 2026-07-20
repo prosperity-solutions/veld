@@ -39,6 +39,16 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
     // Check PID liveness for each node and compute effective statuses.
     let effective_statuses = compute_effective_statuses(&run_state);
 
+    // Latest per-node resource stats (recorded by the daemon's stats sampler);
+    // keyed by node key ("node:variant"). Empty when the daemon hasn't sampled
+    // yet or isn't running. Stale samples (a dead node, or a daemon that has
+    // stopped writing) are dropped so we never present a frozen reading as live.
+    let mut node_stats = db
+        .latest_node_stats(&project_root, run_name)
+        .unwrap_or_default();
+    let stats_now = chrono::Utc::now();
+    node_stats.retain(|_, s| s.is_fresh(stats_now));
+
     if json {
         // Build a modified run state with effective statuses for JSON output.
         let mut run_for_json = run_state.clone();
@@ -55,7 +65,20 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
         {
             run_for_json.status = RunStatus::Failed;
         }
-        match serde_json::to_string_pretty(&run_for_json) {
+        // Attach live resource stats alongside the run without polluting the
+        // persisted `NodeState` type: flatten the run and add a `stats` map.
+        #[derive(serde::Serialize)]
+        struct StatusJson<'a> {
+            #[serde(flatten)]
+            run: &'a veld_core::state::RunState,
+            #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
+            stats: &'a std::collections::HashMap<String, veld_core::stats::ProcessStats>,
+        }
+        let payload = StatusJson {
+            run: &run_for_json,
+            stats: &node_stats,
+        };
+        match serde_json::to_string_pretty(&payload) {
             Ok(s) => println!("{s}"),
             Err(e) => {
                 output::print_error(&format!("JSON serialization failed: {e}"), json);
@@ -98,15 +121,21 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             } else {
                 format_node_status(&ns.status)
             };
+            let (cpu_str, mem_str) = match node_stats.get(key.as_str()) {
+                Some(s) => (fmt_cpu(s.cpu_percent), fmt_bytes(s.memory_bytes)),
+                None => (output::dim("-"), output::dim("-")),
+            };
             rows.push(vec![
                 ns.node_name.clone(),
                 ns.variant.clone(),
                 status_str,
+                cpu_str,
+                mem_str,
                 ns.url.clone().unwrap_or_default(),
             ]);
         }
 
-        output::print_table(&["NODE", "VARIANT", "STATUS", "URL"], &rows);
+        output::print_table(&["NODE", "VARIANT", "STATUS", "CPU", "MEM", "URL"], &rows);
 
         // Show liveness/recovery details for nodes that have them.
         let has_liveness_info = run_state.nodes.values().any(|ns| {
@@ -208,6 +237,27 @@ fn compute_effective_statuses(
         result.insert(key.as_str(), effective);
     }
     result
+}
+
+/// Human-readable byte size: 1024-based, with the conventional short KB/MB/GB
+/// labels (kept identical to the dashboard's `fmtBytes` so the two agree).
+fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.0} KB", b / KIB)
+    } else if b < KIB * KIB * KIB {
+        format!("{:.0} MB", b / (KIB * KIB))
+    } else {
+        format!("{:.1} GB", b / (KIB * KIB * KIB))
+    }
+}
+
+/// CPU usage as a whole-percent-of-one-core figure.
+fn fmt_cpu(percent: f32) -> String {
+    format!("{percent:.0}%")
 }
 
 fn format_run_status(status: &RunStatus) -> String {

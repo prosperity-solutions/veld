@@ -135,6 +135,12 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .svc-table .svc-url-btns button.ok{color:var(--green)}
 .svc-table .svc-dim{color:var(--text2)}
 .svc-table .svc-pid{color:var(--dim);font-family:var(--mono);font-size:11px}
+.svc-table .svc-stats{white-space:nowrap;font-family:var(--mono);font-size:11px}
+.svc-table .svc-stats .stat-mem{color:var(--text)}
+.svc-table .svc-stats .stat-cpu{margin-left:8px;color:var(--text2)}
+.svc-table .svc-stats .stat-spark{margin-left:8px;vertical-align:middle}
+.svc-table .svc-stats .stat-spark polyline{fill:none;stroke:var(--accent);stroke-width:1.25;stroke-linejoin:round;stroke-linecap:round}
+.svc-table .svc-stats .stat-none{color:var(--dim)}
 .svc-empty{color:var(--dim);font-size:12px;padding:8px 0}
 
 /* log tab */
@@ -341,7 +347,7 @@ function render(data){
       // Services panel (merged URLs + debug)
       h+='<div class="tab-panel'+(st.tab==='services'?' active':'')+'" data-panel="services">';
       if(nodes.length){
-        h+='<table class="svc-table"><thead><tr><th>Node</th><th>URL</th><th></th><th>Variant</th><th>PID</th></tr></thead><tbody>';
+        h+='<table class="svc-table"><thead><tr><th>Node</th><th>URL</th><th></th><th>Variant</th><th>PID</th><th>Resources</th></tr></thead><tbody>';
         for(const n of nodes){
           const url=n.url||'';
           h+='<tr><td class="svc-node">'+esc(n.name)+'<span class="health-dot '+esc(n.status)+'" title="'+esc(n.status)+'"></span></td>';
@@ -358,9 +364,13 @@ function render(data){
           }
           h+='</td>';
           h+='<td class="svc-dim">'+esc(n.variant)+'</td>';
-          h+='<td class="svc-pid">'+(n.pid||'')+'</td></tr>';
+          h+='<td class="svc-pid">'+(n.pid||'')+'</td>';
+          // Resources cell — patched in place by refreshStats() on its own
+          // cadence (kept out of the /api/environments fingerprint so live
+          // numbers never trigger a full card re-render).
+          h+='<td class="svc-stats" data-statkey="'+esc(n.name+':'+n.variant)+'"><span class="stat-none">&ndash;</span></td></tr>';
           if(n.recovery_count||n.consecutive_failures||n.last_liveness_error){
-            h+='<tr><td colspan="5" class="svc-liveness">';
+            h+='<tr><td colspan="6" class="svc-liveness">';
             var parts=[];
             if(n.consecutive_failures)parts.push('<span class="warn">failures: '+n.consecutive_failures+'</span>');
             if(n.recovery_count)parts.push('recoveries: '+n.recovery_count);
@@ -384,6 +394,9 @@ function render(data){
     if(host&&s.panelEl)host.appendChild(s.panelEl);
     if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
   }
+  // Freshly rendered cells are placeholders; fill them without waiting for the
+  // next stats tick.
+  refreshStats();
 }
 
 // --- Log panel ---
@@ -638,6 +651,43 @@ function fmtTs(ts){const i=ts.indexOf('T');if(i<0)return ts;let t=ts.substring(i
 function shortUrl(u){try{return new URL(u).hostname;}catch{return u;}}
 function esc(s){if(s==null)return'';return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
 
+// --- Process resource stats ---
+// Fetched from /api/stats on its own cadence and patched into the per-node
+// Resources cells, so live numbers never disturb the main render fingerprint.
+function fmtBytes(b){
+  if(b==null)return'–';
+  const K=1024;
+  if(b<K)return b+' B';
+  if(b<K*K)return (b/K).toFixed(0)+' KB';
+  if(b<K*K*K)return (b/(K*K)).toFixed(0)+' MB';
+  return (b/(K*K*K)).toFixed(1)+' GB';
+}
+function sparkSvg(vals){
+  if(!Array.isArray(vals)||vals.length<2)return'';
+  const w=64,h=16,n=vals.length;let mn=Math.min(...vals),mx=Math.max(...vals);
+  if(mx<=mn)mx=mn+1; // flat series → flat line along the baseline
+  const pts=vals.map((v,i)=>((i/(n-1))*w).toFixed(1)+','+(h-((v-mn)/(mx-mn))*(h-2)-1).toFixed(1)).join(' ');
+  return '<svg class="stat-spark" viewBox="0 0 '+w+' '+h+'" width="'+w+'" height="'+h+'" preserveAspectRatio="none" aria-hidden="true"><polyline points="'+pts+'"/></svg>';
+}
+function statCell(ns){
+  if(!ns)return'<span class="stat-none">–</span>';
+  return '<span class="stat-mem" title="Resident memory (whole process tree)">'+esc(fmtBytes(ns.mem))+'</span>'+
+         '<span class="stat-cpu" title="CPU, % of one core (whole process tree)">'+Math.round(ns.cpu||0)+'%</span>'+
+         sparkSvg(ns.spark);
+}
+async function refreshStats(){
+  try{
+    const r=await fetch('/api/stats');if(!r.ok)return;
+    // Keyed by project root then run name — run names collide across projects,
+    // so match a card on both its path and run, mirroring the response.
+    const projects=(await r.json()).projects||{};
+    for(const card of $$('.card')){
+      const byNode=(projects[card.dataset.path]||{})[card.dataset.run]||{};
+      for(const cell of $$('[data-statkey]',card))cell.innerHTML=statCell(byNode[cell.dataset.statkey]);
+    }
+  }catch(e){}
+}
+
 // One badge per live tunnel: direct (green, full bandwidth) or relayed
 // (yellow — throughput is capped by the relay, the usual cause of slow
 // shares). `connections` is absent from pre-transport-reporting daemons.
@@ -815,6 +865,7 @@ document.addEventListener('change',async e=>{
 });
 refresh();setInterval(refresh,3000);
 refreshShares();setInterval(refreshShares,3000);
+refreshStats();setInterval(refreshStats,5000);
 if(location.pathname.replace(/\/+$/,'').endsWith('/join'))runJoinFlow();
 })();
 </script>

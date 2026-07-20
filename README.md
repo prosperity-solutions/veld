@@ -144,7 +144,7 @@ veld stop --name dev
 | `veld start [NODE:VARIANT...] --name <n>` | Start an environment |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
-| `veld status [--name <n>] [--json]` | Show run status |
+| `veld status [--name <n>] [--json]` | Show run status, including per-node CPU and memory usage |
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
 | `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
 | `veld actions [--json]` | List the actions defined across the project's nodes |
@@ -292,7 +292,7 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 
 ### Storage
 
-All CLI/daemon state — run state, the project registry, service logs, feedback threads and screenshots, relay auth tokens — lives in one SQLite database at `<data_dir>/veld/veld.db` (macOS: `~/Library/Application Support/veld/veld.db`; Linux: `~/.local/share/veld/veld.db`; override with `VELD_DB_PATH`). The file is `0600` (it holds secrets) and runs in WAL mode, so the CLI, daemon, and detached log writers read and write concurrently without file locking. The schema is versioned (`PRAGMA user_version`) and migrates forward automatically on upgrade — a CLI update never orphans or stops running environments because the data shape changed. A database created by a *newer* veld is refused with an error instead of being modified.
+All CLI/daemon state — run state, the project registry, service logs, per-node process resource samples, feedback threads and screenshots, relay auth tokens — lives in one SQLite database at `<data_dir>/veld/veld.db` (macOS: `~/Library/Application Support/veld/veld.db`; Linux: `~/.local/share/veld/veld.db`; override with `VELD_DB_PATH`). The file is `0600` (it holds secrets) and runs in WAL mode, so the CLI, daemon, and detached log writers read and write concurrently without file locking. The schema is versioned (`PRAGMA user_version`) and migrates forward automatically on upgrade — a CLI update never orphans or stops running environments because the data shape changed. A database created by a *newer* veld is refused with an error instead of being modified.
 
 ## Extensions
 
@@ -300,7 +300,7 @@ All CLI/daemon state — run state, the project registry, service logs, feedback
 
 Veld includes a browser-based dashboard at `https://veld.localhost` (or `https://veld.localhost:18443` in unprivileged mode). It shows all environments with:
 
-- **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID
+- **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID, and live resource usage (memory + CPU per process tree, with a memory sparkline)
 - **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter, source filter (server/client/all)
 - **Stop/Restart** — control environments directly from the browser
 - **Sharing** — start/stop peer shares and public web shares per run; each live tunnel shows its transport (`direct`, or `relayed via <relay>` — throughput capped by the relay) so slow shares are diagnosable at a glance

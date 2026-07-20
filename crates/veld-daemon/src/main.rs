@@ -3,6 +3,7 @@ mod feedback_server;
 mod gc;
 mod monitor;
 mod share;
+mod stats;
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -139,6 +140,13 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler(gc_manager).await;
     });
 
+    // Resource-stats sampling runs on its own timer, deliberately separate from
+    // the health monitor: liveness probes there can block for tens of seconds,
+    // which would stretch the sampling gap and make live stats read as stale.
+    let stats_handle = tokio::spawn(async move {
+        stats::run_stats_sampler().await;
+    });
+
     let feedback_manager = std::sync::Arc::clone(&share_manager);
     let feedback_handle = tokio::spawn(async move {
         feedback_server::run_feedback_server(feedback_manager).await;
@@ -156,6 +164,7 @@ async fn main() -> Result<()> {
     // Abort background tasks.
     monitor_handle.abort();
     gc_handle.abort();
+    stats_handle.abort();
     accept_handle.abort();
     feedback_handle.abort();
 
