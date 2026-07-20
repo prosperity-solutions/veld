@@ -56,6 +56,8 @@ This starts a local HTTP server for the `website/` directory with an HTTPS URL l
 
 Veld ships consumer-facing skills in `skills/` for the [npx skills](https://github.com/vercel-labs/skills) ecosystem. Users install with `npx skills add prosperity-solutions/veld`. Skills are auto-discovered from `skills/*/SKILL.md`.
 
+For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
+
 ## PR Workflow
 
 Follow this workflow for every feature or fix:
