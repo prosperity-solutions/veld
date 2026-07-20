@@ -8,11 +8,13 @@
 //! rewritten to the **origin hostname** — dev servers (Vite & friends) enforce
 //! host allow-lists and already accept their own `*.localhost` hostname, so
 //! this makes the flagship case work zero-config. `Origin` and `Referer` are
-//! rewritten to the origin in lockstep with `Host`, so an Origin-checking dev
-//! server sees a coherent same-origin request — except on **upgrade requests**,
-//! where `Origin` is dropped instead: Next's HMR WebSocket allow-lists origins
-//! against `localhost`/`allowedDevOrigins` (its own hostname doesn't pass) and
-//! destroys the socket on mismatch, while an absent Origin is accepted. The
+//! rewritten to the origin in lockstep with `Host` — uniformly, including on
+//! upgrade requests — so an Origin-checking dev server sees a coherent
+//! same-origin request. (Next's HMR WebSocket allow-lists origins against
+//! `localhost`/`allowedDevOrigins`, so its own hostname must be listed there;
+//! set `allowedDevOrigins` in the framework config, or drop `Origin` entirely
+//! with the per-service `proxy.request.remove: ["Origin"]` opt-in. veld does no
+//! header stripping by default — see [`veld_core::config::ProxyConfig`].) The
 //! public host travels in
 //! `X-Forwarded-Host` (`X-Forwarded-*`/`Forwarded` from the client are stripped
 //! — the gateway is the public trust boundary). On the way back: `Location`
@@ -100,6 +102,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         &public_host,
         client_addr.as_deref(),
         is_upgrade,
+        target.proxy.as_ref(),
     ) {
         Ok(r) => r,
         Err(err) => return err.into_response(),
@@ -129,9 +132,11 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
                 // On the upgrade path this is the signature of a dev server
-                // destroying the handshake socket without a response (Next's
-                // dev-origin gate did exactly that before the Origin drop) —
-                // warn with the classification so a recurrence is diagnosable
+                // destroying the handshake socket without a response — e.g.
+                // Next's dev-origin gate rejecting the coherently-rewritten
+                // Origin when the origin host isn't in `allowedDevOrigins` (and
+                // the service didn't opt into `proxy.request.remove: ["Origin"]`).
+                // Warn with the classification so a recurrence is diagnosable
                 // from the gateway logs alone.
                 if is_upgrade {
                     warn!(error = %e, hostname = %target.hostname,
@@ -175,6 +180,7 @@ pub async fn handle(state: AppState, target: SlugTarget, req: Request) -> Respon
         &reg.nodes,
         &state.config.domain,
         target.access == veld_core::config::WebAccessMode::Password,
+        target.proxy.as_ref(),
     );
     Response::from_parts(resp_parts, Body::new(resp_body))
 }
@@ -236,6 +242,7 @@ fn build_upstream_request(
     public_host: &str,
     client_ip: Option<&str>,
     is_upgrade: bool,
+    proxy: Option<&veld_core::config::ResolvedProxy>,
 ) -> Result<axum::http::Request<Body>, (StatusCode, &'static str)> {
     let path_and_query = parts
         .uri
@@ -292,30 +299,30 @@ fn build_upstream_request(
     // docs). Rewriting Host alone while leaving Origin/Referer at the public
     // host would manufacture a cross-origin request that Origin-checking dev
     // servers (Next Server Actions, Vite's DNS-rebinding guard) reject — the
-    // dev server must see a coherent same-origin request.
+    // dev server must see a coherent same-origin request. This is intrinsic
+    // correctness, NOT "stripping": the browser's public-host Origin is
+    // translated to the origin's own host, applied uniformly to every request
+    // including WebSocket upgrades.
     //
-    // EXCEPT on upgrade requests: Origin is DROPPED there, never rewritten.
-    // Next's dev server (webpack/turbopack HMR) allow-lists WS origins against
-    // `localhost` + `allowedDevOrigins` — its own serving hostname does NOT
-    // pass, so a rewritten Origin gets the socket destroyed without a response
-    // (surfacing as a 502 and dead HMR). Dev servers accept an absent Origin
-    // (non-browser clients), and the local helper Caddy has stripped Origin
-    // for exactly this reason since `aed79c9`. (Origin-REQUIRED WS gates —
-    // Rails ActionCable, Django Channels, strict Phoenix check_origin —
-    // reject an absent Origin, but those are already broken through the
-    // local Caddy for the same reason; the invariant is "works locally
-    // implies works shared", and the flagship WS use case is browser HMR.) NOTE the deliberate divergence:
-    // Caddy deletes Origin on ALL requests (a local browser's Origin already
-    // matches Host, so nothing is lost), while the gateway drops it ONLY on
-    // upgrades — non-upgrade requests keep the rewrite above because Next
-    // Server Actions require a coherent Origin/Host pair. Don't "align" the
-    // two by deleting unconditionally here.
+    // For frameworks that gate WS HMR on an origin allow-list (Next's
+    // webpack/turbopack dev server checks `localhost` + `allowedDevOrigins`),
+    // the coherent rewrite means the origin's own serving host must be
+    // allow-listed — set `allowedDevOrigins` in the framework config (the
+    // recommended fix). If that isn't possible, drop Origin entirely with the
+    // per-service `proxy.request.remove: ["Origin"]` opt-in, which is applied
+    // below after this rewrite. veld no longer drops Origin by default (it did
+    // on upgrades before this change). NOTE the intrinsic default still differs
+    // from the local Caddy proxy by necessity: the gateway's public host is not
+    // the origin host, so it MUST rewrite Origin/Host/Referer coherently; the
+    // local Caddy request is already same-origin, so it passes them through
+    // untouched. Only the *user-config* header layer (`proxy.*`) is applied
+    // identically on both.
     headers.insert(
         header::HOST,
         HeaderValue::from_str(origin_hostname)
             .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid origin hostname"))?,
     );
-    if !is_upgrade && parts.headers.contains_key(header::ORIGIN) {
+    if parts.headers.contains_key(header::ORIGIN) {
         if let Ok(v) = HeaderValue::from_str(origin) {
             headers.insert(header::ORIGIN, v);
         }
@@ -348,6 +355,14 @@ fn build_upstream_request(
         if let Ok(v) = HeaderValue::from_str(ip) {
             headers.insert("x-forwarded-for", v);
         }
+    }
+
+    // User-configured header rules, applied last so they win over the rewrites
+    // above (this is where `proxy.request.remove: ["Origin"]` takes effect) —
+    // but BEFORE the transport-critical Connection/Upgrade fixups below, which
+    // must stay authoritative for the one-request-per-stream tunnel.
+    if let Some(proxy) = proxy {
+        apply_header_rules(headers, &proxy.request);
     }
 
     if is_upgrade {
@@ -410,7 +425,11 @@ fn splice_upgrade(
     // rewrites are meaningless on a 101 — so any guard that must hold on
     // every response needs mirroring here. Today that is exactly one rule:
     // the upstream must never (re)set the gateway's own session cookie
-    // (same reasoning as in `rewrite_response_headers`).
+    // (same reasoning as in `rewrite_response_headers`). NOTE: user
+    // `proxy.response` rules are intentionally NOT applied here — a 101 carries
+    // only handshake-critical headers (Upgrade/Connection/Sec-WebSocket-*), and
+    // letting config strip/overwrite them would break the WebSocket. Documented
+    // as an exception in docs/configuration.md.
     let mut client_resp = Response::builder().status(StatusCode::SWITCHING_PROTOCOLS);
     if let Some(headers) = client_resp.headers_mut() {
         for (name, value) in upstream_resp.headers() {
@@ -467,6 +486,7 @@ fn rewrite_response_headers(
     nodes: &[RegisteredNode],
     domain: &str,
     password_mode: bool,
+    proxy: Option<&veld_core::config::ResolvedProxy>,
 ) {
     for name in hop_by_hop() {
         headers.remove(name);
@@ -485,7 +505,10 @@ fn rewrite_response_headers(
     // password-mode node it names the target. Force
     // `Referrer-Policy: no-referrer` (overriding any weaker app value) —
     // cheap, and it closes the most common slug-leak channel. Defence in
-    // depth alongside the §6.1 password gate.
+    // depth alongside the §6.1 password gate. NOTE: this is re-asserted AFTER
+    // user `proxy.response` rules below — that later insert is the authoritative
+    // one (config must not be able to weaken it). Keep both; if you dedupe, keep
+    // the LATE one.
     headers.insert(
         header::REFERRER_POLICY,
         HeaderValue::from_static("no-referrer"),
@@ -545,6 +568,52 @@ fn rewrite_response_headers(
                 Err(_) => cookie,
             };
             headers.append(header::SET_COOKIE, value);
+        }
+    }
+
+    // User-configured response header rules, applied last so they win over the
+    // gateway's intrinsic response rewrites above.
+    //
+    // The session-cookie strip above is NOT re-asserted after this: a host's
+    // `proxy.response.set` of the `__Host-`-prefixed session cookie is confined
+    // by the browser to that host's own slug (host-only, no Domain), so it can't
+    // shadow another slug's session; and the value wouldn't verify anyway (the
+    // session MAC uses a gateway-held capability-derived key the host doesn't
+    // know). Co-tenant safety here rests on the `__Host-` prefix, not the strip.
+    // Referrer-Policy differs — it IS re-asserted below because there is no such
+    // structural guard behind it.
+    if let Some(proxy) = proxy {
+        apply_header_rules(headers, &proxy.response);
+    }
+
+    // Re-assert the non-negotiable slug-leak guard AFTER user rules: unlike
+    // Cache-Control (which the gateway only sets when the app is silent, so
+    // config overriding it is symmetric with the app doing so), the gateway
+    // forces Referrer-Policy: no-referrer unconditionally — an upstream app
+    // cannot weaken it, so a `proxy.response` rule must not be able to either.
+    // On a link-access node the slug is the sole bearer credential.
+    headers.insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+}
+
+/// Apply a set of static header rules to a header map: remove the named headers,
+/// then set the configured name→value pairs (replacing any existing value).
+/// Header names/values that aren't valid HTTP tokens are skipped rather than
+/// failing the whole request — a config typo must not take the proxy down.
+fn apply_header_rules(headers: &mut HeaderMap, rules: &veld_core::config::HeaderRules) {
+    for name in &rules.remove {
+        if let Ok(hn) = HeaderName::from_bytes(name.as_bytes()) {
+            headers.remove(&hn);
+        }
+    }
+    for (name, value) in &rules.set {
+        if let (Ok(hn), Ok(hv)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            headers.insert(hn, hv);
         }
     }
 }
@@ -630,6 +699,7 @@ mod tests {
                 slug: "abcdefabcdefabcdefabcdefab".into(),
                 public_url: "https://abcdefabcdefabcdefabcdefab.share.example".into(),
                 access: veld_core::config::WebAccessMode::Password,
+                proxy: None,
             },
             RegisteredNode {
                 node: "api".into(),
@@ -638,6 +708,7 @@ mod tests {
                 slug: "xyzxyzxyzxyzxyzxyzxyzxyzxy".into(),
                 public_url: "https://xyzxyzxyzxyzxyzxyzxyzxyzxy.share.example".into(),
                 access: veld_core::config::WebAccessMode::Link,
+                proxy: None,
             },
         ]
     }
@@ -650,7 +721,7 @@ mod tests {
     fn password_mode_defaults_no_store_only_when_app_is_silent() {
         // Password node + no app cache policy → default closed.
         let mut h = HeaderMap::new();
-        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true, None);
         assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "no-store");
 
         // Password node + app states its own policy → respected, not overridden.
@@ -659,12 +730,12 @@ mod tests {
             header::CACHE_CONTROL,
             HeaderValue::from_static("public, max-age=60"),
         );
-        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true, None);
         assert_eq!(h.get(header::CACHE_CONTROL).unwrap(), "public, max-age=60");
 
         // Link node → the gateway never injects no-store.
         let mut h = HeaderMap::new();
-        rewrite_response_headers(&mut h, &nodes(), "share.example", false);
+        rewrite_response_headers(&mut h, &nodes(), "share.example", false, None);
         assert!(h.get(header::CACHE_CONTROL).is_none());
     }
 
@@ -681,7 +752,7 @@ mod tests {
             header::SET_COOKIE,
             HeaderValue::from_static("app_sid=legit; Path=/"),
         );
-        rewrite_response_headers(&mut h, &nodes(), "share.example", true);
+        rewrite_response_headers(&mut h, &nodes(), "share.example", true, None);
         let cookies: Vec<&str> = h
             .get_all(header::SET_COOKIE)
             .iter()
@@ -815,6 +886,7 @@ mod tests {
             "abc.share.example",
             Some("9.9.9.9"),
             false,
+            None,
         )
         .unwrap();
         let h = out.headers();
@@ -874,6 +946,7 @@ mod tests {
             "abc.share.example",
             None,
             false,
+            None,
         )
         .unwrap();
         let cookie = out.headers().get(header::COOKIE).unwrap().to_str().unwrap();
@@ -895,17 +968,67 @@ mod tests {
             "abc.share.example",
             None,
             false,
+            None,
         )
         .unwrap();
         assert!(out.headers().get(header::COOKIE).is_none());
     }
 
     #[test]
-    fn upgrade_requests_drop_origin_instead_of_rewriting() {
-        // Regression (Next.js HMR): the dev server allow-lists WS origins
-        // against localhost/allowedDevOrigins — its own hostname does NOT
-        // pass — and destroys the socket on mismatch. The upgrade path must
-        // send NO Origin at all; the non-upgrade path keeps the rewrite.
+    fn origin_is_rewritten_coherently_on_both_upgrade_and_plain_requests() {
+        // Default (no proxy config): the gateway rewrites Origin to the origin
+        // host in lockstep with Host, UNIFORMLY — upgrades included. No more
+        // upgrade-only Origin drop; header stripping is now opt-in via config.
+        for (method, uri, is_upgrade, upgrade_headers) in [
+            ("GET", "/_next/webpack-hmr?id=abc", true, true),
+            ("POST", "/action", false, false),
+        ] {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("host", "abc.share.example")
+                .header("origin", "https://abc.share.example");
+            if upgrade_headers {
+                builder = builder
+                    .header("connection", "keep-alive, Upgrade")
+                    .header("upgrade", "websocket");
+            }
+            let req = builder.body(Body::empty()).unwrap();
+            let (parts, _) = req.into_parts();
+            let out = build_upstream_request(
+                &parts,
+                "app.demo.p.localhost",
+                "https://app.demo.p.localhost",
+                "abc.share.example",
+                None,
+                is_upgrade,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                out.headers().get(header::ORIGIN).unwrap(),
+                "https://app.demo.p.localhost",
+                "{method} {uri}: Origin rewritten to the origin host",
+            );
+            if is_upgrade {
+                assert_eq!(out.headers().get(header::UPGRADE).unwrap(), "websocket");
+                assert_eq!(out.headers().get(header::CONNECTION).unwrap(), "upgrade");
+            }
+        }
+    }
+
+    #[test]
+    fn proxy_request_remove_drops_origin_after_the_rewrite() {
+        // Opt-in `proxy.request.remove: ["Origin"]` restores the pre-change
+        // drop-on-upgrade behavior — but now for any request, and only when the
+        // sharer's config asks for it. Applied AFTER the coherent rewrite.
+        let proxy = veld_core::config::ResolvedProxy {
+            request: veld_core::config::HeaderRules {
+                remove: vec!["Origin".into()],
+                set: Default::default(),
+            },
+            response: Default::default(),
+        };
         let req = axum::http::Request::builder()
             .method("GET")
             .uri("/_next/webpack-hmr?id=abc")
@@ -923,18 +1046,31 @@ mod tests {
             "abc.share.example",
             None,
             true,
+            Some(&proxy),
         )
         .unwrap();
         assert!(out.headers().get(header::ORIGIN).is_none());
+        // Transport headers stay authoritative even with config applied.
         assert_eq!(out.headers().get(header::UPGRADE).unwrap(), "websocket");
         assert_eq!(out.headers().get(header::CONNECTION).unwrap(), "upgrade");
+    }
 
-        // Same request, non-upgrade: Origin is rewritten to the origin.
+    #[test]
+    fn proxy_request_set_overrides_a_header() {
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("X-Custom".to_string(), "veld".to_string());
+        let proxy = veld_core::config::ResolvedProxy {
+            request: veld_core::config::HeaderRules {
+                remove: Vec::new(),
+                set,
+            },
+            response: Default::default(),
+        };
         let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/action")
+            .method("GET")
+            .uri("/")
             .header("host", "abc.share.example")
-            .header("origin", "https://abc.share.example")
+            .header("x-custom", "attacker")
             .body(Body::empty())
             .unwrap();
         let (parts, _) = req.into_parts();
@@ -945,12 +1081,46 @@ mod tests {
             "abc.share.example",
             None,
             false,
+            Some(&proxy),
         )
         .unwrap();
-        assert_eq!(
-            out.headers().get(header::ORIGIN).unwrap(),
-            "https://app.demo.p.localhost"
-        );
+        assert_eq!(out.headers().get("x-custom").unwrap(), "veld");
+    }
+
+    #[test]
+    fn proxy_response_rules_apply_after_intrinsic_rewrites() {
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("X-Frame-Options".to_string(), "DENY".to_string());
+        let proxy = veld_core::config::ResolvedProxy {
+            request: Default::default(),
+            response: veld_core::config::HeaderRules {
+                remove: vec!["Server".into()],
+                set,
+            },
+        };
+        let mut h = HeaderMap::new();
+        h.insert(header::SERVER, HeaderValue::from_static("nginx"));
+        rewrite_response_headers(&mut h, &nodes(), "share.example", false, Some(&proxy));
+        assert!(h.get(header::SERVER).is_none());
+        assert_eq!(h.get("x-frame-options").unwrap(), "DENY");
+    }
+
+    #[test]
+    fn config_cannot_weaken_forced_referrer_policy() {
+        // A response.set of Referrer-Policy must NOT re-open the slug-leak
+        // channel — the gateway re-asserts no-referrer after user rules.
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("Referrer-Policy".to_string(), "unsafe-url".to_string());
+        let proxy = veld_core::config::ResolvedProxy {
+            request: Default::default(),
+            response: veld_core::config::HeaderRules {
+                remove: Vec::new(),
+                set,
+            },
+        };
+        let mut h = HeaderMap::new();
+        rewrite_response_headers(&mut h, &nodes(), "share.example", false, Some(&proxy));
+        assert_eq!(h.get(header::REFERRER_POLICY).unwrap(), "no-referrer");
     }
 
     #[test]

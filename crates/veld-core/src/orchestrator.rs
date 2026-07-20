@@ -299,6 +299,11 @@ impl Orchestrator {
         selections: &[NodeSelection],
         run_name: &str,
     ) -> Result<RunState, OrchestratorError> {
+        // Fail loudly on an invalid proxy header before it reaches Caddy (a bad
+        // value baked into a persisted route can poison the whole config reload).
+        // Done here, not in load_config, so a typo doesn't strand `veld stop`.
+        config::validate_proxy_headers(&self.config)?;
+
         // Clean up any runs whose processes have all died. This catches
         // orphaned runs from previous sessions (crash, kill -9, etc.).
         self.cleanup_dead_runs().await;
@@ -1714,6 +1719,18 @@ async fn execute_start_server_isolated(
         variant_cfg.client_log_levels.as_deref(),
     );
     route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
+
+    // Resolve reverse-proxy header rules (variant > node > project). Only sent
+    // when non-empty — an absent `proxy` key means "no manipulation" to the
+    // helper, so old behavior (Origin passes through) holds by default.
+    let proxy = config::resolve_proxy(
+        ctx.config.proxy.as_ref(),
+        node_cfg.proxy.as_ref(),
+        variant_cfg.proxy.as_ref(),
+    );
+    if !proxy.is_empty() {
+        route["proxy"] = serde_json::json!(proxy);
+    }
     if let Err(e) = ctx.helper_client.add_route(route).await {
         tracing::warn!(error = %e, "failed to add Caddy route via helper");
     }

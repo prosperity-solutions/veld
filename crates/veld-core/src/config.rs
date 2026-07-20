@@ -1,5 +1,5 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -26,6 +26,9 @@ pub enum ConfigError {
 
     #[error("unsupported schema version \"{0}\" — run `veld update` to get the latest version")]
     UnsupportedSchemaVersion(String),
+
+    #[error("invalid proxy header at {location}: {detail}")]
+    InvalidProxyHeader { location: String, detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -63,6 +66,12 @@ pub struct VeldConfig {
     /// Overridable at node and variant level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
+
+    /// Reverse-proxy header rules (project-level defaults).
+    /// Applied by the local Caddy proxy and the public web gateway.
+    /// Overridable at node and variant level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
 
     /// Global environment variables inherited by all node variants.
     /// Overridable at node and variant level.
@@ -576,6 +585,11 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
 
+    /// Reverse-proxy header rules override for all variants of this node.
+    /// Overrides project-level `proxy`. Overridable at variant level.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
+
     /// Extra environment variables inherited by all variants of this node.
     /// Overrides project-level env. Overridable at variant level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -726,6 +740,11 @@ pub struct VariantConfig {
     /// Feature toggles override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub features: Option<FeaturesConfig>,
+
+    /// Reverse-proxy header rules override for this specific variant.
+    /// Overrides node- and project-level `proxy`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<ProxyConfig>,
 
     /// Working directory for this variant. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overrides node-level `cwd`. Supports variable substitution.
@@ -888,6 +907,136 @@ pub fn resolve_env(
         }
     }
     Some(merged)
+}
+
+// ---------------------------------------------------------------------------
+// Proxy header rules
+// ---------------------------------------------------------------------------
+
+/// Static header manipulation applied by the reverse proxies (local Caddy +
+/// public web gateway) to requests forwarded upstream and responses returned to
+/// the client. Absent = the proxies pass headers through with only their
+/// intrinsic, correctness-required rewrites (see the gateway/Caddy proxy docs).
+///
+/// This is the generic escape hatch for framework quirks — most notably Next.js
+/// dev servers that gate WebSocket HMR on the `Origin` header. The preferred fix
+/// there is the framework's own `allowedDevOrigins`; `proxy.request.remove:
+/// ["Origin"]` is the sledgehammer for frameworks that offer no allow-list.
+///
+/// Resolvable at project, node, and variant level (most specific wins; see
+/// [`resolve_proxy`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProxyConfig {
+    /// Rules applied to the request forwarded to the upstream service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<HeaderRules>,
+
+    /// Rules applied to the response returned from the upstream service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<HeaderRules>,
+}
+
+/// A set of header manipulations: names to remove, and static name→value pairs
+/// to set (overwriting any existing value). Header names are matched
+/// case-insensitively by the proxies; `set` uses a single value per name.
+///
+/// Deliberately NOT `deny_unknown_fields`: this type is also the wire payload
+/// embedded in [`ResolvedProxy`] → `SharedNode` → the share manifest, which is
+/// deserialized by separately-versioned receivers (the web gateway, join-side
+/// daemons). Strict field rejection here would make a future field addition
+/// fail the *entire* manifest on an older receiver. Structural typos are caught
+/// one level up by `ProxyConfig`'s `deny_unknown_fields` plus the JSON schema.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HeaderRules {
+    /// Header names to remove before forwarding.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub remove: Vec<String>,
+
+    /// Header name → value pairs to set (replacing any existing value).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub set: BTreeMap<String, String>,
+}
+
+impl HeaderRules {
+    /// True when there is nothing to do (no removes and no sets).
+    pub fn is_empty(&self) -> bool {
+        self.remove.is_empty() && self.set.is_empty()
+    }
+}
+
+/// Resolved (concrete) proxy header rules for one node — no more `Option`s.
+/// This is what travels the wire to the gateway (in the share manifest) and to
+/// the helper (in the Caddy route), so it derives `Serialize`/`Deserialize`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedProxy {
+    #[serde(default, skip_serializing_if = "HeaderRules::is_empty")]
+    pub request: HeaderRules,
+    #[serde(default, skip_serializing_if = "HeaderRules::is_empty")]
+    pub response: HeaderRules,
+}
+
+impl ResolvedProxy {
+    /// True when neither request nor response rules do anything.
+    pub fn is_empty(&self) -> bool {
+        self.request.is_empty() && self.response.is_empty()
+    }
+}
+
+/// Merge two `HeaderRules` layers, most-specific last. Header names are treated
+/// case-insensitively throughout (HTTP header names are case-insensitive):
+/// `remove` lists union (first spelling wins), and `set` maps override per key
+/// with the more specific layer winning — including when the two layers spell
+/// the same header with different case.
+fn merge_header_rules(base: HeaderRules, over: &HeaderRules) -> HeaderRules {
+    let mut remove = base.remove;
+    for name in &over.remove {
+        if !remove.iter().any(|n| n.eq_ignore_ascii_case(name)) {
+            remove.push(name.clone());
+        }
+    }
+    let mut set = base.set;
+    for (k, v) in &over.set {
+        // Drop any existing key that differs only by case, so the more specific
+        // layer's spelling+value wins deterministically (a BTreeMap keyed by raw
+        // string would otherwise keep both "X-Foo" and "x-foo").
+        set.retain(|existing, _| !existing.eq_ignore_ascii_case(k));
+        set.insert(k.clone(), v.clone());
+    }
+    HeaderRules { remove, set }
+}
+
+/// Resolve proxy header rules by layering project → node → variant, most
+/// specific last. Within each of `request`/`response`, `remove` lists union and
+/// `set` maps merge (variant > node > project per key), both case-insensitively.
+pub fn resolve_proxy(
+    project: Option<&ProxyConfig>,
+    node: Option<&ProxyConfig>,
+    variant: Option<&ProxyConfig>,
+) -> ResolvedProxy {
+    let layers: [Option<&ProxyConfig>; 3] = [project, node, variant];
+    let mut request = HeaderRules::default();
+    let mut response = HeaderRules::default();
+    for layer in layers.into_iter().flatten() {
+        if let Some(rules) = &layer.request {
+            request = merge_header_rules(request, rules);
+        }
+        if let Some(rules) = &layer.response {
+            response = merge_header_rules(response, rules);
+        }
+    }
+    // A header named in both `remove` and `set` is contradictory; `set` wins
+    // (you asked for a concrete value). Resolve it HERE so both proxies agree —
+    // the gateway applies remove-then-set (set wins) but Caddy's emitted
+    // delete+set would otherwise resolve by Caddy's own op order. Dropping the
+    // overlap from `remove` makes the outcome identical on both.
+    request
+        .remove
+        .retain(|n| !request.set.keys().any(|k| k.eq_ignore_ascii_case(n)));
+    response
+        .remove
+        .retain(|n| !response.set.keys().any(|k| k.eq_ignore_ascii_case(n)));
+    ResolvedProxy { request, response }
 }
 
 // ---------------------------------------------------------------------------
@@ -1065,6 +1214,65 @@ pub fn load_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     Ok(config)
 }
 
+/// Reject syntactically invalid proxy header names/values, once and loudly.
+/// Both proxies otherwise skip invalid headers silently (the gateway) or hand
+/// them to Caddy verbatim (the local proxy), so a typo like `"X Frame Options"`
+/// would no-op with no diagnostic — and an unvalidated value reaching the
+/// persisted Caddy route could poison the shared config reload.
+///
+/// NOT called from [`load_config`] on purpose: that runs on every subcommand
+/// (`stop`, `status`, `logs`, …) and inside the daemon monitor, so failing there
+/// would strand teardown/inspection and disable health checks over an unrelated
+/// typo. Instead it is invoked only on the paths that actually emit headers —
+/// `veld start` (the orchestrator) and the share flow — matching how the graph
+/// validates cycles/selections only at start.
+pub fn validate_proxy_headers(config: &VeldConfig) -> Result<(), ConfigError> {
+    fn check_side(location: &str, side: &str, rules: &HeaderRules) -> Result<(), ConfigError> {
+        let invalid = |detail: String| ConfigError::InvalidProxyHeader {
+            location: format!("{location}.{side}"),
+            detail,
+        };
+        for name in &rules.remove {
+            reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| invalid(format!("invalid header name to remove: {name:?}")))?;
+        }
+        for (name, value) in &rules.set {
+            reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|_| invalid(format!("invalid header name to set: {name:?}")))?;
+            reqwest::header::HeaderValue::from_str(value)
+                .map_err(|_| invalid(format!("invalid value for header {name:?}: {value:?}")))?;
+        }
+        Ok(())
+    }
+    fn check(location: &str, proxy: &ProxyConfig) -> Result<(), ConfigError> {
+        if let Some(rules) = &proxy.request {
+            check_side(location, "request", rules)?;
+        }
+        if let Some(rules) = &proxy.response {
+            check_side(location, "response", rules)?;
+        }
+        Ok(())
+    }
+
+    if let Some(proxy) = &config.proxy {
+        check("proxy", proxy)?;
+    }
+    for (node_name, node) in &config.nodes {
+        if let Some(proxy) = &node.proxy {
+            check(&format!("nodes.{node_name}.proxy"), proxy)?;
+        }
+        for (variant_name, variant) in &node.variants {
+            if let Some(proxy) = &variant.proxy {
+                check(
+                    &format!("nodes.{node_name}.variants.{variant_name}.proxy"),
+                    proxy,
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Convenience: discover from CWD and load.
 pub fn load_config_from_cwd() -> Result<(PathBuf, VeldConfig), ConfigError> {
     let cwd = std::env::current_dir().map_err(|e| ConfigError::ReadError {
@@ -1150,6 +1358,121 @@ pub fn project_root(config_path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rules(remove: &[&str], set: &[(&str, &str)]) -> HeaderRules {
+        HeaderRules {
+            remove: remove.iter().map(|s| s.to_string()).collect(),
+            set: set
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn resolve_proxy_absent_is_empty() {
+        assert!(resolve_proxy(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn resolve_proxy_unions_removes_and_merges_sets() {
+        let project = ProxyConfig {
+            request: Some(rules(&["Origin"], &[("X-A", "p"), ("X-B", "p")])),
+            response: None,
+        };
+        let node = ProxyConfig {
+            request: Some(rules(&["Referer"], &[("X-B", "n")])),
+            response: Some(rules(&["Server"], &[])),
+        };
+        let variant = ProxyConfig {
+            // Case-insensitive dedup: "origin" must not re-add "Origin".
+            request: Some(rules(&["origin"], &[("X-C", "v")])),
+            response: None,
+        };
+        let r = resolve_proxy(Some(&project), Some(&node), Some(&variant));
+        // remove: union, first spelling wins, no case-dup.
+        assert_eq!(r.request.remove, vec!["Origin", "Referer"]);
+        // set: variant/node override project per key.
+        assert_eq!(r.request.set.get("X-A").unwrap(), "p");
+        assert_eq!(r.request.set.get("X-B").unwrap(), "n");
+        assert_eq!(r.request.set.get("X-C").unwrap(), "v");
+        // response only came from node.
+        assert_eq!(r.response.remove, vec!["Server"]);
+    }
+
+    #[test]
+    fn proxy_config_roundtrips_json() {
+        let json = r#"{"request":{"remove":["Origin"],"set":{"X-Foo":"bar"}}}"#;
+        let cfg: ProxyConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.request.as_ref().unwrap().remove, vec!["Origin"]);
+        // Empty response is skipped on the way back out.
+        let out = serde_json::to_string(&cfg).unwrap();
+        assert!(!out.contains("response"), "empty response omitted: {out}");
+    }
+
+    #[test]
+    fn proxy_config_rejects_misnested_fields_but_header_rules_are_lenient() {
+        // ProxyConfig is deny_unknown_fields: the natural-but-wrong flattened
+        // shape (missing request/response nesting) and pluralized keys are caught.
+        assert!(serde_json::from_str::<ProxyConfig>(r#"{"remove":["Origin"]}"#).is_err());
+        assert!(serde_json::from_str::<ProxyConfig>(r#"{"requests":{}}"#).is_err());
+        // HeaderRules is intentionally lenient (it is also the wire type embedded
+        // in the share manifest), so a key typo inside request/response is ignored
+        // rather than failing the whole manifest on a version-skewed receiver —
+        // the JSON schema catches it in-editor. It must NOT hard-fail here.
+        let lenient: HeaderRules = serde_json::from_str(r#"{"remve":["Origin"]}"#).unwrap();
+        assert!(lenient.is_empty());
+    }
+
+    #[test]
+    fn resolve_proxy_set_override_is_case_insensitive() {
+        let project = ProxyConfig {
+            request: Some(rules(&[], &[("X-Frame-Options", "DENY")])),
+            response: None,
+        };
+        let variant = ProxyConfig {
+            request: Some(rules(&[], &[("x-frame-options", "SAMEORIGIN")])),
+            response: None,
+        };
+        let r = resolve_proxy(Some(&project), None, Some(&variant));
+        // Exactly one entry survives, the more-specific value wins.
+        assert_eq!(r.request.set.len(), 1);
+        let (_, v) = r.request.set.iter().next().unwrap();
+        assert_eq!(v, "SAMEORIGIN");
+    }
+
+    #[test]
+    fn resolve_proxy_set_wins_over_remove_for_same_header() {
+        let cfg = ProxyConfig {
+            request: Some(rules(&["X-Foo"], &[("x-foo", "bar")])),
+            response: None,
+        };
+        let r = resolve_proxy(Some(&cfg), None, None);
+        // The overlap is dropped from remove — set wins, identically on both proxies.
+        assert!(r.request.remove.is_empty());
+        assert_eq!(r.request.set.get("x-foo").unwrap(), "bar");
+    }
+
+    #[test]
+    fn validate_proxy_headers_rejects_bad_names_and_values() {
+        let mut config: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#,
+        )
+        .unwrap();
+        config.proxy = Some(ProxyConfig {
+            request: Some(rules(&["X Frame Options"], &[])),
+            response: None,
+        });
+        let err = validate_proxy_headers(&config).unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidProxyHeader { .. }));
+
+        // A valid config passes.
+        config.proxy = Some(ProxyConfig {
+            request: Some(rules(&["Origin"], &[("X-Ok", "value")])),
+            response: None,
+        });
+        assert!(validate_proxy_headers(&config).is_ok());
+    }
 
     #[test]
     fn test_resolve_client_log_levels_defaults() {

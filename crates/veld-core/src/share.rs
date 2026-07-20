@@ -44,6 +44,11 @@ pub struct SharedNode {
     /// Host-local TCP port the origin's service listens on (the tunnel target
     /// the host dials).
     pub upstream_port: u16,
+    /// Resolved reverse-proxy header rules for this node, applied by the gateway
+    /// when forwarding to / from the origin. Absent = no manipulation. Defaulted
+    /// for backward compatibility with manifests minted before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<crate::config::ResolvedProxy>,
 }
 
 /// The set of services a host is sharing, plus lifetime metadata. Carried inside
@@ -633,6 +638,7 @@ mod tests {
                 hostname: "app.demo.irohtest.localhost".to_string(),
                 url: "https://app.demo.irohtest.localhost".to_string(),
                 upstream_port: 19001,
+                proxy: None,
             }],
             created_at: 1_000_000,
             expires_at: 1_007_200,

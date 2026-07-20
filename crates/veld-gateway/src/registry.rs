@@ -52,6 +52,9 @@ pub struct RegisteredNode {
     pub public_url: String,
     /// Viewer access mode the gateway enforces for this slug (§6.1).
     pub access: WebAccessMode,
+    /// Resolved reverse-proxy header rules from the sharer's config, applied to
+    /// requests forwarded to / responses returned from this node. Absent = none.
+    pub proxy: Option<veld_core::config::ResolvedProxy>,
 }
 
 /// A live registration: one joined share, its tunnel, and its public slugs.
@@ -122,6 +125,9 @@ pub struct SlugTarget {
     pub slug: String,
     /// Viewer access mode for this slug.
     pub access: WebAccessMode,
+    /// Resolved reverse-proxy header rules for this node (from the sharer's
+    /// config). Absent = no manipulation.
+    pub proxy: Option<veld_core::config::ResolvedProxy>,
 }
 
 /// The gateway's relay confinement, with any tokens **already resolved once**
@@ -407,6 +413,7 @@ impl Registry {
                     slug: s.clone(),
                     public_url: format!("https://{s}.{}", self.domain),
                     access: node_access(access, &n.hostname),
+                    proxy: n.proxy.clone(),
                 }
             })
             .collect();
@@ -453,6 +460,7 @@ impl Registry {
                         origin: n.origin.clone(),
                         slug: n.slug.clone(),
                         access: n.access,
+                        proxy: n.proxy.clone(),
                     },
                 );
             }

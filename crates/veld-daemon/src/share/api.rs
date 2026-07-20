@@ -14,7 +14,8 @@ use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
 use veld_core::config::{
-    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, load_config,
+    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, load_config, resolve_proxy,
+    validate_proxy_headers,
 };
 use veld_core::share::{
     ApprovalMode, Capability, GatewayAccessPolicy, JoinRequest, JoinResponse, ShareManifest,
@@ -542,6 +543,11 @@ fn build_manifest(
         )
     })?;
 
+    // Reject invalid proxy headers before they travel to the gateway in the
+    // manifest (validated on the emitting path only — load_config stays lenient
+    // so unrelated commands aren't blocked; see validate_proxy_headers).
+    validate_proxy_headers(&config).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
     // Track why URL-bearing nodes were excluded, so the error can point the user
     // at the opt-in they are missing rather than a bare "nothing to share".
     // `node:variant` labels because the opt-in check uses the *live* variant, and
@@ -581,12 +587,14 @@ fn build_manifest(
         if mode == ExposeMode::Web {
             web_access.push((hostname.clone(), share.and_then(|s| s.web_access())));
         }
+        let proxy = variant_proxy(&config, &ns.node_name, &ns.variant);
         nodes.push(SharedNode {
             node: ns.node_name.clone(),
             variant: ns.variant.clone(),
             hostname,
             url: url.clone(),
             upstream_port: port,
+            proxy: (!proxy.is_empty()).then_some(proxy),
         });
     }
 
@@ -685,6 +693,22 @@ fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Optio
         .get(node)
         .and_then(|n| n.variants.get(variant))
         .and_then(|v| v.share.as_ref())
+}
+
+/// Resolved reverse-proxy header rules for a node's specific variant
+/// (project → node → variant, most specific wins).
+fn variant_proxy(
+    config: &VeldConfig,
+    node: &str,
+    variant: &str,
+) -> veld_core::config::ResolvedProxy {
+    let node_cfg = config.nodes.get(node);
+    let variant_cfg = node_cfg.and_then(|n| n.variants.get(variant));
+    resolve_proxy(
+        config.proxy.as_ref(),
+        node_cfg.and_then(|n| n.proxy.as_ref()),
+        variant_cfg.and_then(|v| v.proxy.as_ref()),
+    )
 }
 
 /// The DANGER warning to surface when a share is about to embed relay token(s)
@@ -998,6 +1022,42 @@ mod tests {
         // Unknown node / variant → None, never a panic.
         assert!(variant_share(&cfg, "missing", "local").is_none());
         assert!(variant_share(&cfg, "web", "missing").is_none());
+    }
+
+    #[test]
+    fn variant_proxy_resolves_and_carries_into_shared_node() {
+        // Project-level response rule + variant-level request rule; variant wins
+        // where they overlap. Mirrors what build_manifest feeds into SharedNode.
+        let json = r#"{
+            "schemaVersion": "2",
+            "name": "demo",
+            "proxy": { "response": { "set": { "X-From": "project" } } },
+            "nodes": {
+                "web": { "variants": {
+                    "local": {
+                        "type": "start_server", "command": "x",
+                        "proxy": { "request": { "remove": ["Origin"] } }
+                    },
+                    "bare": { "type": "start_server", "command": "x" }
+                } }
+            }
+        }"#;
+        let cfg: VeldConfig = serde_json::from_str(json).unwrap();
+
+        let resolved = variant_proxy(&cfg, "web", "local");
+        assert_eq!(resolved.request.remove, vec!["Origin"]);
+        assert_eq!(resolved.response.set.get("X-From").unwrap(), "project");
+        // This is exactly the elision build_manifest applies before SharedNode.
+        assert!(!resolved.is_empty());
+
+        // A variant with no own proxy still inherits the project response rule.
+        let bare = variant_proxy(&cfg, "web", "bare");
+        assert!(bare.request.is_empty());
+        assert_eq!(bare.response.set.get("X-From").unwrap(), "project");
+
+        // A config with no proxy anywhere resolves empty → elided to None.
+        let plain = config_with_variant("");
+        assert!(variant_proxy(&plain, "web", "local").is_empty());
     }
 
     #[test]

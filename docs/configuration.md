@@ -40,6 +40,7 @@ All relative paths in the configuration resolve relative to the directory contai
 | `presets`           | object | No       | Named shortcuts for node:variant selections       |
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
+| `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
 | `env`               | object | No       | Global environment variables inherited by all nodes |
 | `sharing`           | object | No       | Sharing policy: relays and public gateway (see [Sharing](#sharing)) |
 | `setup`             | array  | No       | Lifecycle steps that run before the graph (see [Setup & Teardown]) |
@@ -145,6 +146,76 @@ Controls which Veld capabilities are injected into `start_server` nodes' HTML re
 ```
 
 In this example, the project disables the feedback overlay by default, and the `api` node also disables client logs. But the `api:local` variant re-enables the feedback overlay.
+
+### `proxy`
+
+Reverse-proxy header rules applied when forwarding requests to a service and responses back to the browser. Rules apply to **both** the local Caddy reverse proxy (local dev) and the public web gateway (`veld share --web`). They do **not** apply to direct iroh peer sharing (`veld share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there. The same override hierarchy applies: variant > node > project.
+
+By default (`proxy` absent) Veld does **no** header manipulation — headers pass through with only the proxies' intrinsic, correctness-required rewrites.
+
+| Field      | Type   | Description                                              |
+|------------|--------|---------------------------------------------------------|
+| `request`  | object | Header rules applied to the request forwarded upstream  |
+| `response` | object | Header rules applied to the response returned to the browser |
+
+Each of `request` and `response` is a set of header rules:
+
+| Field    | Type             | Description                                                    |
+|----------|------------------|---------------------------------------------------------------|
+| `remove` | array of strings | Header names to strip                                         |
+| `set`    | object (map)     | Header name → value pairs to set, replacing any existing value |
+
+Header names are matched case-insensitively.
+
+```json
+{
+  "proxy": {
+    "request":  { "remove": ["Origin"], "set": { "X-Env": "dev" } },
+    "response": { "remove": ["Server"], "set": { "X-Frame-Options": "DENY" } }
+  }
+}
+```
+
+**Resolution / merge.** When `proxy` is set at more than one level, Veld merges across project → node → variant: `remove` lists are **unioned** (case-insensitive dedup) and `set` maps are **merged** per key, with the more specific level winning. This mirrors how [`env`](#env) cascades.
+
+```json
+{
+  "proxy": {
+    "response": { "set": { "X-Frame-Options": "DENY" } }
+  },
+  "nodes": {
+    "frontend": {
+      "variants": {
+        "local": {
+          "proxy": { "request": { "remove": ["Origin"] } }
+        }
+      }
+    }
+  }
+}
+```
+
+In this example, `frontend:local` inherits the `X-Frame-Options: DENY` response header from the project and additionally strips the `Origin` request header at the variant level.
+
+#### Default behavior change: `Origin`
+
+Earlier versions stripped the `Origin` header by default to make dev-server WebSocket HMR (Next.js, etc.) work: the local Caddy proxy deleted `Origin` on all requests, and the web gateway dropped `Origin` on WebSocket upgrades. Veld now does **no** header manipulation by default — `Origin` passes through the local proxy, and the gateway rewrites `Origin` *coherently* to the origin host on **all** requests (including WebSocket upgrades) rather than dropping it.
+
+A Next.js dev server that gates WS HMR on `Origin` may reject the passed-through value. The recommended fix is to allow the origin host in your framework's config — for Next.js, set [`allowedDevOrigins`](https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins) in `next.config.js`. For frameworks with no such allow-list, use the escape hatch of stripping `Origin` at the proxy:
+
+```json
+"proxy": { "request": { "remove": ["Origin"] } }
+```
+
+The local proxy route is (re)built when a run starts, so a `proxy` change — or the default change itself after an update — takes effect on the **next `veld start`** of that service, not for a service already running.
+
+#### Notes and limitations
+
+- **`remove` only unions — it cannot un-remove.** A header stripped at the project level cannot be re-enabled for one variant; the resolved `remove` is the union across levels. Set the rule at the narrowest level you need it, rather than broadly then trying to exempt a variant.
+- **Header names are case-insensitive.** Both `remove` (dedup) and `set` (override) treat names case-insensitively, so `X-Foo` and `x-foo` are the same header. A header named in both `remove` and `set` is set (the value wins).
+- **Don't `set` the proxy's own routing headers.** `set`/`remove` on `Host`, `Origin`, `Referer`, or `X-Forwarded-*` override the gateway's coherent-origin rewrite and forwarding metadata — you can break origin routing or spoof the client IP the origin sees. These are an escape hatch for people who know they need them.
+- **WebSocket (101) responses on the gateway.** `response` rules are not applied to a WebSocket upgrade's `101` response — it carries only handshake-critical headers. `request` rules (including `remove: ["Origin"]`) *do* apply to upgrades.
+- **On the gateway, response rules run last, but two security headers behave differently.** `Cache-Control: no-store` is only injected on password-mode content when the app itself is silent, so a `response.set` of `Cache-Control` overrides it — exactly as the app setting that header would. `Referrer-Policy: no-referrer`, however, is **non-negotiable**: the gateway forces it and re-asserts it *after* your rules (the slug is a bearer credential on link-access nodes), so a `response.set` of `Referrer-Policy` on the gateway has no effect. Both are gateway-only; the local proxy applies your rules as written.
 
 ### `env`
 
@@ -295,6 +366,17 @@ Overrides the project-level `features` for all variants of this node. See [Featu
 }
 ```
 
+### `proxy` (node-level)
+
+Overrides the project-level `proxy` for all variants of this node. See [`proxy`](#proxy) for the field reference and merge semantics.
+
+```json
+"api": {
+  "proxy": { "response": { "set": { "X-Frame-Options": "DENY" } } },
+  "variants": { ... }
+}
+```
+
 ### `url_template` (node-level)
 
 Overrides the project-level `url_template` for all variants of this node. See [URL Template Cascade](#url-template-cascade) for resolution order.
@@ -334,6 +416,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `skip_if`           | string           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
+| `proxy`             | object           | No       | `start_server` | Reverse-proxy header rules override for this variant (see [Proxy](#proxy)) |
 | `share`             | object           | No       | any (inert on `command`) | Sharing opt-in for this variant (see [Sharing](#sharing)) |
 
 ### `type`
