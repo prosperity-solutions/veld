@@ -32,6 +32,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
 - **Internal logs** — liveness probe outcomes (with stderr), recovery decisions, health state transitions; view with `veld logs --source internal`
+- **Reverse-proxy header rules** — add or strip request/response headers on the local proxy and the public web gateway with a `proxy` config block (project/node/variant). Veld does no header manipulation by default.
 - **Peer-to-peer sharing** — share a running environment with a colleague over an encrypted P2P tunnel (`veld share`); they open the same URLs on their own machine. Services opt in explicitly in config, and relays are configurable (public or self-hosted) for compliance. No accounts, no Veld-hosted server.
 - **Public web sharing** — expose a service to someone *without* Veld (`veld share --web`): a self-hosted gateway (`veld-gateway`, one Docker container) mints a real public URL anyone can open in a browser. The overlay's **Copy public URL** action translates your current page (path + query preserved) into the public link.
 
@@ -242,6 +243,27 @@ Control which Veld capabilities are injected into `start_server` nodes' HTML res
 ```
 
 Available features: `feedback_overlay` (toolbar/comments UI), `client_logs` (browser log collector), `inject` (auto-inject bootstrap scripts). All default to `true`.
+
+### Reverse-proxy header rules
+
+Add or strip HTTP headers as requests and responses pass through the reverse proxy with `proxy` at the project, node, or variant level (most specific wins). Rules apply to **both** the local Caddy proxy (local dev) and the public web gateway (`veld share --web`). They do **not** apply to direct iroh peer sharing (`veld share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there.
+
+```json
+"proxy": {
+  "request":  { "remove": ["Origin"] },
+  "response": { "set": { "X-Frame-Options": "DENY" } }
+}
+```
+
+- `request` rules apply to the request forwarded upstream; `response` rules to the response returned to the browser.
+- `remove` strips the listed headers; `set` sets each header to the given value (replacing any existing value). Header names are matched case-insensitively.
+- Across project → node → variant, `remove` lists are unioned (case-insensitive) and `set` maps are merged per key (most specific level wins). Absent `proxy` means no manipulation — the default.
+
+**Default behavior changed.** Veld no longer manipulates any headers by default. Previously it stripped the `Origin` header so dev-server WebSocket HMR (Next.js, etc.) worked; now `Origin` passes through the local proxy, and the gateway rewrites `Origin` *coherently* to the origin host on all requests (including WebSocket upgrades) rather than dropping it. If your dev server gates WS HMR on `Origin` and rejects the passed-through value, set [`allowedDevOrigins`](https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins) in `next.config.js` (the recommended fix). For frameworks with no allow-list, use the escape hatch of stripping `Origin` at the proxy:
+
+```json
+"proxy": { "request": { "remove": ["Origin"] } }
+```
 
 ### Environment variables
 

@@ -154,6 +154,7 @@ async fn gateway_proxies_through_daemon_host_half() {
             hostname: hostname.clone(),
             url: format!("https://{hostname}"),
             upstream_port: origin_port,
+            proxy: None,
         }],
         created_at: 0,
         expires_at: i64::MAX,
@@ -282,8 +283,19 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
     let origin_port = spawn_ws_echo_origin().await;
     let hostname = "app.demo.p.localhost".to_string();
 
-    // Host side — exactly what the daemon runs.
+    // Host side — exactly what the daemon runs. This node opts into dropping the
+    // Origin header (`proxy.request.remove: ["Origin"]`), the escape hatch for a
+    // dev server that gates WS HMR on Origin and offers no allow-list. Without
+    // it the gateway now rewrites Origin coherently (see proxy.rs), which the
+    // strict echo origin below rejects — exercising the opt-in end-to-end.
     let capability = Capability::generate();
+    let proxy = veld_core::config::ResolvedProxy {
+        request: veld_core::config::HeaderRules {
+            remove: vec!["Origin".into()],
+            set: Default::default(),
+        },
+        response: Default::default(),
+    };
     let manifest = ShareManifest {
         run_id: uuid::Uuid::new_v4(),
         run: "demo".into(),
@@ -294,6 +306,7 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
             hostname: hostname.clone(),
             url: format!("https://{hostname}"),
             upstream_port: origin_port,
+            proxy: Some(proxy),
         }],
         created_at: 0,
         expires_at: i64::MAX,
@@ -371,8 +384,9 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
     let addr = handle.listening().await.expect("gateway bound");
 
     // Raw HTTP/1.1 WebSocket handshake, browser/Next-HMR shape — including
-    // the Origin header a browser always sends, which the gateway must DROP
-    // (the origin above kills the socket if it sees one).
+    // the Origin header a browser always sends. With this node's
+    // `proxy.request.remove: ["Origin"]` opt-in the gateway must DROP it (the
+    // strict echo origin above kills the socket if it sees one).
     let mut client = tokio::net::TcpStream::connect(addr).await.unwrap();
     let handshake = format!(
         "GET /_next/webpack-hmr?id=abc123 HTTP/1.1\r\n\

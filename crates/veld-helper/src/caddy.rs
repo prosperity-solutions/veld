@@ -262,8 +262,9 @@ impl CaddyManager {
         hostname: &str,
         upstream: &str,
         feedback: Option<FeedbackConfig<'_>>,
+        proxy: &veld_core::config::ResolvedProxy,
     ) -> Result<()> {
-        let route = build_route_json(route_id, hostname, upstream, feedback);
+        let route = build_route_json(route_id, hostname, upstream, feedback, proxy);
 
         // Record in the durable store first (and persist) so the route is
         // replayed on any future reload/restart even if the live POST below
@@ -774,13 +775,66 @@ fn filter_route_ids_by_prefix(routes: &serde_json::Value, prefix: &str) -> Vec<S
         .unwrap_or_default()
 }
 
+/// Translate resolved proxy header rules into a Caddy `reverse_proxy` `headers`
+/// object (`{"request": {...}, "response": {...}}`). Caddy's `set` takes an
+/// array of values per header, so single values are wrapped. Returns `None` when
+/// there are no rules, so the caller can omit the `headers` key entirely.
+fn caddy_proxy_headers(proxy: &veld_core::config::ResolvedProxy) -> Option<serde_json::Value> {
+    fn side(rules: &veld_core::config::HeaderRules) -> Option<serde_json::Value> {
+        if rules.is_empty() {
+            return None;
+        }
+        let mut obj = serde_json::Map::new();
+        if !rules.remove.is_empty() {
+            obj.insert("delete".into(), serde_json::json!(rules.remove));
+        }
+        if !rules.set.is_empty() {
+            let set: serde_json::Map<String, serde_json::Value> = rules
+                .set
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::json!([v])))
+                .collect();
+            obj.insert("set".into(), serde_json::Value::Object(set));
+        }
+        Some(serde_json::Value::Object(obj))
+    }
+
+    if proxy.is_empty() {
+        return None;
+    }
+    // At least one side is non-empty (guarded above), so `headers` is always
+    // populated here.
+    let mut headers = serde_json::Map::new();
+    if let Some(req) = side(&proxy.request) {
+        headers.insert("request".into(), req);
+    }
+    if let Some(resp) = side(&proxy.response) {
+        headers.insert("response".into(), resp);
+    }
+    Some(serde_json::Value::Object(headers))
+}
+
 fn build_route_json(
     route_id: &str,
     hostname: &str,
     upstream: &str,
     feedback: Option<FeedbackConfig<'_>>,
+    proxy: &veld_core::config::ResolvedProxy,
 ) -> serde_json::Value {
     let mut subroutes = Vec::new();
+
+    // Caddy `reverse_proxy` header manipulation, built from the resolved
+    // `proxy` config. `None` when there are no rules — the `headers` key is
+    // then omitted entirely and headers pass through untouched (the default;
+    // veld no longer strips `Origin` unless the config asks it to).
+    //
+    // Unlike the public web gateway (which MUST rewrite Origin/Host/Referer
+    // coherently because its public host differs from the origin host), the
+    // local proxy does NO intrinsic Origin/Host rewrite: the browser's request
+    // to `*.localhost` is already same-origin with the upstream, so nothing
+    // needs translating. Only the user-config layer below applies here — don't
+    // "align" the two by re-adding an unconditional Origin rewrite/strip.
+    let proxy_headers = caddy_proxy_headers(proxy);
 
     if let Some(fb) = feedback {
         // /__veld__/* → strip prefix, proxy to daemon with context headers.
@@ -812,15 +866,6 @@ fn build_route_json(
             String::new()
         };
 
-        // Strip the Origin header from requests to the upstream. Dev servers
-        // (Next.js, Vite, etc.) reject WebSocket upgrades when Origin doesn't
-        // match localhost. Since veld IS the trusted proxy, the Origin check
-        // provides no security value — strip it so WebSocket HMR works.
-        let proxy_headers = serde_json::json!({
-            "request": {
-                "delete": ["Origin"]
-            }
-        });
         // Accept-Encoding: identity is set by the veld_inject handler itself
         // (not the proxy config) so non-HTML requests get normal compression.
 
@@ -828,32 +873,36 @@ fn build_route_json(
             // No injection (either inject:false or both features disabled).
             // Plain reverse proxy, but /__veld__/* routes above are still active
             // for manual script tag usage.
-            subroutes.push(serde_json::json!({
-                "handle": [{
-                    "handler": "reverse_proxy",
-                    "flush_interval": -1,
-                    "headers": proxy_headers,
-                    "upstreams": [{ "dial": upstream }]
-                }]
-            }));
+            let mut handler = serde_json::json!({
+                "handler": "reverse_proxy",
+                "flush_interval": -1,
+                "upstreams": [{ "dial": upstream }]
+            });
+            if let Some(h) = &proxy_headers {
+                handler["headers"] = h.clone();
+            }
+            subroutes.push(serde_json::json!({ "handle": [handler] }));
         } else {
             // veld_inject prepends the bootstrap script to text/html responses
             // without buffering. Accept-Encoding: identity ensures the upstream
             // sends uncompressed HTML (can't prepend to gzipped bytes).
             // flush_interval: -1 disables response buffering so that React
             // streaming hydration (chunked transfer-encoding) works correctly.
+            let mut handler = serde_json::json!({
+                "handler": "reverse_proxy",
+                "flush_interval": -1,
+                "upstreams": [{ "dial": upstream }]
+            });
+            if let Some(h) = &proxy_headers {
+                handler["headers"] = h.clone();
+            }
             subroutes.push(serde_json::json!({
                 "handle": [
                     {
                         "handler": "veld_inject",
                         "prefix": bootstrap
                     },
-                    {
-                        "handler": "reverse_proxy",
-                        "flush_interval": -1,
-                        "headers": proxy_headers,
-                        "upstreams": [{ "dial": upstream }]
-                    }
+                    handler
                 ]
             }));
         }
@@ -861,20 +910,15 @@ fn build_route_json(
         // No feedback — plain reverse proxy.
         // flush_interval: -1 passes through chunked/streamed responses
         // immediately (required for React streaming hydration, SSE, etc.).
-        subroutes.push(serde_json::json!({
-            "handle": [{
-                "handler": "reverse_proxy",
-                "flush_interval": -1,
-                "headers": {
-                    "request": {
-                        "delete": ["Origin"]
-                    }
-                },
-                "upstreams": [{
-                    "dial": upstream
-                }]
-            }]
-        }));
+        let mut handler = serde_json::json!({
+            "handler": "reverse_proxy",
+            "flush_interval": -1,
+            "upstreams": [{ "dial": upstream }]
+        });
+        if let Some(h) = &proxy_headers {
+            handler["headers"] = h.clone();
+        }
+        subroutes.push(serde_json::json!({ "handle": [handler] }));
     }
 
     serde_json::json!({
@@ -1025,6 +1069,66 @@ mod tests {
     use super::*;
 
     #[test]
+    fn caddy_proxy_headers_empty_is_none() {
+        let empty = veld_core::config::ResolvedProxy::default();
+        assert!(caddy_proxy_headers(&empty).is_none());
+    }
+
+    #[test]
+    fn caddy_proxy_headers_translates_remove_and_set() {
+        let mut set = std::collections::BTreeMap::new();
+        set.insert("X-Foo".to_string(), "bar".to_string());
+        let proxy = veld_core::config::ResolvedProxy {
+            request: veld_core::config::HeaderRules {
+                remove: vec!["Origin".into()],
+                set,
+            },
+            response: veld_core::config::HeaderRules {
+                remove: vec!["Server".into()],
+                set: Default::default(),
+            },
+        };
+        let h = caddy_proxy_headers(&proxy).unwrap();
+        assert_eq!(h["request"]["delete"][0], "Origin");
+        // Caddy `set` values are arrays.
+        assert_eq!(h["request"]["set"]["X-Foo"][0], "bar");
+        assert_eq!(h["response"]["delete"][0], "Server");
+        // No `set` key when there's nothing to set.
+        assert!(h["response"]["set"].is_null());
+    }
+
+    #[test]
+    fn build_route_json_omits_headers_by_default() {
+        let route = build_route_json(
+            "r",
+            "app.test.localhost",
+            "localhost:3000",
+            None,
+            &veld_core::config::ResolvedProxy::default(),
+        );
+        let proxy = &route["handle"][0]["routes"][0]["handle"][0];
+        assert_eq!(proxy["handler"], "reverse_proxy");
+        assert!(
+            proxy["headers"].is_null(),
+            "no headers key when config is empty (Origin passes through)"
+        );
+    }
+
+    #[test]
+    fn build_route_json_applies_proxy_headers() {
+        let proxy = veld_core::config::ResolvedProxy {
+            request: veld_core::config::HeaderRules {
+                remove: vec!["Origin".into()],
+                set: Default::default(),
+            },
+            response: Default::default(),
+        };
+        let route = build_route_json("r", "app.test.localhost", "localhost:3000", None, &proxy);
+        let handler = &route["handle"][0]["routes"][0]["handle"][0];
+        assert_eq!(handler["headers"]["request"]["delete"][0], "Origin");
+    }
+
+    #[test]
     fn test_filter_route_ids_by_prefix() {
         let routes = serde_json::json!([
             { "@id": "veld-join-abc-app" },
@@ -1047,7 +1151,13 @@ mod tests {
 
     #[test]
     fn test_build_route_json() {
-        let route = build_route_json("test-route", "app.test.localhost", "localhost:3000", None);
+        let route = build_route_json(
+            "test-route",
+            "app.test.localhost",
+            "localhost:3000",
+            None,
+            &veld_core::config::ResolvedProxy::default(),
+        );
         assert_eq!(route["@id"], "test-route");
         assert_eq!(route["match"][0]["host"][0], "app.test.localhost");
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
@@ -1074,6 +1184,7 @@ mod tests {
                 inject_feedback_overlay: true,
                 inject_client_logs: true,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         // /__veld__/* + veld_inject catch-all (no bypass routes needed).
@@ -1134,6 +1245,7 @@ mod tests {
                 inject_feedback_overlay: true,
                 inject_client_logs: false,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 2);
@@ -1171,6 +1283,7 @@ mod tests {
                 inject_feedback_overlay: false,
                 inject_client_logs: true,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         assert_eq!(subroutes.len(), 2);
@@ -1205,6 +1318,7 @@ mod tests {
                 inject_feedback_overlay: false,
                 inject_client_logs: false,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         // /__veld__/* + plain proxy (no veld_inject).
@@ -1236,6 +1350,7 @@ mod tests {
                 inject_feedback_overlay: true,
                 inject_client_logs: true,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
         // /__veld__/* route still present + plain proxy (no veld_inject).
@@ -1265,6 +1380,7 @@ mod tests {
                 inject_feedback_overlay: true,
                 inject_client_logs: true,
             }),
+            &veld_core::config::ResolvedProxy::default(),
         );
         let subroutes = route["handle"][0]["routes"].as_array().unwrap();
 
@@ -1302,11 +1418,23 @@ mod tests {
         let mut stored = HashMap::new();
         stored.insert(
             "veld-run-b".to_string(),
-            build_route_json("veld-run-b", "b.dev.localhost", "localhost:3001", None),
+            build_route_json(
+                "veld-run-b",
+                "b.dev.localhost",
+                "localhost:3001",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
         );
         stored.insert(
             "veld-run-a".to_string(),
-            build_route_json("veld-run-a", "a.dev.localhost", "localhost:3000", None),
+            build_route_json(
+                "veld-run-a",
+                "a.dev.localhost",
+                "localhost:3000",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
         );
 
         let config = build_full_config(443, 80, &None, &stored);
@@ -1354,7 +1482,13 @@ mod tests {
         let mut routes = HashMap::new();
         routes.insert(
             "veld-run-a".to_string(),
-            build_route_json("veld-run-a", "a.dev.localhost", "localhost:3000", None),
+            build_route_json(
+                "veld-run-a",
+                "a.dev.localhost",
+                "localhost:3000",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
         );
         let snapshot = RouteSnapshot {
             path: path.clone(),

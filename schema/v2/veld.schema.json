@@ -55,6 +55,10 @@
       "$ref": "#/$defs/FeaturesConfig",
       "description": "Feature toggles (project-level defaults). Overridable at node and variant level."
     },
+    "proxy": {
+      "$ref": "#/$defs/ProxyConfig",
+      "description": "Reverse-proxy header rules (project-level defaults), applied by the local Caddy proxy and the public web gateway. Overridable at node and variant level."
+    },
     "env": {
       "$ref": "#/$defs/EnvMap",
       "description": "Global environment variables inherited by all node variants. Overridable at node and variant level."
@@ -138,6 +142,10 @@
         "features": {
           "$ref": "#/$defs/FeaturesConfig",
           "description": "Feature toggles override for all variants of this node."
+        },
+        "proxy": {
+          "$ref": "#/$defs/ProxyConfig",
+          "description": "Reverse-proxy header rules override for all variants of this node. Overrides project-level proxy. Overridable at variant level."
         },
         "env": {
           "$ref": "#/$defs/EnvMap",
@@ -261,6 +269,10 @@
         "features": {
           "$ref": "#/$defs/FeaturesConfig",
           "description": "Feature toggles override for this specific variant."
+        },
+        "proxy": {
+          "$ref": "#/$defs/ProxyConfig",
+          "description": "Reverse-proxy header rules override for this specific variant. Overrides node- and project-level proxy."
         },
         "cwd": {
           "type": "string",
@@ -453,6 +465,42 @@
           "type": "boolean",
           "description": "Automatically inject bootstrap scripts into HTML responses. When false, the /__veld__/* proxy routes are still created so you can manually add <script> tags. Default: true.",
           "default": true
+        }
+      }
+    },
+    "ProxyConfig": {
+      "type": "object",
+      "description": "Reverse-proxy header rules applied by the local Caddy proxy and the public web gateway when forwarding to/from a service. Absent = no manipulation (the default): headers pass through with only the proxies' intrinsic, correctness-required rewrites. Resolvable at project/node/variant level (most specific wins; remove lists union, set maps merge). NOTE: does NOT apply to direct iroh peer sharing (veld share without --web), which is a transport-level byte splice with no HTTP layer.",
+      "additionalProperties": false,
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/HeaderRules",
+          "description": "Rules applied to the request forwarded upstream. Common use: `{\"remove\": [\"Origin\"]}` for a dev server that gates WebSocket HMR on Origin and offers no allow-list (prefer the framework's own allowedDevOrigins where available)."
+        },
+        "response": {
+          "$ref": "#/$defs/HeaderRules",
+          "description": "Rules applied to the response returned from the upstream service."
+        }
+      }
+    },
+    "HeaderRules": {
+      "type": "object",
+      "description": "A set of static header manipulations. Header names are matched case-insensitively.",
+      "additionalProperties": false,
+      "properties": {
+        "remove": {
+          "type": "array",
+          "description": "Header names to remove before forwarding.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": "object",
+          "description": "Header name -> value pairs to set, replacing any existing value.",
+          "additionalProperties": {
+            "type": "string"
+          }
         }
       }
     },

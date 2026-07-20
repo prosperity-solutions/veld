@@ -1249,6 +1249,7 @@ mod tests {
                 hostname: "app.demo.p.localhost".to_string(),
                 url: "https://app.demo.p.localhost".to_string(),
                 upstream_port: 19001,
+                proxy: None,
             }],
             created_at: 0,
             expires_at: i64::MAX,

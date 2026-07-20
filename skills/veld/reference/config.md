@@ -171,6 +171,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `hidden` | node | Hide from `veld nodes` output |
 | `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
 | `features` | project, node, variant | `{"feedback_overlay": bool, "client_logs": bool, "inject": bool}`. All default `true`. |
+| `proxy` | project, node, variant | `{request?: {remove?: [str], set?: {k: v}}, response?: {...}}`. Reverse-proxy header rules for the local Caddy proxy + web gateway (NOT peer shares). Cascades: `remove` lists union, `set` maps merge (variant > node > project). Absent = no manipulation. See [Proxy](#proxy). |
 | `on_stop` | variant | Per-node teardown command that runs on `veld stop`. |
 | `sensitive_outputs` | variant | Output keys to mask in logs and encrypt at rest. |
 | `skip_if` | variant (`command` only) | Idempotency check — skip step if exits 0. Alias: `verify`. |
@@ -203,3 +204,20 @@ A service is shareable only if its variant declares `share.expose` — `veld sha
 - `sharing.gateway` — the public web gateway `veld share --web` registers with: a bare URL, or `{ "url": ..., "token": ... }` where `token` is a secret source (same forms as relay tokens) for the gateway's required registration auth. Env override: `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` on the daemon. The gateway is a self-hosted container (`ghcr.io/prosperity-solutions/veld-gateway`); operator guide: `docs/gateway.md`.
 - `share.expose` — `peer` (Veld-to-Veld via `veld share`, verbatim URL) and/or `web` (any browser via `veld share --web` + the gateway; real public URL, best-effort fidelity). Empty list or absent = not shareable. Peer and web are separate shares with separate capabilities — revoking one never touches the other.
 - `share.web.access` — viewer access for the public URL: `"password"` (**default, also when absent** — the gateway shows a password page; `veld share --web` generates and prints the share password, `--password` chooses it, and the printed `#veld-key=…` one-link carries it in the URL fragment) or `"link"` (anyone with the URL; the unguessable slug is the only gate — treat the link as a secret). An explicit config value always wins over the `--access` CLI flag; the flag only covers config-silent services. Multi-service caveat: the viewer session cookie is per public host, so a password-protected API called cross-origin from the frontend gets 401s — give API nodes `"web": { "access": "link" }`.
+
+## Proxy
+
+Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and the **public web gateway** (`veld share --web`) when forwarding to/from a service. **Not** applied to direct iroh peer sharing (`veld share` without `--web`) — that path is a transport-level byte splice with no HTTP layer, so header rules cannot be applied there. Absent = no header manipulation (the default). Resolvable at project/node/variant (most specific wins): `remove` lists union (case-insensitive), `set` maps merge per key.
+
+```json
+{
+  "proxy": {
+    "request":  { "remove": ["Origin"], "set": { "X-Env": "dev" } },
+    "response": { "set": { "X-Frame-Options": "DENY" } }
+  }
+}
+```
+
+- `request` → header rules for the request forwarded upstream; `response` → for the response returned to the browser.
+- `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
+- **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.

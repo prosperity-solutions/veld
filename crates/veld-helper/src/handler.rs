@@ -160,9 +160,12 @@ impl State {
             }
         };
 
+        // Reverse-proxy header rules, if the orchestrator resolved any.
+        let proxy = parse_proxy_arg(args);
+
         match self
             .caddy
-            .add_route(route_id, hostname, upstream, feedback)
+            .add_route(route_id, hostname, upstream, feedback, &proxy)
             .await
         {
             Ok(()) => Response::ok(),
@@ -247,5 +250,49 @@ impl State {
         }
         let _ = self.shutdown_tx.send(true);
         Response::ok()
+    }
+}
+
+/// Extract the resolved proxy header rules from add_route args. Absent → default
+/// (no manipulation). A malformed value is logged and treated as absent rather
+/// than failing the whole route — but the log makes a daemon↔helper version-skew
+/// serialization mismatch diagnosable instead of silently dropping the rules.
+fn parse_proxy_arg(args: &Value) -> veld_core::config::ResolvedProxy {
+    match args.get("proxy") {
+        None => veld_core::config::ResolvedProxy::default(),
+        Some(v) => match serde_json::from_value::<veld_core::config::ResolvedProxy>(v.clone()) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "ignoring malformed proxy config in add_route args");
+                veld_core::config::ResolvedProxy::default()
+            }
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_proxy_arg_absent_is_default() {
+        let args = serde_json::json!({ "route_id": "r" });
+        assert!(parse_proxy_arg(&args).is_empty());
+    }
+
+    #[test]
+    fn parse_proxy_arg_reads_valid_rules() {
+        let args = serde_json::json!({
+            "proxy": { "request": { "remove": ["Origin"] } }
+        });
+        let p = parse_proxy_arg(&args);
+        assert_eq!(p.request.remove, vec!["Origin"]);
+    }
+
+    #[test]
+    fn parse_proxy_arg_malformed_falls_back_to_default() {
+        // Wrong shape (a string where an object is expected) → default, no panic.
+        let args = serde_json::json!({ "proxy": "not-an-object" });
+        assert!(parse_proxy_arg(&args).is_empty());
     }
 }

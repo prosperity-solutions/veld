@@ -246,6 +246,16 @@ Quick reference for the two node types:
 }
 ```
 
+**Reverse-proxy header rules** — optional `proxy` block at project/node/variant level (most specific wins; `remove` lists union, `set` maps merge). Applies to the local Caddy proxy **and** the web gateway (`veld share --web`), NOT to direct peer shares (`veld share`). Veld does no header manipulation by default.
+```json
+{
+  "proxy": {
+    "request":  { "remove": ["Origin"] },
+    "response": { "set": { "X-Frame-Options": "DENY" } }
+  }
+}
+```
+
 ## Feedback Loop
 
 For the full feedback workflow, the `next` output schema, thread fields, and the resolve policy, see [reference/feedback.md](reference/feedback.md).
@@ -329,6 +339,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port
 - **`--oneshot` needs a `command` node** — the terminal node must run to completion; a `start_server` is rejected. Its exit code becomes veld's exit code; only its logs stream to stdout unless `--all-logs`
 - **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Only project-level variables (`${veld.name}`, `${veld.root}`, `${veld.run}`) are available, not `${veld.port}` or `${nodes.*}`
+- **No default header stripping** — Veld no longer strips `Origin` by default (it used to, for dev-server WS HMR). `Origin` now passes through the local proxy and is rewritten coherently by the gateway. If a Next.js dev server rejects WS HMR, set `allowedDevOrigins` in `next.config.js`; the escape hatch is `"proxy": { "request": { "remove": ["Origin"] } }`. Proxy header rules never apply to direct peer shares (`veld share` without `--web`)
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
