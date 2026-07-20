@@ -43,10 +43,18 @@ jobs:
         id: semantic
         with:
           dry_run: true
+          # conventional-changelog-conventionalcommits is pinned to v9:
+          # @semantic-release/release-notes-generator@14 bundles
+          # conventional-changelog-writer@8, and the conventionalcommits preset
+          # v10+ emits writerOpts incompatible with it — the release notes body
+          # comes out empty (header only). v9 matches the bundled writer. The
+          # empty-notes regression started with #128, which added this preset.
+          # NOTE: keep this list free of "#" comments — the action runs
+          # `npm install` on every non-empty line verbatim.
           extra_plugins: |
             @semantic-release/exec
             @semantic-release/git
-            conventional-changelog-conventionalcommits
+            conventional-changelog-conventionalcommits@^9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -181,10 +189,12 @@ jobs:
       - uses: cycjimmy/semantic-release-action@v4
         id: semantic
         with:
+          # Pin conventional-changelog-conventionalcommits to v9 — see the plan
+          # job above for why (preset v10+ breaks release notes with writer@8).
           extra_plugins: |
             @semantic-release/exec
             @semantic-release/git
-            conventional-changelog-conventionalcommits
+            conventional-changelog-conventionalcommits@^9
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
