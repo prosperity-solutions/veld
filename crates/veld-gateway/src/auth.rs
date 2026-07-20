@@ -514,26 +514,70 @@ fn login_page(status: StatusCode, next: &str, error: Option<&str>) -> Response {
 }
 
 /// The login form + one-link script, rendered inside the branded page shell
-/// (self-contained, CSP-friendly, no external assets). The inline script
-/// implements the one-link flow: a `#veld-key=…` fragment auto-fills and
-/// submits the form, then strips itself from the URL — the fragment never
-/// reaches the server or its logs.
+/// (self-contained, CSP-friendly, no external assets). Two behaviours:
+///
+/// * **One-link flow** — a `#veld-key=…` fragment auto-fills and submits the
+///   form, then strips itself from the URL, so the fragment never reaches the
+///   server or its logs.
+/// * **Loading state** — on submit (manual OR the auto-fill path) the form
+///   enters a `loading` state: the field goes read-only and dims, the button
+///   shows a spinner and "Unlocking…", so there is a visible cue that an
+///   attempt is in flight. It is progressive: with JS disabled the form still
+///   submits, just without the affordance. The field is made **read-only, not
+///   disabled** — a disabled field is omitted from the POST body, which would
+///   silently drop the password. No client-side reset is needed: a wrong
+///   password re-renders this page fresh (server-side), which clears the
+///   state; a correct one navigates away.
 const LOGIN_BODY: &str = r#"<form id="f" method="post" action="/__veld_gateway__/auth" autocomplete="off">
   <h1>Password required</h1>
   <p>This preview is protected. Enter the password you were given.</p>
   {error}
   <input type="hidden" name="next" value="{next}">
-  <input id="pw" type="password" name="password" autofocus aria-label="Password">
-  <button type="submit">Open</button>
+  <input id="pw" type="password" name="password" autofocus aria-label="Password" required>
+  <button id="unlock" type="submit">
+    <span class="btn-idle">Open</span>
+    <span class="btn-busy"><span class="spinner" aria-hidden="true"></span>Unlocking&hellip;</span>
+  </button>
   <p class="hint">Your browser must allow cookies for this site.</p>
 </form>
+<style>
+  .btn-busy{display:none;align-items:center;justify-content:center;gap:.5rem}
+  #f.loading .btn-idle{display:none}
+  #f.loading .btn-busy{display:inline-flex}
+  #f.loading input[type=password]{opacity:.55}
+  button:disabled{cursor:default;filter:none}
+  .spinner{width:.85rem;height:.85rem;border:2px solid rgba(15,17,23,.3);border-top-color:var(--bg);border-radius:50%;display:inline-block;animation:veld-spin .6s linear infinite}
+  @keyframes veld-spin{to{transform:rotate(360deg)}}
+  @media (prefers-reduced-motion:reduce){.spinner{animation:none}}
+</style>
 <script>
 (function () {
+  var form = document.getElementById('f');
+  var pw = document.getElementById('pw');
+  // NB: the button's id must not be `submit` (or any HTMLFormElement member) —
+  // a like-named child shadows `form.submit`, breaking the auto-submit below.
+  var btn = document.getElementById('unlock');
+  var loading = false;
+  function setLoading() {
+    if (loading) return;
+    loading = true;
+    form.classList.add('loading');
+    form.setAttribute('aria-busy', 'true');
+    // `readOnly` (not `disabled`) keeps the value in the POST body while
+    // still blocking edits while the attempt is in flight.
+    pw.readOnly = true;
+    btn.disabled = true;
+  }
+  // Manual submit: the native submit event fires, so hook it. (The auto-fill
+  // path below calls form.submit(), which does NOT fire this event, so it
+  // sets the state itself.)
+  form.addEventListener('submit', setLoading);
+
   var m = location.hash.match(/[#&]veld-key=([^&]+)/);
   if (!m) return;
   var key;
   try { key = decodeURIComponent(m[1]); } catch (e) { return; }
-  document.getElementById('pw').value = key;
+  pw.value = key;
   // Everything in the fragment except the key survives: it is stripped from
   // the visible URL and forwarded through `next` so the app's own hash (e.g.
   // a deep-link anchor) still arrives after the redirect.
@@ -545,7 +589,8 @@ const LOGIN_BODY: &str = r#"<form id="f" method="post" action="/__veld_gateway__
     next.value = location.pathname + location.search;
   if (rest) next.value += '#' + rest;
   history.replaceState(null, '', location.pathname + location.search + (rest ? '#' + rest : ''));
-  document.getElementById('f').submit();
+  setLoading();
+  form.submit();
 })();
 </script>"#;
 
@@ -1034,6 +1079,29 @@ mod tests {
             panic!("expected a response");
         };
         assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn login_page_ships_loading_state_that_preserves_the_password() {
+        let body = body_string(login_page(StatusCode::OK, "/", None)).await;
+        // The busy affordance and its trigger ship on the page…
+        assert!(body.contains("Unlocking"), "{body}");
+        assert!(body.contains("class=\"spinner\""), "{body}");
+        assert!(body.contains("classList.add('loading')"), "{body}");
+        assert!(body.contains("addEventListener('submit'"), "{body}");
+        // The one-link path calls form.submit() (which does NOT fire the submit
+        // event), so it must set the loading state itself right before it —
+        // this coupling is the only loading cue the auto-submit flow gets.
+        assert!(body.contains("setLoading();\n  form.submit();"), "{body}");
+        // The button's id must never be `submit`: a like-named child shadows
+        // HTMLFormElement.submit, turning form.submit() into a TypeError and
+        // freezing the one-link flow on a permanent spinner.
+        assert!(!body.contains("id=\"submit\""), "{body}");
+        // …and the field is made read-only, NOT disabled — a disabled field is
+        // omitted from the POST body, which would silently drop the password.
+        assert!(body.contains("readOnly = true"), "{body}");
+        assert!(body.contains("btn.disabled = true"), "{body}");
+        assert!(!body.contains("pw.disabled"), "{body}");
     }
 
     #[test]
