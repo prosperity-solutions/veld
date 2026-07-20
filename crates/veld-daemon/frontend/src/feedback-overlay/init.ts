@@ -72,7 +72,7 @@ export function init(): void {
   loadThreads();
   primeEventSeq(); // baseline the cursor so a reload doesn't replay old toasts
   pollListenStatus();
-  pollShareStatus(); // light up the Sharing dot if this page is already web-shared
+  pollShareStatus(); // prime share status so the Sharing dot is right when the menu first opens
   setInterval(pollEvents, 3000);
   setInterval(pollListenStatus, 5000);
   setInterval(pollShareStatus, 5000);

@@ -1,11 +1,14 @@
 // Sharing — public web share control, surfaced as a top-level toolbar submenu.
 //
 // This replaces the old "Web sharing" card: starting, stopping, copying the
-// URL and reading the status are now radial menu actions, and a live status
-// dot on the Sharing bubble shows at a glance whether THIS page is on the
-// public web. Relay/transport detail (direct vs relayed, RTT, throughput
-// warnings) is intentionally NOT shown here — that diagnosis belongs on the
-// management UI; the in-page toolbar stays lean.
+// URL and reading the status are now radial menu actions. The Sharing item
+// carries a status dot that lights (accent) while THIS page is web-shared —
+// visible whenever the arc menu is open, so you see sharing is on before
+// drilling into the submenu (the button only exists while the menu is
+// expanded; it isn't a resting badge on the collapsed bubble). Relay/transport
+// detail (direct vs relayed, RTT, throughput warnings) is intentionally NOT
+// shown here — that diagnosis belongs on the management UI; the in-page toolbar
+// stays lean.
 //
 // All calls go same-origin under /__veld__/ (Caddy proxies them to the daemon
 // and injects X-Veld-Run, so the daemon resolves which run the page belongs to
@@ -66,6 +69,10 @@ export function updateSharingIndicator(): void {
  * start/stop so the dot and submenu reflect reality quickly.
  */
 export function pollShareStatus(): void {
+  // The dot only shows while the (visible) overlay's menu is open, so there's
+  // nothing to keep fresh while hidden — skip the network until it's shown
+  // again. The old card was likewise torn down on hide.
+  if (getState().hidden) return;
   fetch("/__veld__/api/shares")
     .then((r) => (r.ok ? (r.json() as Promise<SharesList>) : Promise.reject()))
     .then((list) => {
@@ -141,7 +148,12 @@ async function stopSharing(): Promise<void> {
   }
 }
 
-/** Toast a plain-language status readout (no relay/transport detail). */
+/**
+ * Toast a plain-language status readout: the public URL and, for a
+ * password-protected share, the viewer password — the split-channel secrecy
+ * flow (send URL and password separately) the old card supported. No
+ * relay/transport detail; that lives in `veld shares` / the management UI.
+ */
 async function showSharingStatus(): Promise<void> {
   let list: SharesList;
   try {
@@ -153,18 +165,25 @@ async function showSharingStatus(): Promise<void> {
     return;
   }
   const target = findPublicUrl(list, window.location.hostname);
+  if (!target) {
+    toast("Not shared to the web. Use Start sharing.");
+    return;
+  }
   toast(
-    target
-      ? "Shared to the web: " + target.publicUrl
-      : "Not shared to the web. Use Start sharing.",
+    target.password
+      ? "Shared to the web: " + target.publicUrl + " — password: " + target.password
+      : "Shared to the web: " + target.publicUrl,
   );
 }
 
 /**
  * Build the top-level "Sharing" menu item (with its submenu + status dot).
  * The submenu is data-driven: Start is shown when not shared, Stop + Copy when
- * shared, and Status always — the arc engine re-reads `isVisible` each time the
- * submenu is opened, so it always matches the current state.
+ * shared, and Status always. The arc engine snapshots `isVisible` when the
+ * submenu is opened (not continuously), so it matches the state at open time;
+ * since share actions close the menu, a mismatch only occurs if the state flips
+ * externally while the submenu sits open — a stale Stop click then no-ops (the
+ * poll keeps `shareId` current regardless of menu state).
  */
 export function buildSharingMenuItem(): ArcItem {
   const shareBtn = makeToolBtn("sharing", ICONS.share);

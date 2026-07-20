@@ -1,3 +1,9 @@
+// The user-facing container is branded "Veld Toolbar", but these internal
+// identifiers deliberately keep the "feedback" name: the feedback SUBSYSTEM
+// (comments/threads), the `veld feedback` CLI, and the daemon's
+// `/__veld__/feedback/` routes are all named "feedback". Do NOT rename these to
+// "toolbar" — API is a hard contract with the Rust daemon route, and PREFIX is
+// threaded through every CSS class + test selector.
 export const API = "/__veld__/feedback/api";
 export const PREFIX = "veld-feedback-";
 export const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);

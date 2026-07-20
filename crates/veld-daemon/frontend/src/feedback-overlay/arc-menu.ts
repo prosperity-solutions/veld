@@ -610,8 +610,11 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
     if (!S.stack.length || S.retracting) return;
     hideAllTooltips();
     S.pendingStack = S.stack.slice(0, -1);
-    // Recompute visibility when returning to the root (the only level with a
-    // conditional item — the listening dot); use the snapshot for deeper levels.
+    // Recompute visibility when returning to the root (it has conditional items
+    // — the listening dot); use the snapshot for deeper levels. Safe only
+    // because the one conditional submenu (Sharing: start/stop/copy) is a
+    // leaf-parent — it's never a level you `goBack` INTO, so its snapshot is
+    // never shown stale. Recompute here too if that ever changes.
     S.pending = S.pendingStack.length
       ? S.stack[S.stack.length - 1]
       : visible(opts.items());
@@ -1099,9 +1102,12 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
     depth: () => S.stack.length,
     reflow: () => {
       if (!S.open || S.closing || S.retracting) return;
-      // Only the root level has visibility-conditional items (the listening
-      // dot). Recompute it and rebuild only when the visible set actually
-      // changed, so routine polls don't re-trigger the open animation.
+      // Recompute the root level's conditional items (the listening dot) and
+      // rebuild only when the visible set actually changed, so routine polls
+      // don't re-trigger the open animation. Submenus can also carry
+      // conditional items (the Sharing submenu's start/stop/copy), but reflow
+      // deliberately does NOT re-evaluate an open submenu — it early-returns for
+      // any non-root level; submenu visibility is snapshotted at enterSub time.
       const level = S.stack.length ? S.menu : visible(opts.items());
       const sameSet =
         level.length === S.menu.length &&

@@ -34,8 +34,9 @@ export function positionPopover(
   pop.style.left = left + "px";
 }
 
-/** Append a top-right close (×) button to a popover. Gives every writing
- *  overlay a clear, window-style dismiss affordance next to Escape/Cancel. */
+/** Append a top-right close (×) button to a popover — a clear, window-style
+ *  dismiss affordance next to Escape/Cancel. Call this on any manually-built
+ *  popover; `showCreatePopover` already does, as does the screenshot editor. */
 export function appendPopoverClose(pop: HTMLElement): void {
   const close = mkEl("button", "popover-close");
   close.setAttribute("aria-label", "Close");
