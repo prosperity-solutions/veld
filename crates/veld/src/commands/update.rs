@@ -1,7 +1,5 @@
-use std::io::Write;
+use std::io::IsTerminal;
 
-use veld_core::config;
-use veld_core::orchestrator::Orchestrator;
 use veld_core::state::RunStatus;
 
 use crate::output;
@@ -14,12 +12,20 @@ pub async fn run() -> i32 {
 
     match veld_core::setup::check_update().await {
         Ok(Some(new_version)) => {
-            // Check for running environments and stop them before updating.
+            // Running environments are NOT stopped for an update. State lives in
+            // a single SQLite DB with a forward-only migration system, so a
+            // binary swap no longer risks the stale/incompatible state files
+            // that the old JSON-per-run storage did. Service processes are
+            // independent of the CLI/daemon/helper: the helper leaves Caddy
+            // running across its own restart (URLs stay up) and the daemon GC
+            // self-heals, so nothing needs tearing down. Environments keep
+            // serving and pick up the new orchestrator on their next
+            // `veld start`/`veld restart`.
             let running = find_running_environments();
             if !running.is_empty() {
                 println!();
                 output::print_info(&format!(
-                    "Found {} running environment(s) that must be stopped before updating:",
+                    "{} environment(s) are running and will keep serving during the update:",
                     running.len()
                 ));
                 for (project, run_name) in &running {
@@ -30,39 +36,22 @@ pub async fn run() -> i32 {
                     );
                 }
                 println!();
-                print!(
-                    "{}",
-                    output::yellow("Stop all environments and proceed with update? [y/N] ")
-                );
-                let _ = std::io::stdout().flush();
-
-                let mut answer = String::new();
-                if std::io::stdin().read_line(&mut answer).is_err()
-                    || !answer.trim().eq_ignore_ascii_case("y")
-                {
-                    output::print_info("Update cancelled.");
-                    return 0;
-                }
-
-                // Stop all running environments.
-                let stopped = stop_all_environments(&running).await;
-                output::print_success(&format!("Stopped {stopped} environment(s)."));
-                println!();
             }
 
             output::print_info(&format!("New version available: {current} → {new_version}"));
 
-            // Privileged mode relies on the helper's own binary-change watcher
-            // plus launchd/systemd (KeepAlive + WatchPaths) to bring up the new
-            // version — restarting the root service from here would need sudo.
-            // Both mechanisms require the service to still be REGISTERED. A
-            // merely-unresponsive process behind an intact registration gets
-            // relaunched onto the new binary, so only the job being gone means
-            // the update truly can't self-apply. Check BEFORE installing so
-            // that's reported as the pre-existing problem it is, instead of a
-            // 45-second wait ending in a misleading "did not pick up the new
-            // binary". In unprivileged mode the installer bootstraps the
-            // LaunchAgent itself, so no pre-flight skip there.
+            // After install, privileged mode restarts the root helper via sudo
+            // (see restart_services), with the helper's own binary-change
+            // watcher + launchd/systemd KeepAlive as the no-sudo fallback. Both
+            // recovery paths require the service to still be REGISTERED: a sudo
+            // restart of a nonexistent job fails, and the watcher only helps a
+            // job launchd already knows about. So a job that is entirely GONE is
+            // the one case the update genuinely can't self-apply — it needs
+            // `veld setup privileged` to re-register the LaunchDaemon. Check for
+            // that BEFORE installing so it's reported as the pre-existing
+            // problem it is, instead of a 45-second wait ending in a misleading
+            // "did not pick up the new binary". In unprivileged mode the
+            // installer bootstraps the LaunchAgent itself, so no pre-flight skip.
             let helper_dead_privileged = super::read_setup_mode().as_deref() == Some("privileged")
                 && !privileged_helper_serviceable().await;
             if helper_dead_privileged {
@@ -102,8 +91,8 @@ pub async fn run() -> i32 {
     }
 }
 
-/// Find all running environments across all projects.
-/// Returns (project_root, run_name) pairs.
+/// Find all running environments across all projects, for the informational
+/// "these keep serving" notice. Returns (project_root, run_name) pairs.
 fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
     let registry = match veld_core::db::Db::open().and_then(|db| db.registry()) {
         Ok(r) => r,
@@ -119,52 +108,6 @@ fn find_running_environments() -> Vec<(std::path::PathBuf, String)> {
         }
     }
     running
-}
-
-/// Stop all running environments. Returns number successfully stopped.
-async fn stop_all_environments(envs: &[(std::path::PathBuf, String)]) -> usize {
-    let mut stopped = 0;
-    for (project_root, run_name) in envs {
-        let config_path = project_root.join("veld.json");
-        let cfg = match config::load_config(&config_path) {
-            Ok(c) => c,
-            Err(e) => {
-                output::print_error(
-                    &format!("Failed to load config for {}: {e}", project_root.display()),
-                    false,
-                );
-                // Even if config can't load, try to clean up state.
-                cleanup_state(project_root, run_name);
-                continue;
-            }
-        };
-
-        let mut orchestrator = match Orchestrator::new(config_path, cfg) {
-            Ok(o) => o,
-            Err(e) => {
-                output::print_error(&format!("Failed to initialize: {e}"), false);
-                cleanup_state(project_root, run_name);
-                continue;
-            }
-        };
-        match orchestrator.stop(run_name).await {
-            Ok(_) => {
-                output::print_info(&format!("  Stopped '{run_name}'"));
-                stopped += 1;
-            }
-            Err(e) => {
-                output::print_error(&format!("  Failed to stop '{run_name}': {e}"), false);
-            }
-        }
-    }
-    stopped
-}
-
-/// Best-effort cleanup of state for a run when config can't be loaded.
-fn cleanup_state(project_root: &std::path::Path, run_name: &str) {
-    if let Ok(db) = veld_core::db::Db::open() {
-        let _ = db.remove_run(project_root, run_name);
-    }
 }
 
 /// Re-install the Hammerspoon Spoon if it was previously set up.
@@ -280,6 +223,43 @@ async fn restart_services(target_version: &str, helper_dead_privileged: bool) {
             false,
         );
     } else {
+        // In privileged mode the helper is a root service, so `veld update`
+        // (unprivileged) cannot bounce it directly. Rather than passively wait
+        // out the ~12s binary-watcher poll (which, if it slips past the 45s
+        // budget, ends in a misleading "re-run veld setup privileged"),
+        // deterministically restart it via sudo (a graceful SIGTERM that leaves
+        // Caddy running — see restart_privileged_helper) — passwordless if a
+        // credential is cached, otherwise a single interactive prompt. This is
+        // the reliable path; the self-restart watcher stays as the no-sudo
+        // fallback. Unprivileged mode's helper is a user LaunchAgent the
+        // installer already bounced, so no sudo is needed there.
+        if mode.as_deref() == Some("privileged") {
+            output::print_info("Restarting veld-helper (privileged) with the new binary...");
+            // A human is present only if we have a TTY AND weren't asked to run
+            // non-interactively — otherwise sudo's password prompt would hang a
+            // scripted/pty-driven update. Treat VELD_NON_INTERACTIVE as set only
+            // when it's non-empty, matching install.sh's `[ -n ... ]` convention:
+            // unset or empty (`=`) stays interactive; any non-empty value
+            // (including `0`) means non-interactive, exactly as the shell reads
+            // it. When interactive, warn before the prompt appears so an
+            // unexpected sudo prompt from a dev tool isn't mistaken for malware.
+            let non_interactive_env = std::env::var("VELD_NON_INTERACTIVE")
+                .map(|v| !v.is_empty())
+                .unwrap_or(false);
+            let interactive = std::io::stdin().is_terminal() && !non_interactive_env;
+            if interactive {
+                output::print_info(
+                    "veld may prompt for your sudo password to restart the privileged helper.",
+                );
+            }
+            if !veld_core::setup::restart_privileged_helper(interactive).await {
+                output::print_info(
+                    "Could not restart the privileged helper via sudo — waiting for it to \
+                     restart itself instead.",
+                );
+            }
+        }
+
         // Verify against the specific socket for this mode — not `connect()` (which
         // falls through to the user socket and could latch onto a stale auto-helper
         // while the privileged one is mid-restart).

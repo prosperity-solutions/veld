@@ -141,6 +141,14 @@ impl CaddyManager {
             // browsers get 404 on WebSocket connections (kills HMR, live reload).
             // See: golang/go#71128, caddyserver/caddy#7309
             .env("GODEBUG", "http2xconnect=1")
+            // Put Caddy in its own process group (pgid = its own pid) so a signal
+            // delivered to the helper's launchd job — e.g. `veld update`'s
+            // `launchctl kill TERM system/dev.veld.helper`, or a bootout — cannot
+            // reach Caddy through the shared group. The helper only ever controls
+            // Caddy deliberately (admin-API `/stop` or an explicit kill-by-pid),
+            // so detaching the group keeps every live URL up across a helper
+            // restart. Mirrors the Linux unit's `KillMode=process`.
+            .process_group(0)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()

@@ -1163,6 +1163,79 @@ pub fn helper_plist_filename() -> String {
 /// wedged service manager must degrade to "unknown", never hang the caller.
 pub const SERVICE_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Deterministically restart the privileged (root) helper so it runs a
+/// freshly installed binary, without waiting on the helper's own binary
+/// watcher.
+///
+/// The helper's system-domain LaunchDaemon / systemd unit runs as root, so
+/// bouncing it needs privilege. `veld update` runs unprivileged, hence sudo:
+/// try passwordless first (`sudo -n`, silent and instant when a cached/NOPASSWD
+/// credential exists), and only if that fails and `interactive` is set (the
+/// caller has a TTY) prompt once for the password. This is the reliable path —
+/// it removes the dependence on the ~12s watcher poll + launchd `WatchPaths`
+/// that could otherwise leave `veld update` waiting out its timeout and telling
+/// the user to re-run `veld setup privileged`.
+///
+/// Returns `true` if a restart command was successfully issued (the caller
+/// should then verify the version flipped), `false` if sudo was unavailable or
+/// the attempt failed — in which case the caller falls back to the helper's
+/// self-restart watcher.
+///
+/// The restart is intentionally **graceful**, not a SIGKILL. On macOS it sends
+/// SIGTERM (`launchctl kill TERM`), which the helper handles by exiting while
+/// leaving Caddy running (see veld-helper `signal_stream`), and launchd's
+/// `KeepAlive` then relaunches the new binary. On Linux `systemctl restart`
+/// relies on the unit's `KillMode=process` for the same effect. Both keep the
+/// Caddy proxy — and therefore every live URL — up across the bounce; a hard
+/// `kickstart -k` / default-KillMode restart could take Caddy's process group
+/// down with the helper, which would break the "environments keep serving"
+/// guarantee this whole change exists to provide.
+pub async fn restart_privileged_helper(interactive: bool) -> bool {
+    // Build owned args so the label constant is the single source of truth.
+    #[cfg(target_os = "macos")]
+    let restart_args: Vec<String> = vec![
+        "launchctl".to_string(),
+        "kill".to_string(),
+        "TERM".to_string(),
+        format!("system/{HELPER_LABEL_MACOS}"),
+    ];
+    #[cfg(not(target_os = "macos"))]
+    let restart_args: Vec<String> = vec![
+        "systemctl".to_string(),
+        "restart".to_string(),
+        HELPER_SERVICE_LINUX.to_string(),
+    ];
+
+    let args: Vec<&str> = restart_args.iter().map(String::as_str).collect();
+
+    // Passwordless first: never prompts, so it's safe to always try.
+    if run_sudo(true, &args).await {
+        return true;
+    }
+    // Fall back to an interactive prompt only when the caller says a human is
+    // present (a TTY, and not VELD_NON_INTERACTIVE) — a headless/scripted
+    // `veld update` must never block on sudo's password prompt.
+    if interactive && run_sudo(false, &args).await {
+        return true;
+    }
+    false
+}
+
+/// Run `sudo` with `args`. When `noninteractive`, pass `-n` (fail instead of
+/// prompting) and swallow output so a probe stays silent; otherwise inherit the
+/// terminal so sudo can prompt for the password. Returns whether it exited 0.
+async fn run_sudo(noninteractive: bool, args: &[&str]) -> bool {
+    let mut cmd = Command::new("sudo");
+    if noninteractive {
+        cmd.arg("-n");
+        cmd.stdin(std::process::Stdio::null());
+        cmd.stdout(std::process::Stdio::null());
+        cmd.stderr(std::process::Stdio::null());
+    }
+    cmd.args(args);
+    matches!(cmd.status().await, Ok(s) if s.success())
+}
+
 /// The MainPID systemd reports for a service, if it exists and is running.
 /// `MainPID=0` means not running. `user_unit` selects `systemctl --user`.
 pub async fn systemd_main_pid(service: &str) -> Option<u32> {
