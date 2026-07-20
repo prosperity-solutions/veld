@@ -195,13 +195,15 @@ secret. Multi-service caveat: the session cookie is per public host, so a
 password-protected API called cross-origin from the shared frontend gets 401s
 — give API nodes `"web": { "access": "link" }`. Web shares default to a 3600s
 TTL (peer: 7200s). Web and peer are separate shares with separate
-capabilities: `veld unshare` on one never affects the other. The overlay arc
-menu (under More) has **Web sharing** (start/stop a web share for the page's
-run from the browser; shows public URL, password, and whether the tunnel is
-direct or relayed) and **Copy public URL** to turn the current page into its
-public deep link (path + query + hash preserved). `veld shares` prints each
-live tunnel's transport — `relayed via <relay>` means throughput is capped by
-that relay (the usual cause of slow shares); `direct` is full bandwidth.
+capabilities: `veld unshare` on one never affects the other. The toolbar arc
+menu has a top-level **Sharing** item (dot when the page is web-shared) whose
+submenu covers **Start/Stop sharing** (toggle a web share for the page's run
+from the browser), **Copy public URL** (turn the current page into its public
+deep link, path + query + hash preserved), and **Sharing status**. Transport
+detail is not shown in the toolbar — `veld shares` prints each live tunnel's
+transport (`relayed via <relay>` means throughput is capped by that relay, the
+usual cause of slow shares; `direct` is full bandwidth), as does the management
+UI.
 Fidelity is best-effort:
 the app sees its own origin `Host` (Vite allowedHosts pass), public host
 rides in `X-Forwarded-Host`, redirects between shared services are rewritten,

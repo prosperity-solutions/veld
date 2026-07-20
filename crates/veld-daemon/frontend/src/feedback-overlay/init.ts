@@ -6,6 +6,7 @@ import { buildDOM } from "./dom";
 import { restoreFabPos, clampFabToViewport } from "./fab";
 import { onKeyDown } from "./keyboard";
 import { pollEvents, pollListenStatus, loadThreads, primeEventSeq } from "./polling";
+import { pollShareStatus } from "./sharing";
 import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass, applyPanelLayout } from "./panel";
 import { setMode } from "./modes";
 import { toggleToolbar } from "./toolbar";
@@ -71,8 +72,10 @@ export function init(): void {
   loadThreads();
   primeEventSeq(); // baseline the cursor so a reload doesn't replay old toasts
   pollListenStatus();
+  pollShareStatus(); // light up the Sharing dot if this page is already web-shared
   setInterval(pollEvents, 3000);
   setInterval(pollListenStatus, 5000);
+  setInterval(pollShareStatus, 5000);
 
   if ("Notification" in window && Notification.permission === "default") {
     Notification.requestPermission();

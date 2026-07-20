@@ -2,7 +2,7 @@ import { refs } from "./refs";
 import { getState, dispatch } from "./store";
 import type { Thread } from "./types";
 import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
-import { PREFIX, SUBMIT_HINT } from "./constants";
+import { PREFIX, SUBMIT_HINT, ICONS } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { deps } from "../shared/registry";
@@ -32,6 +32,19 @@ export function positionPopover(
 
   pop.style.top = top + "px";
   pop.style.left = left + "px";
+}
+
+/** Append a top-right close (×) button to a popover. Gives every writing
+ *  overlay a clear, window-style dismiss affordance next to Escape/Cancel. */
+export function appendPopoverClose(pop: HTMLElement): void {
+  const close = mkEl("button", "popover-close");
+  close.setAttribute("aria-label", "Close");
+  close.innerHTML = ICONS.cancel;
+  close.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeActivePopover();
+  });
+  pop.appendChild(close);
 }
 
 export function closeActivePopover(): void {
@@ -128,6 +141,7 @@ export function showCreatePopover(
   submitOnModEnter(textarea, sendBtn);
   popoverBody.appendChild(actions);
   popover.appendChild(popoverBody);
+  appendPopoverClose(popover);
 
   refs.shadow.appendChild(popover);
   dispatch({ type: "SET_POPOVER", popover });

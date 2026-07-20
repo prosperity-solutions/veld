@@ -5,7 +5,7 @@ import { mkEl, submitOnModEnter } from "./helpers";
 import { PREFIX, API, SUBMIT_HINT } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
-import { closeActivePopover, positionPopover } from "./popover";
+import { closeActivePopover, positionPopover, appendPopoverClose } from "./popover";
 import { deps } from "../shared/registry";
 
 // The single captured frame the user selects over. Held here (not in the store)
@@ -431,6 +431,7 @@ export function showScreenshotThreadEditor(
   submitOnModEnter(ta, sendBtn);
   body.appendChild(actions);
   pop.appendChild(body);
+  appendPopoverClose(pop);
 
   // Highlight the screenshot toolbar button while the editor is open.
   refs.toolBtnScreenshot.classList.add(PREFIX + "tool-active");

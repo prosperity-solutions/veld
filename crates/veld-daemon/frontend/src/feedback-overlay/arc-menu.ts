@@ -1082,7 +1082,7 @@ export function createArcMenu(opts: ArcMenuOptions): ArcMenuHandle {
   opts.bubbleIcon.innerHTML = opts.icons.logo;
   currentIconKey = "logo";
   applyBubbleScale(1);
-  opts.bubble.setAttribute("aria-label", opts.bubbleTooltip?.label || "Feedback menu");
+  opts.bubble.setAttribute("aria-label", opts.bubbleTooltip?.label || "Veld Toolbar menu");
   opts.bubble.setAttribute("aria-haspopup", "true");
 
   // ── public handle ─────────────────────────────────────────────────────

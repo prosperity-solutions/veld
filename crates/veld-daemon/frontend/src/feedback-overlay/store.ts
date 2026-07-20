@@ -8,6 +8,11 @@ export interface Store {
   lastEventSeq: number;
   agentListening: boolean;
 
+  // Public web sharing (live status of THIS page's hostname). Drives the
+  // Sharing menu's indicator dot and the Start/Stop submenu visibility.
+  shareActive: boolean;
+  shareId: string | null;
+
   // UI state
   panelOpen: boolean;
   panelSide: "left" | "right";
@@ -57,6 +62,7 @@ export type Action =
   | { type: "SET_HOVERED"; el: Element | null }
   | { type: "SET_LOCKED"; el: Element | null }
   | { type: "SET_LISTENING"; listening: boolean }
+  | { type: "SET_SHARE_STATUS"; active: boolean; id: string | null }
   | { type: "SET_CAPTURE_STREAM"; stream: MediaStream | null }
   | { type: "SET_PIN"; threadId: string; el: HTMLElement }
   | { type: "REMOVE_PIN"; threadId: string }
@@ -105,6 +111,8 @@ function reduce(s: Store, action: Action): Store {
       return { ...s, lockedEl: action.el };
     case "SET_LISTENING":
       return { ...s, agentListening: action.listening };
+    case "SET_SHARE_STATUS":
+      return { ...s, shareActive: action.active, shareId: action.id };
     case "SET_CAPTURE_STREAM":
       return { ...s, captureStream: action.stream };
     case "SET_PIN": {
@@ -174,6 +182,8 @@ function createInitial(): Store {
     threads: [],
     lastEventSeq: 0,
     agentListening: false,
+    shareActive: false,
+    shareId: null,
     panelOpen: false,
     panelSide: readPanelSide(),
     panelMode: readPanelMode(),

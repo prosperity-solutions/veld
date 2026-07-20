@@ -387,17 +387,32 @@
 }
 
 .veld-feedback-popover-header {
-  padding: 10px 14px; background: var(--vf-bg-card);
+  padding: 10px 34px 10px 14px; background: var(--vf-bg-card);
   font-size: 11px; color: var(--vf-text-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   border-bottom: 1px solid var(--vf-border);
 }
 
 .veld-feedback-popover-selector {
-  padding: 10px 14px 4px; background: var(--vf-bg-card);
+  padding: 10px 34px 4px 14px; background: var(--vf-bg-card);
   font-size: 11px; color: var(--vf-text-muted);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+
+/* Window-style close (×) for writing overlays — a clear dismiss affordance
+   next to Escape/Cancel. Absolute top-right; a small chip background keeps it
+   legible over whatever the popover's first row is (header, selector, or the
+   textarea corner on a bare page comment). */
+.veld-feedback-popover-close {
+  position: absolute; top: 8px; right: 8px; z-index: 1;
+  width: 22px; height: 22px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--vf-border); border-radius: 6px;
+  background: var(--vf-bg-card); color: var(--vf-text-muted);
+  cursor: pointer; transition: color .15s, background .15s;
+}
+.veld-feedback-popover-close:hover { color: var(--vf-text); background: var(--vf-border); }
+.veld-feedback-popover-close svg { width: 14px; height: 14px; }
 
 .veld-feedback-popover-trace {
   padding: 2px 14px 10px; background: var(--vf-bg-card);
@@ -908,46 +923,14 @@
   display: flex; gap: 8px; justify-content: flex-end;
 }
 
-/* ── Web sharing card ─────────────────────────────────────────────────── */
-/* Fixed near the top center (viewport-aware via max-width) — the arc menu
-   can sit anywhere, so the card doesn't chase it. */
-.veld-feedback-web-share-card {
-  position: fixed;
-  top: 84px; left: 50%;
-  transform: translateX(-50%);
-  animation: veld-feedback-fadeIn .15s ease;
-}
-.veld-feedback-web-share-muted {
-  color: var(--vf-text-muted);
-  font-size: 12px;
-  margin-bottom: 10px;
-  overflow-wrap: anywhere;
-}
-.veld-feedback-web-share-url {
-  font-size: 12px;
-  color: var(--vf-accent);
-  cursor: pointer;
-  margin-bottom: 8px;
-  overflow-wrap: anywhere;
-}
-.veld-feedback-web-share-url:hover { text-decoration: underline; }
-.veld-feedback-web-share-conn {
-  display: flex; align-items: baseline; gap: 7px;
-  font-size: 12px;
-  margin-bottom: 8px;
-}
-.veld-feedback-web-share-conn-text { overflow-wrap: anywhere; }
-.veld-feedback-web-share-dot {
-  flex: none;
+/* Sharing menu status dot — lit (accent) while THIS page is on the public
+   web. Sits on the Sharing bubble; the ring keeps it legible over the goo
+   blob. Hidden by default; `-on` reveals it. */
+.veld-feedback-status-dot {
+  position: absolute; top: 1px; right: 1px;
   width: 8px; height: 8px; border-radius: 50%;
-  background: var(--vf-text-muted);
-  align-self: center;
+  background: var(--vf-accent);
+  box-shadow: 0 0 0 2px var(--vf-bg);
+  display: none;
 }
-.veld-feedback-web-share-dot-direct { background: var(--vf-accent); }
-.veld-feedback-web-share-dot-relayed { background: #eab308; }
-.veld-feedback-web-share-notice {
-  color: var(--vf-danger);
-  font-size: 12px;
-  margin-bottom: 10px;
-  overflow-wrap: anywhere;
-}
+.veld-feedback-status-dot-on { display: block; }

@@ -210,7 +210,8 @@ Two consequences to know before sharing a non-trivial app:
   state plus `rtt_ms`. A tunnel that stays `relayed` is capped by that relay's
   throughput (n0's public relays throttle) — the first thing to check when a
   share feels slow. The developer sees the same picture in `veld shares` and
-  the overlay's Web sharing card.
+  the management UI (the in-page toolbar's Sharing menu deliberately omits
+  transport detail — it just starts/stops/copies).
 - **Health**: `GET /livez` (liveness — the process is up) and `GET /readyz`
   (readiness — safe to route traffic) both answer `ok` on any Host
   (container/LB probes included), so Kubernetes `livenessProbe` /
