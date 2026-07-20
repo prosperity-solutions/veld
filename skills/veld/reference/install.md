@@ -32,7 +32,12 @@ veld doctor
 veld update
 ```
 
-This downloads the latest release and restarts background services automatically.
+This downloads the latest release and restarts the background services
+(helper + daemon) onto the new binaries automatically. **Running environments
+are left running** — state lives in a migrated SQLite DB, so a binary swap no
+longer risks stale state, and services keep serving throughout. In privileged
+mode the root helper is restarted via sudo (you may be prompted once for your
+password); if sudo isn't available, the helper restarts itself shortly after.
 
 ## Uninstalling
 

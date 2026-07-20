@@ -215,71 +215,14 @@ else
 fi
 
 # --- Install ---
-
-# --- Stop running environments (prevents stale state files after upgrade) ---
 #
-# When upgrading across major versions, state file format may change.
-# Stop all running environments using the OLD binary so state is cleanly
-# removed before the new binary is installed.
-
-EXISTING_VELD_BIN="$(command -v veld 2>/dev/null || true)"
-if [ -n "$EXISTING_VELD_BIN" ]; then
-  # Use `veld list --json` to find running environments across ALL projects.
-  # Parse with basic grep — no jq dependency required.
-  LIST_JSON="$("$EXISTING_VELD_BIN" list --json 2>/dev/null || true)"
-
-  # Extract project_root + run_name pairs for running environments.
-  # The JSON structure is: { "projects": { "<path>": { "runs": { "<name>": { "status": "running" } } } } }
-  RUNNING_INFO=""
-  if [ -n "$LIST_JSON" ]; then
-    # Use python3 (available on macOS and most Linux) for reliable JSON parsing.
-    RUNNING_INFO="$(echo "$LIST_JSON" | python3 -c '
-import json, sys
-try:
-    data = json.load(sys.stdin)
-    for path, proj in data.get("projects", {}).items():
-        for name, run in proj.get("runs", {}).items():
-            if run.get("status") == "running":
-                print(f"{path}\t{name}")
-except: pass
-' 2>/dev/null || true)"
-  fi
-
-  if [ -n "$RUNNING_INFO" ]; then
-    echo ""
-    echo "============================================================"
-    echo "  RUNNING ENVIRONMENTS DETECTED"
-    echo "============================================================"
-    echo ""
-    echo "  The following environments will be stopped before updating"
-    echo "  (prevents stale state files after upgrade):"
-    echo ""
-    echo "$RUNNING_INFO" | while IFS=$'\t' read -r proj_root run_name; do
-      echo "    - ${run_name}  (${proj_root})"
-    done
-    echo ""
-
-    if [ -z "${VELD_NON_INTERACTIVE:-}" ] && [ -t 0 ]; then
-      printf "  Stop all and continue? [Y/n] "
-      read -r answer < /dev/tty 2>/dev/null || answer="y"
-      answer="${answer:-y}"
-      if [ "$answer" != "y" ] && [ "$answer" != "Y" ]; then
-        echo "Update cancelled."
-        exit 0
-      fi
-    fi
-
-    echo "  Stopping environments..."
-    echo "$RUNNING_INFO" | while IFS=$'\t' read -r proj_root run_name; do
-      if (cd "$proj_root" 2>/dev/null && "$EXISTING_VELD_BIN" stop --name "$run_name" 2>/dev/null); then
-        echo "    Stopped '${run_name}'"
-      else
-        echo "    Warning: could not stop '${run_name}' (may need manual cleanup)"
-      fi
-    done
-    echo ""
-  fi
-fi
+# Running environments are intentionally NOT stopped for an update. State lives
+# in a single SQLite DB with a forward-only migration system, so swapping the
+# binaries no longer risks the stale/incompatible state files that the old
+# JSON-per-run storage did. Service processes are independent of the CLI,
+# daemon, and helper (the helper leaves Caddy running across its own restart, so
+# URLs stay up), and they pick up the new orchestrator on the next
+# `veld start`/`veld restart`.
 
 echo "Installing binaries..."
 $NEED_SUDO mkdir -p "$INSTALL_DIR"
@@ -390,14 +333,23 @@ if [ "$OS" = "macos" ]; then
     # (root). Restarting it in the system domain requires root — the old code
     # ran `$NEED_SUDO launchctl ... system/...` with NEED_SUDO empty for the
     # default user-path install, so it silently failed and left a stale helper.
-    # If passwordless sudo is available, kickstart it now for an immediate swap;
+    # If passwordless sudo is available, restart it now for an immediate swap;
     # otherwise the helper restarts itself when it detects its binary changed
     # (in-process watcher + the plist's WatchPaths) — no password prompt.
+    #
+    # Use a graceful SIGTERM (`launchctl kill TERM`), NOT `kickstart -k`: the
+    # helper handles SIGTERM by exiting while leaving Caddy running, and the
+    # plist's unconditional KeepAlive relaunches it onto the new binary — so
+    # every live URL stays up across the swap. A hard `kickstart -k` (SIGKILL,
+    # possibly escalating to launchd job teardown) is riskier for the child
+    # Caddy; the helper also spawns Caddy in its own process group as a second
+    # safeguard (see veld-helper caddy.rs). `veld update`'s own post-install
+    # restart uses this same graceful path.
     HELPER_PLIST="/Library/LaunchDaemons/dev.veld.helper.plist"
     if [ -f "$HELPER_PLIST" ]; then
       if sudo -n true 2>/dev/null; then
         echo "Restarting veld-helper service (privileged)..."
-        sudo launchctl kickstart -k system/dev.veld.helper 2>/dev/null || true
+        sudo launchctl kill TERM system/dev.veld.helper 2>/dev/null || true
       else
         echo "Privileged veld-helper will restart itself to pick up the new binary (no sudo needed)."
       fi
