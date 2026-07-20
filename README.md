@@ -142,6 +142,7 @@ veld stop --name dev
 | Command | Description |
 |---------|-------------|
 | `veld start [NODE:VARIANT...] --name <n>` | Start an environment |
+| `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. Ideal for end-to-end test runs. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
 | `veld status [--name <n>] [--json]` | Show run status |

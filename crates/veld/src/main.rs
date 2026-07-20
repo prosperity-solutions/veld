@@ -65,6 +65,18 @@ enum Command {
         #[arg(long, short = 'a')]
         attach: bool,
 
+        /// Run the selected command node as a one-off: bring up its
+        /// dependencies, run it to completion streaming its output, then tear
+        /// everything down and exit with the node's exit code. Ideal for
+        /// end-to-end test runs. Requires exactly one command-type selection.
+        #[arg(long)]
+        oneshot: bool,
+
+        /// With --oneshot, also stream the dependencies' logs (not just the
+        /// terminal node's output).
+        #[arg(long)]
+        all_logs: bool,
+
         /// Enable debug logging for the started environment.
         #[arg(long)]
         debug: bool,
@@ -415,7 +427,13 @@ fn init_tracing(debug: bool) {
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
 
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    // Diagnostic logs go to stderr (the conventional target), keeping stdout
+    // clean for machine-readable output — notably the terminal node's own
+    // output under `veld start --oneshot`.
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(filter)
+        .init();
 }
 
 #[tokio::main]
@@ -468,8 +486,10 @@ async fn main() {
             preset,
             name,
             attach,
+            oneshot,
+            all_logs,
             debug,
-        } => commands::start::run(selections, preset, name, attach, debug).await,
+        } => commands::start::run(selections, preset, name, attach, oneshot, all_logs, debug).await,
 
         Command::Stop { name, all } => commands::stop::run(name, all).await,
 

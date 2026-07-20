@@ -382,6 +382,230 @@ pub async fn run_command(
 }
 
 // ---------------------------------------------------------------------------
+// Run a command to completion while streaming its output live
+// ---------------------------------------------------------------------------
+
+/// Run a command/script to completion, streaming its output live.
+///
+/// Unlike [`run_command`], every stdout line is echoed to the process's own
+/// stdout and every stderr line to its stderr, so a human (or CI, or a coding
+/// agent) sees the output as it happens — this is what makes a `--oneshot`
+/// terminal node (e.g. an end-to-end test runner) print its results inline.
+/// When `log_target` is `Some`, each line is also timestamped into the
+/// database `server` stream so `veld logs --node <n>` works after the run.
+///
+/// `VELD_OUTPUT key=value` control lines on stdout are still parsed (for
+/// declared outputs) but are never echoed or logged — they are machinery, not
+/// program output.
+///
+/// The child runs in its own process group so a Ctrl+C delivered to the CLI's
+/// controlling terminal is not auto-forwarded to it; instead we catch the
+/// signal, kill the whole group, and report exit code `130` (SIGINT). This
+/// keeps interruption deterministic regardless of how the child handles
+/// signals itself.
+pub async fn run_command_streaming(
+    command: &str,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    output_file: Option<&Path>,
+    log_target: Option<LogTarget>,
+) -> Result<CommandOutput, ProcessError> {
+    use tokio::io::AsyncWriteExt;
+
+    // Prepare the output file and augmented env (mirrors `run_command`).
+    let mut env = env.clone();
+    if let Some(path) = output_file {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| ProcessError::OutputFileError {
+                path: path.to_path_buf(),
+                source: e,
+            })?;
+        }
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(path)
+                .map_err(|e| ProcessError::OutputFileError {
+                    path: path.to_path_buf(),
+                    source: e,
+                })?;
+        }
+        env.insert(
+            "VELD_OUTPUT_FILE".to_owned(),
+            path.to_string_lossy().into_owned(),
+        );
+    }
+
+    let spawn_result = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(working_dir)
+        .envs(&env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0) // own group — we forward Ctrl+C by killing the group
+        .spawn();
+
+    let mut child = match spawn_result {
+        Ok(child) => child,
+        Err(e) => {
+            if let Some(path) = output_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(ProcessError::SpawnFailed(e));
+        }
+    };
+
+    let pid = child.id().unwrap_or(0);
+    let stdout = child.stdout.take().expect("stdout should be piped");
+    let stderr = child.stderr.take().expect("stderr should be piped");
+
+    // Each stream is drained to completion by its own task, so a Ctrl+C
+    // (handled in the select below) can never cancel a partial read — the
+    // tasks own their readers and stop only at EOF (or an unrecoverable read
+    // error). Lines are decoded
+    // lossily: a test runner may emit non-UTF-8 bytes, and a bad byte must
+    // replace one character, not truncate the rest of the stream (which
+    // `Lines`/`str`-based reads would do on the first `InvalidData`).
+    //
+    // stdout carries the program's real output; `VELD_OUTPUT key=value`
+    // control lines are peeled off it and sent back over `out_tx` instead of
+    // being echoed or logged. stderr is forwarded verbatim.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let out_log = log_target.clone();
+    let out_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout);
+        let mut w = tokio::io::stdout();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                        buf.pop();
+                    }
+                    let line = String::from_utf8_lossy(&buf);
+                    if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
+                        if let Some((key, value)) = kv.split_once('=') {
+                            let _ = out_tx.send((key.trim().to_owned(), value.trim().to_owned()));
+                        }
+                        // Control line — never echoed or logged.
+                    } else {
+                        let _ = w.write_all(line.as_bytes()).await;
+                        let _ = w.write_all(b"\n").await;
+                        let _ = w.flush().await;
+                        if let Some(ref t) = out_log {
+                            t.append(&line);
+                        }
+                    }
+                }
+            }
+        }
+    });
+    let err_log = log_target.clone();
+    let err_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr);
+        let mut w = tokio::io::stderr();
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            match reader.read_until(b'\n', &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    while matches!(buf.last(), Some(b'\n' | b'\r')) {
+                        buf.pop();
+                    }
+                    let line = String::from_utf8_lossy(&buf);
+                    let _ = w.write_all(line.as_bytes()).await;
+                    let _ = w.write_all(b"\n").await;
+                    let _ = w.flush().await;
+                    if let Some(ref t) = err_log {
+                        t.append(&line);
+                    }
+                }
+            }
+        }
+    });
+
+    // Wait for both drain tasks to finish; a Ctrl+C kills the child's process
+    // group (the tasks then hit EOF) and reports the conventional 130 code.
+    let mut interrupted = false;
+    let drain = async {
+        let _ = tokio::join!(out_task, err_task);
+    };
+    tokio::pin!(drain);
+    tokio::select! {
+        _ = &mut drain => {}
+        _ = tokio::signal::ctrl_c() => {
+            interrupted = true;
+            if pid > 1 {
+                let _ = kill_process(pid).await;
+            }
+            // Bounded wait for the drain tasks to finish after the kill: they
+            // normally hit EOF immediately once the pipes close, but don't hang
+            // the interrupt forever if our own stdout consumer has stalled.
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(10), &mut drain).await;
+        }
+    }
+
+    let mut outputs = HashMap::new();
+    while let Ok((key, value)) = out_rx.try_recv() {
+        outputs.insert(key, value);
+    }
+
+    let status = child.wait().await.map_err(ProcessError::SpawnFailed)?;
+
+    // Read file-based outputs (overrides stdout for duplicate keys).
+    if let Some(path) = output_file {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                for line in contents.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some((key, value)) = line.split_once('=') {
+                        outputs.insert(key.trim().to_owned(), value.trim().to_owned());
+                    } else {
+                        tracing::warn!(
+                            line,
+                            "ignoring malformed line in output file (expected key=value)"
+                        );
+                    }
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(path = %path.display(), "output file was deleted by the script");
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(path);
+                return Err(ProcessError::OutputFileError {
+                    path: path.to_path_buf(),
+                    source: e,
+                });
+            }
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    // On Ctrl+C, report the conventional SIGINT exit code regardless of how
+    // the child actually terminated.
+    let exit_code = if interrupted {
+        130
+    } else {
+        status.code().unwrap_or(-1)
+    };
+
+    Ok(CommandOutput { exit_code, outputs })
+}
+
+// ---------------------------------------------------------------------------
 // Process monitoring
 // ---------------------------------------------------------------------------
 
@@ -474,4 +698,59 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    /// A non-zero exit is the terminal node's *result*: `run_command_streaming`
+    /// must surface it as `exit_code` (never an error) so `--oneshot` can
+    /// propagate it, and must still parse `VELD_OUTPUT` control lines.
+    #[tokio::test]
+    async fn captures_nonzero_exit_and_outputs() {
+        let env = HashMap::new();
+        let dir = std::env::temp_dir();
+        let out = run_command_streaming(
+            "echo hello; echo 'VELD_OUTPUT foo=bar'; echo oops 1>&2; exit 3",
+            &dir,
+            &env,
+            None,
+            None,
+        )
+        .await
+        .expect("streaming run should not error on non-zero exit");
+        assert_eq!(out.exit_code, 3);
+        assert_eq!(out.outputs.get("foo").map(String::as_str), Some("bar"));
+    }
+
+    #[tokio::test]
+    async fn zero_exit_no_outputs() {
+        let env = HashMap::new();
+        let dir = std::env::temp_dir();
+        let out = run_command_streaming("true", &dir, &env, None, None)
+            .await
+            .expect("streaming run should succeed");
+        assert_eq!(out.exit_code, 0);
+        assert!(out.outputs.is_empty());
+    }
+
+    /// A raw non-UTF-8 byte on stdout must not truncate the stream: the later
+    /// `VELD_OUTPUT` line is still parsed (lossy decode replaces the bad byte).
+    #[tokio::test]
+    async fn lossy_decode_survives_non_utf8() {
+        let env = HashMap::new();
+        let dir = std::env::temp_dir();
+        let out = run_command_streaming(
+            "printf '\\377\\n'; echo 'VELD_OUTPUT foo=bar'",
+            &dir,
+            &env,
+            None,
+            None,
+        )
+        .await
+        .expect("streaming run should tolerate non-UTF-8 output");
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(out.outputs.get("foo").map(String::as_str), Some("bar"));
+    }
 }

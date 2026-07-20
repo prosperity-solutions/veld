@@ -4302,7 +4302,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "veld"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -4322,7 +4322,7 @@ dependencies = [
 
 [[package]]
 name = "veld-core"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -4345,7 +4345,7 @@ dependencies = [
 
 [[package]]
 name = "veld-daemon"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "veld-gateway"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -4400,7 +4400,7 @@ dependencies = [
 
 [[package]]
 name = "veld-helper"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "nix",
@@ -4416,7 +4416,7 @@ dependencies = [
 
 [[package]]
 name = "veld-share"
-version = "10.4.0"
+version = "10.6.0"
 dependencies = [
  "anyhow",
  "dirs",

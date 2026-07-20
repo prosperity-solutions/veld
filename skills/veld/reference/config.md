@@ -62,6 +62,12 @@ Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or l
 
 Emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE`.
 
+A `command` node can also be a run's **terminal node** via
+`veld start <node> --oneshot`: veld starts its dependencies, runs it to
+completion (streaming its output), then tears everything down and exits with the
+node's exit code — the e2e/CI pattern. See the CLI reference / configuration
+guide for details.
+
 ```json
 {
   "type": "command",

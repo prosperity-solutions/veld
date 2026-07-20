@@ -1235,6 +1235,75 @@ veld logs -f
 
 When not running in a terminal (e.g. piped or in a script), `veld start` always detaches automatically.
 
+### One-off runs (`--oneshot`)
+
+`veld start <node> --oneshot` turns a `command` node into the run's **terminal
+node**: Veld starts the node's dependencies, waits for them to become healthy,
+then runs the node to completion — streaming its output live — and, the moment
+it exits, tears the whole environment down in reverse dependency order and exits
+with the node's exit code. It's the local-dev and CI analog of
+`docker compose run --rm` (with `--abort-on-container-exit --exit-code-from`).
+
+This makes end-to-end test setups trivial: one command brings up every backend
+and web app the tests need, runs the test runner, prints its results, and cleans
+everything up afterwards — with the test runner's pass/fail becoming the process
+exit code.
+
+```sh
+# Start db + api + web (e2e's dependencies), run the e2e suite, tear down,
+# and exit with the suite's exit code.
+veld start e2e --oneshot
+```
+
+```json
+{
+  "nodes": {
+    "e2e": {
+      "variants": {
+        "local": {
+          "type": "command",
+          "command": "playwright test --reporter=line",
+          "env": { "BASE_URL": "${nodes.web.url}" },
+          "depends_on": { "web": "local", "api": "local" }
+        }
+      }
+    }
+  }
+}
+```
+
+Ports are allocated dynamically, so the test runner can't hardcode a URL — hand
+it the started services' URLs by interpolating `${nodes.<node>.url}` (or
+`.url.host`, `.port`, …) into the command or its `env`, as the `BASE_URL` above
+does. See [Variables](#variables) for the full set of `${nodes.*}` references.
+
+Details:
+
+- **stdout carries only the terminal node's stdout.** Veld's own chrome (the
+  startup summary, "Running…", teardown lines, and the non-TTY NDJSON progress
+  stream) all go to **stderr**, so a CI job or coding agent can capture stdout
+  and get just the program's output. Dependency logs are recorded (read them
+  with `veld logs --node <dep>`), not streamed; pass `--all-logs` to interleave
+  them (on stderr) during the run.
+- **The terminal node must be a `command` type** (a `start_server` never exits,
+  so it can't be the thing whose exit ends the run). Veld errors otherwise —
+  and the command itself **must terminate**: a node mistyped as `command` that
+  actually runs a long-lived server will hang the run until you Ctrl+C.
+- **Exactly one selection** is required — the terminal node (a `--preset` that
+  expands to several nodes is rejected). Its dependencies are resolved through
+  the graph and started automatically.
+- **The exit code is the node's own.** A non-zero exit (failing tests) is the
+  node's *result*, not a startup error — Veld propagates it as its own exit
+  code so `veld start e2e --oneshot && deploy` works.
+- **Teardown always runs** — on normal completion and on Ctrl+C (which aborts
+  the run and exits `130`) — and runs to completion once started; a further
+  Ctrl+C during teardown is ignored. Per-node `on_stop` hooks and project
+  `teardown` steps run in reverse order, exactly as `veld stop` does.
+- **Dependencies are not health-monitored while the terminal node runs.** If a
+  dependency crashes mid-run it surfaces only as the node's own failure (e.g. a
+  connection error), not a distinct diagnostic.
+- `--oneshot` cannot be combined with `--attach`.
+
 ### Log Timestamps
 
 All log output (both `start_server` stdout/stderr and internal Veld events) is timestamped with ISO 8601 timestamps:

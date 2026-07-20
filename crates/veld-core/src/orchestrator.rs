@@ -197,6 +197,15 @@ pub struct Orchestrator {
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
     /// Internal log writer for the current run (liveness/recovery/lifecycle events).
     internal_log: Option<LogWriter>,
+    /// When set, this `command` node is the run's terminal one-off: it is NOT
+    /// executed during the normal startup stages (its dependencies are), and is
+    /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
+    /// the run (see `veld start --oneshot`).
+    terminal_node: Option<NodeSelection>,
+    /// Dependency outputs captured at the end of `start` when a terminal node
+    /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
+    /// exact values the stages produced (no reconstruction drift).
+    terminal_outputs: Option<HashMap<String, HashMap<String, String>>>,
 }
 
 impl Orchestrator {
@@ -220,7 +229,16 @@ impl Orchestrator {
             foreground: false,
             progress_tx: None,
             internal_log: None,
+            terminal_node: None,
+            terminal_outputs: None,
         })
+    }
+
+    /// Designate a `command` node as the run's terminal one-off (`--oneshot`).
+    /// The node is skipped during startup stages and run afterwards; its exit
+    /// terminates the run. Only its dependencies are brought up by `start`.
+    pub fn set_terminal_node(&mut self, sel: Option<NodeSelection>) {
+        self.terminal_node = sel;
     }
 
     /// Enable foreground mode (timestamped pipe for server output).
@@ -314,6 +332,16 @@ impl Orchestrator {
 
         let resolved = graph::resolve_selections(selections, &self.config)?;
         let plan = graph::build_execution_plan(&resolved, &self.config)?;
+
+        // The terminal one-off node (`--oneshot`) is part of the graph — its
+        // dependencies are brought up here — but the node itself is executed
+        // afterwards by `run_terminal`, so it is skipped in the stage loop and
+        // excluded from the healthy-node count. It stays seeded as `Pending`
+        // below so the reverse-order teardown path can still find it.
+        let terminal_key: Option<String> = self
+            .terminal_node
+            .as_ref()
+            .map(|s| RunState::node_key(&s.node, &s.variant));
 
         // Set up debug log writer if debug mode is enabled.
         if self.debug {
@@ -442,18 +470,29 @@ impl Orchestrator {
             }
         }
 
-        // Count total nodes for progress reporting.
-        let total_nodes: usize = plan.iter().map(|s| s.len()).sum();
+        // Count total nodes for progress reporting (the terminal node runs
+        // separately, so it does not contribute to the startup count). Because
+        // `--oneshot` allows exactly one endpoint selection, the terminal node
+        // is always the sole node in the final stage, so that stage empties out
+        // once it is filtered — drop it from the reported stage count too.
+        let total_nodes: usize = plan
+            .iter()
+            .flatten()
+            .filter(|sel| !is_terminal(terminal_key.as_deref(), sel))
+            .count();
+        let total_stages = if terminal_key.is_some() {
+            plan.len().saturating_sub(1)
+        } else {
+            plan.len()
+        };
         self.internal_log(&format!(
             "[start] starting environment '{}' — {} node(s) in {} stage(s)",
-            run_name,
-            total_nodes,
-            plan.len()
+            run_name, total_nodes, total_stages
         ))
         .await;
         self.emit(ProgressEvent::PlanResolved {
             total_nodes,
-            stages: plan.len(),
+            stages: total_stages,
         });
 
         // Persist the run *before* the first stage kicks off so it is
@@ -498,9 +537,16 @@ impl Orchestrator {
         let mut node_index: usize = 0;
         let execute_result: Result<(), OrchestratorError> = async {
             for stage in &plan {
+                // Drop the terminal node from its stage; only its dependencies
+                // run during startup.
+                let stage_nodes: Vec<NodeSelection> = stage
+                    .iter()
+                    .filter(|sel| !is_terminal(terminal_key.as_deref(), sel))
+                    .cloned()
+                    .collect();
                 let results = self
                     .execute_stage(
-                        stage,
+                        &stage_nodes,
                         &run,
                         &branch,
                         &worktree,
@@ -561,6 +607,11 @@ impl Orchestrator {
         // All reservations have been consumed — clear the map.
         self.precomputed_servers.clear();
 
+        // Capture the dependency outputs for a pending terminal-node run.
+        if terminal_key.is_some() {
+            self.terminal_outputs = Some(all_outputs.clone());
+        }
+
         run.status = RunStatus::Running;
 
         // Final state save with Running status.
@@ -573,6 +624,215 @@ impl Orchestrator {
         .await;
 
         Ok(run)
+    }
+
+    /// Run the terminal one-off node (`--oneshot`) after its dependencies are
+    /// healthy. Streams the node's output live (and into the run log), captures
+    /// its exit code, and persists its final state.
+    ///
+    /// A non-zero exit is the node's *result* (e.g. failing tests), not a
+    /// startup error, so — unlike a `command` node inside a startup stage — it
+    /// is captured and returned rather than raised as `NodeFailed`. The caller
+    /// is expected to tear the run down afterwards and propagate the code.
+    ///
+    /// A command node's `readiness_probe` (which `execute_command_isolated`
+    /// runs after a zero exit) is intentionally NOT run here — a post-run probe
+    /// on the run's final node is meaningless.
+    ///
+    /// **Must be called after [`Orchestrator::start`] on the same instance**:
+    /// `start` stashes the dependency outputs this method interpolates into the
+    /// command. Calling it standalone leaves `${nodes.X.*}` references
+    /// unresolved.
+    pub async fn run_terminal(
+        &mut self,
+        run_name: &str,
+        sel: &NodeSelection,
+    ) -> Result<i32, OrchestratorError> {
+        let node_cfg = self.config.nodes.get(&sel.node).cloned().ok_or_else(|| {
+            OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason: "terminal node not found in config".to_owned(),
+            }
+        })?;
+        let variant_cfg = node_cfg
+            .variants
+            .get(&sel.variant)
+            .cloned()
+            .ok_or_else(|| OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason: "terminal variant not found in config".to_owned(),
+            })?;
+
+        // A terminal node must run to completion — a start_server never exits,
+        // so it can never be the thing whose exit ends the run.
+        if variant_cfg.step_type != config::StepType::Command {
+            return Err(OrchestratorError::NodeFailed {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+                reason: "--oneshot requires a command-type node (start_server never exits)"
+                    .to_owned(),
+            });
+        }
+
+        // Load the run so we can persist the terminal node's result back into
+        // its state and execution order (for reverse-order teardown).
+        let mut run = match self.db.get_run(&self.project_root, run_name)? {
+            Some(r) => r,
+            None => {
+                return Err(OrchestratorError::NodeFailed {
+                    node: sel.node.clone(),
+                    variant: sel.variant.clone(),
+                    reason: format!("run '{run_name}' not found"),
+                });
+            }
+        };
+
+        // Build the variable context: same builtins as a stage node, plus the
+        // dependency outputs captured by `start`.
+        let branch = url::detect_git_branch(&self.project_root);
+        let worktree = self
+            .project_root
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("default")
+            .to_owned();
+        let username = whoami_username();
+
+        let mut var_ctx = VariableContext::new();
+        var_ctx.set_builtin("run", run_name.to_owned());
+        var_ctx.set_builtin("run_id", run.run_id.to_string());
+        var_ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        var_ctx.set_builtin("project", self.config.name.clone());
+        var_ctx.set_builtin("name", self.config.name.clone());
+        var_ctx.set_builtin("worktree", url::slugify(&worktree));
+        var_ctx.set_builtin("branch", url::slugify(&branch));
+        var_ctx.set_builtin("username", username);
+
+        // Clone (not take) the stashed dependency outputs so a defensive
+        // re-invocation still resolves `${nodes.X.*}` rather than silently
+        // getting an empty map.
+        let outputs_map = self.terminal_outputs.clone().unwrap_or_default();
+        for (node_key, outputs) in &outputs_map {
+            for (field, value) in outputs {
+                var_ctx.set_node_output(&format!("nodes.{node_key}.{field}"), value.clone());
+            }
+        }
+
+        // Resolve working directory, command/script, and environment.
+        let working_dir = resolve_working_dir(
+            variant_cfg.cwd.as_deref(),
+            node_cfg.cwd.as_deref(),
+            &self.project_root,
+            &var_ctx,
+        )?;
+        let raw_cmd = if let Some(ref script) = variant_cfg.script {
+            format!("sh {}", self.project_root.join(script).display())
+        } else {
+            variant_cfg.command.clone().unwrap_or_default()
+        };
+        let resolved_cmd = crate::variables::interpolate(&raw_cmd, &var_ctx)?;
+        let merged_env = config::resolve_env(
+            self.config.env.as_ref(),
+            node_cfg.env.as_ref(),
+            variant_cfg.env.as_ref(),
+        );
+        let env = build_env(merged_env.as_ref(), &var_ctx)?;
+
+        let key = RunState::node_key(&sel.node, &sel.variant);
+
+        // Idempotency: if skip_if passes, skip the run entirely (exit 0).
+        if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
+            let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, &var_ctx)?;
+            if let Ok(out) = process::run_command(&skip_if_resolved, &working_dir, &env, None).await
+            {
+                if out.exit_code == 0 {
+                    tracing::info!(
+                        node = sel.node,
+                        variant = sel.variant,
+                        "skip_if passed — skipping terminal node"
+                    );
+                    if let Some(ns) = run.nodes.get_mut(&key) {
+                        ns.status = NodeStatus::Skipped;
+                        ns.outputs.insert("exit_code".to_owned(), "0".to_owned());
+                    }
+                    if !run.execution_order.contains(&key) {
+                        run.execution_order.push(key.clone());
+                    }
+                    // Best-effort persist — a bookkeeping failure must not turn
+                    // a skipped (exit 0) result into an error.
+                    if let Err(e) = self.save_state(&run) {
+                        tracing::warn!(error = %e, "failed to persist skipped terminal node");
+                    }
+                    return Ok(0);
+                }
+            }
+        }
+
+        // Run the command, streaming its output live and into the run log.
+        let output_file =
+            logging::output_file(&self.project_root, run_name, &sel.node, &sel.variant);
+        let log_target = process::LogTarget {
+            db: self.db.clone(),
+            project_root: self.project_root.clone(),
+            run_name: run_name.to_owned(),
+            node: sel.node.clone(),
+            variant: sel.variant.clone(),
+        };
+        let result = process::run_command_streaming(
+            &resolved_cmd,
+            &working_dir,
+            &env,
+            Some(&output_file),
+            Some(log_target),
+        )
+        .await?;
+
+        // Persist the terminal node's final state. Undeclared outputs are
+        // ignored (not fatal): the node has already produced its result and its
+        // exit code is what matters — failing the run over strict_outputs here
+        // would only mask it.
+        let declared_keys = variant_cfg
+            .outputs
+            .as_ref()
+            .map(|o| o.declared_keys())
+            .unwrap_or_default();
+        let mut node_state = run
+            .nodes
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| NodeState::new(&sel.node, &sel.variant));
+        node_state
+            .outputs
+            .insert("exit_code".to_owned(), result.exit_code.to_string());
+        for (k, v) in &result.outputs {
+            if declared_keys.contains(k.as_str()) {
+                node_state.outputs.insert(k.clone(), v.clone());
+            }
+        }
+        node_state.status = if result.exit_code == 0 {
+            NodeStatus::Healthy
+        } else {
+            NodeStatus::Failed
+        };
+        if let Some(sensitive) = variant_cfg.sensitive_outputs.clone() {
+            node_state.sensitive_keys = sensitive;
+        }
+        run.nodes.insert(key.clone(), node_state);
+        // Append last so reverse-order teardown runs its on_stop hook first.
+        if !run.execution_order.contains(&key) {
+            run.execution_order.push(key.clone());
+        }
+        // Best-effort persist: the command has already run and its exit code is
+        // the whole `--oneshot` contract, so a post-completion bookkeeping
+        // failure must not override it (a passing run reporting 127 to CI would
+        // be a false failure). Log and return the real code regardless.
+        if let Err(e) = self.save_state(&run) {
+            tracing::warn!(error = %e, "failed to persist terminal node result");
+        }
+
+        Ok(result.exit_code)
     }
 
     /// Execute a single stage: all nodes run in parallel via `JoinSet`.
@@ -1244,6 +1504,18 @@ fn resolve_working_dir(
         }
         None => Ok(project_root.to_path_buf()),
     }
+}
+
+/// Whether `sel` is the run's terminal one-off node (`--oneshot`), given the
+/// precomputed terminal node key. Such a node is present in the execution plan
+/// (so its dependencies resolve) but must be dropped from startup execution and
+/// the healthy-node count — it runs later via [`Orchestrator::run_terminal`].
+/// Every pass over the plan that executes or counts nodes routes through this
+/// so the invariant "deps run at startup, terminal node runs after" holds in
+/// one place. The pre-stage `Pending` seeding is the deliberate exception: the
+/// terminal node IS seeded so reverse-order teardown can find it.
+fn is_terminal(terminal_key: Option<&str>, sel: &NodeSelection) -> bool {
+    terminal_key == Some(RunState::node_key(&sel.node, &sel.variant).as_str())
 }
 
 /// Execute a single node in isolation (no `&self`). Designed to be spawned
@@ -2099,5 +2371,77 @@ mod tests {
             assert!(!is_reapable_orphan(&status, false, false));
             assert!(!is_reapable_orphan(&status, false, true));
         }
+    }
+
+    /// Build a minimal orchestrator backed by a throwaway database, with no
+    /// helper interaction — enough to exercise `run_terminal` in isolation.
+    fn test_orchestrator(project_root: &std::path::Path, config: VeldConfig) -> Orchestrator {
+        let db = Db::open_at(&project_root.join("veld.db")).unwrap();
+        Orchestrator {
+            config,
+            config_path: project_root.join("veld.json"),
+            project_root: project_root.to_path_buf(),
+            db,
+            port_allocator: PortAllocator::new(),
+            helper_client: HelperClient::default_client(),
+            https_port: 443,
+            children: HashMap::new(),
+            precomputed_servers: HashMap::new(),
+            debug: false,
+            debug_writer: None,
+            foreground: false,
+            progress_tx: None,
+            internal_log: None,
+            terminal_node: None,
+            terminal_outputs: Some(HashMap::new()),
+        }
+    }
+
+    /// The core `--oneshot` contract: a non-zero terminal exit is returned (not
+    /// raised as an error) and the node's result is persisted, appended to the
+    /// execution order so reverse-order teardown can find it.
+    #[tokio::test]
+    async fn run_terminal_propagates_exit_code_and_persists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "2",
+                "name": "testcfg",
+                "url_template": "{service}.{run}.{project}.localhost",
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "command": "echo running; exit 7" }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let sel = NodeSelection {
+            node: "task".to_owned(),
+            variant: "local".to_owned(),
+        };
+        let key = RunState::node_key(&sel.node, &sel.variant);
+
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+        run.nodes
+            .insert(key.clone(), NodeState::new(&sel.node, &sel.variant));
+        orch.save_state(&run).unwrap();
+
+        let code = orch.run_terminal("testrun", &sel).await.unwrap();
+        assert_eq!(code, 7, "non-zero exit must be returned, not an error");
+
+        let reloaded = orch.db.get_run(project_root, "testrun").unwrap().unwrap();
+        let ns = reloaded.nodes.get(&key).unwrap();
+        assert_eq!(ns.status, NodeStatus::Failed);
+        assert_eq!(ns.outputs.get("exit_code").map(String::as_str), Some("7"));
+        assert!(
+            reloaded.execution_order.contains(&key),
+            "terminal node must be appended to execution_order for teardown"
+        );
     }
 }

@@ -261,6 +261,35 @@ loop:
 re-run and resumes cleanly after a restart. Reply parks a thread on the human
 and drops it off the queue; a new human comment brings it back automatically.
 
+## One-off runs (`--oneshot`) — e2e tests, CI
+
+`veld start <node> --oneshot` runs a `command` node as the run's **terminal
+node**: it starts the node's dependencies, runs the node to completion
+(streaming its output), then tears the whole environment down in reverse order
+and exits with the node's exit code. The local/CI analog of
+`docker compose run --rm --abort-on-container-exit`.
+
+```sh
+# Bring up e2e's deps (web, api, db), run the suite, tear down, exit w/ its code.
+veld start e2e --oneshot
+veld start e2e --oneshot --all-logs   # also interleave dependency logs (stderr)
+```
+
+- **stdout = only the terminal node's stdout.** Veld's chrome (summary,
+  progress NDJSON, teardown lines) and dependency logs all go to **stderr**, so
+  an agent/CI capturing stdout gets just the program output. Dep logs are
+  recorded (`veld logs --node <dep>`); `--all-logs` interleaves them live.
+- Ports are dynamic, so pass dep URLs into the runner via `${nodes.<node>.url}`
+  in the command or its `env` (e.g. `"env": { "BASE_URL": "${nodes.web.url}" }`).
+- The node **must be `command` type** (a `start_server` never exits) **and must
+  terminate** — a server mistyped as `command` hangs the run. Exactly **one**
+  selection is required (no multi-node preset); its deps start automatically.
+- A non-zero exit (failing tests) becomes veld's own exit code — chain it:
+  `veld start e2e --oneshot && deploy`. Ctrl+C aborts and exits `130`.
+- Teardown (`on_stop` hooks, project `teardown`) always runs — on completion
+  and on Ctrl+C — and runs to completion once started. Deps aren't
+  health-monitored while the node runs.
+
 ## Reading Outputs
 
 After starting an environment, read node outputs (database URLs, ports, credentials, etc.):
@@ -287,6 +316,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
 - **`outputs` shape differs by type** — object (`{"KEY": "template"}`) for `start_server`, array (`["KEY"]`) for `command`
 - **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port
+- **`--oneshot` needs a `command` node** — the terminal node must run to completion; a `start_server` is rejected. Its exit code becomes veld's exit code; only its logs stream to stdout unless `--all-logs`
 - **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Only project-level variables (`${veld.name}`, `${veld.root}`, `${veld.run}`) are available, not `${veld.port}` or `${nodes.*}`
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
