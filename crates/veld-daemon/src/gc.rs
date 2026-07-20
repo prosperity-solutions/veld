@@ -17,6 +17,11 @@ const MAX_ENTRY_AGE_HOURS: i64 = 72;
 /// Maximum age for log files before pruning (hours).
 const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 
+/// Maximum age for process-stats samples before pruning (hours). Short: the
+/// samples are high-frequency (one row per node every 5s) and only feed the
+/// live UI/CLI views, which never look back more than a few minutes.
+const MAX_STATS_AGE_HOURS: i64 = 6;
+
 /// Run the garbage-collection scheduler. This function loops forever and
 /// performs GC on the configured interval.
 pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
@@ -32,10 +37,11 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} routes cleaned",
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned, {} routes cleaned",
                     summary.stale_removed,
                     summary.orphans_killed,
                     summary.logs_pruned,
+                    summary.stats_pruned,
                     summary.routes_cleaned
                 );
                 // Stop any shares whose run just died so they don't outlive the
@@ -58,6 +64,7 @@ pub struct GcSummary {
     pub stale_removed: usize,
     pub orphans_killed: usize,
     pub logs_pruned: usize,
+    pub stats_pruned: usize,
     pub routes_cleaned: usize,
     /// Run ids whose processes were found dead this pass — their P2P shares
     /// should be stopped.
@@ -166,6 +173,8 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
     let _ = db.prune_orphaned_feedback(log_cutoff);
+    let stats_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_STATS_AGE_HOURS);
+    summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
     let _ = db.vacuum();
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's

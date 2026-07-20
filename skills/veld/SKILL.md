@@ -270,6 +270,14 @@ veld status --outputs --name my-feature        # human-readable
 veld status --outputs --json --name my-feature  # machine-readable
 ```
 
+`veld status` also reports per-node resource usage (CPU % and memory, summed
+over each node's whole process tree) — a `CPU`/`MEM` column in the table, and a
+top-level `stats` map (`"node:variant"` → `{ cpu_percent, memory_bytes,
+process_count, sampled_at }`) in `--json`. Values are sampled by the daemon
+every ~5s, so they're absent (`–` / omitted) until the first sample lands, and
+go absent again shortly after a node dies or the daemon stops. The management UI
+shows the same figures live with a memory sparkline.
+
 To debug liveness probe failures and recovery decisions:
 ```sh
 veld logs --source internal --name my-feature     # shows probe stderr, recovery attempts

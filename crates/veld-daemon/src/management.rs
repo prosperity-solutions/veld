@@ -38,6 +38,7 @@ pub fn routes() -> Router {
         // daemon is reachable), mirroring the helper's version check.
         .route("/api/health", get(health))
         .route("/api/environments", get(list_environments))
+        .route("/api/stats", get(get_stats))
         .route("/api/logs/{run}", get(get_logs))
         .route("/api/open-terminal", post(open_terminal))
         .route("/api/environments/{run}/stop", post(stop_environment))
@@ -211,6 +212,95 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(Json(EnvironmentList { projects }))
+}
+
+// ---------------------------------------------------------------------------
+// Process stats API
+// ---------------------------------------------------------------------------
+
+/// How many recent memory samples to include per node for the UI sparkline.
+/// At the 5s scan cadence this is the last ~5 minutes.
+const SPARK_POINTS: usize = 60;
+
+/// Live resource stats for every running run, keyed by project root, then run
+/// name, then node key (`"node:variant"`). Served on its own endpoint (not
+/// folded into `/api/environments`) so the dashboard can patch the numbers in
+/// place on a fast cadence without re-rendering — and skipping its render
+/// fingerprint. Keyed by project root (not bare run name) because run names
+/// collide across projects — two repos both on branch `main` default to a run
+/// named `main` — and the dashboard cards are likewise project-scoped.
+#[derive(Serialize)]
+struct StatsResponse {
+    projects: HashMap<String, HashMap<String, HashMap<String, NodeStats>>>,
+}
+
+#[derive(Serialize)]
+struct NodeStats {
+    /// CPU percentage of a single core, summed across the process tree.
+    cpu: f32,
+    /// Resident memory in bytes, summed across the process tree.
+    mem: u64,
+    /// Number of live processes in the tree.
+    procs: u32,
+    /// Recent memory samples (bytes), oldest-first, for the sparkline.
+    spark: Vec<u64>,
+}
+
+async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
+    let db = open_db()?;
+    let registry = db.registry().map_err(|e| {
+        warn!("failed to load registry for stats: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let now = chrono::Utc::now();
+    let mut projects: HashMap<String, HashMap<String, HashMap<String, NodeStats>>> = HashMap::new();
+    for entry in registry.projects.values() {
+        for (run_name, run_info) in &entry.runs {
+            if run_info.status != RunStatus::Running {
+                continue;
+            }
+            let latest = match db.latest_node_stats(&entry.project_root, run_name) {
+                Ok(l) => l,
+                Err(e) => {
+                    warn!("failed to load stats for run '{run_name}': {e}");
+                    continue;
+                }
+            };
+            let mut nodes = HashMap::new();
+            for (node_key, s) in latest {
+                // Drop stale samples so a crashed node or a stopped daemon
+                // shows as absent rather than freezing its last reading.
+                if !s.is_fresh(now) {
+                    continue;
+                }
+                let spark = db
+                    .node_stats_history(&entry.project_root, run_name, &node_key, SPARK_POINTS)
+                    .unwrap_or_default()
+                    .iter()
+                    .map(|h| h.memory_bytes)
+                    .collect();
+                nodes.insert(
+                    node_key,
+                    NodeStats {
+                        cpu: s.cpu_percent,
+                        mem: s.memory_bytes,
+                        procs: s.process_count,
+                        spark,
+                    },
+                );
+            }
+            if nodes.is_empty() {
+                continue;
+            }
+            projects
+                .entry(entry.project_root.display().to_string())
+                .or_default()
+                .insert(run_name.clone(), nodes);
+        }
+    }
+
+    Ok(Json(StatsResponse { projects }))
 }
 
 // ---------------------------------------------------------------------------
