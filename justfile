@@ -204,16 +204,47 @@ dev-daemon-sandbox:
     echo "✓ Sandbox DB: $sandbox_db (copy of $real_db)"
 
     plist="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
+    unloaded=""
+    daemon_pid=""
+    cleanup() {
+        # Kill the dev daemon explicitly — depending on how the signal
+        # arrived (Ctrl-C via just, kill on the script, terminal close), the
+        # daemon may or may not have received it itself.
+        if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
+            kill -INT "$daemon_pid" 2>/dev/null || true
+            for _ in $(seq 1 20); do
+                kill -0 "$daemon_pid" 2>/dev/null || break
+                sleep 0.5
+            done
+            kill -9 "$daemon_pid" 2>/dev/null || true
+        fi
+        if [ -n "$unloaded" ]; then
+            unloaded=""
+            echo "Restoring released daemon…"
+            launchctl bootstrap "gui/$(id -u)" "$plist" || true
+        fi
+    }
+    # EXIT alone is not enough: bash skips the EXIT trap when it dies on an
+    # untrapped SIGINT/SIGTERM, so trap those to funnel into a normal exit.
+    trap cleanup EXIT
+    trap 'exit 130' INT TERM
     if [ -f "$plist" ] && launchctl list dev.veld.daemon &>/dev/null; then
         echo "Unloading released daemon (restored on exit)…"
         launchctl bootout "gui/$(id -u)/dev.veld.daemon" || true
-        trap 'echo "Restoring released daemon…"; launchctl bootstrap "gui/$(id -u)" "'"$plist"'" || true' EXIT
+        unloaded=1
     fi
 
     echo "Dev daemon on http://127.0.0.1:19899 (v2 UI: /v2) — Ctrl-C to stop."
     VELD_DB_PATH="$sandbox_db" \
     VELD_SPAWN_VELD_BIN="{{justfile_directory()}}/target/debug/veld" \
-        ./target/debug/veld-daemon
+        ./target/debug/veld-daemon &
+    daemon_pid=$!
+    # wait returns >128 when a trapped signal interrupts it — loop until the
+    # daemon is actually gone so the INT/TERM path flows through cleanup once.
+    while kill -0 "$daemon_pid" 2>/dev/null; do
+        wait "$daemon_pid" || true
+    done
+    daemon_pid=""
 
 # --- Tier 3: Install helper (privileged, requires sudo) ---
 
