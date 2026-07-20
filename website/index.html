@@ -230,10 +230,49 @@
     .btn-primary:hover { filter: brightness(1.08); border-color: var(--accent-ink); background: var(--accent-ink); }
 
     /* ---------- features grid ---------- */
-    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    /* Explicit column counts (not auto-fill) so the joke cell below can span the
+       exact leftover slack after the 13 feature cells. Content width (~892px)
+       never fits a 4th 260px column, so 3 is the max. */
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    @media (max-width: 760px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+    @media (max-width: 480px) { .grid { grid-template-columns: 1fr; } }
     .grid .cell { background: var(--bg); padding: 20px 22px; }
     .grid .cell h3 { color: var(--text); }
     .grid .cell p { color: var(--text2); font-size: 14px; margin-bottom: 0; }
+
+    /* "coming soon" joke cell — fills the leftover slack so the grid never shows
+       an empty gray gap. 13 feature cells at 3 cols leave 1 orphan + 2 gaps, so
+       the joke bar spans 2 to complete that last row. At 2/1 cols it (and the
+       orphaned last feature) go full-width instead. NB: tuned to 13 features —
+       revisit the span if you add or remove feature cells. */
+    .grid .cell-next { grid-column: span 2; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
+    @media (max-width: 760px) {
+      .grid .cell:nth-last-child(2) { grid-column: 1 / -1; }
+      .grid .cell-next { grid-column: 1 / -1; }
+    }
+    .cell-next .next-line { font-family: var(--mono); font-size: 14px; color: var(--text); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .cell-next .next-prompt { color: var(--accent-ink); font-weight: 700; flex: none; }
+    .cell-next .next-ticker { position: relative; display: inline-block; min-width: 1px; height: 1.4em; line-height: 1.4em; overflow: hidden; flex: 1 1 auto; }
+    .cell-next .next-ticker b { position: absolute; left: 0; top: 0; height: 1.4em; line-height: 1.4em; white-space: nowrap; font-weight: 400; color: var(--text2); opacity: 0; animation: veld-tick 20s infinite; }
+    .cell-next .next-ticker b:nth-child(1) { animation-delay: 0s; }
+    .cell-next .next-ticker b:nth-child(2) { animation-delay: -4s; }
+    .cell-next .next-ticker b:nth-child(3) { animation-delay: -8s; }
+    .cell-next .next-ticker b:nth-child(4) { animation-delay: -12s; }
+    .cell-next .next-ticker b:nth-child(5) { animation-delay: -16s; }
+    .cell-next .next-cursor { display: inline-block; width: .55ch; height: 1.05em; background: var(--accent-ink); margin-left: 2px; animation: veld-blink 1.1s step-end infinite; flex: none; }
+    .cell-next .next-note { color: var(--text2); font-size: 12.5px; margin: 8px 0 0; font-style: italic; }
+    @keyframes veld-tick {
+      0%, 2% { opacity: 0; transform: translateY(5px); }
+      4%, 18% { opacity: 1; transform: translateY(0); }
+      20%, 100% { opacity: 0; transform: translateY(-5px); }
+    }
+    @keyframes veld-blink { 0%, 50% { opacity: 1; } 50.01%, 100% { opacity: 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      .cell-next .next-ticker { height: auto; }
+      .cell-next .next-ticker b { position: static; opacity: 1; animation: none; }
+      .cell-next .next-ticker b:not(:first-child) { display: none; }
+      .cell-next .next-cursor { animation: none; }
+    }
 
     /* ---------- components / diagram ---------- */
     .comp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 36px; }
@@ -373,6 +412,20 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
         <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
+        <div class="cell cell-next">
+          <div class="next-line">
+            <span class="next-prompt">$ claude</span>
+            <span class="next-ticker">
+              <b>building the next big feature…</b>
+              <b>teaching your flaky tests to pass on the first try…</b>
+              <b>negotiating a ceasefire with your Docker daemon…</b>
+              <b>removing three more port numbers that never existed…</b>
+              <b>convincing localhost to finally love you back…</b>
+            </span>
+            <span class="next-cursor" aria-hidden="true"></span>
+          </div>
+          <p class="next-note">Claude is already working on it. Probably. Check back never — it'll just show up.</p>
+        </div>
       </div>
     </div>
   </section>
