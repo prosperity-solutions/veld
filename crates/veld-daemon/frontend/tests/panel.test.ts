@@ -9,7 +9,9 @@ import {
   showThreadDetail,
   showThreadList,
   applyPanelLayout,
+  restoreSession,
 } from "../src/feedback-overlay/panel";
+import { savePanelState, saveComposerDraft } from "../src/feedback-overlay/persist";
 import { refs } from "../src/feedback-overlay/refs";
 import { getState, dispatch } from "../src/feedback-overlay/store";
 import { PREFIX } from "../src/feedback-overlay/constants";
@@ -235,5 +237,50 @@ describe("panel float/dock layout", () => {
     dispatch({ type: "SET_PANEL_OPEN", open: false });
     applyPanelLayout();
     expect(document.documentElement.style.marginRight).toBe("");
+  });
+});
+
+// restoreSession is guarded to run once per module load, so this file gets a
+// single effective restore test (the unguarded restoreComposer is covered in
+// popover.test.ts).
+describe("restoreSession", () => {
+  beforeEach(() => {
+    sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+    setupMockRefs();
+  });
+
+  it("re-opens the panel with the saved tab and the open composer after a reload", () => {
+    // Simulate pre-reload state: panel open on the Resolved tab, plus a
+    // half-typed page comment.
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    dispatch({ type: "SET_PANEL_TAB", tab: "resolved" });
+    savePanelState();
+    saveComposerDraft({
+      text: "unsent page comment",
+      isPage: true,
+      selector: null,
+      tagInfo: null,
+      trace: null,
+      elementText: null,
+      sourceFile: null,
+      sourceLine: null,
+      rect: { x: 0, y: 0, width: 0, height: 0 },
+    });
+
+    // Reload: fresh store + refs, sessionStorage survives.
+    setupMockRefs();
+    expect(getState().panelOpen).toBe(false);
+
+    restoreSession();
+
+    expect(getState().panelOpen).toBe(true);
+    expect(getState().panelTab).toBe("resolved");
+    expect(refs.panel.classList.contains(PREFIX + "panel-open")).toBe(true);
+    // The composer was re-opened with its text.
+    const pop = getState().activePopover;
+    expect(pop).not.toBeNull();
+    const ta = pop!.querySelector("textarea." + PREFIX + "textarea") as HTMLTextAreaElement;
+    expect(ta.value).toBe("unsent page comment");
   });
 });

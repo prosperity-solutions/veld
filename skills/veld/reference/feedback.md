@@ -4,6 +4,8 @@ Veld injects a feedback overlay into every page it serves. A human leaves commen
 
 The queue is **stateless from your side**: there is no cursor to track. You call `veld feedback next`, work the item it returns, then `reply` or `resolve` it. That item drops off the queue and the next call returns the following one.
 
+The overlay is robust to reloads: when your fix hot-reloads the page (or the reviewer just refreshes), the overlay restores the reviewer's in-progress state — a half-typed element or page comment and the element it's attached to, the open panel/tab and scroll position, and any unsent thread replies — from tab-local `sessionStorage`. So you can push a fix mid-review without wiping the comment the reviewer was typing. (A half-drawn *screenshot* comment is the exception: its captured frame can't survive a reload, so that composer isn't restored.) It's cleared when they submit or click Done.
+
 ## When to Run the Loop
 
 - After visual/UI changes that need human eyes

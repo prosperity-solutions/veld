@@ -185,6 +185,8 @@ The feedback server runs per-run and exposes:
 
 The feedback overlay automatically captures React and Vue component stack traces when available, providing agents with component-level context (not just CSS selectors) for precise modifications.
 
+The overlay survives full page reloads: when the agent's fix hot-reloads the page or the reviewer refreshes, it restores in-progress state (a half-typed element or page comment and the element it targets, the open panel/tab and scroll position, and unsent replies) from tab-local session storage — so an agent can push a fix mid-review without discarding the comment the reviewer was writing. (A screenshot comment in progress is not restored — its captured frame can't be reconstructed after a reload.)
+
 This makes veld uniquely suited for agentic workflows where AI agents build UI and humans provide iterative feedback without context-switching.
 
 ---

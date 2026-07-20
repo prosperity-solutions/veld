@@ -13,6 +13,7 @@ import { togglePanel, togglePanelSide, showThreadList, renderPanel, markAllRead,
 import { sendAllGood } from "./listening";
 import { captureFullScreenshot } from "./screenshot";
 import { buildSharingMenuItem } from "./sharing";
+import { savePanelState, schedulePanelSave } from "./persist";
 
 export function buildDOM(): void {
   initTooltip();
@@ -250,9 +251,9 @@ export function buildDOM(): void {
 
   const segControl = mkEl("div", "segmented");
   refs.segBtnActive = mkEl("button", "segmented-btn segmented-btn-active", "Active");
-  refs.segBtnActive.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "active" }); renderPanel(); });
+  refs.segBtnActive.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "active" }); renderPanel(); savePanelState(); });
   refs.segBtnResolved = mkEl("button", "segmented-btn", "Resolved");
-  refs.segBtnResolved.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "resolved" }); renderPanel(); });
+  refs.segBtnResolved.addEventListener("click", function () { dispatch({ type: "SET_PANEL_TAB", tab: "resolved" }); renderPanel(); savePanelState(); });
   segControl.appendChild(refs.segBtnActive);
   segControl.appendChild(refs.segBtnResolved);
   panelHead.appendChild(segControl);
@@ -283,6 +284,9 @@ export function buildDOM(): void {
   refs.panel.appendChild(panelHead);
 
   refs.panelBody = mkEl("div", "panel-body");
+  // Persist the panel scroll position (rAF-coalesced) so a reload restores the
+  // spot in a long thread list, not the top.
+  refs.panelBody.addEventListener("scroll", schedulePanelSave);
   refs.panel.appendChild(refs.panelBody);
 
   refs.panelResize = mkEl("div", "panel-resize");
