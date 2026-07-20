@@ -97,6 +97,11 @@ If the change is purely internal (refactor, bugfix with no new surface area), th
   metadata on anonymous pages. Never ship an unbranded, system-default-styled
   page; when adding one to an existing binary, reuse its page shell (e.g.
   `veld-gateway`'s `pages::shell`) instead of writing bespoke HTML.
+- **Diagnostics go to stderr; machine-readable output goes to stdout.** Tracing
+  logs, progress, and human status/receipt lines are stderr; `--json` payloads
+  and the terminal node's own output under `veld start --oneshot` are the only
+  things on stdout. A stray `println!`/`tracing::*!`-to-stdout in a command
+  silently corrupts an agent's or CI's stdout capture — keep chrome on stderr.
 - Domain: `veld.oss.life.li` (not `veld.dev`)
 - Install URL: `https://veld.oss.life.li/get`
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`

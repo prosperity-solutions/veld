@@ -32,6 +32,25 @@
           "depends_on": { "backend": "local" }
         }
       }
+    },
+    "e2e": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "command",
+          "command": "echo \"running e2e against ${nodes.frontend.url}\"; curl -fsS ${nodes.backend.url}/health >/dev/null && echo '  ✓ backend healthy'; echo '  ✓ homepage loads'; echo; echo '2 passed, 0 failed'",
+          "depends_on": { "frontend": "local" }
+        }
+      }
+    },
+    "failtest": {
+      "default_variant": "local",
+      "variants": {
+        "local": {
+          "type": "command",
+          "command": "echo boom; exit 3"
+        }
+      }
     }
   }
 }

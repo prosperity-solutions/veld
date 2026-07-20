@@ -362,6 +362,7 @@ veld share <span class="kw">--web</span>
       <div class="grid">
         <div class="cell"><h3>No port numbers</h3><p>Real names like <code>frontend.my-feature.localhost</code> instead of <code>localhost:3847</code>.</p></div>
         <div class="cell"><h3>Starts things in the right order</h3><p>Works out what depends on what, starts it all (in parallel where it can), and shuts down cleanly in reverse.</p></div>
+        <div class="cell"><h3>Run your e2e tests on it</h3><p>Point <code>veld start --oneshot</code> at a test command: it spins up every service the tests need, runs them, prints the results, then tears it all down — and the test's exit code becomes veld's. One line in CI.</p></div>
         <div class="cell"><h3>Real HTTPS, no warnings</h3><p>Every URL is <code>https://</code> with a trusted certificate. Set up once — no browser warnings.</p></div>
         <div class="cell"><h3>Waits until things are ready</h3><p>You don't get a URL until the service actually responds — and veld keeps watching after it's up.</p></div>
         <div class="cell"><h3>Restarts what crashes</h3><p>If a service falls over, veld brings the environment back on its own.</p></div>
@@ -386,6 +387,7 @@ veld share <span class="kw">--web</span>
         <h3>Environments</h3>
         <div class="cli-row"><code>veld start NODE:VARIANT --name N</code><span>Start an environment</span></div>
         <div class="cli-row"><code>veld start PRESET --name N</code><span>Start a preset — a saved selection of nodes (e.g. <code>fullstack</code>)</span></div>
+        <div class="cli-row"><code>veld start NODE --oneshot</code><span>Run a command node as a one-off — start its deps, run it to completion, tear down, exit with its code (e.g. e2e tests)</span></div>
         <div class="cli-row"><code>veld stop [--name N] [--all]</code><span>Stop a running environment</span></div>
         <div class="cli-row"><code>veld restart [--name N]</code><span>Restart an environment</span></div>
         <div class="cli-row"><code>veld status [--name N]</code><span>Show run status</span></div>

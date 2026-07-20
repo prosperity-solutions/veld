@@ -8,12 +8,14 @@ use tokio::sync::mpsc;
 
 use crate::output::{self, is_tty};
 
-/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--debug]`
+/// `veld start [node:variant...] [--preset <n>] [--name <n>] [-a] [--oneshot] [--debug]`
 pub async fn run(
     selections: Vec<String>,
     preset: Option<String>,
     name: Option<String>,
     attach: bool,
+    oneshot: bool,
+    all_logs: bool,
     _debug: bool,
 ) -> i32 {
     let Some((config_path, config)) = super::load_config(false) else {
@@ -83,6 +85,47 @@ pub async fn run(
         }
     }
 
+    // --oneshot: validate and pick the terminal command node.
+    let terminal_sel = if oneshot {
+        if attach {
+            output::print_error("--attach and --oneshot cannot be combined.", false);
+            return 1;
+        }
+        if parsed_selections.len() != 1 {
+            output::print_error(
+                "--oneshot requires exactly one command-type selection (the terminal node whose \
+                 exit ends the run). Its dependencies are started automatically.",
+                false,
+            );
+            return 1;
+        }
+        let sel = parsed_selections[0].clone();
+        let is_command = config
+            .nodes
+            .get(&sel.node)
+            .and_then(|n| n.variants.get(&sel.variant))
+            .map(|v| v.step_type == veld_core::config::StepType::Command)
+            .unwrap_or(false);
+        if !is_command {
+            output::print_error(
+                &format!(
+                    "--oneshot requires a command-type node; '{}:{}' is a start_server (it never \
+                     exits, so it cannot be the terminal node).",
+                    sel.node, sel.variant
+                ),
+                false,
+            );
+            return 1;
+        }
+        Some(sel)
+    } else {
+        if all_logs {
+            output::print_error("--all-logs only applies with --oneshot.", false);
+            return 1;
+        }
+        None
+    };
+
     let project_root = veld_core::config::project_root(&config_path);
     let run_name = match name {
         Some(ref n) => n.clone(),
@@ -101,12 +144,15 @@ pub async fn run(
     };
     orchestrator.set_debug(_debug);
     orchestrator.set_foreground(foreground);
+    orchestrator.set_terminal_node(terminal_sel.clone());
 
     // Set up live progress channel.
     let (progress_tx, progress_rx) = mpsc::unbounded_channel::<ProgressEvent>();
     orchestrator.set_progress_sender(progress_tx);
     let tty = is_tty();
-    let progress_handle = tokio::spawn(render_progress(progress_rx, tty));
+    // In --oneshot mode, stdout must carry ONLY the terminal node's output, so
+    // the startup progress stream goes to stderr.
+    let progress_handle = tokio::spawn(render_progress(progress_rx, tty, terminal_sel.is_some()));
 
     eprintln!(
         "{} Starting environment {}...",
@@ -122,9 +168,17 @@ pub async fn run(
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
             eprintln!();
-            output::print_info("Interrupted — stopping partially started environment...");
+            // Interrupt/cleanup messages are diagnostics → stderr (keeps stdout
+            // clean, notably for --oneshot where stdout is the node's output).
+            eprintln!(
+                "  {} Interrupted — stopping partially started environment...",
+                output::dim("»")
+            );
             match orchestrator.stop(run_name_str).await {
-                Ok(_) => output::print_success(&format!("Environment '{}' cleaned up.", run_name_str)),
+                Ok(_) => eprintln!(
+                    "  {} Environment '{run_name_str}' cleaned up.",
+                    output::checkmark()
+                ),
                 Err(e) => output::print_error(&format!("Cleanup failed: {e}"), false),
             }
             return 130; // Standard exit code for SIGINT
@@ -136,6 +190,20 @@ pub async fn run(
             // Drop the progress sender so the renderer can finish.
             orchestrator.close_progress_sender();
             let _ = progress_handle.await;
+
+            // --oneshot: dependencies are up; now run the terminal node to
+            // completion, tear everything down, and exit with its code.
+            if let Some(ref sel) = terminal_sel {
+                return run_oneshot_terminal(
+                    &mut orchestrator,
+                    &run_state,
+                    sel,
+                    run_name_str,
+                    &project_root,
+                    all_logs,
+                )
+                .await;
+            }
 
             // Final receipt: summary table.
             println!();
@@ -312,16 +380,26 @@ fn print_start_receipt(run_state: &veld_core::state::RunState) {
 ///
 /// TTY mode: Uses `indicatif::MultiProgress` for concurrent node spinners.
 /// Non-TTY/JSON mode: Emits NDJSON for agent consumption.
-async fn render_progress(mut rx: mpsc::UnboundedReceiver<ProgressEvent>, tty: bool) {
+async fn render_progress(
+    mut rx: mpsc::UnboundedReceiver<ProgressEvent>,
+    tty: bool,
+    json_stderr: bool,
+) {
     let mut ctx = TtyProgressCtx::new();
 
     while let Some(event) = rx.recv().await {
         if tty {
             render_progress_tty(&event, &mut ctx);
         } else {
-            // NDJSON for non-TTY / agent mode.
+            // NDJSON for non-TTY / agent mode. In --oneshot mode this startup
+            // progress is chrome, not program output, so route it to stderr to
+            // keep stdout carrying only the terminal node's output.
             if let Ok(json) = serde_json::to_string(&event) {
-                println!("{json}");
+                if json_stderr {
+                    eprintln!("{json}");
+                } else {
+                    println!("{json}");
+                }
             }
         }
     }
@@ -634,6 +712,155 @@ async fn follow_logs_until_interrupt(
             _ = tokio::signal::ctrl_c() => {
                 return;
             }
+        }
+    }
+}
+
+/// Run the terminal one-off node (`--oneshot`) after its dependencies are
+/// healthy: stream its output, tear everything down in reverse order, and
+/// return its exit code so CI/callers see pass/fail directly.
+async fn run_oneshot_terminal(
+    orchestrator: &mut Orchestrator,
+    run_state: &veld_core::state::RunState,
+    sel: &NodeSelection,
+    run_name: &str,
+    project_root: &std::path::Path,
+    all_logs: bool,
+) -> i32 {
+    let label = format!("{}:{}", sel.node, sel.variant);
+
+    // Everything veld prints here is chrome and goes to STDERR: stdout must
+    // carry only the terminal node's own output (streamed by run_terminal), so
+    // an agent or CI job that captures stdout gets just the test results.
+    eprintln!();
+    print_deps_summary_stderr(run_state, sel);
+    eprintln!();
+    eprintln!(
+        "  {} Running {} (Ctrl+C to abort)...",
+        output::dim("»"),
+        output::bold(&label)
+    );
+    eprintln!();
+
+    // Optionally interleave dependency logs — also on stderr, keeping stdout
+    // the terminal node's output only.
+    let tailer = if all_logs {
+        let db = orchestrator.db.clone();
+        let pr = project_root.to_path_buf();
+        let rn = run_name.to_owned();
+        let dep_targets: Vec<(String, String)> = run_state
+            .nodes
+            .values()
+            .filter(|ns| !(ns.node_name == sel.node && ns.variant == sel.variant))
+            .map(|ns| (ns.node_name.clone(), ns.variant.clone()))
+            .collect();
+        Some(tokio::spawn(async move {
+            follow_dep_logs(&db, &dep_targets, &pr, &rn).await;
+        }))
+    } else {
+        None
+    };
+
+    let result = orchestrator.run_terminal(run_name, sel).await;
+
+    if let Some(handle) = tailer {
+        handle.abort();
+    }
+
+    let exit_code = match result {
+        Ok(code) => code,
+        Err(e) => {
+            output::print_error(&format!("Failed to run {label}: {e}"), false);
+            127
+        }
+    };
+
+    // Tear down all dependencies in reverse order, regardless of outcome.
+    eprintln!();
+    eprintln!("  {} Tearing down environment...", output::dim("»"));
+    match orchestrator.stop(run_name).await {
+        Ok(_) => eprintln!(
+            "  {} Environment '{run_name}' torn down.",
+            output::checkmark()
+        ),
+        Err(e) => output::print_error(&format!("Teardown failed: {e}"), false),
+    }
+
+    eprintln!();
+    if exit_code == 0 {
+        eprintln!(
+            "  {} {} completed successfully (exit 0).",
+            output::checkmark(),
+            label
+        );
+    } else {
+        output::print_error(&format!("{label} exited with code {exit_code}."), false);
+    }
+
+    exit_code
+}
+
+/// Print a compact summary of the started dependencies to **stderr** (stdout is
+/// reserved for the terminal node's own output in `--oneshot` mode).
+fn print_deps_summary_stderr(run_state: &veld_core::state::RunState, terminal: &NodeSelection) {
+    use veld_core::state::{NodeStatus, RunState};
+
+    let term_key = RunState::node_key(&terminal.node, &terminal.variant);
+    for key in &run_state.execution_order {
+        if key == &term_key {
+            continue;
+        }
+        let Some(ns) = run_state.nodes.get(key) else {
+            continue;
+        };
+        let status = match ns.status {
+            NodeStatus::Healthy => output::green("healthy"),
+            NodeStatus::Skipped => output::dim("skipped"),
+            _ => output::dim(&format!("{:?}", ns.status).to_lowercase()),
+        };
+        eprintln!(
+            "  {} {} {}",
+            output::dim(&format!("{}:{}", ns.node_name, ns.variant)),
+            status,
+            output::dim(ns.url.as_deref().unwrap_or("-")),
+        );
+    }
+}
+
+/// Tail dependency server logs until the task is aborted. Used by
+/// `--oneshot --all-logs` to interleave dependency output with the terminal
+/// node's own (already-streamed) output.
+async fn follow_dep_logs(
+    db: &veld_core::db::Db,
+    targets: &[(String, String)],
+    project_root: &std::path::Path,
+    run_name: &str,
+) {
+    let mut last_id = db.max_log_id().unwrap_or(0);
+    let target_set: std::collections::HashSet<(String, String)> = targets.iter().cloned().collect();
+    let filter = veld_core::db::LogFilter {
+        node: None,
+        variant: None,
+        streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+    };
+
+    let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+    loop {
+        interval.tick().await;
+        let rows = match db.logs_after_id(project_root, run_name, &filter, last_id) {
+            Ok(rows) => rows,
+            Err(_) => continue,
+        };
+        for row in rows {
+            last_id = row.id;
+            let (Some(node), Some(variant)) = (row.node.as_deref(), row.variant.as_deref()) else {
+                continue;
+            };
+            if !target_set.contains(&(node.to_owned(), variant.to_owned())) {
+                continue;
+            }
+            let plabel = output::dim(&format!("{node}:{variant}"));
+            eprintln!("{plabel} {}", output::dim(&row.line));
         }
     }
 }

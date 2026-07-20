@@ -389,6 +389,66 @@ fi
 "$VELD_BIN" stop --name "$RUN_NAME" >/dev/null 2>&1 || true
 
 # ---------------------------------------------------------------------------
+# Test 12: veld start --oneshot (terminal node: e2e/CI pattern)
+# ---------------------------------------------------------------------------
+
+header "One-off run (--oneshot)"
+
+cd "$PROJECT_DIR"
+OS_RUN="oneshot-$$"
+OS_OUT="$(mktemp)"
+OS_ERR="$(mktemp)"
+
+# The `e2e` command node runs to completion after its deps are healthy, then
+# the whole environment is torn down; the node's exit code becomes veld's.
+if run_with_timeout 120 "$VELD_BIN" start e2e --oneshot --name "$OS_RUN" >"$OS_OUT" 2>"$OS_ERR"; then
+    pass "veld start e2e --oneshot exits 0"
+else
+    fail "veld start e2e --oneshot (exit $?)"
+    info "stderr: $(cat "$OS_ERR")"
+fi
+
+# stdout must carry ONLY the terminal node's output: its result line present,
+# veld's chrome (NDJSON progress, teardown banner) absent (that goes to stderr).
+if grep -q "2 passed, 0 failed" "$OS_OUT"; then
+    pass "oneshot: terminal node output present on stdout"
+else
+    fail "oneshot: terminal node output missing from stdout"
+    info "stdout: $(cat "$OS_OUT")"
+fi
+if grep -qE "plan_resolved|node_healthy|Tearing down" "$OS_OUT"; then
+    fail "oneshot: veld chrome leaked onto stdout"
+    info "stdout: $(cat "$OS_OUT")"
+else
+    pass "oneshot: stdout free of veld chrome (chrome routed to stderr)"
+fi
+
+# Teardown ran: the run is gone afterwards.
+if OS_STATUS=$("$VELD_BIN" status --name "$OS_RUN" --json 2>/dev/null); then
+    if echo "$OS_STATUS" | grep -qiE '"(stopped|not.found|exited)"'; then
+        pass "oneshot: environment torn down after run"
+    else
+        fail "oneshot: environment not torn down after run"
+    fi
+else
+    pass "oneshot: environment torn down after run (run gone)"
+fi
+
+# A non-zero terminal exit becomes veld's own exit code.
+OSF_RUN="oneshotfail-$$"
+run_with_timeout 60 "$VELD_BIN" start failtest --oneshot --name "$OSF_RUN" >/dev/null 2>&1
+OSF_RC=$?
+if [ "$OSF_RC" -eq 3 ]; then
+    pass "oneshot: non-zero terminal exit code propagated (exit 3)"
+else
+    fail "oneshot: expected exit 3 from failing terminal node, got $OSF_RC"
+fi
+
+rm -f "$OS_OUT" "$OS_ERR"
+"$VELD_BIN" stop --name "$OS_RUN" >/dev/null 2>&1 || true
+"$VELD_BIN" stop --name "$OSF_RUN" >/dev/null 2>&1 || true
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
