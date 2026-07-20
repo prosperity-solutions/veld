@@ -176,6 +176,45 @@ dev-install-daemon:
         echo "✗ Daemon not responding — run 'veld doctor'"
     fi
 
+# --- Tier 2b: Sandbox daemon (dev schema, copied database) ---
+
+# Run the dev daemon in the FOREGROUND against a COPY of the real database.
+# Use when: the dev build carries schema migrations the released binaries
+# don't know yet — installing it via dev-install-daemon would migrate the
+# real veld.db and every released binary would then refuse to open it
+# ("created by a newer veld version"). This recipe never touches the real DB:
+#   1. snapshots veld.db → target/dev-db/veld.db (sqlite .backup, atomic)
+#   2. unloads the released daemon service (reloaded automatically on exit)
+#   3. runs the dev daemon in the foreground on the copy; daemon-spawned
+#      `veld` commands use the dev CLI + the same copy (VELD_SPAWN_VELD_BIN,
+#      VELD_DB_PATH). Ctrl-C to stop; the released daemon comes back.
+dev-daemon-sandbox:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}"
+    cargo build -p veld-daemon
+    cargo build
+
+    real_db="$HOME/Library/Application Support/veld/veld.db"
+    [ -f "$real_db" ] || real_db="${XDG_DATA_HOME:-$HOME/.local/share}/veld/veld.db"
+    sandbox_db="{{justfile_directory()}}/target/dev-db/veld.db"
+    mkdir -p "$(dirname "$sandbox_db")"
+    rm -f "$sandbox_db" "$sandbox_db-wal" "$sandbox_db-shm"
+    sqlite3 "$real_db" ".backup '$sandbox_db'"
+    echo "✓ Sandbox DB: $sandbox_db (copy of $real_db)"
+
+    plist="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
+    if [ -f "$plist" ] && launchctl list dev.veld.daemon &>/dev/null; then
+        echo "Unloading released daemon (restored on exit)…"
+        launchctl bootout "gui/$(id -u)/dev.veld.daemon" || true
+        trap 'echo "Restoring released daemon…"; launchctl bootstrap "gui/$(id -u)" "'"$plist"'" || true' EXIT
+    fi
+
+    echo "Dev daemon on http://127.0.0.1:19899 (v2 UI: /v2) — Ctrl-C to stop."
+    VELD_DB_PATH="$sandbox_db" \
+    VELD_SPAWN_VELD_BIN="{{justfile_directory()}}/target/debug/veld" \
+        ./target/debug/veld-daemon
+
 # --- Tier 3: Install helper (privileged, requires sudo) ---
 
 # Install dev helper and restart Caddy.

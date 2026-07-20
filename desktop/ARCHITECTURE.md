@@ -161,15 +161,30 @@ collisions).
 Prereqs: Rust stable, Node 22+, a working `veld` install (`veld doctor`).
 
 ```sh
-# 1. daemon with the /v2 UI embedded (rebuilds ui/ via build.rs)
-just dev-install-daemon
+# 0. once: npm deps for ui/ and desktop/
+just setup-ui
+
+# 1. dev daemon in the foreground, on a COPY of the real database
+just dev-daemon-sandbox
 
 # 2. UI with HMR — vite dev server on :5199, proxies /api → 127.0.0.1:19899
-cd crates/veld-daemon/ui && npm run dev
+just dev-ui
 
 # 3. Electron shell pointed at the dev server
-cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+just dev-desktop
 ```
+
+**Why the sandbox (step 1) and not `just dev-install-daemon`:** the dev build
+carries schema migrations the released binaries don't know yet. Installing it
+as the real daemon migrates the real `veld.db` on first open — after which
+every *released* `veld` binary refuses the database ("created by a newer veld
+version"), including from unrelated projects. `dev-daemon-sandbox` instead
+snapshots the database to `target/dev-db/veld.db`, temporarily unloads the
+released daemon service, and runs the dev daemon in the foreground against
+the copy — daemon-spawned `veld` commands are routed to the dev CLI on the
+same copy (`VELD_SPAWN_VELD_BIN`, `VELD_DB_PATH`). Ctrl-C restores the
+released daemon; the real database is never touched. Use
+`just dev-install-daemon` only when dev and released schema versions match.
 
 Without step 2/3: the embedded UI is at `http://127.0.0.1:19899/v2` (or
 `https://veld.localhost/v2` when the helper/Caddy is set up) in any browser.
