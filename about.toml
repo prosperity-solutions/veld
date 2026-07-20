@@ -1,0 +1,36 @@
+# cargo-about config — governs THIRD-PARTY-LICENSES.md generation.
+# Regenerate with `just licenses`. The release workflow regenerates a fresh
+# copy and bundles it into every binary tarball, so shipped artifacts always
+# carry accurate attribution even if the committed copy drifts.
+
+# Licenses we accept in our dependency tree. cargo-about fails if a crate's
+# license is not on this list — that failure is intentional: a new dep under
+# an unvetted (e.g. copyleft) license must be reviewed, not silently shipped.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",
+    "BSL-1.0",
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "OpenSSL",
+    "Unlicense",
+    "CDLA-Permissive-2.0",
+]
+
+# Resolve licenses for every platform we release binaries for, so a
+# target-specific dependency's license is never missed.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+# Private workspace crates are the thing being licensed, not third parties.
+private = { ignore = true }

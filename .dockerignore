@@ -3,3 +3,6 @@
 *
 !dist/
 !crates/veld-gateway/Dockerfile
+# License + third-party attribution ship inside the image (see Dockerfile).
+!LICENSE
+!THIRD-PARTY-LICENSES.md

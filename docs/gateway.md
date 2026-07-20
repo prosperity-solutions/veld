@@ -105,7 +105,7 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_TOKEN_FILE` | `auth.token` | — | Read the token from a file instead (Docker/K8s secret mounts — preferred over the env literal) |
 | `VELD_GATEWAY_LISTEN` | `listen` | `0.0.0.0:8080` | Bind address |
 | `VELD_GATEWAY_TLS_CERT` / `_KEY` | `tls.cert` / `tls.key` | unset | Wildcard cert/key (PEM). Unset = plain HTTP behind your TLS terminator |
-| `VELD_GATEWAY_RELAYS` | `relays` | unset | `public`, or comma-separated relay URLs. When a list is set it is also an **allow-list**: tickets naming other relays are refused |
+| `VELD_GATEWAY_RELAYS` | `relays` | unset | `public`, or comma-separated relay URLs. When a list is set it is also an **allow-list**: tickets naming other relays are refused. **For a production gateway, list self-hosted relays** — n0's `public` relays are rate-limited, best-effort, and [meant for dev/testing only](https://docs.iroh.computer/concepts/relays), so a busy gateway riding them will throttle |
 | `VELD_GATEWAY_RELAY_TOKEN` | *(per-entry `token` in file)* | unset | Auth token presented to the listed relay(s) |
 | `VELD_GATEWAY_LEASE_SECS` | `lease_secs` | `90` | Registration lease; origin daemons heartbeat inside it |
 | `VELD_GATEWAY_STATE_DIR` | `state_dir` | platform data dir | Where the persistent iroh node key lives (optional volume) |
