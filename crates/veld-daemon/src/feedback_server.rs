@@ -23,6 +23,9 @@ mod feedback_assets;
 #[path = "management.rs"]
 mod management;
 
+#[path = "desktop.rs"]
+mod desktop;
+
 // The feedback HTTP server listens on this instance's daemon port —
 // `veld_core::instance::daemon_port()` (19899 for the installed instance;
 // a dev instance overrides via VELD_DAEMON_PORT).
@@ -82,6 +85,7 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // directly on this port for debugging). Merged after with_state()
         // because management routes are stateless.
         .merge(management::routes())
+        .merge(desktop::routes())
         .merge(crate::share::api::routes(share_manager));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));

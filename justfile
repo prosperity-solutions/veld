@@ -274,15 +274,18 @@ dev-restore:
 
 build:
     cd crates/veld-daemon/frontend && npm run build
+    cd crates/veld-daemon/ui && npm run build
     cargo build
 
 test:
     cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
+    cd crates/veld-daemon/ui && npm test
 
 lint:
     cargo clippy --workspace --all-targets
     cd crates/veld-daemon/frontend && npx tsc --noEmit
+    cd crates/veld-daemon/ui && npm run typecheck
 
 build-frontend:
     cd crates/veld-daemon/frontend && npm run build
@@ -295,6 +298,33 @@ lint-frontend:
 
 setup-frontend:
     cd crates/veld-daemon/frontend && npm install
+
+# --- Management UI v2 (crates/veld-daemon/ui) + desktop shell (desktop/) ---
+
+build-ui:
+    cd crates/veld-daemon/ui && npm run build
+
+test-ui:
+    cd crates/veld-daemon/ui && npm test
+
+lint-ui:
+    cd crates/veld-daemon/ui && npm run typecheck
+
+setup-ui:
+    cd crates/veld-daemon/ui && npm install
+    cd desktop && npm install
+
+# Vite dev server for the /v2 UI (HMR, proxies /api to the daemon on :19899).
+dev-ui:
+    cd crates/veld-daemon/ui && npm run dev
+
+# Electron shell pointed at the vite dev server (start `just dev-ui` first).
+dev-desktop:
+    cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+
+# Electron shell against the installed daemon's embedded /v2.
+desktop:
+    cd desktop && npm start
 
 # --- Licenses ---
 

@@ -10,9 +10,12 @@ veld/
 │   ├── veld/              # CLI binary
 │   ├── veld-core/         # Shared types, feedback protocol
 │   ├── veld-daemon/       # User-space daemon (health, GC, state)
+│   │   ├── frontend/      # npm: feedback overlay + client-log bundles (esbuild)
+│   │   └── ui/            # npm: management UI v2 (React+Vite), served at /v2
 │   ├── veld-helper/       # Privileged daemon (DNS, Caddy routes)
 │   ├── veld-share/        # Shared P2P transport (iroh) — used by daemon + gateway
 │   └── veld-gateway/      # Public web gateway server (veld share --web)
+├── desktop/               # Veld Desktop: Electron shell around /v2 (ARCHITECTURE.md)
 ├── website/               # Marketing website (one static HTML page)
 │   ├── index.html         # The whole site (/, single boring page)
 │   ├── llms.txt           # LLM index

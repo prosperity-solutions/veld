@@ -18,8 +18,13 @@ use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
+/// The v2 management UI (React, built by `ui/` via build.rs into a single
+/// self-contained HTML file). Served under /v2 until it reaches parity with
+/// the v1 dashboard above; Veld Desktop wraps this page.
+const DASHBOARD_V2_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-v2.html"));
+
 /// Open the central database, mapping failures to a 500.
-fn open_db() -> Result<Db, StatusCode> {
+pub(super) fn open_db() -> Result<Db, StatusCode> {
     Db::open().map_err(|e| {
         warn!("failed to open veld database: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -33,6 +38,7 @@ pub fn routes() -> Router {
         .route("/", get(dashboard))
         // Same SPA; the join ticket rides in the URL fragment (client-only).
         .route("/join", get(dashboard))
+        .route("/v2", get(dashboard_v2))
         // Liveness + version probe. `veld update` polls this to confirm the
         // daemon actually restarted onto the new binary (not just that *some*
         // daemon is reachable), mirroring the helper's version check.
@@ -66,6 +72,17 @@ async fn dashboard() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         DASHBOARD_HTML,
+    )
+        .into_response()
+}
+
+async fn dashboard_v2() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        DASHBOARD_V2_HTML,
     )
         .into_response()
 }
@@ -558,7 +575,7 @@ async fn get_logs(
 /// Check that a mutating request has the `X-Veld-Request` header.
 /// Browsers won't send custom headers in cross-origin simple requests,
 /// forcing a CORS preflight that is blocked (no Access-Control-Allow-Origin).
-fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+pub(super) fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     if headers.get("x-veld-request").is_some() {
         Ok(())
     } else {
@@ -567,7 +584,7 @@ fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
 }
 
 /// Validate that a run name contains only safe characters.
-fn validate_run_name(name: &str) -> Result<(), StatusCode> {
+pub(super) fn validate_run_name(name: &str) -> Result<(), StatusCode> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -787,7 +804,7 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
 /// Spawn `veld <args...>` in the project directory via a login shell. The
 /// project_root is looked up from the GlobalRegistry (never supplied by the
 /// client) to prevent directory traversal; every argument is shell-escaped.
-fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
+pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     // Resolve the veld binary as THIS daemon's sibling (current_exe), by
@@ -830,7 +847,7 @@ fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
 
 /// Allow only conservative identifier characters for action/node names that
 /// originate from the browser, as defence in depth on top of shell escaping.
-fn is_safe_identifier(s: &str) -> bool {
+pub(super) fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()
