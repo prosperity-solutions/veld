@@ -534,18 +534,27 @@ impl Orchestrator {
             // Release all remaining port reservations so the ports become
             // available to the system immediately.
             self.precomputed_servers.clear();
-            // The run was already made visible by the pre-stage save, so persist
-            // it as `Failed` (with `stopped_at`) rather than leaving it stuck at
-            // `starting` forever. This keeps a failed startup observable (status
-            // + logs) instead of vanishing. `stopped_at` is required: the daemon
-            // GC's age-based prune for terminal runs keys on it (see gc.rs, the
-            // `Stopped | Failed` arm), and it also cleans up any Caddy/DNS routes
-            // an earlier stage created before the failure — without it a failed
-            // run would never be reclaimed by any automatic path. Best-effort
-            // save: don't mask the real startup error.
-            run.status = RunStatus::Failed;
-            run.stopped_at = Some(chrono::Utc::now());
-            let _ = self.save_state(&run);
+
+            // Do NOT save our in-memory `run` here. On failure it still holds the
+            // seeded `Pending` placeholders for the failed stage (stage results
+            // are only merged into `run` on success), while the persisted state
+            // holds each spawned node's real PID from its per-node checkpoint
+            // (see `execute_start_server_isolated`). Saving the in-memory copy
+            // would clobber those PIDs with `None` and a later `veld stop` could
+            // no longer kill the leaked process. So we leave the persisted state
+            // untouched — a run that spawned stays `Starting` with real PIDs and
+            // is torn down by `veld stop` or reaped by the next start once its
+            // processes die (matching behaviour before the pre-stage save).
+            //
+            // The one thing the pre-stage save added is a persisted row for a run
+            // that fails *before spawning anything*; reap that ghost so a failed
+            // pre-spawn startup doesn't linger as `starting`.
+            if let Ok(Some(persisted)) = self.db.get_run(&self.project_root, run_name) {
+                let ever_spawned = persisted.nodes.values().any(|ns| ns.pid.is_some());
+                if !ever_spawned {
+                    let _ = self.db.remove_run(&self.project_root, run_name);
+                }
+            }
             return Err(e);
         }
 
