@@ -303,7 +303,11 @@ How a viewer gets in:
 2. The form POSTs to `/__veld_gateway__/auth` on the slug host (a reserved
    path prefix — `/__veld_gateway__/` never reaches the origin service).
    A `#veld-key=…` URL fragment auto-fills and submits the form (the
-   "one-link" flow); fragments never reach the gateway or its logs.
+   "one-link" flow); fragments never reach the gateway or its logs. On submit
+   — manual or one-link — the form shows a loading state (field goes
+   read-only, button spins on "Unlocking…") so an in-flight attempt is
+   visible; it degrades gracefully when JS is off, and a wrong password simply
+   re-renders the page (clearing the state) with an error.
 3. Correct password → a session cookie scoped to that slug host
    (`HttpOnly; Secure; SameSite=Lax`), then a redirect to the originally
    requested path. The cookie is **stripped before proxying** — the origin
