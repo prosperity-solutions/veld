@@ -42,6 +42,7 @@ export function makeFakeDeps() {
     openThreadInPanel: vi.fn(),
     scrollToThread: vi.fn(),
     checkPendingScroll: vi.fn(),
+    restoreSession: vi.fn(),
     updateBadge: vi.fn(),
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),

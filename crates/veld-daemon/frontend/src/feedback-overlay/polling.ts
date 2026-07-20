@@ -7,6 +7,7 @@ import { api } from "./api";
 import { mkEl } from "./helpers";
 import { updateBadge } from "./badge";
 import { updateListeningModule } from "./listening";
+import { pruneReplyDrafts } from "./persist";
 import { deps } from "../shared/registry";
 
 export function pollEvents(): void {
@@ -288,10 +289,27 @@ export function sendBrowserNotification(title: string, body: string, threadId: s
 
 export function loadThreads(): void {
   api("GET", "/threads").then(function (raw) {
-    dispatch({ type: "SET_THREADS", threads: (raw as Thread[]) || [] });
+    const threads = (raw as Thread[]) || [];
+    dispatch({ type: "SET_THREADS", threads });
+    // Threads are authoritative here (fetch succeeded), so drop reply drafts
+    // orphaned by a thread resolved/deleted while the tab was away — they'd
+    // render no reply box and never otherwise clear. NOT done on fetch failure
+    // (the .catch below), where an empty list would wipe live drafts.
+    pruneReplyDrafts(threads.filter((t) => t.status === "open").map((t) => t.id));
     deps().renderAllPins();
     updateBadge();
     deps().checkPendingScroll();
     if (getState().panelOpen) deps().renderPanel();
-  }).catch(function () {});
+    // Restore tab-local state saved before a reload (open panel/tab/scroll,
+    // expanded thread, open composer). One-shot: no-ops on later loadThreads
+    // calls triggered by events.
+    deps().restoreSession();
+  }).catch(function () {
+    // Even if the initial thread fetch fails, restore once at boot so a later
+    // event-driven loadThreads can't fire the (one-shot) restore late — after
+    // the user has already started interacting with the freshly-booted overlay.
+    // Composer/panel restore don't need threads; a saved expanded thread just
+    // degrades to the list view when the thread set is empty.
+    deps().restoreSession();
+  });
 }

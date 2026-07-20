@@ -1,11 +1,17 @@
 import { refs } from "./refs";
 import { getState, dispatch } from "./store";
-import type { Thread } from "./types";
-import { mkEl, submitOnModEnter, formatTrace } from "./helpers";
+import type { Thread, VeldPopoverElement } from "./types";
+import { mkEl, submitOnModEnter, formatTrace, docRect } from "./helpers";
 import { PREFIX, SUBMIT_HINT, ICONS } from "./constants";
 import { api } from "./api";
 import { toast } from "./toast";
 import { deps } from "../shared/registry";
+import {
+  saveComposerDraft,
+  clearComposerDraft,
+  pageKey,
+  type ComposerDraft,
+} from "./persist";
 
 export function positionPopover(
   pop: HTMLElement,
@@ -49,7 +55,13 @@ export function appendPopoverClose(pop: HTMLElement): void {
 }
 
 export function closeActivePopover(): void {
+  // The composer is going away (sent, cancelled, ×, Escape, a thread action
+  // that closes it, or replaced by a new selection) — its unsent draft must
+  // not survive into the next reload. Clear against the page the composer was
+  // opened on (`_veldPageKey`), which may differ from the current URL if the
+  // app client-navigated while the composer stayed open.
   const popover = getState().activePopover;
+  clearComposerDraft(popover?._veldPageKey);
   if (popover) {
     if (typeof popover._veldCleanup === "function") {
       popover._veldCleanup();
@@ -99,6 +111,37 @@ export function showCreatePopover(
   textarea.placeholder = "Leave feedback...";
   textarea.rows = 3;
   popoverBody.appendChild(textarea);
+
+  // Mirror the draft (text + the scope it's attached to) to tab-local storage
+  // on every keystroke so a reload can re-open this exact composer. Writes are
+  // synchronous and tiny; an empty box clears the draft rather than restoring
+  // an empty popover on the next reload.
+  //
+  // The composer survives a client-side (SPA) navigation — onNavigate doesn't
+  // close it — so pin the URL it opened on and stop persisting once the app
+  // routes elsewhere: the draft's selector/rect are relative to the open-time
+  // page and must not be written under a different URL's key (which a later
+  // reload of that URL would then mis-restore).
+  const openPageKey = pageKey();
+  (popover as VeldPopoverElement)._veldPageKey = openPageKey;
+  textarea.addEventListener("input", () => {
+    if (pageKey() !== openPageKey) return;
+    if (textarea.value.trim()) {
+      saveComposerDraft({
+        text: textarea.value,
+        isPage: !selector,
+        selector,
+        tagInfo,
+        trace,
+        elementText: extra?.elementText ?? null,
+        sourceFile: extra?.sourceFile ?? null,
+        sourceLine: extra?.sourceLine ?? null,
+        rect,
+      });
+    } else {
+      clearComposerDraft();
+    }
+  });
 
   const actions = mkEl("div", "popover-actions");
   const cancelBtn = mkEl("button", "btn btn-secondary btn-sm", "Cancel");
@@ -157,4 +200,74 @@ export function togglePageComment(): void {
     null, null, null, null,
   );
   refs.toolBtnPageComment.classList.add(PREFIX + "tool-active");
+}
+
+/** Fallback anchor: viewport-centred, current scroll — used when a restored
+ *  draft's element can't be re-found so the popover still lands somewhere
+ *  visible. */
+function fallbackRect(): { x: number; y: number; width: number; height: number } {
+  return {
+    x: window.scrollX + window.innerWidth / 2 - 180,
+    y: window.scrollY + 120,
+    width: 0,
+    height: 0,
+  };
+}
+
+/** Re-open the new-comment composer from a persisted draft after a reload.
+ *
+ *  Element-scoped drafts are re-anchored to the live element by selector (the
+ *  same lookup navigation.ts uses to scroll to a thread). If the element is
+ *  gone — removed or renamed by the edit that triggered the reload — the draft
+ *  and its original element scope are KEPT (so the thread still attaches to
+ *  that selector on send, degrading like an anchored pin whose element left),
+ *  and the popover is shown at a visible fallback position instead of the
+ *  vanished element's stale coordinates. */
+export function restoreComposer(draft: ComposerDraft): void {
+  const finiteRect = (r: { x: number; y: number; width: number; height: number }): boolean =>
+    !!r && [r.x, r.y, r.width, r.height].every((n) => typeof n === "number" && isFinite(n));
+
+  // Page/global comments aren't anchored to anything, so their saved rect is
+  // just an arbitrary point captured at open time — and its document-relative
+  // Y is stale after a reload that changed scroll or layout (exactly the HMR
+  // case), which would drop the composer off-screen. Re-centre it in the
+  // current viewport instead. Element comments re-anchor to the live element
+  // below; only when that element is gone do they fall back too.
+  let rect = draft.isPage || !finiteRect(draft.rect) ? fallbackRect() : draft.rect;
+  let targetEl: Element | null = null;
+  if (!draft.isPage && draft.selector) {
+    try { targetEl = document.querySelector(draft.selector); } catch (_) { targetEl = null; }
+    if (targetEl) {
+      rect = docRect(targetEl); // re-anchor to the element's fresh position
+    } else {
+      rect = fallbackRect();
+      toast("The element for your saved comment is gone — draft kept");
+    }
+  }
+
+  showCreatePopover(
+    rect,
+    draft.isPage ? null : draft.selector,
+    draft.tagInfo,
+    targetEl,
+    draft.trace,
+    draft.isPage
+      ? null
+      : { elementText: draft.elementText, sourceFile: draft.sourceFile, sourceLine: draft.sourceLine },
+  );
+
+  // showCreatePopover cleared the persisted draft (via closeActivePopover) and
+  // built an empty textarea; refill it and fire `input` so the listener above
+  // re-persists — keeping the text through a second reload before the user
+  // types again, and re-saving with the element's fresh anchor rect.
+  const pop = getState().activePopover;
+  const ta = pop
+    ? (pop.querySelector("textarea." + PREFIX + "textarea") as HTMLTextAreaElement | null)
+    : null;
+  if (ta) {
+    ta.value = draft.text;
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.focus();
+    try { ta.setSelectionRange(draft.text.length, draft.text.length); } catch (_) { /* ignore */ }
+  }
 }

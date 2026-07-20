@@ -52,4 +52,8 @@ export interface FeedbackEvent {
 export interface VeldPopoverElement extends HTMLElement {
   _veldType?: string;
   _veldCleanup?: () => void;
+  /** For a new-comment composer: the pageKey() of the URL it was opened on, so
+   *  its persisted draft is cleared against the right page even after a
+   *  client-side navigation. */
+  _veldPageKey?: string;
 }

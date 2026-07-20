@@ -7,7 +7,7 @@ import { restoreFabPos, clampFabToViewport } from "./fab";
 import { onKeyDown } from "./keyboard";
 import { pollEvents, pollListenStatus, loadThreads, primeEventSeq } from "./polling";
 import { pollShareStatus } from "./sharing";
-import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass, applyPanelLayout } from "./panel";
+import { togglePanel, renderPanel, openThreadInPanel, syncPanelSideClass, applyPanelLayout, restoreSession } from "./panel";
 import { setMode } from "./modes";
 import { toggleToolbar } from "./toolbar";
 import { togglePageComment, closeActivePopover, showCreatePopover } from "./popover";
@@ -35,6 +35,7 @@ function wireDeps(): void {
     openThreadInPanel,
     scrollToThread,
     checkPendingScroll,
+    restoreSession,
     updateBadge,
     captureScreenshot,
     showCreatePopover,

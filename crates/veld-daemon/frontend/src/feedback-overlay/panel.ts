@@ -8,6 +8,15 @@ import { updateBadge } from "./badge";
 import type { Thread, Message } from "./types";
 import { deps } from "../shared/registry";
 import { scheduleReposition } from "./pins";
+import { restoreComposer } from "./popover";
+import {
+  savePanelState,
+  saveReplyDraft,
+  clearReplyDraft,
+  getReplyDraft,
+  getComposerDraft,
+  getPanelState,
+} from "./persist";
 
 export function togglePanel(): void {
   dispatch({ type: "SET_PANEL_OPEN", open: !getState().panelOpen });
@@ -15,6 +24,7 @@ export function togglePanel(): void {
   refs.panel.classList.toggle(PREFIX + "panel-open", getState().panelOpen);
   applyPanelLayout();
   if (getState().panelOpen) renderPanel();
+  savePanelState();
 }
 
 export function togglePanelSide(): void {
@@ -111,11 +121,13 @@ export function initPanelResize(): void {
 export function showThreadDetail(threadId: string): void {
   dispatch({ type: "SET_EXPANDED_THREAD", threadId });
   renderPanel();
+  savePanelState();
 }
 
 export function showThreadList(): void {
   dispatch({ type: "SET_EXPANDED_THREAD", threadId: null });
   renderPanel();
+  savePanelState();
 }
 
 export function openThreadInPanel(threadId: string): void {
@@ -125,6 +137,7 @@ export function openThreadInPanel(threadId: string): void {
   refs.panel.classList.add(PREFIX + "panel-open");
   applyPanelLayout();
   renderPanel();
+  savePanelState();
 }
 
 function updateSegmentedControl(): void {
@@ -433,6 +446,12 @@ function renderThreadMessages(thread: Thread): HTMLElement {
   textarea.placeholder = "Reply...";
   textarea.rows = 2;
   textarea.dataset.threadId = thread.id;
+  // Restore any reply draft saved for this thread before a reload. (The
+  // in-memory captureDraft/restoreDraft in renderPanel handles the same box
+  // across re-renders and, running after this, keeps the cursor position.)
+  const savedReply = getReplyDraft(thread.id);
+  if (savedReply) textarea.value = savedReply;
+  textarea.addEventListener("input", function () { saveReplyDraft(thread.id, textarea.value); });
   input.appendChild(textarea);
 
   const inputActions = mkEl("div", "thread-input-actions");
@@ -443,6 +462,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
     const doResolve = function () {
       api("POST", "/threads/" + thread.id + "/resolve").then(function () {
         thread.status = "resolved";
+        clearReplyDraft(thread.id);
         dispatch({ type: "SET_THREADS", threads: [...getState().threads] });
         deps().closeActivePopover();
         showThreadList();
@@ -471,6 +491,7 @@ function renderThreadMessages(thread: Thread): HTMLElement {
       thread.messages.push(raw as Message);
       thread.updated_at = new Date().toISOString();
       textarea.value = "";
+      clearReplyDraft(thread.id);
       sendBtn.disabled = false;
       if (getState().panelOpen) renderPanel();
       deps().renderAllPins();
@@ -497,6 +518,49 @@ export function markThreadSeen(threadId: string): void {
   if (thread) deps().addPin(thread);
   updateBadge();
   updateMarkReadBtn();
+}
+
+let sessionRestored = false;
+
+/** One-shot restore of tab-local state after a reload — the open panel + tab +
+ *  scroll, the expanded thread, and the open new-comment composer. Reply drafts
+ *  restore lazily inside renderThreadMessages, so they're not handled here.
+ *
+ *  Called once when the boot loadThreads() settles (success OR failure, so a
+ *  failed first fetch can't defer restore onto a later event-driven load).
+ *  Threads, when present, let a saved expanded-thread id be validated; without
+ *  them it degrades to the list. Guarded to run at most once per overlay boot —
+ *  loadThreads is re-invoked on some events, and re-running this would re-open a
+ *  panel the user has since closed or re-summon a dismissed composer. A reload
+ *  re-executes the whole bundle, resetting the guard, which is the point.
+ *  Restore is boot-only by design: it does NOT retry to pick up a saved
+ *  expanded thread that arrives in a later, slower load. */
+export function restoreSession(): void {
+  if (sessionRestored) return;
+  sessionRestored = true;
+
+  const panel = getPanelState();
+  // NOTE: every panel field below is only meaningful while the panel is open,
+  // so all restore is gated on panel.open. A future field that matters while
+  // the panel is CLOSED (a default filter, a mute flag) must restore outside
+  // this guard.
+  if (panel.open) {
+    dispatch({ type: "SET_PANEL_OPEN", open: true });
+    dispatch({ type: "SET_PANEL_TAB", tab: panel.tab });
+    // Only re-expand a thread that still exists; else fall back to the list.
+    const canExpand = !!panel.expandedThreadId
+      && getState().threads.some(function (t: Thread) { return t.id === panel.expandedThreadId; });
+    dispatch({ type: "SET_EXPANDED_THREAD", threadId: canExpand ? panel.expandedThreadId : null });
+    refs.panel.classList.add(PREFIX + "panel-open");
+    applyPanelLayout();
+    renderPanel();
+    // Restore scroll after the body is populated. Only meaningful in list view
+    // (detail view sets overflow-y:hidden on the body).
+    if (refs.panelBody) refs.panelBody.scrollTop = panel.scrollTop;
+  }
+
+  const composer = getComposerDraft();
+  if (composer) restoreComposer(composer);
 }
 
 export function markAllRead(): void {

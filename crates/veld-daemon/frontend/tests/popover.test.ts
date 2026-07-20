@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach } from "vitest";
-import { positionPopover, closeActivePopover } from "../src/feedback-overlay/popover";
+import { positionPopover, closeActivePopover, restoreComposer } from "../src/feedback-overlay/popover";
+import { getComposerDraft, saveComposerDraft, type ComposerDraft } from "../src/feedback-overlay/persist";
+import { PREFIX } from "../src/feedback-overlay/constants";
 import { initState } from "../src/feedback-overlay/state";
 import { refs } from "../src/feedback-overlay/refs";
 import { getState, dispatch } from "../src/feedback-overlay/store";
@@ -27,6 +29,7 @@ function makeFakeDeps() {
     openThreadInPanel: vi.fn(),
     scrollToThread: vi.fn(),
     checkPendingScroll: vi.fn(),
+    restoreSession: vi.fn(),
     updateBadge: vi.fn(),
     captureScreenshot: vi.fn(),
     showCreatePopover: vi.fn(),
@@ -122,5 +125,151 @@ describe("closeActivePopover", () => {
     // Should not throw
     closeActivePopover();
     expect(getState().activePopover).toBeNull();
+  });
+
+  it("clears any persisted composer draft (dismiss must not resurrect on reload)", () => {
+    sessionStorage.clear();
+    saveComposerDraft({
+      text: "typed then cancelled",
+      isPage: true,
+      selector: null,
+      tagInfo: null,
+      trace: null,
+      elementText: null,
+      sourceFile: null,
+      sourceLine: null,
+      rect: { x: 0, y: 0, width: 0, height: 0 },
+    });
+    closeActivePopover();
+    expect(getComposerDraft()).toBeNull();
+  });
+});
+
+describe("restoreComposer", () => {
+  function draft(overrides: Partial<ComposerDraft> = {}): ComposerDraft {
+    return {
+      text: "half-typed comment",
+      isPage: false,
+      selector: "#target",
+      tagInfo: "button.btn",
+      trace: ["App", "Toolbar"],
+      elementText: "Click me",
+      sourceFile: "src/Toolbar.tsx",
+      sourceLine: 42,
+      rect: { x: 10, y: 20, width: 30, height: 40 },
+      ...overrides,
+    };
+  }
+
+  function textareaOf(): HTMLTextAreaElement | null {
+    const pop = getState().activePopover;
+    return pop ? pop.querySelector("textarea." + PREFIX + "textarea") : null;
+  }
+
+  beforeEach(() => {
+    sessionStorage.clear();
+    window.history.pushState({}, "", "/");
+    document.body.innerHTML = "";
+    const host = document.createElement("veld-feedback");
+    const shadow = host.attachShadow({ mode: "open" });
+    initState(shadow, host);
+    refs.hoverOutline = document.createElement("div");
+    refs.componentTraceEl = document.createElement("div");
+    refs.toolBtnPageComment = document.createElement("div");
+    refs.toolBtnScreenshot = document.createElement("div");
+    registerDeps(makeFakeDeps());
+  });
+
+  it("re-anchors to the live element and refills the draft text", () => {
+    const el = document.createElement("button");
+    el.id = "target";
+    document.body.appendChild(el);
+
+    restoreComposer(draft());
+
+    const ta = textareaOf();
+    expect(ta).not.toBeNull();
+    expect(ta!.value).toBe("half-typed comment");
+    // Locked to the re-found element so the thread re-attaches to it on send.
+    expect(getState().lockedEl).toBe(el);
+    // Re-persisted (so a second reload before typing keeps the text).
+    expect(getComposerDraft()?.text).toBe("half-typed comment");
+  });
+
+  it("keeps the draft + element scope when the element is gone (graceful degrade)", () => {
+    // No #target in the DOM.
+    restoreComposer(draft());
+
+    const ta = textareaOf();
+    expect(ta).not.toBeNull();
+    expect(ta!.value).toBe("half-typed comment");
+    // No live element to lock onto, but the popover still opened with the text.
+    expect(getState().lockedEl).toBeNull();
+    // The element selector is preserved so the thread still attaches on send.
+    expect(getComposerDraft()?.selector).toBe("#target");
+  });
+
+  it("restores a page-scoped draft with no selector", () => {
+    restoreComposer(draft({ isPage: true, selector: null, tagInfo: null, trace: null, elementText: null, sourceFile: null, sourceLine: null }));
+
+    const ta = textareaOf();
+    expect(ta!.value).toBe("half-typed comment");
+    expect(getComposerDraft()?.isPage).toBe(true);
+    expect(getComposerDraft()?.selector).toBeNull();
+  });
+
+  it("re-centres a page draft in the viewport instead of using a stale off-screen rect", () => {
+    // A page comment saved while scrolled far down carries a huge document-Y.
+    restoreComposer(draft({
+      isPage: true, selector: null, tagInfo: null, trace: null,
+      elementText: null, sourceFile: null, sourceLine: null,
+      rect: { x: 0, y: 999999, width: 0, height: 0 },
+    }));
+    const pop = getState().activePopover!;
+    const top = parseFloat(pop.style.top);
+    // Must land within the current viewport, not at the stale y=999999.
+    expect(top).toBeLessThan(window.scrollY + window.innerHeight);
+  });
+
+  it("falls back safely when the saved rect is non-finite", () => {
+    restoreComposer(draft({
+      selector: null, isPage: false, // element scope but no selector → uses rect
+      rect: { x: NaN, y: NaN, width: 0, height: 0 },
+    }));
+    const pop = getState().activePopover!;
+    expect(pop.style.top).toMatch(/^-?\d+(\.\d+)?px$/); // a real pixel value, not "NaNpx"
+    expect(pop.style.top).not.toContain("NaN");
+  });
+
+  it("stops persisting once the app client-navigates away from the open-time URL", () => {
+    const el = document.createElement("button");
+    el.id = "target";
+    document.body.appendChild(el);
+    restoreComposer(draft());
+    expect(getComposerDraft()?.text).toBe("half-typed comment"); // saved under "/"
+
+    // SPA navigation to a different URL, composer still open.
+    window.history.pushState({}, "", "/other?x=1");
+    const ta = textareaOf()!;
+    ta.value = "typed on the new page";
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+
+    // Nothing written under the new URL's key — the draft belongs to "/".
+    expect(getComposerDraft()).toBeNull();
+    window.history.pushState({}, "", "/");
+    expect(getComposerDraft()?.text).toBe("half-typed comment");
+  });
+
+  it("dismissing after a client-navigation clears the draft's ORIGIN page, not the current one", () => {
+    restoreComposer(draft({ isPage: true, selector: null, tagInfo: null, trace: null, elementText: null, sourceFile: null, sourceLine: null }));
+    expect(getComposerDraft()?.text).toBe("half-typed comment"); // under "/"
+
+    // App client-navigates away, composer still open, then the user cancels.
+    window.history.pushState({}, "", "/elsewhere");
+    closeActivePopover();
+
+    // The cancelled composer's origin page ("/") must not resurrect on reload.
+    window.history.pushState({}, "", "/");
+    expect(getComposerDraft()).toBeNull();
   });
 });

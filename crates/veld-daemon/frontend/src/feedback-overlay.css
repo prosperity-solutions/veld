@@ -644,7 +644,10 @@
 }
 
 /* --- Panel section (page group) --- */
-.veld-feedback-panel-section { margin-bottom: 12px; }
+/* flex-shrink:0 — panel-body is a flex column; without it a section shrinks
+   below its content when the list overflows instead of letting the body
+   scroll. */
+.veld-feedback-panel-section { margin-bottom: 12px; flex-shrink: 0; }
 .veld-feedback-panel-section-heading {
   display: flex; align-items: center; gap: 6px;
   font-size: 11px; font-weight: 600; color: var(--vf-text-muted);
@@ -668,6 +671,11 @@
   border: 1px solid var(--vf-border); cursor: pointer;
   transition: border-color .15s;
   overflow: hidden; min-width: 0;
+  /* flex-shrink:0 — resolved cards are direct children of the flex-column
+     panel-body, and `overflow:hidden` above zeroes their flex min-size, so
+     without this a long resolved list squishes every card below its text
+     height (collapsed, clipped rows) instead of scrolling. */
+  flex-shrink: 0;
 }
 .veld-feedback-thread-card:hover { border-color: var(--vf-accent); }
 .veld-feedback-thread-card-resolved { opacity: 0.45; cursor: pointer; }

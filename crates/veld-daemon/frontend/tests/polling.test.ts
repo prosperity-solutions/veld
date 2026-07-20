@@ -5,6 +5,7 @@ import { refs } from "../src/feedback-overlay/refs";
 import { dispatch, getState } from "../src/feedback-overlay/store";
 import { PREFIX } from "../src/feedback-overlay/constants";
 import { setupMockRefs, makeThread, makeMessage } from "./test-helpers";
+import { saveReplyDraft, getReplyDraft } from "../src/feedback-overlay/persist";
 
 // Mock the api module
 vi.mock("../src/feedback-overlay/api", () => ({
@@ -65,6 +66,8 @@ describe("loadThreads", () => {
   let fakeDeps: ReturnType<typeof setupMockRefs>["deps"];
 
   beforeEach(() => {
+    sessionStorage.clear();
+    window.history.pushState({}, "", "/");
     const env = setupMockRefs();
     fakeDeps = env.deps;
     mockApi.mockReset();
@@ -99,5 +102,39 @@ describe("loadThreads", () => {
     await new Promise((r) => setTimeout(r, 10));
     // State unchanged
     expect(getState().threads).toEqual([]);
+  });
+
+  it("restores the session on success", async () => {
+    mockApi.mockResolvedValueOnce([]);
+    loadThreads();
+    await vi.waitFor(() => expect(fakeDeps.restoreSession).toHaveBeenCalled());
+  });
+
+  it("restores the session even when the fetch fails (boot restore isn't deferred)", async () => {
+    const env = setupMockRefs();
+    mockApi.mockRejectedValueOnce(new Error("down"));
+    loadThreads();
+    await vi.waitFor(() => expect(env.deps.restoreSession).toHaveBeenCalled());
+  });
+
+  it("prunes reply drafts for gone threads on a successful load, keeping live ones", async () => {
+    saveReplyDraft("t-live", "keep this");
+    saveReplyDraft("t-gone", "orphan");
+    mockApi.mockResolvedValueOnce([makeThread({ id: "t-live", status: "open" })]);
+
+    loadThreads();
+    await vi.waitFor(() => expect(getState().threads.length).toBe(1));
+    expect(getReplyDraft("t-live")).toBe("keep this");
+    expect(getReplyDraft("t-gone")).toBe("");
+  });
+
+  it("does NOT prune reply drafts when the fetch fails (no data loss)", async () => {
+    saveReplyDraft("t-1", "unsent reply");
+    mockApi.mockRejectedValueOnce(new Error("Network error"));
+
+    loadThreads();
+    await new Promise((r) => setTimeout(r, 10));
+    // The draft survives a failed boot fetch — the thread list wasn't authoritative.
+    expect(getReplyDraft("t-1")).toBe("unsent reply");
   });
 });

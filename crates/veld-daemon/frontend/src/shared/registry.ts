@@ -16,6 +16,7 @@ export interface Deps {
   openThreadInPanel: (threadId: string) => void;
   scrollToThread: (threadId: string) => void;
   checkPendingScroll: () => void;
+  restoreSession: () => void;
   updateBadge: () => void;
   captureScreenshot: (x: number, y: number, w: number, h: number) => void;
   showCreatePopover: (rect: { x: number; y: number; width: number; height: number }, selector: string | null, tagInfo: string | null, targetEl: Element | null, trace: string[] | null, extra?: CreatePopoverExtra | null) => void;
