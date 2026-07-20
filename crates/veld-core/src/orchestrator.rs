@@ -85,6 +85,37 @@ pub enum StopResult {
     AlreadyStopped,
 }
 
+/// Decide whether `cleanup_dead_runs` should reap a run as a dead orphan.
+///
+/// A run is now persisted as `Starting` *before* its first stage spawns any
+/// process, and pure `command` stages never record a PID at all — so a live,
+/// still-starting run legitimately has no alive PIDs for an unbounded window
+/// (slow setup, a long `command`/build first stage). Liveness alone therefore
+/// cannot distinguish such a run from an orphan, and any time-based grace would
+/// eventually reap a genuinely-starting run.
+///
+/// So we reap only what we can prove is dead:
+/// - `Running` with no live PIDs — startup finished and its processes have since
+///   died (orphaned by a crash / `kill -9`), or it was a `command`-only env that
+///   never held a long-lived process. Either way there is nothing alive to keep.
+/// - `Starting` **that has already spawned** a process (recorded a PID) which
+///   is now dead — it got underway, then its process died.
+///
+/// A `Starting` run that has never spawned is left alone: it leaks no processes
+/// or routes, and a same-name `veld start` (`cleanup_stale_run`) or `veld stop`
+/// clears it. Any other status (Stopping/Stopped/Failed/Recovering) is never
+/// reaped here.
+fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -> bool {
+    if any_alive {
+        return false;
+    }
+    match status {
+        RunStatus::Running => true,
+        RunStatus::Starting => ever_spawned,
+        _ => false,
+    }
+}
+
 /// Pre-computed port and URL for a `start_server` node, resolved before
 /// any node begins execution so that all nodes can reference any other
 /// node's URL/port without requiring a dependency edge.
@@ -425,6 +456,39 @@ impl Orchestrator {
             stages: plan.len(),
         });
 
+        // Persist the run *before* the first stage kicks off so it is
+        // immediately visible in `veld status` and the management UI. Without
+        // this, the earliest write is the per-node checkpoint (start_server
+        // nodes only, after the process spawns) or the post-stage save that
+        // runs only once stage 1 completes — so a run could not be observed
+        // while its first stage was still starting. Seed every planned node as
+        // `Pending`; each stage overwrites its own nodes with real state as it
+        // executes.
+        //
+        // Port/URL are deliberately NOT seeded here: `url` is populated only
+        // once a node actually spawns, so downstream consumers (`veld urls`,
+        // the registry URL list at db/state.rs, the management UI) keep their
+        // "url present ⇒ server reachable" invariant and never advertise a
+        // not-yet-listening address during startup. `execution_order` is also
+        // left untouched — it is appended per stage below (and a pre-seed would
+        // duplicate every key); the reverse-order stop path falls back to the
+        // node map when it is empty.
+        for stage in &plan {
+            for sel in stage {
+                let key = RunState::node_key(&sel.node, &sel.variant);
+                run.nodes
+                    .insert(key, NodeState::new(&sel.node, &sel.variant));
+            }
+        }
+        if let Err(e) = self.save_state(&run) {
+            // Persisting failed before anything spawned — release the port
+            // reservations we are holding and abort so the ports free up.
+            self.precomputed_servers.clear();
+            return Err(e);
+        }
+        self.debug_log("Run persisted as 'starting' before first stage executes")
+            .await;
+
         // Wrap immutable data in Arc once for all stages.
         let shared_config = Arc::new(self.config.clone());
         let shared_project_root = Arc::new(self.project_root.clone());
@@ -470,6 +534,27 @@ impl Orchestrator {
             // Release all remaining port reservations so the ports become
             // available to the system immediately.
             self.precomputed_servers.clear();
+
+            // Do NOT save our in-memory `run` here. On failure it still holds the
+            // seeded `Pending` placeholders for the failed stage (stage results
+            // are only merged into `run` on success), while the persisted state
+            // holds each spawned node's real PID from its per-node checkpoint
+            // (see `execute_start_server_isolated`). Saving the in-memory copy
+            // would clobber those PIDs with `None` and a later `veld stop` could
+            // no longer kill the leaked process. So we leave the persisted state
+            // untouched — a run that spawned stays `Starting` with real PIDs and
+            // is torn down by `veld stop` or reaped by the next start once its
+            // processes die (matching behaviour before the pre-stage save).
+            //
+            // The one thing the pre-stage save added is a persisted row for a run
+            // that fails *before spawning anything*; reap that ghost so a failed
+            // pre-spawn startup doesn't linger as `starting`.
+            if let Ok(Some(persisted)) = self.db.get_run(&self.project_root, run_name) {
+                let ever_spawned = persisted.nodes.values().any(|ns| ns.pid.is_some());
+                if !ever_spawned {
+                    let _ = self.db.remove_run(&self.project_root, run_name);
+                }
+            }
             return Err(e);
         }
 
@@ -778,17 +863,14 @@ impl Orchestrator {
         let mut dead_run_names = Vec::new();
 
         for (run_name, run_state) in &project_state.runs {
-            // Only check runs that are supposedly active.
-            if run_state.status != RunStatus::Running && run_state.status != RunStatus::Starting {
-                continue;
-            }
-
             let any_alive = run_state
                 .nodes
                 .values()
                 .any(|ns| ns.pid.is_some_and(process::is_alive));
+            // A node records a PID only once its process actually spawns.
+            let ever_spawned = run_state.nodes.values().any(|ns| ns.pid.is_some());
 
-            if !any_alive {
+            if is_reapable_orphan(&run_state.status, any_alive, ever_spawned) {
                 dead_run_names.push(run_name.clone());
             }
         }
@@ -1983,4 +2065,39 @@ fn whoami_hostname() -> String {
             .map(|s| s.trim().to_owned())
             .unwrap_or_else(|| "localhost".to_owned())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reap_only_proven_dead_orphans() {
+        // Live processes are never reaped, whatever the status.
+        assert!(!is_reapable_orphan(&RunStatus::Running, true, true));
+        assert!(!is_reapable_orphan(&RunStatus::Starting, true, true));
+
+        // Running with no live PIDs: startup finished, processes died → reap.
+        assert!(is_reapable_orphan(&RunStatus::Running, false, true));
+        assert!(is_reapable_orphan(&RunStatus::Running, false, false));
+
+        // Starting that spawned then died → reap.
+        assert!(is_reapable_orphan(&RunStatus::Starting, false, true));
+
+        // Starting that never spawned → still starting (pre-spawn / slow
+        // command stage); must NOT be reaped, or a concurrent `veld start`
+        // would delete a run that is still coming up.
+        assert!(!is_reapable_orphan(&RunStatus::Starting, false, false));
+
+        // Terminal / transitional statuses are never reaped here.
+        for status in [
+            RunStatus::Stopping,
+            RunStatus::Stopped,
+            RunStatus::Failed,
+            RunStatus::Recovering,
+        ] {
+            assert!(!is_reapable_orphan(&status, false, false));
+            assert!(!is_reapable_orphan(&status, false, true));
+        }
+    }
 }
