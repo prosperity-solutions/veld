@@ -36,6 +36,10 @@ RUN apt-get update \
 ARG TARGETARCH
 COPY dist/${TARGETARCH}/veld-gateway /usr/local/bin/veld-gateway
 
+# Ship license + third-party attribution in the image (MIT/Apache-2.0 etc.
+# require the notices travel with the redistributed binary).
+COPY LICENSE THIRD-PARTY-LICENSES.md /usr/share/doc/veld-gateway/
+
 USER veld
 ENV VELD_GATEWAY_STATE_DIR=/var/lib/veld-gateway
 EXPOSE 8080

@@ -14,6 +14,10 @@ version = "10.6.1"
 edition = "2024"
 license = "MIT"
 rust-version = "1.85"
+# Distributed as prebuilt binaries, not crates.io packages. Marking the
+# workspace unpublished also keeps our own crates out of the cargo-about
+# THIRD-PARTY-LICENSES.md (see about.toml `private.ignore`).
+publish = false
 
 [workspace.dependencies]
 veld-core = { path = "crates/veld-core" }

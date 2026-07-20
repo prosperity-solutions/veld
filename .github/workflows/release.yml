@@ -150,6 +150,9 @@ jobs:
           for bin in veld veld-helper veld-daemon; do
             cp target/${{ matrix.target }}/release/$bin dist/
           done
+          # Ship license + third-party attribution alongside the binaries
+          # (MIT/Apache-2.0 etc. require the notices travel with the code).
+          cp LICENSE THIRD-PARTY-LICENSES.md dist/
           tar -czf veld-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist .
 
       # Gateway: separate per-arch tarball, consumed by the docker-gateway job
@@ -158,6 +161,7 @@ jobs:
         run: |
           mkdir -p dist-gateway
           cp target/${{ matrix.target }}/release/veld-gateway dist-gateway/
+          cp LICENSE THIRD-PARTY-LICENSES.md dist-gateway/
           tar -czf veld-gateway-${{ needs.plan.outputs.new_release_version }}-${{ matrix.suffix }}.tar.gz -C dist-gateway .
 
       - name: Upload artifact

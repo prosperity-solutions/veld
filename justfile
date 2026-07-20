@@ -202,3 +202,15 @@ lint-frontend:
 
 setup-frontend:
     cd crates/veld-daemon/frontend && npm install
+
+# --- Licenses ---
+
+# Regenerate THIRD-PARTY-LICENSES.md from the current dependency tree.
+# Requires cargo-about 0.9.1 (pinned in ci.yml so output matches the CI
+# drift check): `cargo install cargo-about@0.9.1 --all-features`.
+# CI fails if the committed file drifts from this output, so run it and
+# commit the result whenever Cargo.lock changes.
+# `tr -d '\r'` normalizes CRLF that some upstream license texts carry, so the
+# committed file is pure LF and the CI drift diff is byte-stable across OSes.
+licenses:
+    cargo about generate about.hbs | tr -d '\r' > THIRD-PARTY-LICENSES.md

@@ -160,7 +160,10 @@ token-valid joiner, reject the rest), `auto` (approve any token-valid joiner).
 Traffic is end-to-end encrypted; a relay only forwards sealed bytes and never
 sees URLs or content. Relay selection is a config compliance control and must be
 opted into explicitly (no implicit default): set `sharing.relays` to `"public"`
-or an array of self-hosted relay URLs, else `veld share` is refused. Config wins
+or an array of self-hosted relay URLs, else `veld share` is refused. **`"public"`
+(n0's relays) is dev/testing only** — rate-limited, best-effort, no guarantees;
+production or high-volume sharing should self-host relays (n0's fair-use guidance,
+not a license limit; iroh is MIT/Apache-2.0). Config wins
 over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's env, not your
 shell; not an enforceable floor). The daemon binds one iroh endpoint per relay
 policy on demand, so shares on different relays run concurrently. A self-hosted

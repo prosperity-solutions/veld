@@ -65,6 +65,34 @@ jobs:
           chmod +x tests/validate-schema.sh
           ./tests/validate-schema.sh --install
 
+  licenses:
+    name: Third-Party Licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Prebuilt cargo-about binary (fast; `cargo install` would compile ~150 deps).
+      - uses: taiki-e/install-action@v2
+        with:
+          # Pin the version — output formatting can change between releases,
+          # which would make the drift diff flaky. Bump in lockstep with the
+          # version used to regenerate THIRD-PARTY-LICENSES.md locally.
+          tool: cargo-about@0.9.1
+      # Regenerate the attribution file and fail if the committed copy is stale.
+      # Resolution is target-pinned in about.toml, so the output does not depend
+      # on which OS runs this — the diff is deterministic against Cargo.lock.
+      - name: Verify THIRD-PARTY-LICENSES.md is current
+        run: |
+          # tr -d '\r' matches `just licenses` — some upstream license texts
+          # carry CRLF; normalizing keeps the diff byte-stable (see justfile).
+          cargo about generate about.hbs | tr -d '\r' > THIRD-PARTY-LICENSES.check.md
+          if ! diff -u THIRD-PARTY-LICENSES.md THIRD-PARTY-LICENSES.check.md; then
+            echo "::error::THIRD-PARTY-LICENSES.md is out of date — run 'just licenses' and commit the result."
+            exit 1
+          fi
+          echo "Third-party license attribution is up to date."
+
   go-test:
     name: Go Module Tests
     runs-on: ubuntu-latest
