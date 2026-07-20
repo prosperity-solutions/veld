@@ -1,8 +1,10 @@
 # Veld
 
-> This thing is 100% vibe coded with [Claude Code](https://claude.com/claude-code).
+> **Like if Kubernetes and localhost had a magic, agentic baby — with a gorgeous UI.**
 
-Local development environment orchestrator for monorepos. Spin up fully configured preview environments with real HTTPS URLs from a single command.
+Real HTTPS URLs for every service you run — one command, no YAML, no cloud bill. Then you and your coding agent build on it, together.
+
+veld is a local development environment orchestrator — for a monorepo, a pile of separate repos, or any set of services you run together. Declare them in one `veld.json`; veld resolves the dependency graph, starts everything, runs health checks, and hands you clean, stable HTTPS URLs.
 
 ```sh
 veld start frontend:local --name my-feature
@@ -11,6 +13,8 @@ veld start frontend:local --name my-feature
 ```
 
 No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
+
+> This thing is 100% vibe coded with [Claude Code](https://claude.com/claude-code).
 
 ## Features
 

@@ -1,109 +1,130 @@
 # Agents Guide — veld website
 
-This directory contains the veld marketing website: three static HTML pages served via nginx in Docker.
+This directory contains the veld marketing website: **one static HTML page**
+served via nginx in Docker. It used to be three pages (experience / humans /
+agents); those were removed in favor of a single, boring, self-explanatory
+landing page that's easy to maintain. Let the tool speak for itself.
 
-## Three-Page Architecture
+## One-page architecture
 
-| Page | Route | File | Purpose |
-|------|-------|------|---------|
-| Experience | `/` | `index.html` | Cinematic scroll homepage. Primary landing page for visitors. |
-| Humans | `/humans` | `humans.html` | Traditional documentation and marketing page for human readers. |
-| Agents | `/agents` | `agents.html` | Structured, agent-friendly page. Primary audience: LLMs and developers who think in terminals. |
+| Surface | Route | File | Purpose |
+|---------|-------|------|---------|
+| Landing page | `/` | `index.html` | The entire human-facing site. Self-contained: inline CSS, embedded wordmark SVG, data-URI favicon, self-hosted fonts. |
+| LLM index | `/llms.txt` | `llms.txt` | llms.txt-convention index; links to GitHub docs. |
+| LLM full docs | `/llms-full.txt` | `llms-full.txt` | All docs inlined into one markdown file for single-request LLM consumption. |
 
-All three pages share a navigation bar: **experience · humans · agents**.
+`index.html` sections: hero + install, features, components + architecture
+diagram, CLI reference, install, sharing, agents/skill, docs, kudos, footer.
 
-## Dual Content Maintenance
+## Dual content maintenance
 
-The website has **two audiences** — humans and LLMs. When you change content, update both:
+The website has **two audiences** — humans (`index.html`) and LLMs
+(`llms.txt` / `llms-full.txt`). When you change content, update both:
 
-| Human/Agent version | LLM version |
-|---------------------|-------------|
-| `index.html` (experience homepage) | `llms.txt` (structured markdown index) |
-| `humans.html` (styled docs for humans) | `llms-full.txt` (full content inlined) |
-| `agents.html` (structured agentic view) | |
-
-### Rules
-
-1. **Any content change to `agents.html` must be reflected in `llms-full.txt`** — features, examples, config snippets, install commands, CLI reference.
-2. **If you add or rename a documentation page**, update the links in `llms.txt`.
-3. **`llms-full.txt` is the single-request version** — it contains all content inlined. Keep it comprehensive but concise. No HTML, no styling, just clean markdown.
-4. **`llms.txt` is the index** — it links to raw markdown files on GitHub and lists the site pages. Only update it when doc structure changes.
-5. **Keep the veld.json example in `llms-full.txt` consistent** with the one in `agents.html`. Both should reflect the same config structure.
+1. **Any factual/content change to `index.html`** (features, CLI, config, install
+   command, architecture) must be reflected in `llms-full.txt`.
+2. **`llms-full.txt` is the single-request version** — all content inlined, clean
+   markdown, no HTML. Comprehensive but concise.
+3. **`llms.txt` is the index** — links to raw markdown on GitHub plus the site.
+   Only update it when doc structure changes.
+4. Keep any `veld.json` example consistent across `index.html` and
+   `llms-full.txt`.
 
 ### Correctness constraints
 
 - `command` type steps do NOT get `${veld.port}` allocated — only `start_server` does.
-- `start_server` outputs are objects (synthetic templates); `command` outputs are arrays (captured from `$VELD_OUTPUT_FILE` or legacy `VELD_OUTPUT` stdout).
+- `start_server` outputs are objects; `command` outputs are arrays.
 - The domain is `veld.oss.life.li`, not `veld.dev`.
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`.
 - The install URL is `https://veld.oss.life.li/get` (nginx redirects to GitHub).
 
-## Visual Identity
+## Visual identity
 
-### Colors
+Follows [../docs/branding.md](../docs/branding.md) — the marketing palette:
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| Background | `#0A0A0B` | Page background (all pages) |
-| Text | `#E8E4DF` | Primary body text |
-| Accent | `#C4F56A` | Highlights, CTAs, active nav |
-| Links | `#5B8DEF` | Hyperlinks |
+The page ships **both a dark and a light theme** (default dark; follows the OS via
+`prefers-color-scheme`, with a three-state auto/light/dark toggle). Colors are CSS
+custom properties defined per theme — never hard-code a hex in a rule. Dark values
+shown; light overrides live in `:root[data-theme="light"]` + the
+`@media (prefers-color-scheme: light)` block. See [../docs/branding.md](../docs/branding.md).
 
-### Typography
+| Token | Dark value | Usage |
+|-------|------------|-------|
+| `--bg` | `#0A0A0B` | Page background |
+| `--text` | `#E8E4DF` | Primary body text |
+| `--accent` | `#C4F56A` | Brand lime — **subtle fills / tints only** (not legible as text on white) |
+| `--accent-ink` | `#C4F56A` (dark) / `#3E7A10` (light) | Accent as **text or a mark**: headline accent, wordmark dot, primary button bg |
+| `--accent-ink-text` | `#0A0A0B` (dark) / `#FFFFFF` (light) | Text on top of `--accent-ink` (e.g. the primary button label) |
+| `--blue` | `#5B8DEF` (dark) / `#2E5BD0` (light) | Links |
 
-| Page | Fonts |
-|------|-------|
-| Experience (`/`) | Playfair Display (serif narrative), Space Grotesk (headings), system monospace |
-| Humans (`/humans`) | Space Grotesk (headings), Inter (body, falls back to system sans), JetBrains Mono (code) |
-| Agents (`/agents`) | JetBrains Mono (body), system sans (nav) |
+**Two-token accent rule:** the wordmark dot, the headline accent, and the primary
+button must all use `--accent-ink` (same green per theme) — never `--accent`, which
+is lime and unreadable on light. Keep them in sync.
 
-## Convention Files
+Typography is **JetBrains Mono** (self-hosted, `fonts/`) for headings, code, and
+UI chrome, with a system sans-serif for body prose. The wordmark is the embedded
+`logo-wordmark.svg` path data, colored via CSS (letters `--text`, trailing dot
+`--accent-ink`) — the dot is the **first** `<path>` in that SVG's source order.
 
-- **`llms.txt`** — Index file following the llms.txt convention. Lists project metadata and links to documentation. Served at `/llms.txt` and discoverable via `/.well-known/llms.txt` (redirect).
-- **`llms-full.txt`** — Full content version. All documentation inlined into a single markdown file for single-request consumption by LLMs.
-- Both are served with `Content-Type: text/markdown` and `Cache-Control: public, max-age=3600`.
-- The `/` route includes `Link` response headers pointing to both files for automated agent discovery.
+**Command blocks:** any `<pre>` whose visible text includes `#` comments or `=>`
+output lines must carry a `data-copy="…"` attribute with the clean command(s)
+only — the copy button copies `data-copy` when present, else the block's full
+`innerText` (which would include the comments/output).
 
-## File Structure
+**CSP note:** the page is self-contained (no external requests) but uses inline
+`<style>` and inline `<script>` for the theme toggle + copy buttons, so it needs
+`'unsafe-inline'` (or nonces/hashes) under a strict CSP. nginx sets no CSP header
+today; don't add a `default-src 'self'` without allowing inline, or the theme and
+copy buttons break.
+
+## Convention files
+
+- **`llms.txt`** — index; served at `/llms.txt`, discoverable via
+  `/.well-known/llms.txt` (301 redirect).
+- **`llms-full.txt`** — full inlined content.
+- Both served as `text/markdown` with `Cache-Control: public, max-age=3600`.
+- The `/` route sends `Link` response headers pointing to both files for agent
+  discovery.
+
+## File structure
 
 ```
 website/
-├── index.html         # Experience page (cinematic homepage, served at /)
-├── humans.html        # Humans page (docs + marketing, served at /humans)
-├── agents.html        # Agents page (structured agentic view, served at /agents)
+├── index.html         # The whole site (served at /)
 ├── og.png             # Open Graph image (1200x630)
-├── favicon.svg        # Favicon
-├── logo.svg           # Logo
-├── logo-wordmark.svg  # Logo wordmark
-├── fonts/             # Self-hosted web fonts (woff2)
-├── llms.txt           # LLM index (markdown, links to docs)
-├── llms-full.txt      # LLM full content (all docs inlined)
+├── favicon.svg        # Favicon (also inlined as data-URI in index.html)
+├── logo.svg           # Icon logo
+├── logo-wordmark.svg  # Wordmark (source for the inlined nav SVG)
+├── fonts/             # Self-hosted JetBrains Mono (woff2)
+├── llms.txt           # LLM index
+├── llms-full.txt      # LLM full content
 ├── nginx.conf         # nginx config (routes, headers, redirects)
-├── robots.txt         # Robots/crawler directives
+├── robots.txt         # Crawler directives
 ├── Dockerfile         # nginx:alpine container
 └── AGENTS.md          # This file
 ```
 
-## Local Development
+## Local development
 
-The root `veld.json` includes a `website` node that serves this directory locally:
+The root `veld.json` serves this directory locally via browser-sync:
 
 ```sh
 veld start website:local --name dev
 ```
 
-This starts a Python HTTP server and gives you an HTTPS URL like `https://website.dev.veld.localhost`. Use the feedback overlay to collaborate on design changes with AI agents.
+This gives an HTTPS URL like `https://website.dev.veld.localhost`. Use the
+feedback overlay to collaborate on design changes with a human reviewer.
 
-## Production Serving
+## Production serving
 
-- Static files served by nginx:alpine
-- `/` → `index.html` (with `Link` headers for llms.txt discovery)
-- `/humans` → `humans.html`
-- `/agents` → `agents.html`
-- `/get` → 302 redirect to GitHub install script
+Static files served by `nginx:alpine`:
+
+- `/` → `index.html` (with `Link` headers for llms discovery)
+- `/humans` and `/agents` → 301 redirect to `/` (retired pages)
+- `/get` → 302 redirect to the GitHub install script
 - `/schema/` → rewrite redirect to GitHub raw schema files
 - `/llms.txt` and `/llms-full.txt` served as `text/markdown`
 - `/.well-known/llms.txt` → 301 redirect to `/llms.txt`
 - `/robots.txt` → crawler directives
-- `/health` → 200 OK (for container health checks)
-- All other paths → SPA fallback to `index.html`
+- `/health` → 200 OK (container health check)
+- All other paths → fallback to `index.html`
