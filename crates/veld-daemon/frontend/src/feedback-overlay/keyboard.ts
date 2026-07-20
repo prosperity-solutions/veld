@@ -1,7 +1,6 @@
 import { getState } from "./store";
 import { modKey } from "./helpers";
 import { deps } from "../shared/registry";
-import { closeWebShareCard } from "./web-share";
 
 export function onKeyDown(e: KeyboardEvent): void {
   if (getState().shortcutsDisabled) return;
@@ -56,12 +55,8 @@ export function onKeyDown(e: KeyboardEvent): void {
     return;
   }
 
-  // Escape: cascading dismiss. The web-share card is the top-most transient
-  // (it floats above everything and self-polls), so it consumes Escape first.
+  // Escape: cascading dismiss.
   if (e.key === "Escape") {
-    if (closeWebShareCard()) {
-      return;
-    }
     if (getState().activePopover) {
       deps().closeActivePopover();
     } else if (getState().activeMode) {
