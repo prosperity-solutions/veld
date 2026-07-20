@@ -31,8 +31,7 @@
           "health_check": { "type": "http", "path": "/", "expect_status": 200, "timeout_seconds": 30 },
           "depends_on": { "backend": "local" },
           "proxy": {
-            "request": { "remove": ["Origin"] },
-            "response": { "set": { "X-Veld-Demo": "proxy-headers" } }
+            "request": { "remove": ["Origin"] }
           }
         }
       }
