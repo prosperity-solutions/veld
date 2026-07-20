@@ -79,6 +79,15 @@ If the change adds config fields, CLI flags, subcommands, or user-visible
 behaviour, update **all** listed files. Purely-internal changes are exempt — say
 so explicitly rather than skipping silently.
 
+Explicitly ask **"does the marketing website need to change?"** For any
+user-visible capability, decide whether it belongs on `website/index.html`
+(features grid, CLI reference, sharing, the `for the nerds` architecture
+diagram) and update it — plus `website/llms-full.txt` — if so. The site should
+stay a current picture of what veld does, not drift behind the CLI. State your
+call either way. When the change is website-facing, prefer serving it locally
+(`veld start website:local`) and collaborating through `veld feedback` before
+shipping.
+
 ## Step 4 — Review rounds
 
 Run the review at the depth chosen in Step 0, following

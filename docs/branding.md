@@ -7,9 +7,14 @@ falling back to unstyled system-default pages.
 
 **The rule:** any HTML page a Veld binary serves to a browser carries the
 Veld brand — the wordmark, the dark token palette below, and self-contained
-assets (inline CSS, embedded SVG, data-URI favicon; no external requests, so
-pages render under any CSP). No page ships looking like a bare `<h1>` on
-white.
+assets (inline CSS, inline JS where needed, embedded SVG, data-URI favicon; no
+external requests, so nothing cross-origin is left to block). No page ships
+looking like a bare `<h1>` on white.
+
+Note: "self-contained" removes *external-host* CSP failures, not *inline* ones —
+inline `<style>`/`<script>` still require `'unsafe-inline'` (or nonces/hashes)
+under a strict CSP. A page that adds a strict `Content-Security-Policy` must
+account for its own inline CSS/JS.
 
 **Scope:** the rule covers pages a human is meant to read in a browser —
 index, login, 404s, viewer-facing error pages (dead tunnel, upstream
@@ -59,16 +64,42 @@ the `--bg` page with 1px `--border`, links in `--blue`, primary buttons in
 
 ## Marketing palette (website)
 
-The website (`website/`) uses its own darker, editorial variant — same accent:
+The website (`website/`, a single self-contained `index.html`) uses its own
+editorial variant of the palette — same lime accent — and ships **both a dark
+and a light theme**. Dark is the default; the page also follows the visitor's
+OS via `prefers-color-scheme` and offers a three-state toggle
+(auto → light → dark, remembered in `localStorage`).
 
 ```css
+/* dark — default / forced-dark */
 :root{
-  --bg:#0A0A0B;--text:#E8E4DF;--accent:#C4F56A;--blue:#5B8DEF;
-  --muted:#4A4A50;--red:#ef4444;--code-bg:#141416;
+  --bg:#0A0A0B;--surface:#141416;--surface2:#1a1a1d;--border:#26262b;
+  --text:#E8E4DF;--text2:#9a9a93;
+  --accent:#C4F56A;          /* brand lime — subtle fills / tints */
+  --accent-ink:#C4F56A;      /* accent as text/mark + primary button */
+  --accent-ink-text:#0A0A0B; /* text on top of --accent-ink */
+  --blue:#5B8DEF;--muted:#7c7c86;--code-bg:#141416;
+}
+/* light — forced-light or system-light */
+:root[data-theme="light"]{
+  --bg:#FBFBF8;--surface:#FFFFFF;--surface2:#F2F2ED;--border:#E3E3DC;
+  --text:#17171A;--text2:#56565d;
+  --accent:#C4F56A;          /* lime as a subtle tint only */
+  --accent-ink:#3E7A10;      /* darker green so accent text stays legible on white */
+  --accent-ink-text:#FFFFFF; /* white text on the dark-green button */
+  --blue:#2E5BD0;--muted:#74747e;--code-bg:#F5F5F0;
 }
 ```
 
-with JetBrains Mono / Playfair Display / Space Grotesk. Marketing pages follow
+**Two-token accent rule:** lime (`--accent`) is only legible on dark. Use it for
+subtle fills and tints; use `--accent-ink` for anything that must read as
+green *text or a mark* (headline accent, the wordmark dot, the primary button)
+so it stays readable in light mode. Keep those in sync — the wordmark dot,
+title accent, and primary button must all be the same green per theme.
+
+Typography is **JetBrains Mono** (self-hosted in `website/fonts/`) for headings,
+code, and UI chrome, with a system sans-serif for body prose. (The earlier
+Playfair Display / Space Grotesk experiment is gone.) Marketing pages follow
 `website/AGENTS.md`; product surfaces do NOT adopt the marketing fonts.
 
 ## Checklist for a new user-facing page

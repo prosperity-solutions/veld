@@ -3,15 +3,25 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>veld — The Experience</title>
-  <meta name="description" content="A cinematic journey from chaos to clarity. See how veld transforms local development from scattered terminal windows into one elegant command.">
-  <meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, developer experience, open source">
+  <script>
+    // Apply the saved theme choice before first paint to avoid a flash.
+    // Stored value is 'auto' | 'light' | 'dark'; 'auto' (or unset) follows the OS.
+    (function () {
+      try {
+        var t = localStorage.getItem('veld-theme');
+        if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+      } catch (e) {}
+    })();
+  </script>
+  <title>veld — local dev environment orchestrator</title>
+  <meta name="description" content="veld is a Rust CLI that starts every service in your project with one command and gives you real HTTPS URLs — no port numbers, no manual wiring. Built for humans and coding agents.">
+  <meta name="keywords" content="veld, local development, HTTPS, dev environment, orchestrator, monorepo, multi-repo, Rust, open source, coding agents">
   <meta name="author" content="Prosperity Solutions">
   <meta name="robots" content="index, follow">
 
   <!-- Open Graph -->
-  <meta property="og:title" content="veld — The Experience">
-  <meta property="og:description" content="A cinematic journey from chaos to clarity. See how veld transforms local development.">
+  <meta property="og:title" content="veld — local dev environment orchestrator">
+  <meta property="og:description" content="One command starts every service with real HTTPS URLs. No port numbers, no manual wiring.">
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://veld.oss.life.li">
   <meta property="og:image" content="https://veld.oss.life.li/og.png">
@@ -22,1957 +32,683 @@
 
   <!-- Twitter -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="veld — The Experience">
-  <meta name="twitter:description" content="A cinematic journey from chaos to clarity. See how veld transforms local development.">
+  <meta name="twitter:title" content="veld — local dev environment orchestrator">
+  <meta name="twitter:description" content="One command starts every service with real HTTPS URLs. No port numbers, no manual wiring.">
   <meta name="twitter:image" content="https://veld.oss.life.li/og.png">
 
   <meta name="theme-color" content="#0A0A0B">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'><path d='M40 0H8C3.58 0 0 3.58 0 8V40C0 44.42 3.58 48 8 48H40C44.42 48 48 44.42 48 40V8C48 3.58 44.42 0 40 0Z' fill='%230A0A0B'/><path d='M21.1 36L11.9 12H16.3L23.6 31.8H23.7L31 12H35.4L26.2 36H21.1Z' fill='white'/><path d='M32.5 36C33.88 36 35 34.88 35 33.5C35 32.12 33.88 31 32.5 31C31.12 31 30 32.12 30 33.5C30 34.88 31.12 36 32.5 36Z' fill='%23C4F56A'/></svg>">
 
-  <!-- Canonical -->
   <link rel="canonical" href="https://veld.oss.life.li">
 
-  <!-- LLMs -->
+  <!-- LLM-facing docs -->
   <link rel="alternate" type="text/markdown" href="llms.txt" title="LLM Index">
   <link rel="alternate" type="text/markdown" href="llms-full.txt" title="Full LLM Documentation">
 
-  <!-- Structured Data -->
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
-    "@type": "WebPage",
-    "name": "veld — The Experience",
-    "description": "A cinematic scroll-driven narrative showing how veld transforms chaotic local development into elegant simplicity.",
+    "@type": "SoftwareApplication",
+    "name": "veld",
+    "applicationCategory": "DeveloperApplication",
+    "operatingSystem": "macOS, Linux",
+    "description": "Local development environment orchestrator. One command starts every service — in a monorepo, multiple repos, or any project — with real HTTPS URLs. No port numbers, no manual wiring.",
     "url": "https://veld.oss.life.li",
-    "isPartOf": {
-      "@type": "WebSite",
-      "name": "veld",
-      "url": "https://veld.oss.life.li"
-    },
-    "author": { "@type": "Organization", "name": "Prosperity Solutions" }
+    "license": "https://github.com/prosperity-solutions/veld/blob/main/LICENSE",
+    "author": { "@type": "Organization", "name": "Prosperity Solutions" },
+    "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
   }
   </script>
 
   <style>
     @font-face {
       font-family: 'JetBrains Mono';
-      font-style: normal;
-      font-weight: 400;
-      font-display: swap;
+      font-style: normal; font-weight: 400; font-display: swap;
       src: url(fonts/jetbrains-mono-regular.woff2) format('woff2');
     }
     @font-face {
       font-family: 'JetBrains Mono';
-      font-style: normal;
-      font-weight: 700;
-      font-display: swap;
+      font-style: normal; font-weight: 700; font-display: swap;
       src: url(fonts/jetbrains-mono-bold.woff2) format('woff2');
-    }
-    @font-face {
-      font-family: 'Playfair Display';
-      font-style: normal;
-      font-weight: 400 700;
-      font-display: swap;
-      src: url(fonts/playfair-display.woff2) format('woff2');
     }
 
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* dark is the default / forced-dark theme */
     :root {
       --bg: #0A0A0B;
+      --surface: #141416;
+      --surface2: #1a1a1d;
+      --border: #26262b;
       --text: #E8E4DF;
-      --accent: #C4F56A;
+      --text2: #9a9a93;
+      --accent: #C4F56A;          /* brand lime — subtle fills / tints */
+      --accent-ink: #C4F56A;      /* accent as text/mark & primary button — readable on bg */
+      --accent-ink-text: #0A0A0B; /* text on top of --accent-ink */
       --blue: #5B8DEF;
-      --muted: #4A4A50;
-      --red: #ef4444;
+      --muted: #7c7c86;
       --code-bg: #141416;
-      --font-narrative: 'Playfair Display', Georgia, 'Times New Roman', serif;
-      --font-mono: 'JetBrains Mono', ui-monospace, Menlo, monospace;
-      --font-heading: 'Space Grotesk', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      --mono: 'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      --maxw: 940px;
     }
+
+    /* light tokens, reused by system-light (unless forced dark) and forced-light */
+    :root[data-theme="light"] {
+      --bg: #FBFBF8;
+      --surface: #FFFFFF;
+      --surface2: #F2F2ED;
+      --border: #E3E3DC;
+      --text: #17171A;
+      --text2: #56565d;
+      --accent: #C4F56A;          /* lime still works as a subtle tint */
+      --accent-ink: #3E7A10;      /* darker green: accent text/mark + button */
+      --accent-ink-text: #FFFFFF; /* white text on the dark-green button */
+      --blue: #2E5BD0;
+      --muted: #74747e;
+      --code-bg: #F5F5F0;
+    }
+    @media (prefers-color-scheme: light) {
+      :root:not([data-theme="dark"]) {
+        --bg: #FBFBF8;
+        --surface: #FFFFFF;
+        --surface2: #F2F2ED;
+        --border: #E3E3DC;
+        --text: #17171A;
+        --text2: #56565d;
+        --accent: #C4F56A;
+        --accent-ink: #3E7A10;
+        --accent-ink-text: #FFFFFF;
+        --blue: #2E5BD0;
+        --muted: #74747e;
+        --code-bg: #F5F5F0;
+      }
+    }
+    html { color-scheme: light dark; }
 
     html { scroll-behavior: smooth; }
-
     body {
-      font-family: var(--font-heading);
+      font-family: var(--sans);
       background: var(--bg);
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.65;
+      font-size: 16px;
       -webkit-font-smoothing: antialiased;
-      overflow-x: hidden;
     }
 
-    /* ===================== NAV ===================== */
+    a { color: var(--blue); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 24px; }
+
+    /* ---------- nav ---------- */
     .nav {
-      position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 48px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 0 24px;
-      background: rgba(10, 10, 11, 0.8);
-      backdrop-filter: blur(12px);
-      -webkit-backdrop-filter: blur(12px);
-      z-index: 1000;
-      border-bottom: 1px solid rgba(74, 74, 80, 0.3);
+      position: sticky; top: 0; z-index: 100;
+      background: var(--bg); /* fallback for engines without color-mix */
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border);
     }
+    .nav .wrap { display: flex; align-items: center; justify-content: space-between; height: 56px; }
+    .wordmark { height: 20px; width: auto; display: block; }
+    .wordmark path { fill: var(--text); }
+    .wordmark path:first-child { fill: var(--accent-ink); } /* the dot is the first path in the source */
+    .nav-links { display: flex; align-items: center; gap: 22px; font-family: var(--mono); font-size: 13px; }
+    .nav-links a { color: var(--text2); }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+    @media (max-width: 620px) { .nav-links a:not(.theme-toggle) { display: none; } }
 
-    .nav-wordmark {
-      font-family: var(--font-heading);
-      font-size: 1.125rem;
-      font-weight: 700;
-      color: var(--text);
-      text-decoration: none;
+    /* theme toggle */
+    .theme-toggle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; padding: 0; cursor: pointer;
+      background: none; border: 1px solid var(--border); border-radius: 7px;
+      color: var(--text2); transition: color .15s, border-color .15s;
     }
+    .theme-toggle:hover { color: var(--text); border-color: var(--muted); }
+    .theme-toggle svg { width: 16px; height: 16px; display: block; }
+    /* icon reflects the CHOSEN mode: no data-theme = auto, else light/dark */
+    .theme-toggle .icon-sun, .theme-toggle .icon-moon { display: none; }
+    .theme-toggle .icon-auto { display: block; }
+    :root[data-theme="light"] .theme-toggle .icon-auto { display: none; }
+    :root[data-theme="light"] .theme-toggle .icon-sun  { display: block; }
+    :root[data-theme="dark"]  .theme-toggle .icon-auto { display: none; }
+    :root[data-theme="dark"]  .theme-toggle .icon-moon { display: block; }
 
-    .nav-dot {
-      color: var(--accent);
-      font-weight: 800;
-    }
+    /* ---------- layout ---------- */
+    section { padding: 72px 0; border-top: 1px solid var(--border); }
+    section:first-of-type { border-top: none; }
+    h1, h2, h3 { font-family: var(--mono); font-weight: 700; line-height: 1.25; letter-spacing: -0.01em; }
+    h2 { font-size: 24px; margin-bottom: 8px; }
+    h2 .dot { color: var(--accent-ink); }
+    .section-sub { color: var(--text2); margin-bottom: 32px; max-width: 640px; }
+    h3 { font-size: 15px; margin-bottom: 6px; }
+    p { margin-bottom: 14px; }
+    .lead { color: var(--text2); }
 
-    .nav-links {
-      display: flex;
-      gap: 14px;
-      font-size: 0.85rem;
-      font-weight: 500;
-      align-items: center;
-    }
+    /* ---------- hero ---------- */
+    .hero { padding: 80px 0 72px; border-top: none; text-align: left; }
+    .hero h1 { font-size: clamp(30px, 5vw, 46px); margin-bottom: 20px; }
+    .hero h1 .accent { color: var(--accent-ink); }
+    .hero .tagline { font-size: 18px; color: var(--text2); max-width: 620px; margin-bottom: 28px; }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 18px; }
+    .vibe { font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+    .vibe a { color: var(--text2); }
 
-    .nav-links a {
-      color: #8a8a92;
-      text-decoration: none;
-      transition: color 0.2s;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    }
-
-    .nav-links a:hover { color: var(--text); }
-
-    .nav-links a.active { color: var(--accent); }
-
-    .nav-links .sep { color: #8a8a92; opacity: 0.5; }
-
-    .nav-github {
-      color: #8a8a92;
-      text-decoration: none;
-      display: flex;
-      align-items: center;
-      margin-left: 8px;
-    }
-    .nav-github:hover { color: var(--text); }
-
-    /* ===================== ACTS ===================== */
-    .act {
-      min-height: 100vh;
+    /* ---------- code ---------- */
+    code { font-family: var(--mono); font-size: .9em; background: var(--surface2); padding: 2px 6px; border-radius: 4px; color: var(--text); }
+    pre {
       position: relative;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      overflow: hidden;
-    }
-
-    /* ===================== ACT 1: CHAOS ===================== */
-    .act-chaos {
-      background: var(--bg);
-      transition: background 0.8s ease;
-    }
-
-    .act-chaos.in-view {
-      background: var(--bg);
-    }
-
-    /* No gradient overlays — clean section transitions */
-
-    /* Gradient fade at bottom of chaos only (chaos has a different bg color) */
-
-    .chaos-container {
-      position: relative;
-      width: 100%;
-      max-width: 900px;
-      margin: 0 auto;
-      padding: 80px 24px 48px;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 32px;
-    }
-
-    .chaos-windows-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 16px;
-      width: 100%;
-    }
-
-    .chaos-window {
-      background: var(--code-bg);
-      border: 1px solid #2a2a2e;
-      border-radius: 8px;
-      font-family: var(--font-mono);
-      font-size: 0.8rem;
-      line-height: 1.5;
-      padding: 0;
-      opacity: 0;
-      transform: translateY(30px);
-      transition: opacity 0.8s ease, transform 0.8s ease;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-    }
-
-    .act-chaos.in-view .chaos-window {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .chaos-window .titlebar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 8px 12px;
-      border-bottom: 1px solid #2a2a2e;
-      background: #1a1a1e;
-      border-radius: 8px 8px 0 0;
-    }
-
-    .titlebar-dot {
-      width: 10px;
-      height: 10px;
-      border-radius: 50%;
-    }
-
-    .titlebar-dot.r { background: #ff5f57; }
-    .titlebar-dot.y { background: #febc2e; }
-    .titlebar-dot.g { background: #28c840; }
-
-    .titlebar-label {
-      margin-left: 8px;
-      font-size: 0.7rem;
-      color: var(--muted);
-    }
-
-    .chaos-window .body {
-      padding: 12px 14px;
-    }
-
-    .chaos-window .prompt { color: var(--accent); }
-    .chaos-window .cmd { color: var(--text); }
-    .chaos-window .error { color: var(--red); }
-    .chaos-window .dim { color: var(--muted); }
-    .chaos-window .slack-name { color: var(--blue); font-weight: 600; }
-    .chaos-window .slack-msg { color: var(--text); }
-
-    /* Window initial rotation offsets */
-    .cw-1 { transform: rotate(-1.5deg) translateY(30px); }
-    .cw-2 { transform: rotate(1deg) translateY(30px); }
-    .cw-3 { transform: rotate(0.5deg) translateY(30px); }
-    .cw-4 { transform: rotate(-0.8deg) translateY(30px); }
-    .cw-5 { transform: rotate(1.2deg) translateY(30px); }
-    .cw-6 { transform: rotate(-0.5deg) translateY(30px); }
-
-    .act-chaos.in-view .cw-1 { transform: rotate(-1.5deg) translateY(0); transition-delay: 0s; animation: wiggle-1 4s ease-in-out 1s infinite; }
-    .act-chaos.in-view .cw-2 { transform: rotate(1deg) translateY(0); transition-delay: 0.4s; animation: wiggle-2 4.5s ease-in-out 1.4s infinite; }
-    .act-chaos.in-view .cw-3 { transform: rotate(0.5deg) translateY(0); transition-delay: 0.8s; animation: wiggle-3 5s ease-in-out 1.8s infinite; }
-    .act-chaos.in-view .cw-4 { transform: rotate(-0.8deg) translateY(0); transition-delay: 1.2s; animation: wiggle-4 4.2s ease-in-out 2.2s infinite; }
-    .act-chaos.in-view .cw-5 { transform: rotate(1.2deg) translateY(0); transition-delay: 1.6s; animation: wiggle-5 4.8s ease-in-out 2.6s infinite; }
-    .act-chaos.in-view .cw-6 { transform: rotate(-0.5deg) translateY(0); transition-delay: 2.0s; animation: wiggle-6 5.2s ease-in-out 3.0s infinite; }
-
-    @keyframes wiggle-1 {
-      0%, 100% { transform: rotate(-1.5deg) translate(0, 0); }
-      25% { transform: rotate(-1.2deg) translate(2px, -3px); }
-      50% { transform: rotate(-1.8deg) translate(-1px, 2px); }
-      75% { transform: rotate(-1.3deg) translate(1px, -1px); }
-    }
-    @keyframes wiggle-2 {
-      0%, 100% { transform: rotate(1deg) translate(0, 0); }
-      25% { transform: rotate(1.3deg) translate(-2px, 2px); }
-      50% { transform: rotate(0.7deg) translate(1px, -2px); }
-      75% { transform: rotate(1.1deg) translate(-1px, 1px); }
-    }
-    @keyframes wiggle-3 {
-      0%, 100% { transform: rotate(0.5deg) translate(0, 0); }
-      25% { transform: rotate(0.8deg) translate(1px, -2px); }
-      50% { transform: rotate(0.2deg) translate(-2px, 1px); }
-      75% { transform: rotate(0.6deg) translate(1px, 2px); }
-    }
-    @keyframes wiggle-4 {
-      0%, 100% { transform: rotate(-0.8deg) translate(0, 0); }
-      25% { transform: rotate(-0.5deg) translate(-1px, 2px); }
-      50% { transform: rotate(-1.1deg) translate(2px, -1px); }
-      75% { transform: rotate(-0.7deg) translate(-1px, -2px); }
-    }
-    @keyframes wiggle-5 {
-      0%, 100% { transform: rotate(1.2deg) translate(0, 0); }
-      25% { transform: rotate(0.9deg) translate(2px, 1px); }
-      50% { transform: rotate(1.5deg) translate(-1px, -2px); }
-      75% { transform: rotate(1.1deg) translate(1px, 2px); }
-    }
-    @keyframes wiggle-6 {
-      0%, 100% { transform: rotate(-0.5deg) translate(0, 0); }
-      25% { transform: rotate(-0.2deg) translate(-2px, -1px); }
-      50% { transform: rotate(-0.8deg) translate(1px, 2px); }
-      75% { transform: rotate(-0.4deg) translate(-1px, -1px); }
-    }
-
-    .chaos-headline {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.5rem, 4vw, 2.5rem);
-      color: #E8E4DF;
-      text-align: center;
-      opacity: 0;
-      transition: opacity 1s ease 0.2s;
-    }
-
-    .act-chaos.in-view .chaos-headline {
-      opacity: 1;
-    }
-
-    .chaos-bottom {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 12px;
-      margin-top: 8px;
-    }
-
-    .cognitive-load {
-      font-family: var(--font-mono);
-      font-size: 0.75rem;
-      color: var(--muted);
-      opacity: 0;
-      transition: opacity 0.6s ease 2.4s;
-      text-align: center;
-    }
-
-    .act-chaos.in-view .cognitive-load { opacity: 1; }
-
-    .scroll-arrow {
-      opacity: 0;
-      transition: opacity 0.6s ease 3s;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 6px;
-      color: var(--text);
-      font-family: var(--font-mono);
-      font-size: 0.85rem;
-      font-weight: 600;
-    }
-
-    .act-chaos.in-view .scroll-arrow { opacity: 1; }
-
-    .scroll-arrow-icon {
-      font-size: 2rem;
-      animation: bounce-arrow 2s ease-in-out infinite;
-    }
-
-    @keyframes bounce-arrow {
-      0%, 100% { transform: translateY(0); }
-      50% { transform: translateY(6px); }
-    }
-
-    .load-bar { color: var(--red); }
-    .load-label { color: var(--red); }
-
-    /* ===================== ACT 2: THE CLEARING ===================== */
-    .act-clearing {
-      min-height: auto;
-      padding: 120px 24px;
-      flex-direction: column;
-      gap: 0;
-    }
-
-    .clearing-terminal {
-      width: 100%;
-      max-width: 680px;
-      padding: 0 24px;
-      font-family: var(--font-mono);
-      font-size: clamp(0.85rem, 1.8vw, 1.05rem);
-      line-height: 1.8;
-      min-height: 420px;
-    }
-
-    .type-line {
-      overflow: hidden;
-      white-space: nowrap;
-      border-right: 2px solid var(--accent);
-      width: 0;
-      opacity: 0;
-    }
-
-    .act-clearing.in-view .type-line {
-      opacity: 1;
-      animation: typewriter 1.2s steps(44) 0.3s forwards, blink-caret 0.6s step-end infinite;
-    }
-
-    @keyframes typewriter {
-      from { width: 0; }
-      to { width: 44ch; }
-    }
-
-    @keyframes blink-caret {
-      50% { border-color: transparent; }
-    }
-
-    .type-line .prompt-char { color: var(--accent); }
-    .type-line .cmd-text { color: var(--text); }
-    .type-line .flag { color: var(--blue); }
-
-    .service-lines {
-      margin-top: 24px;
-    }
-
-    .service-line {
-      opacity: 0;
-      transform: translateY(8px);
-      transition: opacity 0.4s ease, transform 0.4s ease;
-      display: flex;
-      gap: 12px;
-      align-items: baseline;
-      white-space: nowrap;
-      padding: 2px 0;
-    }
-
-    .act-clearing.in-view .service-line {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .act-clearing.in-view .sl-1-starting { transition-delay: 1.8s; }
-    .act-clearing.in-view .sl-1-healthy  { transition-delay: 2.6s; }
-    .act-clearing.in-view .sl-2-starting { transition-delay: 3.2s; }
-    .act-clearing.in-view .sl-2-healthy  { transition-delay: 4.0s; }
-    .act-clearing.in-view .sl-3-starting { transition-delay: 4.6s; }
-    .act-clearing.in-view .sl-3-ready    { transition-delay: 5.4s; }
-    .act-clearing.in-view .sl-final      { transition-delay: 6.2s; }
-
-    /* Hide starting line when healthy appears */
-    .act-clearing.in-view .sl-1-starting { animation: fade-replace 0s 2.6s forwards; }
-    .act-clearing.in-view .sl-2-starting { animation: fade-replace 0s 4.0s forwards; }
-    .act-clearing.in-view .sl-3-starting { animation: fade-replace 0s 5.4s forwards; }
-
-    @keyframes fade-replace {
-      to { height: 0; overflow: hidden; opacity: 0; padding: 0; margin: 0; }
-    }
-
-    .svc-icon { display: inline-block; width: 16px; text-align: center; }
-    .svc-icon.starting { color: var(--muted); animation: pulse-dot 1s ease-in-out infinite; }
-    .svc-icon.healthy { color: var(--accent); }
-
-    @keyframes pulse-dot {
-      0%, 100% { opacity: 0.4; }
-      50% { opacity: 1; }
-    }
-
-    .svc-name { color: var(--text); min-width: 100px; }
-    .svc-status { color: var(--muted); min-width: 90px; }
-    .svc-status.ok { color: var(--accent); }
-    .svc-url { color: var(--blue); }
-
-    .final-line {
-      margin-top: 20px;
-      color: var(--accent);
-      font-weight: 600;
-    }
-
-    .cognitive-load-zero {
-      margin-top: 40px;
-      font-family: var(--font-mono);
-      font-size: 0.75rem;
-      color: var(--accent);
-      opacity: 0;
-      transition: opacity 0.6s ease;
-    }
-
-    .act-clearing.in-view .cognitive-load-zero {
-      opacity: 1;
-      transition-delay: 6.8s;
-    }
-
-    /* ===================== ACT 3: FEEDBACK LOOP ===================== */
-    .act-feedback {
-      flex-direction: column;
-      padding: 48px 24px;
-      gap: 0;
-    }
-
-    .feedback-stage {
-      width: 100%;
-      max-width: 1000px;
-      margin: 0 auto;
-    }
-
-    .feedback-narrative {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
-      line-height: 1.4;
-      text-align: center;
-      color: var(--text);
-      margin-bottom: 48px;
-      opacity: 0;
-      transform: translateY(20px);
-      transition: opacity 0.8s ease, transform 0.8s ease;
-      position: relative;
-      z-index: 3;
-    }
-
-    .act-feedback.in-view .feedback-narrative { opacity: 1; transform: translateY(0); }
-
-    .feedback-split {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 32px;
-      align-items: start;
-      margin-bottom: 40px;
-    }
-
-    @media (max-width: 768px) {
-      .feedback-split {
-        grid-template-columns: 1fr;
-      }
-    }
-
-    /* Browser mockup */
-    .browser-mockup {
-      background: #1a1a1e;
-      border: 1px solid #2a2a2e;
-      border-radius: 10px;
-      overflow: hidden;
-      opacity: 0;
-      transform: translateX(30px);
-      transition: opacity 0.7s ease 0.3s, transform 0.7s ease 0.3s;
-    }
-
-    .act-feedback.in-view .browser-mockup { opacity: 1; transform: translateX(0); }
-
-    .browser-bar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 10px 14px;
-      background: #111113;
-      border-bottom: 1px solid #2a2a2e;
-    }
-
-    .browser-url {
-      flex: 1;
-      margin-left: 10px;
-      font-family: var(--font-mono);
-      font-size: 0.7rem;
-      color: var(--muted);
-      background: #0A0A0B;
-      padding: 4px 10px;
-      border-radius: 4px;
-    }
-
-    .browser-url .lock { color: var(--accent); margin-right: 4px; }
-
-    .browser-content {
-      padding: 24px 20px;
-      min-height: 240px;
-      position: relative;
-    }
-
-    .browser-header {
-      font-family: var(--font-heading);
-      font-size: 1.1rem;
-      font-weight: 700;
-      color: var(--text);
-      margin-bottom: 8px;
-      padding-bottom: 12px;
-      border-bottom: 1px solid #2a2a2e;
-      transition: padding-bottom 0.6s ease, margin-bottom 0.6s ease;
-    }
-
-    .act-feedback.phase-fix .browser-header {
-      padding-bottom: 20px;
-      margin-bottom: 16px;
-    }
-
-    .browser-body-text {
-      font-size: 0.85rem;
-      color: var(--muted);
-      line-height: 1.6;
-    }
-
-    .feedback-btn-mock {
-      position: absolute;
-      bottom: 16px;
-      right: 16px;
-      width: 40px;
-      height: 40px;
-      border-radius: 50%;
-      background: #0a0a0a;
-      border: 1px solid #1e1e24;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      box-shadow: 0 8px 30px rgba(0,0,0,.5);
-    }
-
-    .act-feedback.in-view .feedback-btn-mock {
-      animation: pulse-ring 2s ease-in-out 1.2s 3;
-    }
-
-    @keyframes pulse-ring {
-      0% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 0 rgba(196, 245, 106, 0.4); }
-      70% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 12px rgba(196, 245, 106, 0); }
-      100% { box-shadow: 0 8px 30px rgba(0,0,0,.5), 0 0 0 0 rgba(196, 245, 106, 0); }
-    }
-
-    /* Feedback overlay popover */
-    .feedback-overlay {
-      position: absolute;
-      bottom: 60px;
-      right: 16px;
-      width: 260px;
-      background: #1a1a1e;
-      border: 1px solid rgba(196, 245, 106, 0.3);
-      border-radius: 10px;
-      padding: 0;
-      opacity: 0;
-      transform: translateY(8px) scale(0.95);
-      pointer-events: none;
-      transition: opacity 0.4s ease, transform 0.4s ease;
-      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
-      overflow: hidden;
-    }
-
-    .act-feedback.phase-overlay .feedback-overlay {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-    }
-
-    .feedback-overlay-header {
-      padding: 10px 14px;
-      font-family: var(--font-heading);
-      font-size: 0.75rem;
-      font-weight: 600;
-      color: var(--text);
-      border-bottom: 1px solid #2a2a2e;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    .feedback-overlay-header .icon { color: var(--accent); }
-
-    .feedback-overlay-body {
-      padding: 12px 14px;
-    }
-
-    .feedback-textarea-mock {
-      width: 100%;
-      min-height: 48px;
-      background: #1e1e24;
-      border: 1px solid #2a2a2e;
-      border-radius: 6px;
-      padding: 8px 10px;
-      font-family: var(--font-mono);
-      font-size: 0.7rem;
-      color: var(--text);
-      line-height: 1.5;
-      overflow: hidden;
-      transition: border-color 0.2s ease;
-    }
-
-    .act-feedback.phase-typing .feedback-textarea-mock {
-      border-color: #C4F56A;
-    }
-
-    .feedback-typing-text {
-      opacity: 0;
-    }
-
-    .act-feedback.phase-typing .feedback-typing-text {
-      opacity: 1;
-      animation: type-feedback 1.5s steps(22) forwards;
-      overflow: hidden;
-      white-space: nowrap;
-      width: 0;
-      display: inline-block;
-    }
-
-    @keyframes type-feedback {
-      from { width: 0; }
-      to { width: 100%; }
-    }
-
-    .feedback-overlay-footer {
-      padding: 8px 14px 12px;
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    .feedback-submit-btn {
-      background: #C4F56A;
-      color: #0A0A0B;
-      border: none;
-      border-radius: 6px;
-      padding: 6px 16px;
-      font-family: var(--font-heading);
-      font-size: 0.7rem;
-      font-weight: 700;
-      opacity: 0.4;
-      transition: opacity 0.3s ease;
-    }
-
-    .act-feedback.phase-typing .feedback-submit-btn {
-      opacity: 1;
-    }
-
-    .feedback-submit-flash {
-      opacity: 0;
-      transition: opacity 0.3s ease;
-    }
-
-    .act-feedback.phase-submit .feedback-submit-flash {
-      opacity: 1;
-    }
-
-    .act-feedback.phase-submit .feedback-overlay {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-      animation: overlay-dismiss 0.5s ease 0.6s forwards;
-    }
-
-    @keyframes overlay-dismiss {
-      to { opacity: 0; transform: translateY(8px) scale(0.95); }
-    }
-
-    .feedback-comment {
-      position: absolute;
-      top: 50%;
-      left: 50%;
-      transform: translate(-50%, -50%);
-      background: rgba(196, 245, 106, 0.1);
-      border: 1px solid rgba(196, 245, 106, 0.3);
-      border-radius: 8px;
-      padding: 12px 16px;
-      font-family: var(--font-mono);
-      font-size: 0.75rem;
-      color: var(--accent);
-      white-space: nowrap;
-      opacity: 0;
-      pointer-events: none;
-    }
-
-    .act-feedback.phase-submit .feedback-comment {
-      animation: comment-pin 0.4s ease 0.2s forwards;
-    }
-
-    @keyframes comment-pin {
-      from { opacity: 0; transform: translate(-50%, -50%) scale(0.9); }
-      to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-    }
-
-    .act-feedback.phase-fix .feedback-comment {
-      opacity: 1;
-      transform: translate(-50%, -50%) scale(1);
-      animation: comment-fade 0.5s ease 1s forwards;
-    }
-
-    @keyframes comment-fade {
-      to { opacity: 0; }
-    }
-
-    /* Browser content update after fix */
-    .browser-update-indicator {
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      height: 2px;
-      background: var(--accent);
-      transform: scaleX(0);
-      transform-origin: left;
-    }
-
-    .act-feedback.phase-fix .browser-update-indicator {
-      animation: progress-bar 0.8s ease 1.2s forwards;
-    }
-
-    @keyframes progress-bar {
-      to { transform: scaleX(1); }
-    }
-
-    .browser-header-fixed {
-      opacity: 0;
-      transition: opacity 0.3s ease;
-    }
-
-    .act-feedback.phase-fix .browser-header-fixed {
-      opacity: 1;
-      transition-delay: 2s;
-    }
-
-    .act-feedback.phase-fix .browser-header-original {
-      transition: padding-top 0.5s ease 2s;
-      padding-top: 12px;
-    }
-
-    /* Terminal on left side for Act 3 */
-    .feedback-terminal {
-      background: var(--code-bg);
-      border: 1px solid #2a2a2e;
-      border-radius: 10px;
-      overflow: hidden;
-      opacity: 0;
-      transform: translateX(-30px);
-      transition: opacity 0.7s ease 0.5s, transform 0.7s ease 0.5s;
-    }
-
-    .act-feedback.in-view .feedback-terminal { opacity: 1; transform: translateX(0); }
-
-    .feedback-terminal .titlebar {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 8px 12px;
-      border-bottom: 1px solid #2a2a2e;
-      background: #1a1a1e;
-    }
-
-    .feedback-terminal .body {
-      padding: 14px 16px;
-      font-family: var(--font-mono);
-      font-size: 0.78rem;
-      line-height: 1.7;
-    }
-
-    .feedback-terminal .body .dim { color: var(--muted); }
-    .feedback-terminal .body .accent { color: var(--accent); }
-    .feedback-terminal .body .blue { color: var(--blue); }
-
-    .terminal-waiting {
-      opacity: 0;
-      transition: opacity 0.5s ease;
-    }
-
-    .act-feedback.in-view .terminal-waiting { opacity: 1; transition-delay: 0.8s; }
-
-    .terminal-waiting-dots::after {
-      content: '';
-      animation: waiting-dots 1.5s step-end infinite;
-    }
-
-    @keyframes waiting-dots {
-      0% { content: ''; }
-      25% { content: '.'; }
-      50% { content: '..'; }
-      75% { content: '...'; }
-    }
-
-    .json-float {
-      opacity: 0;
-      transform: translateX(20px);
-      transition: opacity 0.5s ease, transform 0.5s ease;
-    }
-
-    .act-feedback.phase-submit .json-float {
-      opacity: 1;
-      transform: translateX(0);
-      transition-delay: 1.2s;
-    }
-
-    .agent-response {
-      opacity: 0;
-      transform: translateY(4px);
-      transition: opacity 0.4s ease, transform 0.4s ease;
-    }
-
-    .agent-response.resp-1 { }
-    .agent-response.resp-2 { }
-    .agent-response.resp-3 { }
-
-    .act-feedback.phase-fix .agent-response.resp-1 {
-      opacity: 1; transform: translateY(0); transition-delay: 0.3s;
-    }
-    .act-feedback.phase-fix .agent-response.resp-2 {
-      opacity: 1; transform: translateY(0); transition-delay: 0.8s;
-    }
-    .act-feedback.phase-fix .agent-response.resp-3 {
-      opacity: 1; transform: translateY(0); transition-delay: 1.3s;
-    }
-
-    .feedback-narrative-2 {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.2rem, 2.5vw, 1.6rem);
-      text-align: center;
-      color: var(--text);
-      margin-top: 40px;
-      opacity: 0;
-      transform: translateY(16px);
-      transition: opacity 0.8s ease, transform 0.8s ease;
-    }
-
-    .act-feedback.phase-fix .feedback-narrative-2 { opacity: 1; transform: translateY(0); transition-delay: 0.5s; }
-
-    .feedback-narrative-result {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.1rem, 2vw, 1.4rem);
-      font-style: italic;
-      text-align: center;
-      color: var(--accent);
-      margin-top: 16px;
-      opacity: 0;
-      transition: opacity 0.8s ease;
-    }
-
-    .act-feedback.phase-fix .feedback-narrative-result { opacity: 1; transition-delay: 2.5s; }
-
-    .feedback-caption {
-      margin-top: 48px;
-      font-family: var(--font-narrative);
-      font-size: clamp(0.9rem, 1.8vw, 1.05rem);
-      text-align: center;
-      color: var(--muted);
-      line-height: 1.6;
-      max-width: 600px;
-      margin-left: auto;
-      margin-right: auto;
-      opacity: 0;
-      transition: opacity 0.8s ease;
-    }
-
-    .act-feedback.phase-fix .feedback-caption { opacity: 1; transition-delay: 3.2s; }
-
-    /* ===================== ACT 3.5: CROSSED-OUT PROBLEMS ===================== */
-    .act-problems {
-      flex-direction: column;
-      padding: 48px 24px;
-      gap: 0;
-    }
-
-    .problems-stage {
-      width: 100%;
-      max-width: 1000px;
-      margin: 0 auto;
-    }
-
-    .problems-narrative {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.5rem, 3.5vw, 2.2rem);
-      line-height: 1.4;
-      text-align: center;
-      color: var(--text);
-      margin-bottom: 48px;
-      opacity: 0;
-      transform: translateY(20px);
-      transition: opacity 0.8s ease, transform 0.8s ease;
-    }
-
-    .act-problems.in-view .problems-narrative { opacity: 1; transform: translateY(0); }
-
-    .problems-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 20px;
-      position: relative;
-    }
-
-    @media (max-width: 900px) {
-      .problems-grid { grid-template-columns: repeat(2, 1fr); }
-    }
-
-    @media (max-width: 560px) {
-      .problems-grid { grid-template-columns: 1fr; }
-    }
-
-    .problem-card {
-      background: #141416;
-      border: 1px solid #1e1e24;
-      border-radius: 10px;
-      padding: 24px 20px;
-      position: relative;
-      overflow: hidden;
-      opacity: 0;
-      transform: translateY(16px);
-      transition: opacity 0.5s ease, transform 0.5s ease;
-    }
-
-    .problem-card.visible {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    .problem-title {
-      font-family: var(--font-heading);
-      font-size: 0.95rem;
-      font-weight: 700;
-      color: var(--accent);
-      margin-bottom: 8px;
-    }
-
-    .problem-desc {
-      font-size: 0.82rem;
-      color: var(--muted);
-      line-height: 1.5;
-      font-style: italic;
-    }
-
-    /* Diagonal strikethrough line */
-    .problem-card::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 141.4%; /* sqrt(2) * 100% to cover diagonal */
-      height: 2px;
-      background: var(--accent);
-      transform-origin: 0 0;
-      transform: rotate(25deg) scaleX(0);
-      transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
-      box-shadow: 0 0 8px rgba(196, 245, 106, 0.4);
-    }
-
-    .problem-card.struck::after {
-      transform: rotate(25deg) scaleX(1);
-    }
-
-    /* Badge below the grid (normal flow) */
-    .problems-overlay-badge {
-      font-family: var(--font-heading);
-      font-size: clamp(0.9rem, 2.5vw, 1.4rem);
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      color: var(--accent);
-      background: transparent;
-      border: 2px solid var(--accent);
-      padding: 12px 28px;
-      border-radius: 12px;
-      opacity: 0;
-      white-space: nowrap;
-      transition: opacity 0.5s ease, transform 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
-      margin: 40px auto 0;
-      text-align: center;
-      display: block;
-      width: fit-content;
-      transform: scale(0.85);
-    }
-
-    .problems-overlay-badge.visible {
-      opacity: 1;
-      transform: scale(1);
-    }
-
-    /* ===================== ACT 3.75: UNLEASHED ===================== */
-    .act-unleashed {
-      flex-direction: column;
-      padding: 0 24px;
-      gap: 0;
-      min-height: auto;
-      align-items: stretch;
-    }
-
-    .unleashed-statement {
-      min-height: 40vh;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-      padding: 80px 0;
-      opacity: 0;
-      transform: translateY(60px);
-      transition: opacity 0.9s cubic-bezier(0.25, 0.46, 0.45, 0.94),
-                  transform 0.9s cubic-bezier(0.25, 0.46, 0.45, 0.94);
-    }
-
-    .unleashed-statement.visible {
-      opacity: 1;
-      transform: translateY(0);
-    }
-
-    /* Alternate alignment for visual rhythm */
-    .unleashed-statement:nth-child(even) {
-      align-items: flex-start;
-      text-align: left;
-      padding-left: 8%;
-    }
-
-    .unleashed-statement:nth-child(3n) {
-      align-items: flex-end;
-      text-align: right;
-      padding-right: 8%;
-    }
-
-    .unleashed-headline {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.8rem, 4.5vw, 3.2rem);
-      line-height: 1.2;
-      color: var(--text);
-      font-weight: 400;
-      max-width: 800px;
-      letter-spacing: -0.01em;
-    }
-
-    .unleashed-headline .accent {
-      color: var(--accent);
-    }
-
-    .unleashed-subtext {
-      font-family: var(--font-heading);
-      font-size: clamp(0.85rem, 1.4vw, 1rem);
-      color: var(--muted);
-      max-width: 560px;
-      margin-top: 20px;
-      line-height: 1.6;
-      font-weight: 400;
-    }
-
-    .unleashed-disclaimer {
-      border-top: 1px solid rgba(196,245,106,0.1);
-      padding-top: 60px;
-      margin-top: 20px;
-    }
-
-    .unleashed-disclaimer .unleashed-headline {
-      font-size: clamp(1.2rem, 3vw, 2rem);
-      opacity: 0.85;
-    }
-
-    .unleashed-disclaimer .unleashed-subtext {
-      max-width: 640px;
-      opacity: 0.7;
-    }
-
-    /* Reduced motion: show everything immediately */
-    @media (prefers-reduced-motion: reduce) {
-      .unleashed-statement {
-        opacity: 1;
-        transform: none;
-        transition: none;
-      }
-    }
-
-    @media (max-width: 768px) {
-      .unleashed-statement,
-      .unleashed-statement:nth-child(even),
-      .unleashed-statement:nth-child(3n) {
-        align-items: center;
-        text-align: center;
-        padding-left: 0;
-        padding-right: 0;
-        min-height: 35vh;
-        padding: 60px 0;
-      }
-    }
-
-    /* ===================== ACT 4: HORIZON ===================== */
-    .act-horizon {
-      flex-direction: column;
-      text-align: center;
-      padding: 48px 24px;
-      position: relative;
-    }
-
-    .contour-bg {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      opacity: 0;
-      transition: opacity 1.5s ease 0.3s;
-      pointer-events: none;
-    }
-
-    .act-horizon.in-view .contour-bg { opacity: 1; }
-
-    .contour-bg svg {
-      width: 100%;
-      height: 100%;
-    }
-
-    .horizon-content {
-      position: relative;
-      z-index: 1;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      gap: 40px;
-    }
-
-    .horizon-quote {
-      font-family: var(--font-narrative);
-      font-size: clamp(1.8rem, 4.5vw, 3rem);
-      line-height: 1.3;
-      color: var(--text);
-      max-width: 700px;
-      opacity: 0;
-      transform: translateY(24px);
-      transition: opacity 1s ease 0.5s, transform 1s ease 0.5s;
-    }
-
-    .act-horizon.in-view .horizon-quote { opacity: 1; transform: translateY(0); }
-
-    .horizon-line {
-      display: inline-block;
-      opacity: 0;
-      transform: translateY(10px);
-      transition: opacity 0.8s ease, transform 0.8s ease;
-    }
-
-    .act-horizon.in-view .horizon-line:nth-child(1) {
-      opacity: 1; transform: translateY(0);
-      transition-delay: 0.5s;
-    }
-
-    .act-horizon.in-view .horizon-line:nth-child(3) {
-      opacity: 1; transform: translateY(0);
-      transition-delay: 0.9s;
-    }
-
-    .act-horizon.in-view .horizon-line:nth-child(5) {
-      opacity: 1; transform: translateY(0);
-      transition-delay: 1.3s;
-    }
-
-    .horizon-install {
-      opacity: 0;
-      transform: translateY(16px);
-      transition: opacity 0.8s ease 1.8s, transform 0.8s ease 1.8s;
-    }
-
-    .act-horizon.in-view .horizon-install { opacity: 1; transform: translateY(0); }
-
-    .install-box {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      background: var(--code-bg);
-      border: 1px solid #2a2a2e;
-      border-radius: 8px;
-      padding: 14px 20px;
-      font-family: var(--font-mono);
-      font-size: clamp(0.8rem, 1.5vw, 0.95rem);
-      color: var(--text);
-      cursor: pointer;
-      position: relative;
-      transition: border-color 0.3s, box-shadow 0.3s;
-    }
-
-    .install-box:hover {
-      border-color: var(--accent);
-      box-shadow: 0 0 20px rgba(196, 245, 106, 0.1);
-    }
-
-    .install-box .copy-icon {
-      color: var(--accent);
-      font-size: 1rem;
-      flex-shrink: 0;
-    }
-
-    .copy-toast {
-      position: absolute;
-      top: -32px;
-      left: 50%;
-      transform: translateX(-50%);
-      background: var(--accent);
-      color: #0A0A0B;
-      padding: 4px 12px;
-      border-radius: 4px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s;
-    }
-
-    .copy-toast.show { opacity: 1; }
-
-    .horizon-links {
-      display: flex;
-      gap: 32px;
-      opacity: 0;
-      transition: opacity 0.8s ease 1.8s;
-    }
-
-    .act-horizon.in-view .horizon-links { opacity: 1; }
-
-    .horizon-links a {
-      font-family: var(--font-heading);
-      font-size: 1rem;
-      font-weight: 600;
-      text-decoration: none;
-      transition: color 0.2s;
-    }
-
-    .horizon-links a.primary {
-      color: var(--accent);
-    }
-
-    .horizon-links a.primary:hover { color: #d4ff8a; }
-
-    .horizon-links a.secondary {
-      color: var(--muted);
-    }
-
-    .horizon-links a.secondary:hover { color: var(--text); }
-
-    .horizon-logo {
-      margin-top: 20px;
-      opacity: 0;
-      transition: opacity 0.8s ease 1.8s;
-    }
-
-    .act-horizon.in-view .horizon-logo { opacity: 1; }
-
-    .horizon-logo-img {
-      height: clamp(1.5rem, 3.5vw, 2.2rem);
-      display: block;
-      margin: 0 auto;
-    }
-
-    /* ===================== LEGAL FOOTER ===================== */
-    .legal-footer {
-      text-align: center;
-      font-size: 11px;
-      color: var(--muted);
-      padding: 24px;
-      border-top: 1px solid rgba(74, 74, 80, 0.3);
-    }
-    .legal-footer a {
-      color: var(--muted);
-      text-decoration: none;
-    }
-    .legal-footer a:hover {
-      color: var(--text);
-      text-decoration: underline;
-    }
-
-    /* ===================== REDUCED MOTION ===================== */
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after {
-        animation-duration: 0.01ms !important;
-        animation-delay: 0ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
-        transition-delay: 0ms !important;
-      }
-
-      .chaos-window,
-      .type-line,
-      .service-line,
-      .browser-mockup,
-      .feedback-terminal,
-      .feedback-narrative,
-      .feedback-narrative-2,
-      .feedback-narrative-result,
-      .feedback-caption,
-      .feedback-comment,
-      .feedback-overlay,
-      .json-float,
-      .agent-response,
-      .terminal-waiting,
-      .chaos-headline,
-      .cognitive-load,
-      .cognitive-load-zero,
-      .scroll-arrow,
-      .problems-narrative,
-      .problem-card,
-      .horizon-quote,
-      .horizon-line,
-      .horizon-install,
-      .horizon-links,
-      .horizon-logo,
-      .contour-bg {
-        opacity: 1 !important;
-        transform: none !important;
-      }
-
-      .type-line {
-        width: 100% !important;
-        border-right: none !important;
-      }
-
-      .problem-card::after {
-        transform: rotate(25deg) scaleX(1) !important;
-      }
-
-      .problems-overlay-badge {
-        opacity: 1 !important;
-        transform: scale(1) !important;
-      }
-    }
-
-    /* ===================== TABLET TWEAKS ===================== */
-    @media (max-width: 900px) {
-      .chaos-windows-grid {
-        grid-template-columns: repeat(2, 1fr);
-      }
-    }
-
-    /* ===================== MOBILE TWEAKS ===================== */
-    @media (max-width: 640px) {
-      .chaos-container { padding: 64px 16px 32px; }
-      .chaos-windows-grid {
-        grid-template-columns: 1fr 1fr;
-        gap: 8px;
-        margin: 0 -8px;
-      }
-      .chaos-window {
-        font-size: 0.65rem;
-      }
-      .feedback-split { gap: 20px; }
-      .nav-links { gap: 10px; font-size: 0.8rem; }
-      .install-box { font-size: 0.75rem; padding: 12px 14px; }
-    }
+      font-family: var(--mono); font-size: 13.5px; line-height: 1.7;
+      background: var(--code-bg); border: 1px solid var(--border); border-radius: 10px;
+      padding: 18px 20px; overflow-x: auto; margin-bottom: 16px;
+    }
+    pre code { background: none; padding: 0; font-size: inherit; }
+    .copy-btn {
+      position: absolute; top: 10px; right: 10px;
+      font-family: var(--mono); font-size: 11px; color: var(--text2);
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 9px; cursor: pointer; opacity: 0; transition: opacity .15s, color .15s, border-color .15s;
+    }
+    pre:hover .copy-btn, .copy-btn:focus-visible { opacity: 1; }
+    .copy-btn:hover { color: var(--text); border-color: var(--muted); }
+    .copy-btn.copied { color: var(--accent-ink); border-color: var(--accent-ink); opacity: 1; }
+    @media (hover: none) { .copy-btn { opacity: 1; } }
+    .cmt { color: var(--muted); }
+    .out { color: var(--accent-ink); }
+    .kw  { color: var(--blue); }
+
+    /* ---------- buttons ---------- */
+    .btn {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--mono); font-size: 14px; font-weight: 700;
+      padding: 11px 20px; border-radius: 8px; border: 1px solid var(--border);
+      color: var(--text); background: var(--surface); transition: border-color .15s, background .15s;
+    }
+    .btn:hover { text-decoration: none; border-color: var(--muted); background: var(--surface2); }
+    .btn-primary { background: var(--accent-ink); color: var(--accent-ink-text); border-color: var(--accent-ink); }
+    .btn-primary:hover { filter: brightness(1.08); border-color: var(--accent-ink); background: var(--accent-ink); }
+
+    /* ---------- features grid ---------- */
+    .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 1px; background: var(--border); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+    .grid .cell { background: var(--bg); padding: 20px 22px; }
+    .grid .cell h3 { color: var(--text); }
+    .grid .cell p { color: var(--text2); font-size: 14px; margin-bottom: 0; }
+
+    /* ---------- components / diagram ---------- */
+    .comp-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 36px; }
+    .comp { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 18px 20px; }
+    .comp .name { font-family: var(--mono); font-weight: 700; color: var(--accent-ink); font-size: 14px; margin-bottom: 6px; }
+    .comp p { color: var(--text2); font-size: 14px; margin-bottom: 0; }
+
+    .diagram {
+      background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+      padding: 28px 20px; overflow-x: auto;
+    }
+    .diagram svg { display: block; margin: 0 auto; max-width: 100%; height: auto; }
+    .dg-box { fill: var(--surface2); stroke: var(--border); }
+    .dg-accent { fill: rgba(196,245,106,.10); fill: color-mix(in srgb, var(--accent-ink) 10%, transparent); stroke: var(--accent-ink); }
+    .dg-blue { fill: rgba(91,141,239,.10); stroke: var(--blue); }
+    .dg-label { fill: var(--text); font-family: var(--mono); font-weight: 700; font-size: 13px; }
+    .dg-sub { fill: var(--text2); font-family: var(--mono); font-size: 10.5px; }
+    .dg-line { stroke: var(--muted); stroke-width: 1.5; fill: none; }
+    .dg-arrow { fill: var(--muted); }
+    .dg-dash { stroke-dasharray: 5 4; }
+    .dg-opt { fill: none; stroke: var(--muted); stroke-dasharray: 5 4; }
+    .dg-divider { stroke: var(--border); stroke-width: 1; stroke-dasharray: 3 4; }
+    .dg-cap { fill: var(--text2); font-family: var(--mono); font-size: 11px; }
+
+    /* ---------- CLI reference ---------- */
+    .cli-group { margin-bottom: 26px; }
+    .cli-group h3 { color: var(--text2); text-transform: uppercase; letter-spacing: .08em; font-size: 12px; margin-bottom: 12px; }
+    .cli-row { display: grid; grid-template-columns: minmax(160px, 260px) 1fr; gap: 16px; padding: 9px 0; border-top: 1px solid var(--border); align-items: baseline; }
+    .cli-row:first-of-type { border-top: none; }
+    .cli-row code { background: none; padding: 0; color: var(--accent-ink); font-size: 13px; white-space: nowrap; }
+    .cli-row span { color: var(--text2); font-size: 14px; }
+    @media (max-width: 560px) { .cli-row { grid-template-columns: 1fr; gap: 2px; } }
+
+    /* ---------- kudos ---------- */
+    .kudos { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
+    .kudo { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+    .kudo .k-name { font-family: var(--mono); font-weight: 700; font-size: 14px; }
+    .kudo p { color: var(--text2); font-size: 13.5px; margin: 4px 0 0; }
+
+    /* ---------- footer ---------- */
+    footer { border-top: 1px solid var(--border); padding: 40px 0 64px; }
+    footer .wrap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 16px; align-items: center; }
+    footer .f-links { display: flex; flex-wrap: wrap; gap: 20px; font-family: var(--mono); font-size: 13px; }
+    footer .f-links a { color: var(--text2); }
+    footer .f-meta { color: var(--muted); font-family: var(--mono); font-size: 12.5px; }
+
+    /* ---------- steps ---------- */
+    .steps { list-style: none; counter-reset: step; display: grid; gap: 12px; margin: 8px 0 20px; padding: 0; }
+    .steps li { counter-increment: step; display: grid; grid-template-columns: 28px 1fr; gap: 14px; align-items: start; }
+    .steps li::before {
+      content: counter(step);
+      font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--accent-ink);
+      background: var(--surface2); border: 1px solid var(--border); border-radius: 7px;
+      width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center;
+    }
+    .steps .step-body { color: var(--text2); font-size: 14.5px; line-height: 1.6; padding-top: 3px; }
+    .steps .step-body strong { color: var(--text); font-weight: 700; }
+    .note { font-family: var(--mono); font-size: 12.5px; color: var(--muted); border-left: 2px solid var(--accent); padding-left: 12px; }
+
+    .anchor { scroll-margin-top: 72px; }
   </style>
 </head>
 <body>
-
-  <!-- ===================== NAV ===================== -->
   <nav class="nav">
-    <a href="index.html" class="nav-wordmark">veld<span class="nav-dot">.</span></a>
-    <div class="nav-links">
-      <a href="index.html" class="active">experience</a>
-      <span class="sep">&middot;</span>
-      <a href="humans.html">humans</a>
-      <span class="sep">&middot;</span>
-      <a href="agents.html">agents</a>
-      <span class="sep">&middot;</span>
-      <a href="https://github.com/prosperity-solutions/veld" class="nav-github" title="GitHub" aria-label="GitHub" target="_blank" rel="noopener">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+    <div class="wrap">
+      <a href="/" aria-label="veld home">
+        <svg class="wordmark" viewBox="0 0 3837 1463" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="veld">
+          <path d="M3757 1463C3801.18 1463 3837 1427.18 3837 1383C3837 1338.82 3801.18 1303 3757 1303C3712.82 1303 3677 1338.82 3677 1383C3677 1427.18 3712.82 1463 3757 1463Z"/>
+          <path d="M383 1463L0 423H183L470 1278H474L762 423H943L561 1463H383Z"/>
+          <path d="M1507 1463C1407.67 1463 1322.17 1441 1250.5 1397C1178.83 1353 1123.83 1290.83 1085.5 1210.5C1047.17 1130.17 1028 1035.67 1028 927V926C1028 818.667 1047.33 724.167 1086 642.5C1124.67 560.833 1179 497.167 1249 451.5C1319 405.833 1401.33 383 1496 383C1590.67 383 1672.17 404.833 1740.5 448.5C1808.83 492.167 1861.33 553.333 1898 632C1934.67 710.667 1953 802 1953 906V970H1115V834H1867L1779 960V893C1779 812.333 1766.83 745.667 1742.5 693C1718.17 640.333 1684.67 601.167 1642 575.5C1599.33 549.833 1550.33 537 1495 537C1439.67 537 1390 550.5 1346 577.5C1302 604.5 1267.33 644.5 1242 697.5C1216.67 750.5 1204 815.667 1204 893V960C1204 1033.33 1216.5 1096 1241.5 1148C1266.5 1200 1302 1239.83 1348 1267.5C1394 1295.17 1448.33 1309 1511 1309C1555 1309 1594.33 1302.33 1629 1289C1663.67 1275.67 1692.67 1257.33 1716 1234C1739.33 1210.67 1756 1184 1766 1154L1769 1145H1940L1938 1155C1929.33 1197.67 1912.83 1237.67 1888.5 1275C1864.17 1312.33 1833 1345.17 1795 1373.5C1757 1401.83 1713.67 1423.83 1665 1439.5C1616.33 1455.17 1563.67 1463 1507 1463Z"/>
+          <path d="M2137 1463V20H2311V1463H2137Z"/>
+          <path d="M2937 1463C2848.33 1463 2770.83 1440.83 2704.5 1396.5C2638.17 1352.17 2586.67 1289.5 2550 1208.5C2513.33 1127.5 2495 1032.33 2495 923V922C2495 812.667 2513.5 717.667 2550.5 637C2587.5 556.333 2639 493.833 2705 449.5C2771 405.167 2847.33 383 2934 383C2983.33 383 3029.17 390.833 3071.5 406.5C3113.83 422.167 3151.67 444.5 3185 473.5C3218.33 502.5 3245.67 537 3267 577H3271V0H3445V1443H3271V1267H3267C3245.67 1307.67 3218.67 1342.5 3186 1371.5C3153.33 1400.5 3116.17 1423 3074.5 1439C3032.83 1455 2987 1463 2937 1463ZM2971 1309C3029.67 1309 3081.67 1293 3127 1261C3172.33 1229 3207.83 1184 3233.5 1126C3259.17 1068 3272 1000.33 3272 923V922C3272 844.667 3259 777.167 3233 719.5C3207 661.833 3171.5 617 3126.5 585C3081.5 553 3029.67 537 2971 537C2909.67 537 2856.67 552.667 2812 584C2767.33 615.333 2733 659.667 2709 717C2685 774.333 2673 842.667 2673 922V923C2673 1002.33 2685 1071 2709 1129C2733 1187 2767.33 1231.5 2812 1262.5C2856.67 1293.5 2909.67 1309 2971 1309Z"/>
+        </svg>
       </a>
+      <div class="nav-links">
+        <a href="#features">features</a>
+        <a href="#cli">cli</a>
+        <a href="#sharing">sharing</a>
+        <a href="#architecture">for the nerds</a>
+        <a href="#docs">docs</a>
+        <a href="https://github.com/prosperity-solutions/veld">github</a>
+        <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Theme: auto. Click to change." title="Theme: auto">
+          <svg class="icon-auto" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="13" rx="2"/><path d="M8 21h8M12 17v4"/></svg>
+          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.4M12 19.1v2.4M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.6 19.4l1.7-1.7M17.7 6.3l1.7-1.7"/></svg>
+          <svg class="icon-moon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M20 14.4A8 8 0 1 1 9.6 4a6.4 6.4 0 0 0 10.4 10.4z"/></svg>
+        </button>
+      </div>
     </div>
   </nav>
 
-  <h1 style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">veld</h1>
+  <!-- ============ HERO ============ -->
+  <header class="hero">
+    <div class="wrap">
+      <h1>Like if Kubernetes and localhost had a <span class="accent">magic, agentic baby</span> — with a gorgeous UI.</h1>
+      <p class="tagline">Real HTTPS URLs for every service you run — one command, no YAML, no cloud bill. Then you and your coding agent build on it, together.</p>
 
-  <main>
+      <pre data-copy="veld start frontend:local
+veld start fullstack
+veld share --web"><code><span class="cmt"># declare it once, then start a service:</span>
+veld start frontend:local
+<span class="out">=> https://frontend.my-feature.myproject.localhost</span>
+<span class="out">=> https://backend.my-feature.myproject.localhost</span>
 
-  <!-- ===================== ACT 1: CHAOS ===================== -->
-  <section class="act act-chaos" id="act-chaos">
-    <div class="chaos-container">
+<span class="cmt"># …or spin up a whole preset:</span>
+veld start fullstack
 
-      <div class="chaos-headline">You've been here before.</div>
+<span class="cmt"># hand it to a colleague on the web — no Veld on their end:</span>
+veld share <span class="kw">--web</span>
+<span class="out">=> https://frontend-a1b2c3.share.yourteam.dev  (password: cheerful-otter-42)</span></code></pre>
+      <p class="vibe" style="margin-bottom:22px;">The run name is inferred from your git branch — no <code>--name</code> needed (pass one to override).</p>
 
-      <div class="chaos-windows-grid">
-
-      <div class="chaos-window cw-1">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Terminal</span>
-        </div>
-        <div class="body">
-          <div><span class="prompt">$</span> <span class="cmd">npm run dev</span></div>
-          <div class="error">Error: Port 3000 already in use</div>
-          <div class="dim">EADDRINUSE: address already in use :::3000</div>
-        </div>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#install">Install</a>
+        <a class="btn" href="https://github.com/prosperity-solutions/veld">GitHub</a>
+        <a class="btn" href="/llms.txt">For agents → llms.txt</a>
       </div>
+      <p class="vibe">100% vibe coded with <a href="https://claude.com/claude-code">Claude Code</a>. MIT licensed. macOS &amp; Linux.</p>
+    </div>
+  </header>
 
-      <div class="chaos-window cw-2">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Terminal — backend</span>
-        </div>
-        <div class="body">
-          <div><span class="prompt">$</span> <span class="cmd">cargo run</span></div>
-          <div class="dim">   Compiling backend v0.1.0</div>
-          <div><span style="color:var(--accent)">info</span>: listening on localhost:8080</div>
-        </div>
+  <!-- ============ FEATURES ============ -->
+  <section id="features" class="anchor">
+    <div class="wrap">
+      <h2>What you get<span class="dot">.</span></h2>
+      <p class="section-sub">Everything it does. No demo to sit through.</p>
+      <div class="grid">
+        <div class="cell"><h3>No port numbers</h3><p>Real names like <code>frontend.my-feature.localhost</code> instead of <code>localhost:3847</code>.</p></div>
+        <div class="cell"><h3>Starts things in the right order</h3><p>Works out what depends on what, starts it all (in parallel where it can), and shuts down cleanly in reverse.</p></div>
+        <div class="cell"><h3>Real HTTPS, no warnings</h3><p>Every URL is <code>https://</code> with a trusted certificate. Set up once — no browser warnings.</p></div>
+        <div class="cell"><h3>Waits until things are ready</h3><p>You don't get a URL until the service actually responds — and veld keeps watching after it's up.</p></div>
+        <div class="cell"><h3>Restarts what crashes</h3><p>If a service falls over, veld brings the environment back on its own.</p></div>
+        <div class="cell"><h3>One config, many setups</h3><p>Run a service locally, in Docker, or against a remote — and start your go-to combinations with one short name.</p></div>
+        <div class="cell"><h3>Many runs, side by side</h3><p>Give every branch or git worktree its own environment — they run in parallel without clashing. Re-running by name just resumes.</p></div>
+        <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
+        <div class="cell"><h3>A dashboard in your browser</h3><p>See health, tail logs, search, and stop/restart — all at <code>veld.localhost</code>.</p></div>
+        <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
+        <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
+        <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
       </div>
-
-      <div class="chaos-window cw-3">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Chrome</span>
-        </div>
-        <div class="body">
-          <div style="text-align:center;padding:16px 0;">
-            <div style="font-size:1.4rem;margin-bottom:8px;">&#9888;</div>
-            <div class="error" style="font-weight:600;font-size:0.9rem;">Your connection is not private</div>
-            <div class="dim" style="margin-top:4px;font-size:0.72rem;">NET::ERR_CERT_AUTHORITY_INVALID</div>
-          </div>
-        </div>
-      </div>
-
-      <div class="chaos-window cw-4">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Terminal</span>
-        </div>
-        <div class="body">
-          <div><span class="prompt">$</span> <span class="cmd">lsof -i :3000</span></div>
-          <div class="dim">node  12847 dev  22u  IPv6 ... (LISTEN)</div>
-          <div><span class="prompt">$</span> <span class="cmd">kill -9 12847</span></div>
-          <div class="dim">... ugh</div>
-        </div>
-      </div>
-
-      <div class="chaos-window cw-5">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Slack — #dev</span>
-        </div>
-        <div class="body">
-          <div><span class="slack-name">@mike</span> <span class="slack-msg">hey which port is the API again?</span></div>
-          <div style="margin-top:6px;"><span class="slack-name">@sarah</span> <span class="slack-msg">8080 I think? or 8081</span></div>
-          <div style="margin-top:6px;"><span class="slack-name">@mike</span> <span class="slack-msg">neither works lol</span></div>
-        </div>
-      </div>
-
-      <div class="chaos-window cw-6">
-        <div class="titlebar">
-          <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-          <span class="titlebar-label">Terminal</span>
-        </div>
-        <div class="body">
-          <div><span class="prompt">$</span> <span class="cmd">./start-everything.sh</span></div>
-          <div class="dim">Starting database...</div>
-          <div class="dim">Starting backend...</div>
-          <div class="error">Error: backend not ready — connection refused</div>
-          <div class="dim">Retrying in 5s...</div>
-        </div>
-      </div>
-
-      </div><!-- end chaos-windows-grid -->
-
-      <div class="chaos-bottom">
-        <div class="cognitive-load">
-          Cognitive load: <span class="load-bar">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</span> <span class="load-label">rising</span>
-        </div>
-
-        <div class="scroll-arrow">
-          <span style="font-family: 'Playfair Display', Georgia, 'Times New Roman', serif; font-size: 1.1rem; font-weight: 400; font-style: italic; letter-spacing: 0.02em;">there's a better way</span>
-          <span class="scroll-arrow-icon">&darr;</span>
-        </div>
-      </div>
-
     </div>
   </section>
 
-  <!-- ===================== ACT 2: THE CLEARING ===================== -->
-  <section class="act act-clearing" id="act-clearing">
-    <div class="clearing-terminal">
+  <!-- ============ CLI ============ -->
+  <section id="cli" class="anchor">
+    <div class="wrap">
+      <h2>The commands<span class="dot">.</span></h2>
+      <p class="section-sub">What you'll actually type. Every one speaks <code>--json</code>.</p>
 
-      <div class="type-line">
-        <span class="prompt-char">$ </span><span class="cmd-text">veld start </span><span class="flag">--preset</span><span class="cmd-text"> fullstack </span><span class="flag">--name</span><span class="cmd-text"> dev</span>
+      <div class="cli-group">
+        <h3>Environments</h3>
+        <div class="cli-row"><code>veld start NODE:VARIANT --name N</code><span>Start an environment</span></div>
+        <div class="cli-row"><code>veld start PRESET --name N</code><span>Start a preset — a saved selection of nodes (e.g. <code>fullstack</code>)</span></div>
+        <div class="cli-row"><code>veld stop [--name N] [--all]</code><span>Stop a running environment</span></div>
+        <div class="cli-row"><code>veld restart [--name N]</code><span>Restart an environment</span></div>
+        <div class="cli-row"><code>veld status [--name N]</code><span>Show run status</span></div>
+        <div class="cli-row"><code>veld urls [--name N]</code><span>Show URLs for a run</span></div>
+        <div class="cli-row"><code>veld logs [-f] [-s TERM]</code><span>View logs (follow, search, context, source filter)</span></div>
+        <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and active runs</span></div>
+        <div class="cli-row"><code>veld action NAME</code><span>Run a node-defined action (e.g. open the DB in a GUI)</span></div>
       </div>
 
-      <div class="service-lines">
-        <div class="service-line sl-1-starting">
-          <span class="svc-icon starting">&#9679;</span>
-          <span class="svc-name">database</span>
-          <span class="svc-status">starting...</span>
-        </div>
-        <div class="service-line sl-1-healthy">
-          <span class="svc-icon healthy">&#10003;</span>
-          <span class="svc-name">database</span>
-          <span class="svc-status ok">healthy</span>
-          <span class="svc-url">database.dev.acme.com</span>
-        </div>
-
-        <div class="service-line sl-2-starting">
-          <span class="svc-icon starting">&#9679;</span>
-          <span class="svc-name">backend</span>
-          <span class="svc-status">starting...</span>
-        </div>
-        <div class="service-line sl-2-healthy">
-          <span class="svc-icon healthy">&#10003;</span>
-          <span class="svc-name">backend</span>
-          <span class="svc-status ok">healthy</span>
-          <span class="svc-url">backend.dev.acme.com</span>
-        </div>
-
-        <div class="service-line sl-3-starting">
-          <span class="svc-icon starting">&#9679;</span>
-          <span class="svc-name">frontend</span>
-          <span class="svc-status">starting...</span>
-        </div>
-        <div class="service-line sl-3-ready">
-          <span class="svc-icon healthy">&#10003;</span>
-          <span class="svc-name">frontend</span>
-          <span class="svc-status ok">ready</span>
-          <span class="svc-url">frontend.dev.acme.com</span>
-        </div>
-
-        <div class="service-line sl-final">
-          <span class="final-line">All services running. All HTTPS.</span>
-        </div>
+      <div class="cli-group">
+        <h3>Sharing</h3>
+        <div class="cli-row"><code>veld share [RUN] [--web]</code><span>Share a run over an encrypted P2P tunnel (or the open web)</span></div>
+        <div class="cli-row"><code>veld join TICKET</code><span>Join a shared env; the same URLs materialize locally</span></div>
+        <div class="cli-row"><code>veld shares</code><span>List shares, joins, and pending requests with transport info</span></div>
+        <div class="cli-row"><code>veld approve / deny REQ</code><span>Gate who connects to your share</span></div>
+        <div class="cli-row"><code>veld unshare / leave</code><span>Stop hosting, or disconnect from a joined share</span></div>
       </div>
 
-      <div class="cognitive-load-zero">
-        Cognitive load: &#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617;&#9617; zero
+      <div class="cli-group">
+        <h3>Setup &amp; misc</h3>
+        <div class="cli-row"><code>veld setup [privileged]</code><span>One-time system setup (clean URLs need privileged; unprivileged is no-sudo)</span></div>
+        <div class="cli-row"><code>veld init</code><span>Create a new veld.json</span></div>
+        <div class="cli-row"><code>veld ui</code><span>Open the management dashboard</span></div>
+        <div class="cli-row"><code>veld feedback next</code><span>Pull the next in-browser review comment (agent-facing)</span></div>
+        <div class="cli-row"><code>veld doctor / gc</code><span>Check extension status; clean up stale state</span></div>
       </div>
-
     </div>
   </section>
 
-  <!-- ===================== ACT 3: THE FEEDBACK LOOP ===================== -->
-  <section class="act act-feedback" id="act-feedback">
-    <div class="feedback-stage">
-
-      <div class="feedback-narrative">
-        Your agent built the UI.<br>Something's off.
-      </div>
-
-      <div class="feedback-split">
-        <!-- Terminal (left) -->
-        <div class="feedback-terminal">
-          <div class="titlebar">
-            <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-            <span class="titlebar-label" style="margin-left:8px;font-size:0.7rem;color:var(--muted);">Agent Terminal</span>
-          </div>
-          <div class="body">
-            <div><span class="dim">$</span> <span class="accent">veld feedback</span> <span class="blue">--wait</span></div>
-            <div class="terminal-waiting">
-              <span class="dim">Waiting for human feedback<span class="terminal-waiting-dots"></span></span>
-            </div>
-            <div class="json-float" style="margin-top:12px;">
-              <div class="dim">&#9484; feedback received</div>
-              <div style="margin-left:8px;">
-                <span class="dim">{</span><br>
-                <span style="margin-left:12px;"><span class="blue">"type"</span><span class="dim">:</span> <span class="accent">"comment"</span><span class="dim">,</span></span><br>
-                <span style="margin-left:12px;"><span class="blue">"text"</span><span class="dim">:</span> <span class="accent">"Spacing too tight on mobile"</span><span class="dim">,</span></span><br>
-                <span style="margin-left:12px;"><span class="blue">"selector"</span><span class="dim">:</span> <span class="accent">".app-header"</span><span class="dim">,</span></span><br>
-                <span style="margin-left:12px;"><span class="blue">"viewport"</span><span class="dim">:</span> <span class="accent">"375x812"</span></span><br>
-                <span class="dim">}</span>
-              </div>
-            </div>
-            <div class="agent-response resp-1" style="margin-top:12px;">
-              <div class="accent">&#9654; Reading .app-header styles...</div>
-            </div>
-            <div class="agent-response resp-2">
-              <div class="accent">&#10003; Updated padding: 8px &rarr; 20px</div>
-            </div>
-            <div class="agent-response resp-3">
-              <div class="accent">&#10003; Hot-reload triggered &mdash; browser updated</div>
-            </div>
-          </div>
-        </div>
-
-        <!-- Browser (right) -->
-        <div class="browser-mockup">
-          <div class="browser-bar">
-            <span class="titlebar-dot r"></span><span class="titlebar-dot y"></span><span class="titlebar-dot g"></span>
-            <div class="browser-url"><span class="lock">&#9919;</span> frontend.dev.acme.com</div>
-          </div>
-          <div class="browser-content">
-            <div class="browser-update-indicator"></div>
-            <div class="browser-header browser-header-original">My Application</div>
-            <div class="browser-body-text">
-              Welcome to the dashboard. Your services are running smoothly across all environments.
-            </div>
-            <div class="feedback-comment">"Spacing too tight on mobile"</div>
-            <!-- Feedback overlay popover -->
-            <div class="feedback-overlay">
-              <div class="feedback-overlay-header">
-                <span class="icon">&#9998;</span> Leave feedback
-              </div>
-              <div class="feedback-overlay-body">
-                <div class="feedback-textarea-mock">
-                  <span class="feedback-typing-text">Spacing too tight on mobile</span>
-                </div>
-              </div>
-              <div class="feedback-overlay-footer">
-                <div class="feedback-submit-btn">Submit</div>
-              </div>
-            </div>
-            <div class="feedback-btn-mock"><svg viewBox="0 0 48 48" width="20" height="20"><path d="M20.1 36L10.9 12H15.3L22.6 31.8H22.7L30 12H34.4L25.2 36H20.1Z" fill="white"/><path d="M32 37C33.66 37 35 35.66 35 34C35 32.34 33.66 31 32 31C30.34 31 29 32.34 29 34C29 35.66 30.34 37 32 37Z" fill="#C4F56A"/></svg></div>
-          </div>
-        </div>
-      </div>
-
-      <div class="feedback-narrative-2">
-        The agent reads. Adjusts. Ships.
-      </div>
-
-      <div class="feedback-narrative-result">
-        The browser updates. The loop closes.
-      </div>
-
-      <div class="feedback-caption">
-        Humans and agents, collaborating in real time.<br>
-        No screenshots. No Slack. Just a loop that works.
-      </div>
-
+  <!-- ============ INSTALL ============ -->
+  <section id="install" class="anchor">
+    <div class="wrap">
+      <h2>Install<span class="dot">.</span></h2>
+      <p class="section-sub">One line. No sudo. Detects your OS and architecture.</p>
+      <pre data-copy="curl -fsSL https://veld.oss.life.li/get | bash"><code>curl -fsSL https://veld.oss.life.li/get | bash</code></pre>
+      <p class="lead" style="font-size:14px;">This installs <code>veld</code> to <code>~/.local/bin</code>. Commands auto-bootstrap on first use with HTTPS on port 18443. For clean URLs with no port suffix, run the one-time <code>veld setup privileged</code> — sudo once, never again. Prefer no sudo at all? <code>veld setup unprivileged</code> supports the full feature set on <code>.localhost</code> domains.</p>
     </div>
   </section>
 
-  <!-- ===================== ACT 3.5: CROSSED-OUT PROBLEMS ===================== -->
-  <section class="act act-problems" id="act-problems">
-    <div class="problems-stage">
-
-      <div class="problems-narrative">
-        Remember these?
+  <!-- ============ SHARING ============ -->
+  <section id="sharing" class="anchor">
+    <div class="wrap">
+      <h2>Hand it to someone<span class="dot">.</span></h2>
+      <p class="section-sub">Two ways to share what you're running. Both opt-in, both encrypted.</p>
+      <div class="comp-list">
+        <div class="comp"><div class="name">To a teammate</div><p>Veld-to-Veld over iroh. Your colleague opens the <em>same</em> URLs on their own machine — no redeploy, no staging server.</p></div>
+        <div class="comp"><div class="name">To anyone, on the web</div><p>Expose a service to anyone with a browser — no Veld required. A self-hosted <code>veld-gateway</code> mints a real public URL.</p></div>
       </div>
-
-      <div class="problems-grid">
-
-        <div class="problem-card">
-          <div class="problem-title">Port conflicts</div>
-          <div class="problem-desc">"Was it 3000 or 3001? Someone's already using 8080."</div>
-        </div>
-
-        <div class="problem-card">
-          <div class="problem-title">Certificate warnings</div>
-          <div class="problem-desc">"Your connection is not private. Proceed anyway?"</div>
-        </div>
-
-        <div class="problem-card">
-          <div class="problem-title">Manual startup order</div>
-          <div class="problem-desc">"Start Postgres, wait, then the API, wait, then the frontend..."</div>
-        </div>
-
-        <div class="problem-card">
-          <div class="problem-title">No HTTPS in dev</div>
-          <div class="problem-desc">"OAuth redirects fail. Secure cookies don't work. WebSockets break."</div>
-        </div>
-
-        <div class="problem-card">
-          <div class="problem-title">Screenshot feedback</div>
-          <div class="problem-desc">"Take a screenshot, paste in Slack, describe what's wrong, hope the agent understands."</div>
-        </div>
-
-        <div class="problem-card">
-          <div class="problem-title">Environment drift</div>
-          <div class="problem-desc">"It works on my machine. Different ports, different configs, different results."</div>
-        </div>
-
-
+      <div class="grid" style="margin-top:4px;">
+        <div class="cell"><h3>End-to-end encrypted</h3><p>Traffic flows through an encrypted P2P tunnel (iroh / QUIC). A relay only forwards sealed bytes — it never sees your URLs or content.</p></div>
+        <div class="cell"><h3>Password-protected by default</h3><p>Web shares get a generated password out of the box. Send the URL and password over different channels, or use the one-link that hides the password in the URL fragment.</p></div>
+        <div class="cell"><h3>You approve every join</h3><p>Peer shares are gated by a capability token <em>and</em> your explicit approval. Nothing connects without your say-so.</p></div>
+        <div class="cell"><h3>Opt-in per service</h3><p>A service is only shareable if its config says so. What leaves your machine is explicit and auditable — nothing is exposed by accident.</p></div>
+        <div class="cell"><h3>Your relays, your rules</h3><p>Keep traffic on infrastructure you control with self-hosted relays (one Docker container) — or use public ones. Your call, per project.</p></div>
+        <div class="cell"><h3>No accounts, no lock-in</h3><p>No sign-up, no Veld-hosted server. Shares live in your daemon and expire on a TTL; stop the run and they're gone.</p></div>
       </div>
-
-      <div class="problems-overlay-badge">Not a problem anymore</div>
-
     </div>
   </section>
 
-  <!-- ===================== ACT 3.75: UNLEASHED ===================== -->
-  <section class="act act-unleashed" id="act-unleashed">
+  <!-- ============ AGENTS / SKILL ============ -->
+  <section id="agents" class="anchor">
+    <div class="wrap">
+      <h2>Build it with your agent<span class="dot">.</span></h2>
+      <p class="section-sub">veld isn't just something your coding agent can drive — it's where the two of you meet. <code>--json</code> on every command, an <a href="/llms.txt">llms.txt</a> it can read, and a skill so it knows the ropes.</p>
+      <pre data-copy="npx skills add prosperity-solutions/veld"><code>npx skills add prosperity-solutions/veld</code></pre>
+      <p class="lead" style="font-size:14px;">Installs the veld skill for Claude Code, Cursor, Codex, Windsurf, and 40+ more — so your agent can configure, run, and share environments without you narrating each step.</p>
 
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Any AI agent. Any framework. <span class="accent">One feedback loop.</span></div>
-      <div class="unleashed-subtext">Claude Code, Cursor, Copilot, your custom agent — veld doesn't care. The feedback overlay works with all of them.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">No remote previews. No cloud. <span class="accent">Just your machine.</span></div>
-      <div class="unleashed-subtext">Skip the $200/month preview environment bill. Real HTTPS, locally, in seconds.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">You give feedback at <span class="accent">2:00pm</span>. Your agent ships the fix at <span class="accent">2:01pm</span>.</div>
-      <div class="unleashed-subtext">Live collaboration, not async screenshots. The feedback overlay turns hours of context-switching into a 60-second loop.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">React traces. Vue traces. <span class="accent">Even jQuery.</span>*</div>
-      <div class="unleashed-subtext">* jQuery support is a lie. But everything else is real. Full component stack traces in every feedback submission. The agent knows exactly what to change.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline"><span class="accent">20</span> services. <span class="accent">20</span> HTTPS URLs. One command. <span class="accent">Zero</span> configuration.</div>
-      <div class="unleashed-subtext">Dependency graphs resolve automatically. Health checks verify everything. You just type <code style="color:var(--accent);font-family:var(--font-mono);font-size:0.9em">veld start</code>.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Works in git worktrees. Works across branches. <span class="accent">Every environment is isolated.</span></div>
-      <div class="unleashed-subtext"><code style="color:var(--text);font-family:var(--font-mono);font-size:0.9em">feature-auth</code> and <code style="color:var(--text);font-family:var(--font-mono);font-size:0.9em">feature-payments</code> run simultaneously with zero conflicts.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Teams using veld report <span class="accent">847%</span> fewer messages starting with "which port is it again?"*</div>
-      <div class="unleashed-subtext">* We made this number up. But you know it's true.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Average time from "I have an idea" to running HTTPS preview: <span class="accent">43 seconds</span>.*</div>
-      <div class="unleashed-subtext">* Measured once, on a fast machine, with everything cached. Your mileage may vary. But not by much.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Number of developers who enjoy manually configuring mkcert: <span class="accent">0</span>.</div>
-      <div class="unleashed-subtext">This one we're actually confident about.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Port 3000 has been freed. Port 8080 has been freed. <span class="accent">All ports have been freed.</span></div>
-      <div class="unleashed-subtext">You never think about ports again. veld allocates them. Caddy routes them. You open a URL.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline"><span class="accent">100</span> microservices. <span class="accent">47</span> microfrontends. <span class="accent">12</span> databases. One person who actually knows why.*</div>
-      <div class="unleashed-subtext">* veld doesn't judge your architecture. It just starts everything in the right order, gives each service an HTTPS URL, and gets out of the way.</div>
-    </div>
-
-    <div class="unleashed-statement">
-      <div class="unleashed-headline">Your agent already knows how to use veld. <span class="accent">You just haven't told it yet.</span></div>
-      <div class="unleashed-subtext"><code style="color:var(--accent);font-family:var(--font-mono);font-size:0.9em">npx skills add prosperity-solutions/veld</code> — three skills, 40+ supported agents, zero configuration. Claude Code, Cursor, Codex, Windsurf, Copilot — they all speak veld now.</div>
-    </div>
-
-    <div class="unleashed-statement unleashed-disclaimer">
-      <div class="unleashed-headline">Disclaimer: <span class="accent">we made all of this up.</span></div>
-      <div class="unleashed-subtext">The numbers, the benchmarks, the "847%" — all fictional. What's real: one command, every service, HTTPS that works. The rest you'll figure out in about 43 seconds.* <br><span style="opacity:0.5;font-size:0.85em">(* This number is also made up.)</span></div>
-    </div>
-
-  </section>
-
-  <!-- ===================== ACT 4: THE HORIZON ===================== -->
-  <section class="act act-horizon" id="act-horizon">
-
-    <div class="contour-bg">
-      <svg viewBox="0 0 1200 800" fill="none" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid slice">
-        <path d="M0 400 Q150 350 300 380 Q450 410 600 370 Q750 330 900 360 Q1050 390 1200 350" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.5"/>
-        <path d="M0 420 Q200 380 400 410 Q600 440 800 400 Q1000 360 1200 390" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.4"/>
-        <path d="M0 440 Q180 400 360 430 Q540 460 720 420 Q900 380 1080 410 L1200 405" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.3"/>
-        <path d="M0 460 Q250 430 500 455 Q750 480 1000 445 Q1100 435 1200 440" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.25"/>
-        <path d="M0 380 Q100 340 200 360 Q400 400 600 350 Q800 300 1000 340 Q1100 360 1200 330" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.35"/>
-        <path d="M0 360 Q300 310 600 340 Q900 370 1200 320" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
-        <path d="M0 480 Q200 460 400 475 Q600 490 800 470 Q1000 450 1200 465" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
-        <path d="M0 340 Q150 300 300 320 Q600 370 900 310 Q1050 290 1200 310" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
-        <!-- Closed contours (topographic islands) -->
-        <ellipse cx="350" cy="380" rx="120" ry="40" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
-        <ellipse cx="350" cy="380" rx="70" ry="22" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
-        <ellipse cx="850" cy="360" rx="100" ry="35" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.2"/>
-        <ellipse cx="850" cy="360" rx="50" ry="18" stroke="#1e1e24" stroke-width="1" fill="none" opacity="0.15"/>
-      </svg>
-    </div>
-
-    <div class="horizon-content">
-
-      <div class="horizon-quote">
-        <span class="horizon-line">One command.</span><br>
-        <span class="horizon-line">Every service.</span><br>
-        <span class="horizon-line">You and your agent.</span>
-      </div>
-
-      <div class="horizon-install">
-        <div class="install-box" id="install-cmd" role="button" tabindex="0" aria-label="Copy install command">
-          <span>curl -fsSL https://veld.oss.life.li/get | bash</span>
-          <span class="copy-icon">&#x2398;</span>
-          <span class="copy-toast" id="copy-toast">Copied!</span>
-        </div>
-      </div>
-
-      <div class="horizon-links">
-        <a href="humans.html" class="primary">Get Started &rarr;</a>
-        <a href="agents.html" class="secondary">Read the docs &rarr;</a>
-      </div>
-
-      <div class="horizon-logo">
-        <img src="logo-wordmark.svg" alt="veld." class="horizon-logo-img">
-      </div>
-
+      <h3 style="margin-top:36px; font-size:17px;">The feedback loop</h3>
+      <p class="lead" style="font-size:14px; margin-bottom:6px;">Every app veld serves gets an in-browser overlay. Review the running thing and hand comments straight to your agent — no copy-pasting screenshots into a chat.</p>
+      <ol class="steps">
+        <li><span class="step-body"><strong>Launch the loop.</strong> In your agent, type <code>/veld-launch-feedback-loop</code> and hit enter — it parks on <code>veld feedback next</code> and waits for you.</span></li>
+        <li><span class="step-body"><strong>You comment on the live app.</strong> Click any element, leave a note — right there in the browser, on the real running page.</span></li>
+        <li><span class="step-body"><strong>Your agent pulls the next item</strong> with <code>veld feedback next</code> — element, selector, screenshot, and your words, in one call.</span></li>
+        <li><span class="step-body"><strong>It fixes the code and replies</strong> on the thread. The change hot-reloads; you see it live.</span></li>
+        <li><span class="step-body"><strong>Repeat until you click Done.</strong> A tight human-in-the-loop review loop, without leaving the page.</span></li>
+      </ol>
+      <p class="note">Fun fact: this entire page was built and refined through exactly that loop.</p>
     </div>
   </section>
 
-  </main>
+  <!-- ============ ARCHITECTURE ============ -->
+  <section id="architecture" class="anchor">
+    <div class="wrap">
+      <h2>How it works<span class="dot">.</span></h2>
+      <p class="section-sub">For the nerds. A few small Rust binaries, one config file, and Caddy for HTTPS — that's the whole thing.</p>
 
-  <div class="legal-footer">
-    <a href="https://github.com/prosperity-solutions/veld">GitHub</a> &middot;
-    <a href="https://github.com/prosperity-solutions/veld/blob/main/LICENSE" style="color:inherit">MIT License</a> &middot;
-    <a href="https://github.com/prosperity-solutions">Prosperity Solutions</a> &middot;
-    <a href="https://prosperitysolutions.li/legal">Legal Notice</a>
-  </div>
+      <div class="comp-list">
+        <div class="comp"><div class="name">veld</div><p>The CLI. Parses commands, orchestrates environments, resolves the dependency graph, displays output.</p></div>
+        <div class="comp"><div class="name">veld-daemon</div><p>User-space daemon. Monitors health, runs garbage collection, broadcasts state updates.</p></div>
+        <div class="comp"><div class="name">veld-helper</div><p>Manages DNS entries and Caddy routes over a minimal Unix socket. Privileged or unprivileged.</p></div>
+        <div class="comp"><div class="name">veld-gateway</div><p>Public web gateway (one Docker container). Joins a share over iroh and reverse-proxies it onto a public URL.</p></div>
+        <div class="comp"><div class="name">veld-share</div><p>Shared P2P transport built on iroh (QUIC, NAT hole-punching). Used by the daemon and the gateway.</p></div>
+        <div class="comp"><div class="name">SQLite</div><p>All state — runs, registry, logs, feedback, tokens — in one WAL-mode database. Versioned, migrates forward.</p></div>
+      </div>
 
-  <!-- ===================== JS ===================== -->
+      <div class="diagram" role="img" aria-label="Architecture. Local: the veld CLI drives the daemon and helper; the helper configures Caddy, which terminates HTTPS and reverse-proxies your services on clean URLs; SQLite holds all state. Sharing over iroh: veld share connects your daemon straight to a colleague's Veld — no gateway involved (an optional self-hosted relay may sit in between). Only veld share --web routes through a veld-gateway to reach anyone in a browser.">
+        <svg viewBox="0 0 760 560" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <marker id="arw" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+              <path class="dg-arrow" d="M0 0 L6 3 L0 6 Z"/>
+            </marker>
+          </defs>
+
+          <!-- ===== local ===== -->
+          <text class="dg-cap" x="20" y="40">on your machine</text>
+
+          <!-- you / terminal -->
+          <rect class="dg-box" x="20" y="70" width="130" height="56" rx="8"/>
+          <text class="dg-label" x="85" y="96" text-anchor="middle">you</text>
+          <text class="dg-sub" x="85" y="113" text-anchor="middle">terminal · veld.json</text>
+
+          <!-- veld CLI -->
+          <rect class="dg-accent" x="210" y="70" width="130" height="56" rx="8"/>
+          <text class="dg-label" x="275" y="96" text-anchor="middle">veld</text>
+          <text class="dg-sub" x="275" y="113" text-anchor="middle">CLI</text>
+
+          <!-- daemon -->
+          <rect class="dg-box" x="400" y="20" width="150" height="52" rx="8"/>
+          <text class="dg-label" x="475" y="43" text-anchor="middle">veld-daemon</text>
+          <text class="dg-sub" x="475" y="59" text-anchor="middle">health · GC · state</text>
+
+          <!-- helper -->
+          <rect class="dg-box" x="400" y="90" width="150" height="52" rx="8"/>
+          <text class="dg-label" x="475" y="113" text-anchor="middle">veld-helper</text>
+          <text class="dg-sub" x="475" y="129" text-anchor="middle">DNS · Caddy routes</text>
+
+          <!-- sqlite -->
+          <rect class="dg-box" x="210" y="160" width="130" height="48" rx="8"/>
+          <text class="dg-label" x="275" y="182" text-anchor="middle">SQLite</text>
+          <text class="dg-sub" x="275" y="198" text-anchor="middle">all state</text>
+
+          <!-- caddy -->
+          <rect class="dg-box" x="600" y="70" width="140" height="56" rx="8"/>
+          <text class="dg-label" x="670" y="96" text-anchor="middle">Caddy</text>
+          <text class="dg-sub" x="670" y="113" text-anchor="middle">HTTPS · proxy</text>
+
+          <!-- your services -->
+          <rect class="dg-accent" x="600" y="160" width="140" height="56" rx="8"/>
+          <text class="dg-label" x="670" y="186" text-anchor="middle">your services</text>
+          <text class="dg-sub" x="670" y="203" text-anchor="middle">clean HTTPS URLs</text>
+
+          <!-- local lines -->
+          <path class="dg-line" d="M150 98 L205 98" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M340 88 L395 55" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M340 98 L395 110" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M275 126 L275 156" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M550 98 L595 98" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M670 126 L670 156" marker-end="url(#arw)"/>
+
+          <!-- ===== divider ===== -->
+          <line class="dg-divider" x1="20" y1="260" x2="740" y2="260"/>
+          <text class="dg-cap" x="20" y="290">sharing your run — encrypted over iroh · dashed = optional</text>
+
+          <!-- host daemon -->
+          <rect class="dg-box" x="20" y="392" width="150" height="56" rx="8"/>
+          <text class="dg-label" x="95" y="418" text-anchor="middle">veld-daemon</text>
+          <text class="dg-sub" x="95" y="435" text-anchor="middle">your machine</text>
+
+          <!-- optional relay on the shared trunk -->
+          <rect class="dg-opt" x="220" y="392" width="150" height="56" rx="8"/>
+          <text class="dg-label" x="295" y="418" text-anchor="middle">your relay</text>
+          <text class="dg-sub" x="295" y="435" text-anchor="middle">self-hosted · optional</text>
+
+          <!-- PEER branch (no gateway) -->
+          <rect class="dg-box" x="558" y="316" width="182" height="56" rx="8"/>
+          <text class="dg-label" x="649" y="342" text-anchor="middle">a colleague's Veld</text>
+          <text class="dg-sub" x="649" y="359" text-anchor="middle">same URLs, their machine</text>
+
+          <!-- WEB branch (gateway only here) -->
+          <rect class="dg-opt" x="410" y="474" width="150" height="56" rx="8"/>
+          <text class="dg-label" x="485" y="500" text-anchor="middle">veld-gateway</text>
+          <text class="dg-sub" x="485" y="517" text-anchor="middle">public URL · web only</text>
+
+          <rect class="dg-box" x="600" y="474" width="140" height="56" rx="8"/>
+          <text class="dg-label" x="670" y="500" text-anchor="middle">anyone</text>
+          <text class="dg-sub" x="670" y="517" text-anchor="middle">just a browser</text>
+
+          <!-- trunk: daemon -> optional relay -->
+          <path class="dg-line dg-dash" d="M170 420 L214 420" marker-end="url(#arw)"/>
+
+          <!-- peer path: elbow up to a colleague's Veld, no gateway -->
+          <text class="dg-cap" x="512" y="330" text-anchor="middle">veld share</text>
+          <path class="dg-line" d="M380 410 L470 410 L470 344 L554 344" marker-end="url(#arw)"/>
+
+          <!-- web path: elbow down through the gateway to anyone -->
+          <text class="dg-cap" x="300" y="476" text-anchor="end">veld share --web</text>
+          <path class="dg-line" d="M305 448 L305 500 L406 500" marker-end="url(#arw)"/>
+          <path class="dg-line" d="M560 500 L594 500" marker-end="url(#arw)"/>
+        </svg>
+      </div>
+      <p class="lead" style="margin-top:18px; font-size:14px;"><code>veld share</code> connects your daemon <strong>straight to a colleague's Veld</strong> over an encrypted iroh tunnel — no gateway in the path (an optional self-hosted <strong>relay</strong> can keep traffic on infrastructure you control). The <strong>veld-gateway</strong> only comes in for <code>veld share --web</code>, which publishes a service on the open web for anyone with a browser, no Veld required.</p>
+    </div>
+  </section>
+
+  <!-- ============ DOCS ============ -->
+  <section id="docs" class="anchor">
+    <div class="wrap">
+      <h2>Docs &amp; references<span class="dot">.</span></h2>
+      <p class="section-sub">The repo is the source of truth. Everything lives next to the code.</p>
+      <div class="cli-group">
+        <div class="cli-row"><code><a href="https://github.com/prosperity-solutions/veld">github.com/prosperity-solutions/veld</a></code><span>Source, issues, releases</span></div>
+        <div class="cli-row"><code><a href="https://github.com/prosperity-solutions/veld/blob/main/README.md">README</a></code><span>Install, quick start, CLI reference, architecture</span></div>
+        <div class="cli-row"><code><a href="https://github.com/prosperity-solutions/veld/blob/main/docs/configuration.md">docs/configuration.md</a></code><span>Full veld.json specification</span></div>
+        <div class="cli-row"><code><a href="https://github.com/prosperity-solutions/veld/blob/main/docs/gateway.md">docs/gateway.md</a></code><span>Deploying the public web gateway</span></div>
+        <div class="cli-row"><code><a href="/schema/v2/veld.schema.json">schema/v2/veld.schema.json</a></code><span>Machine-readable JSON Schema for veld.json</span></div>
+        <div class="cli-row"><code><a href="/llms-full.txt">llms-full.txt</a></code><span>Complete docs in a single request, for LLMs</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ KUDOS ============ -->
+  <section id="kudos" class="anchor">
+    <div class="wrap">
+      <h2>Kudos<span class="dot">.</span></h2>
+      <p class="section-sub">veld is mostly glue. The hard parts are other people's brilliant work — thank you.</p>
+      <div class="kudos">
+        <div class="kudo"><div class="k-name"><a href="https://claude.com/claude-code">Claude Code</a> <span style="color:var(--text2)">· Anthropic</span></div><p>This whole project was vibe coded with it — every line, this page included. Without it, veld wouldn't exist.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://caddyserver.com/">Caddy</a></div><p>HTTPS termination, reverse proxy, and an internal CA that makes local TLS just work.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://www.iroh.computer/">iroh</a> <span style="color:var(--text2)">· n0</span></div><p>QUIC peer-to-peer with NAT hole-punching and relay fallback. The whole sharing story.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://tokio.rs/">Tokio</a></div><p>The async runtime everything runs on.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://github.com/clap-rs/clap">clap</a></div><p>The CLI argument parser behind every command and flag.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://github.com/tokio-rs/axum">axum</a></div><p>The HTTP framework powering the daemon UI and the gateway.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://www.sqlite.org/">SQLite</a> <span style="color:var(--text2)">· rusqlite</span></div><p>One embedded, WAL-mode database holds all of veld's state.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://github.com/rustls/rustls">rustls</a></div><p>Memory-safe TLS for veld's own outbound connections.</p></div>
+        <div class="kudo"><div class="k-name"><a href="https://serde.rs/">serde</a></div><p>Serialization for veld.json, state, and every <code>--json</code> payload.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <div class="wrap">
+      <div class="f-links">
+        <a href="https://github.com/prosperity-solutions/veld">GitHub</a>
+        <a href="https://github.com/prosperity-solutions/veld/blob/main/README.md">Docs</a>
+        <a href="/llms.txt">llms.txt</a>
+        <a href="https://github.com/prosperity-solutions/veld/blob/main/LICENSE">MIT License</a>
+        <a href="https://liechtensteinlife.com/en-DE/markets/de/legal-notice-ps">Legal Notice</a>
+      </div>
+      <div class="f-meta">veld · by <a href="https://github.com/prosperity-solutions">Prosperity Solutions</a> · vibe coded with Claude Code</div>
+    </div>
+  </footer>
+
   <script>
-    // IntersectionObserver for scroll-driven animations
-    const acts = document.querySelectorAll('.act');
-    const observer = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('in-view');
-
-          // Feedback section phased animation
-          if (entry.target.id === 'act-feedback') {
-            startFeedbackSequence(entry.target);
-          }
-
-          // Problems section staggered strikethrough
-          if (entry.target.id === 'act-problems') {
-            startProblemsSequence(entry.target);
-          }
+    // Theme toggle: cycles auto → light → dark → auto. 'auto' follows the OS;
+    // the choice is remembered in localStorage.
+    (function () {
+      var root = document.documentElement;
+      var btn = document.getElementById('theme-toggle');
+      var meta = document.querySelector('meta[name="theme-color"]');
+      var order = ['auto', 'light', 'dark'];
+      function chosen() {
+        try {
+          var v = localStorage.getItem('veld-theme');
+          return (v === 'light' || v === 'dark' || v === 'auto') ? v : 'auto';
+        } catch (e) { return 'auto'; }
+      }
+      function effective() {
+        var t = root.getAttribute('data-theme');
+        if (t === 'light' || t === 'dark') return t;
+        return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+      }
+      function apply(mode) {
+        if (mode === 'auto') root.removeAttribute('data-theme');
+        else root.setAttribute('data-theme', mode);
+        if (btn) {
+          var label = 'Theme: ' + mode + (mode === 'auto' ? ' (follows your system)' : '');
+          btn.setAttribute('title', label);
+          btn.setAttribute('aria-label', label + '. Click to change.');
         }
-      });
-    }, { threshold: 0.05 });
-
-    acts.forEach(act => observer.observe(act));
-
-    // Feedback loop phased animation
-    function startFeedbackSequence(el) {
-      if (el.dataset.started) return;
-      el.dataset.started = '1';
-
-      // Phase 1: button pulses (already via CSS), then overlay opens
-      setTimeout(() => el.classList.add('phase-overlay'), 2500);
-
-      // Phase 2: typing appears in the textarea
-      setTimeout(() => el.classList.add('phase-typing'), 3500);
-
-      // Phase 3: submit — overlay dismisses, comment pins, JSON appears in terminal
-      setTimeout(() => el.classList.add('phase-submit'), 5500);
-
-      // Phase 4: agent processes and browser updates
-      setTimeout(() => el.classList.add('phase-fix'), 8000);
-    }
-
-    // Problems section animation: cards appear staggered, then all struck at once, then big overlay badge
-    function startProblemsSequence(el) {
-      if (el.dataset.started) return;
-      el.dataset.started = '1';
-
-      const cards = el.querySelectorAll('.problem-card');
-      const badge = el.querySelector('.problems-overlay-badge');
-
-      // Step 1: Cards appear one by one (staggered, 150ms between each)
-      cards.forEach((card, i) => {
-        setTimeout(() => card.classList.add('visible'), i * 150);
-      });
-
-      // Calculate when last card finishes appearing
-      const lastCardDelay = (cards.length - 1) * 150; // ms
-      const cardAppearDuration = 500; // transition duration from CSS
-      const pauseAfterCards = 1000; // 1 second pause
-
-      const strikeTime = lastCardDelay + cardAppearDuration + pauseAfterCards;
-
-      // Step 2: ALL cards get struck through at once
-      setTimeout(() => {
-        cards.forEach((card) => {
-          card.classList.add('struck');
+        if (meta) meta.setAttribute('content', effective() === 'light' ? '#FBFBF8' : '#0A0A0B');
+      }
+      if (btn) {
+        btn.addEventListener('click', function () {
+          var next = order[(order.indexOf(chosen()) + 1) % order.length];
+          try { localStorage.setItem('veld-theme', next); } catch (e) {}
+          apply(next);
         });
-      }, strikeTime);
-
-      // Step 3: Big overlay badge appears (after strikethrough animation finishes)
-      setTimeout(() => {
-        badge.classList.add('visible');
-      }, strikeTime + 600);
-    }
-
-    // Unleashed section: individual statement reveal on scroll
-    const unleashedStatements = document.querySelectorAll('.unleashed-statement');
-    const statementObserver = new IntersectionObserver((entries) => {
-      entries.forEach(entry => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('visible');
-          statementObserver.unobserve(entry.target);
-        }
-      });
-    }, { threshold: 0.15 });
-
-    unleashedStatements.forEach(s => statementObserver.observe(s));
-
-    // Copy install command
-    const installCmd = document.getElementById('install-cmd');
-    const copyToast = document.getElementById('copy-toast');
-
-    function doCopy() {
-      navigator.clipboard.writeText('curl -fsSL https://veld.oss.life.li/get | bash').then(() => {
-        copyToast.classList.add('show');
-        setTimeout(() => copyToast.classList.remove('show'), 1500);
-      }).catch(function(){});
-    }
-
-    installCmd.addEventListener('click', doCopy);
-    installCmd.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); doCopy(); }
-    });
+      }
+      // Reflect OS changes while in auto mode (updates meta colour + is live).
+      // Guard: older WebKit (<14) only has addListener(); don't let a missing
+      // addEventListener throw and abort the rest of this script.
+      var mql = window.matchMedia('(prefers-color-scheme: light)');
+      var onOsChange = function () { if (chosen() === 'auto') apply('auto'); };
+      if (mql.addEventListener) mql.addEventListener('change', onOsChange);
+      else if (mql.addListener) mql.addListener(onOsChange);
+      apply(chosen());
+    })();
   </script>
 
+  <script>
+    // Copy buttons for command blocks. Copies data-copy (clean commands) when
+    // present, else the block's visible text. Self-contained, no external deps.
+    // Kept in its own <script> so a failure elsewhere can't disable it.
+    document.querySelectorAll('pre').forEach(function (pre) {
+      var text = pre.getAttribute('data-copy') || pre.innerText;
+      if (!text.trim()) return;
+      var btn = document.createElement('button');
+      btn.className = 'copy-btn';
+      btn.type = 'button';
+      btn.textContent = 'copy';
+      btn.setAttribute('aria-label', 'Copy to clipboard');
+      function done() {
+        btn.textContent = 'copied';
+        btn.classList.add('copied');
+        setTimeout(function () { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1600);
+      }
+      function fallbackCopy() {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+        document.body.appendChild(ta); ta.select();
+        try { document.execCommand('copy'); done(); } catch (e) {}
+        document.body.removeChild(ta);
+      }
+      btn.addEventListener('click', function () {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          // On reject (iframe without clipboard-write, transient denial) fall back.
+          navigator.clipboard.writeText(text).then(done).catch(fallbackCopy);
+        } else {
+          fallbackCopy();
+        }
+      });
+      pre.appendChild(btn);
+    });
+  </script>
 </body>
 </html>

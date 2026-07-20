@@ -6,9 +6,6 @@ veld is a Rust-based CLI tool that replaces the ritual of opening multiple termi
 
 - Source: https://github.com/prosperity-solutions/veld
 - Website: https://veld.oss.life.li
-  - https://veld.oss.life.li/ (homepage, cinematic experience)
-  - https://veld.oss.life.li/agents (structured, agent-optimized)
-  - https://veld.oss.life.li/humans (developer documentation)
 - License: MIT
 - Platforms: macOS (arm64/x64), Linux (x64/arm64)
 
@@ -94,6 +91,8 @@ cargo build --release
 ```sh
 veld start frontend:local --name dev
 ```
+
+`--name` is optional: when omitted, the run name is inferred from the current git worktree folder, then the git branch (slugified), then the project folder, falling back to a random name. Pass `--name` to override.
 
 Veld resolves the dependency graph (backend first, then frontend), allocates ports, starts processes, runs health checks, configures Caddy routes, and gives you HTTPS URLs.
 

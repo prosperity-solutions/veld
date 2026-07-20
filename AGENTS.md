@@ -13,10 +13,8 @@ veld/
 │   ├── veld-helper/       # Privileged daemon (DNS, Caddy routes)
 │   ├── veld-share/        # Shared P2P transport (iroh) — used by daemon + gateway
 │   └── veld-gateway/      # Public web gateway server (veld share --web)
-├── website/               # Marketing website (3 static HTML pages)
-│   ├── index.html         # Agents view (/, structured for LLMs)
-│   ├── humans.html        # Humans view (/humans, docs + demos)
-│   ├── experience.html    # Experience view (/experience, cinematic)
+├── website/               # Marketing website (one static HTML page)
+│   ├── index.html         # The whole site (/, single boring page)
 │   ├── llms.txt           # LLM index
 │   ├── llms-full.txt      # LLM full docs
 │   └── AGENTS.md          # Website-specific agent guide
@@ -80,7 +78,10 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `skills/veld/SKILL.md` | Agent-facing skill (quick reference, gotchas) |
 | `skills/veld/reference/config.md` | Agent-facing config reference |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
-| `website/llms-full.txt` | LLM-facing docs (if applicable, see `website/AGENTS.md`) |
+| `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
+| `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
+
+**Always ask "does the website need to change?"** For every user-visible feature, weigh whether it's worth surfacing on the marketing site — the site should stay an accurate, current picture of what veld can do, not drift behind the CLI. If it fits, update `website/index.html` (and `llms-full.txt`); if it deliberately doesn't, say so.
 
 If the change is purely internal (refactor, bugfix with no new surface area), this checklist does not apply.
 
