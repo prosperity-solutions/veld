@@ -13,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use veld_core::config::{RelayEntry, RelayPolicy, SecretSource};
+use veld_share::endpoint::IpFamilies;
 
 /// How long a registration lives without a heartbeat before the gateway drops
 /// it. Origins re-`POST` (heartbeat) well inside this window.
@@ -75,6 +76,12 @@ pub struct GatewayConfig {
     /// inbound `X-Forwarded-Host` — an edge that merely passes it through
     /// lets a viewer inject the value that origin apps then see.
     pub trust_forwarded_host: bool,
+    /// Which IP families the gateway's iroh (QUIC/UDP) endpoints bind. Both
+    /// default **on** (iroh's native dual-stack, IPv6 allowed to fail). Set
+    /// `VELD_GATEWAY_BIND_IPV6=false` on a host with no IPv6 egress route
+    /// (e.g. Qovery) to stop iroh re-probing unreachable IPv6 peer candidates
+    /// and logging a `NetworkUnreachable` WARN every ~60s.
+    pub ip_families: IpFamilies,
 }
 
 /// Paths to a TLS certificate chain and private key (PEM).
@@ -104,6 +111,10 @@ struct FileConfig {
     trust_forwarded_headers: Option<bool>,
     #[serde(rename = "trust_forwarded_host")]
     trust_forwarded_host: Option<bool>,
+    #[serde(rename = "bind_ipv4")]
+    bind_ipv4: Option<bool>,
+    #[serde(rename = "bind_ipv6")]
+    bind_ipv6: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -243,6 +254,25 @@ impl GatewayConfig {
             None => file.trust_forwarded_host.unwrap_or(false),
         };
 
+        let bind_v4 = match get("VELD_GATEWAY_BIND_IPV4") {
+            Some(raw) => parse_bool("VELD_GATEWAY_BIND_IPV4", raw)?,
+            None => file.bind_ipv4.unwrap_or(true),
+        };
+        let bind_v6 = match get("VELD_GATEWAY_BIND_IPV6") {
+            Some(raw) => parse_bool("VELD_GATEWAY_BIND_IPV6", raw)?,
+            None => file.bind_ipv6.unwrap_or(true),
+        };
+        if !bind_v4 && !bind_v6 {
+            bail!(
+                "VELD_GATEWAY_BIND_IPV4 and VELD_GATEWAY_BIND_IPV6 cannot both be false; \
+                 the gateway needs at least one IP family to reach peers over a direct path"
+            );
+        }
+        let ip_families = IpFamilies {
+            v4: bind_v4,
+            v6: bind_v6,
+        };
+
         Ok(Self {
             domain,
             listen,
@@ -254,6 +284,7 @@ impl GatewayConfig {
             max_registrations,
             trust_forwarded_headers,
             trust_forwarded_host,
+            ip_families,
         })
     }
 }
@@ -394,6 +425,49 @@ mod tests {
         let mut huge = base.to_vec();
         huge.push(("VELD_GATEWAY_MAX_REGISTRATIONS", "99999999999"));
         assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&huge)).is_err());
+    }
+
+    #[test]
+    fn ip_families_default_env_and_both_disabled_guard() {
+        let base = [
+            ("VELD_GATEWAY_DOMAIN", "share.acme.internal"),
+            ("VELD_GATEWAY_TOKEN", "t"),
+        ];
+        // Default is dual-stack (unchanged behaviour).
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&base)).unwrap();
+        assert_eq!(cfg.ip_families, IpFamilies::default());
+        assert!(cfg.ip_families.v4 && cfg.ip_families.v6);
+
+        // Disabling IPv6 (the Qovery no-v6-egress case) keeps IPv4 only.
+        let mut v4_only = base.to_vec();
+        v4_only.push(("VELD_GATEWAY_BIND_IPV6", "false"));
+        let cfg = GatewayConfig::from_parts(FileConfig::default(), &env(&v4_only)).unwrap();
+        assert_eq!(
+            cfg.ip_families,
+            IpFamilies {
+                v4: true,
+                v6: false
+            }
+        );
+
+        // Env wins over a file value.
+        let file = FileConfig {
+            bind_ipv6: Some(true),
+            ..FileConfig::default()
+        };
+        let cfg = GatewayConfig::from_parts(file, &env(&v4_only)).unwrap();
+        assert!(!cfg.ip_families.v6);
+
+        // Both families off is refused — the endpoint needs at least one.
+        let mut none = base.to_vec();
+        none.push(("VELD_GATEWAY_BIND_IPV4", "false"));
+        none.push(("VELD_GATEWAY_BIND_IPV6", "false"));
+        assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&none)).is_err());
+
+        // A garbage boolean is rejected.
+        let mut bad = base.to_vec();
+        bad.push(("VELD_GATEWAY_BIND_IPV4", "maybe"));
+        assert!(GatewayConfig::from_parts(FileConfig::default(), &env(&bad)).is_err());
     }
 
     #[test]

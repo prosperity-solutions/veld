@@ -217,7 +217,17 @@ impl ShareManager {
         if let Some(ep) = endpoints.get(requested) {
             return Ok(ep.clone());
         }
-        let ep = bind_endpoint(self.key_for(requested), requested).await?;
+        // Daemon endpoints are short-lived, per-session client endpoints, not a
+        // long-running edge service, so the recurring IPv6 re-probe noise the
+        // gateway's knob addresses isn't worth a daemon-side config surface;
+        // keep iroh's native dual-stack bind. (A v4-only user network still just
+        // fails the v6 probe as iroh natively tolerates.)
+        let ep = bind_endpoint(
+            self.key_for(requested),
+            requested,
+            veld_share::endpoint::IpFamilies::default(),
+        )
+        .await?;
         info!(node_id = %ep.id(), relays = %requested, "iroh share endpoint bound");
         self.clone()
             .spawn_accept_loop(ep.clone(), requested.clone());

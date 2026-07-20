@@ -10,13 +10,48 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use iroh::endpoint::presets;
+use iroh::endpoint::{BindOpts, presets};
 use iroh::{Endpoint, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey};
 use tracing::warn;
 use veld_core::config::{RelayEntry, RelayPolicy, SecretSource};
 
 /// ALPN protocol identifier for veld's share tunnels.
 pub const ALPN: &[u8] = b"veld/share/1";
+
+/// Which IP address families the endpoint's **direct** (QUIC/UDP) sockets bind.
+///
+/// Relay transports are always kept; this only gates the direct IP sockets.
+/// The default binds both, matching iroh's native `.bind()` — where the IPv6
+/// socket is allowed to fail, so a host without IPv6 still comes up.
+///
+/// Restricting to a single family matters on a host that has no *egress route*
+/// for the other family. iroh still opens the socket there (the bind succeeds
+/// on the unspecified address) and then, whenever a peer advertises a candidate
+/// in that family, re-probes it on a timer — each attempt logging a `noq_udp:
+/// sendmsg error: ... NetworkUnreachable` WARN. A cloud gateway with no IPv6
+/// route is the canonical case: dropping the v6 socket removes the wasted
+/// probes and the recurring warning outright.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IpFamilies {
+    /// Bind an IPv4 (`0.0.0.0`) direct socket.
+    pub v4: bool,
+    /// Bind an IPv6 (`[::]`) direct socket.
+    pub v6: bool,
+}
+
+impl Default for IpFamilies {
+    fn default() -> Self {
+        Self { v4: true, v6: true }
+    }
+}
+
+impl IpFamilies {
+    /// Both families enabled — iroh's native default bind, which we leave
+    /// untouched so its "IPv6 bind may fail" leniency is preserved.
+    fn is_dual(self) -> bool {
+        self.v4 && self.v6
+    }
+}
 
 /// Env var to point the endpoint at a self-hosted relay instead of n0's public
 /// relays (e.g. `VELD_SHARE_RELAY=https://relay.example.com`). Only consulted
@@ -379,10 +414,46 @@ fn restrict_permissions(_path: &Path) {}
 /// `Debug` prints `auth_token` in the clear. Veld's own types redact it (see
 /// `SecretSource`'s `Debug`) and never log the built `RelayConfig`/`RelayMap` —
 /// keep it that way (no `debug!(?config)` on these).
-pub async fn bind_endpoint(secret_key: SecretKey, choice: &RelayChoice) -> Result<Endpoint> {
+pub async fn bind_endpoint(
+    secret_key: SecretKey,
+    choice: &RelayChoice,
+    families: IpFamilies,
+) -> Result<Endpoint> {
     let mut builder = Endpoint::builder(presets::N0)
         .secret_key(secret_key)
         .alpns(vec![ALPN.to_vec()]);
+
+    // Only touch the default IP transports when restricting to one family; the
+    // dual default keeps iroh's native `.bind()` (v6 allowed to fail). Both
+    // disabled would leave a relay-only endpoint with no direct path at all,
+    // which is never intended — refuse it with a clear message. This is a
+    // generic veld-share API (the daemon calls it too), so the message names
+    // the type, not the gateway's env vars.
+    if !families.is_dual() {
+        if !families.v4 && !families.v6 {
+            bail!(
+                "iroh endpoint needs at least one IP family; enable at least one of \
+                 IpFamilies::v4 / IpFamilies::v6"
+            );
+        }
+        builder = builder.clear_ip_transports();
+        if families.v4 {
+            // IPv4 is the primary family — required, matching iroh's native v4
+            // transport (a failed v4 bind is a real error worth surfacing).
+            builder = builder
+                .bind_addr("0.0.0.0:0")
+                .map_err(|e| anyhow::anyhow!("configuring IPv4 socket for iroh endpoint: {e}"))?;
+        }
+        if families.v6 {
+            // Mirror iroh's native leniency: its default v6 transport is
+            // `is_required=false` ("bind allowed to fail"). Keep that here so a
+            // v6-only request on a host with the v6 stack disabled degrades to
+            // relay rather than hard-aborting endpoint creation.
+            builder = builder
+                .bind_addr_with_opts("[::]:0", BindOpts::default().set_is_required(false))
+                .map_err(|e| anyhow::anyhow!("configuring IPv6 socket for iroh endpoint: {e}"))?;
+        }
+    }
 
     if let RelayChoice::Custom(entries) = choice {
         let mut configs: Vec<RelayConfig> = Vec::new();
@@ -414,7 +485,23 @@ pub async fn bind_endpoint(secret_key: SecretKey, choice: &RelayChoice) -> Resul
         builder = builder.relay_mode(RelayMode::Custom(RelayMap::from_iter(configs)));
     }
 
-    builder.bind().await.context("binding iroh endpoint")
+    let endpoint = builder.bind().await.context("binding iroh endpoint")?;
+
+    // A restricted single family whose bind was lenient (v6, is_required=false)
+    // can leave the endpoint with no direct socket on a host lacking that stack
+    // — a relay-only endpoint. That's a valid degrade, but it's almost always an
+    // operator misconfig (e.g. IPv6-only on a v4-only host), so surface it rather
+    // than let it be silent. The gateway's v4-only case never hits this: v4 is
+    // required, so `bind()` only returns once a v4 socket exists.
+    if !families.is_dual() && endpoint.bound_sockets().is_empty() {
+        warn!(
+            ?families,
+            "iroh endpoint bound with no direct IP socket (relay-only); the requested \
+             IP family failed to bind — check the host's network stack"
+        );
+    }
+
+    Ok(endpoint)
 }
 
 /// Resolve the relay auth tokens to embed in a share ticket — one per relay the
@@ -1085,7 +1172,7 @@ mod tests {
                 sentinel.display()
             ))),
         }]);
-        let err = bind_endpoint(SecretKey::generate(), &choice)
+        let err = bind_endpoint(SecretKey::generate(), &choice, IpFamilies::default())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("no valid relay URLs"));
@@ -1093,6 +1180,71 @@ mod tests {
             !sentinel.exists(),
             "token command ran for an unparseable relay URL"
         );
+    }
+
+    #[tokio::test]
+    async fn bind_endpoint_v4_only_binds_no_ipv6_socket() {
+        // The load-bearing branch of this change: a v4-only endpoint must open a
+        // direct socket and it must be IPv4 (dropping the v6 socket is what
+        // stops the NetworkUnreachable re-probe). Binding to `0.0.0.0:0` is a
+        // local socket op — no relay/network needed for `.bind()` to return.
+        let ep = bind_endpoint(
+            SecretKey::generate(),
+            &RelayChoice::Public,
+            IpFamilies {
+                v4: true,
+                v6: false,
+            },
+        )
+        .await
+        .unwrap();
+        let socks = ep.bound_sockets();
+        assert!(!socks.is_empty(), "v4-only endpoint bound no direct socket");
+        assert!(
+            socks.iter().all(|s| s.is_ipv4()),
+            "v4-only endpoint bound a non-IPv4 socket: {socks:?}"
+        );
+        ep.close().await;
+    }
+
+    #[tokio::test]
+    async fn bind_endpoint_v6_only_binds_no_ipv4_socket() {
+        // Symmetric guard: v6-only must never open a v4 direct socket. The v6
+        // bind is lenient (`is_required=false`), so on a host with no IPv6 stack
+        // `bound_sockets` is empty — which still satisfies "no IPv4 socket".
+        let ep = bind_endpoint(
+            SecretKey::generate(),
+            &RelayChoice::Public,
+            IpFamilies {
+                v4: false,
+                v6: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            ep.bound_sockets().iter().all(|s| s.is_ipv6()),
+            "v6-only endpoint bound an IPv4 socket: {:?}",
+            ep.bound_sockets()
+        );
+        ep.close().await;
+    }
+
+    #[tokio::test]
+    async fn bind_endpoint_refuses_no_ip_families() {
+        // Both families disabled is rejected before any socket bind or network
+        // I/O — a relay-only endpoint with no direct path is never intended.
+        let err = bind_endpoint(
+            SecretKey::generate(),
+            &RelayChoice::Public,
+            IpFamilies {
+                v4: false,
+                v6: false,
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("at least one IP family"));
     }
 
     #[tokio::test]

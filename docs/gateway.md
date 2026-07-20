@@ -112,6 +112,8 @@ Env-var-first; a config file is optional (`--config /path` or
 | `VELD_GATEWAY_MAX_REGISTRATIONS` | `max_registrations` | `512` | Hard cap on concurrently live + in-flight shares; bounds a leaked token's blast radius. Raise for a large fleet — share #N+1 is refused with a clear error |
 | `VELD_GATEWAY_TRUST_FORWARDED` | `trust_forwarded_headers` | `false` | Trust the immediate upstream LB's `X-Forwarded-For`: its last entry becomes the client IP (password rate-limit keying) and the chain is forwarded upstream. **Enable this when the gateway sits behind a TLS-terminating LB** — otherwise every viewer shares the LB's IP and a few wrong passwords rate-limit everyone. Leave off when the gateway is the direct internet edge (an inbound chain would be viewer-spoofable). Deliberately does not affect `X-Forwarded-Host` |
 | `VELD_GATEWAY_TRUST_FORWARDED_HOST` | `trust_forwarded_host` | `false` | Trust `X-Forwarded-Host` (first entry) as the host the viewer addressed: it overrides `Host` for slug routing, the upstream `X-Forwarded-Host`, and Referer rewriting. Required behind a CDN that rewrites `Host` to its origin (see [Behind a CDN](#behind-a-cdn-cloudfront)). Enable ONLY behind an edge that **overwrites or strips** inbound `X-Forwarded-Host` — an edge that passes it through lets viewers inject the host your apps see |
+| `VELD_GATEWAY_BIND_IPV4` | `bind_ipv4` | `true` | Bind an IPv4 direct (QUIC/UDP) socket for iroh. Leave on. |
+| `VELD_GATEWAY_BIND_IPV6` | `bind_ipv6` | `true` | Bind an IPv6 direct socket for iroh. **Set to `false` on a host with no IPv6 egress route** (e.g. Qovery). Otherwise iroh re-probes each peer's IPv6 candidate on a timer and logs a `noq_udp: sendmsg error … NetworkUnreachable` WARN every ~60s. Sharing already works over IPv4 + relay; this only removes the dead probes and the log noise. At least one family must stay enabled |
 
 File form (all fields optional, `SecretSource` accepted for secrets):
 
@@ -125,7 +127,9 @@ File form (all fields optional, `SecretSource` accepted for secrets):
   "lease_secs": 90,
   "max_registrations": 512,
   "trust_forwarded_headers": false,
-  "trust_forwarded_host": false
+  "trust_forwarded_host": false,
+  "bind_ipv4": true,
+  "bind_ipv6": false
 }
 ```
 

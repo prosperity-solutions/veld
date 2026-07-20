@@ -21,7 +21,7 @@ use tracing::{info, warn};
 use veld_core::config::{RelayPolicy, WebAccessMode};
 use veld_core::share::{Capability, GatewayAccessPolicy, ShareTicket};
 use veld_share::endpoint::{
-    RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_secret,
+    IpFamilies, RelayAuth, RelayChoice, bind_endpoint, relay_auth_status, resolve_secret,
 };
 use veld_share::join;
 
@@ -177,6 +177,10 @@ pub struct Registry {
     lease: Duration,
     relays: RelayAllowList,
     secret_key: SecretKey,
+    /// Which IP families the gateway's iroh endpoints bind. Restricting to IPv4
+    /// on a host with no IPv6 egress route silences iroh's recurring
+    /// `NetworkUnreachable` re-probe warnings (see [`IpFamilies`]).
+    ip_families: IpFamilies,
     /// Hard bound on registrations, covering both settled and in-flight
     /// attempts: a permit is taken before dialing and held until the
     /// registration is removed. Closes the leaked-token exhaustion vector
@@ -211,12 +215,14 @@ impl Registry {
         relays: RelayAllowList,
         secret_key: SecretKey,
         max_registrations: usize,
+        ip_families: IpFamilies,
     ) -> Arc<Self> {
         Arc::new(Self {
             domain,
             lease,
             relays,
             secret_key,
+            ip_families,
             slots: Arc::new(tokio::sync::Semaphore::new(max_registrations)),
             max_registrations,
             endpoints: Mutex::new(HashMap::new()),
@@ -640,8 +646,13 @@ impl Registry {
             RelayChoice::Public => self.secret_key.clone(),
             RelayChoice::Custom(_) => SecretKey::generate(),
         };
-        let ep = bind_endpoint(key, requested).await?;
-        info!(node_id = %ep.id(), relays = %requested, "gateway iroh endpoint bound");
+        let ep = bind_endpoint(key, requested, self.ip_families).await?;
+        info!(
+            node_id = %ep.id(),
+            relays = %requested,
+            ip_families = ?self.ip_families,
+            "gateway iroh endpoint bound"
+        );
         endpoints.insert(requested.clone(), (ep.clone(), 1));
         Ok(ep)
     }
@@ -742,6 +753,7 @@ mod tests {
             relays,
             SecretKey::generate(),
             512,
+            IpFamilies::default(),
         );
 
         let listed: RelayUrl = "https://relay.acme.internal".parse().unwrap();
@@ -776,6 +788,7 @@ mod tests {
             RelayAllowList::Unconfined,
             SecretKey::generate(),
             1,
+            IpFamilies::default(),
         );
         // Hold the only slot, as a live registration would.
         let held = Arc::clone(&reg.slots).try_acquire_owned().unwrap();
@@ -839,6 +852,7 @@ mod tests {
             RelayAllowList::Unconfined,
             SecretKey::generate(),
             8,
+            IpFamilies::default(),
         );
         let ticket = ShareTicket {
             iroh_ticket: "does-not-matter".into(),
