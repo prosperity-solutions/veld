@@ -776,6 +776,7 @@ mod tests {
                 max_registrations: 8,
                 trust_forwarded_headers: trust_forwarded,
                 trust_forwarded_host: trust_forwarded,
+                ip_families: veld_share::endpoint::IpFamilies::default(),
             }),
             registry: Registry::new(
                 "share.example".into(),
@@ -783,6 +784,7 @@ mod tests {
                 RelayAllowList::Unconfined,
                 iroh::SecretKey::generate(),
                 8,
+                veld_share::endpoint::IpFamilies::default(),
             ),
             auth_token: "t".into(),
             limiter: std::sync::Arc::new(RateLimiter::default()),

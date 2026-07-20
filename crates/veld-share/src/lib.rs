@@ -66,12 +66,20 @@ mod tests {
             }
         });
 
-        let host_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
-            .await
-            .unwrap();
-        let client_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
-            .await
-            .unwrap();
+        let host_ep = bind_endpoint(
+            SecretKey::generate(),
+            &RelayChoice::Public,
+            crate::endpoint::IpFamilies::default(),
+        )
+        .await
+        .unwrap();
+        let client_ep = bind_endpoint(
+            SecretKey::generate(),
+            &RelayChoice::Public,
+            crate::endpoint::IpFamilies::default(),
+        )
+        .await
+        .unwrap();
         host_ep.online().await;
         let host_addr = host_ep.addr();
 

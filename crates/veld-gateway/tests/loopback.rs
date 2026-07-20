@@ -166,9 +166,13 @@ async fn gateway_proxies_through_daemon_host_half() {
         manifest,
     });
 
-    let host_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
-        .await
-        .unwrap();
+    let host_ep = bind_endpoint(
+        SecretKey::generate(),
+        &RelayChoice::Public,
+        veld_share::endpoint::IpFamilies::default(),
+    )
+    .await
+    .unwrap();
     host_ep.online().await;
     let ticket = ShareTicket {
         iroh_ticket: iroh_tickets::endpoint::EndpointTicket::new(host_ep.addr()).to_string(),
@@ -203,6 +207,7 @@ async fn gateway_proxies_through_daemon_host_half() {
         veld_gateway::registry::RelayAllowList::Unconfined,
         SecretKey::generate(),
         512,
+        veld_share::endpoint::IpFamilies::default(),
     );
     // Register with a §6.1 access policy: the node is password-protected.
     let mut access_nodes = std::collections::BTreeMap::new();
@@ -301,9 +306,13 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
         manifest,
     });
 
-    let host_ep = bind_endpoint(SecretKey::generate(), &RelayChoice::Public)
-        .await
-        .unwrap();
+    let host_ep = bind_endpoint(
+        SecretKey::generate(),
+        &RelayChoice::Public,
+        veld_share::endpoint::IpFamilies::default(),
+    )
+    .await
+    .unwrap();
     host_ep.online().await;
     let ticket = ShareTicket {
         iroh_ticket: iroh_tickets::endpoint::EndpointTicket::new(host_ep.addr()).to_string(),
@@ -319,6 +328,7 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
         veld_gateway::registry::RelayAllowList::Unconfined,
         SecretKey::generate(),
         512,
+        veld_share::endpoint::IpFamilies::default(),
     );
     // Link access: the slug itself is the credential — no password gate in
     // the way of the upgrade request.
@@ -345,6 +355,7 @@ async fn gateway_splices_websocket_upgrade_end_to_end() {
         max_registrations: 512,
         trust_forwarded_headers: false,
         trust_forwarded_host: false,
+        ip_families: veld_share::endpoint::IpFamilies::default(),
     };
     let state = veld_gateway::state::AppState {
         config: Arc::new(config),

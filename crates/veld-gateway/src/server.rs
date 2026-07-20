@@ -46,6 +46,7 @@ pub async fn run(config: GatewayConfig) -> Result<()> {
         relays,
         secret_key,
         config.max_registrations,
+        config.ip_families,
     );
     tokio::spawn(Arc::clone(&registry).sweep_expired_leases());
 
@@ -270,6 +271,7 @@ mod tests {
                 max_registrations: 8,
                 trust_forwarded_headers: false,
                 trust_forwarded_host: false,
+                ip_families: veld_share::endpoint::IpFamilies::default(),
             }),
             registry: Registry::new(
                 "share.example".into(),
@@ -277,6 +279,7 @@ mod tests {
                 crate::registry::RelayAllowList::Unconfined,
                 iroh::SecretKey::generate(),
                 8,
+                veld_share::endpoint::IpFamilies::default(),
             ),
             auth_token: "t".into(),
             limiter: Arc::new(crate::auth::RateLimiter::default()),
