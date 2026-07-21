@@ -71,10 +71,19 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
         struct StatusJson<'a> {
             #[serde(flatten)]
             run: &'a veld_core::state::RunState,
+            /// Whether the run occupies the live slot. Stale URLs on a
+            /// non-live run must not read as reachable.
+            live: bool,
+            /// Deprecated alias of `ended_at` — kept so status-parsing
+            /// scripts survive the v3 rename.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            stopped_at: Option<chrono::DateTime<chrono::Utc>>,
             #[serde(skip_serializing_if = "std::collections::HashMap::is_empty")]
             stats: &'a std::collections::HashMap<String, veld_core::stats::ProcessStats>,
         }
         let payload = StatusJson {
+            live: run_for_json.is_live(),
+            stopped_at: run_for_json.ended_at,
             run: &run_for_json,
             stats: &node_stats,
         };
@@ -106,7 +115,26 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
             output::bold("Environment:"),
             output::cyan(run_name),
         );
+        println!(
+            "{} {}",
+            output::bold("Run:"),
+            output::dim(&run_state.short_id()),
+        );
         println!("{} {}", output::bold("State:"), run_status_display,);
+        let live = run_state.is_live();
+        if !live {
+            // Last run's outcome — the "why did it die" line.
+            println!("{} {}", output::bold("Outcome:"), run_state.outcome_label(),);
+            if let Some(ended) = run_state.ended_at {
+                println!(
+                    "{} {}",
+                    output::bold("Ended:"),
+                    ended
+                        .with_timezone(&chrono::Local)
+                        .format("%Y-%m-%d %H:%M:%S"),
+                );
+            }
+        }
         println!();
 
         let mut rows: Vec<Vec<String>> = Vec::new();
@@ -125,17 +153,26 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
                 Some(s) => (fmt_cpu(s.cpu_percent), fmt_bytes(s.memory_bytes)),
                 None => (output::dim("-"), output::dim("-")),
             };
-            rows.push(vec![
+            let mut row = vec![
                 ns.node_name.clone(),
                 ns.variant.clone(),
                 status_str,
                 cpu_str,
                 mem_str,
-                ns.url.clone().unwrap_or_default(),
-            ]);
+            ];
+            if live {
+                row.push(ns.url.clone().unwrap_or_default());
+            }
+            rows.push(row);
         }
 
-        output::print_table(&["NODE", "VARIANT", "STATUS", "CPU", "MEM", "URL"], &rows);
+        // Routes are torn down with the run — a non-live run's URLs are dead,
+        // so the column is dropped rather than shown as if reachable.
+        if live {
+            output::print_table(&["NODE", "VARIANT", "STATUS", "CPU", "MEM", "URL"], &rows);
+        } else {
+            output::print_table(&["NODE", "VARIANT", "STATUS", "CPU", "MEM"], &rows);
+        }
 
         // Show liveness/recovery details for nodes that have them.
         let has_liveness_info = run_state.nodes.values().any(|ns| {
@@ -267,7 +304,7 @@ fn format_run_status(status: &RunStatus) -> String {
         RunStatus::Stopping => output::yellow("stopping"),
         RunStatus::Stopped => output::dim("stopped"),
         RunStatus::Failed => output::red("failed"),
-        RunStatus::Recovering => output::yellow("recovering"),
+        RunStatus::Crashed => output::red("crashed"),
     }
 }
 

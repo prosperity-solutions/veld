@@ -36,11 +36,15 @@ fn stats_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, ProcessS
     ))
 }
 
-/// Resolve the `runs.id` for a project root + run name, if the run exists.
+/// Resolve the `runs.id` of an environment's latest run, if one exists —
+/// samples always describe the live (= latest) instance.
 fn run_row_id(conn: &Connection, root: &str, run_name: &str) -> Result<Option<i64>, DbError> {
     Ok(conn
         .query_row(
-            "SELECT id FROM runs WHERE project_root = ?1 AND name = ?2",
+            "SELECT r.id FROM runs r
+             JOIN environments e ON e.id = r.environment_id
+             WHERE e.project_root = ?1 AND e.name = ?2
+             ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
             params![root, run_name],
             |r| r.get(0),
         )
@@ -236,12 +240,17 @@ mod tests {
     fn stats_cascade_delete_with_run() {
         let (_dir, db) = test_db();
         let root = Path::new("/tmp/projCascade");
-        db.save_run(root, "proj", &RunState::new("dev", "proj"))
-            .unwrap();
+        let run = RunState::new("dev", "proj");
+        db.save_run(root, "proj", &run).unwrap();
         db.record_node_stats(root, "dev", &[("web:local".into(), stat(1.0, 1, 1, 1))])
             .unwrap();
 
-        db.remove_run(root, "dev").unwrap();
+        assert!(
+            db.begin_ending(&run.run_id, crate::state::EndReason::Stopped, None)
+                .unwrap()
+        );
+        assert!(db.finalize_run(&run.run_id).unwrap());
+        assert!(db.delete_ended_run(&run.run_id).unwrap());
 
         let n: i64 = db
             .lock()

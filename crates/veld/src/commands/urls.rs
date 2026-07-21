@@ -34,6 +34,26 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         }
     };
 
+    // Routes are torn down when a run ends — the last run's URLs are dead.
+    // Erroring beats printing 404s an agent would then curl believing the
+    // environment is up.
+    if !run_state.is_live() {
+        let ended = run_state
+            .ended_at
+            .map(|t| {
+                format!(
+                    " (last run ended {})",
+                    t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                )
+            })
+            .unwrap_or_default();
+        output::print_error(
+            &format!("Environment '{run_name}' is not running{ended} — no live URLs."),
+            json,
+        );
+        return 1;
+    }
+
     // Collect URLs from node states.
     let mut url_entries: Vec<(&str, &str, &str)> = Vec::new();
     for ns in run_state.nodes.values() {

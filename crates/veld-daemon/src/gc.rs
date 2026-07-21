@@ -11,10 +11,18 @@ use crate::share::manager::ShareManager;
 /// Interval between garbage-collection runs (seconds).
 const GC_INTERVAL_SECS: u64 = 600; // 10 minutes
 
-/// Maximum age for stopped/failed entries before pruning (hours).
-const MAX_ENTRY_AGE_HOURS: i64 = 72;
+/// Ended runs kept per environment (run history cap). Runs beyond the cap —
+/// and ended runs older than `MAX_LOG_AGE_HOURS` — are pruned with their logs.
+const RUN_HISTORY_KEEP: usize = 10;
 
-/// Maximum age for log files before pruning (hours).
+/// Grace period before the stale-`stopping` reaper touches a `stopping` run.
+/// Dead PIDs under `stopping` is the NORMAL state of a healthy `veld stop`
+/// (PIDs are killed first, then on_stop hooks and teardown steps run for
+/// seconds to minutes) — indistinguishable in DB state from a SIGKILLed
+/// ender, so only age separates them. Generous on purpose.
+const STOPPING_GRACE_SECS: i64 = 600;
+
+/// Maximum age for log lines and ended runs before pruning (hours).
 const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 
 /// Maximum age for process-stats samples before pruning (hours). Short: the
@@ -97,73 +105,123 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
         };
 
         for (run_name, run_state) in &project_state.runs {
-            match run_state.status {
-                RunStatus::Running | RunStatus::Starting => {
-                    // Check if processes are actually alive.
-                    let mut any_alive = false;
-                    let mut dead_pids = Vec::new();
+            if !matches!(run_state.status, RunStatus::Running | RunStatus::Starting) {
+                // `stopping` belongs to the grace-gated reaper below; terminal
+                // runs are history (retention handles them).
+                continue;
+            }
 
-                    for node_state in run_state.nodes.values() {
-                        if let Some(pid) = node_state.pid {
-                            if is_process_alive(pid) {
-                                any_alive = true;
-                            } else {
-                                dead_pids.push(pid);
-                            }
-                        }
+            // Check if processes are actually alive.
+            let mut any_alive = false;
+            let mut dead_pids = Vec::new();
+
+            for node_state in run_state.nodes.values() {
+                if let Some(pid) = node_state.pid {
+                    if is_process_alive(pid) {
+                        any_alive = true;
+                    } else {
+                        dead_pids.push(pid);
                     }
+                }
+            }
 
-                    if !any_alive && !dead_pids.is_empty() {
-                        // All processes dead -- mark as stopped (orphan cleanup).
+            if !any_alive && !dead_pids.is_empty() {
+                // Crash detection: same one-step guarded finalize as the
+                // monitor — whichever fires first wins, both say `crashed`.
+                info!(
+                    "finalizing orphan run '{}' as crashed (dead PIDs: {:?})",
+                    run_name, dead_pids
+                );
+
+                let mut run = run_state.clone();
+                summary.orphaned_runs.push(run.run_id);
+                let mut dead_node: Option<String> = None;
+                for (key, node) in run.nodes.iter_mut() {
+                    if node.pid.take().is_some() {
+                        if dead_node.is_none() {
+                            dead_node = Some(key.clone());
+                        }
+                        node.status = veld_core::state::NodeStatus::Stopped;
+                    }
+                }
+
+                // Clean up Caddy routes and DNS entries.
+                summary.routes_cleaned += cleanup_routes_and_dns(&run, run_name, &helper).await;
+
+                // Final node states while live, then the guarded finalize (a
+                // no-op if a deliberate ender moved it to `stopping` first).
+                let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
+                let detail = veld_core::state::EndDetail {
+                    failed_node: dead_node,
+                    ..Default::default()
+                };
+                let _ = db.finalize_crashed(&run.run_id, Some(&detail));
+                summary.orphans_killed += 1;
+            }
+        }
+    }
+
+    // Phase 1b: stale-`stopping` reaper, grace-gated on BOTH branches (dead
+    // PIDs under `stopping` is what a healthy slow teardown looks like).
+    // Past the grace period the ender is dead or hung: re-kill anything
+    // alive, then finalize with the intent `begin_ending` stored.
+    let stopping_cutoff = chrono::Utc::now() - chrono::Duration::seconds(STOPPING_GRACE_SECS);
+    if let Ok(stale) = db.stale_stopping_runs(stopping_cutoff) {
+        for (_project_root, _project_name, run) in stale {
+            let run_name = run.name.clone();
+            info!("finalizing stale 'stopping' run '{run_name}' (ender gone)");
+            for (key, node) in &run.nodes {
+                if let Some(pid) = node.pid {
+                    if is_process_alive(pid) {
+                        kill_process(pid);
+                    }
+                    // Confirm before clearing — an unkilled PID stays recorded
+                    // so the straggler sweep keeps covering it.
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    if !is_process_alive(pid) {
+                        let _ = db.clear_node_pid(&run.run_id, key);
+                    }
+                }
+            }
+            summary.routes_cleaned += cleanup_routes_and_dns(&run, &run_name, &helper).await;
+            if db.finalize_run(&run.run_id).unwrap_or(false) {
+                summary.orphaned_runs.push(run.run_id);
+                summary.stale_removed += 1;
+            }
+        }
+    }
+
+    // Phase 1c: terminal-run straggler sweep. A PID recorded under a terminal
+    // run means a finalize could not confirm its kill — re-kill until it dies,
+    // then clear it. Leak-freedom never depends on the end label.
+    if let Ok(stragglers) = db.terminal_runs_with_pids() {
+        for run in stragglers {
+            for (key, node) in &run.nodes {
+                if let Some(pid) = node.pid {
+                    if is_process_alive(pid) {
                         info!(
-                            "killing orphan run '{}' with dead PIDs: {:?}",
-                            run_name, dead_pids
+                            "re-killing straggler PID {pid} under terminal run '{}'",
+                            run.name
                         );
-
-                        let mut run = run_state.clone();
-                        run.status = RunStatus::Stopped;
-                        run.stopped_at = Some(chrono::Utc::now());
-                        summary.orphaned_runs.push(run.run_id);
-                        for node in run.nodes.values_mut() {
-                            if let Some(pid) = node.pid {
-                                if !is_process_alive(pid) {
-                                    node.status = veld_core::state::NodeStatus::Stopped;
-                                } else {
-                                    // Still alive -- kill it.
-                                    kill_process(pid);
-                                    node.status = veld_core::state::NodeStatus::Stopped;
-                                }
-                            }
-                        }
-
-                        // Clean up Caddy routes and DNS entries.
-                        summary.routes_cleaned +=
-                            cleanup_routes_and_dns(&run, run_name, &helper).await;
-
-                        let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
-                        summary.orphans_killed += 1;
+                        kill_process(pid);
+                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    }
+                    if !is_process_alive(pid) {
+                        let _ = db.clear_node_pid(&run.run_id, key);
                     }
                 }
-                RunStatus::Stopped | RunStatus::Failed => {
-                    // Check age -- remove if older than threshold.
-                    if let Some(stopped_at) = run_state.stopped_at {
-                        let age = chrono::Utc::now().signed_duration_since(stopped_at);
-                        if age.num_hours() > MAX_ENTRY_AGE_HOURS {
-                            debug!(
-                                "removing stale run '{}' from project {}",
-                                run_name,
-                                project_root.display()
-                            );
-                            // Best-effort route/DNS cleanup before removing state.
-                            summary.routes_cleaned +=
-                                cleanup_routes_and_dns(run_state, run_name, &helper).await;
+            }
+        }
+    }
 
-                            let _ = db.remove_run(&project_root, run_name);
-                            summary.stale_removed += 1;
-                        }
-                    }
-                }
-                _ => {}
+    // Phase 1d: run-history retention — keep the newest RUN_HISTORY_KEEP ended
+    // runs per environment, and nothing older than the log age cap. Deleting a
+    // run cascades nodes/node_stats by FK and removes its log lines by run_id.
+    let history_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
+    if let Ok(prunable) = db.prunable_run_ids(RUN_HISTORY_KEEP, history_cutoff) {
+        for run_id in prunable {
+            if db.delete_ended_run(&run_id).unwrap_or(false) {
+                summary.stale_removed += 1;
             }
         }
     }

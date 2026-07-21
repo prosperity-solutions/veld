@@ -190,9 +190,24 @@ enum Command {
         #[arg(long)]
         since: Option<String>,
 
-        /// Stream logs continuously (like `tail -f`).
+        /// Stream logs continuously (like `tail -f`). Exits once the
+        /// followed run ends.
         #[arg(long, short = 'f')]
         follow: bool,
+
+        /// Show logs of a specific past run by id prefix (see `veld runs`).
+        #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["previous", "all_runs"])]
+        run: Option<String>,
+
+        /// Show logs of the run before the latest one (after a restart:
+        /// the previous generation).
+        #[arg(long, short = 'p', conflicts_with = "all_runs")]
+        previous: bool,
+
+        /// Show logs of every run under this name interleaved (pre-v3
+        /// behavior), including lines that predate run scoping.
+        #[arg(long)]
+        all_runs: bool,
 
         /// Output as JSON.
         #[arg(long)]
@@ -395,6 +410,10 @@ enum Command {
         /// Run name.
         #[arg(long)]
         run: String,
+        /// Run instance id (UUID). Optional: detached pipelines started by a
+        /// pre-v3 veld invoke this without it.
+        #[arg(long)]
+        run_id: Option<String>,
         /// Node name.
         #[arg(long)]
         node: String,
@@ -525,6 +544,9 @@ async fn main() {
             source,
             search,
             context,
+            run,
+            previous,
+            all_runs,
         } => {
             let source_filter =
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
@@ -546,6 +568,9 @@ async fn main() {
                 source: source_filter,
                 search,
                 context_lines: context,
+                run,
+                previous,
+                all_runs,
             })
             .await
         }
@@ -612,6 +637,7 @@ async fn main() {
         Command::InternalLog {
             project_root,
             run,
+            run_id,
             node,
             variant,
         } => {
@@ -643,6 +669,7 @@ async fn main() {
                         let _ = db.append_log(
                             &project_root,
                             &run,
+                            run_id.as_deref(),
                             Some(&node),
                             Some(&variant),
                             veld_core::db::LogStream::Server,

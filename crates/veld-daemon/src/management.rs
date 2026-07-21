@@ -165,9 +165,14 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
             // Load config so we know which actions each node exposes.
             let project_config = load_project_config(&entry.project_root);
 
+            // Increment 1 keeps the dashboard scoped to live runs — the UI
+            // has no controls or history shape for ended environments yet, so
+            // showing them would render dead cards. Increment 2 (run history
+            // in the UI) lifts this filter alongside the history payload.
             let mut runs: Vec<RunInfo> = entry
                 .runs
                 .values()
+                .filter(|r| r.status.is_live())
                 .map(|r| {
                     let mut nodes: Vec<NodeInfo> = project_state
                         .as_ref()
@@ -193,7 +198,7 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
 
                     RunInfo {
                         name: r.name.clone(),
-                        status: r.status.clone(),
+                        status: r.status,
                         urls: r.urls.clone(),
                         nodes,
                     }
@@ -209,6 +214,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         })
         .collect();
 
+    // A project whose environments are all ended has nothing to show under
+    // the live-only filter above (pre-v3 such a project had no rows at all).
+    projects.retain(|p| !p.runs.is_empty());
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(Json(EnvironmentList { projects }))
@@ -319,6 +327,10 @@ struct LogQuery {
     /// Filter by source: "all" (default), "server", or "client".
     #[serde(default = "default_source")]
     source: String,
+    /// Run instance to read (id prefix). Default: the environment's latest
+    /// run. `all` reads every run under the name interleaved (incl. legacy
+    /// unscoped rows).
+    run_id: Option<String>,
 }
 
 fn default_source() -> String {
@@ -361,13 +373,28 @@ async fn get_logs(
 
     let project_root = find_project_for_run(&registry, &run_name).ok_or(StatusCode::NOT_FOUND)?;
 
-    let run_state = db
-        .get_run(&project_root, &run_name)
-        .map_err(|e| {
-            warn!("failed to load run state for logs: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Resolve the run instance: an explicit id prefix, "all" for the old
+    // interleaved scope, or (default) the environment's latest run.
+    let run_state = match q.run_id.as_deref() {
+        Some(prefix) if prefix != "all" => db
+            .get_run_by_id_prefix(&project_root, prefix)
+            .map_err(|e| {
+                warn!("failed to resolve run id for logs: {e}");
+                StatusCode::BAD_REQUEST
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?,
+        _ => db
+            .get_run(&project_root, &run_name)
+            .map_err(|e| {
+                warn!("failed to load run state for logs: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?,
+    };
+    let run_scope: Option<String> = match q.run_id.as_deref() {
+        Some("all") => None,
+        _ => Some(run_state.run_id.to_string()),
+    };
 
     let lines_limit = q.lines.clamp(1, 5000);
     let include_server = q.source == "all" || q.source == "server";
@@ -380,6 +407,7 @@ async fn get_logs(
             node: node.map(str::to_owned),
             variant: variant.map(str::to_owned),
             streams: Some(vec![stream.as_str()]),
+            run_id: run_scope.clone(),
         };
         db.tail_logs(&project_root, &run_name, &filter, lines_limit)
             .map(|rows| {

@@ -108,36 +108,49 @@ async fn scan_and_update(
             }
 
             if any_dead {
-                // Mark the run as stopped (the registry view derives from the
-                // same tables, so there is no second store to update).
+                // Crash detection: one-step finalize, guarded on
+                // starting/running only — a run that `begin_ending` already
+                // moved to `stopping` (a deliberate stop mid-teardown) makes
+                // this a no-op, so the stop can't be relabeled as a crash.
                 let mut run = run_state;
-                run.status = RunStatus::Stopped;
-                run.stopped_at = Some(chrono::Utc::now());
-
-                // Mark dead nodes as stopped.
-                for node in run.nodes.values_mut() {
+                let mut dead_node: Option<String> = None;
+                for (key, node) in run.nodes.iter_mut() {
                     if let Some(pid) = node.pid {
                         if !is_process_alive(pid) {
+                            if dead_node.is_none() {
+                                dead_node = Some(key.clone());
+                            }
                             node.status = veld_core::state::NodeStatus::Stopped;
+                            node.pid = None;
                         }
                     }
                 }
 
+                // Persist final node states while the run is still live (a
+                // save against an already-finalized run is a whole-txn no-op),
+                // then finalize as crashed.
                 let _ = db.save_run(project_root, &reg_entry.project_name, &run);
+                let detail = veld_core::state::EndDetail {
+                    failed_node: dead_node,
+                    ..Default::default()
+                };
+                let crashed = db
+                    .finalize_crashed(&run.run_id, Some(&detail))
+                    .unwrap_or(false);
 
-                // Broadcast the change.
-                let event = serde_json::json!({
-                    "event": "status_change",
-                    "run": run_name,
-                    "project": project_root.to_string_lossy(),
-                    "old_status": "running",
-                    "new_status": "stopped",
-                    "timestamp": chrono::Utc::now().to_rfc3339(),
-                });
-                broadcaster.broadcast(&event).await;
-
-                changes += 1;
-                continue; // Skip liveness checks for a run that just stopped.
+                if crashed {
+                    let event = serde_json::json!({
+                        "event": "status_change",
+                        "run": run_name,
+                        "project": project_root.to_string_lossy(),
+                        "old_status": "running",
+                        "new_status": "crashed",
+                        "timestamp": chrono::Utc::now().to_rfc3339(),
+                    });
+                    broadcaster.broadcast(&event).await;
+                    changes += 1;
+                }
+                continue; // Skip liveness checks for a run that just ended.
             }
 
             // --- Liveness probe checks ---
@@ -147,9 +160,10 @@ async fn scan_and_update(
                 None => continue,
             };
 
-            // Create internal log writer for this run.
-            let internal_log =
+            // Create internal log writer for this run instance.
+            let mut internal_log =
                 LogWriter::for_run(db.clone(), project_root, run_name, LogStream::Internal);
+            internal_log.set_run_id(run_info.run_id);
 
             changes += run_liveness_checks(
                 &db,

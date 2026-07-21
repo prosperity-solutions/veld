@@ -57,6 +57,13 @@ pub struct LogsOptions {
     pub source: SourceFilter,
     pub search: Option<String>,
     pub context_lines: usize,
+    /// Address a specific past run by id prefix.
+    pub run: Option<String>,
+    /// The run before the latest one.
+    pub previous: bool,
+    /// Every run under the name interleaved (pre-v3 behavior, includes
+    /// legacy unscoped rows).
+    pub all_runs: bool,
 }
 
 /// `veld logs [--name <n>] [--node <n>] [--lines <n>] [--since <d>] [-f] [--json] [--source <s>] [--search <term>] [--context <n>]`
@@ -71,6 +78,9 @@ pub async fn run(opts: LogsOptions) -> i32 {
         source,
         search,
         context_lines,
+        run,
+        previous,
+        all_runs,
     } = opts;
     let Some((config_path, _cfg)) = super::load_config(json) else {
         return 1;
@@ -94,9 +104,54 @@ pub async fn run(opts: LogsOptions) -> i32 {
     };
     let run_name = run_name.as_str();
 
-    let Some(run_state) = project_state.get_run(run_name) else {
-        output::print_error(&format!("Run '{run_name}' not found."), json);
-        return 1;
+    // Resolve which run instance to read. Default: the environment's latest
+    // run (fixes the old generation-interleaving: a restart no longer mixes
+    // last week's lines into today's tail). `--all-runs` restores the old
+    // interleaved scope and is the only way to see legacy unscoped rows.
+    let target_run: Option<veld_core::state::RunState> = if let Some(ref prefix) = run {
+        match db.get_run_by_id_prefix(&project_root, prefix) {
+            Ok(Some(r)) => Some(r),
+            Ok(None) => {
+                output::print_error(
+                    &format!("No run matches id prefix '{prefix}' (see `veld runs`)."),
+                    json,
+                );
+                return 1;
+            }
+            Err(e) => {
+                output::print_error(&format!("{e}"), json);
+                return 1;
+            }
+        }
+    } else if previous {
+        match db.list_runs(&project_root, Some(run_name)) {
+            Ok(history) if history.len() >= 2 => Some(history[1].clone()),
+            Ok(_) => {
+                output::print_error(
+                    &format!("Environment '{run_name}' has no previous run recorded."),
+                    json,
+                );
+                return 1;
+            }
+            Err(e) => {
+                output::print_error(&format!("Failed to load run history: {e}"), json);
+                return 1;
+            }
+        }
+    } else {
+        match project_state.get_run(run_name) {
+            Some(r) => Some(r.clone()),
+            None => {
+                output::print_error(&format!("Run '{run_name}' not found."), json);
+                return 1;
+            }
+        }
+    };
+    let run_state = target_run.as_ref().unwrap();
+    let run_scope: Option<String> = if all_runs {
+        None
+    } else {
+        Some(run_state.run_id.to_string())
     };
 
     // Follow mode polls these: per-node streams honor `--node`, run-level
@@ -114,6 +169,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
             node: node.clone(),
             variant: None,
             streams: Some(per_node_streams),
+            run_id: run_scope.clone(),
         });
     }
     if !run_level_streams.is_empty() {
@@ -121,6 +177,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
             node: None,
             variant: None,
             streams: Some(run_level_streams),
+            run_id: run_scope.clone(),
         });
     }
 
@@ -143,6 +200,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
                     node: Some(node_name.to_owned()),
                     variant: Some(variant.to_owned()),
                     streams: Some(vec![stream]),
+                    run_id: run_scope.clone(),
                 });
             }
         } else {
@@ -152,6 +210,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
                 node: None,
                 variant: None,
                 streams: Some(vec![stream]),
+                run_id: run_scope.clone(),
             });
         }
     }
@@ -249,12 +308,30 @@ pub async fn run(opts: LogsOptions) -> i32 {
         println!("{}", serde_json::to_string_pretty(&all_output).unwrap());
     }
 
-    // Follow mode: poll for new rows continuously.
+    // Follow mode: poll for new rows continuously. Following an ended run
+    // (already ended, or ending mid-follow) prints history and exits 0 —
+    // polling forever on a run that can't produce lines would hang an agent
+    // waiting on a crashed environment. The note goes to stderr so stdout
+    // stays pure log payload. `--all-runs` has no single run to watch and
+    // keeps the old poll-forever behavior.
     if follow {
+        if !all_runs && !run_state.is_live() {
+            eprintln!(
+                "run {} has ended ({}) — nothing to follow",
+                run_state.short_id(),
+                run_state.outcome_label()
+            );
+            return 0;
+        }
         follow_logs(
             &db,
             &project_root,
             run_name,
+            if all_runs {
+                None
+            } else {
+                Some(run_state.run_id)
+            },
             &follow_filters,
             follow_from,
             already_shown,
@@ -282,7 +359,11 @@ fn format_row(row: &LogRow) -> String {
     format!("{label} [{}] {}", row.ts, row.line)
 }
 
-/// Poll the database for new rows, printing them as they appear, until Ctrl+C.
+/// Poll the database for new rows, printing them as they appear, until
+/// Ctrl+C — or until the followed run reaches a terminal status (one final
+/// drain tick, then exit; a run that ended produces no further lines and an
+/// agent must not block on it forever). `watch_run` is `None` under
+/// `--all-runs`, which has no single run to watch.
 /// The filters' stream sets are disjoint, so no row matches twice; rows from
 /// all filters are merged in id order per tick. `already_shown` holds ids past
 /// the watermark that the historical snapshot already printed.
@@ -291,6 +372,7 @@ async fn follow_logs(
     db: &Db,
     project_root: &std::path::Path,
     run_name: &str,
+    watch_run: Option<veld_core::uuid::Uuid>,
     filters: &[LogFilter],
     mut last_id: i64,
     mut already_shown: std::collections::HashSet<i64>,
@@ -298,6 +380,10 @@ async fn follow_logs(
     search: &Option<String>,
 ) {
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
+    // Check the run's status only every ~2s (every 10th tick) — the status
+    // probe is cheap but needless at 5Hz.
+    let mut tick: u64 = 0;
+    let mut final_drain = false;
 
     loop {
         tokio::select! {
@@ -325,6 +411,26 @@ async fn follow_logs(
                         println!("{}", serde_json::to_string(&entry).unwrap());
                     } else {
                         println!("{}", format_row(&row));
+                    }
+                }
+
+                if final_drain {
+                    return;
+                }
+                tick += 1;
+                if tick % 10 == 0 {
+                    if let Some(run_id) = watch_run {
+                        let ended = match db.run_status_by_id(&run_id) {
+                            Ok(Some(s)) => !s.is_live(),
+                            Ok(None) => true, // pruned while following
+                            Err(_) => false,  // transient DB error — keep going
+                        };
+                        if ended {
+                            // One more tick to drain late-arriving lines
+                            // (detached `_log` writers can trail the finalize).
+                            eprintln!("run has ended — stopping follow");
+                            final_drain = true;
+                        }
                     }
                 }
             }

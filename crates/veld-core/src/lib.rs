@@ -1,4 +1,5 @@
 pub mod config;
+pub use uuid;
 pub mod db;
 pub mod feedback;
 pub mod graph;

@@ -268,6 +268,7 @@ pub async fn run(
                         node: Some(node.clone()),
                         variant: Some(variant.clone()),
                         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+                        run_id: None,
                     };
                     if let Ok(rows) =
                         orchestrator
@@ -685,6 +686,7 @@ async fn follow_logs_until_interrupt(
         node: None,
         variant: None,
         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+        run_id: None,
     };
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -842,6 +844,7 @@ async fn follow_dep_logs(
         node: None,
         variant: None,
         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+        run_id: None,
     };
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));

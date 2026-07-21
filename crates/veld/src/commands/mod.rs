@@ -42,12 +42,13 @@ pub fn read_setup_mode() -> Option<String> {
     veld_core::setup::read_setup_mode()
 }
 
-/// Resolve the run name to use. If `name` is given, use it directly. Otherwise
-/// look at the project state: if exactly one active run exists, use that; if
-/// zero or multiple, print an actionable error and return `None`.
-///
-/// For read-only commands (status, urls, logs), also considers stopped runs
-/// so that users can inspect past runs without specifying `--name`.
+/// Resolve the environment name to use. If `name` is given, use it directly.
+/// Otherwise look at the project state, two-tiered: if exactly one environment
+/// has a *live* run (starting/running/stopping), use that; only when zero are
+/// live, fall back to a sole environment (stopped ones persist as history now,
+/// so `veld restart`/`veld stop` can find last night's crashed environment).
+/// The tiers are deliberately not collapsed — a crashed `dev` next to a
+/// running `staging` must not turn a bare `veld stop` into an ambiguity error.
 pub fn resolve_run_name(
     name: Option<String>,
     project_state: &veld_core::state::ProjectState,
@@ -58,28 +59,30 @@ pub fn resolve_run_name(
         return Some(n);
     }
 
-    // Prefer active runs first.
-    let active_runs: Vec<&String> = project_state
+    // Tier 1: environments with a live run.
+    let live: Vec<&String> = project_state
         .runs
         .iter()
-        .filter(|(_, r)| r.status != veld_core::state::RunStatus::Stopped)
+        .filter(|(_, r)| r.is_live())
         .map(|(name, _)| name)
         .collect();
 
-    match active_runs.len() {
+    match live.len() {
         1 => {
-            let resolved = active_runs[0].clone();
+            let resolved = live[0].clone();
             if !json {
-                output::print_info(&format!("Using run '{}' (only active run).", resolved));
+                output::print_info(&format!(
+                    "Using environment '{resolved}' (only live environment)."
+                ));
             }
             return Some(resolved);
         }
         n if n > 1 => {
-            let mut names: Vec<&str> = active_runs.iter().map(|s| s.as_str()).collect();
+            let mut names: Vec<&str> = live.iter().map(|s| s.as_str()).collect();
             names.sort();
             output::print_error(
                 &format!(
-                    "Multiple active runs found. Specify one with --name: {}",
+                    "Multiple live environments found. Specify one with --name: {}",
                     names.join(", ")
                 ),
                 json,
@@ -89,11 +92,14 @@ pub fn resolve_run_name(
         _ => {}
     }
 
-    // No active runs. For read-only commands, fall back to any run.
+    // Tier 2: nothing live — fall back to a sole environment (its latest run
+    // is history at this point).
     if include_stopped && project_state.runs.len() == 1 {
         let resolved = project_state.runs.keys().next().unwrap().clone();
         if !json {
-            output::print_info(&format!("Using run '{}' (only run).", resolved));
+            output::print_info(&format!(
+                "Using environment '{resolved}' (only environment)."
+            ));
         }
         return Some(resolved);
     }
@@ -103,7 +109,7 @@ pub fn resolve_run_name(
         names.sort();
         output::print_error(
             &format!(
-                "Multiple runs found. Specify one with --name: {}",
+                "Multiple environments found. Specify one with --name: {}",
                 names.join(", ")
             ),
             json,
@@ -111,7 +117,7 @@ pub fn resolve_run_name(
         return None;
     }
 
-    output::print_error("No runs found. Start one with `veld start`.", json);
+    output::print_error("No environments found. Start one with `veld start`.", json);
     None
 }
 

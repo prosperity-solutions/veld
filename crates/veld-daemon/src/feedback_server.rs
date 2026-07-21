@@ -350,6 +350,7 @@ async fn ingest_client_logs(
         db,
         &project_path,
         run_name,
+        run_state.run_id,
         &node,
         &variant,
         veld_core::db::LogStream::Client,
