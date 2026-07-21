@@ -390,7 +390,7 @@ fn relay_entry_from_value(value: serde_json::Value) -> Result<RelayEntry, String
 }
 
 /// A reference to the public web gateway an environment registers `web`
-/// shares with (SHARING_V2.md §5). Mirrors [`RelayEntry`]'s serde shape: a
+/// shares with. Mirrors [`RelayEntry`]'s serde shape: a
 /// bare URL string round-trips, and the object form adds the registration
 /// auth token the gateway requires.
 #[derive(Clone, PartialEq, Eq)]
@@ -505,7 +505,7 @@ pub struct SharePolicy {
     /// Audiences this service may be exposed to. Empty means not shareable.
     #[serde(default)]
     pub expose: Vec<ExposeMode>,
-    /// Web-audience settings (SHARING_V2.md §6.1). Absent means defaults —
+    /// Web-audience settings. Absent means defaults —
     /// which for `access` is `password` (never an open URL by default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub web: Option<WebSharePolicy>,

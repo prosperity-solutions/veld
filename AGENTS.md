@@ -87,6 +87,13 @@ If the change is purely internal (refactor, bugfix with no new surface area), th
 
 ## Key Conventions
 
+- **RFCs and working documents are never tracked in git.** Drafts, RFCs, PRDs,
+  plans, and any other working document live in `notes/` (gitignored) — never
+  commit them. The repo's tracked Markdown is user/contributor documentation
+  only (`README.md`, `docs/`, `skills/`, `AGENTS.md`, `CONTRIBUTING.md`).
+  Design context that must outlive a working document belongs in the PR
+  description, commit messages, or `docs/` — don't cite `notes/` files from
+  code comments, since readers of the repo can't see them.
 - **Any user-supplied command executed by a daemon must inherit the user's login-shell `PATH`.** The daemon (launchd), gateway (systemd), and helper run with a bare service `PATH`, so a raw `sh -c` cannot find user-installed CLIs (`op`, `vault`, `pg_isready`, version-manager shims) even though the same command works in the user's terminal. Resolve the PATH with `veld_core::user_path::resolve_user_path()` and pass it via `.env("PATH", …)` — as liveness probes (`veld-daemon/src/monitor.rs`) and `SecretSource::Command` token resolution (`veld-share/src/endpoint.rs`) already do. Never spawn a config-declared command on a daemon without this. Scope: the rule covers daemon/gateway/helper spawns only — commands the `veld` CLI itself spawns (orchestrator `command`/`start_server` steps, setup checks, actions) already inherit the terminal's `PATH` and are exempt. Only `PATH` is inherited, never the rest of the shell environment.
 - **Every user-facing HTML surface carries the Veld brand.** Any HTML a Veld
   binary serves to a browser — management UI, gateway pages (index, login,

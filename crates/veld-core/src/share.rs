@@ -189,7 +189,7 @@ pub struct StartShareRequest {
     pub approve: Option<ApprovalMode>,
     /// Share to the **web** audience: mint a share scoped to the `web`-opted
     /// nodes and register it with the configured public gateway instead of
-    /// handing the ticket to a human (SHARING_V2.md §5.4).
+    /// handing the ticket to a human.
     #[serde(default)]
     pub web: bool,
     /// Web only: access mode for nodes whose config is *silent* on
@@ -383,7 +383,7 @@ pub struct SharesList {
 pub struct GatewayRegisterRequest {
     /// The `veldshare_…` ticket of the web share to expose.
     pub ticket: String,
-    /// Viewer access policy (SHARING_V2.md §6.1). Absent = link-access for
+    /// Viewer access policy. Absent = link-access for
     /// every node (the pre-access-layer wire format, so old daemons keep
     /// working against new gateways). The daemon re-sends the same policy on
     /// every heartbeat, so a gateway restart re-learns it with the lease.

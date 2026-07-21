@@ -21,6 +21,9 @@
 # Frontend build
 node_modules/
 
+# Working documents — RFCs, PRDs, plans, scratch notes. Never tracked (see AGENTS.md).
+/notes/
+
 # Environment / secrets
 .env
 .env.local

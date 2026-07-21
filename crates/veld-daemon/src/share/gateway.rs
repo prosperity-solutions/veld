@@ -1,4 +1,4 @@
-//! Client for the public web gateway's registration API (SHARING_V2.md §5.4).
+//! Client for the public web gateway's registration API.
 //!
 //! The daemon registers a *web share*'s ticket with the org's gateway, then
 //! keeps the registration alive by re-`POST`ing (the heartbeat) until the

@@ -29,4 +29,3 @@ Installs: **veld-config** (write veld.json), **veld-feedback** (human-in-the-loo
 ## Optional
 
 - [Releases](https://github.com/prosperity-solutions/veld/releases): Version history and release notes
-- [Product Requirements](https://raw.githubusercontent.com/prosperity-solutions/veld/main/PRD.md): Design decisions and product context

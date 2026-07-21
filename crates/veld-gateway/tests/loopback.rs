@@ -1,4 +1,4 @@
-//! Cross-crate drift guard (SHARING_V2.md §5.2): the gateway joins a share
+//! Cross-crate drift guard: the gateway joins a share
 //! served by the *same host half the daemon uses* (`veld_share::host`) and
 //! proxies a real HTTP request through the tunnel. If the gateway ever drifts
 //! from the protocol the daemon speaks, this fails.

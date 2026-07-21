@@ -1,7 +1,7 @@
 // "Copy public URL" — translate the current browser location to its public
-// gateway URL (SHARING_V2.md §5.6): swap the host for the share's minted
-// public host, keep path + query + hash so a deep link to the current screen
-// survives the copy. For a password-protected share (the default, §6.1) the
+// gateway URL: swap the host for the share's minted public host, keep
+// path + query + hash so a deep link to the current screen survives the
+// copy. For a password-protected share (the default) the
 // copied link is the ONE-LINK form — the share password rides in a
 // `veld-key` URL fragment, which never reaches DNS/TLS/server logs, and the
 // gateway's login page auto-submits it — so the recipient gets a link that

@@ -1,4 +1,4 @@
-//! veld-gateway — the public web gateway for Veld sharing (SHARING_V2.md §5).
+//! veld-gateway — the public web gateway for Veld sharing.
 //!
 //! A headless Veld peer that joins shares over iroh and reverse-proxies the
 //! tunneled services onto real public URLs (`https://<slug>.<domain>`).
