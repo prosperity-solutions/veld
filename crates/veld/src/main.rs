@@ -104,15 +104,18 @@ enum Command {
         debug: bool,
     },
 
-    /// List environment runs.
+    /// Run history: list, inspect, or diff run instances.
     Runs {
-        /// Filter by run name.
+        /// Filter by environment name.
         #[arg(long)]
         name: Option<String>,
 
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        #[command(subcommand)]
+        cmd: Option<RunsCmd>,
     },
 
     /// Show status of a running environment.
@@ -439,6 +442,34 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum RunsCmd {
+    /// Show one run in full: outcome, node results, and the graph snapshot
+    /// it was started with.
+    Show {
+        /// Run id prefix (see `veld runs`).
+        run_id: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diff two runs' graph snapshots — what changed in the config between
+    /// them. With one id, diffs that run against its predecessor.
+    Diff {
+        /// Older run id prefix (or, with one argument, the run to compare
+        /// against its predecessor).
+        a: String,
+
+        /// Newer run id prefix.
+        b: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 fn init_tracing(debug: bool) {
     use tracing_subscriber::EnvFilter;
 
@@ -516,7 +547,13 @@ async fn main() {
 
         Command::Restart { name, debug } => commands::restart::run(name, debug).await,
 
-        Command::Runs { name, json } => commands::runs::list(name.as_deref(), json).await,
+        Command::Runs { name, json, cmd } => match cmd {
+            None => commands::runs::list(name.as_deref(), json).await,
+            Some(RunsCmd::Show { run_id, json }) => commands::runs::show(&run_id, json).await,
+            Some(RunsCmd::Diff { a, b, json }) => {
+                commands::runs::diff(&a, b.as_deref(), json).await
+            }
+        },
 
         Command::Status {
             name,

@@ -128,6 +128,8 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs [--name <n>] [--json]` | Run history: one row per execution instance (short id, started/ended, duration, outcome) |
+| `veld runs show <id> [--json]` | One run in full: outcome, node exit codes, and the graph snapshot it was started with |
+| `veld runs diff <old> <new> [--json]` | Config diff between two runs (nodes added/removed, command/cwd/env/url changes); one id diffs against its predecessor |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command). `--web`: publish via the configured gateway and print public URLs (password-protected by default) |
@@ -158,7 +160,7 @@ All CLI/daemon state (run state, project registry, service logs, feedback thread
 
 ### Environments and runs
 
-An **environment** is the durable named slot `--name` addresses; a **run** is one execution instance of it. Ended runs — stopped, failed, crashed, replaced, or completed (`--oneshot`) — persist as history (last 10 per environment, up to 7 days) with their logs, an explicit end reason, and machine-readable failure detail, so "why did last night's run die?" stays answerable after the fact. `veld runs` lists the history; `veld logs --run <id-prefix>` (or `-p` for the previous run) reads a past run's logs; `veld status`/`veld runs --json` expose `end_reason`/`end_detail` for agents. Crashes are detected by the daemon and recorded as `crashed` — distinguishable from a clean stop. The dashboard shows ended environments with their last outcome, a run picker in the Logs tab, and one-click Restart.
+An **environment** is the durable named slot `--name` addresses; a **run** is one execution instance of it. Ended runs — stopped, failed, crashed, replaced, or completed (`--oneshot`) — persist as history (last 10 per environment, up to 7 days) with their logs, an explicit end reason, and machine-readable failure detail, so "why did last night's run die?" stays answerable after the fact. `veld runs` lists the history; `veld logs --run <id-prefix>` (or `-p` for the previous run) reads a past run's logs; `veld status`/`veld runs --json` expose `end_reason`/`end_detail` for agents. Crashes are detected by the daemon and recorded as `crashed` — distinguishable from a clean stop. The dashboard shows ended environments with their last outcome, a run picker in the Logs tab, and one-click Restart. Each run also stores a **graph snapshot** taken at start — raw pre-interpolation command strings, env variable names (never values), cwd, URL templates, and a veld.json hash — so `veld runs show <id>` reconstructs what a run was started with and `veld runs diff` answers "what changed in the config between the run that worked and the run that didn't?"
 
 ---
 

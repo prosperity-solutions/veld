@@ -141,6 +141,66 @@ async fn kill_and_confirm(pids: &[u32]) -> bool {
     pids.iter().all(|&p| !process::is_alive(p))
 }
 
+/// Capture what this run is being started WITH — the pre-interpolation
+/// resolved graph (see [`crate::state::GraphSnapshot`]). Raw command strings
+/// keep their `${...}` placeholders and env is names-only, so no resolved
+/// value (port, URL, secret output) is ever persisted.
+fn build_graph_snapshot(
+    config: &VeldConfig,
+    config_path: &std::path::Path,
+    plan: &[Vec<NodeSelection>],
+) -> crate::state::GraphSnapshot {
+    use sha2::{Digest, Sha256};
+    let config_hash = std::fs::read(config_path)
+        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+        .unwrap_or_default();
+
+    let mut nodes = std::collections::BTreeMap::new();
+    for sel in plan.iter().flatten() {
+        let Some(node_cfg) = config.nodes.get(&sel.node) else {
+            continue;
+        };
+        let Some(variant_cfg) = node_cfg.variants.get(&sel.variant) else {
+            continue;
+        };
+        let command = variant_cfg
+            .script
+            .as_ref()
+            .map(|s| format!("script:{s}"))
+            .or_else(|| variant_cfg.command.clone());
+        let mut env_keys: Vec<String> = config::resolve_env(
+            config.env.as_ref(),
+            node_cfg.env.as_ref(),
+            variant_cfg.env.as_ref(),
+        )
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+        env_keys.sort();
+        let url_template = (variant_cfg.step_type == config::StepType::StartServer).then(|| {
+            url::resolve_url_template(
+                &config.url_template,
+                node_cfg.url_template.as_deref(),
+                variant_cfg.url_template.as_deref(),
+            )
+            .to_owned()
+        });
+        nodes.insert(
+            RunState::node_key(&sel.node, &sel.variant),
+            crate::state::NodeSnapshot {
+                step_type: match variant_cfg.step_type {
+                    config::StepType::Command => "command".to_owned(),
+                    config::StepType::StartServer => "start_server".to_owned(),
+                },
+                command,
+                cwd: variant_cfg.cwd.clone().or_else(|| node_cfg.cwd.clone()),
+                env_keys,
+                url_template,
+            },
+        );
+    }
+    crate::state::GraphSnapshot { config_hash, nodes }
+}
+
 /// Machine-readable outcome detail for a failed start.
 fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
     let mut detail = EndDetail::default();
@@ -410,6 +470,10 @@ impl Orchestrator {
         self.debug_log("Caddy start requested").await;
 
         let mut run = RunState::new(run_name, &self.config.name);
+        // Forensics: record what this run is being started with, so a later
+        // `veld runs show/diff` can answer "what changed since the run that
+        // worked" even after veld.json moved on.
+        run.graph_snapshot = Some(build_graph_snapshot(&self.config, &self.config_path, &plan));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).
         if let Some(w) = self.internal_log.as_mut() {

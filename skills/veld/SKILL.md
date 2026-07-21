@@ -72,7 +72,16 @@ Post-mortem workflow — "why did last night's run die?":
 ```sh
 veld runs --name dev                # list past runs for dev, newest first
 veld logs --run a3f8c12             # logs for that specific run (id prefix, like git)
+veld runs show a3f8c12              # full detail: node results + the graph snapshot it started with
+veld runs diff a3f8c12              # config diff vs its predecessor ("what changed since it worked?")
 ```
+
+Every run stores a **graph snapshot** at start: raw (pre-interpolation)
+command strings, cwd, env variable *names* (never values — they can be
+secrets), URL templates, and a hash of veld.json. `veld runs diff <old> <new>`
+(or one id, against its predecessor) reports node added/removed and per-field
+changes — the fastest answer to "did the config change between the run that
+worked and the run that didn't?"
 
 `veld runs --json` gives the machine-readable outcome: `end_reason` is one of
 `stopped | failed | crashed | replaced | completed`, and `end_detail` carries

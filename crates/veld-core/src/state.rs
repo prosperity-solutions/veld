@@ -207,6 +207,42 @@ impl NodeState {
 }
 
 // ---------------------------------------------------------------------------
+// Graph snapshot — what a run was started WITH, captured at start time so
+// "what changed between the run that worked and the run that didn't" stays
+// answerable after veld.json has moved on. Deliberately PRE-interpolation:
+// command strings keep their `${...}` placeholders and env is names-only, so
+// no resolved value (port, URL, secret output) is ever persisted here.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GraphSnapshot {
+    /// SHA-256 of the veld.json bytes at start time — equal hashes mean the
+    /// whole config file was identical, before any per-node diffing.
+    pub config_hash: String,
+    /// Node keys (`"node:variant"`) → what the config said about them.
+    /// BTreeMap for stable serialization (diff-friendly).
+    pub nodes: std::collections::BTreeMap<String, NodeSnapshot>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeSnapshot {
+    /// `command` or `start_server`.
+    pub step_type: String,
+    /// Raw command string with `${...}` placeholders intact (or the script
+    /// path, prefixed `script:`), exactly as configured — never interpolated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    /// Configured env variable NAMES (sorted). Values are never stored —
+    /// they can be secrets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url_template: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Run state
 // ---------------------------------------------------------------------------
 
@@ -226,6 +262,10 @@ pub struct RunState {
     pub end_reason: Option<EndReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_detail: Option<EndDetail>,
+    /// The resolved graph this run was started with (pre-interpolation; see
+    /// [`GraphSnapshot`]). `None` on pre-snapshot rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graph_snapshot: Option<GraphSnapshot>,
     pub nodes: HashMap<String, NodeState>,
     /// Node keys in the order they were started (for reverse-order stop).
     #[serde(default)]
@@ -245,6 +285,7 @@ impl RunState {
             status: RunStatus::Starting,
             end_reason: None,
             end_detail: None,
+            graph_snapshot: None,
             nodes: HashMap::new(),
             execution_order: Vec::new(),
             created_at: Utc::now(),

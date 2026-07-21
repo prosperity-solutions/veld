@@ -475,6 +475,10 @@ fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
             status TEXT NOT NULL,
             end_reason TEXT,
             end_detail TEXT,
+            -- The resolved graph the run was started with (JSON, see
+            -- GraphSnapshot). Pre-interpolation by design: placeholders stay
+            -- `${...}`, env is names-only — no resolved value lands here.
+            graph_snapshot TEXT,
             execution_order TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             -- When begin_ending moved the run to 'stopping' — the daemon's

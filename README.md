@@ -156,6 +156,8 @@ veld stop --name dev
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
 | `veld runs [--name <n>] [--json]` | List run history — one row per execution instance (short id, started/ended, duration, outcome), newest first. Without `--name`, all environments' runs grouped |
+| `veld runs show <id> [--json]` | One run in full: outcome, node results with exit codes, and the graph snapshot it was started with (raw commands, env key names, URL templates — never resolved values) |
+| `veld runs diff <old> <new> [--json]` | What changed in the config between two runs (node added/removed, command/cwd/env/url changes, veld.json hash). With one id, diffs that run against its predecessor |
 | `veld feedback next [--wait] [--name <n>] [--json]` | Get the next feedback item to work on (agent-facing; pure read, no cursor) |
 | `veld feedback reply <thread-id> "<msg>"` | Reply to a feedback thread (parks it on the reviewer) |
 | `veld feedback resolve <thread-id>` | Resolve a thread (agent-facing; only on explicit approval) |

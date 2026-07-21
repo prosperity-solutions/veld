@@ -193,6 +193,7 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, RunState)> {
     let execution_order: String = row.get(7)?;
     let created_at: String = row.get(8)?;
     let ended_at: Option<String> = row.get(9)?;
+    let graph_snapshot: Option<String> = row.get(10)?;
     Ok((
         row_id,
         RunState {
@@ -204,6 +205,9 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, RunState)> {
             end_detail: end_detail
                 .as_deref()
                 .and_then(|d| serde_json::from_str::<EndDetail>(d).ok()),
+            graph_snapshot: graph_snapshot
+                .as_deref()
+                .and_then(|g| serde_json::from_str(g).ok()),
             nodes: HashMap::new(),
             execution_order: serde_json::from_str(&execution_order).unwrap_or_default(),
             created_at: super::parse_ts(&created_at)
@@ -214,7 +218,7 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, RunState)> {
 }
 
 const RUN_COLS: &str = "r.id, r.run_id, e.name, p.name, r.status, r.end_reason, r.end_detail, \
-                        r.execution_order, r.created_at, r.ended_at";
+                        r.execution_order, r.created_at, r.ended_at, r.graph_snapshot";
 const RUN_JOIN: &str = "runs r JOIN environments e ON e.id = r.environment_id \
                         JOIN projects p ON p.root = e.project_root";
 /// Correlated predicate selecting each environment's latest run. Ordered by
@@ -427,8 +431,8 @@ impl Db {
 
         tx.execute(
             "INSERT INTO runs (environment_id, run_id, status, end_reason, end_detail,
-                               execution_order, created_at, ended_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                               graph_snapshot, execution_order, created_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(run_id) DO UPDATE SET
                -- Once `begin_ending` has moved a run to 'stopping', a stale
                -- writer (a snapshot taken before the ending began) must not
@@ -438,6 +442,9 @@ impl Db {
                -- ...and the first ender's stored intent always wins.
                end_reason = COALESCE(runs.end_reason, excluded.end_reason),
                end_detail = COALESCE(runs.end_detail, excluded.end_detail),
+               -- Written once at start; a later save without one (a reloaded
+               -- RunState round-trips it, but be defensive) keeps the stored.
+               graph_snapshot = COALESCE(excluded.graph_snapshot, runs.graph_snapshot),
                execution_order = excluded.execution_order,
                ended_at = excluded.ended_at",
             params![
@@ -446,6 +453,10 @@ impl Db {
                 run_status_str(&run.status),
                 run.end_reason.as_ref().map(end_reason_str),
                 run.end_detail
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                run.graph_snapshot
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
@@ -587,7 +598,7 @@ impl Db {
         let rows: Vec<(i64, RunState, String)> = stmt
             .query_map([ts_to_str(cutoff)], |row| {
                 let (row_id, run) = run_from_row(row)?;
-                let root: String = row.get(10)?;
+                let root: String = row.get(11)?;
                 Ok((row_id, run, root))
             })?
             .collect::<Result<_, _>>()?;
@@ -1016,6 +1027,51 @@ mod tests {
         assert_eq!(
             entry.runs["dev"].urls["web:local"],
             "https://web.test.veld.localhost"
+        );
+    }
+
+    #[test]
+    fn graph_snapshot_round_trips_and_survives_snapshotless_saves() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projSnap");
+        let mut run = sample_run("dev");
+        run.graph_snapshot = Some(crate::state::GraphSnapshot {
+            config_hash: "abc123".into(),
+            nodes: [(
+                "web:local".to_string(),
+                crate::state::NodeSnapshot {
+                    step_type: "start_server".into(),
+                    command: Some("npm run dev".into()),
+                    cwd: None,
+                    env_keys: vec!["PORT".into()],
+                    url_template: Some("{service}.{run}.localhost".into()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+        db.save_run(root, "proj", &run).unwrap();
+
+        let loaded = db.get_run(root, "dev").unwrap().unwrap();
+        let snap = loaded.graph_snapshot.as_ref().unwrap();
+        assert_eq!(snap.config_hash, "abc123");
+        assert_eq!(
+            snap.nodes["web:local"].command.as_deref(),
+            Some("npm run dev")
+        );
+
+        // A later save WITHOUT a snapshot (defensive: e.g. a writer that
+        // built RunState by hand) must not clobber the stored one.
+        let mut stale = sample_run("dev");
+        stale.run_id = run.run_id;
+        stale.graph_snapshot = None;
+        db.save_run(root, "proj", &stale).unwrap();
+        assert!(
+            db.get_run(root, "dev")
+                .unwrap()
+                .unwrap()
+                .graph_snapshot
+                .is_some()
         );
     }
 
