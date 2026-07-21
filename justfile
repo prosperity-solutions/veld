@@ -1,22 +1,28 @@
 export PATH := env("HOME") + "/.cargo/bin:" + env("PATH")
 
-# Dedicated state for source-built binaries: tier-1 `just dev` (and the
-# veld-dev wrapper / dev-daemon) never touch the installed veld's database at
-# ~/Library/Application Support/veld/veld.db — dev builds carry newer schema
-# migrations, and letting one loose on the real DB would migrate it forward
-# and blind the installed daemon (NewerSchema) until `veld update`.
-# NOTE: this isolates STATE only. The helper/Caddy/DNS are still the real,
-# shared system services, and the installed daemon only watches the real DB —
-# dev-DB runs get no crash detection/GC unless `just dev-daemon` is running.
+# Dedicated DEV INSTANCE for source-built binaries: tier-1 `just dev` (and
+# the veld-dev wrapper / dev-daemon) run with their own database, daemon
+# port, and daemon socket — never the installed veld's. Dev builds carry
+# newer schema migrations, and letting one loose on the real DB would migrate
+# it forward and blind the installed daemon (NewerSchema) until `veld update`.
+# The dev daemon runs ALONGSIDE the installed one and serves its own
+# dashboard at https://veld-dev.localhost.
+# NOTE: the helper/Caddy/DNS layer is NOT instanced — it is a singleton
+# owning 443/18443 and system DNS; both instances share it (distinct
+# hostnames and route ids keep them apart).
 dev_db := justfile_directory() + "/.veld-dev/veld.db"
+# The dev instance's daemon port — installed daemon keeps 19899; both run
+# side by side. Dev CLI and dev daemon must agree on this.
+dev_daemon_port := "19898"
 
 # ============================================================================
 # Veld Development Workflow
 #
 # Three tiers — use the lightest one that covers your change:
 #
-#   just dev <args>           CLI only, no install, own dev DB (most changes)
-#   just dev-daemon           Run daemon from source against the dev DB
+#   just dev <args>           CLI only, no install, own dev instance (most changes)
+#   just dev-daemon           Daemon from source, alongside the installed one
+#                             (own port/DB/socket, dashboard: veld-dev.localhost)
 #   just dev-db-reset         Wipe the dev DB (fresh state)
 #   just dev-db-from-real     Snapshot the REAL DB into the dev DB (migration rehearsal)
 #   just dev-install-daemon   Install daemon (overlay/feedback changes)
@@ -39,30 +45,26 @@ dev *ARGS:
     mkdir -p "{{justfile_directory()}}/.veld-dev"
     VELD_LIB_DIR="{{justfile_directory()}}/target/debug" \
     VELD_DB_PATH="{{dev_db}}" \
+    VELD_DAEMON_PORT="{{dev_daemon_port}}" \
+    VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock" \
         ./target/debug/veld {{ARGS}}
 
-# Run the daemon from source, foreground, against the dev DB — gives dev-DB
-# runs their monitoring/GC. Stops the installed daemon service first (port
-# 19899 is single-occupancy) and restarts it when you Ctrl-C out.
+# Run the daemon from source, foreground, ALONGSIDE the installed one — own
+# DB, own port (19898), own socket, own dashboard at https://veld-dev.localhost
+# (self-registered Caddy route; removed again on Ctrl-C). Gives dev-DB runs
+# their monitoring/GC without touching the installed daemon.
 dev-daemon:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
     cargo build -p veld-daemon
     mkdir -p .veld-dev
-    restart_installed() {
-        if launchctl print "gui/$(id -u)/dev.veld.daemon" &>/dev/null; then
-            echo "Restarting installed daemon service..."
-            launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
-        fi
-    }
-    if launchctl print "gui/$(id -u)/dev.veld.daemon" &>/dev/null; then
-        echo "Stopping installed daemon (restored on exit)..."
-        launchctl kill SIGTERM "gui/$(id -u)/dev.veld.daemon" 2>/dev/null || true
-        sleep 1
-    fi
-    trap restart_installed EXIT
-    VELD_DB_PATH="{{dev_db}}" ./target/debug/veld-daemon
+    echo "Dev daemon: port {{dev_daemon_port}}, DB {{dev_db}}, dashboard https://veld-dev.localhost"
+    VELD_DB_PATH="{{dev_db}}" \
+    VELD_DAEMON_PORT="{{dev_daemon_port}}" \
+    VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock" \
+    VELD_MANAGEMENT_HOST="veld-dev.localhost" \
+        ./target/debug/veld-daemon
 
 # Run the source-built CLI against the REAL installed DB — for inspecting
 # runs the installed veld started (e.g. feedback loops on a shared run).
@@ -122,7 +124,7 @@ dev-link:
     cargo build
     mkdir -p "$HOME/.local/bin" .veld-dev
     wrapper="$HOME/.local/bin/veld-dev"
-    printf '#!/usr/bin/env bash\nexport VELD_LIB_DIR="{{justfile_directory()}}/target/debug"\nexport VELD_DB_PATH="{{dev_db}}"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
+    printf '#!/usr/bin/env bash\nexport VELD_LIB_DIR="{{justfile_directory()}}/target/debug"\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
     chmod +x "$wrapper"
     echo "Created $wrapper — use 'veld-dev' from any directory."
     echo "Remove with: rm $wrapper"

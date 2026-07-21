@@ -59,12 +59,20 @@ just dev start --name foo website:local   # own state, invisible to installed ve
 just dev runs --name foo
 just dev-db-reset                          # fresh dev state
 just dev-db-from-real                      # snapshot the real DB → rehearse migrations on the copy
-just dev-daemon                            # daemon from source against the dev DB (monitoring/GC for dev runs)
+just dev-daemon                            # daemon from source, ALONGSIDE the installed one
 ```
 
-The dev DB isolates *state only* — helper/Caddy/DNS are still the real shared
-services, and the installed daemon only watches the real DB (dev runs get no
-crash detection unless `just dev-daemon` is running).
+`just dev-daemon` is a full parallel instance: own DB, own port (19898 vs the
+installed 19899), own socket, and its own dashboard at
+**https://veld-dev.localhost** (the route is self-registered with the shared
+Caddy on startup and removed on Ctrl-C). Runs started with `just dev` mint
+routes pointing at the dev daemon, so their feedback overlay/client logs land
+in the dev instance too.
+
+The helper/Caddy/DNS layer is *not* instanced — it's a singleton owning
+443/18443 and system DNS; both instances share it. And the installed daemon
+only watches the real DB: dev runs get no crash detection unless
+`just dev-daemon` is running.
 
 To point the source-built CLI at the **real** DB — e.g. a feedback loop
 against a run the installed veld started — use `just dev-real <args>`. It

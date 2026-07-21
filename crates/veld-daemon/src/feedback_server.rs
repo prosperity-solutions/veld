@@ -23,8 +23,9 @@ mod feedback_assets;
 #[path = "management.rs"]
 mod management;
 
-/// Port the feedback HTTP server listens on.
-pub const FEEDBACK_PORT: u16 = 19899;
+// The feedback HTTP server listens on this instance's daemon port —
+// `veld_core::instance::daemon_port()` (19899 for the installed instance;
+// a dev instance overrides via VELD_DAEMON_PORT).
 
 // ---------------------------------------------------------------------------
 // Shared state
@@ -82,7 +83,7 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         .merge(management::routes())
         .merge(crate::share::api::routes(share_manager));
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], FEEDBACK_PORT));
+    let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
     info!("feedback server listening on {addr}");
 
     match tokio::net::TcpListener::bind(addr).await {

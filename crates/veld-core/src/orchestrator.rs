@@ -1984,7 +1984,7 @@ async fn execute_start_server_isolated(
     // The proxy routes are created whenever a feature is enabled, even if
     // inject is false (manual injection mode — user adds script tags themselves).
     if features.feedback_overlay || features.client_logs {
-        route["feedback_upstream"] = serde_json::json!("localhost:19899");
+        route["feedback_upstream"] = serde_json::json!(crate::instance::daemon_upstream());
         route["run_name"] = serde_json::json!(&ctx.run_name);
         route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
     }

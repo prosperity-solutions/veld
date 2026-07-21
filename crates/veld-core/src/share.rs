@@ -460,8 +460,9 @@ pub enum TicketError {
 // Daemon control-API client (used by the CLI)
 // ---------------------------------------------------------------------------
 
-/// Base URL of the daemon's local control API.
-const DAEMON_BASE: &str = "http://127.0.0.1:19899";
+// Base URL of the daemon's local control API comes from
+// `instance::daemon_base()` — the installed default, or the dev instance's
+// port when `VELD_DAEMON_PORT` is set.
 
 /// Errors talking to the local daemon.
 #[derive(Debug, thiserror::Error)]
@@ -490,7 +491,7 @@ impl DaemonClient {
     pub fn new() -> Self {
         Self {
             http: reqwest::Client::new(),
-            base: DAEMON_BASE.to_string(),
+            base: crate::instance::daemon_base(),
         }
     }
 
