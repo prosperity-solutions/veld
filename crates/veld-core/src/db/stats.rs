@@ -44,7 +44,7 @@ fn run_row_id(conn: &Connection, root: &str, run_name: &str) -> Result<Option<i6
             "SELECT r.id FROM runs r
              JOIN environments e ON e.id = r.environment_id
              WHERE e.project_root = ?1 AND e.name = ?2
-             ORDER BY r.created_at DESC, r.id DESC LIMIT 1",
+             ORDER BY r.id DESC LIMIT 1",
             params![root, run_name],
             |r| r.get(0),
         )

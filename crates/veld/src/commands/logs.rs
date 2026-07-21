@@ -98,19 +98,19 @@ pub async fn run(opts: LogsOptions) -> i32 {
         }
     };
 
-    let run_name = match super::resolve_run_name(name, &project_state, true, json) {
-        Some(n) => n,
-        None => return 1,
-    };
-    let run_name = run_name.as_str();
-
     // Resolve which run instance to read. Default: the environment's latest
     // run (fixes the old generation-interleaving: a restart no longer mixes
     // last week's lines into today's tail). `--all-runs` restores the old
     // interleaved scope and is the only way to see legacy unscoped rows.
-    let target_run: Option<veld_core::state::RunState> = if let Some(ref prefix) = run {
+    //
+    // `--run <prefix>` identifies the instance by itself, project-wide — the
+    // environment name is then DERIVED from the resolved run, never resolved
+    // separately (a separately-resolved name from another environment would
+    // scope the query to zero rows, and a multi-live-env project would error
+    // on ambiguity before the prefix was even considered).
+    let target_run: veld_core::state::RunState = if let Some(ref prefix) = run {
         match db.get_run_by_id_prefix(&project_root, prefix) {
-            Ok(Some(r)) => Some(r),
+            Ok(Some(r)) => r,
             Ok(None) => {
                 output::print_error(
                     &format!("No run matches id prefix '{prefix}' (see `veld runs`)."),
@@ -123,31 +123,38 @@ pub async fn run(opts: LogsOptions) -> i32 {
                 return 1;
             }
         }
-    } else if previous {
-        match db.list_runs(&project_root, Some(run_name)) {
-            Ok(history) if history.len() >= 2 => Some(history[1].clone()),
-            Ok(_) => {
-                output::print_error(
-                    &format!("Environment '{run_name}' has no previous run recorded."),
-                    json,
-                );
-                return 1;
-            }
-            Err(e) => {
-                output::print_error(&format!("Failed to load run history: {e}"), json);
-                return 1;
-            }
-        }
     } else {
-        match project_state.get_run(run_name) {
-            Some(r) => Some(r.clone()),
-            None => {
-                output::print_error(&format!("Run '{run_name}' not found."), json);
-                return 1;
+        let run_name = match super::resolve_run_name(name, &project_state, true, json) {
+            Some(n) => n,
+            None => return 1,
+        };
+        if previous {
+            match db.list_runs(&project_root, Some(&run_name)) {
+                Ok(history) if history.len() >= 2 => history[1].clone(),
+                Ok(_) => {
+                    output::print_error(
+                        &format!("Environment '{run_name}' has no previous run recorded."),
+                        json,
+                    );
+                    return 1;
+                }
+                Err(e) => {
+                    output::print_error(&format!("Failed to load run history: {e}"), json);
+                    return 1;
+                }
+            }
+        } else {
+            match project_state.get_run(&run_name) {
+                Some(r) => r.clone(),
+                None => {
+                    output::print_error(&format!("Run '{run_name}' not found."), json);
+                    return 1;
+                }
             }
         }
     };
-    let run_state = target_run.as_ref().unwrap();
+    let run_state = &target_run;
+    let run_name = run_state.name.as_str();
     let run_scope: Option<String> = if all_runs {
         None
     } else {
@@ -384,6 +391,7 @@ async fn follow_logs(
     // probe is cheap but needless at 5Hz.
     let mut tick: u64 = 0;
     let mut final_drain = false;
+    let mut drain_ticks: u64 = 0;
 
     loop {
         tokio::select! {
@@ -396,6 +404,7 @@ async fn follow_logs(
                     }
                 }
                 rows.sort_by_key(|r| r.id);
+                let quiet_tick = rows.is_empty();
                 for row in rows {
                     last_id = last_id.max(row.id);
                     if already_shown.remove(&row.id) {
@@ -415,7 +424,16 @@ async fn follow_logs(
                 }
 
                 if final_drain {
-                    return;
+                    // Drain until a quiet tick (detached `_log` writers can
+                    // trail the finalize by more than one 200ms tick — the
+                    // trailing lines are often the crash output itself),
+                    // bounded so a still-chattering wrapper can't hold the
+                    // exit forever.
+                    drain_ticks += 1;
+                    if quiet_tick || drain_ticks >= 25 {
+                        return;
+                    }
+                    continue;
                 }
                 tick += 1;
                 if tick % 10 == 0 {
@@ -426,8 +444,6 @@ async fn follow_logs(
                             Err(_) => false,  // transient DB error — keep going
                         };
                         if ended {
-                            // One more tick to drain late-arriving lines
-                            // (detached `_log` writers can trail the finalize).
                             eprintln!("run has ended — stopping follow");
                             final_drain = true;
                         }

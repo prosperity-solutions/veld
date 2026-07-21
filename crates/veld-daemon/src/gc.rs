@@ -19,11 +19,19 @@ const RUN_HISTORY_KEEP: usize = 10;
 /// Dead PIDs under `stopping` is the NORMAL state of a healthy `veld stop`
 /// (PIDs are killed first, then on_stop hooks and teardown steps run for
 /// seconds to minutes) — indistinguishable in DB state from a SIGKILLed
-/// ender, so only age separates them. Generous on purpose.
+/// ender, so only age separates them. Generous on purpose. Conscious accept:
+/// a legitimate teardown that runs longer than this gets finalized early,
+/// releasing the live slot mid-teardown — at 10 minutes that's a hung hook,
+/// not a working stop.
 const STOPPING_GRACE_SECS: i64 = 600;
 
 /// Maximum age for log lines and ended runs before pruning (hours).
 const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
+
+/// How long after a run ends its unconfirmed PIDs are still re-killed by the
+/// straggler sweep. Past this, PID recycling makes re-killing more dangerous
+/// than the leak — the PID is cleared with a warning instead.
+const STRAGGLER_SWEEP_MAX_AGE_SECS: i64 = 3600;
 
 /// Maximum age for process-stats samples before pruning (hours). Short: the
 /// samples are high-frequency (one row per node every 5s) and only feed the
@@ -194,21 +202,40 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     // Phase 1c: terminal-run straggler sweep. A PID recorded under a terminal
     // run means a finalize could not confirm its kill — re-kill until it dies,
     // then clear it. Leak-freedom never depends on the end label.
+    //
+    // Bounded window: PIDs are only swept while the run ended less than
+    // STRAGGLER_SWEEP_MAX_AGE_SECS ago. Terminal rows now persist for days,
+    // and the OS recycles PIDs — an old recorded PID is more likely an
+    // unrelated process than our straggler, and SIGTERMing it every pass
+    // would be worse than the leak. Past the window the PID is cleared with
+    // a warning instead of killed.
     if let Ok(stragglers) = db.terminal_runs_with_pids() {
+        let now = chrono::Utc::now();
         for run in stragglers {
+            let within_window = run
+                .ended_at
+                .is_some_and(|t| (now - t).num_seconds() < STRAGGLER_SWEEP_MAX_AGE_SECS);
             for (key, node) in &run.nodes {
-                if let Some(pid) = node.pid {
-                    if is_process_alive(pid) {
-                        info!(
-                            "re-killing straggler PID {pid} under terminal run '{}'",
-                            run.name
-                        );
-                        kill_process(pid);
-                        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-                    }
-                    if !is_process_alive(pid) {
-                        let _ = db.clear_node_pid(&run.run_id, key);
-                    }
+                let Some(pid) = node.pid else { continue };
+                if !within_window {
+                    warn!(
+                        "giving up on unconfirmed PID {pid} under terminal run '{}' \
+                         (ended too long ago to safely re-kill; PID may be recycled)",
+                        run.name
+                    );
+                    let _ = db.clear_node_pid(&run.run_id, key);
+                    continue;
+                }
+                if is_process_alive(pid) {
+                    info!(
+                        "re-killing straggler PID {pid} under terminal run '{}'",
+                        run.name
+                    );
+                    kill_process(pid);
+                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                }
+                if !is_process_alive(pid) {
+                    let _ = db.clear_node_pid(&run.run_id, key);
                 }
             }
         }

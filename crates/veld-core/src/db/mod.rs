@@ -440,12 +440,26 @@ fn migrate_v2_node_stats(conn: &Connection) -> rusqlite::Result<()> {
 /// clauses to follow.
 fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
     // Guard: `run_id` becomes UNIQUE. Duplicates can only exist in a DB whose
-    // rows predate the SQLite import; suffix them so the copy cannot fail.
+    // rows predate the SQLite import. Re-key them with fresh UUIDs (not a
+    // text suffix — the value must stay a parseable UUID, or the row becomes
+    // unaddressable by every run_id-keyed operation after loading as nil).
+    {
+        let dup_ids: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM runs
+                 WHERE id NOT IN (SELECT MIN(id) FROM runs GROUP BY run_id)",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for id in dup_ids {
+            conn.execute(
+                "UPDATE runs SET run_id = ?1 WHERE id = ?2",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+            )?;
+        }
+    }
     conn.execute_batch(
         r#"
-        UPDATE runs SET run_id = run_id || '-dup-' || id
-         WHERE id NOT IN (SELECT MIN(id) FROM runs GROUP BY run_id);
-
         CREATE TABLE environments (
             id INTEGER PRIMARY KEY,
             project_root TEXT NOT NULL REFERENCES projects(root) ON DELETE CASCADE,

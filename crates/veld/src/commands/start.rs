@@ -773,6 +773,21 @@ async fn run_oneshot_terminal(
         Ok(code) => code,
         Err(e) => {
             output::print_error(&format!("Failed to run {label}: {e}"), false);
+            // The terminal node never produced an exit — record the failure
+            // intent before the teardown below finalizes, or history would
+            // read `stopped` for a run that actually failed to execute.
+            if let Ok(Some(run)) = orchestrator.db.get_run(project_root, run_name) {
+                let detail = veld_core::state::EndDetail {
+                    exit_code: Some(127),
+                    message: Some(format!("terminal node failed to run: {e}")),
+                    ..Default::default()
+                };
+                let _ = orchestrator.db.begin_ending(
+                    &run.run_id,
+                    veld_core::state::EndReason::Failed,
+                    Some(&detail),
+                );
+            }
             127
         }
     };

@@ -38,19 +38,32 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
     // Erroring beats printing 404s an agent would then curl believing the
     // environment is up.
     if !run_state.is_live() {
-        let ended = run_state
-            .ended_at
-            .map(|t| {
-                format!(
-                    " (last run ended {})",
-                    t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
-                )
-            })
-            .unwrap_or_default();
-        output::print_error(
-            &format!("Environment '{run_name}' is not running{ended} — no live URLs."),
-            json,
-        );
+        if json {
+            // Machine-readable shape an agent can branch on without parsing
+            // an error string: no URLs, and explicitly not live.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "urls": [],
+                    "live": false,
+                    "ended_at": run_state.ended_at.map(|t| t.to_rfc3339()),
+                })
+            );
+        } else {
+            let ended = run_state
+                .ended_at
+                .map(|t| {
+                    format!(
+                        " (last run ended {})",
+                        t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    )
+                })
+                .unwrap_or_default();
+            output::print_error(
+                &format!("Environment '{run_name}' is not running{ended} — no live URLs."),
+                false,
+            );
+        }
         return 1;
     }
 

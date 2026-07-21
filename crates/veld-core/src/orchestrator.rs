@@ -71,6 +71,9 @@ pub enum OrchestratorError {
         reason: String,
         failure_message: Option<String>,
     },
+
+    #[error("environment '{0}' was replaced by another `veld start` while starting")]
+    Superseded(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -627,6 +630,22 @@ impl Orchestrator {
                 // Save partial state after each stage so that Ctrl+C or crashes
                 // leave enough information for `veld stop` to find and kill PIDs.
                 self.save_state(&run)?;
+
+                // A concurrent same-name `veld start` may have replaced this
+                // run mid-flight (`cleanup_stale_run`: begin_ending(replaced)
+                // + finalize) — the save above was then a silent no-op
+                // (terminal runs are immutable) and anything this start
+                // spawns from here on would be tracked by no run row and
+                // covered by no reaper. Detect it, kill what we know about,
+                // and abort instead of leaking.
+                match self.db.run_status_by_id(&run.run_id) {
+                    Ok(Some(s)) if !s.is_live() => {
+                        let pids: Vec<u32> = run.nodes.values().filter_map(|ns| ns.pid).collect();
+                        let _ = kill_and_confirm(&pids).await;
+                        return Err(OrchestratorError::Superseded(run_name.to_owned()));
+                    }
+                    _ => {}
+                }
             }
             Ok(())
         }
@@ -649,37 +668,40 @@ impl Orchestrator {
             // would clobber those PIDs with `None` and a later `veld stop` could
             // no longer kill the leaked process.
             //
-            // Ending protocol: label the run `failed` only over confirmed-dead
-            // processes. Kill whatever the checkpoints recorded and wait
-            // (bounded); on confirmation, finalize to `failed` history with the
-            // failure detail. If a kill cannot be confirmed, leave the run
-            // `starting` with its real PIDs — `veld stop` and the orphan
-            // reapers still cover it, so leak-freedom never depends on the
-            // label.
+            // Ending protocol, in order: persist the `failed` intent FIRST
+            // (before any PID dies — otherwise the GC orphan sweep, which
+            // includes `starting` runs, can race the kill window and record
+            // this deliberate failure as `crashed`, clobbering the failure
+            // detail this feature exists to preserve), then kill, then
+            // finalize only over confirmed-dead processes. An unconfirmed
+            // kill leaves the run `stopping` with its recorded PIDs — the
+            // stale-`stopping` reaper re-kills and finalizes it later, so
+            // leak-freedom never depends on the label.
             let detail = end_detail_for_error(&e);
             if let Ok(Some(persisted)) = self.db.get_run(&self.project_root, run_name) {
                 if persisted.run_id == run.run_id {
+                    let _ = self
+                        .db
+                        .begin_ending(&run.run_id, EndReason::Failed, Some(&detail));
                     let pids: Vec<u32> = persisted.nodes.values().filter_map(|ns| ns.pid).collect();
-                    if pids.is_empty() || kill_and_confirm(&pids).await {
-                        // Routes for anything that spawned far enough to get one.
-                        for (key, ns) in &persisted.nodes {
-                            self.remove_node_routes(run_name, ns).await;
-                            if ns.pid.is_some() {
-                                // Confirmed dead — a recorded PID under a
-                                // terminal run means "possibly alive" to the
-                                // GC straggler sweep.
-                                let _ = self.db.clear_node_pid(&run.run_id, key);
-                            }
+                    let confirmed = pids.is_empty() || kill_and_confirm(&pids).await;
+                    // Routes for anything that spawned far enough to get one.
+                    for (key, ns) in &persisted.nodes {
+                        self.remove_node_routes(run_name, ns).await;
+                        if confirmed && ns.pid.is_some() {
+                            // Confirmed dead — a recorded PID under an ended
+                            // run means "possibly alive" to the GC straggler
+                            // sweep.
+                            let _ = self.db.clear_node_pid(&run.run_id, key);
                         }
-                        let _ = self
-                            .db
-                            .begin_ending(&run.run_id, EndReason::Failed, Some(&detail));
+                    }
+                    if confirmed {
                         let _ = self.db.finalize_run(&run.run_id);
                     } else {
                         tracing::warn!(
                             run_name,
                             "startup failed but a spawned process did not die — \
-                             leaving the run 'starting' for the orphan reaper"
+                             leaving the run 'stopping' for the stale-stopping reaper"
                         );
                     }
                 }

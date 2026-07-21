@@ -395,6 +395,10 @@ async fn get_logs(
         Some("all") => None,
         _ => Some(run_state.run_id.to_string()),
     };
+    // Scope log queries by the RESOLVED run's environment name — an explicit
+    // run_id prefix may belong to a different environment than the path
+    // segment, and a mismatched (name, run_id) pair matches zero rows.
+    let run_name = run_state.name.clone();
 
     let lines_limit = q.lines.clamp(1, 5000);
     let include_server = q.source == "all" || q.source == "server";
