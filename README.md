@@ -328,7 +328,7 @@ Veld includes a browser-based dashboard at `https://veld.localhost` (or `https:/
 
 - **Services tab** — nodes with health status indicators, URLs with copy/open, variant, PID, and live resource usage (memory + CPU per process tree, with a memory sparkline); on a stopped environment it shows the last run's final node states
 - **Logs tab** — terminal viewer with search + highlighting, context lines (grep -C), auto-scroll, node filter, source filter (server/client/all), and a run picker to read past runs' logs (latest, any ended run, or all interleaved)
-- **Run history** — ended environments stay visible with their last run's outcome (`crashed`/`failed` in red) and a one-click Restart
+- **Run history** — a top-level **Active | History** switcher keeps the everyday view to live environments; ended ones live under History with their last run's outcome (`crashed`/`failed` in red) and a one-click Restart
 - **Stop/Restart** — control environments directly from the browser
 - **Sharing** — start/stop peer shares and public web shares per run; each live tunnel shows its transport (`direct`, or `relayed via <relay>` — throughput capped by the relay) so slow shares are diagnosable at a glance
 

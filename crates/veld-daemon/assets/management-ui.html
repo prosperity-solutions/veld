@@ -35,6 +35,12 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
 .dot.off{background:var(--dim)}
 
+/* top-level Active/History view switcher */
+.view-switch{display:flex;gap:2px;padding:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;width:fit-content;margin-bottom:18px}
+.view-switch .seg-btn{flex:none;padding:6px 16px}
+.view-switch .count{color:var(--dim);font-weight:400;margin-left:4px}
+.view-switch .seg-btn.active .count{color:inherit;opacity:.7}
+
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
 .empty p{font-size:13px;line-height:1.6}
@@ -212,6 +218,10 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     </div>
   </header>
   <section id="shares-panel" class="shares-panel" hidden></section>
+  <div class="segmented view-switch" id="view-switch" hidden>
+    <button class="seg-btn active" data-view="active">Active<span class="count" data-count="active"></span></button>
+    <button class="seg-btn" data-view="history">History<span class="count" data-count="history"></span></button>
+  </div>
   <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
 <div id="join-overlay" class="join-overlay" hidden><div class="join-card"><div id="join-body"></div></div></div>
@@ -224,6 +234,10 @@ let lastFP=null;
 let sharesByRun={};
 let historyByKey={};
 let joinCount=0;
+// Top-level view: 'active' (live environments — the default, so ended runs
+// don't clutter the everyday dashboard) or 'history' (ended environments).
+let view=localStorage.getItem('veld-view')==='history'?'history':'active';
+let lastEnvData=null;
 const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
@@ -263,21 +277,49 @@ async function refresh(){
 }
 
 function render(data){
+  lastEnvData=data;
+  // View switcher: counts + visibility. Hidden entirely until something exists.
+  const liveCount=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.live).length,0);
+  const endedCount=data.projects.reduce((n,p)=>n+p.runs.filter(r=>!r.live).length,0);
+  const sw=$('#view-switch');
+  if(sw){
+    sw.hidden=!(liveCount||endedCount);
+    const ac=sw.querySelector('[data-count="active"]'),hc=sw.querySelector('[data-count="history"]');
+    if(ac)ac.textContent=liveCount?(' '+liveCount):'';
+    if(hc)hc.textContent=endedCount?(' '+endedCount):'';
+    sw.querySelectorAll('.seg-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  }
+
   if(!data.projects.length){
     content.innerHTML=joinCount>0
       ?'<div class="empty fade-in"><h2>No local environments</h2><p>You’ve joined '+joinCount+' shared environment'+(joinCount>1?'s':'')+' — see the panel above.</p></div>'
       :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
     return;
   }
+  // Empty states for the selected view (there ARE environments, just not here).
+  if(view==='active'&&!liveCount){
+    content.innerHTML='<div class="empty fade-in"><h2>Nothing running</h2><p>'+endedCount+' ended environment'+(endedCount>1?'s':'')+' in <b>History</b>.</p></div>';
+    stopHiddenLogPolling(new Set());
+    return;
+  }
+  if(view==='history'&&!endedCount){
+    content.innerHTML='<div class="empty fade-in"><h2>No ended environments</h2><p>Stopped and crashed environments land here (kept for 7 days).</p></div>';
+    stopHiddenLogPolling(new Set());
+    return;
+  }
   for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
+  const shownKeys=new Set();
   for(const proj of data.projects){
-    const runs=proj.runs.slice().sort((a,b)=>{
-      if(a.status==='running'&&b.status!=='running')return -1;
-      if(b.status==='running'&&a.status!=='running')return 1;
-      return a.name.localeCompare(b.name);
-    });
+    const runs=proj.runs.slice()
+      .filter(r=>view==='active'?r.live:!r.live)
+      .sort((a,b)=>{
+        if(a.status==='running'&&b.status!=='running')return -1;
+        if(b.status==='running'&&a.status!=='running')return 1;
+        return a.name.localeCompare(b.name);
+      });
     for(const run of runs){
+      shownKeys.add(rk(proj.name,run.name));
       const key=rk(proj.name,run.name);
       const st=runState[key]||{tab:'services'};
       const nodes=run.nodes||[];
@@ -416,11 +458,20 @@ function render(data){
     const host=$('[data-loghost="'+CSS.escape(k)+'"]');
     if(host&&s.panelEl)host.appendChild(s.panelEl);
     if(s.panelEl)updateRunPicker(k,s);
-    if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
+    if(s.tab==='logs'&&!s.logInterval&&shownKeys.has(k))startLogPolling(k);
   }
+  stopHiddenLogPolling(shownKeys);
   // Freshly rendered cells are placeholders; fill them without waiting for the
   // next stats tick.
   refreshStats();
+}
+
+// Stop log polling for any card not currently rendered (the other view) —
+// its panel keeps its state and resumes when the view shows it again.
+function stopHiddenLogPolling(shownKeys){
+  for(const k of Object.keys(runState)){
+    if(!shownKeys.has(k))stopLogPolling(k);
+  }
 }
 
 // --- Log panel ---
@@ -622,6 +673,15 @@ function highlightSearch(html,term){
 // --- Event delegation ---
 
 document.addEventListener('click',e=>{
+  const vb=e.target.closest('#view-switch .seg-btn');
+  if(vb){
+    if(vb.dataset.view!==view){
+      view=vb.dataset.view;
+      localStorage.setItem('veld-view',view);
+      if(lastEnvData)render(lastEnvData);
+    }
+    return;
+  }
   const card=e.target.closest('.card');
   const tabBtn=e.target.closest('[data-action="tab"]');
   if(tabBtn&&card){
