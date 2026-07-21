@@ -84,10 +84,41 @@ struct ProjectInfo {
 
 #[derive(Serialize)]
 struct RunInfo {
+    /// Environment name (what `--name` addresses).
     name: String,
+    /// Status of the environment's latest run.
     status: RunStatus,
+    /// Whether the latest run occupies the live slot. Stale URLs on a
+    /// non-live run must never read as reachable — `urls`/node URLs are
+    /// stripped server-side when this is false.
+    live: bool,
+    /// Short id of the latest run (git-style prefix).
+    run_id: String,
+    /// One-line outcome of the latest run when it has ended
+    /// (e.g. "crashed (api:local pid died)").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at: Option<String>,
     urls: HashMap<String, String>,
     nodes: Vec<NodeInfo>,
+    /// Ended runs, newest first (retention-bounded) — the log run picker and
+    /// the history view feed from this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    history: Vec<HistoryEntry>,
+}
+
+/// One ended run in an environment's history. Node detail is deliberately
+/// omitted — the dashboard links into the logs view by run id instead.
+#[derive(Serialize)]
+struct HistoryEntry {
+    run_id: String,
+    status: RunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -165,18 +196,13 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
             // Load config so we know which actions each node exposes.
             let project_config = load_project_config(&entry.project_root);
 
-            // Increment 1 keeps the dashboard scoped to live runs — the UI
-            // has no controls or history shape for ended environments yet, so
-            // showing them would render dead cards. Increment 2 (run history
-            // in the UI) lifts this filter alongside the history payload.
             let mut runs: Vec<RunInfo> = entry
                 .runs
                 .values()
-                .filter(|r| r.status.is_live())
                 .map(|r| {
-                    let mut nodes: Vec<NodeInfo> = project_state
-                        .as_ref()
-                        .and_then(|ps| ps.get_run(&r.name))
+                    let latest = project_state.as_ref().and_then(|ps| ps.get_run(&r.name));
+                    let live = r.status.is_live();
+                    let mut nodes: Vec<NodeInfo> = latest
                         .map(|rs| {
                             rs.nodes
                                 .values()
@@ -184,8 +210,10 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     name: ns.node_name.clone(),
                                     variant: ns.variant.clone(),
                                     status: ns.status.clone(),
-                                    url: ns.url.clone(),
-                                    pid: ns.pid,
+                                    // Routes die with the run — an ended
+                                    // run's URLs must not render as links.
+                                    url: if live { ns.url.clone() } else { None },
+                                    pid: if live { ns.pid } else { None },
                                     recovery_count: ns.recovery_count,
                                     consecutive_failures: ns.consecutive_failures,
                                     last_liveness_error: ns.last_liveness_error.clone(),
@@ -196,11 +224,35 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         .unwrap_or_default();
                     nodes.sort_by(|a, b| a.name.cmp(&b.name));
 
+                    // Ended runs, newest first; the latest run is shown on
+                    // the card itself, so history lists only its predecessors.
+                    let history: Vec<HistoryEntry> = db
+                        .list_runs(&entry.project_root, Some(&r.name))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|run| !run.is_live())
+                        .filter(|run| latest.is_none_or(|l| run.run_id != l.run_id))
+                        .map(|run| HistoryEntry {
+                            run_id: run.short_id(),
+                            status: run.status,
+                            outcome: Some(run.outcome_label()),
+                            created_at: run.created_at.to_rfc3339(),
+                            ended_at: run.ended_at.map(|t| t.to_rfc3339()),
+                        })
+                        .collect();
+
                     RunInfo {
                         name: r.name.clone(),
                         status: r.status,
-                        urls: r.urls.clone(),
+                        live,
+                        run_id: latest
+                            .map(|l| l.short_id())
+                            .unwrap_or_else(|| r.run_id.to_string()[..8].to_owned()),
+                        outcome: latest.filter(|l| !l.is_live()).map(|l| l.outcome_label()),
+                        ended_at: latest.and_then(|l| l.ended_at).map(|t| t.to_rfc3339()),
+                        urls: if live { r.urls.clone() } else { HashMap::new() },
                         nodes,
+                        history,
                     }
                 })
                 .collect();
@@ -214,9 +266,6 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
         })
         .collect();
 
-    // A project whose environments are all ended has nothing to show under
-    // the live-only filter above (pre-v3 such a project had no rows at all).
-    projects.retain(|p| !p.runs.is_empty());
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     Ok(Json(EnvironmentList { projects }))

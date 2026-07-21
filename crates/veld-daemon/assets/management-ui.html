@@ -92,9 +92,14 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
 .badge.starting,.badge.stopping,.badge.health_checking,.badge.pending{background:var(--yellow-bg);color:var(--yellow)}
-.badge.failed{background:var(--red-bg);color:var(--red)}
-.badge.recovering,.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
+.badge.failed,.badge.crashed{background:var(--red-bg);color:var(--red)}
+.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
+
+/* last-run outcome line on ended environments */
+.card-outcome{padding:0 18px 10px;font-size:12px;color:var(--text2)}
+.card-outcome.err{color:var(--red)}
+.card-outcome .when{color:var(--dim)}
 
 .card-path{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;flex:1;min-width:0}
 .card-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 18px 12px}
@@ -217,6 +222,7 @@ const $$=(s,p)=>(p||document).querySelectorAll(s);
 const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
 let lastFP=null;
 let sharesByRun={};
+let historyByKey={};
 let joinCount=0;
 const runState={},nodeColors={};
 let colorIdx=0;
@@ -227,7 +233,11 @@ function fp(data){
     const rs=p.runs.map(r=>{
       const u=Object.keys(r.urls||{}).sort().map(k=>k+'='+r.urls[k]).join('|');
       const n=(r.nodes||[]).map(x=>x.name+':'+x.status).sort().join('|');
-      return r.name+':'+r.status+':'+u+':'+n;
+      // run_id + outcome + history length: a crash, a restart (new run id),
+      // or a new history entry must re-render even when the status string
+      // alone is unchanged (e.g. stopped → stopped after a failed start).
+      const hist=(r.history||[]).length;
+      return r.name+':'+r.status+':'+r.run_id+':'+(r.outcome||'')+':h'+hist+':'+u+':'+n;
     }).sort().join(';');
     return p.name+'/'+rs;
   }).sort().join('\n');
@@ -278,20 +288,29 @@ function render(data){
       const runShares=(run.status==='running')?(sharesByRun[run.name]||[]):[];
       const peerShare=runShares.find(x=>!(x.public_urls&&x.public_urls.length))||null;
       const webShares=runShares.filter(x=>x.public_urls&&x.public_urls.length);
-      const active=run.status==='running'||run.status==='starting';
+      const live=!!run.live;
 
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
-      // Zone 1 — identity: run name primary, project + path as context, status.
+      // Zone 1 — identity: environment name primary, project + path as
+      // context, latest-run status.
       h+='<div class="card-head">';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
       h+='<span class="card-project">'+esc(proj.name)+'</span>';
       h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
       h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
       h+='</div>';
+      // Last-run outcome — the "why did it die" line ("crashed at 3am" →
+      // open card, read outcome, hit Restart).
+      if(!live&&run.outcome){
+        const bad=run.status==='crashed'||run.status==='failed';
+        h+='<div class="card-outcome'+(bad?' err':'')+'">'+esc(run.outcome)
+          +(run.ended_at?' <span class="when">· ended '+esc(fmtWhen(run.ended_at))+'</span>':'')
+          +'</div>';
+      }
       // Zone 2 — one action toolbar (lifecycle + utility + share).
       h+='<div class="card-toolbar">';
-      if(active){
-        h+='<button class="card-btn" data-action="restart-env" title="Restart environment">Restart</button>';
+      h+='<button class="card-btn" data-action="restart-env" title="'+(live?'Restart environment':'Start this environment again')+'">Restart</button>';
+      if(live){
         h+='<button class="card-btn" data-action="stop-env" title="Stop environment">Stop</button>';
       }
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
@@ -388,10 +407,15 @@ function render(data){
     }
   }
   content.innerHTML=h;
+  // Run history per card, for the logs run picker (kept out of the DOM
+  // string — the picker lives in the persistent log panel element).
+  historyByKey={};
+  for(const proj of data.projects)for(const run of proj.runs)historyByKey[rk(proj.name,run.name)]=run.history||[];
   for(const k of Object.keys(runState)){
     const s=runState[k];
     const host=$('[data-loghost="'+CSS.escape(k)+'"]');
     if(host&&s.panelEl)host.appendChild(s.panelEl);
+    if(s.panelEl)updateRunPicker(k,s);
     if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
   }
   // Freshly rendered cells are placeholders; fill them without waiting for the
@@ -405,10 +429,11 @@ function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
   s.autoScroll=true;s.knownNodes=new Map();s.prevHtml=null;s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
-  s.lastData=null;s.sourceFilter='all'; // cache raw data for re-renders
+  s.lastData=null;s.sourceFilter='all';s.runFilter=''; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
     '<div class="log-bar">'+
+      '<select class="run-filter" data-action="run-filter" title="Which run instance to read"><option value="">Latest run</option><option value="all">All runs</option></select>'+
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
       '<div class="source-filter">'+
         '<button class="active" data-action="source-filter" data-source="all">All</button>'+
@@ -437,10 +462,41 @@ function updateAutoScrollBtn(el,on){
   btn.classList.toggle('on',on);btn.textContent=on?'Auto-scroll ON':'Auto-scroll OFF';
 }
 
+// Rebuild the run picker's history options in place: "Latest run", then each
+// ended predecessor as "<outcome> · <start time>", then "All runs". The
+// current selection survives re-renders; a selection whose run was pruned
+// falls back to the latest run.
+function updateRunPicker(key,s){
+  if(!s.panelEl)return;const sel=s.panelEl.querySelector('.run-filter');if(!sel)return;
+  const hist=historyByKey[key]||[];
+  const sig=hist.map(x=>x.run_id).join(',');
+  if(sel.dataset.sig===sig)return;
+  sel.dataset.sig=sig;
+  const v=s.runFilter||'';
+  sel.innerHTML='';
+  const add=(val,label)=>{const o=document.createElement('option');o.value=val;o.textContent=label;sel.appendChild(o);};
+  add('','Latest run');
+  for(const e of hist)add(e.run_id,(e.outcome||e.status)+' · '+fmtWhen(e.created_at));
+  add('all','All runs');
+  sel.value=Array.from(sel.options).some(o=>o.value===v)?v:'';
+  if(sel.value!==v){s.runFilter=sel.value;}
+}
+
+// Compact local time for outcome lines / picker labels: "14:32" today,
+// "Jul 20 14:32" otherwise.
+function fmtWhen(iso){
+  const d=new Date(iso);if(isNaN(d))return iso;
+  const now=new Date();
+  const hm=d.toTimeString().slice(0,5);
+  if(d.toDateString()===now.toDateString())return hm;
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+hm;
+}
+
 function startLogPolling(key){
   const s=runState[key];if(!s||s.logInterval)return;
   const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;if(!runName)return;
-  ensureLogPanel(key);
+  const panel=ensureLogPanel(key);
+  updateRunPicker(key,panel);
   const host=$('[data-loghost="'+CSS.escape(key)+'"]');
   if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
   fetchLogs(key,runName);
@@ -453,7 +509,9 @@ async function fetchLogs(key,runName){
   const s=runState[key];if(!s||s.fetching)return;s.fetching=true;
   try{
     const src=s.sourceFilter||'all';
-    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src);
+    // '' = latest run (server default); a short id or 'all' scopes the read.
+    const rq=s.runFilter?('&run_id='+encodeURIComponent(s.runFilter)):'';
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src+rq);
     if(!resp.ok)return;
     const data=await resp.json();
     for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
@@ -634,6 +692,11 @@ document.addEventListener('change',e=>{
   const sel=e.target.closest('[data-action="log-filter"]');
   if(sel){const card=sel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
     if(s){s.logFilter=sel.value;s.prevHtml=null;s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);doRenderLogs(key);}return;}
+  const runSel=e.target.closest('[data-action="run-filter"]');
+  if(runSel){const card=runSel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.runFilter=runSel.value;s.prevHtml=null;s.lastData=null;s.autoScroll=true;
+      if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
+      const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}return;}
 });
 
 document.addEventListener('input',e=>{
