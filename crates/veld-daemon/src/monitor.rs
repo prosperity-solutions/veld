@@ -122,15 +122,17 @@ async fn scan_and_update(
                 for (key, node) in run.nodes.iter_mut() {
                     if let Some(pid) = node.pid {
                         if is_process_alive(pid) {
-                            kill_process_group(pid);
+                            // Escalating SIGTERM → SIGKILL — leak-freedom
+                            // must not depend on the survivor honoring
+                            // SIGTERM.
+                            let _ = veld_core::process::kill_process(pid).await;
                         } else if dead_node.is_none() {
                             dead_node = Some(key.clone());
                         }
                     }
                 }
-                // Brief confirm pass; unconfirmed PIDs stay recorded so the
-                // GC straggler sweep keeps covering them.
-                tokio::time::sleep(Duration::from_millis(300)).await;
+                // Confirm pass; unconfirmed PIDs stay recorded so the GC
+                // straggler sweep keeps covering them.
                 for node in run.nodes.values_mut() {
                     if let Some(pid) = node.pid {
                         if !is_process_alive(pid) {
@@ -707,19 +709,4 @@ fn is_process_alive(pid: u32) -> bool {
         return false;
     };
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
-}
-
-/// SIGTERM a process group (falling back to the single PID), mirroring the
-/// GC's kill helper — servers run in their own process group with a `_log`
-/// wrapper that must die with them.
-fn kill_process_group(pid: u32) {
-    if pid <= 1 || pid > i32::MAX as u32 {
-        return;
-    }
-    unsafe {
-        let pgid = -(pid as libc::pid_t);
-        if libc::kill(pgid, libc::SIGTERM) != 0 {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
 }

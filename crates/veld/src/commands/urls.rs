@@ -77,7 +77,11 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
     url_entries.sort_by_key(|(node, variant, _)| (*node, *variant));
 
     if json {
-        let payload: Vec<serde_json::Value> = url_entries
+        // Same top-level shape as the stopped branch above — an agent can
+        // always read `.live` and `.urls` without probing the type first.
+        // (Pre-v3 this was a bare array; the object shape is part of the v3
+        // output changes.)
+        let urls: Vec<serde_json::Value> = url_entries
             .iter()
             .map(|(node, variant, url)| {
                 serde_json::json!({
@@ -87,7 +91,14 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "urls": urls,
+                "live": true,
+            }))
+            .unwrap()
+        );
     } else if url_entries.is_empty() {
         output::print_info("No URLs exposed.");
     } else {

@@ -376,6 +376,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`veld logs` defaults to the latest run** — after a restart, `veld logs` no longer reaches into the previous generation's lines. Use `--run <id-prefix>` for a specific past run, `-p`/`--previous` for the run before the latest, or `--all-runs` to restore the old interleaved-across-runs behavior
 - **`veld logs -f` exits 0 when the run ends** — it no longer hangs forever on a run that crashed or was stopped; it prints history then a stderr note and returns
 - **`veld status`/`veld urls` on a stopped environment** — `status` still works and shows the last run's outcome, but hides the URL column (routes are torn down); `urls` errors outright instead of printing dead links
+- **`veld urls --json` shape** — `{ "urls": [{node, variant, url}...], "live": bool }` (no longer a bare array); check `.live` first, then read `.urls`
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results
 - **Sharing needs matching setup modes** — both people must have veld installed and be in the *same* mode (both privileged → clean URLs, or both unprivileged → `:18443` in URLs), or the shared URLs won't match
 - **Local URL wins on collision** — if the joiner already runs the same environment, their local URL is kept; that shared node is skipped and reported as a warning

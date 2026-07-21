@@ -217,9 +217,14 @@ const RUN_COLS: &str = "r.id, r.run_id, e.name, p.name, r.status, r.end_reason, 
                         r.execution_order, r.created_at, r.ended_at";
 const RUN_JOIN: &str = "runs r JOIN environments e ON e.id = r.environment_id \
                         JOIN projects p ON p.root = e.project_root";
-/// Correlated predicate selecting each environment's latest run (live runs
-/// always sort into the latest position because a new run's `created_at` is
-/// newer than every ended predecessor's).
+/// Correlated predicate selecting each environment's latest run. Ordered by
+/// rowid, NOT by `created_at`: SQLite assigns each insert max(existing
+/// rowid)+1, so the newest run always holds the highest id among its
+/// environment's surviving rows — independent of wall-clock movement (NTP
+/// step-back, VM restore) and of rowid reuse after deletes (a reused value
+/// still lands above every survivor). A `created_at` ordering here would let
+/// a clock step make a live run invisible to the monitor and unstoppable by
+/// name — do not "simplify" back to it.
 const LATEST_PER_ENV: &str = "r.id = (SELECT r2.id FROM runs r2 \
                               WHERE r2.environment_id = r.environment_id \
                               ORDER BY r2.id DESC LIMIT 1)";
@@ -1046,9 +1051,33 @@ mod tests {
         }
     }
 
+    /// Compiler tripwire: adding a `RunStatus`/`EndReason` variant makes
+    /// these matches non-exhaustive and breaks the build HERE — update the
+    /// arrays in `status_and_reason_strings_round_trip` (and the parsers'
+    /// wildcard arms) in the same change, or the new variant round-trips to
+    /// the wrong value silently.
+    #[allow(dead_code)]
+    fn force_exhaustive_variant_lists(s: RunStatus, r: EndReason) {
+        match s {
+            RunStatus::Starting
+            | RunStatus::Running
+            | RunStatus::Stopping
+            | RunStatus::Stopped
+            | RunStatus::Failed
+            | RunStatus::Crashed => {}
+        }
+        match r {
+            EndReason::Stopped
+            | EndReason::Failed
+            | EndReason::Crashed
+            | EndReason::Replaced
+            | EndReason::Completed => {}
+        }
+    }
+
     /// Status and end-reason strings must round-trip — the writers are
     /// exhaustive matches, but the parsers use wildcard fallbacks a new
-    /// variant would silently fall into.
+    /// variant would silently fall into (see `force_exhaustive_variant_lists`).
     #[test]
     fn status_and_reason_strings_round_trip() {
         for status in [

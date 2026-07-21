@@ -180,12 +180,16 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
             info!("finalizing stale 'stopping' run '{run_name}' (ender gone)");
             for (key, node) in &run.nodes {
                 if let Some(pid) = node.pid {
+                    // Escalating kill (SIGTERM → wait → SIGKILL): a run stuck
+                    // in `stopping` past the grace period must actually end,
+                    // or leak-freedom would depend on the process honoring
+                    // SIGTERM. Recycled-PID exposure is bounded here — a run
+                    // sits in `stopping` for minutes, not days.
                     if is_process_alive(pid) {
-                        kill_process(pid);
+                        let _ = veld_core::process::kill_process(pid).await;
                     }
                     // Confirm before clearing — an unkilled PID stays recorded
                     // so the straggler sweep keeps covering it.
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                     if !is_process_alive(pid) {
                         let _ = db.clear_node_pid(&run.run_id, key);
                     }
@@ -231,8 +235,9 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
                         "re-killing straggler PID {pid} under terminal run '{}'",
                         run.name
                     );
-                    kill_process(pid);
-                    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                    // Escalates SIGTERM → SIGKILL; a SIGTERM-ignorer must not
+                    // survive every pass until the window closes and leak.
+                    let _ = veld_core::process::kill_process(pid).await;
                 }
                 if !is_process_alive(pid) {
                     let _ = db.clear_node_pid(&run.run_id, key);
@@ -329,18 +334,7 @@ fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-fn kill_process(pid: u32) {
-    // Guard against dangerous PIDs (same as veld-core::process::kill_process).
-    if pid <= 1 || pid > i32::MAX as u32 {
-        return;
-    }
-    unsafe {
-        // Send to the process group first (negative PID) to kill the entire
-        // pipeline (server + _timestamp wrapper). Fall back to the individual
-        // PID if the group kill fails (process may not be a group leader).
-        let pgid = -(pid as libc::pid_t);
-        if libc::kill(pgid, libc::SIGTERM) != 0 {
-            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-        }
-    }
-}
+// Process kills go through `veld_core::process::kill_process`, which
+// escalates SIGTERM → bounded wait → SIGKILL for the whole process group —
+// the daemon reapers are exactly the paths that must not depend on a target
+// honoring SIGTERM.

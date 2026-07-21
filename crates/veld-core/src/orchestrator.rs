@@ -641,7 +641,17 @@ impl Orchestrator {
                 match self.db.run_status_by_id(&run.run_id) {
                     Ok(Some(s)) if !s.is_live() => {
                         let pids: Vec<u32> = run.nodes.values().filter_map(|ns| ns.pid).collect();
-                        let _ = kill_and_confirm(&pids).await;
+                        if !kill_and_confirm(&pids).await {
+                            // Nothing can persist these PIDs (the run is
+                            // terminal and immutable), so no reaper covers
+                            // them — a warning is the only remaining signal.
+                            tracing::warn!(
+                                run_name,
+                                ?pids,
+                                "superseded start could not confirm killing its own \
+                                 spawned processes — they may leak"
+                            );
+                        }
                         return Err(OrchestratorError::Superseded(run_name.to_owned()));
                     }
                     _ => {}

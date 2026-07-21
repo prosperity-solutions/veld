@@ -196,7 +196,9 @@ enum Command {
         follow: bool,
 
         /// Show logs of a specific past run by id prefix (see `veld runs`).
-        #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["previous", "all_runs"])]
+        /// The run identifies its environment by itself, so this conflicts
+        /// with --name.
+        #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["previous", "all_runs", "name"])]
         run: Option<String>,
 
         /// Show logs of the run before the latest one (after a restart:
