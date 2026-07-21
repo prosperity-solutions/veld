@@ -111,8 +111,9 @@ struct RunInfo {
     history: Vec<HistoryEntry>,
 }
 
-/// One ended run in an environment's history. Node detail is deliberately
-/// omitted — the dashboard links into the logs view by run id instead.
+/// One ended run in an environment's history, with the final node states —
+/// enough for the dashboard's history run selector to render the full card
+/// (badge, outcome, node table) for any past run.
 #[derive(Serialize)]
 struct HistoryEntry {
     /// Full run UUID (same contract as `veld runs --json`).
@@ -125,6 +126,18 @@ struct HistoryEntry {
     created_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     ended_at: Option<String>,
+    /// Final node states (no URLs/PIDs — the run is over).
+    nodes: Vec<HistoryNode>,
+}
+
+#[derive(Serialize)]
+struct HistoryNode {
+    name: String,
+    variant: String,
+    status: NodeStatus,
+    /// Exit code where one was observable (command/oneshot nodes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -238,13 +251,27 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         .into_iter()
                         .filter(|run| !run.is_live())
                         .filter(|run| latest.is_none_or(|l| run.run_id != l.run_id))
-                        .map(|run| HistoryEntry {
-                            run_id: run.run_id.to_string(),
-                            short_id: run.short_id(),
-                            status: run.status,
-                            outcome: Some(run.outcome_label()),
-                            created_at: run.created_at.to_rfc3339(),
-                            ended_at: run.ended_at.map(|t| t.to_rfc3339()),
+                        .map(|run| {
+                            let mut hnodes: Vec<HistoryNode> = run
+                                .nodes
+                                .values()
+                                .map(|ns| HistoryNode {
+                                    name: ns.node_name.clone(),
+                                    variant: ns.variant.clone(),
+                                    status: ns.status.clone(),
+                                    exit_code: ns.outputs.get("exit_code").cloned(),
+                                })
+                                .collect();
+                            hnodes.sort_by(|a, b| a.name.cmp(&b.name));
+                            HistoryEntry {
+                                run_id: run.run_id.to_string(),
+                                short_id: run.short_id(),
+                                status: run.status,
+                                outcome: Some(run.outcome_label()),
+                                created_at: run.created_at.to_rfc3339(),
+                                ended_at: run.ended_at.map(|t| t.to_rfc3339()),
+                                nodes: hnodes,
+                            }
                         })
                         .collect();
 

@@ -94,7 +94,12 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
             }
         }
         Err(e) => {
-            warn!("failed to bind feedback server on {addr}: {e}");
+            warn!(
+                "failed to bind feedback server on {addr}: {e} — is another \
+                 veld-daemon instance already running on this port? The daemon \
+                 will keep running WITHOUT its HTTP API (no dashboard, no \
+                 feedback, no shares) until restarted"
+            );
         }
     }
 }

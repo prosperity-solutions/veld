@@ -35,11 +35,13 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
 .dot.off{background:var(--dim)}
 
-/* top-level Active/History view switcher */
-.view-switch{display:flex;gap:2px;padding:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;width:fit-content;margin-bottom:18px}
-.view-switch .seg-btn{flex:none;padding:6px 16px}
+/* top-level Active/History view switcher — centered in the header row */
+header{position:relative}
+.view-switch{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;gap:2px;padding:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;width:fit-content}
+.view-switch .seg-btn{flex:none;padding:4px 14px}
 .view-switch .count{color:var(--dim);font-weight:400;margin-left:4px}
 .view-switch .seg-btn.active .count{color:inherit;opacity:.7}
+@media (max-width:640px){.view-switch{position:static;transform:none;margin-left:auto;margin-right:12px}}
 
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
@@ -106,6 +108,9 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .card-outcome{padding:0 18px 10px;font-size:12px;color:var(--text2)}
 .card-outcome.err{color:var(--red)}
 .card-outcome .when{color:var(--dim)}
+/* history run selector in the card head (ended environments with >1 run) */
+.hist-select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit;max-width:220px}
+.hist-select:focus{outline:none;border-color:var(--accent)}
 
 .card-path{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;flex:1;min-width:0}
 .card-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 18px 12px}
@@ -212,16 +217,16 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     </svg>
     <span class="sep">/</span>
     <span class="subtitle">Environments</span>
+    <div class="segmented view-switch" id="view-switch" hidden>
+      <button class="seg-btn active" data-view="active">Active<span class="count" data-count="active"></span></button>
+      <button class="seg-btn" data-view="history">History<span class="count" data-count="history"></span></button>
+    </div>
     <div class="meta">
       <span id="status-dot"><span class="dot off"></span></span>
       <span id="status-text">connecting...</span>
     </div>
   </header>
   <section id="shares-panel" class="shares-panel" hidden></section>
-  <div class="segmented view-switch" id="view-switch" hidden>
-    <button class="seg-btn active" data-view="active">Active<span class="count" data-count="active"></span></button>
-    <button class="seg-btn" data-view="history">History<span class="count" data-count="history"></span></button>
-  </div>
   <main id="content"><div class="empty"><div class="spinner"></div></div></main>
 </div>
 <div id="join-overlay" class="join-overlay" hidden><div class="join-card"><div id="join-body"></div></div></div>
@@ -322,8 +327,6 @@ function render(data){
       shownKeys.add(rk(proj.name,run.name));
       const key=rk(proj.name,run.name);
       const st=runState[key]||{tab:'services'};
-      const nodes=run.nodes||[];
-      const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
 
       // A run may host a peer share and/or one or more web shares at once
       // (separate capabilities). Split them: web shares carry public_urls.
@@ -331,22 +334,44 @@ function render(data){
       const peerShare=runShares.find(x=>!(x.public_urls&&x.public_urls.length))||null;
       const webShares=runShares.filter(x=>x.public_urls&&x.public_urls.length);
       const live=!!run.live;
+      // History run selection: an ended environment's card can show any past
+      // run (badge, outcome, node table). '' / unset = the latest ended run
+      // (the card's own data); otherwise a run_id from run.history.
+      const hist=run.history||[];
+      const histSel=(!live&&st.histSel)?hist.find(x=>x.run_id===st.histSel):null;
+      if(st.histSel&&!histSel)st.histSel=null; // selected run got pruned
+      const shownStatus=histSel?histSel.status:run.status;
+      const shownOutcome=histSel?histSel.outcome:run.outcome;
+      const shownEnded=histSel?histSel.ended_at:run.ended_at;
+      // Node table follows the shown run. History nodes carry only
+      // name/variant/status/exit_code — url/pid/actions are absent, which
+      // the table already renders as dashes/blank (the run is over).
+      const nodes=(histSel?histSel.nodes:run.nodes)||[];
 
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
       // Zone 1 — identity: environment name primary, project + path as
-      // context, latest-run status.
+      // context, status of the shown run.
       h+='<div class="card-head">';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
       h+='<span class="card-project">'+esc(proj.name)+'</span>';
       h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
-      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
+      if(!live&&hist.length){
+        h+='<select class="hist-select" data-action="hist-select" title="Show an older run">';
+        h+='<option value=""'+(histSel?'':' selected')+'>'+esc((run.outcome||run.status)+(run.ended_at?' · '+fmtWhen(run.ended_at):''))+'</option>';
+        for(const e2 of hist){
+          h+='<option value="'+esc(e2.run_id)+'"'+(histSel&&histSel.run_id===e2.run_id?' selected':'')+'>'
+            +esc((e2.outcome||e2.status)+' · '+fmtWhen(e2.created_at))+'</option>';
+        }
+        h+='</select>';
+      }
+      h+='<span class="badge '+esc(shownStatus)+'">'+esc(shownStatus)+'</span>';
       h+='</div>';
-      // Last-run outcome — the "why did it die" line ("crashed at 3am" →
+      // Shown run's outcome — the "why did it die" line ("crashed at 3am" →
       // open card, read outcome, hit Restart).
-      if(!live&&run.outcome){
-        const bad=run.status==='crashed'||run.status==='failed';
-        h+='<div class="card-outcome'+(bad?' err':'')+'">'+esc(run.outcome)
-          +(run.ended_at?' <span class="when">· ended '+esc(fmtWhen(run.ended_at))+'</span>':'')
+      if(!live&&shownOutcome){
+        const bad=shownStatus==='crashed'||shownStatus==='failed';
+        h+='<div class="card-outcome'+(bad?' err':'')+'">'+esc(shownOutcome)
+          +(shownEnded?' <span class="when">· ended '+esc(fmtWhen(shownEnded))+'</span>':'')
           +'</div>';
       }
       // Zone 2 — one action toolbar (lifecycle + utility + share).
@@ -521,14 +546,18 @@ function updateRunPicker(key,s){
   if(!s.panelEl)return;const sel=s.panelEl.querySelector('.run-filter');if(!sel)return;
   const hist=historyByKey[key]||[];
   const sig=hist.map(x=>x.run_id).join(',');
-  if(sel.dataset.sig===sig)return;
-  sel.dataset.sig=sig;
+  if(sel.dataset.sig!==sig){
+    sel.dataset.sig=sig;
+    sel.innerHTML='';
+    const add=(val,label)=>{const o=document.createElement('option');o.value=val;o.textContent=label;sel.appendChild(o);};
+    add('','Latest run');
+    for(const e of hist)add(e.run_id,(e.outcome||e.status)+' · '+fmtWhen(e.created_at));
+    add('all','All runs');
+  }
+  // Always re-apply the state's selection — it can change without the
+  // history signature changing (e.g. the card's history run selector
+  // scoped the logs to a past run). A pruned selection falls back to latest.
   const v=s.runFilter||'';
-  sel.innerHTML='';
-  const add=(val,label)=>{const o=document.createElement('option');o.value=val;o.textContent=label;sel.appendChild(o);};
-  add('','Latest run');
-  for(const e of hist)add(e.run_id,(e.outcome||e.status)+' · '+fmtWhen(e.created_at));
-  add('all','All runs');
   sel.value=Array.from(sel.options).some(o=>o.value===v)?v:'';
   if(sel.value!==v){s.runFilter=sel.value;}
 }
@@ -757,6 +786,20 @@ document.addEventListener('change',e=>{
     if(s){s.runFilter=runSel.value;s.prevHtml=null;s.lastData=null;s.autoScroll=true;
       if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
       const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}return;}
+  const histSel=e.target.closest('[data-action="hist-select"]');
+  if(histSel){
+    const card=histSel.closest('.card');if(!card)return;
+    const key=card.dataset.key;
+    const s=runState[key]||(runState[key]={tab:'services'});
+    // Swap the card to the chosen run and scope the logs picker to it —
+    // '' = the latest ended run (matches the picker's "Latest run").
+    s.histSel=histSel.value||null;
+    s.runFilter=histSel.value||'';
+    s.prevHtml=null;s.lastData=null;
+    if(lastEnvData)render(lastEnvData);
+    if(s.tab==='logs'){const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}
+    return;
+  }
 });
 
 document.addEventListener('input',e=>{

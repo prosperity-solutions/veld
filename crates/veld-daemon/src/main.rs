@@ -94,8 +94,33 @@ async fn main() -> Result<()> {
             .context("failed to remove stale socket")?;
     }
 
-    // Bind the Unix socket listener.
-    let listener = UnixListener::bind(&args.socket_path).context("failed to bind Unix socket")?;
+    // Bind the Unix socket listener. A leftover socket FILE from a crashed
+    // daemon must not block startup — but a LIVE socket means another
+    // instance of this daemon is already running, which must be a loud,
+    // immediate error (two half-alive daemons fighting over one port was a
+    // miserable thing to debug).
+    let listener = match UnixListener::bind(&args.socket_path) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            match tokio::net::UnixStream::connect(&args.socket_path).await {
+                Ok(_) => anyhow::bail!(
+                    "another veld-daemon is already running on {} — stop it first \
+                     (two instances cannot share a socket/port)",
+                    args.socket_path.display()
+                ),
+                Err(_) => {
+                    info!(
+                        "removing stale socket {} (no daemon answering)",
+                        args.socket_path.display()
+                    );
+                    std::fs::remove_file(&args.socket_path)
+                        .context("failed to remove stale socket")?;
+                    UnixListener::bind(&args.socket_path).context("failed to bind Unix socket")?
+                }
+            }
+        }
+        Err(e) => return Err(e).context("failed to bind Unix socket"),
+    };
 
     info!("listening on {}", args.socket_path.display());
 
