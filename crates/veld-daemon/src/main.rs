@@ -87,12 +87,10 @@ async fn main() -> Result<()> {
             .context("failed to create socket parent directory")?;
     }
 
-    // Remove stale socket file if present.
-    if args.socket_path.exists() {
-        tokio::fs::remove_file(&args.socket_path)
-            .await
-            .context("failed to remove stale socket")?;
-    }
+    // NOTE: no unconditional unlink here — removing the socket file blindly
+    // would break a LIVE daemon's socket and make the AddrInUse arm below
+    // (the "another instance is already running" abort) unreachable. Stale
+    // files are removed only after a connect() probe proves nobody answers.
 
     // Bind the Unix socket listener. A leftover socket FILE from a crashed
     // daemon must not block startup — but a LIVE socket means another
