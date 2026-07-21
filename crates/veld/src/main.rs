@@ -549,9 +549,14 @@ async fn main() {
 
         Command::Runs { name, json, cmd } => match cmd {
             None => commands::runs::list(name.as_deref(), json).await,
-            Some(RunsCmd::Show { run_id, json }) => commands::runs::show(&run_id, json).await,
-            Some(RunsCmd::Diff { a, b, json }) => {
-                commands::runs::diff(&a, b.as_deref(), json).await
+            // OR the outer flag in: `veld runs --json show <id>` must not
+            // silently fall back to human output (exit 0, unparseable) for
+            // an agent that treats --json as global.
+            Some(RunsCmd::Show { run_id, json: sub }) => {
+                commands::runs::show(&run_id, json || sub).await
+            }
+            Some(RunsCmd::Diff { a, b, json: sub }) => {
+                commands::runs::diff(&a, b.as_deref(), json || sub).await
             }
         },
 

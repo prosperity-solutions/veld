@@ -288,6 +288,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "environments-and-runs",
         apply: migrate_v3_environments_and_runs,
     },
+    Migration {
+        version: 4,
+        name: "run-graph-snapshot",
+        apply: migrate_v4_graph_snapshot,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -475,10 +480,6 @@ fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
             status TEXT NOT NULL,
             end_reason TEXT,
             end_detail TEXT,
-            -- The resolved graph the run was started with (JSON, see
-            -- GraphSnapshot). Pre-interpolation by design: placeholders stay
-            -- `${...}`, env is names-only — no resolved value lands here.
-            graph_snapshot TEXT,
             execution_order TEXT NOT NULL DEFAULT '[]',
             created_at TEXT NOT NULL,
             -- When begin_ending moved the run to 'stopping' — the daemon's
@@ -573,6 +574,18 @@ fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM log_lines WHERE ts < ?1", [&cutoff])?;
     conn.execute_batch("CREATE INDEX idx_log_lines_run_id ON log_lines(run_id, id);")?;
     Ok(())
+}
+
+/// v4: per-run graph snapshot (config forensics). A separate migration — NOT
+/// folded into v3 — because v3 already existed on this branch before the
+/// column did, so a database that migrated to v3 under an earlier build must
+/// still gain the column ("schema changes are always a NEW migration").
+///
+/// The JSON (see `GraphSnapshot`) is pre-interpolation by design:
+/// placeholders stay `${...}`, env is names-only — no resolved value (port,
+/// URL, secret output) ever lands here.
+fn migrate_v4_graph_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE runs ADD COLUMN graph_snapshot TEXT;")
 }
 
 // ---------------------------------------------------------------------------

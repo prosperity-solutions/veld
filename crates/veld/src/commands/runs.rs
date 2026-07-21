@@ -148,8 +148,10 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
     };
 
     if json {
-        // The full RunState (including the graph snapshot) plus the display
-        // short id — same field meanings as `veld runs --json`.
+        // The FULL RunState (nodes as a map of complete node states, plus
+        // graph_snapshot/execution_order) with the display short id added.
+        // Deliberately richer than `veld runs --json`'s list entries — this
+        // is the drill-down; don't parse the two `.nodes` shapes the same way.
         let mut payload = serde_json::to_value(&run).unwrap_or_default();
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("short_id".into(), run.short_id().into());
@@ -345,12 +347,18 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
     println!(
         "{} {}",
         output::bold("veld.json:"),
-        if d.config_changed {
-            output::yellow("changed")
-        } else {
-            output::green("identical")
+        match d.config_changed {
+            Some(true) => output::yellow("changed"),
+            Some(false) => output::green("identical"),
+            None => output::dim("unknown (hash unavailable)"),
         },
     );
+    if old.created_at > new.created_at {
+        println!(
+            "{}",
+            output::dim("note: the first run is newer than the second — arguments reversed?"),
+        );
+    }
     if d.added.is_empty() && d.removed.is_empty() && d.changed.is_empty() {
         println!("{}", output::dim("Resolved graph is identical."));
         return 0;
@@ -378,7 +386,9 @@ pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
 
 #[derive(serde::Serialize)]
 struct SnapshotDiff {
-    config_changed: bool,
+    /// `None` when either hash is unavailable (a config read failed at start
+    /// time) — unknown, not "identical".
+    config_changed: Option<bool>,
     added: Vec<String>,
     removed: Vec<String>,
     changed: Vec<NodeChange>,
@@ -461,7 +471,8 @@ fn diff_snapshots(
     }
 
     SnapshotDiff {
-        config_changed: old.config_hash != new.config_hash,
+        config_changed: (!old.config_hash.is_empty() && !new.config_hash.is_empty())
+            .then(|| old.config_hash != new.config_hash),
         added,
         removed,
         changed,
@@ -513,7 +524,7 @@ mod tests {
             ],
         );
         let d = diff_snapshots(&old, &new);
-        assert!(d.config_changed);
+        assert_eq!(d.config_changed, Some(true));
         assert_eq!(d.added, vec!["worker:local"]);
         assert_eq!(d.removed, vec!["cache:local"]);
         assert_eq!(d.changed.len(), 1);
@@ -530,7 +541,7 @@ mod tests {
     fn diff_identical_snapshots_is_empty() {
         let s = snap("aaa", &[("api:local", node("npm run dev", &["PORT"]))]);
         let d = diff_snapshots(&s, &s);
-        assert!(!d.config_changed);
+        assert_eq!(d.config_changed, Some(false));
         assert!(d.added.is_empty() && d.removed.is_empty() && d.changed.is_empty());
     }
 }

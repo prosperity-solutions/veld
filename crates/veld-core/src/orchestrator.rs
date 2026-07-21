@@ -147,15 +147,13 @@ async fn kill_and_confirm(pids: &[u32]) -> bool {
 /// value (port, URL, secret output) is ever persisted.
 fn build_graph_snapshot(
     config: &VeldConfig,
-    config_path: &std::path::Path,
+    config_hash: String,
     plan: &[Vec<NodeSelection>],
 ) -> crate::state::GraphSnapshot {
-    use sha2::{Digest, Sha256};
-    let config_hash = std::fs::read(config_path)
-        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
-        .unwrap_or_default();
-
     let mut nodes = std::collections::BTreeMap::new();
+    // The FULL resolved graph, deliberately including the oneshot terminal
+    // node (which never gets a node row of its own) — the snapshot describes
+    // what was planned, not what spawned.
     for sel in plan.iter().flatten() {
         let Some(node_cfg) = config.nodes.get(&sel.node) else {
             continue;
@@ -274,6 +272,12 @@ struct NodeExecutionResult {
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
+    /// SHA-256 of the veld.json bytes, hashed once at construction — as close
+    /// to the parse as we can get without changing the config-loading API, so
+    /// the snapshot's hash describes (within microseconds of) the bytes that
+    /// became `config`, not whatever is on disk seconds later when `start`'s
+    /// cleanup phases have finished.
+    config_hash: String,
     pub project_root: PathBuf,
     pub db: Db,
     pub port_allocator: PortAllocator,
@@ -315,9 +319,16 @@ impl Orchestrator {
     pub fn new(config_path: PathBuf, config: VeldConfig) -> Result<Self, OrchestratorError> {
         let project_root = config::project_root(&config_path);
         let db = Db::open()?;
+        let config_hash = {
+            use sha2::{Digest, Sha256};
+            std::fs::read(&config_path)
+                .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+                .unwrap_or_default()
+        };
         Ok(Self {
             config,
             config_path,
+            config_hash,
             project_root,
             db,
             port_allocator: PortAllocator::new(),
@@ -473,7 +484,11 @@ impl Orchestrator {
         // Forensics: record what this run is being started with, so a later
         // `veld runs show/diff` can answer "what changed since the run that
         // worked" even after veld.json moved on.
-        run.graph_snapshot = Some(build_graph_snapshot(&self.config, &self.config_path, &plan));
+        run.graph_snapshot = Some(build_graph_snapshot(
+            &self.config,
+            self.config_hash.clone(),
+            &plan,
+        ));
         // Scope the run-level log streams to this instance (the writers were
         // created before the run existed).
         if let Some(w) = self.internal_log.as_mut() {
@@ -2665,6 +2680,7 @@ mod tests {
         Orchestrator {
             config,
             config_path: project_root.join("veld.json"),
+            config_hash: String::new(),
             project_root: project_root.to_path_buf(),
             db,
             port_allocator: PortAllocator::new(),
