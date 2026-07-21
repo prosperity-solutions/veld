@@ -50,7 +50,7 @@ If the installed version is older than what `compatibility` requires, tell the u
 !`veld nodes 2>&1`
 !`veld presets 2>&1`
 
-### Active runs
+### Run history
 !`veld runs 2>&1`
 
 ## CLI
@@ -58,6 +58,29 @@ If the installed version is older than what `compatibility` requires, tell the u
 !`veld --help 2>&1`
 
 Run `veld <subcommand> --help` for flags and options.
+
+## Environments and runs
+
+An **environment** is the durable named slot (`--name dev`) — what `veld start`,
+`veld stop`, and `veld status` address. A **run** is one execution instance of
+an environment: it has an id, a start/end time, and an outcome. Stopping,
+crashing, or replacing a run doesn't erase it — it persists as history (last 10
+runs per environment, 7 days) along with its logs.
+
+Post-mortem workflow — "why did last night's run die?":
+
+```sh
+veld runs --name dev                # list past runs for dev, newest first
+veld logs --run a3f8c12             # logs for that specific run (id prefix, like git)
+```
+
+`veld runs --json` gives the machine-readable outcome: `end_reason` is one of
+`stopped | failed | crashed | replaced | completed`, and `end_detail` carries
+the specifics (`failed_step`, `failed_node`, `exit_code`, `message`) — a
+crashed run tells you which node's process died, a failed setup step tells you
+which step and its exit code. `crashed` (process died unexpectedly) is now
+distinguishable from `stopped` (clean `veld stop`). A `--oneshot` run records
+`completed` (exit 0) or `failed` (non-zero).
 
 ## Node actions
 
@@ -298,7 +321,9 @@ veld start e2e --oneshot --all-logs   # also interleave dependency logs (stderr)
   terminate** — a server mistyped as `command` hangs the run. Exactly **one**
   selection is required (no multi-node preset); its deps start automatically.
 - A non-zero exit (failing tests) becomes veld's own exit code — chain it:
-  `veld start e2e --oneshot && deploy`. Ctrl+C aborts and exits `130`.
+  `veld start e2e --oneshot && deploy`. Ctrl+C aborts and exits `130`. The run
+  is recorded with `end_reason: completed` (exit 0) or `failed` (non-zero,
+  `end_detail.exit_code` set) — visible via `veld runs --name e2e`.
 - Teardown (`on_stop` hooks, project `teardown`) always runs — on completion
   and on Ctrl+C — and runs to completion once started. Deps aren't
   health-monitored while the node runs.
@@ -319,6 +344,11 @@ process_count, sampled_at }`) in `--json`. Values are sampled by the daemon
 every ~5s, so they're absent (`–` / omitted) until the first sample lands, and
 go absent again shortly after a node dies or the daemon stops. The management UI
 shows the same figures live with a memory sparkline.
+
+`veld status --json` additionally carries `live` (whether the environment
+occupies the live run slot), `end_reason`/`end_detail` (populated once the run
+has ended), and `ended_at` (also emitted as the deprecated alias `stopped_at`,
+for scripts written against the old shape).
 
 To debug liveness probe failures and recovery decisions:
 ```sh
@@ -343,6 +373,9 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory
 - **Name resolution** — if `--name` omitted: one run → auto-selects, multiple → prompts, none → errors
+- **`veld logs` defaults to the latest run** — after a restart, `veld logs` no longer reaches into the previous generation's lines. Use `--run <id-prefix>` for a specific past run, `-p`/`--previous` for the run before the latest, or `--all-runs` to restore the old interleaved-across-runs behavior
+- **`veld logs -f` exits 0 when the run ends** — it no longer hangs forever on a run that crashed or was stopped; it prints history then a stderr note and returns
+- **`veld status`/`veld urls` on a stopped environment** — `status` still works and shows the last run's outcome, but hides the URL column (routes are torn down); `urls` errors outright instead of printing dead links
 - **`--json`** — most commands accept it for machine-readable output, prefer it when parsing results
 - **Sharing needs matching setup modes** — both people must have veld installed and be in the *same* mode (both privileged → clean URLs, or both unprivileged → `:18443` in URLs), or the shared URLs won't match
 - **Local URL wins on collision** — if the joiner already runs the same environment, their local URL is kept; that shared node is skipped and reported as a warning

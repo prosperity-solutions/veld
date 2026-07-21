@@ -24,7 +24,8 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Health checks** — readiness probes (two-phase: TCP port + HTTP/command) gate startup; liveness probes detect failures after startup (e.g., dropped SSH tunnels)
 - **Automatic recovery** — when liveness probes detect failure, the environment is automatically restarted (configurable failure threshold and max recovery attempts)
 - **Multiple variants** — same node, different behaviors (local server, Docker, remote URL)
-- **Named runs** — multiple environments coexist; re-running by name is idempotent
+- **Named environments** — multiple environments coexist (`--name dev`); re-running by name is idempotent
+- **Run history** — a stopped, failed, or crashed run persists as history (last 10 per environment, 7 days) with its logs; `veld runs` lists it, `veld logs --run/--previous` targets it, and a crash is distinguishable from a clean stop
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
 - **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`)
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
@@ -146,15 +147,15 @@ veld stop --name dev
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. Ideal for end-to-end test runs. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
-| `veld status [--name <n>] [--json]` | Show run status, including per-node CPU and memory usage |
-| `veld urls [--name <n>] [--json]` | Show URLs for a run |
+| `veld status [--name <n>] [--json]` | Show environment status: current run id, per-node CPU/memory, and (when the environment isn't live) the last run's outcome. URLs are shown only while live |
+| `veld urls [--name <n>] [--json]` | Show URLs for a running environment; errors if the environment is stopped (routes are torn down with the run) |
 | `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
 | `veld actions [--json]` | List the actions defined across the project's nodes |
-| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>]` | View logs (`-f` follow, `-s` search, `-C` context lines) |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--run <id-prefix>] [-p] [--all-runs] [--source <s>] [-s <term>] [-C <n>] [--json]` | View logs, scoped to the latest run by default (`-f` follow — exits 0 when the followed run ends, `--run` targets a past run by id prefix, `-p`/`--previous` the run before the latest, `--all-runs` restores the old interleaved-across-runs behavior, `-s` search, `-C` context lines) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
-| `veld runs` | List all runs |
+| `veld runs [--name <n>] [--json]` | List run history — one row per execution instance (short id, started/ended, duration, outcome), newest first. Without `--name`, all environments' runs grouped |
 | `veld feedback next [--wait] [--name <n>] [--json]` | Get the next feedback item to work on (agent-facing; pure read, no cursor) |
 | `veld feedback reply <thread-id> "<msg>"` | Reply to a feedback thread (parks it on the reviewer) |
 | `veld feedback resolve <thread-id>` | Resolve a thread (agent-facing; only on explicit approval) |
