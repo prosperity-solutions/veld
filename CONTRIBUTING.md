@@ -47,27 +47,44 @@ Veld has three tiers of binaries with different lifecycles:
 
 ### Tier 1: CLI changes (most common)
 
-Use `just dev` or `veld-dev` for read-only CLI commands:
+`just dev` (and the `veld-dev` wrapper) run the source build against a
+**dedicated dev database** at `.veld-dev/veld.db` (gitignored) — never the
+installed veld's DB. Dev builds can carry newer schema migrations, and a
+schema-ahead binary migrates whatever DB it opens; on the real DB that would
+blind the installed daemon (`NewerSchema`) until `veld update`. Isolation
+makes that impossible by default:
 
 ```sh
-just dev feedback next --wait --name myrun --json
-just dev status
-veld-dev doctor
+just dev start --name foo website:local   # own state, invisible to installed veld
+just dev runs --name foo
+just dev-db-reset                          # fresh dev state
+just dev-db-from-real                      # snapshot the real DB → rehearse migrations on the copy
+just dev-daemon                            # daemon from source against the dev DB (monitoring/GC for dev runs)
 ```
+
+The dev DB isolates *state only* — helper/Caddy/DNS are still the real shared
+services, and the installed daemon only watches the real DB (dev runs get no
+crash detection unless `just dev-daemon` is running).
+
+To point the source-built CLI at the **real** DB — e.g. a feedback loop
+against a run the installed veld started — use `just dev-real <args>`. It
+refuses to run when the branch's schema is ahead of the real DB (that's the
+migration trap above); in that case test via `just dev` + `just dev-daemon`
+or `just dev-install`.
 
 **Do not use `veld-dev` for `start`/`restart`** — it overrides the lib directory which breaks Caddy path resolution. Use the installed `veld` for starting environments:
 
 ```sh
-veld start --name myrun website:local    # uses installed veld
-veld-dev feedback next --wait --name myrun    # uses source build for CLI
+veld start --name myrun website:local         # uses installed veld (real DB)
+just dev-real feedback next --wait --name myrun   # source CLI reading that run
 ```
 
-For cross-project CLI use:
+For cross-project CLI use (carries the dev DB):
 
 ```sh
 just dev-link    # one-time: creates ~/.local/bin/veld-dev
 cd ~/other-project
-veld-dev feedback next --wait --name myrun
+veld-dev status
 ```
 
 ### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)

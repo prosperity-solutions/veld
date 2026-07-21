@@ -8,6 +8,9 @@
 .veld/
 **/.veld/
 
+# Dedicated SQLite state for source-built binaries (`just dev` tier)
+/.veld-dev/
+
 # IDE
 .idea/
 .vscode/
