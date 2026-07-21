@@ -515,7 +515,15 @@ async fn main() {
             | Command::Logs { .. }
     );
 
-    if needs_version_check && std::env::var("VELD_LIB_DIR").is_err() {
+    // The version gate compares this CLI against the INSTALLED helper/daemon
+    // binaries. A dev instance (VELD_DAEMON_PORT set) shares those services
+    // deliberately, so a version gap with them is expected — enforce
+    // alignment only for the installed instance. VELD_LIB_DIR is the older
+    // escape hatch (points version discovery at a dev build dir) and still
+    // skips too.
+    let is_dev_instance =
+        veld_core::instance::daemon_port() != veld_core::instance::DEFAULT_DAEMON_PORT;
+    if needs_version_check && std::env::var("VELD_LIB_DIR").is_err() && !is_dev_instance {
         if let Err(msg) = commands::version::check_version_mismatch() {
             output::print_error(&msg, false);
             std::process::exit(1);

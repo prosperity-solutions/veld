@@ -43,7 +43,6 @@ dev_daemon_port := "19898"
 dev *ARGS:
     cargo build
     mkdir -p "{{justfile_directory()}}/.veld-dev"
-    VELD_LIB_DIR="{{justfile_directory()}}/target/debug" \
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
     VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock" \
@@ -124,7 +123,7 @@ dev-link:
     cargo build
     mkdir -p "$HOME/.local/bin" .veld-dev
     wrapper="$HOME/.local/bin/veld-dev"
-    printf '#!/usr/bin/env bash\nexport VELD_LIB_DIR="{{justfile_directory()}}/target/debug"\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
+    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$wrapper"
     chmod +x "$wrapper"
     echo "Created $wrapper — use 'veld-dev' from any directory."
     echo "Remove with: rm $wrapper"

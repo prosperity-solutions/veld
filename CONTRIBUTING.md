@@ -80,20 +80,24 @@ refuses to run when the branch's schema is ahead of the real DB (that's the
 migration trap above); in that case test via `just dev` + `just dev-daemon`
 or `just dev-install`.
 
-**Do not use `veld-dev` for `start`/`restart`** — it overrides the lib directory which breaks Caddy path resolution. Use the installed `veld` for starting environments:
+**`veld-dev` — the dev instance from any project.** `just dev-link` (one-time)
+installs `~/.local/bin/veld-dev`, a wrapper that carries the full dev
+instance (dev DB, daemon port 19898, dev socket). It is the complete CLI —
+`start`/`stop`/`restart` included — and shares the installed helper/Caddy,
+so URLs work normally. The old "don't `veld-dev start`" caveat is gone: the
+wrapper no longer overrides the lib directory (the CLI↔installed-services
+version gate is skipped for dev instances instead).
 
 ```sh
-veld start --name myrun website:local         # uses installed veld (real DB)
-just dev-real feedback next --wait --name myrun   # source CLI reading that run
-```
-
-For cross-project CLI use (carries the dev DB):
-
-```sh
-just dev-link    # one-time: creates ~/.local/bin/veld-dev
-cd ~/other-project
+just dev-link                       # one-time: creates ~/.local/bin/veld-dev
+cd ~/some-test-project
+veld-dev start website:local --name devtest   # dev instance, from anywhere
+veld-dev runs --name devtest
 veld-dev status
 ```
+
+Rebuilds: `veld-dev` executes `target/debug/veld` directly, so a plain
+`cargo build` in the repo refreshes it — no re-link needed.
 
 ### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)
 
