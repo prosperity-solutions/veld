@@ -92,8 +92,11 @@ struct RunInfo {
     /// non-live run must never read as reachable — `urls`/node URLs are
     /// stripped server-side when this is false.
     live: bool,
-    /// Short id of the latest run (git-style prefix).
+    /// Full run UUID of the latest run — `run_id` means the canonical UUID on
+    /// every veld JSON surface (`veld runs --json`, `veld status --json`).
     run_id: String,
+    /// Git-style short prefix of `run_id`, for display.
+    short_id: String,
     /// One-line outcome of the latest run when it has ended
     /// (e.g. "crashed (api:local pid died)").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -112,7 +115,10 @@ struct RunInfo {
 /// omitted — the dashboard links into the logs view by run id instead.
 #[derive(Serialize)]
 struct HistoryEntry {
+    /// Full run UUID (same contract as `veld runs --json`).
     run_id: String,
+    /// Git-style short prefix, for display.
+    short_id: String,
     status: RunStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     outcome: Option<String>,
@@ -233,7 +239,8 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         .filter(|run| !run.is_live())
                         .filter(|run| latest.is_none_or(|l| run.run_id != l.run_id))
                         .map(|run| HistoryEntry {
-                            run_id: run.short_id(),
+                            run_id: run.run_id.to_string(),
+                            short_id: run.short_id(),
                             status: run.status,
                             outcome: Some(run.outcome_label()),
                             created_at: run.created_at.to_rfc3339(),
@@ -246,6 +253,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         status: r.status,
                         live,
                         run_id: latest
+                            .map(|l| l.run_id.to_string())
+                            .unwrap_or_else(|| r.run_id.to_string()),
+                        short_id: latest
                             .map(|l| l.short_id())
                             .unwrap_or_else(|| r.run_id.to_string()[..8].to_owned()),
                         outcome: latest.filter(|l| !l.is_live()).map(|l| l.outcome_label()),
