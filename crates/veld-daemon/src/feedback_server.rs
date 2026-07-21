@@ -40,7 +40,8 @@ struct AppState {
 // Startup
 // ---------------------------------------------------------------------------
 
-/// Start the feedback HTTP server on `127.0.0.1:FEEDBACK_PORT`.
+/// Start the feedback HTTP server on 127.0.0.1 at this instance's daemon
+/// port (`veld_core::instance::daemon_port()`).
 pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::ShareManager>) {
     let state = Arc::new(AppState {
         event_notify: Notify::new(),

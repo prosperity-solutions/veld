@@ -172,7 +172,8 @@ impl ShareTicket {
 }
 
 // ---------------------------------------------------------------------------
-// Control-API DTOs (daemon HTTP on 127.0.0.1:19899, shared with the CLI client)
+// Control-API DTOs (daemon HTTP on 127.0.0.1 at the instance's daemon port,
+// shared with the CLI client)
 // ---------------------------------------------------------------------------
 
 /// `POST /api/shares` — start sharing a run.

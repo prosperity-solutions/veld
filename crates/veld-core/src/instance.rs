@@ -11,7 +11,12 @@
 //!
 //! The helper/Caddy/DNS layer is deliberately NOT instanced — it is a
 //! singleton owning ports 80/443/18443 and system DNS; every instance shares
-//! it and coexists through distinct hostnames and route ids.
+//! it. Only the *management* route is instance-scoped (`veld-mgmt-<host>`):
+//! RUN routes stay keyed by `veld-{run}-{node}-{variant}` and run-name-based
+//! hostnames, so two instances starting an environment with the SAME name
+//! collide in shared Caddy (last-write-wins, and stopping one removes the
+//! route the other still needs). Keep dev-instance run names distinct from
+//! the installed instance's.
 
 use std::path::PathBuf;
 
@@ -58,8 +63,27 @@ pub fn daemon_socket() -> PathBuf {
 /// Management hostname this daemon should self-register with the helper
 /// (e.g. `veld-dev.localhost`). `None` for the installed instance — its
 /// `veld.localhost` route is part of the helper's base Caddy config.
+///
+/// Rejected (returns `None`, with a warning): a value that isn't a plausible
+/// hostname, and `veld.localhost` itself — self-registering the installed
+/// dashboard's hostname would hijack it to this instance (last route wins).
 pub fn management_host() -> Option<String> {
-    env_nonempty("VELD_MANAGEMENT_HOST")
+    let host = env_nonempty("VELD_MANAGEMENT_HOST")?;
+    let valid = !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+        && host != "veld.localhost";
+    if !valid {
+        tracing::warn!(
+            host,
+            "ignoring VELD_MANAGEMENT_HOST: not a valid hostname (or it is \
+             the installed dashboard's veld.localhost)"
+        );
+        return None;
+    }
+    Some(host)
 }
 
 #[cfg(test)]
@@ -70,8 +94,10 @@ mod tests {
     // default parallel test runner can't interleave them.
     #[test]
     fn overrides_and_defaults() {
-        // SAFETY: single-threaded within this test; no other test in this
-        // module touches these variables.
+        // SAFETY: set_var's contract is process-wide — this is sound only
+        // because no other test in the WHOLE test binary reads or writes
+        // these variables (verified by grep), so no thread observes the
+        // mutation concurrently. Keep it that way.
         unsafe {
             std::env::remove_var("VELD_DAEMON_PORT");
             assert_eq!(daemon_port(), DEFAULT_DAEMON_PORT);

@@ -763,9 +763,21 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
 fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
+    // Resolve the veld binary as THIS daemon's sibling (current_exe), by
+    // absolute path — a bare `veld` in the login shell resolves via PATH to
+    // the INSTALLED binary, which would then operate a dev instance's
+    // DB/daemon (inherited env) and fail closed on a schema-ahead dev DB.
+    // The login shell stays: veld's own children need the user's full PATH.
+    let veld_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("veld")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "veld".to_owned());
     let cmd = format!(
-        "cd {} && veld {}",
+        "cd {} && {} {}",
         shell_escape(&project_root.to_string_lossy()),
+        shell_escape(&veld_bin),
         escaped_args.join(" "),
     );
 
