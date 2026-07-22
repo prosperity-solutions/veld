@@ -295,7 +295,7 @@ password-gated content, which a shared URL-keyed cache must not store.
 
 ## Viewer access control (passwords)
 
-Web shares are **password-protected by default** (SHARING_V2.md §6.1). The
+Web shares are **password-protected by default**. The
 developer's daemon sends the access policy — per-hostname mode plus the share
 password — inside the registration call, and re-sends it with every
 heartbeat. The gateway keeps it in memory only: a restart forgets it, the

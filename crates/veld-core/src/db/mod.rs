@@ -61,6 +61,15 @@ pub enum DbError {
 
     #[error("run \"{0}\" not found")]
     RunNotFound(String),
+
+    #[error(
+        "environment \"{0}\" already has a run in progress (starting/running/stopping) — \
+         stop it first or wait for its teardown to finish"
+    )]
+    EnvironmentBusy(String),
+
+    #[error("run id prefix \"{0}\" matches more than one run — use more characters")]
+    AmbiguousRunId(String),
 }
 
 /// Handle to the central Veld database. Cheap to clone; all clones share one
@@ -274,6 +283,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "node-process-stats",
         apply: migrate_v2_node_stats,
     },
+    Migration {
+        version: 3,
+        name: "environments-and-runs",
+        apply: migrate_v3_environments_and_runs,
+    },
+    Migration {
+        version: 4,
+        name: "run-graph-snapshot",
+        apply: migrate_v4_graph_snapshot,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -411,6 +430,164 @@ fn migrate_v2_node_stats(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
+/// v3: split "runs" into environments (the durable named slot) × runs (one
+/// execution instance each, keyed by `run_id`). Stopped/crashed runs become
+/// retention-bounded history instead of being deleted, and `log_lines` gains
+/// per-instance scoping.
+///
+/// Rebuild mechanics: SQLite cannot alter constraints, and `PRAGMA
+/// foreign_keys=OFF` is a no-op inside this already-open transaction — a
+/// naive `DROP TABLE runs` would cascade-delete every `nodes`/`node_stats`
+/// row through their `ON DELETE CASCADE` FKs. So all three tables are rebuilt
+/// in dependency order: create the new shapes, copy rows (preserving
+/// `runs.id` so `nodes.run_row` values stay valid), drop children before the
+/// parent, then rename — `ALTER TABLE ... RENAME` rewrites the referencing FK
+/// clauses to follow.
+fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
+    // Guard: `run_id` becomes UNIQUE. Duplicates can only exist in a DB whose
+    // rows predate the SQLite import. Re-key them with fresh UUIDs (not a
+    // text suffix — the value must stay a parseable UUID, or the row becomes
+    // unaddressable by every run_id-keyed operation after loading as nil).
+    {
+        let dup_ids: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM runs
+                 WHERE id NOT IN (SELECT MIN(id) FROM runs GROUP BY run_id)",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<Result<_, _>>()?;
+        for id in dup_ids {
+            conn.execute(
+                "UPDATE runs SET run_id = ?1 WHERE id = ?2",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), id],
+            )?;
+        }
+    }
+    conn.execute_batch(
+        r#"
+        CREATE TABLE environments (
+            id INTEGER PRIMARY KEY,
+            project_root TEXT NOT NULL REFERENCES projects(root) ON DELETE CASCADE,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            UNIQUE(project_root, name)
+        );
+
+        CREATE TABLE runs_v3 (
+            id INTEGER PRIMARY KEY,
+            environment_id INTEGER NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL,
+            end_reason TEXT,
+            end_detail TEXT,
+            execution_order TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL,
+            -- When begin_ending moved the run to 'stopping' — the daemon's
+            -- stale-stopping reaper uses this as its grace-period clock.
+            ending_at TEXT,
+            ended_at TEXT
+        );
+
+        INSERT INTO environments (project_root, name, created_at)
+            SELECT project_root, name, created_at FROM runs;
+
+        -- Copy each old run, preserving its rowid. Status normalization:
+        -- live statuses carry over with end_reason NULL; terminal rows get the
+        -- matching end_reason; anything outside the known set (a persisted
+        -- 'recovering', which is never written in practice) is normalized to
+        -- stopped so it cannot sit outside both the live set and every
+        -- reaper's gate forever.
+        INSERT INTO runs_v3 (id, environment_id, run_id, status, end_reason, end_detail,
+                             execution_order, created_at, ended_at)
+            SELECT r.id, e.id, r.run_id,
+                   CASE WHEN r.status IN ('starting','running','stopping','failed') THEN r.status
+                        ELSE 'stopped' END,
+                   CASE WHEN r.status IN ('starting','running') THEN NULL
+                        WHEN r.status = 'stopping' THEN NULL
+                        WHEN r.status = 'failed' THEN 'failed'
+                        ELSE 'stopped' END,
+                   CASE WHEN r.status IN ('starting','running','stopping','failed','stopped') THEN NULL
+                        ELSE '{"message":"status normalized by v3 migration"}' END,
+                   r.execution_order, r.created_at, r.stopped_at
+            FROM runs r
+            JOIN environments e ON e.project_root = r.project_root AND e.name = r.name;
+
+        CREATE TABLE nodes_v3 (
+            id INTEGER PRIMARY KEY,
+            run_row INTEGER NOT NULL REFERENCES runs_v3(id) ON DELETE CASCADE,
+            node_key TEXT NOT NULL,
+            node_name TEXT NOT NULL,
+            variant TEXT NOT NULL,
+            status TEXT NOT NULL,
+            pid INTEGER,
+            port INTEGER,
+            url TEXT,
+            outputs TEXT NOT NULL DEFAULT '{}',
+            readiness_phases TEXT NOT NULL DEFAULT '[]',
+            recovery_count INTEGER NOT NULL DEFAULT 0,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            last_liveness_error TEXT,
+            sensitive_keys TEXT NOT NULL DEFAULT '[]',
+            UNIQUE(run_row, node_key)
+        );
+        INSERT INTO nodes_v3 SELECT * FROM nodes;
+
+        CREATE TABLE node_stats_v3 (
+            id INTEGER PRIMARY KEY,
+            run_row INTEGER NOT NULL REFERENCES runs_v3(id) ON DELETE CASCADE,
+            node_key TEXT NOT NULL,
+            cpu_percent REAL NOT NULL,
+            memory_bytes INTEGER NOT NULL,
+            process_count INTEGER NOT NULL,
+            sampled_at TEXT NOT NULL
+        );
+        INSERT INTO node_stats_v3 SELECT * FROM node_stats;
+
+        -- Children before parent, so nothing cascades.
+        DROP TABLE node_stats;
+        DROP TABLE nodes;
+        DROP TABLE runs;
+
+        ALTER TABLE runs_v3 RENAME TO runs;
+        ALTER TABLE nodes_v3 RENAME TO nodes;
+        ALTER TABLE node_stats_v3 RENAME TO node_stats;
+
+        CREATE INDEX idx_nodes_run ON nodes(run_row);
+        CREATE INDEX idx_node_stats_lookup ON node_stats(run_row, node_key, sampled_at);
+        CREATE INDEX idx_node_stats_sampled ON node_stats(sampled_at);
+        CREATE INDEX idx_runs_env ON runs(environment_id, created_at);
+
+        -- The one-live-run invariant, enforced by the engine: a second
+        -- concurrent `veld start` fails atomically instead of racing a
+        -- check-then-act in application code.
+        CREATE UNIQUE INDEX idx_runs_one_live ON runs(environment_id)
+            WHERE status IN ('starting','running','stopping');
+
+        ALTER TABLE log_lines ADD COLUMN run_id TEXT;
+        "#,
+    )?;
+
+    // Prune before indexing: the run_id index build scans the whole table,
+    // which can hold a week of logs — shrink it first (same 168h policy GC
+    // applies) so the migration stays inside the 60s busy budget.
+    let cutoff = ts_to_str(chrono::Utc::now() - chrono::Duration::hours(168));
+    conn.execute("DELETE FROM log_lines WHERE ts < ?1", [&cutoff])?;
+    conn.execute_batch("CREATE INDEX idx_log_lines_run_id ON log_lines(run_id, id);")?;
+    Ok(())
+}
+
+/// v4: per-run graph snapshot (config forensics). A separate migration — NOT
+/// folded into v3 — because v3 already existed on this branch before the
+/// column did, so a database that migrated to v3 under an earlier build must
+/// still gain the column ("schema changes are always a NEW migration").
+///
+/// The JSON (see `GraphSnapshot`) is pre-interpolation by design:
+/// placeholders stay `${...}`, env is names-only — no resolved value (port,
+/// URL, secret output) ever lands here.
+fn migrate_v4_graph_snapshot(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE runs ADD COLUMN graph_snapshot TEXT;")
+}
+
 // ---------------------------------------------------------------------------
 // Timestamp helpers — one canonical format for every TEXT timestamp column
 // (RFC 3339, UTC, microsecond precision, `Z` suffix) so lexicographic
@@ -496,6 +673,101 @@ mod tests {
             Err(e) => panic!("expected NewerSchema, got {e}"),
             Ok(_) => panic!("expected NewerSchema, got Ok"),
         }
+    }
+
+    #[test]
+    fn v3_migration_preserves_rows_and_normalizes_statuses() {
+        use crate::state::{EndReason, NodeStatus, RunStatus};
+
+        // Build a genuine v2 database by hand (the shipped v1+v2 migrations),
+        // then open it through the normal path so v3 runs against real data.
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("veld.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+            migrate_v1_initial(&conn).unwrap();
+            migrate_v2_node_stats(&conn).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute_batch(
+                r#"
+                INSERT INTO projects (root, name) VALUES ('/tmp/p', 'proj');
+                INSERT INTO runs (project_root, name, run_id, status, execution_order, created_at, stopped_at) VALUES
+                  ('/tmp/p', 'dev',   'aaaaaaaa-0000-0000-0000-000000000001', 'running',    '["web:local"]', '2026-01-01T00:00:00.000000Z', NULL),
+                  ('/tmp/p', 'old',   'aaaaaaaa-0000-0000-0000-000000000002', 'stopped',    '[]', '2026-01-01T00:00:00.000000Z', '2026-01-02T00:00:00.000000Z'),
+                  ('/tmp/p', 'weird', 'aaaaaaaa-0000-0000-0000-000000000003', 'recovering', '[]', '2026-01-01T00:00:00.000000Z', NULL);
+                INSERT INTO nodes (run_row, node_key, node_name, variant, status, pid)
+                  VALUES (1, 'web:local', 'web', 'local', 'healthy', 4242);
+                INSERT INTO node_stats (run_row, node_key, cpu_percent, memory_bytes, process_count, sampled_at)
+                  VALUES (1, 'web:local', 1.5, 100, 1, '2026-01-01T00:00:01.000000Z');
+                "#,
+            )
+            .unwrap();
+            // Fresh timestamp — the v3 migration age-prunes log_lines before
+            // indexing, so a fixed old date would be (correctly) deleted.
+            conn.execute(
+                "INSERT INTO log_lines (project_root, run_name, node, variant, stream, ts, line)
+                 VALUES ('/tmp/p', 'dev', 'web', 'local', 'server', ?1, 'hello')",
+                [ts_to_str(chrono::Utc::now())],
+            )
+            .unwrap();
+        }
+
+        let db = Db::open_at(&path).unwrap();
+        let root = Path::new("/tmp/p");
+
+        // The table rebuild must NOT cascade-wipe nodes/node_stats.
+        let run = db.get_run(root, "dev").unwrap().unwrap();
+        assert_eq!(run.status, RunStatus::Running);
+        assert_eq!(run.end_reason, None);
+        assert_eq!(run.nodes["web:local"].pid, Some(4242));
+        let stats: i64 = db
+            .lock()
+            .query_row("SELECT COUNT(*) FROM node_stats", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stats, 1, "node_stats must survive the rebuild");
+
+        // Terminal rows get the matching end_reason; stopped_at → ended_at.
+        let old = db.get_run(root, "old").unwrap().unwrap();
+        assert_eq!(old.status, RunStatus::Stopped);
+        assert_eq!(old.end_reason, Some(EndReason::Stopped));
+        assert!(old.ended_at.is_some());
+
+        // Out-of-set legacy statuses are normalized to a terminal state so
+        // they can't sit outside both the live set and every reaper's gate.
+        let weird = db.get_run(root, "weird").unwrap().unwrap();
+        assert_eq!(weird.status, RunStatus::Stopped);
+        assert!(
+            weird
+                .end_detail
+                .unwrap()
+                .message
+                .unwrap()
+                .contains("normalized")
+        );
+
+        // Legacy log rows (run_id NULL) stay readable via the name scope.
+        let rows = db
+            .tail_logs(root, "dev", &crate::db::LogFilter::default(), 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].line, "hello");
+        // ...but are invisible under an instance scope, by design.
+        let scoped = db
+            .tail_logs(
+                root,
+                "dev",
+                &crate::db::LogFilter {
+                    run_id: Some("aaaaaaaa-0000-0000-0000-000000000001".into()),
+                    ..Default::default()
+                },
+                10,
+            )
+            .unwrap();
+        assert!(scoped.is_empty());
+
+        // Node status parses through the rebuild.
+        assert_eq!(run.nodes["web:local"].status, NodeStatus::Healthy);
     }
 
     #[cfg(unix)]

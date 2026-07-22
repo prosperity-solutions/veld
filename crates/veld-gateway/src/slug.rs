@@ -1,4 +1,4 @@
-//! Deterministic, unguessable public-URL slugs (SHARING_V2.md §5.3).
+//! Deterministic, unguessable public-URL slugs.
 //!
 //! ```text
 //! slug = base32( SHA-256("veld-gateway-slug/1" ‖ host_node_id ‖ len(hostname) ‖ hostname ‖ capability)[..16] )

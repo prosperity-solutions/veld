@@ -59,6 +59,8 @@ pub async fn run(urls: bool, json: bool) -> i32 {
                 let status_str = match run_info.status {
                     RunStatus::Running => output::green("running"),
                     RunStatus::Stopped => output::dim("stopped"),
+                    RunStatus::Crashed => output::red("crashed"),
+                    RunStatus::Failed => output::red("failed"),
                     _ => output::yellow(&format!("{:?}", run_info.status).to_lowercase()),
                 };
                 println!("    {} {}", output::bold(run_name), status_str,);

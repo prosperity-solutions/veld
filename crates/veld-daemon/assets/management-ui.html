@@ -35,6 +35,14 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .dot{width:6px;height:6px;border-radius:50%;background:var(--green);display:inline-block}
 .dot.off{background:var(--dim)}
 
+/* top-level Active/History view switcher — centered in the header row */
+header{position:relative}
+.view-switch{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);display:flex;gap:2px;padding:4px;background:var(--surface);border:1px solid var(--border);border-radius:8px;width:fit-content}
+.view-switch .seg-btn{flex:none;padding:4px 14px}
+.view-switch .count{color:var(--dim);font-weight:400;margin-left:4px}
+.view-switch .seg-btn.active .count{color:inherit;opacity:.7}
+@media (max-width:640px){.view-switch{position:static;transform:none;margin-left:auto;margin-right:12px}}
+
 .empty{text-align:center;padding:80px 20px;color:var(--text2)}
 .empty h2{font-size:16px;font-weight:500;margin-bottom:8px;color:var(--text)}
 .empty p{font-size:13px;line-height:1.6}
@@ -92,9 +100,17 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
 .badge.running,.badge.healthy{background:var(--green-bg);color:var(--green)}
 .badge.stopped{background:rgba(85,88,112,.15);color:var(--dim)}
 .badge.starting,.badge.stopping,.badge.health_checking,.badge.pending{background:var(--yellow-bg);color:var(--yellow)}
-.badge.failed{background:var(--red-bg);color:var(--red)}
-.badge.recovering,.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
+.badge.failed,.badge.crashed{background:var(--red-bg);color:var(--red)}
+.badge.unhealthy{background:var(--yellow-bg,#3d3800);color:var(--yellow)}
 .badge.skipped{background:rgba(85,88,112,.15);color:var(--dim)}
+
+/* last-run outcome line on ended environments */
+.card-outcome{padding:0 18px 10px;font-size:12px;color:var(--text2)}
+.card-outcome.err{color:var(--red)}
+.card-outcome .when{color:var(--dim)}
+/* history run selector in the card head (ended environments with >1 run) */
+.hist-select{background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;padding:2px 8px;border-radius:4px;font-family:inherit;max-width:220px}
+.hist-select:focus{outline:none;border-color:var(--accent)}
 
 .card-path{font-size:12px;color:var(--dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;unicode-bidi:plaintext;flex:1;min-width:0}
 .card-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:6px;padding:0 18px 12px}
@@ -201,6 +217,10 @@ header .subtitle{color:var(--text2);font-weight:400;font-size:14px}
     </svg>
     <span class="sep">/</span>
     <span class="subtitle">Environments</span>
+    <div class="segmented view-switch" id="view-switch" hidden>
+      <button class="seg-btn active" data-view="active">Active<span class="count" data-count="active"></span></button>
+      <button class="seg-btn" data-view="history">History<span class="count" data-count="history"></span></button>
+    </div>
     <div class="meta">
       <span id="status-dot"><span class="dot off"></span></span>
       <span id="status-text">connecting...</span>
@@ -217,7 +237,12 @@ const $$=(s,p)=>(p||document).querySelectorAll(s);
 const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
 let lastFP=null;
 let sharesByRun={};
+let historyByKey={};
 let joinCount=0;
+// Top-level view: 'active' (live environments — the default, so ended runs
+// don't clutter the everyday dashboard) or 'history' (ended environments).
+let view=localStorage.getItem('veld-view')==='history'?'history':'active';
+let lastEnvData=null;
 const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
@@ -227,7 +252,11 @@ function fp(data){
     const rs=p.runs.map(r=>{
       const u=Object.keys(r.urls||{}).sort().map(k=>k+'='+r.urls[k]).join('|');
       const n=(r.nodes||[]).map(x=>x.name+':'+x.status).sort().join('|');
-      return r.name+':'+r.status+':'+u+':'+n;
+      // run_id + outcome + history length: a crash, a restart (new run id),
+      // or a new history entry must re-render even when the status string
+      // alone is unchanged (e.g. stopped → stopped after a failed start).
+      const hist=(r.history||[]).length;
+      return r.name+':'+r.status+':'+r.run_id+':'+(r.outcome||'')+':h'+hist+':'+u+':'+n;
     }).sort().join(';');
     return p.name+'/'+rs;
   }).sort().join('\n');
@@ -253,45 +282,102 @@ async function refresh(){
 }
 
 function render(data){
+  lastEnvData=data;
+  // View switcher: counts + visibility. Hidden entirely until something exists.
+  const liveCount=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.live).length,0);
+  const endedCount=data.projects.reduce((n,p)=>n+p.runs.filter(r=>!r.live).length,0);
+  const sw=$('#view-switch');
+  if(sw){
+    sw.hidden=!(liveCount||endedCount);
+    const ac=sw.querySelector('[data-count="active"]'),hc=sw.querySelector('[data-count="history"]');
+    if(ac)ac.textContent=liveCount?(' '+liveCount):'';
+    if(hc)hc.textContent=endedCount?(' '+endedCount):'';
+    sw.querySelectorAll('.seg-btn').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
+  }
+
   if(!data.projects.length){
     content.innerHTML=joinCount>0
       ?'<div class="empty fade-in"><h2>No local environments</h2><p>You’ve joined '+joinCount+' shared environment'+(joinCount>1?'s':'')+' — see the panel above.</p></div>'
       :'<div class="empty fade-in"><h2>No environments yet</h2><p>Start one with <code>veld start</code> in any project with a <code>veld.json</code></p></div>';
     return;
   }
+  // Empty states for the selected view (there ARE environments, just not here).
+  if(view==='active'&&!liveCount){
+    content.innerHTML='<div class="empty fade-in"><h2>Nothing running</h2><p>'+endedCount+' ended environment'+(endedCount>1?'s':'')+' in <b>History</b>.</p></div>';
+    stopHiddenLogPolling(new Set());
+    return;
+  }
+  if(view==='history'&&!endedCount){
+    content.innerHTML='<div class="empty fade-in"><h2>No ended environments</h2><p>Stopped and crashed environments land here (kept for 7 days).</p></div>';
+    stopHiddenLogPolling(new Set());
+    return;
+  }
   for(const k of Object.keys(runState)){const s=runState[k];if(s.panelEl&&s.panelEl.parentNode)s.panelEl.parentNode.removeChild(s.panelEl);}
   let h='';
+  const shownKeys=new Set();
   for(const proj of data.projects){
-    const runs=proj.runs.slice().sort((a,b)=>{
-      if(a.status==='running'&&b.status!=='running')return -1;
-      if(b.status==='running'&&a.status!=='running')return 1;
-      return a.name.localeCompare(b.name);
-    });
+    const runs=proj.runs.slice()
+      .filter(r=>view==='active'?r.live:!r.live)
+      .sort((a,b)=>{
+        if(a.status==='running'&&b.status!=='running')return -1;
+        if(b.status==='running'&&a.status!=='running')return 1;
+        return a.name.localeCompare(b.name);
+      });
     for(const run of runs){
+      shownKeys.add(rk(proj.name,run.name));
       const key=rk(proj.name,run.name);
       const st=runState[key]||{tab:'services'};
-      const nodes=run.nodes||[];
-      const nodeMap={};for(const n of nodes)nodeMap[n.name]=n;
 
       // A run may host a peer share and/or one or more web shares at once
       // (separate capabilities). Split them: web shares carry public_urls.
       const runShares=(run.status==='running')?(sharesByRun[run.name]||[]):[];
       const peerShare=runShares.find(x=>!(x.public_urls&&x.public_urls.length))||null;
       const webShares=runShares.filter(x=>x.public_urls&&x.public_urls.length);
-      const active=run.status==='running'||run.status==='starting';
+      const live=!!run.live;
+      // History run selection: an ended environment's card can show any past
+      // run (badge, outcome, node table). '' / unset = the latest ended run
+      // (the card's own data); otherwise a run_id from run.history.
+      const hist=run.history||[];
+      const histSel=(!live&&st.histSel)?hist.find(x=>x.run_id===st.histSel):null;
+      if(st.histSel&&!histSel)st.histSel=null; // selected run got pruned
+      const shownStatus=histSel?histSel.status:run.status;
+      const shownOutcome=histSel?histSel.outcome:run.outcome;
+      const shownEnded=histSel?histSel.ended_at:run.ended_at;
+      // Node table follows the shown run. History nodes carry only
+      // name/variant/status/exit_code — url/pid/actions are absent, which
+      // the table already renders as dashes/blank (the run is over).
+      const nodes=(histSel?histSel.nodes:run.nodes)||[];
 
       h+='<div class="card fade-in" data-key="'+esc(key)+'" data-run="'+esc(run.name)+'" data-path="'+esc(proj.project_root)+'">';
-      // Zone 1 — identity: run name primary, project + path as context, status.
+      // Zone 1 — identity: environment name primary, project + path as
+      // context, status of the shown run.
       h+='<div class="card-head">';
       h+='<span class="card-run">'+esc(run.name)+'</span>';
       h+='<span class="card-project">'+esc(proj.name)+'</span>';
       h+='<span class="card-path" title="'+esc(proj.project_root)+'">'+esc(proj.project_root)+'</span>';
-      h+='<span class="badge '+esc(run.status)+'">'+esc(run.status)+'</span>';
+      if(!live&&hist.length){
+        h+='<select class="hist-select" data-action="hist-select" title="Show an older run">';
+        h+='<option value=""'+(histSel?'':' selected')+'>'+esc((run.outcome||run.status)+(run.ended_at?' · '+fmtWhen(run.ended_at):''))+'</option>';
+        for(const e2 of hist){
+          h+='<option value="'+esc(e2.run_id)+'"'+(histSel&&histSel.run_id===e2.run_id?' selected':'')+'>'
+            +esc((e2.outcome||e2.status)+' · '+fmtWhen(e2.created_at))+'</option>';
+        }
+        h+='</select>';
+      }
+      h+='<span class="badge '+esc(shownStatus)+'">'+esc(shownStatus)+'</span>';
       h+='</div>';
+      // Shown run's outcome — the "why did it die" line ("crashed at 3am" →
+      // open card, read outcome, hit Restart).
+      if(!live&&shownOutcome){
+        const bad=shownStatus==='crashed'||shownStatus==='failed';
+        h+='<div class="card-outcome'+(bad?' err':'')+'">'+esc(shownOutcome)
+          +(shownEnded?' <span class="when">· ended '+esc(fmtWhen(shownEnded))+'</span>':'')
+          +'</div>';
+      }
       // Zone 2 — one action toolbar (lifecycle + utility + share).
       h+='<div class="card-toolbar">';
-      if(active){
-        h+='<button class="card-btn" data-action="restart-env" title="Restart environment">Restart</button>';
+      h+='<button class="card-btn" data-action="restart-env" title="'+(live?'Restart environment':'Start this environment again')+'">Restart</button>';
+      if(live){
         h+='<button class="card-btn" data-action="stop-env" title="Stop environment">Stop</button>';
       }
       h+='<button class="card-btn" data-action="open-terminal" title="Open in Terminal">Terminal</button>';
@@ -388,15 +474,29 @@ function render(data){
     }
   }
   content.innerHTML=h;
+  // Run history per card, for the logs run picker (kept out of the DOM
+  // string — the picker lives in the persistent log panel element).
+  historyByKey={};
+  for(const proj of data.projects)for(const run of proj.runs)historyByKey[rk(proj.name,run.name)]=run.history||[];
   for(const k of Object.keys(runState)){
     const s=runState[k];
     const host=$('[data-loghost="'+CSS.escape(k)+'"]');
     if(host&&s.panelEl)host.appendChild(s.panelEl);
-    if(s.tab==='logs'&&!s.logInterval)startLogPolling(k);
+    if(s.panelEl)updateRunPicker(k,s);
+    if(s.tab==='logs'&&!s.logInterval&&shownKeys.has(k))startLogPolling(k);
   }
+  stopHiddenLogPolling(shownKeys);
   // Freshly rendered cells are placeholders; fill them without waiting for the
   // next stats tick.
   refreshStats();
+}
+
+// Stop log polling for any card not currently rendered (the other view) —
+// its panel keeps its state and resumes when the view shows it again.
+function stopHiddenLogPolling(shownKeys){
+  for(const k of Object.keys(runState)){
+    if(!shownKeys.has(k))stopLogPolling(k);
+  }
 }
 
 // --- Log panel ---
@@ -405,10 +505,11 @@ function ensureLogPanel(key){
   let s=runState[key];if(!s){s=runState[key]={tab:'logs'};}
   if(s.panelEl)return s;
   s.autoScroll=true;s.knownNodes=new Map();s.prevHtml=null;s.fetching=false;s.logFilter='';s.searchTerm='';s.ctxLines=5;
-  s.lastData=null;s.sourceFilter='all'; // cache raw data for re-renders
+  s.lastData=null;s.sourceFilter='all';s.runFilter=''; // cache raw data for re-renders
   const el=document.createElement('div');
   el.innerHTML=
     '<div class="log-bar">'+
+      '<select class="run-filter" data-action="run-filter" title="Which run instance to read"><option value="">Latest run</option><option value="all">All runs</option></select>'+
       '<select class="node-filter" data-action="log-filter"><option value="">All nodes</option></select>'+
       '<div class="source-filter">'+
         '<button class="active" data-action="source-filter" data-source="all">All</button>'+
@@ -437,10 +538,45 @@ function updateAutoScrollBtn(el,on){
   btn.classList.toggle('on',on);btn.textContent=on?'Auto-scroll ON':'Auto-scroll OFF';
 }
 
+// Rebuild the run picker's history options in place: "Latest run", then each
+// ended predecessor as "<outcome> · <start time>", then "All runs". The
+// current selection survives re-renders; a selection whose run was pruned
+// falls back to the latest run.
+function updateRunPicker(key,s){
+  if(!s.panelEl)return;const sel=s.panelEl.querySelector('.run-filter');if(!sel)return;
+  const hist=historyByKey[key]||[];
+  const sig=hist.map(x=>x.run_id).join(',');
+  if(sel.dataset.sig!==sig){
+    sel.dataset.sig=sig;
+    sel.innerHTML='';
+    const add=(val,label)=>{const o=document.createElement('option');o.value=val;o.textContent=label;sel.appendChild(o);};
+    add('','Latest run');
+    for(const e of hist)add(e.run_id,(e.outcome||e.status)+' · '+fmtWhen(e.created_at));
+    add('all','All runs');
+  }
+  // Always re-apply the state's selection — it can change without the
+  // history signature changing (e.g. the card's history run selector
+  // scoped the logs to a past run). A pruned selection falls back to latest.
+  const v=s.runFilter||'';
+  sel.value=Array.from(sel.options).some(o=>o.value===v)?v:'';
+  if(sel.value!==v){s.runFilter=sel.value;}
+}
+
+// Compact local time for outcome lines / picker labels: "14:32" today,
+// "Jul 20 14:32" otherwise.
+function fmtWhen(iso){
+  const d=new Date(iso);if(isNaN(d))return iso;
+  const now=new Date();
+  const hm=d.toTimeString().slice(0,5);
+  if(d.toDateString()===now.toDateString())return hm;
+  return d.toLocaleDateString(undefined,{month:'short',day:'numeric'})+' '+hm;
+}
+
 function startLogPolling(key){
   const s=runState[key];if(!s||s.logInterval)return;
   const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;if(!runName)return;
-  ensureLogPanel(key);
+  const panel=ensureLogPanel(key);
+  updateRunPicker(key,panel);
   const host=$('[data-loghost="'+CSS.escape(key)+'"]');
   if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
   fetchLogs(key,runName);
@@ -453,7 +589,9 @@ async function fetchLogs(key,runName){
   const s=runState[key];if(!s||s.fetching)return;s.fetching=true;
   try{
     const src=s.sourceFilter||'all';
-    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src);
+    // '' = latest run (server default); a short id or 'all' scopes the read.
+    const rq=s.runFilter?('&run_id='+encodeURIComponent(s.runFilter)):'';
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src+rq);
     if(!resp.ok)return;
     const data=await resp.json();
     for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
@@ -564,6 +702,15 @@ function highlightSearch(html,term){
 // --- Event delegation ---
 
 document.addEventListener('click',e=>{
+  const vb=e.target.closest('#view-switch .seg-btn');
+  if(vb){
+    if(vb.dataset.view!==view){
+      view=vb.dataset.view;
+      localStorage.setItem('veld-view',view);
+      if(lastEnvData)render(lastEnvData);
+    }
+    return;
+  }
   const card=e.target.closest('.card');
   const tabBtn=e.target.closest('[data-action="tab"]');
   if(tabBtn&&card){
@@ -634,6 +781,25 @@ document.addEventListener('change',e=>{
   const sel=e.target.closest('[data-action="log-filter"]');
   if(sel){const card=sel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
     if(s){s.logFilter=sel.value;s.prevHtml=null;s.autoScroll=true;if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);doRenderLogs(key);}return;}
+  const runSel=e.target.closest('[data-action="run-filter"]');
+  if(runSel){const card=runSel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
+    if(s){s.runFilter=runSel.value;s.prevHtml=null;s.lastData=null;s.autoScroll=true;
+      if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
+      const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}return;}
+  const histSel=e.target.closest('[data-action="hist-select"]');
+  if(histSel){
+    const card=histSel.closest('.card');if(!card)return;
+    const key=card.dataset.key;
+    const s=runState[key]||(runState[key]={tab:'services'});
+    // Swap the card to the chosen run and scope the logs picker to it —
+    // '' = the latest ended run (matches the picker's "Latest run").
+    s.histSel=histSel.value||null;
+    s.runFilter=histSel.value||'';
+    s.prevHtml=null;s.lastData=null;
+    if(lastEnvData)render(lastEnvData);
+    if(s.tab==='logs'){const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}
+    return;
+  }
 });
 
 document.addEventListener('input',e=>{

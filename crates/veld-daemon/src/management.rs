@@ -84,10 +84,60 @@ struct ProjectInfo {
 
 #[derive(Serialize)]
 struct RunInfo {
+    /// Environment name (what `--name` addresses).
     name: String,
+    /// Status of the environment's latest run.
     status: RunStatus,
+    /// Whether the latest run occupies the live slot. Stale URLs on a
+    /// non-live run must never read as reachable — `urls`/node URLs are
+    /// stripped server-side when this is false.
+    live: bool,
+    /// Full run UUID of the latest run — `run_id` means the canonical UUID on
+    /// every veld JSON surface (`veld runs --json`, `veld status --json`).
+    run_id: String,
+    /// Git-style short prefix of `run_id`, for display.
+    short_id: String,
+    /// One-line outcome of the latest run when it has ended
+    /// (e.g. "crashed (api:local pid died)").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at: Option<String>,
     urls: HashMap<String, String>,
     nodes: Vec<NodeInfo>,
+    /// Ended runs, newest first (retention-bounded) — the log run picker and
+    /// the history view feed from this.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    history: Vec<HistoryEntry>,
+}
+
+/// One ended run in an environment's history, with the final node states —
+/// enough for the dashboard's history run selector to render the full card
+/// (badge, outcome, node table) for any past run.
+#[derive(Serialize)]
+struct HistoryEntry {
+    /// Full run UUID (same contract as `veld runs --json`).
+    run_id: String,
+    /// Git-style short prefix, for display.
+    short_id: String,
+    status: RunStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    created_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ended_at: Option<String>,
+    /// Final node states (no URLs/PIDs — the run is over).
+    nodes: Vec<HistoryNode>,
+}
+
+#[derive(Serialize)]
+struct HistoryNode {
+    name: String,
+    variant: String,
+    status: NodeStatus,
+    /// Exit code where one was observable (command/oneshot nodes).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exit_code: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -169,9 +219,9 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                 .runs
                 .values()
                 .map(|r| {
-                    let mut nodes: Vec<NodeInfo> = project_state
-                        .as_ref()
-                        .and_then(|ps| ps.get_run(&r.name))
+                    let latest = project_state.as_ref().and_then(|ps| ps.get_run(&r.name));
+                    let live = r.status.is_live();
+                    let mut nodes: Vec<NodeInfo> = latest
                         .map(|rs| {
                             rs.nodes
                                 .values()
@@ -179,8 +229,10 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                                     name: ns.node_name.clone(),
                                     variant: ns.variant.clone(),
                                     status: ns.status.clone(),
-                                    url: ns.url.clone(),
-                                    pid: ns.pid,
+                                    // Routes die with the run — an ended
+                                    // run's URLs must not render as links.
+                                    url: if live { ns.url.clone() } else { None },
+                                    pid: if live { ns.pid } else { None },
                                     recovery_count: ns.recovery_count,
                                     consecutive_failures: ns.consecutive_failures,
                                     last_liveness_error: ns.last_liveness_error.clone(),
@@ -191,11 +243,53 @@ async fn list_environments() -> Result<Json<EnvironmentList>, StatusCode> {
                         .unwrap_or_default();
                     nodes.sort_by(|a, b| a.name.cmp(&b.name));
 
+                    // Ended runs, newest first; the latest run is shown on
+                    // the card itself, so history lists only its predecessors.
+                    let history: Vec<HistoryEntry> = db
+                        .list_runs(&entry.project_root, Some(&r.name))
+                        .unwrap_or_default()
+                        .into_iter()
+                        .filter(|run| !run.is_live())
+                        .filter(|run| latest.is_none_or(|l| run.run_id != l.run_id))
+                        .map(|run| {
+                            let mut hnodes: Vec<HistoryNode> = run
+                                .nodes
+                                .values()
+                                .map(|ns| HistoryNode {
+                                    name: ns.node_name.clone(),
+                                    variant: ns.variant.clone(),
+                                    status: ns.status.clone(),
+                                    exit_code: ns.outputs.get("exit_code").cloned(),
+                                })
+                                .collect();
+                            hnodes.sort_by(|a, b| a.name.cmp(&b.name));
+                            HistoryEntry {
+                                run_id: run.run_id.to_string(),
+                                short_id: run.short_id(),
+                                status: run.status,
+                                outcome: Some(run.outcome_label()),
+                                created_at: run.created_at.to_rfc3339(),
+                                ended_at: run.ended_at.map(|t| t.to_rfc3339()),
+                                nodes: hnodes,
+                            }
+                        })
+                        .collect();
+
                     RunInfo {
                         name: r.name.clone(),
-                        status: r.status.clone(),
-                        urls: r.urls.clone(),
+                        status: r.status,
+                        live,
+                        run_id: latest
+                            .map(|l| l.run_id.to_string())
+                            .unwrap_or_else(|| r.run_id.to_string()),
+                        short_id: latest
+                            .map(|l| l.short_id())
+                            .unwrap_or_else(|| r.run_id.to_string()[..8].to_owned()),
+                        outcome: latest.filter(|l| !l.is_live()).map(|l| l.outcome_label()),
+                        ended_at: latest.and_then(|l| l.ended_at).map(|t| t.to_rfc3339()),
+                        urls: if live { r.urls.clone() } else { HashMap::new() },
                         nodes,
+                        history,
                     }
                 })
                 .collect();
@@ -319,6 +413,10 @@ struct LogQuery {
     /// Filter by source: "all" (default), "server", or "client".
     #[serde(default = "default_source")]
     source: String,
+    /// Run instance to read (id prefix). Default: the environment's latest
+    /// run. `all` reads every run under the name interleaved (incl. legacy
+    /// unscoped rows).
+    run_id: Option<String>,
 }
 
 fn default_source() -> String {
@@ -361,13 +459,32 @@ async fn get_logs(
 
     let project_root = find_project_for_run(&registry, &run_name).ok_or(StatusCode::NOT_FOUND)?;
 
-    let run_state = db
-        .get_run(&project_root, &run_name)
-        .map_err(|e| {
-            warn!("failed to load run state for logs: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
+    // Resolve the run instance: an explicit id prefix, "all" for the old
+    // interleaved scope, or (default) the environment's latest run.
+    let run_state = match q.run_id.as_deref() {
+        Some(prefix) if prefix != "all" => db
+            .get_run_by_id_prefix(&project_root, prefix)
+            .map_err(|e| {
+                warn!("failed to resolve run id for logs: {e}");
+                StatusCode::BAD_REQUEST
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?,
+        _ => db
+            .get_run(&project_root, &run_name)
+            .map_err(|e| {
+                warn!("failed to load run state for logs: {e}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .ok_or(StatusCode::NOT_FOUND)?,
+    };
+    let run_scope: Option<String> = match q.run_id.as_deref() {
+        Some("all") => None,
+        _ => Some(run_state.run_id.to_string()),
+    };
+    // Scope log queries by the RESOLVED run's environment name — an explicit
+    // run_id prefix may belong to a different environment than the path
+    // segment, and a mismatched (name, run_id) pair matches zero rows.
+    let run_name = run_state.name.clone();
 
     let lines_limit = q.lines.clamp(1, 5000);
     let include_server = q.source == "all" || q.source == "server";
@@ -380,6 +497,7 @@ async fn get_logs(
             node: node.map(str::to_owned),
             variant: variant.map(str::to_owned),
             streams: Some(vec![stream.as_str()]),
+            run_id: run_scope.clone(),
         };
         db.tail_logs(&project_root, &run_name, &filter, lines_limit)
             .map(|rows| {
@@ -672,9 +790,21 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
 fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
+    // Resolve the veld binary as THIS daemon's sibling (current_exe), by
+    // absolute path — a bare `veld` in the login shell resolves via PATH to
+    // the INSTALLED binary, which would then operate a dev instance's
+    // DB/daemon (inherited env) and fail closed on a schema-ahead dev DB.
+    // The login shell stays: veld's own children need the user's full PATH.
+    let veld_bin = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("veld")))
+        .filter(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "veld".to_owned());
     let cmd = format!(
-        "cd {} && veld {}",
+        "cd {} && {} {}",
         shell_escape(&project_root.to_string_lossy()),
+        shell_escape(&veld_bin),
         escaped_args.join(" "),
     );
 

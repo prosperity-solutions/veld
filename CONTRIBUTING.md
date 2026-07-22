@@ -47,28 +47,57 @@ Veld has three tiers of binaries with different lifecycles:
 
 ### Tier 1: CLI changes (most common)
 
-Use `just dev` or `veld-dev` for read-only CLI commands:
+`just dev` (and the `veld-dev` wrapper) run the source build against a
+**dedicated dev database** at `.veld-dev/veld.db` (gitignored) — never the
+installed veld's DB. Dev builds can carry newer schema migrations, and a
+schema-ahead binary migrates whatever DB it opens; on the real DB that would
+blind the installed daemon (`NewerSchema`) until `veld update`. Isolation
+makes that impossible by default:
 
 ```sh
-just dev feedback next --wait --name myrun --json
-just dev status
-veld-dev doctor
+just dev start --name foo website:local   # own state, invisible to installed veld
+just dev runs --name foo
+just dev-db-reset                          # fresh dev state
+just dev-db-from-real                      # snapshot the real DB → rehearse migrations on the copy
+just dev-daemon                            # daemon from source, ALONGSIDE the installed one
 ```
 
-**Do not use `veld-dev` for `start`/`restart`** — it overrides the lib directory which breaks Caddy path resolution. Use the installed `veld` for starting environments:
+`just dev-daemon` is a full parallel instance: own DB, own port (19898 vs the
+installed 19899), own socket, and its own dashboard at
+**https://veld-dev.localhost** (the route is self-registered with the shared
+Caddy on startup and removed on Ctrl-C). Runs started with `just dev` mint
+routes pointing at the dev daemon, so their feedback overlay/client logs land
+in the dev instance too.
+
+The helper/Caddy/DNS layer is *not* instanced — it's a singleton owning
+443/18443 and system DNS; both instances share it. And the installed daemon
+only watches the real DB: dev runs get no crash detection unless
+`just dev-daemon` is running.
+
+To point the source-built CLI at the **real** DB — e.g. a feedback loop
+against a run the installed veld started — use `just dev-real <args>`. It
+refuses to run when the branch's schema is ahead of the real DB (that's the
+migration trap above); in that case test via `just dev` + `just dev-daemon`
+or `just dev-install`.
+
+**`veld-dev` — the dev instance from any project.** `just dev-link` (one-time)
+installs `~/.local/bin/veld-dev`, a wrapper that carries the full dev
+instance (dev DB, daemon port 19898, dev socket). It is the complete CLI —
+`start`/`stop`/`restart` included — and shares the installed helper/Caddy,
+so URLs work normally. The old "don't `veld-dev start`" caveat is gone: the
+wrapper no longer overrides the lib directory (the CLI↔installed-services
+version gate is skipped for dev instances instead).
 
 ```sh
-veld start --name myrun website:local    # uses installed veld
-veld-dev feedback next --wait --name myrun    # uses source build for CLI
+just dev-link                       # one-time: creates ~/.local/bin/veld-dev
+cd ~/some-test-project
+veld-dev start website:local --name devtest   # dev instance, from anywhere
+veld-dev runs --name devtest
+veld-dev status
 ```
 
-For cross-project CLI use:
-
-```sh
-just dev-link    # one-time: creates ~/.local/bin/veld-dev
-cd ~/other-project
-veld-dev feedback next --wait --name myrun
-```
+Rebuilds: `veld-dev` executes `target/debug/veld` directly, so a plain
+`cargo build` in the repo refreshes it — no re-link needed.
 
 ### Tier 2: Daemon changes (feedback overlay, client-log, health monitoring)
 

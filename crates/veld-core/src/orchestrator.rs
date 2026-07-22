@@ -17,7 +17,9 @@ use crate::logging::{self, LogWriter};
 use crate::port::PortAllocator;
 use crate::process;
 use crate::progress::ProgressEvent;
-use crate::state::{NodeState, NodeStatus, ReadinessPhase, RunState, RunStatus};
+use crate::state::{
+    EndDetail, EndReason, NodeState, NodeStatus, ReadinessPhase, RunState, RunStatus,
+};
 use crate::url;
 use crate::variables::VariableContext;
 
@@ -69,6 +71,9 @@ pub enum OrchestratorError {
         reason: String,
         failure_message: Option<String>,
     },
+
+    #[error("environment '{0}' was replaced by another `veld start` while starting")]
+    Superseded(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -103,8 +108,9 @@ pub enum StopResult {
 ///
 /// A `Starting` run that has never spawned is left alone: it leaks no processes
 /// or routes, and a same-name `veld start` (`cleanup_stale_run`) or `veld stop`
-/// clears it. Any other status (Stopping/Stopped/Failed/Recovering) is never
-/// reaped here.
+/// clears it. Any other status is never reaped here: `Stopping` belongs to an
+/// ender that is still tearing down (the daemon's grace-gated stale-`stopping`
+/// reaper covers a SIGKILLed one), and terminal runs are history.
 fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -> bool {
     if any_alive {
         return false;
@@ -114,6 +120,99 @@ fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -
         RunStatus::Starting => ever_spawned,
         _ => false,
     }
+}
+
+/// Best-effort kill of a set of PIDs, then a bounded wait for them to die.
+/// Returns whether every PID is confirmed dead. Callers finalize a run only
+/// on `true`; on `false` the run keeps a live/`stopping` status so a reaper
+/// still covers the leaked process (leak-freedom never depends on the label).
+async fn kill_and_confirm(pids: &[u32]) -> bool {
+    for &pid in pids {
+        if process::is_alive(pid) {
+            let _ = process::kill_process(pid).await;
+        }
+    }
+    for _ in 0..10 {
+        if pids.iter().all(|&p| !process::is_alive(p)) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    }
+    pids.iter().all(|&p| !process::is_alive(p))
+}
+
+/// Capture what this run is being started WITH — the pre-interpolation
+/// resolved graph (see [`crate::state::GraphSnapshot`]). Raw command strings
+/// keep their `${...}` placeholders and env is names-only, so no resolved
+/// value (port, URL, secret output) is ever persisted.
+fn build_graph_snapshot(
+    config: &VeldConfig,
+    config_hash: String,
+    plan: &[Vec<NodeSelection>],
+) -> crate::state::GraphSnapshot {
+    let mut nodes = std::collections::BTreeMap::new();
+    // The FULL resolved graph, deliberately including the oneshot terminal
+    // node (which never gets a node row of its own) — the snapshot describes
+    // what was planned, not what spawned.
+    for sel in plan.iter().flatten() {
+        let Some(node_cfg) = config.nodes.get(&sel.node) else {
+            continue;
+        };
+        let Some(variant_cfg) = node_cfg.variants.get(&sel.variant) else {
+            continue;
+        };
+        let command = variant_cfg
+            .script
+            .as_ref()
+            .map(|s| format!("script:{s}"))
+            .or_else(|| variant_cfg.command.clone());
+        let mut env_keys: Vec<String> = config::resolve_env(
+            config.env.as_ref(),
+            node_cfg.env.as_ref(),
+            variant_cfg.env.as_ref(),
+        )
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+        env_keys.sort();
+        let url_template = (variant_cfg.step_type == config::StepType::StartServer).then(|| {
+            url::resolve_url_template(
+                &config.url_template,
+                node_cfg.url_template.as_deref(),
+                variant_cfg.url_template.as_deref(),
+            )
+            .to_owned()
+        });
+        nodes.insert(
+            RunState::node_key(&sel.node, &sel.variant),
+            crate::state::NodeSnapshot {
+                step_type: match variant_cfg.step_type {
+                    config::StepType::Command => "command".to_owned(),
+                    config::StepType::StartServer => "start_server".to_owned(),
+                },
+                command,
+                cwd: variant_cfg.cwd.clone().or_else(|| node_cfg.cwd.clone()),
+                env_keys,
+                url_template,
+            },
+        );
+    }
+    crate::state::GraphSnapshot { config_hash, nodes }
+}
+
+/// Machine-readable outcome detail for a failed start.
+fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
+    let mut detail = EndDetail::default();
+    match e {
+        OrchestratorError::NodeFailed { node, variant, .. } => {
+            detail.failed_node = Some(format!("{node}:{variant}"));
+        }
+        OrchestratorError::SetupFailed { name, .. } => {
+            detail.failed_step = Some(name.clone());
+        }
+        _ => {}
+    }
+    detail.message = Some(e.to_string().chars().take(500).collect());
+    detail
 }
 
 /// Pre-computed port and URL for a `start_server` node, resolved before
@@ -173,6 +272,12 @@ struct NodeExecutionResult {
 pub struct Orchestrator {
     pub config: VeldConfig,
     pub config_path: PathBuf,
+    /// SHA-256 of the veld.json bytes, hashed once at construction — as close
+    /// to the parse as we can get without changing the config-loading API, so
+    /// the snapshot's hash describes (within microseconds of) the bytes that
+    /// became `config`, not whatever is on disk seconds later when `start`'s
+    /// cleanup phases have finished.
+    config_hash: String,
     pub project_root: PathBuf,
     pub db: Db,
     pub port_allocator: PortAllocator,
@@ -214,9 +319,16 @@ impl Orchestrator {
     pub fn new(config_path: PathBuf, config: VeldConfig) -> Result<Self, OrchestratorError> {
         let project_root = config::project_root(&config_path);
         let db = Db::open()?;
+        let config_hash = {
+            use sha2::{Digest, Sha256};
+            std::fs::read(&config_path)
+                .map(|bytes| format!("{:x}", Sha256::digest(&bytes)))
+                .unwrap_or_default()
+        };
         Ok(Self {
             config,
             config_path,
+            config_hash,
             project_root,
             db,
             port_allocator: PortAllocator::new(),
@@ -369,6 +481,22 @@ impl Orchestrator {
         self.debug_log("Caddy start requested").await;
 
         let mut run = RunState::new(run_name, &self.config.name);
+        // Forensics: record what this run is being started with, so a later
+        // `veld runs show/diff` can answer "what changed since the run that
+        // worked" even after veld.json moved on.
+        run.graph_snapshot = Some(build_graph_snapshot(
+            &self.config,
+            self.config_hash.clone(),
+            &plan,
+        ));
+        // Scope the run-level log streams to this instance (the writers were
+        // created before the run existed).
+        if let Some(w) = self.internal_log.as_mut() {
+            w.set_run_id(run.run_id);
+        }
+        if let Some(w) = self.debug_writer.as_mut() {
+            w.set_run_id(run.run_id);
+        }
         self.debug_log(&format!(
             "Run '{}' created (id: {}), graph has {} stages",
             run_name,
@@ -377,8 +505,17 @@ impl Orchestrator {
         ))
         .await;
 
-        // Run project-level setup steps before the graph executes.
-        self.run_setup_steps(run_name).await?;
+        // Run project-level setup steps before the graph executes. A setup
+        // failure happens before the run is persisted, so record it as
+        // `failed` history directly — this run never held the live slot.
+        if let Err(e) = self.run_setup_steps(run_name).await {
+            run.status = RunStatus::Failed;
+            run.end_reason = Some(EndReason::Failed);
+            run.end_detail = Some(end_detail_for_error(&e));
+            run.ended_at = Some(chrono::Utc::now());
+            let _ = self.save_state(&run);
+            return Err(e);
+        }
 
         // Gather context info for URL templates.
         let branch = url::detect_git_branch(&self.project_root);
@@ -572,6 +709,32 @@ impl Orchestrator {
                 // Save partial state after each stage so that Ctrl+C or crashes
                 // leave enough information for `veld stop` to find and kill PIDs.
                 self.save_state(&run)?;
+
+                // A concurrent same-name `veld start` may have replaced this
+                // run mid-flight (`cleanup_stale_run`: begin_ending(replaced)
+                // + finalize) — the save above was then a silent no-op
+                // (terminal runs are immutable) and anything this start
+                // spawns from here on would be tracked by no run row and
+                // covered by no reaper. Detect it, kill what we know about,
+                // and abort instead of leaking.
+                match self.db.run_status_by_id(&run.run_id) {
+                    Ok(Some(s)) if !s.is_live() => {
+                        let pids: Vec<u32> = run.nodes.values().filter_map(|ns| ns.pid).collect();
+                        if !kill_and_confirm(&pids).await {
+                            // Nothing can persist these PIDs (the run is
+                            // terminal and immutable), so no reaper covers
+                            // them — a warning is the only remaining signal.
+                            tracing::warn!(
+                                run_name,
+                                ?pids,
+                                "superseded start could not confirm killing its own \
+                                 spawned processes — they may leak"
+                            );
+                        }
+                        return Err(OrchestratorError::Superseded(run_name.to_owned()));
+                    }
+                    _ => {}
+                }
             }
             Ok(())
         }
@@ -592,18 +755,44 @@ impl Orchestrator {
             // holds each spawned node's real PID from its per-node checkpoint
             // (see `execute_start_server_isolated`). Saving the in-memory copy
             // would clobber those PIDs with `None` and a later `veld stop` could
-            // no longer kill the leaked process. So we leave the persisted state
-            // untouched — a run that spawned stays `Starting` with real PIDs and
-            // is torn down by `veld stop` or reaped by the next start once its
-            // processes die (matching behaviour before the pre-stage save).
+            // no longer kill the leaked process.
             //
-            // The one thing the pre-stage save added is a persisted row for a run
-            // that fails *before spawning anything*; reap that ghost so a failed
-            // pre-spawn startup doesn't linger as `starting`.
+            // Ending protocol, in order: persist the `failed` intent FIRST
+            // (before any PID dies — otherwise the GC orphan sweep, which
+            // includes `starting` runs, can race the kill window and record
+            // this deliberate failure as `crashed`, clobbering the failure
+            // detail this feature exists to preserve), then kill, then
+            // finalize only over confirmed-dead processes. An unconfirmed
+            // kill leaves the run `stopping` with its recorded PIDs — the
+            // stale-`stopping` reaper re-kills and finalizes it later, so
+            // leak-freedom never depends on the label.
+            let detail = end_detail_for_error(&e);
             if let Ok(Some(persisted)) = self.db.get_run(&self.project_root, run_name) {
-                let ever_spawned = persisted.nodes.values().any(|ns| ns.pid.is_some());
-                if !ever_spawned {
-                    let _ = self.db.remove_run(&self.project_root, run_name);
+                if persisted.run_id == run.run_id {
+                    let _ = self
+                        .db
+                        .begin_ending(&run.run_id, EndReason::Failed, Some(&detail));
+                    let pids: Vec<u32> = persisted.nodes.values().filter_map(|ns| ns.pid).collect();
+                    let confirmed = pids.is_empty() || kill_and_confirm(&pids).await;
+                    // Routes for anything that spawned far enough to get one.
+                    for (key, ns) in &persisted.nodes {
+                        self.remove_node_routes(run_name, ns).await;
+                        if confirmed && ns.pid.is_some() {
+                            // Confirmed dead — a recorded PID under an ended
+                            // run means "possibly alive" to the GC straggler
+                            // sweep.
+                            let _ = self.db.clear_node_pid(&run.run_id, key);
+                        }
+                    }
+                    if confirmed {
+                        let _ = self.db.finalize_run(&run.run_id);
+                    } else {
+                        tracing::warn!(
+                            run_name,
+                            "startup failed but a spawned process did not die — \
+                             leaving the run 'stopping' for the stale-stopping reaper"
+                        );
+                    }
                 }
             }
             return Err(e);
@@ -770,6 +959,15 @@ impl Orchestrator {
                     if let Err(e) = self.save_state(&run) {
                         tracing::warn!(error = %e, "failed to persist skipped terminal node");
                     }
+                    // A skipped oneshot is a passing one for history purposes.
+                    let detail = EndDetail {
+                        exit_code: Some(0),
+                        message: Some("terminal node skipped (skip_if passed)".to_owned()),
+                        ..Default::default()
+                    };
+                    let _ = self
+                        .db
+                        .begin_ending(&run.run_id, EndReason::Completed, Some(&detail));
                     return Ok(0);
                 }
             }
@@ -782,6 +980,7 @@ impl Orchestrator {
             db: self.db.clone(),
             project_root: self.project_root.clone(),
             run_name: run_name.to_owned(),
+            run_id: run.run_id.to_string(),
             node: sel.node.clone(),
             variant: sel.variant.clone(),
         };
@@ -835,6 +1034,26 @@ impl Orchestrator {
         // be a false failure). Log and return the real code regardless.
         if let Err(e) = self.save_state(&run) {
             tracing::warn!(error = %e, "failed to persist terminal node result");
+        }
+
+        // Store the run's outcome intent now: zero exit → completed, non-zero
+        // → failed with the code. The caller's teardown (`veld stop`) finds
+        // the run already `stopping`, loses `begin_ending`, and finalizes
+        // with THIS reason — so history says "completed"/"failed (exit N)",
+        // not "stopped", for oneshot runs. An agent reading `end_reason =
+        // completed` must be able to trust that the command passed.
+        let reason = if result.exit_code == 0 {
+            EndReason::Completed
+        } else {
+            EndReason::Failed
+        };
+        let detail = EndDetail {
+            failed_node: (result.exit_code != 0).then(|| key.clone()),
+            exit_code: Some(result.exit_code),
+            ..Default::default()
+        };
+        if let Err(e) = self.db.begin_ending(&run.run_id, reason, Some(&detail)) {
+            tracing::warn!(error = %e, "failed to record oneshot outcome");
         }
 
         Ok(result.exit_code)
@@ -995,20 +1214,33 @@ impl Orchestrator {
         let mut run = match self.db.get_run(&self.project_root, run_name) {
             Ok(Some(r)) => r,
             _ => {
-                // Run not found in state (e.g., setup failed before state was saved).
+                // Environment unknown (e.g., setup failed before state was saved).
                 // Still run teardown steps to clean up anything setup may have created.
                 self.run_teardown_steps(run_name).await;
                 return Ok(StopResult::AlreadyStopped);
             }
         };
 
-        if run.status == RunStatus::Stopped {
-            // Already stopped — clean up state, run teardown, and return.
+        if let Some(w) = self.internal_log.as_mut() {
+            w.set_run_id(run.run_id);
+        }
+
+        if !run.is_live() {
+            // Latest run already ended — it is history now, never deleted here.
+            // Teardown steps still run so a re-stop stays a cleanup tool.
             self.run_teardown_steps(run_name).await;
-            self.db.remove_run(&self.project_root, run_name)?;
             return Ok(StopResult::AlreadyStopped);
         }
 
+        // Phase 1 of the ending protocol: persist the intent BEFORE any PID
+        // dies, so the crash detectors (which scan only starting/running)
+        // cannot mislabel this deliberate stop as a crash. Losing the race
+        // (already `stopping` — a SIGKILLed earlier stop, or an ending oneshot
+        // that stored completed/failed) is fine: proceed with teardown and
+        // finalize whatever intent is stored.
+        let _ = self
+            .db
+            .begin_ending(&run.run_id, EndReason::Stopped, None)?;
         run.status = RunStatus::Stopping;
 
         // Stop in reverse execution order (dependencies last). Fall back to
@@ -1065,8 +1297,11 @@ impl Orchestrator {
         // Run project-level teardown steps after all per-node on_stop hooks.
         self.run_teardown_steps(run_name).await;
 
-        // Remove the run from state entirely (no lingering stopped state).
-        self.db.remove_run(&self.project_root, run_name)?;
+        // Persist the final node states while the run is still `stopping`
+        // (save_run refuses to touch terminal runs), then finalize it into
+        // history with whatever end_reason `begin_ending` stored.
+        self.save_state(&run)?;
+        let _ = self.db.finalize_run(&run.run_id)?;
 
         self.internal_log(&format!("[stop] environment '{run_name}' stopped"))
             .await;
@@ -1091,29 +1326,46 @@ impl Orchestrator {
             Ok(Some(r)) => r,
             _ => return,
         };
+        if !run.is_live() {
+            // Latest run already ended — history, nothing to clean up.
+            return;
+        }
 
-        tracing::info!(run_name, "cleaning up stale run before starting");
+        tracing::info!(run_name, "replacing live run before starting");
 
-        // Kill any processes that are still alive.
-        for ns in run.nodes.values() {
-            if let Some(pid) = ns.pid {
-                if process::is_alive(pid) {
-                    let _ = process::kill_process(pid).await;
-                }
-            }
-            // Remove DNS + Caddy route.
-            if let Some(ref url_str) = ns.url {
-                let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                // Strip port if present (e.g., "host:18443" → "host")
-                let hostname = hostname.split(':').next().unwrap_or(hostname);
-                let _ = self.helper_client.remove_host(hostname).await;
-                let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
-                let _ = self.helper_client.remove_route(&route_id).await;
+        // Ending protocol, replaced path: persist the intent BEFORE killing —
+        // this moves the run out of the crash detectors' scan set, so the 5s
+        // monitor can't label the deliberate replacement `crashed`. Losing the
+        // race (already `stopping`) is fine; teardown continues either way.
+        let _ = self.db.begin_ending(&run.run_id, EndReason::Replaced, None);
+
+        // Kill and wait (bounded) for the old run's processes.
+        let pids: Vec<u32> = run.nodes.values().filter_map(|ns| ns.pid).collect();
+        let confirmed = pids.is_empty() || kill_and_confirm(&pids).await;
+
+        for (key, ns) in &run.nodes {
+            self.remove_node_routes(run_name, ns).await;
+            if confirmed && ns.pid.is_some() {
+                let _ = self.db.clear_node_pid(&run.run_id, key);
             }
         }
 
-        // Remove from state (registry rows derive from the same tables).
-        let _ = self.db.remove_run(&self.project_root, run_name);
+        // Finalize even on an unconfirmed kill — an unkillable old PID must
+        // not block the new start (today's behavior ignores kill failures
+        // entirely). The GC's terminal-run straggler sweep re-kills any PID
+        // still alive under a terminal run, so leak-freedom never depends on
+        // this label; the detail records what happened for the history view.
+        if !confirmed {
+            let detail = EndDetail {
+                message: Some("kill unconfirmed at replacement".to_owned()),
+                ..Default::default()
+            };
+            let mut ended = run.clone();
+            ended.status = RunStatus::Stopping;
+            ended.end_detail = Some(detail);
+            let _ = self.save_state(&ended);
+        }
+        let _ = self.db.finalize_run(&run.run_id);
     }
 
     /// Clean up ALL runs in the project whose processes have died.
@@ -1141,30 +1393,59 @@ impl Orchestrator {
         }
 
         for run_name in &dead_run_names {
-            tracing::info!(run_name, "cleaning up dead run (all processes exited)");
+            tracing::info!(
+                run_name,
+                "finalizing dead run as crashed (all processes exited)"
+            );
 
-            if let Some(run_state) = project_state.runs.get(run_name) {
-                // Kill any stragglers and clean up routes.
-                for ns in run_state.nodes.values() {
-                    if let Some(pid) = ns.pid {
-                        if process::is_alive(pid) {
-                            let _ = process::kill_process(pid).await;
-                        }
-                    }
-                    if let Some(ref url_str) = ns.url {
-                        let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                        let hostname = hostname.split(':').next().unwrap_or(hostname);
-                        let _ = self.helper_client.remove_host(hostname).await;
-                        let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
-                        let _ = self.helper_client.remove_route(&route_id).await;
+            let Some(run_state) = project_state.runs.get(run_name) else {
+                continue;
+            };
+
+            // Kill any stragglers and clean up routes.
+            let mut dead_node: Option<String> = None;
+            for (key, ns) in &run_state.nodes {
+                if ns.pid.is_some() && dead_node.is_none() {
+                    dead_node = Some(key.clone());
+                }
+                if let Some(pid) = ns.pid {
+                    if process::is_alive(pid) {
+                        let _ = process::kill_process(pid).await;
                     }
                 }
+                self.remove_node_routes(run_name, ns).await;
             }
-        }
 
-        // Persist the cleanup.
-        for run_name in &dead_run_names {
-            let _ = self.db.remove_run(&self.project_root, run_name);
+            // Record the final node states while the run is still live in the
+            // DB, then finalize as crashed (one-step: PIDs are already dead;
+            // the guard no-ops if an ender got here first).
+            let mut ended = run_state.clone();
+            for node in ended.nodes.values_mut() {
+                if node.pid.take().is_some() {
+                    node.status = NodeStatus::Stopped;
+                }
+            }
+            let _ = self.save_state(&ended);
+            let detail = EndDetail {
+                failed_node: dead_node,
+                ..Default::default()
+            };
+            let _ = self.db.finalize_crashed(&run_state.run_id, Some(&detail));
+        }
+    }
+
+    /// Remove the DNS host and Caddy route for a node (best-effort).
+    async fn remove_node_routes(&self, run_name: &str, node_state: &NodeState) {
+        if let Some(ref url_str) = node_state.url {
+            let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
+            // Strip port if present (e.g., "host:18443" → "host")
+            let hostname = hostname.split(':').next().unwrap_or(hostname);
+            let _ = self.helper_client.remove_host(hostname).await;
+            let route_id = format!(
+                "veld-{}-{}-{}",
+                run_name, node_state.node_name, node_state.variant
+            );
+            let _ = self.helper_client.remove_route(&route_id).await;
         }
     }
 
@@ -1703,7 +1984,7 @@ async fn execute_start_server_isolated(
     // The proxy routes are created whenever a feature is enabled, even if
     // inject is false (manual injection mode — user adds script tags themselves).
     if features.feedback_overlay || features.client_logs {
-        route["feedback_upstream"] = serde_json::json!("localhost:19899");
+        route["feedback_upstream"] = serde_json::json!(crate::instance::daemon_upstream());
         route["run_name"] = serde_json::json!(&ctx.run_name);
         route["project_root"] = serde_json::json!(ctx.project_root.to_string_lossy());
     }
@@ -1781,6 +2062,7 @@ async fn execute_start_server_isolated(
         db: ctx.db.clone(),
         project_root: ctx.project_root.as_ref().clone(),
         run_name: ctx.run_name.clone(),
+        run_id: ctx.run_id.to_string(),
         node: sel.node.clone(),
         variant: sel.variant.clone(),
     };
@@ -1869,6 +2151,7 @@ async fn execute_start_server_isolated(
                     node: Some(node.clone()),
                     variant: Some(variant.clone()),
                     streams: Some(vec![LogStream::Server.as_str()]),
+                    run_id: None,
                 };
                 let mut last_id: i64 = 0;
                 loop {
@@ -2383,7 +2666,7 @@ mod tests {
             RunStatus::Stopping,
             RunStatus::Stopped,
             RunStatus::Failed,
-            RunStatus::Recovering,
+            RunStatus::Crashed,
         ] {
             assert!(!is_reapable_orphan(&status, false, false));
             assert!(!is_reapable_orphan(&status, false, true));
@@ -2397,6 +2680,7 @@ mod tests {
         Orchestrator {
             config,
             config_path: project_root.join("veld.json"),
+            config_hash: String::new(),
             project_root: project_root.to_path_buf(),
             db,
             port_allocator: PortAllocator::new(),

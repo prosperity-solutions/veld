@@ -104,15 +104,18 @@ enum Command {
         debug: bool,
     },
 
-    /// List environment runs.
+    /// Run history: list, inspect, or diff run instances.
     Runs {
-        /// Filter by run name.
+        /// Filter by environment name.
         #[arg(long)]
         name: Option<String>,
 
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        #[command(subcommand)]
+        cmd: Option<RunsCmd>,
     },
 
     /// Show status of a running environment.
@@ -190,9 +193,26 @@ enum Command {
         #[arg(long)]
         since: Option<String>,
 
-        /// Stream logs continuously (like `tail -f`).
+        /// Stream logs continuously (like `tail -f`). Exits once the
+        /// followed run ends.
         #[arg(long, short = 'f')]
         follow: bool,
+
+        /// Show logs of a specific past run by id prefix (see `veld runs`).
+        /// The run identifies its environment by itself, so this conflicts
+        /// with --name.
+        #[arg(long, value_name = "RUN_ID", conflicts_with_all = ["previous", "all_runs", "name"])]
+        run: Option<String>,
+
+        /// Show logs of the run before the latest one (after a restart:
+        /// the previous generation).
+        #[arg(long, short = 'p', conflicts_with = "all_runs")]
+        previous: bool,
+
+        /// Show logs of every run under this name interleaved (pre-v3
+        /// behavior), including lines that predate run scoping.
+        #[arg(long)]
+        all_runs: bool,
 
         /// Output as JSON.
         #[arg(long)]
@@ -395,6 +415,10 @@ enum Command {
         /// Run name.
         #[arg(long)]
         run: String,
+        /// Run instance id (UUID). Optional: detached pipelines started by a
+        /// pre-v3 veld invoke this without it.
+        #[arg(long)]
+        run_id: Option<String>,
         /// Node name.
         #[arg(long)]
         node: String,
@@ -415,6 +439,34 @@ enum Command {
         /// Path to the log file to append to.
         #[arg(long)]
         log: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunsCmd {
+    /// Show one run in full: outcome, node results, and the graph snapshot
+    /// it was started with.
+    Show {
+        /// Run id prefix (see `veld runs`).
+        run_id: String,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Diff two runs' graph snapshots — what changed in the config between
+    /// them. With one id, diffs that run against its predecessor.
+    Diff {
+        /// Older run id prefix (or, with one argument, the run to compare
+        /// against its predecessor).
+        a: String,
+
+        /// Newer run id prefix.
+        b: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -463,7 +515,15 @@ async fn main() {
             | Command::Logs { .. }
     );
 
-    if needs_version_check && std::env::var("VELD_LIB_DIR").is_err() {
+    // The version gate compares this CLI against the INSTALLED helper/daemon
+    // binaries. A dev instance (VELD_DAEMON_PORT set) shares those services
+    // deliberately, so a version gap with them is expected — enforce
+    // alignment only for the installed instance. VELD_LIB_DIR is the older
+    // escape hatch (points version discovery at a dev build dir) and still
+    // skips too.
+    let is_dev_instance =
+        veld_core::instance::daemon_port() != veld_core::instance::DEFAULT_DAEMON_PORT;
+    if needs_version_check && std::env::var("VELD_LIB_DIR").is_err() && !is_dev_instance {
         if let Err(msg) = commands::version::check_version_mismatch() {
             output::print_error(&msg, false);
             std::process::exit(1);
@@ -495,7 +555,18 @@ async fn main() {
 
         Command::Restart { name, debug } => commands::restart::run(name, debug).await,
 
-        Command::Runs { name, json } => commands::runs::list(name.as_deref(), json).await,
+        Command::Runs { name, json, cmd } => match cmd {
+            None => commands::runs::list(name.as_deref(), json).await,
+            // OR the outer flag in: `veld runs --json show <id>` must not
+            // silently fall back to human output (exit 0, unparseable) for
+            // an agent that treats --json as global.
+            Some(RunsCmd::Show { run_id, json: sub }) => {
+                commands::runs::show(&run_id, json || sub).await
+            }
+            Some(RunsCmd::Diff { a, b, json: sub }) => {
+                commands::runs::diff(&a, b.as_deref(), json || sub).await
+            }
+        },
 
         Command::Status {
             name,
@@ -525,6 +596,9 @@ async fn main() {
             source,
             search,
             context,
+            run,
+            previous,
+            all_runs,
         } => {
             let source_filter =
                 commands::logs::SourceFilter::from_str(&source).unwrap_or_else(|| {
@@ -546,6 +620,9 @@ async fn main() {
                 source: source_filter,
                 search,
                 context_lines: context,
+                run,
+                previous,
+                all_runs,
             })
             .await
         }
@@ -612,6 +689,7 @@ async fn main() {
         Command::InternalLog {
             project_root,
             run,
+            run_id,
             node,
             variant,
         } => {
@@ -643,6 +721,7 @@ async fn main() {
                         let _ = db.append_log(
                             &project_root,
                             &run,
+                            run_id.as_deref(),
                             Some(&node),
                             Some(&variant),
                             veld_core::db::LogStream::Server,

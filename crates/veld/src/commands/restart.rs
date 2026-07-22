@@ -28,13 +28,14 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
         }
     };
 
-    let run_name = match super::resolve_run_name(name, &project_state, false, false) {
+    let run_name = match super::resolve_run_name(name, &project_state, true, false) {
         Some(n) => n,
         None => return 1,
     };
     let run_name = run_name.as_str();
 
-    // Save the selections BEFORE stopping (stop removes the run from state).
+    // Take the selections from the latest run — live or ended history (the
+    // "dev crashed overnight → veld restart" case reads the crashed run).
     let selections: Vec<graph::NodeSelection> = match project_state.get_run(run_name) {
         Some(run_state) => run_state
             .nodes
@@ -52,7 +53,7 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
 
     output::print_info(&format!("Restarting environment '{run_name}'..."));
 
-    // Stop the existing run (this removes it from state).
+    // Stop the existing run (a no-op teardown when it already ended).
     if let Err(e) = orchestrator.stop(run_name).await {
         output::print_error(&format!("Failed to stop '{run_name}': {e}"), false);
         return 1;

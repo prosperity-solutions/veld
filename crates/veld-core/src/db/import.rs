@@ -207,7 +207,9 @@ mod tests {
         assert!(db.kv_get(IMPORT_FLAG).unwrap().is_some());
 
         // Second call is a no-op: mutate the DB, re-import, nothing reverts.
-        db.remove_run(&project, "dev").unwrap();
+        let run = db.get_run(&project, "dev").unwrap().unwrap();
+        assert!(db.finalize_crashed(&run.run_id, None).unwrap());
+        assert!(db.delete_ended_run(&run.run_id).unwrap());
         db.import_legacy_from(Some(&data), Some(&home));
         assert!(db.get_run(&project, "dev").unwrap().is_none());
     }

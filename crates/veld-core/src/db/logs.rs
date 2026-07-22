@@ -61,18 +61,25 @@ pub struct LogRow {
 }
 
 /// A filter for reading logs. `node`/`variant` of `None` match any node;
-/// `streams` of `None` matches all streams.
+/// `streams` of `None` matches all streams; `run_id` of `None` matches every
+/// run instance under the name — including legacy pre-v3 rows whose stored
+/// `run_id` is NULL — while `Some` scopes to one instance.
 #[derive(Debug, Clone, Default)]
 pub struct LogFilter {
     pub node: Option<String>,
     pub variant: Option<String>,
     pub streams: Option<Vec<&'static str>>,
+    pub run_id: Option<String>,
 }
 
 impl LogFilter {
     fn where_clause(&self) -> (String, Vec<Box<dyn rusqlite::ToSql>>) {
         let mut sql = String::new();
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ref run_id) = self.run_id {
+            sql.push_str(" AND run_id = ?");
+            params.push(Box::new(run_id.clone()));
+        }
         if let Some(ref node) = self.node {
             sql.push_str(" AND node = ?");
             params.push(Box::new(node.clone()));
@@ -115,12 +122,14 @@ const LOG_COLS: &str = "id, node, variant, stream, ts, line";
 
 impl Db {
     /// Append one log line. `node`/`variant` are `None` for run-level streams
-    /// (debug/internal).
+    /// (debug/internal). `run_id` scopes the line to one run instance; `None`
+    /// only for writers that predate the run (never in new code paths).
     #[allow(clippy::too_many_arguments)]
     pub fn append_log(
         &self,
         project_root: &Path,
         run_name: &str,
+        run_id: Option<&str>,
         node: Option<&str>,
         variant: Option<&str>,
         stream: LogStream,
@@ -129,12 +138,13 @@ impl Db {
     ) -> Result<(), DbError> {
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(
-            "INSERT INTO log_lines (project_root, run_name, node, variant, stream, ts, line)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT INTO log_lines (project_root, run_name, run_id, node, variant, stream, ts, line)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         )?;
         stmt.execute(params![
             root_key(project_root),
             run_name,
+            run_id,
             node,
             variant,
             stream.as_str(),
@@ -270,6 +280,7 @@ mod tests {
         db.append_log(
             Path::new("/tmp/p"),
             "dev",
+            None,
             node,
             node.map(|_| "local"),
             stream,
@@ -291,6 +302,7 @@ mod tests {
             node: Some("web".into()),
             variant: None,
             streams: Some(vec!["server"]),
+            run_id: None,
         };
         let tail = db
             .tail_logs(Path::new("/tmp/p"), "dev", &filter, 3)
@@ -322,6 +334,7 @@ mod tests {
         db.append_log(
             Path::new("/tmp/p"),
             "dev",
+            None,
             Some("web"),
             Some("local"),
             LogStream::Server,

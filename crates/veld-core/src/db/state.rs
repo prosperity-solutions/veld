@@ -1,8 +1,23 @@
-//! Run state + global project registry, stored in the central database.
+//! Environment/run state + global project registry, stored in the central
+//! database.
 //!
-//! Replaces the old per-project `.veld/state.json` and the global
-//! `registry.json`. The registry is no longer a second store that can drift —
-//! it is derived from the same `projects`/`runs`/`nodes` tables.
+//! Two concepts, split in schema v3:
+//! - **environments** — the durable named slot (`(project_root, name)`), what
+//!   `--name` addresses. Survives stop/start cycles.
+//! - **runs** — one execution instance each, keyed by `run_id`. At most one
+//!   run per environment is *live* (`starting`/`running`/`stopping`), enforced
+//!   by the `idx_runs_one_live` partial unique index; ended runs accumulate as
+//!   retention-bounded history.
+//!
+//! Ending a run is a two-phase protocol (see the RunStatus docs):
+//! [`Db::begin_ending`] persists the intent (`stopping` + `end_reason`)
+//! *before* any PID is killed, then [`Db::finalize_run`] moves it to its
+//! terminal status once teardown is done. Crash detection collapses both
+//! phases into [`Db::finalize_crashed`], guarded on `starting`/`running` only
+//! — never `stopping` — so a deliberate stop can't be relabeled as a crash.
+//!
+//! The registry is derived from the same tables, so there is no second store
+//! that can drift.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -11,8 +26,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::state::{
-    GlobalRegistry, NodeState, NodeStatus, ProjectState, ReadinessPhase, RegistryEntry,
-    RegistryRunInfo, RunState, RunStatus,
+    EndDetail, EndReason, GlobalRegistry, NodeState, NodeStatus, ProjectState, ReadinessPhase,
+    RegistryEntry, RegistryRunInfo, RunState, RunStatus,
 };
 
 use super::{Db, DbError, ts_to_str};
@@ -25,10 +40,10 @@ pub(crate) fn run_status_str(s: &RunStatus) -> &'static str {
     match s {
         RunStatus::Starting => "starting",
         RunStatus::Running => "running",
-        RunStatus::Recovering => "recovering",
         RunStatus::Stopping => "stopping",
         RunStatus::Stopped => "stopped",
         RunStatus::Failed => "failed",
+        RunStatus::Crashed => "crashed",
     }
 }
 
@@ -36,10 +51,31 @@ pub(crate) fn parse_run_status(s: &str) -> RunStatus {
     match s {
         "starting" => RunStatus::Starting,
         "running" => RunStatus::Running,
-        "recovering" => RunStatus::Recovering,
         "stopping" => RunStatus::Stopping,
         "failed" => RunStatus::Failed,
+        "crashed" => RunStatus::Crashed,
         _ => RunStatus::Stopped,
+    }
+}
+
+fn end_reason_str(r: &EndReason) -> &'static str {
+    match r {
+        EndReason::Stopped => "stopped",
+        EndReason::Failed => "failed",
+        EndReason::Crashed => "crashed",
+        EndReason::Replaced => "replaced",
+        EndReason::Completed => "completed",
+    }
+}
+
+fn parse_end_reason(s: &str) -> Option<EndReason> {
+    match s {
+        "stopped" => Some(EndReason::Stopped),
+        "failed" => Some(EndReason::Failed),
+        "crashed" => Some(EndReason::Crashed),
+        "replaced" => Some(EndReason::Replaced),
+        "completed" => Some(EndReason::Completed),
+        _ => None,
     }
 }
 
@@ -72,6 +108,32 @@ fn parse_node_status(s: &str) -> NodeStatus {
 /// Canonical string key for a project root path.
 pub(crate) fn root_key(project_root: &Path) -> String {
     project_root.to_string_lossy().into_owned()
+}
+
+/// SQL statuses that occupy the live slot. Must match both
+/// `RunStatus::is_live` and the `idx_runs_one_live` partial index predicate.
+/// The index copy is FROZEN inside shipped migration v3 (shipped migrations
+/// are never edited) — changing the live set requires a NEW migration that
+/// rebuilds `idx_runs_one_live`, or the one-live-run invariant silently stops
+/// covering the new status.
+const LIVE_SET: &str = "('starting','running','stopping')";
+
+/// Map a unique-constraint violation on the one-live-run index to the typed
+/// error; pass every other error through. SQLite reports a partial-index
+/// violation by the indexed column ("UNIQUE constraint failed:
+/// runs.environment_id"), not by index name — and `environment_id` appears in
+/// no other unique constraint, so the match is unambiguous.
+fn map_live_conflict(e: rusqlite::Error, env_name: &str) -> DbError {
+    if let rusqlite::Error::SqliteFailure(ref code, ref msg) = e {
+        if code.code == rusqlite::ErrorCode::ConstraintViolation
+            && msg
+                .as_deref()
+                .is_some_and(|m| m.contains("runs.environment_id"))
+        {
+            return DbError::EnvironmentBusy(env_name.to_owned());
+        }
+    }
+    e.into()
 }
 
 // ---------------------------------------------------------------------------
@@ -126,9 +188,12 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, RunState)> {
     let name: String = row.get(2)?;
     let project: String = row.get(3)?;
     let status: String = row.get(4)?;
-    let execution_order: String = row.get(5)?;
-    let created_at: String = row.get(6)?;
-    let stopped_at: Option<String> = row.get(7)?;
+    let end_reason: Option<String> = row.get(5)?;
+    let end_detail: Option<String> = row.get(6)?;
+    let execution_order: String = row.get(7)?;
+    let created_at: String = row.get(8)?;
+    let ended_at: Option<String> = row.get(9)?;
+    let graph_snapshot: Option<String> = row.get(10)?;
     Ok((
         row_id,
         RunState {
@@ -136,31 +201,51 @@ fn run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(i64, RunState)> {
             name,
             project,
             status: parse_run_status(&status),
+            end_reason: end_reason.as_deref().and_then(parse_end_reason),
+            end_detail: end_detail
+                .as_deref()
+                .and_then(|d| serde_json::from_str::<EndDetail>(d).ok()),
+            graph_snapshot: graph_snapshot
+                .as_deref()
+                .and_then(|g| serde_json::from_str(g).ok()),
             nodes: HashMap::new(),
             execution_order: serde_json::from_str(&execution_order).unwrap_or_default(),
             created_at: super::parse_ts(&created_at)
                 .unwrap_or(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH),
-            stopped_at: stopped_at.as_deref().and_then(super::parse_ts),
+            ended_at: ended_at.as_deref().and_then(super::parse_ts),
         },
     ))
 }
 
-const RUN_COLS: &str = "r.id, r.run_id, r.name, p.name, r.status, r.execution_order, \
-                        r.created_at, r.stopped_at";
+const RUN_COLS: &str = "r.id, r.run_id, e.name, p.name, r.status, r.end_reason, r.end_detail, \
+                        r.execution_order, r.created_at, r.ended_at, r.graph_snapshot";
+const RUN_JOIN: &str = "runs r JOIN environments e ON e.id = r.environment_id \
+                        JOIN projects p ON p.root = e.project_root";
+/// Correlated predicate selecting each environment's latest run. Ordered by
+/// rowid, NOT by `created_at`: SQLite assigns each insert max(existing
+/// rowid)+1, so the newest run always holds the highest id among its
+/// environment's surviving rows — independent of wall-clock movement (NTP
+/// step-back, VM restore) and of rowid reuse after deletes (a reused value
+/// still lands above every survivor). A `created_at` ordering here would let
+/// a clock step make a live run invisible to the monitor and unstoppable by
+/// name — do not "simplify" back to it.
+const LATEST_PER_ENV: &str = "r.id = (SELECT r2.id FROM runs r2 \
+                              WHERE r2.environment_id = r.environment_id \
+                              ORDER BY r2.id DESC LIMIT 1)";
 
 impl Db {
     // -----------------------------------------------------------------------
-    // Project state (all runs of one project)
+    // Project state (latest run of each environment in one project)
     // -----------------------------------------------------------------------
 
-    /// Load all runs for a project (replacement for `ProjectState::load`).
+    /// Load the latest run of every environment in a project.
     /// Sensitive output values are decrypted after loading.
     pub fn load_project_state(&self, project_root: &Path) -> Result<ProjectState, DbError> {
         let root = root_key(project_root);
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {RUN_COLS} FROM runs r JOIN projects p ON p.root = r.project_root
-             WHERE r.project_root = ?1"
+            "SELECT {RUN_COLS} FROM {RUN_JOIN}
+             WHERE e.project_root = ?1 AND {LATEST_PER_ENV}"
         ))?;
         let runs: Vec<(i64, RunState)> = stmt
             .query_map([&root], run_from_row)?
@@ -174,7 +259,7 @@ impl Db {
         Ok(state)
     }
 
-    /// Load a single run by name.
+    /// Load an environment's latest run by environment name.
     pub fn get_run(
         &self,
         project_root: &Path,
@@ -183,8 +268,8 @@ impl Db {
         let root = root_key(project_root);
         let conn = self.lock();
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT {RUN_COLS} FROM runs r JOIN projects p ON p.root = r.project_root
-             WHERE r.project_root = ?1 AND r.name = ?2"
+            "SELECT {RUN_COLS} FROM {RUN_JOIN}
+             WHERE e.project_root = ?1 AND e.name = ?2 AND {LATEST_PER_ENV}"
         ))?;
         let found = stmt
             .query_row(params![root, run_name], run_from_row)
@@ -198,9 +283,103 @@ impl Db {
         }
     }
 
-    /// Insert or replace a run (and its project row). This is the single
-    /// write path — the registry is derived from the same tables, so there is
-    /// no second store to update. Sensitive output values are encrypted.
+    /// Look up a single run by `run_id` prefix (git-style short ids). Errors
+    /// on an ambiguous prefix; `Ok(None)` when nothing matches.
+    pub fn get_run_by_id_prefix(
+        &self,
+        project_root: &Path,
+        prefix: &str,
+    ) -> Result<Option<RunState>, DbError> {
+        // UUIDs are hex + hyphens; anything else can't match (and this keeps
+        // LIKE wildcards out of the pattern without escaping gymnastics).
+        if prefix.is_empty() || !prefix.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Ok(None);
+        }
+        let root = root_key(project_root);
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {RUN_COLS} FROM {RUN_JOIN}
+             WHERE e.project_root = ?1 AND r.run_id LIKE ?2 || '%'
+             ORDER BY r.id DESC LIMIT 2"
+        ))?;
+        let matches: Vec<(i64, RunState)> = stmt
+            .query_map(params![root, prefix], run_from_row)?
+            .collect::<Result<_, _>>()?;
+        match matches.len() {
+            0 => Ok(None),
+            1 => {
+                let (row_id, mut run) = matches.into_iter().next().unwrap();
+                run.nodes = load_nodes(&conn, row_id)?;
+                Ok(Some(run))
+            }
+            _ => Err(DbError::AmbiguousRunId(prefix.to_owned())),
+        }
+    }
+
+    /// List runs (history), newest first: all of a project's, or one
+    /// environment's when `run_name` is given. Nodes are loaded.
+    pub fn list_runs(
+        &self,
+        project_root: &Path,
+        run_name: Option<&str>,
+    ) -> Result<Vec<RunState>, DbError> {
+        let root = root_key(project_root);
+        let conn = self.lock();
+        let rows: Vec<(i64, RunState)> = match run_name {
+            Some(name) => {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {RUN_COLS} FROM {RUN_JOIN}
+                     WHERE e.project_root = ?1 AND e.name = ?2
+                     ORDER BY r.id DESC"
+                ))?;
+                stmt.query_map(params![root, name], run_from_row)?
+                    .collect::<Result<_, _>>()?
+            }
+            None => {
+                let mut stmt = conn.prepare_cached(&format!(
+                    "SELECT {RUN_COLS} FROM {RUN_JOIN}
+                     WHERE e.project_root = ?1
+                     ORDER BY e.name ASC, r.id DESC"
+                ))?;
+                stmt.query_map([&root], run_from_row)?
+                    .collect::<Result<_, _>>()?
+            }
+        };
+        let mut out = Vec::with_capacity(rows.len());
+        for (row_id, mut run) in rows {
+            run.nodes = load_nodes(&conn, row_id)?;
+            out.push(run);
+        }
+        Ok(out)
+    }
+
+    /// Cheap status probe by `run_id` (no node loading) — used by log follow
+    /// mode to notice its run ending.
+    pub fn run_status_by_id(&self, run_id: &Uuid) -> Result<Option<RunStatus>, DbError> {
+        let conn = self.lock();
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = ?1",
+                [run_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(status.as_deref().map(parse_run_status))
+    }
+
+    /// Insert or update a run, keyed by `run_id`. This is the single write
+    /// path — the registry is derived from the same tables, so there is no
+    /// second store to update. Sensitive output values are encrypted.
+    ///
+    /// Guards:
+    /// - **Terminal runs are immutable.** If the stored row is already
+    ///   terminal, the whole transaction is a no-op — including the node
+    ///   rewrite, so a stale read-modify-write (e.g. the monitor's liveness
+    ///   pass racing a finalize) cannot overwrite an ended run's final node
+    ///   states with live-era data.
+    /// - **One live run per environment.** Inserting a live run while the
+    ///   environment already has one fails with [`DbError::EnvironmentBusy`]
+    ///   (the `idx_runs_one_live` partial unique index).
     pub fn save_run(
         &self,
         project_root: &Path,
@@ -211,6 +390,28 @@ impl Db {
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
+        let stored: Option<String> = tx
+            .query_row(
+                "SELECT status FROM runs WHERE run_id = ?1",
+                [run.run_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(status) = stored {
+            if !parse_run_status(&status).is_live() {
+                // Ended runs are history — never rewritten. Loud enough to
+                // grep: a caller that finalizes first and saves second wrote
+                // nothing (persist node states BEFORE finalizing).
+                tracing::debug!(
+                    run_id = %run.run_id,
+                    run_name = %run.name,
+                    "save_run skipped: run already terminal"
+                );
+                tx.commit()?;
+                return Ok(());
+            }
+        }
+
         tx.execute(
             "INSERT INTO projects (root, name) VALUES (?1, ?2)
              ON CONFLICT(root) DO UPDATE SET name = excluded.name",
@@ -218,28 +419,57 @@ impl Db {
         )?;
 
         tx.execute(
-            "INSERT INTO runs (project_root, name, run_id, status, execution_order, created_at, stopped_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-             ON CONFLICT(project_root, name) DO UPDATE SET
-               run_id = excluded.run_id,
-               status = excluded.status,
-               execution_order = excluded.execution_order,
-               created_at = excluded.created_at,
-               stopped_at = excluded.stopped_at",
-            params![
-                root,
-                run.name,
-                run.run_id.to_string(),
-                run_status_str(&run.status),
-                serde_json::to_string(&run.execution_order)?,
-                ts_to_str(run.created_at),
-                run.stopped_at.map(ts_to_str),
-            ],
+            "INSERT INTO environments (project_root, name, created_at) VALUES (?1, ?2, ?3)
+             ON CONFLICT(project_root, name) DO NOTHING",
+            params![root, run.name, ts_to_str(run.created_at)],
+        )?;
+        let env_id: i64 = tx.query_row(
+            "SELECT id FROM environments WHERE project_root = ?1 AND name = ?2",
+            params![root, run.name],
+            |r| r.get(0),
         )?;
 
+        tx.execute(
+            "INSERT INTO runs (environment_id, run_id, status, end_reason, end_detail,
+                               graph_snapshot, execution_order, created_at, ended_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(run_id) DO UPDATE SET
+               -- Once `begin_ending` has moved a run to 'stopping', a stale
+               -- writer (a snapshot taken before the ending began) must not
+               -- pull it back into the crash detectors' scan set...
+               status = CASE WHEN runs.status = 'stopping'
+                             THEN runs.status ELSE excluded.status END,
+               -- ...and the first ender's stored intent always wins.
+               end_reason = COALESCE(runs.end_reason, excluded.end_reason),
+               end_detail = COALESCE(runs.end_detail, excluded.end_detail),
+               -- Written once at start; a later save without one (a reloaded
+               -- RunState round-trips it, but be defensive) keeps the stored.
+               graph_snapshot = COALESCE(excluded.graph_snapshot, runs.graph_snapshot),
+               execution_order = excluded.execution_order,
+               ended_at = excluded.ended_at",
+            params![
+                env_id,
+                run.run_id.to_string(),
+                run_status_str(&run.status),
+                run.end_reason.as_ref().map(end_reason_str),
+                run.end_detail
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                run.graph_snapshot
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                serde_json::to_string(&run.execution_order)?,
+                ts_to_str(run.created_at),
+                run.ended_at.map(ts_to_str),
+            ],
+        )
+        .map_err(|e| map_live_conflict(e, &run.name))?;
+
         let run_row: i64 = tx.query_row(
-            "SELECT id FROM runs WHERE project_root = ?1 AND name = ?2",
-            params![root, run.name],
+            "SELECT id FROM runs WHERE run_id = ?1",
+            [run.run_id.to_string()],
             |r| r.get(0),
         )?;
 
@@ -277,30 +507,211 @@ impl Db {
         Ok(())
     }
 
-    /// Remove a run. Also removes the project row when it has no runs left
-    /// (mirrors the old registry behavior). Logs and feedback are kept:
-    /// feedback is cleared on run-name reuse (`FeedbackStore::clear`), logs
-    /// are only age-pruned by GC — a reused run name shows the previous
-    /// run's log lines until then, matching the old per-name log files.
-    pub fn remove_run(&self, project_root: &Path, run_name: &str) -> Result<(), DbError> {
-        let root = root_key(project_root);
-        let mut conn = self.lock();
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-        tx.execute(
-            "DELETE FROM runs WHERE project_root = ?1 AND name = ?2",
-            params![root, run_name],
+    // -----------------------------------------------------------------------
+    // Ending protocol
+    // -----------------------------------------------------------------------
+
+    /// Phase 1 of ending a run: persist the intent *before* killing anything.
+    /// Guarded on the live pre-ending statuses — the first ender wins the
+    /// label; returns whether this call won. After this, the run is out of
+    /// the crash detectors' scan set (they gate on `starting`/`running`).
+    pub fn begin_ending(
+        &self,
+        run_id: &Uuid,
+        reason: EndReason,
+        detail: Option<&EndDetail>,
+    ) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE runs SET status = 'stopping', end_reason = ?2, end_detail = ?3,
+                             ending_at = ?4
+             WHERE run_id = ?1 AND status IN ('starting','running')",
+            params![
+                run_id.to_string(),
+                end_reason_str(&reason),
+                detail.map(serde_json::to_string).transpose()?,
+                super::now_str(),
+            ],
         )?;
-        tx.execute(
-            "DELETE FROM projects WHERE root = ?1
-             AND NOT EXISTS (SELECT 1 FROM runs WHERE project_root = ?1)",
-            [&root],
+        Ok(changed == 1)
+    }
+
+    /// Phase 2: move a `stopping` run to its terminal status (derived from the
+    /// stored `end_reason`; a legacy row without one counts as `stopped`).
+    /// Call once PIDs are confirmed dead and teardown has run. Returns whether
+    /// this call performed the transition.
+    pub fn finalize_run(&self, run_id: &Uuid) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE runs SET
+               status = CASE COALESCE(end_reason, 'stopped')
+                          WHEN 'failed' THEN 'failed'
+                          WHEN 'crashed' THEN 'crashed'
+                          ELSE 'stopped' END,
+               end_reason = COALESCE(end_reason, 'stopped'),
+               ended_at = ?2
+             WHERE run_id = ?1 AND status = 'stopping'",
+            params![run_id.to_string(), super::now_str()],
         )?;
-        tx.commit()?;
+        Ok(changed == 1)
+    }
+
+    /// Crash detection: both phases in one guarded step. The guard is exactly
+    /// `starting`/`running` — never `stopping` — which is what makes the
+    /// protocol race-free: `begin_ending` commits while PIDs are still alive,
+    /// so by the time a detector sees dead PIDs the guard finds `stopping`
+    /// and no-ops. Returns whether this call performed the transition.
+    pub fn finalize_crashed(
+        &self,
+        run_id: &Uuid,
+        detail: Option<&EndDetail>,
+    ) -> Result<bool, DbError> {
+        let conn = self.lock();
+        let changed = conn.execute(
+            "UPDATE runs SET status = 'crashed', end_reason = 'crashed',
+                             end_detail = ?2, ended_at = ?3
+             WHERE run_id = ?1 AND status IN ('starting','running')",
+            params![
+                run_id.to_string(),
+                detail.map(serde_json::to_string).transpose()?,
+                super::now_str(),
+            ],
+        )?;
+        Ok(changed == 1)
+    }
+
+    /// `stopping` runs whose ending began before `cutoff` (or that predate the
+    /// `ending_at` column) — candidates for the daemon's grace-gated
+    /// stale-`stopping` reaper. Dead PIDs under `stopping` is the *normal*
+    /// state of a healthy slow teardown, hence the grace period on both
+    /// branches. Returns `(project_root, project_name, run)` with nodes loaded.
+    pub fn stale_stopping_runs(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<(PathBuf, String, RunState)>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {RUN_COLS}, e.project_root FROM {RUN_JOIN}
+             WHERE r.status = 'stopping'
+               AND (r.ending_at IS NULL OR r.ending_at < ?1)"
+        ))?;
+        let rows: Vec<(i64, RunState, String)> = stmt
+            .query_map([ts_to_str(cutoff)], |row| {
+                let (row_id, run) = run_from_row(row)?;
+                let root: String = row.get(11)?;
+                Ok((row_id, run, root))
+            })?
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (row_id, mut run, root) in rows {
+            run.nodes = load_nodes(&conn, row_id)?;
+            let project = run.project.clone();
+            out.push((PathBuf::from(root), project, run));
+        }
+        Ok(out)
+    }
+
+    /// Terminal runs that still record node PIDs — targets for the GC's
+    /// straggler sweep (a finalize whose kill could not be confirmed). PIDs of
+    /// confirmed-dead processes are nulled at finalize time, so a recorded PID
+    /// under a terminal run means "possibly still alive".
+    pub fn terminal_runs_with_pids(&self) -> Result<Vec<RunState>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT {RUN_COLS} FROM {RUN_JOIN}
+             WHERE r.status NOT IN {LIVE_SET}
+               AND EXISTS (SELECT 1 FROM nodes n
+                           WHERE n.run_row = r.id AND n.pid IS NOT NULL)"
+        ))?;
+        let rows: Vec<(i64, RunState)> = stmt
+            .query_map([], run_from_row)?
+            .collect::<Result<_, _>>()?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (row_id, mut run) in rows {
+            run.nodes = load_nodes(&conn, row_id)?;
+            out.push(run);
+        }
+        Ok(out)
+    }
+
+    /// Null a node's recorded PID (and mark it stopped) after its death has
+    /// been confirmed. Targeted update: `save_run` deliberately refuses to
+    /// touch terminal runs, and this is the one legitimate post-terminal write.
+    pub fn clear_node_pid(&self, run_id: &Uuid, node_key: &str) -> Result<(), DbError> {
+        let conn = self.lock();
+        conn.execute(
+            "UPDATE nodes SET pid = NULL, status = 'stopped'
+             WHERE node_key = ?2
+               AND run_row = (SELECT id FROM runs WHERE run_id = ?1)",
+            params![run_id.to_string(), node_key],
+        )?;
         Ok(())
     }
 
-    /// Remove a project and all of its runs (e.g. the project directory no
-    /// longer exists on disk).
+    // -----------------------------------------------------------------------
+    // Retention (called from the daemon GC pass, never from finalize — stop
+    // and crash detection are latency-sensitive; an 11th history row for ten
+    // minutes is harmless)
+    // -----------------------------------------------------------------------
+
+    /// Delete one ended run and its logs by `run_id`. `nodes`/`node_stats`
+    /// cascade by FK; `log_lines` has no FK (logs deliberately outlive state
+    /// rows) so they are deleted explicitly. Live runs are never deleted.
+    /// Also drops the environment/project rows when nothing references them.
+    pub fn delete_ended_run(&self, run_id: &Uuid) -> Result<bool, DbError> {
+        let mut conn = self.lock();
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let deleted = tx.execute(
+            &format!("DELETE FROM runs WHERE run_id = ?1 AND status NOT IN {LIVE_SET}"),
+            [run_id.to_string()],
+        )?;
+        if deleted == 1 {
+            tx.execute(
+                "DELETE FROM log_lines WHERE run_id = ?1",
+                [run_id.to_string()],
+            )?;
+            tx.execute(
+                "DELETE FROM environments WHERE NOT EXISTS
+                   (SELECT 1 FROM runs WHERE environment_id = environments.id)",
+                [],
+            )?;
+            tx.execute(
+                "DELETE FROM projects WHERE NOT EXISTS
+                   (SELECT 1 FROM environments WHERE project_root = projects.root)",
+                [],
+            )?;
+        }
+        tx.commit()?;
+        Ok(deleted == 1)
+    }
+
+    /// Run ids of ended runs beyond the newest `keep` per environment, plus
+    /// ended runs older than `cutoff` — the GC deletes each via
+    /// [`Db::delete_ended_run`].
+    pub fn prunable_run_ids(
+        &self,
+        keep: usize,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<Uuid>, DbError> {
+        let conn = self.lock();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT run_id FROM (
+                 SELECT run_id, ended_at,
+                        ROW_NUMBER() OVER (PARTITION BY environment_id
+                                           ORDER BY id DESC) AS rn
+                 FROM runs WHERE status NOT IN {LIVE_SET}
+             ) WHERE rn > ?1 OR (ended_at IS NOT NULL AND ended_at < ?2)"
+        ))?;
+        let ids = stmt
+            .query_map(params![keep as i64, ts_to_str(cutoff)], |r| {
+                r.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(ids.iter().filter_map(|s| Uuid::parse_str(s).ok()).collect())
+    }
+
+    /// Remove a project and all of its environments/runs (e.g. the project
+    /// directory no longer exists on disk).
     pub fn remove_project(&self, project_root: &Path) -> Result<(), DbError> {
         let conn = self.lock();
         conn.execute(
@@ -311,18 +722,18 @@ impl Db {
     }
 
     // -----------------------------------------------------------------------
-    // Registry (derived view over projects/runs/nodes)
+    // Registry (derived view over projects/environments/runs/nodes)
     // -----------------------------------------------------------------------
 
-    /// Assemble the global registry (replacement for `GlobalRegistry::load`).
+    /// Assemble the global registry: every environment with its latest run.
     /// URLs are derived from node state, so the registry can never drift from
-    /// the run state again.
+    /// the run state.
     pub fn registry(&self) -> Result<GlobalRegistry, DbError> {
         let conn = self.lock();
-        let mut stmt = conn.prepare_cached(
-            "SELECT r.id, r.project_root, p.name, r.name, r.run_id, r.status
-             FROM runs r JOIN projects p ON p.root = r.project_root",
-        )?;
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT r.id, e.project_root, p.name, e.name, r.run_id, r.status
+             FROM {RUN_JOIN} WHERE {LATEST_PER_ENV}"
+        ))?;
         let rows: Vec<(i64, String, String, String, String, String)> = stmt
             .query_map([], |row| {
                 Ok((
@@ -398,6 +809,12 @@ mod tests {
         run
     }
 
+    /// End a live run cleanly: begin_ending + finalize.
+    fn end_run(db: &Db, run: &RunState, reason: EndReason) {
+        assert!(db.begin_ending(&run.run_id, reason, None).unwrap());
+        assert!(db.finalize_run(&run.run_id).unwrap());
+    }
+
     #[test]
     fn save_load_roundtrip() {
         let (_dir, db) = test_db();
@@ -437,19 +854,164 @@ mod tests {
     }
 
     #[test]
-    fn save_is_upsert_and_remove_cleans_project() {
+    fn ended_runs_accumulate_as_history() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+
+        let first = sample_run("dev");
+        db.save_run(root, "proj", &first).unwrap();
+        end_run(&db, &first, EndReason::Stopped);
+
+        let second = sample_run("dev");
+        db.save_run(root, "proj", &second).unwrap();
+
+        // Latest wins the name lookup; both exist in history.
+        let latest = db.get_run(root, "dev").unwrap().unwrap();
+        assert_eq!(latest.run_id, second.run_id);
+        let history = db.list_runs(root, Some("dev")).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].run_id, second.run_id);
+        assert_eq!(history[1].run_id, first.run_id);
+        assert_eq!(history[1].status, RunStatus::Stopped);
+        assert_eq!(history[1].end_reason, Some(EndReason::Stopped));
+        assert!(history[1].ended_at.is_some());
+        // The ended run's final node states survive.
+        assert_eq!(history[1].nodes["web:local"].node_name, "web");
+    }
+
+    #[test]
+    fn one_live_run_per_environment() {
         let (_dir, db) = test_db();
         let root = Path::new("/tmp/projA");
         db.save_run(root, "proj", &sample_run("dev")).unwrap();
-        let mut updated = sample_run("dev");
-        updated.status = RunStatus::Stopped;
-        db.save_run(root, "proj", &updated).unwrap();
 
-        let state = db.load_project_state(root).unwrap();
-        assert_eq!(state.runs.len(), 1);
-        assert_eq!(state.runs["dev"].status, RunStatus::Stopped);
+        match db.save_run(root, "proj", &sample_run("dev")) {
+            Err(DbError::EnvironmentBusy(name)) => assert_eq!(name, "dev"),
+            other => panic!("expected EnvironmentBusy, got {other:?}"),
+        }
 
-        db.remove_run(root, "dev").unwrap();
+        // A different environment is unaffected.
+        db.save_run(root, "proj", &sample_run("staging")).unwrap();
+    }
+
+    #[test]
+    fn terminal_runs_are_immutable() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+        end_run(&db, &run, EndReason::Stopped);
+
+        // A stale writer (e.g. the monitor holding a pre-finalize snapshot)
+        // must not resurrect the run or rewrite its final node states.
+        let mut stale = run.clone();
+        stale.status = RunStatus::Running;
+        stale.nodes.get_mut("web:local").unwrap().pid = Some(9999);
+        db.save_run(root, "proj", &stale).unwrap();
+
+        let stored = db.get_run(root, "dev").unwrap().unwrap();
+        assert_eq!(stored.status, RunStatus::Stopped);
+        assert_eq!(stored.nodes["web:local"].pid, Some(4242));
+    }
+
+    #[test]
+    fn ending_protocol_first_ender_wins() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+
+        assert!(
+            db.begin_ending(&run.run_id, EndReason::Stopped, None)
+                .unwrap()
+        );
+        // Second ender (e.g. replaced-path) loses.
+        assert!(
+            !db.begin_ending(&run.run_id, EndReason::Replaced, None)
+                .unwrap()
+        );
+        // Crash detection no-ops against a stopping run.
+        assert!(!db.finalize_crashed(&run.run_id, None).unwrap());
+
+        assert!(db.finalize_run(&run.run_id).unwrap());
+        assert!(!db.finalize_run(&run.run_id).unwrap());
+        let stored = db.get_run(root, "dev").unwrap().unwrap();
+        assert_eq!(stored.status, RunStatus::Stopped);
+        assert_eq!(stored.end_reason, Some(EndReason::Stopped));
+    }
+
+    #[test]
+    fn crash_detection_labels_crashed() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+
+        let detail = EndDetail {
+            failed_node: Some("web:local".into()),
+            ..Default::default()
+        };
+        assert!(db.finalize_crashed(&run.run_id, Some(&detail)).unwrap());
+        let stored = db.get_run(root, "dev").unwrap().unwrap();
+        assert_eq!(stored.status, RunStatus::Crashed);
+        assert_eq!(stored.end_reason, Some(EndReason::Crashed));
+        assert_eq!(
+            stored.end_detail.unwrap().failed_node.as_deref(),
+            Some("web:local")
+        );
+        assert!(stored.ended_at.is_some());
+    }
+
+    #[test]
+    fn run_id_prefix_lookup() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+
+        let short = run.short_id();
+        let found = db.get_run_by_id_prefix(root, &short).unwrap().unwrap();
+        assert_eq!(found.run_id, run.run_id);
+        assert!(db.get_run_by_id_prefix(root, "zzzz").unwrap().is_none());
+    }
+
+    #[test]
+    fn retention_prunes_beyond_cap_and_age() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+
+        let mut ended: Vec<RunState> = Vec::new();
+        for _ in 0..4 {
+            let run = sample_run("dev");
+            db.save_run(root, "proj", &run).unwrap();
+            end_run(&db, &run, EndReason::Stopped);
+            ended.push(run);
+        }
+
+        // Cap 2: the two oldest are prunable.
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(168);
+        let prunable = db.prunable_run_ids(2, cutoff).unwrap();
+        assert_eq!(prunable.len(), 2);
+        for id in &prunable {
+            assert!(db.delete_ended_run(id).unwrap());
+        }
+        assert_eq!(db.list_runs(root, Some("dev")).unwrap().len(), 2);
+
+        // A live run is never deleted, even when passed explicitly.
+        let live = sample_run("dev");
+        db.save_run(root, "proj", &live).unwrap();
+        assert!(!db.delete_ended_run(&live.run_id).unwrap());
+    }
+
+    #[test]
+    fn delete_last_run_drops_environment_and_project() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projA");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+        end_run(&db, &run, EndReason::Stopped);
+
+        assert!(db.delete_ended_run(&run.run_id).unwrap());
         assert!(db.load_project_state(root).unwrap().runs.is_empty());
         assert!(db.registry().unwrap().projects.is_empty());
     }
@@ -469,8 +1031,224 @@ mod tests {
     }
 
     #[test]
+    fn graph_snapshot_round_trips_and_survives_snapshotless_saves() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projSnap");
+        let mut run = sample_run("dev");
+        run.graph_snapshot = Some(crate::state::GraphSnapshot {
+            config_hash: "abc123".into(),
+            nodes: [(
+                "web:local".to_string(),
+                crate::state::NodeSnapshot {
+                    step_type: "start_server".into(),
+                    command: Some("npm run dev".into()),
+                    cwd: None,
+                    env_keys: vec!["PORT".into()],
+                    url_template: Some("{service}.{run}.localhost".into()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        });
+        db.save_run(root, "proj", &run).unwrap();
+
+        let loaded = db.get_run(root, "dev").unwrap().unwrap();
+        let snap = loaded.graph_snapshot.as_ref().unwrap();
+        assert_eq!(snap.config_hash, "abc123");
+        assert_eq!(
+            snap.nodes["web:local"].command.as_deref(),
+            Some("npm run dev")
+        );
+
+        // A later save WITHOUT a snapshot (defensive: e.g. a writer that
+        // built RunState by hand) must not clobber the stored one.
+        let mut stale = sample_run("dev");
+        stale.run_id = run.run_id;
+        stale.graph_snapshot = None;
+        db.save_run(root, "proj", &stale).unwrap();
+        assert!(
+            db.get_run(root, "dev")
+                .unwrap()
+                .unwrap()
+                .graph_snapshot
+                .is_some()
+        );
+    }
+
+    #[test]
     fn get_run_missing_is_none() {
         let (_dir, db) = test_db();
         assert!(db.get_run(Path::new("/nope"), "dev").unwrap().is_none());
+    }
+
+    /// The finalize SQL CASE and `EndReason::terminal_status()` are two
+    /// encodings of the same mapping — pin them together so they can't drift.
+    #[test]
+    fn finalize_status_matches_terminal_status_for_every_reason() {
+        for (i, reason) in [
+            EndReason::Stopped,
+            EndReason::Failed,
+            EndReason::Crashed,
+            EndReason::Replaced,
+            EndReason::Completed,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (_dir, db) = test_db();
+            let root = Path::new("/tmp/projReasons");
+            let run = sample_run(&format!("env{i}"));
+            db.save_run(root, "proj", &run).unwrap();
+            assert!(db.begin_ending(&run.run_id, reason, None).unwrap());
+            assert!(db.finalize_run(&run.run_id).unwrap());
+            let stored = db.get_run(root, &format!("env{i}")).unwrap().unwrap();
+            assert_eq!(stored.status, reason.terminal_status(), "{reason:?}");
+            assert_eq!(stored.end_reason, Some(reason));
+        }
+    }
+
+    /// Compiler tripwire: adding a `RunStatus`/`EndReason` variant makes
+    /// these matches non-exhaustive and breaks the build HERE — update the
+    /// arrays in `status_and_reason_strings_round_trip` (and the parsers'
+    /// wildcard arms) in the same change, or the new variant round-trips to
+    /// the wrong value silently.
+    #[allow(dead_code)]
+    fn force_exhaustive_variant_lists(s: RunStatus, r: EndReason) {
+        match s {
+            RunStatus::Starting
+            | RunStatus::Running
+            | RunStatus::Stopping
+            | RunStatus::Stopped
+            | RunStatus::Failed
+            | RunStatus::Crashed => {}
+        }
+        match r {
+            EndReason::Stopped
+            | EndReason::Failed
+            | EndReason::Crashed
+            | EndReason::Replaced
+            | EndReason::Completed => {}
+        }
+    }
+
+    /// Status and end-reason strings must round-trip — the writers are
+    /// exhaustive matches, but the parsers use wildcard fallbacks a new
+    /// variant would silently fall into (see `force_exhaustive_variant_lists`).
+    #[test]
+    fn status_and_reason_strings_round_trip() {
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::Stopping,
+            RunStatus::Stopped,
+            RunStatus::Failed,
+            RunStatus::Crashed,
+        ] {
+            assert_eq!(parse_run_status(run_status_str(&status)), status);
+        }
+        for reason in [
+            EndReason::Stopped,
+            EndReason::Failed,
+            EndReason::Crashed,
+            EndReason::Replaced,
+            EndReason::Completed,
+        ] {
+            assert_eq!(parse_end_reason(end_reason_str(&reason)), Some(reason));
+        }
+    }
+
+    #[test]
+    fn stale_stopping_runs_respects_grace_and_legacy_null() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projStale");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+        assert!(
+            db.begin_ending(&run.run_id, EndReason::Stopped, None)
+                .unwrap()
+        );
+
+        // Fresh 'stopping' (ending_at = now) is NOT stale for a past cutoff…
+        let past_cutoff = chrono::Utc::now() - chrono::Duration::seconds(600);
+        assert!(db.stale_stopping_runs(past_cutoff).unwrap().is_empty());
+
+        // …but is for a future cutoff (as if the grace period elapsed).
+        let future_cutoff = chrono::Utc::now() + chrono::Duration::seconds(600);
+        let stale = db.stale_stopping_runs(future_cutoff).unwrap();
+        assert_eq!(stale.len(), 1);
+        let (stale_root, _project, stale_run) = &stale[0];
+        assert_eq!(stale_root, &root.to_path_buf());
+        assert_eq!(stale_run.run_id, run.run_id);
+        assert_eq!(stale_run.nodes.len(), 1, "reaper needs the node PIDs");
+
+        // A migrated legacy 'stopping' row (ending_at NULL) is always stale.
+        db.lock()
+            .execute("UPDATE runs SET ending_at = NULL", [])
+            .unwrap();
+        assert_eq!(db.stale_stopping_runs(past_cutoff).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn terminal_runs_with_pids_finds_only_unconfirmed_kills() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projStrag");
+
+        // Ended run whose PID was cleared (confirmed dead) — not a straggler.
+        let clean = sample_run("clean");
+        db.save_run(root, "proj", &clean).unwrap();
+        end_run(&db, &clean, EndReason::Stopped);
+        db.clear_node_pid(&clean.run_id, "web:local").unwrap();
+
+        // Ended run that kept its PID (kill unconfirmed) — straggler.
+        let dirty = sample_run("dirty");
+        db.save_run(root, "proj", &dirty).unwrap();
+        end_run(&db, &dirty, EndReason::Replaced);
+
+        // Live run with a PID — never a straggler.
+        let live = sample_run("live");
+        db.save_run(root, "proj", &live).unwrap();
+
+        let stragglers = db.terminal_runs_with_pids().unwrap();
+        assert_eq!(stragglers.len(), 1);
+        assert_eq!(stragglers[0].run_id, dirty.run_id);
+        assert_eq!(stragglers[0].nodes["web:local"].pid, Some(4242));
+    }
+
+    #[test]
+    fn delete_ended_run_removes_its_logs_but_never_live_runs() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projDel");
+        let run = sample_run("dev");
+        db.save_run(root, "proj", &run).unwrap();
+        let run_id = run.run_id.to_string();
+        db.append_log(
+            root,
+            "dev",
+            Some(&run_id),
+            Some("web"),
+            Some("local"),
+            crate::db::LogStream::Server,
+            chrono::Utc::now(),
+            "scoped line",
+        )
+        .unwrap();
+
+        // Live-run guard: no deletion while live, logs untouched.
+        assert!(!db.delete_ended_run(&run.run_id).unwrap());
+        assert_eq!(
+            db.tail_logs(root, "dev", &crate::db::LogFilter::default(), 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        end_run(&db, &run, EndReason::Stopped);
+        assert!(db.delete_ended_run(&run.run_id).unwrap());
+        // log_lines has no FK — the delete must be explicit, and it happened.
+        assert!(
+            db.tail_logs(root, "dev", &crate::db::LogFilter::default(), 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 }

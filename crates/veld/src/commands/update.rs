@@ -317,7 +317,11 @@ async fn wait_for_daemon_version(expected_version: &str, timeout: std::time::Dur
     };
     let start = std::time::Instant::now();
     loop {
-        if let Ok(resp) = client.get("http://127.0.0.1:19899/api/health").send().await {
+        if let Ok(resp) = client
+            .get(format!("{}/api/health", veld_core::instance::daemon_base()))
+            .send()
+            .await
+        {
             if let Ok(body) = resp.json::<serde_json::Value>().await {
                 if body.get("version").and_then(|v| v.as_str()) == Some(expected_version) {
                     return true;

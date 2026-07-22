@@ -562,8 +562,8 @@ impl Db {
                      UNION ALL
                      SELECT project_root, run_name, created_at AS ts FROM feedback_screenshots
                  ) f
-                 LEFT JOIN runs r ON r.project_root = f.project_root AND r.name = f.run_name
-                 WHERE r.id IS NULL
+                 LEFT JOIN environments e ON e.project_root = f.project_root AND e.name = f.run_name
+                 WHERE e.id IS NULL
                  GROUP BY f.project_root, f.run_name
                  HAVING MAX(f.ts) < ?1",
             )?;
@@ -585,5 +585,58 @@ impl Db {
         }
         tx.commit()?;
         Ok(scopes.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::db::test_db;
+    use crate::state::RunState;
+
+    /// Regression: the orphan-scope query must reference the v3 schema
+    /// (feedback is environment-scoped; `runs` no longer has project_root/
+    /// name columns). Both callers swallow errors, so a broken statement
+    /// would silently disable feedback pruning forever.
+    #[test]
+    fn prune_orphaned_feedback_prunes_dead_scopes_and_keeps_live_ones() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projFb");
+        db.save_run(root, "proj", &RunState::new("dev", "proj"))
+            .unwrap();
+
+        let old = "2020-01-01T00:00:00.000000Z";
+        {
+            let conn = db.lock();
+            for (run, ts) in [("dev", old), ("ghost", old)] {
+                conn.execute(
+                    "INSERT INTO feedback_threads
+                       (project_root, run_name, id, payload, created_at, updated_at)
+                     VALUES ('/tmp/projFb', ?1, 't1', '{}', ?2, ?2)",
+                    rusqlite::params![run, ts],
+                )
+                .unwrap();
+            }
+        }
+
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(1);
+        // The regression fails here with "no such column" (swallowed by the
+        // real callers, surfaced by the test).
+        let pruned = db.prune_orphaned_feedback(cutoff).unwrap();
+        assert_eq!(pruned, 1, "only the environment-less scope is pruned");
+
+        let conn = db.lock();
+        let mut stmt = conn
+            .prepare("SELECT run_name FROM feedback_threads")
+            .unwrap();
+        let remaining: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        drop(stmt);
+        drop(conn);
+        assert_eq!(remaining, vec!["dev".to_string()]);
     }
 }

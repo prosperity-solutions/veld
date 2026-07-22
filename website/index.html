@@ -404,11 +404,11 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Run your e2e tests on it</h3><p>Point <code>veld start --oneshot</code> at a test command: it spins up every service the tests need, runs them, prints the results, then tears it all down — and the test's exit code becomes veld's. One line in CI.</p></div>
         <div class="cell"><h3>Real HTTPS, no warnings</h3><p>Every URL is <code>https://</code> with a trusted certificate. Set up once — no browser warnings.</p></div>
         <div class="cell"><h3>Waits until things are ready</h3><p>You don't get a URL until the service actually responds — and veld keeps watching after it's up.</p></div>
-        <div class="cell"><h3>Restarts what crashes</h3><p>If a service falls over, veld brings the environment back on its own.</p></div>
+        <div class="cell"><h3>Restarts what crashes — and remembers why</h3><p>If a service falls over, veld brings the environment back on its own. Every run leaves a record: when it ran, how it ended, and its logs — so <code>veld runs</code> answers "why did last night's run die?" days later.</p></div>
         <div class="cell"><h3>One config, many setups</h3><p>Run a service locally, in Docker, or against a remote — and start your go-to combinations with one short name.</p></div>
         <div class="cell"><h3>Many runs, side by side</h3><p>Give every branch or git worktree its own environment — they run in parallel without clashing. Re-running by name just resumes.</p></div>
         <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
-        <div class="cell"><h3>A dashboard in your browser</h3><p>See health, per-service memory &amp; CPU, tail logs, search, and stop/restart — all at <code>veld.localhost</code>.</p></div>
+        <div class="cell"><h3>A dashboard in your browser</h3><p>See health, per-service memory &amp; CPU, tail logs, search, browse past runs, and stop/restart — all at <code>veld.localhost</code>.</p></div>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
         <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
@@ -445,8 +445,8 @@ veld share <span class="kw">--web</span>
         <div class="cli-row"><code>veld restart [--name N]</code><span>Restart an environment</span></div>
         <div class="cli-row"><code>veld status [--name N]</code><span>Show run status</span></div>
         <div class="cli-row"><code>veld urls [--name N]</code><span>Show URLs for a run</span></div>
-        <div class="cli-row"><code>veld logs [-f] [-s TERM]</code><span>View logs (follow, search, context, source filter)</span></div>
-        <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and active runs</span></div>
+        <div class="cli-row"><code>veld logs [-f] [-s TERM] [--run ID]</code><span>View logs (follow, search, source filter — including past runs)</span></div>
+        <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and the run history</span></div>
         <div class="cli-row"><code>veld action NAME</code><span>Run a node-defined action (e.g. open the DB in a GUI)</span></div>
       </div>
 

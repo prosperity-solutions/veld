@@ -89,6 +89,8 @@ pub struct LogTarget {
     pub db: Db,
     pub project_root: PathBuf,
     pub run_name: String,
+    /// Run instance the lines belong to (stringified UUID).
+    pub run_id: String,
     pub node: String,
     pub variant: String,
 }
@@ -98,6 +100,7 @@ impl LogTarget {
         let _ = self.db.append_log(
             &self.project_root,
             &self.run_name,
+            Some(&self.run_id),
             Some(&self.node),
             Some(&self.variant),
             LogStream::Server,
@@ -199,9 +202,10 @@ fn start_server_detached(
         .to_string_lossy()
         .replace('\'', "'\\''");
     let wrapper = format!(
-        "{{ {command} ; }} 2>&1 | '{veld_bin}' _log --project-root '{root}' --run '{run}' --node '{node}' --variant '{variant}'",
+        "{{ {command} ; }} 2>&1 | '{veld_bin}' _log --project-root '{root}' --run '{run}' --run-id '{run_id}' --node '{node}' --variant '{variant}'",
         root = sq(&log_target.project_root.to_string_lossy()),
         run = sq(&log_target.run_name),
+        run_id = sq(&log_target.run_id),
         node = sq(&log_target.node),
         variant = sq(&log_target.variant),
     );

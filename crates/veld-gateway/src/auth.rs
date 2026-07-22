@@ -1,4 +1,4 @@
-//! Viewer access control for password-protected slugs (SHARING_V2.md §6.1).
+//! Viewer access control for password-protected slugs.
 //!
 //! The gateway holds no session store: a viewer session is a signed token in
 //! a cookie, verifiable from the registration alone. The signing key is
@@ -95,9 +95,9 @@ impl SlugAuth {
 /// Decide whether `req` may reach the tunnel.
 pub async fn gate(state: &AppState, target: &SlugAuth, req: Request) -> Gate {
     use veld_core::config::WebAccessMode;
-    // Exhaustive on purpose: a future access mode (e.g. per-viewer approval,
-    // parked in SHARING_V2.md §6.1) must force a conscious decision here
-    // rather than silently inheriting the password flow.
+    // Exhaustive on purpose: a future access mode (e.g. per-viewer approval)
+    // must force a conscious decision here rather than silently inheriting
+    // the password flow.
     match target.access {
         // Fully transparent for link-access nodes — no reserved paths either.
         WebAccessMode::Link => return Gate::Allow(req),
@@ -355,7 +355,7 @@ fn trim_ascii_ws_end(mut b: &[u8]) -> &[u8] {
 }
 
 // ---------------------------------------------------------------------------
-// Session tokens — stateless, capability-derived (SHARING_V2.md §6.1)
+// Session tokens — stateless, capability-derived
 // ---------------------------------------------------------------------------
 
 type HmacSha256 = Hmac<Sha256>;

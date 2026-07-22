@@ -1,7 +1,7 @@
 //! Live share registrations: join engine + slug routing table + lease
 //! bookkeeping.
 //!
-//! The registry holds no persistent state (SHARING_V2.md §5.3): registrations
+//! The registry holds no persistent state: registrations
 //! are leases the origin daemon refreshes by re-`POST`ing, slugs are
 //! deterministic (`slug::derive`), and a gateway restart is recovered by the
 //! next heartbeat. Cleanup is belt-and-braces: the tunnel's `conn.closed()`

@@ -72,12 +72,22 @@ pub async fn run() -> i32 {
                     }
                 }
 
-                run.status = RunStatus::Stopped;
-                run.stopped_at = Some(chrono::Utc::now());
-                for node in run.nodes.values_mut() {
+                // Same guarded one-step finalize as the daemon: record final
+                // node states while the run is still live, then label it
+                // crashed (no-ops if an ender moved it to `stopping` first).
+                let mut dead_node: Option<String> = None;
+                for (key, node) in run.nodes.iter_mut() {
+                    if node.pid.take().is_some() && dead_node.is_none() {
+                        dead_node = Some(key.clone());
+                    }
                     node.status = NodeStatus::Stopped;
                 }
                 let _ = db.save_run(&project_root, &reg_entry.project_name, &run);
+                let detail = veld_core::state::EndDetail {
+                    failed_node: dead_node,
+                    ..Default::default()
+                };
+                let _ = db.finalize_crashed(&run.run_id, Some(&detail));
                 orphans_cleaned += 1;
             }
         }

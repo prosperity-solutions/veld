@@ -1,9 +1,11 @@
 pub mod config;
+pub use uuid;
 pub mod db;
 pub mod feedback;
 pub mod graph;
 pub mod health;
 pub mod helper;
+pub mod instance;
 pub mod logging;
 pub mod orchestrator;
 pub mod paths;

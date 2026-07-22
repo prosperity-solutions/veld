@@ -268,6 +268,7 @@ pub async fn run(
                         node: Some(node.clone()),
                         variant: Some(variant.clone()),
                         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+                        run_id: None,
                     };
                     if let Ok(rows) =
                         orchestrator
@@ -685,6 +686,7 @@ async fn follow_logs_until_interrupt(
         node: None,
         variant: None,
         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+        run_id: None,
     };
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));
@@ -771,6 +773,21 @@ async fn run_oneshot_terminal(
         Ok(code) => code,
         Err(e) => {
             output::print_error(&format!("Failed to run {label}: {e}"), false);
+            // The terminal node never produced an exit — record the failure
+            // intent before the teardown below finalizes, or history would
+            // read `stopped` for a run that actually failed to execute.
+            if let Ok(Some(run)) = orchestrator.db.get_run(project_root, run_name) {
+                let detail = veld_core::state::EndDetail {
+                    exit_code: Some(127),
+                    message: Some(format!("terminal node failed to run: {e}")),
+                    ..Default::default()
+                };
+                let _ = orchestrator.db.begin_ending(
+                    &run.run_id,
+                    veld_core::state::EndReason::Failed,
+                    Some(&detail),
+                );
+            }
             127
         }
     };
@@ -842,6 +859,7 @@ async fn follow_dep_logs(
         node: None,
         variant: None,
         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
+        run_id: None,
     };
 
     let mut interval = tokio::time::interval(std::time::Duration::from_millis(200));

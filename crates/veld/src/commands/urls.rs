@@ -34,6 +34,39 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
         }
     };
 
+    // Routes are torn down when a run ends — the last run's URLs are dead.
+    // Erroring beats printing 404s an agent would then curl believing the
+    // environment is up.
+    if !run_state.is_live() {
+        if json {
+            // Machine-readable shape an agent can branch on without parsing
+            // an error string: no URLs, and explicitly not live.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "urls": [],
+                    "live": false,
+                    "ended_at": run_state.ended_at.map(|t| t.to_rfc3339()),
+                })
+            );
+        } else {
+            let ended = run_state
+                .ended_at
+                .map(|t| {
+                    format!(
+                        " (last run ended {})",
+                        t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M")
+                    )
+                })
+                .unwrap_or_default();
+            output::print_error(
+                &format!("Environment '{run_name}' is not running{ended} — no live URLs."),
+                false,
+            );
+        }
+        return 1;
+    }
+
     // Collect URLs from node states.
     let mut url_entries: Vec<(&str, &str, &str)> = Vec::new();
     for ns in run_state.nodes.values() {
@@ -44,7 +77,11 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
     url_entries.sort_by_key(|(node, variant, _)| (*node, *variant));
 
     if json {
-        let payload: Vec<serde_json::Value> = url_entries
+        // Same top-level shape as the stopped branch above — an agent can
+        // always read `.live` and `.urls` without probing the type first.
+        // (Pre-v3 this was a bare array; the object shape is part of the v3
+        // output changes.)
+        let urls: Vec<serde_json::Value> = url_entries
             .iter()
             .map(|(node, variant, url)| {
                 serde_json::json!({
@@ -54,7 +91,14 @@ pub async fn run(name: Option<String>, json: bool) -> i32 {
                 })
             })
             .collect();
-        println!("{}", serde_json::to_string_pretty(&payload).unwrap());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "urls": urls,
+                "live": true,
+            }))
+            .unwrap()
+        );
     } else if url_entries.is_empty() {
         output::print_info("No URLs exposed.");
     } else {

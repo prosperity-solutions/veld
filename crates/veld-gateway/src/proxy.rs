@@ -4,7 +4,7 @@
 //! splices each to a new TCP connection, so browser connection reuse maps to
 //! stream-per-request here) and speaks HTTP/1.1 to the origin service.
 //!
-//! Fidelity policy (SHARING_V2.md §5.3): the upstream `Host` header is
+//! Fidelity policy: the upstream `Host` header is
 //! rewritten to the **origin hostname** — dev servers (Vite & friends) enforce
 //! host allow-lists and already accept their own `*.localhost` hostname, so
 //! this makes the flagship case work zero-config. `Origin` and `Referer` are

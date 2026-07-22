@@ -123,11 +123,13 @@ veld stop --name dev
 | `veld urls [--name <n>] [--json]` | Show URLs for a run |
 | `veld action <name> [--name <n>] [--node <n>] [--print] [--json]` | Run a node-defined action (e.g. open the database in a GUI client); `--print` emits the resolved command |
 | `veld actions [--json]` | List the actions defined across the project's nodes |
-| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>]` | View logs (`-f` follow, `-s` search, `-C` context lines) |
+| `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>] [--run <id>] [-p] [--all-runs]` | View logs — defaults to the latest run; `--run <id-prefix>` reads a past run, `-p` the previous one, `--all-runs` interleaves everything; `-f` follow (exits when the run ends) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
 | `veld presets` | List presets |
-| `veld runs` | List all runs |
+| `veld runs [--name <n>] [--json]` | Run history: one row per execution instance (short id, started/ended, duration, outcome) |
+| `veld runs show <id> [--json]` | One run in full: outcome, node exit codes, and the graph snapshot it was started with |
+| `veld runs diff <old> <new> [--json]` | Config diff between two runs (nodes added/removed, command/cwd/env/url changes); one id diffs against its predecessor |
 | `veld feedback [--name <n>]` | Open feedback UI for a run |
 | `veld feedback next --wait [--name <n>]` | Block until feedback is submitted (for agent tool-use loops) |
 | `veld share [RUN] [--node <n>]... [--ttl <secs>] [--approve <first\|manual\|auto>] [--web] [--access <password\|link>] [--password <pw>] [--json]` | Share a running env over an encrypted P2P tunnel; prints a join URL (and `veld join` command). `--web`: publish via the configured gateway and print public URLs (password-protected by default) |
@@ -155,6 +157,10 @@ Three binaries work together:
 Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted in the system keychain during setup so browsers accept certificates without warnings.
 
 All CLI/daemon state (run state, project registry, service logs, feedback threads and screenshots, relay auth tokens) lives in one SQLite database at `<data_dir>/veld/veld.db` (override with `VELD_DB_PATH`; `0600`, WAL mode — concurrent access without file locking). The schema is versioned and migrates forward automatically on upgrade, so a CLI update never stops running environments because the data shape changed.
+
+### Environments and runs
+
+An **environment** is the durable named slot `--name` addresses; a **run** is one execution instance of it. Ended runs — stopped, failed, crashed, replaced, or completed (`--oneshot`) — persist as history (last 10 per environment, up to 7 days) with their logs, an explicit end reason, and machine-readable failure detail, so "why did last night's run die?" stays answerable after the fact. `veld runs` lists the history; `veld logs --run <id-prefix>` (or `-p` for the previous run) reads a past run's logs; `veld status`/`veld runs --json` expose `end_reason`/`end_detail` for agents. Crashes are detected by the daemon and recorded as `crashed` — distinguishable from a clean stop. The dashboard defaults to live environments (a top-level Active | History switcher); ended environments live under History with their last outcome, a run picker in the Logs tab, and one-click Restart. Each run also stores a **graph snapshot** taken at start — raw pre-interpolation command strings, env variable names (never values), cwd, URL templates, and a veld.json hash — so `veld runs show <id>` reconstructs what a run was started with and `veld runs diff` answers "what changed in the config between the run that worked and the run that didn't?"
 
 ---
 

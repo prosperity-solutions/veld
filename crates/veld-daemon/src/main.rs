@@ -53,10 +53,9 @@ fn parse_args() -> Args {
         }
     }
 
-    let socket_path = socket_path.unwrap_or_else(|| {
-        let home = dirs::home_dir().expect("could not determine home directory");
-        home.join(".veld").join("daemon.sock")
-    });
+    // Precedence: --socket-path flag, then VELD_DAEMON_SOCK, then the
+    // installed default (~/.veld/daemon.sock).
+    let socket_path = socket_path.unwrap_or_else(veld_core::instance::daemon_socket);
 
     Args { socket_path }
 }
@@ -88,15 +87,38 @@ async fn main() -> Result<()> {
             .context("failed to create socket parent directory")?;
     }
 
-    // Remove stale socket file if present.
-    if args.socket_path.exists() {
-        tokio::fs::remove_file(&args.socket_path)
-            .await
-            .context("failed to remove stale socket")?;
-    }
+    // NOTE: no unconditional unlink here — removing the socket file blindly
+    // would break a LIVE daemon's socket and make the AddrInUse arm below
+    // (the "another instance is already running" abort) unreachable. Stale
+    // files are removed only after a connect() probe proves nobody answers.
 
-    // Bind the Unix socket listener.
-    let listener = UnixListener::bind(&args.socket_path).context("failed to bind Unix socket")?;
+    // Bind the Unix socket listener. A leftover socket FILE from a crashed
+    // daemon must not block startup — but a LIVE socket means another
+    // instance of this daemon is already running, which must be a loud,
+    // immediate error (two half-alive daemons fighting over one port was a
+    // miserable thing to debug).
+    let listener = match UnixListener::bind(&args.socket_path) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            match tokio::net::UnixStream::connect(&args.socket_path).await {
+                Ok(_) => anyhow::bail!(
+                    "another veld-daemon is already running on {} — stop it first \
+                     (two instances cannot share a socket/port)",
+                    args.socket_path.display()
+                ),
+                Err(_) => {
+                    info!(
+                        "removing stale socket {} (no daemon answering)",
+                        args.socket_path.display()
+                    );
+                    std::fs::remove_file(&args.socket_path)
+                        .context("failed to remove stale socket")?;
+                    UnixListener::bind(&args.socket_path).context("failed to bind Unix socket")?
+                }
+            }
+        }
+        Err(e) => return Err(e).context("failed to bind Unix socket"),
+    };
 
     info!("listening on {}", args.socket_path.display());
 
@@ -129,6 +151,33 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Dev-instance dashboard: when VELD_MANAGEMENT_HOST is set (e.g.
+    // `veld-dev.localhost`), self-register a Caddy route for it pointing at
+    // THIS daemon's HTTP port. The installed instance never sets this — its
+    // `veld.localhost` route ships in the helper's base config. Best-effort
+    // with backoff (helper may still be booting); `.localhost` names need no
+    // DNS entry (RFC 6761).
+    if let Some(host) = veld_core::instance::management_host() {
+        let upstream = veld_core::instance::daemon_upstream();
+        tokio::spawn(async move {
+            let route = serde_json::json!({
+                "route_id": format!("veld-mgmt-{host}"),
+                "hostname": host,
+                "upstream": upstream,
+            });
+            for attempt in 0..5u64 {
+                if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+                    if helper.add_route(route.clone()).await.is_ok() {
+                        info!("management route registered: https://{host}");
+                        return;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(2 * (attempt + 1))).await;
+            }
+            warn!("could not register management route for {host} (helper unreachable)");
+        });
+    }
+
     // Spawn background tasks.
     let monitor_broadcaster = broadcaster.clone();
     let monitor_handle = tokio::spawn(async move {
@@ -160,6 +209,14 @@ async fn main() -> Result<()> {
     // Wait for shutdown signal.
     shutdown_signal().await;
     info!("shutdown signal received, cleaning up");
+
+    // Deregister the dev-instance management route (best-effort — a stale
+    // route only 502s until the next dev daemon re-registers it).
+    if let Some(host) = veld_core::instance::management_host() {
+        if let Ok(helper) = veld_core::helper::HelperClient::connect().await {
+            let _ = helper.remove_route(&format!("veld-mgmt-{host}")).await;
+        }
+    }
 
     // Abort background tasks.
     monitor_handle.abort();

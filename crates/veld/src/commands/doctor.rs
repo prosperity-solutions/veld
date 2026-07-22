@@ -459,14 +459,22 @@ impl Diagnostics {
             },
         });
 
-        // 5. Feedback server responding
-        let feedback_ok = tcp_connect_ok("127.0.0.1", 19899).await;
+        // 5. Feedback server responding. Name the port so a contributor
+        // running a dev instance (VELD_DAEMON_PORT) can tell WHICH daemon
+        // this green/red check is about.
+        let daemon_port = veld_core::instance::daemon_port();
+        let feedback_ok = tcp_connect_ok("127.0.0.1", daemon_port).await;
+        let instance_note = if daemon_port == veld_core::instance::DEFAULT_DAEMON_PORT {
+            String::new()
+        } else {
+            format!(" (dev instance, port {daemon_port})")
+        };
         self.checks.push(Check {
             pass: feedback_ok,
             label: if feedback_ok {
-                "Feedback server responding".into()
+                format!("Feedback server responding{instance_note}")
             } else {
-                "Feedback server not responding".into()
+                format!("Feedback server not responding{instance_note}")
             },
         });
 
@@ -789,7 +797,7 @@ async fn check_daemon_status() -> String {
     }
 
     // Try daemon socket
-    let daemon_sock = dirs::home_dir().map(|h| h.join(".veld").join("daemon.sock"));
+    let daemon_sock = Some(veld_core::instance::daemon_socket());
     if let Some(ref sock) = daemon_sock {
         if sock.exists() {
             if tokio::net::UnixStream::connect(sock).await.is_ok() {
