@@ -72,6 +72,15 @@ async fn login_shell_path(shell: &str) -> Option<String> {
         .arg("-i")
         .arg("-c")
         .arg("command env")
+        // stdin MUST be detached from any terminal: an interactive (-i) zsh
+        // with a tty on stdin attaches its line editor and job control to it
+        // — flipping termios to raw (ISIG off) and seizing the foreground
+        // process group — and leaves the terminal in that state on exit.
+        // Symptom: Ctrl-C in a foreground daemon (`just dev-daemon`) echoes
+        // ^C but signals nothing, re-broken every 60s by PATH re-resolution.
+        // With stdin null there is no tty fd, so the shell can't touch the
+        // terminal at all; PATH extraction only needs stdout.
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         // Kill the shell if we abandon it on timeout, so a hung `.zshrc`
