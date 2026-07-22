@@ -67,26 +67,34 @@ pub async fn resolve_user_path() -> String {
 /// `env`) so an `env` alias or shell function defined in an interactive rc
 /// file can't shadow the real binary.
 async fn login_shell_path(shell: &str) -> Option<String> {
-    let output = tokio::process::Command::new(shell)
-        .arg("-l")
+    let mut cmd = tokio::process::Command::new(shell);
+    cmd.arg("-l")
         .arg("-i")
         .arg("-c")
         .arg("command env")
-        // stdin MUST be detached from any terminal: an interactive (-i) zsh
-        // with a tty on stdin attaches its line editor and job control to it
-        // — flipping termios to raw (ISIG off) and seizing the foreground
-        // process group — and leaves the terminal in that state on exit.
-        // Symptom: Ctrl-C in a foreground daemon (`just dev-daemon`) echoes
-        // ^C but signals nothing, re-broken every 60s by PATH re-resolution.
-        // With stdin null there is no tty fd, so the shell can't touch the
-        // terminal at all; PATH extraction only needs stdout.
+        // No terminal on any fd — PATH extraction only needs stdout.
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         // Kill the shell if we abandon it on timeout, so a hung `.zshrc`
         // doesn't leak a live process per resolution.
-        .kill_on_drop(true)
-        .output();
+        .kill_on_drop(true);
+    // The shell must have NO CONTROLLING TERMINAL, not just clean stdio: an
+    // interactive (-i) zsh opens /dev/tty directly and seizes the terminal's
+    // foreground process group, then exits without restoring it — leaving
+    // Ctrl-C signalling a dead group. When the daemon runs foreground on a
+    // tty (`just dev-daemon`), that killed Ctrl-C for the whole session,
+    // re-broken by every 60s PATH re-resolution. setsid() detaches the child
+    // from the session so /dev/tty does not resolve to the user's terminal.
+    // (Verified by reproducing the foreground-group theft under a pty.)
+    #[cfg(unix)]
+    unsafe {
+        cmd.pre_exec(|| {
+            let _ = nix::unistd::setsid();
+            Ok(())
+        });
+    }
+    let output = cmd.output();
 
     match tokio::time::timeout(PATH_RESOLVE_TIMEOUT, output).await {
         Ok(Ok(o)) if o.status.success() => {
