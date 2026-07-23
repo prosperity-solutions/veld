@@ -4,7 +4,7 @@ import { viteSingleFile } from "vite-plugin-singlefile";
 
 // The production build is a single self-contained HTML file (JS, CSS, and
 // fonts inlined) so veld-daemon can embed it with include_str! and serve it
-// at /v2 with no external requests — see docs/branding.md.
+// at /ide with no external requests — see docs/branding.md.
 // Vite runs in Node; only this config file sees `process`.
 declare const process: { env: Record<string, string | undefined> };
 

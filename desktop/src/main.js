@@ -1,4 +1,4 @@
-// Veld Desktop — Electron shell around the veld daemon's /v2 management UI.
+// Veld Desktop — Electron shell around the veld daemon's /ide UI.
 //
 // Deliberately thin (see desktop/ARCHITECTURE.md): a frameless window that
 // loads the daemon-served UI, a macOS tray with run status, and nothing else.
@@ -18,7 +18,7 @@ const {
 // (VELD_DESKTOP_URL=http://localhost:5199). Default: the daemon directly —
 // no Caddy/helper needed.
 const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
-const APP_URL = `${BASE_URL}/v2?shell=electron`;
+const APP_URL = `${BASE_URL}/ide?shell=electron`;
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
 

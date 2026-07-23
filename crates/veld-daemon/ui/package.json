@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Veld management UI v2 (served by veld-daemon at /v2, wrapped by Veld Desktop)",
+  "description": "Veld management UI (worktree mode served by veld-daemon at /ide, wrapped by Veld Desktop)",
   "scripts": {
     "dev": "vite",
     "build": "vite build",

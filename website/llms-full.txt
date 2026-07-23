@@ -158,7 +158,7 @@ Caddy handles HTTPS termination and reverse proxying. Its internal CA is trusted
 
 All CLI/daemon state (run state, project registry, service logs, feedback threads and screenshots, relay auth tokens) lives in one SQLite database at `<data_dir>/veld/veld.db` (override with `VELD_DB_PATH`; `0600`, WAL mode — concurrent access without file locking). The schema is versioned and migrates forward automatically on upgrade, so a CLI update never stops running environments because the data shape changed.
 
-An experimental second-generation management UI is served at `/v2` on the same daemon (worktree-first: import git repositories, manage `git worktree` checkouts with aliases, drive veld runs per worktree). It is also the web core of Veld Desktop, an Electron shell that wraps it.
+An experimental second-generation management UI is served at `/ide` on the same daemon (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, drive veld runs per worktree). It is also the web core of Veld Desktop, an Electron shell that wraps it.
 
 ### Environments and runs
 

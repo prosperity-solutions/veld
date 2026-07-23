@@ -57,7 +57,7 @@ fn main() {
     }
 
     // Management UI v2: vite builds a single self-contained HTML file
-    // (JS/CSS/fonts inlined) that the daemon embeds and serves at /v2.
+    // (JS/CSS/fonts inlined) that the daemon embeds and serves at /ide.
     ensure_node_modules(&ui_dir);
     let status = Command::new("npm")
         .arg("run")
@@ -75,7 +75,7 @@ fn main() {
     }
     std::fs::rename(
         Path::new(&out_dir).join("index.html"),
-        Path::new(&out_dir).join("management-ui-v2.html"),
+        Path::new(&out_dir).join("management-ui-ide.html"),
     )
     .expect("vite build did not produce index.html");
     // The embed is include_str! of that ONE file — if the singlefile plugin

@@ -334,7 +334,7 @@ Veld includes a browser-based dashboard at `https://veld.localhost` (or `https:/
 
 Open it with `veld ui` or visit the URL directly.
 
-An experimental second-generation management UI is served at `/v2` (worktree-first: import git repositories, manage `git worktree` checkouts with aliases, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
+An experimental second-generation management UI is served at `/ide` (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
 
 ### Hammerspoon (macOS)
 

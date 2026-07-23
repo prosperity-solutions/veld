@@ -314,7 +314,7 @@ setup-ui:
     cd crates/veld-daemon/ui && npm install
     cd desktop && npm install
 
-# Vite dev server for the /v2 UI (HMR). Proxies /api to the DEV daemon
+# Vite dev server for the /ide UI (HMR). Proxies /api to the DEV daemon
 # (port {{dev_daemon_port}}) — start `just dev-daemon` first. Override with
 # VELD_DAEMON_PORT=19899 to develop against the installed daemon instead
 # (only works once its release carries the desktop endpoints).
@@ -325,12 +325,12 @@ dev-ui:
 dev-desktop:
     cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
 
-# Electron shell straight at the dev daemon's embedded /v2 (no HMR) —
+# Electron shell straight at the dev daemon's embedded /ide (no HMR) —
 # start `just dev-daemon` first.
 dev-desktop-embedded:
     cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
 
-# Electron shell against the installed daemon's embedded /v2.
+# Electron shell against the installed daemon's embedded /ide.
 desktop:
     cd desktop && npm start
 

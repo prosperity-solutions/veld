@@ -27,7 +27,7 @@ import {
 
 const POLL_MS = 5000;
 
-// The Electron shell loads /v2?shell=electron: the top bar then doubles as
+// The Electron shell loads /ide?shell=electron: the top bar then doubles as
 // the frameless window's native title bar (drag region, traffic-light inset).
 const isElectron =
   new URLSearchParams(window.location.search).get("shell") === "electron";

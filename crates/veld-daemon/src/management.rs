@@ -19,9 +19,10 @@ use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
 /// The v2 management UI (React, built by `ui/` via build.rs into a single
-/// self-contained HTML file). Served under /v2 until it reaches parity with
+/// self-contained HTML file). Served under /ide (worktree mode); a future
+/// runs mode reaches parity with
 /// the v1 dashboard above; Veld Desktop wraps this page.
-const DASHBOARD_V2_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-v2.html"));
+const IDE_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-ide.html"));
 
 /// Open the central database, mapping failures to a 500.
 pub(super) fn open_db() -> Result<Db, StatusCode> {
@@ -38,7 +39,7 @@ pub fn routes() -> Router {
         .route("/", get(dashboard))
         // Same SPA; the join ticket rides in the URL fragment (client-only).
         .route("/join", get(dashboard))
-        .route("/v2", get(dashboard_v2))
+        .route("/ide", get(ide_ui))
         // Liveness + version probe. `veld update` polls this to confirm the
         // daemon actually restarted onto the new binary (not just that *some*
         // daemon is reachable), mirroring the helper's version check.
@@ -76,13 +77,13 @@ async fn dashboard() -> Response {
         .into_response()
 }
 
-async fn dashboard_v2() -> Response {
+async fn ide_ui() -> Response {
     (
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8"),
             (header::CACHE_CONTROL, "no-cache"),
         ],
-        DASHBOARD_V2_HTML,
+        IDE_HTML,
     )
         .into_response()
 }

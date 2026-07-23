@@ -64,7 +64,7 @@ the `--bg` page with 1px `--border`, links in `--blue`, primary buttons in
 
 ## Desktop theme (management UI v2 / Veld Desktop)
 
-The `/v2` management UI (`crates/veld-daemon/ui/`, wrapped by the Electron
+The `/ide` management UI (`crates/veld-daemon/ui/`, wrapped by the Electron
 shell in `desktop/`) is the sanctioned second product theme. It follows the
 Veld Desktop design handoff rather than the classic product palette above:
 dark **and** light themes, a green accent, **Inter** for UI text, and

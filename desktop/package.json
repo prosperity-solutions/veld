@@ -2,7 +2,7 @@
   "name": "@veld/desktop",
   "private": true,
   "version": "0.0.0",
-  "description": "Veld Desktop — Electron shell around the veld management UI (/v2)",
+  "description": "Veld Desktop — Electron shell around the veld management UI (/ide)",
   "main": "src/main.js",
   "scripts": {
     "start": "electron ."

@@ -1,4 +1,4 @@
-//! Veld Desktop APIs: the repo/worktree registry behind the `/v2` management
+//! Veld Desktop APIs: the repo/worktree registry behind the `/ide` management
 //! UI and its Electron shell.
 //!
 //! A "repo" is a git repository the user imported (keyed by its main checkout

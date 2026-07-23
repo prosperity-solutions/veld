@@ -18,7 +18,7 @@ deliberately **not** part of this foundation.
 |---|---|---|
 | Repo placement | Veld monorepo | Every feature crosses the daemon API boundary; separate repo means version skew and dual PRs. Release/CI/review machinery already exists here. |
 | Name | **Veld Desktop** | The value prop *is* the veld integration (runs, URLs, share, SQLite state). A generic "agentic worktree manager" name promises veld-independence we chose not to build. Extraction later is cheap (see below). |
-| UI delivery | Served by `veld-daemon` at `/v2` | The daemon already owns the management HTTP server (`127.0.0.1:19899`) and the SQLite state. The desktop app is a thin wrapper, and the same UI works in a plain browser. |
+| UI delivery | Served by `veld-daemon` at `/ide` | The daemon already owns the management HTTP server (`127.0.0.1:19899`) and the SQLite state. The desktop app is a thin wrapper, and the same UI works in a plain browser. |
 | Electron's role | Supplementary shell | Frameless window, tray icon, later: embedded webviews with isolated sessions, CLI install. The web UI must stay fully usable without it. |
 | Run orchestration | Daemon shells out to the `veld` CLI | The daemon never runs the orchestrator in-process — stop/restart already work by spawning `cd <root> && veld …` in a login shell. Start follows the same pattern. |
 | Theme | Handoff palette (Inter + JetBrains Mono, oklch greens) | Deviates from the classic product tokens in `docs/branding.md`; sanctioned there as the **desktop theme**. Structural branding rules (wordmark, self-contained assets, noindex) still apply. |
@@ -38,12 +38,12 @@ client, not surgery.
 │ desktop/            Electron wrapper            │
 │  - frameless window (hiddenInset on macOS)      │
 │  - macOS tray icon (run status)                 │
-│  - loads http://127.0.0.1:19899/v2              │
+│  - loads http://127.0.0.1:19899/ide              │
 └──────────────────────┬──────────────────────────┘
                        │ plain HTTP, same as a browser
 ┌──────────────────────▼──────────────────────────┐
 │ veld-daemon         127.0.0.1:19899             │
-│  GET  /v2                → embedded UI bundle   │
+│  GET  /ide                → embedded UI bundle   │
 │  GET  /api/environments  → projects/runs/URLs   │
 │  GET  /api/repos         → repos + worktrees    │
 │  POST /api/repos/import  → register a git repo  │
@@ -58,7 +58,7 @@ client, not surgery.
 └─────────────────────────────────────────────────┘
 ```
 
-### `crates/veld-daemon/ui/` — the /v2 management UI
+### `crates/veld-daemon/ui/` — the /ide management UI
 
 React + TypeScript + Vite. Built as a **single self-contained HTML file**
 (`vite-plugin-singlefile`): JS, CSS, and fonts (Inter + JetBrains Mono
@@ -66,7 +66,7 @@ variable woff2, base64) are inlined so the daemon can embed it with
 `include_str!` exactly like the existing feedback-overlay assets. No external
 requests at runtime — branding rule.
 
-- Served at `GET /v2` (one route; the app is a SPA with client-side state, no
+- Served at `GET /ide` (one route; the app is a SPA with client-side state, no
   router needed yet).
 - Talks to the same-origin `/api/*`. All mutating calls send the
   `X-Veld-Request: 1` CSRF header the daemon requires.
@@ -75,8 +75,8 @@ requests at runtime — branding rule.
 - Detects the Electron shell via a `?shell=electron` query param to render the
   native-title-bar layout (drag region, traffic-light inset padding) instead of
   the browser-build header row.
-- The v1 dashboard at `/` is untouched; `/v2` replaces it only when it reaches
-  parity.
+- The v1 dashboard at `/` is untouched until the runs-mode rebuild reaches
+  parity and takes it over.
 
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
@@ -88,7 +88,7 @@ npm projects beat one franken-config.
 Minimal by design. Main process only does:
 
 1. Create a frameless `BrowserWindow` (`titleBarStyle: 'hiddenInset'`) and load
-   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/v2?shell=electron`.
+   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/ide?shell=electron`.
 2. If the daemon isn't reachable, show a local retry page (embedded data URL —
    install/start instructions) and poll until it appears.
 3. macOS tray (template icon): shows running-run count, per-run stop/restart
@@ -204,9 +204,9 @@ dev instance, so the worktree rail picks them up.
 > (`just dev-db-reset`) and re-import.
 
 Without step 2/3: the dev daemon's embedded UI is at
-`http://127.0.0.1:19898/v2` (or `https://veld-dev.localhost/v2`); once a
+`http://127.0.0.1:19898/ide` (or `https://veld-dev.localhost/ide`); once a
 release ships these endpoints, the installed daemon serves the same at
-`https://veld.localhost/v2`. Without step 3: everything works browser-only;
+`https://veld.localhost/ide`. Without step 3: everything works browser-only;
 Electron adds the native shell (`just dev-desktop-embedded` points it at the
 dev daemon without vite).
 
@@ -227,8 +227,9 @@ dashboard, with two modes and a view switcher in the top bar:
 - **Worktree mode** (served at `/ide`) — this increment's cockpit: rail,
   run controls, terminals, previews, scoped to one worktree.
 
-`/v2` is the staging route until runs mode reaches v1 parity; then the app
-takes over `/` + `/ide` and `assets/management-ui.html` is retired. Selection
+Worktree mode already lives at its final route (`/ide`); once runs mode
+reaches v1 parity the app also takes over `/` and `assets/management-ui.html`
+is retired. Selection
 already lives in the URL, so modes are just routes.
 
 ## Later increments (explicitly out of scope here)
