@@ -92,6 +92,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   environments: () => request<EnvironmentList>("/api/environments"),
+  /** Pure read (no reconciliation) — kept for consumers that must not
+   *  trigger git; the app itself polls refreshRepos. */
   repos: () => request<RepoList>("/api/repos"),
   /**
    * Reconcile worktree rows with git and return the fresh list — the poll
@@ -129,7 +131,8 @@ export const api = {
   /**
    * Open the OS folder picker (hosted by the daemon — it runs in the user's
    * GUI session). Resolves to the chosen absolute path, or null on cancel.
-   * Throws on systems without a picker backend (501).
+   * Throws on: no picker backend (501), backend failure (500), another
+   * picker already open (409), or the 10-minute timeout (408).
    */
   pickDirectory: async (): Promise<string | null> => {
     const res = await fetch("/api/pick-directory", {

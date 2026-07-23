@@ -51,8 +51,14 @@ async fn csrf_layer(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    use axum::http::Method;
     use axum::response::IntoResponse;
-    if req.method() != axum::http::Method::GET && check_csrf(req.headers()).is_err() {
+    // HEAD rides along with GET (axum auto-serves it for get() routes) and is
+    // equally side-effect-free. OPTIONS is deliberately NOT exempt: a CORS
+    // preflight without the header failing is exactly the cross-origin block
+    // this gate exists for.
+    let safe = req.method() == Method::GET || req.method() == Method::HEAD;
+    if !safe && check_csrf(req.headers()).is_err() {
         return err(StatusCode::FORBIDDEN, "missing X-Veld-Request header").into_response();
     }
     next.run(req).await
@@ -87,12 +93,18 @@ async fn run_picker(cmd: &str, args: &[&str]) -> Pick {
         }
         Ok(o) => {
             let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
-            // osascript reports a dismissed dialog as "User canceled. (-128)";
-            // zenity/kdialog exit 1 on cancel. Everything else is a real
-            // failure (no display, TCC denial) and must NOT read as cancel.
-            let cancelled = stderr.contains("-128")
-                || stderr.to_lowercase().contains("user canceled")
-                || (cmd != "osascript" && o.status.code() == Some(1) && stderr.is_empty());
+            // osascript reports a dismissed dialog as "User canceled. (-128)"
+            // (the numeric code is locale-independent); zenity/kdialog signal
+            // cancel purely via exit code 1 — stderr must be IGNORED there,
+            // because GTK/Qt binaries spawned from a daemon context routinely
+            // print module/a11y warnings even on a clean cancel. Anything
+            // else is a real failure (no display, TCC denial) and must NOT
+            // read as cancel.
+            let cancelled = if cmd == "osascript" {
+                stderr.contains("-128") || stderr.to_lowercase().contains("user canceled")
+            } else {
+                o.status.code() == Some(1)
+            };
             if cancelled {
                 Pick::Cancelled
             } else {
@@ -432,29 +444,40 @@ async fn list_repos() -> Result<Json<RepoList>, ApiError> {
 /// triggerable by an ungated cross-origin GET. Debounced daemon-side so
 /// several clients polling concurrently don't multiply the git spawns.
 async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, Instant};
-    static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
+    /// Debounce clock + the availability each repo had at the last real sync.
+    /// Memoizing availability keeps concurrent clients consistent: a non-due
+    /// poll must not substitute a semantically-weaker check (is_dir) that can
+    /// disagree with the due poll's git result during a failure.
+    static LAST_SYNC: Mutex<Option<(Instant, HashMap<String, bool>)>> = Mutex::new(None);
 
-    let due = {
-        let mut last = LAST_SYNC.lock().expect("picker sync mutex poisoned");
-        let due = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
-        if due {
-            *last = Some(Instant::now());
+    let memo = {
+        let last = LAST_SYNC.lock().expect("refresh debounce mutex poisoned");
+        match &*last {
+            Some((t, memo)) if t.elapsed() < Duration::from_secs(2) => Some(memo.clone()),
+            _ => None,
         }
-        due
     };
 
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
+    let mut availability = HashMap::new();
     for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
-        let available = if due {
-            sync_repo_worktrees(&db, &root).await.is_ok()
-        } else {
-            root.is_dir()
+        let available = match &memo {
+            // Repo imported inside the debounce window: not in the memo yet —
+            // its rows were just written by import, dir-exists is fine.
+            Some(memo) => memo.get(&repo.root).copied().unwrap_or(root.is_dir()),
+            None => sync_repo_worktrees(&db, &root).await.is_ok(),
         };
+        availability.insert(repo.root.clone(), available);
         repos.push(repo_view(&db, repo, available).await?);
+    }
+    if memo.is_none() {
+        *LAST_SYNC.lock().expect("refresh debounce mutex poisoned") =
+            Some((Instant::now(), availability));
     }
     Ok(Json(RepoList { repos }))
 }

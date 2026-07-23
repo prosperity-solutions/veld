@@ -152,7 +152,7 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /api/repos` | Repos with their worktrees, each worktree annotated with `has_veld_config` + `presets` (run state is NOT joined here — the UI joins `/api/environments` client-side by path). Reconciles each repo's worktree rows with `git worktree list` on every call, so out-of-app `git worktree add/remove` shows up on the next poll; a repo whose directory is gone keeps its last-known rows and is marked `available: false`. |
+| `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config` + `presets` (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
 | `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |

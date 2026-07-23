@@ -99,9 +99,17 @@ function createWindow() {
   // doesn't emit will-navigate.
   const appOrigin = new URL(APP_URL).origin;
   win.webContents.on("will-navigate", (event, url) => {
-    if (new URL(url).origin !== appOrigin) {
+    // Fail CLOSED: an unparseable target must not fall through into the
+    // shell (skipping preventDefault would navigate).
+    let origin = null;
+    try {
+      origin = new URL(url).origin;
+    } catch {
+      // leave origin null → blocked below
+    }
+    if (origin !== appOrigin) {
       event.preventDefault();
-      void shell.openExternal(url);
+      if (origin) void shell.openExternal(url);
     }
   });
 

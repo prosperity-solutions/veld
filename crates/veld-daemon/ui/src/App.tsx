@@ -153,11 +153,10 @@ export function App() {
     if (worktree) p.set("wt", String(worktree.id));
     else p.delete("wt");
     const query = p.toString();
-    window.history.replaceState(
-      null,
-      "",
-      query ? `?${query}` : window.location.pathname,
-    );
+    const next = query ? `?${query}` : "";
+    // Every poll produces fresh repo objects; skip the no-op replaceState.
+    if (next === window.location.search) return;
+    window.history.replaceState(null, "", next || window.location.pathname);
   }, [repoList, repo, worktree]);
 
   // ---- derived run state --------------------------------------------------
