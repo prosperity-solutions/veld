@@ -88,7 +88,10 @@ export function ImportRepoDialog(props: {
         </p>
         {pickError && <div className="error-text">{pickError}</div>}
         {error && <div className="error-text">{error}</div>}
-        <button className="primary-btn" disabled={busy || !path.trim()}>
+        <button
+          className="primary-btn"
+          disabled={busy || picking || !path.trim()}
+        >
           {busy ? "Importing…" : "Import"}
         </button>
       </form>
@@ -238,7 +241,9 @@ export function RenameWorktreeDialog(props: {
             <>
               <p style={{ margin: 0, fontSize: 12, color: "var(--muted)" }}>
                 Removes the checkout from disk (git refuses if it has
-                uncommitted changes). The branch itself is kept.
+                uncommitted changes). The branch itself is kept. Stop any
+                running environment in this worktree first — removing pulls
+                the directory out from under it.
               </p>
               {del.error && <div className="error-text">{del.error}</div>}
               {del.error && (

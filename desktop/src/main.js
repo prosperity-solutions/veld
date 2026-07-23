@@ -93,6 +93,18 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  // Same policy for top-level navigations (plain <a>, window.location,
+  // redirects): the shell renders only the app origin; anything else goes to
+  // the real browser. data: URLs (the waiting page) load via loadURL, which
+  // doesn't emit will-navigate.
+  const appOrigin = new URL(APP_URL).origin;
+  win.webContents.on("will-navigate", (event, url) => {
+    if (new URL(url).origin !== appOrigin) {
+      event.preventDefault();
+      void shell.openExternal(url);
+    }
+  });
+
   void loadAppWhenReady(win);
   win.on("closed", () => {
     win = null;

@@ -25,9 +25,14 @@ use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, val
 
 /// Build an axum [`Router`] for the desktop APIs (mounted into the daemon's
 /// HTTP server alongside the management routes).
+///
+/// CSRF is enforced as a LAYER, not per handler: every non-GET request on
+/// this router must carry `X-Veld-Request` (see `check_csrf`), so a future
+/// mutating route cannot ship ungated by forgetting a call.
 pub fn routes() -> Router {
     Router::new()
         .route("/api/repos", get(list_repos).delete(remove_repo))
+        .route("/api/repos/refresh", post(refresh_repos))
         .route("/api/repos/import", post(import_repo))
         .route("/api/worktrees", post(create_worktree))
         .route(
@@ -36,59 +41,117 @@ pub fn routes() -> Router {
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
         .route("/api/pick-directory", post(pick_directory))
+        .layer(axum::middleware::from_fn(csrf_layer))
+}
+
+/// Reject any mutating request without the `X-Veld-Request` header. GETs on
+/// this router are read-only by contract (enforced by keeping side effects
+/// out of them — see `list_repos`).
+async fn csrf_layer(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if req.method() != axum::http::Method::GET && check_csrf(req.headers()).is_err() {
+        return err(StatusCode::FORBIDDEN, "missing X-Veld-Request header").into_response();
+    }
+    next.run(req).await
 }
 
 // ---------------------------------------------------------------------------
 // Native directory picker
 // ---------------------------------------------------------------------------
 
+/// Result of one picker-backend attempt.
+enum Pick {
+    Chosen(String),
+    Cancelled,
+    /// The backend ran but failed (no GUI session, permission denied, …).
+    Failed(String),
+    /// The backend binary doesn't exist on this system.
+    Unavailable,
+}
+
+async fn run_picker(cmd: &str, args: &[&str]) -> Pick {
+    let out = tokio::process::Command::new(cmd)
+        .args(args)
+        .env("PATH", resolve_user_path().await)
+        // If the request is abandoned (timeout, client gone) the dialog
+        // process must not linger on the user's screen.
+        .kill_on_drop(true)
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {
+            Pick::Chosen(String::from_utf8_lossy(&o.stdout).trim().to_string())
+        }
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+            // osascript reports a dismissed dialog as "User canceled. (-128)";
+            // zenity/kdialog exit 1 on cancel. Everything else is a real
+            // failure (no display, TCC denial) and must NOT read as cancel.
+            let cancelled = stderr.contains("-128")
+                || stderr.to_lowercase().contains("user canceled")
+                || (cmd != "osascript" && o.status.code() == Some(1) && stderr.is_empty());
+            if cancelled {
+                Pick::Cancelled
+            } else {
+                Pick::Failed(if stderr.is_empty() {
+                    format!("{cmd} exited with {}", o.status)
+                } else {
+                    stderr
+                })
+            }
+        }
+        Err(_) => Pick::Unavailable,
+    }
+}
+
 /// Open the OS folder picker and return the chosen absolute path. The daemon
 /// runs in the user's GUI session (it already opens Terminal.app), so it can
 /// host the dialog for the browser build too — the web platform itself never
-/// exposes absolute paths. Responses: 200 `{path}`, 204 on cancel, 501 when
-/// no picker backend exists on this system.
-async fn pick_directory(
-    headers: axum::http::HeaderMap,
-) -> Result<axum::response::Response, ApiError> {
+/// exposes absolute paths. Responses: 200 `{path}`, 204 on cancel, 409 while
+/// another pick is already open, 408 after the 10-minute timeout, 501 when no
+/// picker backend exists, 500 when the backend fails (no GUI session, macOS
+/// permission denial).
+async fn pick_directory() -> Result<axum::response::Response, ApiError> {
     use axum::response::IntoResponse;
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
-    let path_env = resolve_user_path().await;
-    let run = |cmd: &'static str, args: &'static [&'static str]| {
-        let path_env = path_env.clone();
-        async move {
-            tokio::process::Command::new(cmd)
-                .args(args)
-                .env("PATH", path_env)
-                .output()
-                .await
+    // Single-flight: dialogs are modal on the user's screen; N tabs (or a
+    // scripted loop) must not stack N of them.
+    static PICKER_OPEN: AtomicBool = AtomicBool::new(false);
+    if PICKER_OPEN.swap(true, Ordering::SeqCst) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "a directory picker is already open",
+        ));
+    }
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            PICKER_OPEN.store(false, Ordering::SeqCst);
         }
-    };
+    }
+    let _reset = Reset;
 
     // 10 minutes: the request intentionally blocks while the dialog is open.
     let picked = tokio::time::timeout(std::time::Duration::from_secs(600), async {
         if cfg!(target_os = "macos") {
-            // `activate` pulls the dialog in front of the browser window —
-            // a background process's dialog opens behind it otherwise.
-            let out = run(
+            // `choose folder` is a Standard Additions dialog — deliberately no
+            // "System Events" activate (that is TCC-gated and a denial would
+            // abort the script before the dialog ever shows).
+            run_picker(
                 "osascript",
                 &[
-                    "-e",
-                    "tell application \"System Events\" to activate",
                     "-e",
                     "POSIX path of (choose folder with prompt \"Choose a git repository\")",
                 ],
             )
-            .await;
-            match out {
-                Ok(o) if o.status.success() => {
-                    Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()))
-                }
-                Ok(_) => Some(Err(())), // cancelled
-                Err(_) => None,
-            }
+            .await
         } else {
-            // Linux: try zenity, then kdialog. Exit 1 = cancelled.
+            // Linux: try zenity, then kdialog.
+            let mut last = Pick::Unavailable;
             for (cmd, args) in [
                 (
                     "zenity",
@@ -100,31 +163,30 @@ async fn pick_directory(
                 ),
                 ("kdialog", &["--getexistingdirectory", "."][..]),
             ] {
-                let out = tokio::process::Command::new(cmd)
-                    .args(args)
-                    .env("PATH", resolve_user_path().await)
-                    .output()
-                    .await;
-                match out {
-                    Ok(o) if o.status.success() => {
-                        return Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+                match run_picker(cmd, args).await {
+                    Pick::Unavailable => continue, // binary missing — try next
+                    outcome => {
+                        last = outcome;
+                        break;
                     }
-                    Ok(_) => return Some(Err(())), // dialog shown, cancelled
-                    Err(_) => continue,            // binary missing — try next
                 }
             }
-            None
+            last
         }
     })
     .await
     .map_err(|_| err(StatusCode::REQUEST_TIMEOUT, "picker timed out"))?;
 
     match picked {
-        Some(Ok(path)) if !path.is_empty() => {
+        Pick::Chosen(path) if !path.is_empty() => {
             Ok(Json(serde_json::json!({ "path": path })).into_response())
         }
-        Some(_) => Ok(StatusCode::NO_CONTENT.into_response()),
-        None => Err(err(
+        Pick::Chosen(_) | Pick::Cancelled => Ok(StatusCode::NO_CONTENT.into_response()),
+        Pick::Failed(reason) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("directory picker failed: {reason}"),
+        )),
+        Pick::Unavailable => Err(err(
             StatusCode::NOT_IMPLEMENTED,
             "no directory picker available on this system",
         )),
@@ -345,17 +407,53 @@ async fn repo_view(db: &Db, repo: RepoRecord, available: bool) -> Result<RepoVie
     })
 }
 
-/// List repos, reconciling each one's worktree rows with the checkouts git
-/// actually reports — so worktrees added or removed outside the app (plain
-/// `git worktree add/remove`) show up on the next poll without a re-import.
-/// A repo whose directory is gone or whose git call fails keeps its last
-/// known rows and is marked `available: false` instead of failing the list.
+/// List repos from the database — a pure read (GETs on this router carry no
+/// CSRF gate, so they must not spawn subprocesses or take write locks).
+/// `available` here is only the cheap directory-exists check; the full git
+/// reconciliation happens in [`refresh_repos`].
 async fn list_repos() -> Result<Json<RepoList>, ApiError> {
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
     for repo in db.list_repos().map_err(db_err)? {
+        let available = FsPath::new(&repo.root).is_dir();
+        repos.push(repo_view(&db, repo, available).await?);
+    }
+    Ok(Json(RepoList { repos }))
+}
+
+/// Reconcile every repo's worktree rows with the checkouts git actually
+/// reports, then return the fresh list — so worktrees added or removed
+/// outside the app (plain `git worktree add/remove`) show up on the next
+/// poll without a re-import. A repo whose directory is gone or whose git
+/// call fails keeps its last-known rows and is marked `available: false`.
+///
+/// This is the UI's poll target. It is a POST (CSRF-gated by the router
+/// layer) because it spawns git and writes — reconciliation must not be
+/// triggerable by an ungated cross-origin GET. Debounced daemon-side so
+/// several clients polling concurrently don't multiply the git spawns.
+async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+    static LAST_SYNC: Mutex<Option<Instant>> = Mutex::new(None);
+
+    let due = {
+        let mut last = LAST_SYNC.lock().expect("picker sync mutex poisoned");
+        let due = last.is_none_or(|t| t.elapsed() >= Duration::from_secs(2));
+        if due {
+            *last = Some(Instant::now());
+        }
+        due
+    };
+
+    let db = open_desktop_db()?;
+    let mut repos = Vec::new();
+    for repo in db.list_repos().map_err(db_err)? {
         let root = PathBuf::from(&repo.root);
-        let available = sync_repo_worktrees(&db, &root).await.is_ok();
+        let available = if due {
+            sync_repo_worktrees(&db, &root).await.is_ok()
+        } else {
+            root.is_dir()
+        };
         repos.push(repo_view(&db, repo, available).await?);
     }
     Ok(Json(RepoList { repos }))
@@ -368,12 +466,7 @@ struct ImportBody {
     path: String,
 }
 
-async fn import_repo(
-    headers: axum::http::HeaderMap,
-    Json(body): Json<ImportBody>,
-) -> Result<Json<RepoView>, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
-
+async fn import_repo(Json(body): Json<ImportBody>) -> Result<Json<RepoView>, ApiError> {
     let given = PathBuf::from(&body.path);
     if !given.is_absolute() {
         return Err(err(StatusCode::BAD_REQUEST, "path must be absolute"));
@@ -392,7 +485,9 @@ async fn import_repo(
                 format!("not a git repository: {e}"),
             )
         })?;
-    let discovered = parse_worktree_list(&porcelain);
+    // Same normalization as sync-on-refresh — an import must not store raw
+    // paths that the first refresh would then churn into canonical ones.
+    let discovered = canonicalize_discovered(parse_worktree_list(&porcelain));
     let Some(main) = discovered.iter().find(|w| w.is_main) else {
         return Err(err(
             StatusCode::BAD_REQUEST,
@@ -420,11 +515,7 @@ struct RemoveRepoBody {
     root: String,
 }
 
-async fn remove_repo(
-    headers: axum::http::HeaderMap,
-    Json(body): Json<RemoveRepoBody>,
-) -> Result<StatusCode, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
+async fn remove_repo(Json(body): Json<RemoveRepoBody>) -> Result<StatusCode, ApiError> {
     let db = open_desktop_db()?;
     // Registry-only removal — the filesystem is never touched.
     if db.remove_repo(FsPath::new(&body.root)).map_err(db_err)? {
@@ -455,10 +546,8 @@ struct CreateWorktreeBody {
 }
 
 async fn create_worktree(
-    headers: axum::http::HeaderMap,
     Json(body): Json<CreateWorktreeBody>,
 ) -> Result<Json<WorktreeView>, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
     validate_branch(&body.branch)?;
     if let Some(ref alias) = body.alias {
         validate_alias(alias)?;
@@ -522,7 +611,15 @@ async fn create_worktree(
         // Compare canonicalized: git records its own realpath'd form, while a
         // caller-supplied custom path may reach the same checkout through a
         // symlink or trailing component.
-        .find(|w| std::fs::canonicalize(&w.path).ok() == std::fs::canonicalize(&checkout_path).ok())
+        .find(|w| {
+            matches!(
+                (
+                    std::fs::canonicalize(&w.path),
+                    std::fs::canonicalize(&checkout_path),
+                ),
+                (Ok(a), Ok(b)) if a == b
+            )
+        })
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
@@ -543,11 +640,9 @@ struct RenameBody {
 }
 
 async fn rename_worktree(
-    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Json(body): Json<RenameBody>,
 ) -> Result<Json<WorktreeView>, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
     validate_alias(&body.alias)?;
     let db = open_desktop_db()?;
     if !db.rename_worktree(id, &body.alias).map_err(db_err)? {
@@ -567,11 +662,9 @@ struct DeleteQuery {
 }
 
 async fn delete_worktree(
-    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Query(q): Query<DeleteQuery>,
 ) -> Result<StatusCode, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
     let db = open_desktop_db()?;
     let wt = db
         .get_worktree(id)
@@ -622,12 +715,9 @@ struct StartBody {
 /// pattern as the management stop/restart endpoints. Returns 202; the UI
 /// observes progress via `/api/environments`.
 async fn start_worktree_run(
-    headers: axum::http::HeaderMap,
     Path(id): Path<i64>,
     Json(body): Json<StartBody>,
 ) -> Result<StatusCode, ApiError> {
-    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
-
     let db = open_desktop_db()?;
     let wt = db
         .get_worktree(id)
@@ -728,7 +818,12 @@ mod tests {
 
         #[tokio::test]
         async fn mutations_without_csrf_header_are_403() {
+            // The csrf_layer covers every non-GET route by construction; this
+            // list exercises each mutating route anyway so a routing change
+            // (e.g. moving one off the layered router) can't ship silently.
+            // Keep it in sync with routes().
             for (method, uri, body) in [
+                ("POST", "/api/repos/refresh", ""),
                 ("POST", "/api/repos/import", r#"{"path":"/tmp"}"#),
                 ("DELETE", "/api/repos", r#"{"root":"/tmp"}"#),
                 (
@@ -739,6 +834,7 @@ mod tests {
                 ("PATCH", "/api/worktrees/1", r#"{"alias":"a"}"#),
                 ("DELETE", "/api/worktrees/1", ""),
                 ("POST", "/api/worktrees/1/start", "{}"),
+                ("POST", "/api/pick-directory", ""),
             ] {
                 let res = super::super::routes()
                     .oneshot(req(method, uri, false, body))

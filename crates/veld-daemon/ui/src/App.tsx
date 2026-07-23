@@ -38,8 +38,8 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
   // the previous key's value silently carries over and overwrites.
   useEffect(() => {
     setValue(window.localStorage.getItem(key) ?? initial);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [key]);
+    // `initial` is intentionally not a dependency — only a key switch re-reads.
+  }, [key]); // eslint-disable-line react-hooks/exhaustive-deps
   const set = useCallback(
     (v: string) => {
       setValue(v);
@@ -71,20 +71,6 @@ function useUrlSelection(): {
   const effectiveRepo = urlRepo || repo;
   const effectiveWt = urlWt || wt;
 
-  useEffect(() => {
-    const p = new URLSearchParams(window.location.search);
-    if (effectiveRepo) p.set("repo", effectiveRepo);
-    else p.delete("repo");
-    if (effectiveWt) p.set("wt", effectiveWt);
-    else p.delete("wt");
-    const query = p.toString();
-    window.history.replaceState(
-      null,
-      "",
-      query ? `?${query}` : window.location.pathname,
-    );
-  }, [effectiveRepo, effectiveWt]);
-
   return {
     repo: effectiveRepo,
     wt: effectiveWt,
@@ -112,8 +98,10 @@ export function App() {
 
   const refresh = useCallback(async () => {
     try {
+      // refreshRepos (not the plain GET): reconciles worktree rows with git
+      // so out-of-app `git worktree add/remove` appears on the next poll.
       const [repos, environments] = await Promise.all([
-        api.repos(),
+        api.refreshRepos(),
         api.environments(),
       ]);
       setRepoList(repos);
@@ -153,6 +141,25 @@ export function App() {
     setActiveWtKey(String(w.id));
   };
 
+  // Self-heal the URL to the RESOLVED selection: a stale/deep-linked
+  // `?repo=`/`?wt=` that doesn't resolve falls back (repos[0] / main) for
+  // display, and the URL must advertise what is actually shown — otherwise a
+  // copied link carries a dead selection. Skipped until the first list load.
+  useEffect(() => {
+    if (!repoList) return;
+    const p = new URLSearchParams(window.location.search);
+    if (repo) p.set("repo", repo.root);
+    else p.delete("repo");
+    if (worktree) p.set("wt", String(worktree.id));
+    else p.delete("wt");
+    const query = p.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query ? `?${query}` : window.location.pathname,
+    );
+  }, [repoList, repo, worktree]);
+
   // ---- derived run state --------------------------------------------------
   const runs = worktree ? runsForWorktree(envs, worktree) : [];
   const run = activeRun(runs);
@@ -165,18 +172,36 @@ export function App() {
   const preset =
     worktree && worktree.presets.includes(presetChoice) ? presetChoice : "";
 
-  // Optimistic pending marker while a 202'd start/stop/restart takes effect.
-  const [pending, setPending] = useState<string | null>(null);
-  useEffect(() => setPending(null), [status]);
+  // Optimistic pending marker while a 202'd start/stop/restart takes effect —
+  // keyed to the worktree it was fired on (NOT a single global flag), so
+  // future per-row controls can't strand a spinner: it clears when THAT
+  // worktree's status changes.
+  const [pending, setPendingState] = useState<{
+    worktreeId: number;
+    label: string;
+    statusAtSet: string;
+  } | null>(null);
+  useEffect(() => {
+    if (!pending) return;
+    const wt = worktrees.find((w) => w.id === pending.worktreeId);
+    const current = wt ? worktreeStatus(runsForWorktree(envs, wt)) : "gone";
+    if (current !== pending.statusAtSet) setPendingState(null);
+  }, [envs, worktrees, pending]);
+  const pendingFor = (w: Worktree | null) =>
+    pending && w && pending.worktreeId === w.id ? pending.label : null;
 
   const [actionError, setActionError] = useState<string | null>(null);
-  const act = async (label: string, fn: () => Promise<void>) => {
+  const act = async (w: Worktree, label: string, fn: () => Promise<void>) => {
     setActionError(null);
-    setPending(label);
+    setPendingState({
+      worktreeId: w.id,
+      label,
+      statusAtSet: worktreeStatus(runsForWorktree(envs, w)),
+    });
     try {
       await fn();
     } catch (e) {
-      setPending(null);
+      setPendingState(null);
       setActionError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -217,7 +242,7 @@ export function App() {
         preset={preset}
         onPreset={setPresetChoice}
         running={status !== "stopped"}
-        pending={pending}
+        pending={pendingFor(worktree)}
         run={run}
         urlCount={urls.length}
         urlsOpen={urlsOpen}
@@ -230,11 +255,19 @@ export function App() {
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
         onStart={() =>
           worktree &&
-          void act("start", () => api.startRun(worktree.id, preset || null))
+          void act(worktree, "start", () =>
+            api.startRun(worktree.id, preset || null),
+          )
         }
-        onStop={() => run && void act("stop", () => api.stopRun(run.name))}
+        onStop={() =>
+          run &&
+          worktree &&
+          void act(worktree, "stop", () => api.stopRun(run.name))
+        }
         onRestart={() =>
-          run && void act("restart", () => api.restartRun(run.name))
+          run &&
+          worktree &&
+          void act(worktree, "restart", () => api.restartRun(run.name))
         }
         onSearch={() => setDialog({ kind: "search" })}
         theme={theme}
@@ -414,7 +447,10 @@ function TopBar(props: {
   onToggleTheme: () => void;
 }) {
   const { worktree, run } = props;
-  const canRun = !!worktree?.has_veld_config;
+  const repoAvailable = props.repo?.available ?? false;
+  // No run controls for a repo we can't see on disk — git/veld actions would
+  // only fail later with a worse error.
+  const canRun = !!worktree?.has_veld_config && repoAvailable;
   const statusColor =
     run?.status === "running"
       ? "var(--live)"
@@ -509,8 +545,16 @@ function TopBar(props: {
             </>
           )}
           {!canRun && (
-            <span className="chip" title="No veld.json in this worktree">
-              no veld config
+            <span
+              className="chip"
+              style={!repoAvailable ? { color: "var(--warn)" } : undefined}
+              title={
+                repoAvailable
+                  ? "No veld.json in this worktree"
+                  : "Repository directory not found on disk — showing last known state"
+              }
+            >
+              {repoAvailable ? "no veld config" : "repository unavailable"}
             </span>
           )}
         </>

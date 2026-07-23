@@ -159,7 +159,8 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `PATCH /api/worktrees/{id}` `{alias}` | Rename the alias (DB only). |
 | `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
 | `POST /api/worktrees/{id}/start` `{preset?, run_name?}` | Spawns `veld start --preset <p> --name <n>` with the worktree as cwd — the CLI resolves veld.json from cwd. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
-| `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
+| `POST /api/repos/refresh` | The UI's poll target: reconciles every repo's worktree rows with `git worktree list`, then returns the same payload as `GET /api/repos`. POST (CSRF-gated) because it spawns git and writes; debounced daemon-side. The plain GET stays a pure read. |
+| `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `409` while a picker is already open (single-flight), `408` after the 10-minute timeout, `500` on backend failure (no GUI session / permission denial), `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
 
 Git subprocesses follow the AGENTS.md daemon rule: resolved user login-shell
 `PATH` via `veld_core::user_path::resolve_user_path()`.
@@ -194,6 +195,12 @@ lock out every released binary until `veld update`. The dev daemon runs on
 its own database copy-free; to rehearse the migration against real data, use
 `just dev-db-from-real` first. Runs started with `just dev` land in the same
 dev instance, so the worktree rail picks them up.
+
+> **Ran this branch before it was rebased onto the environments×runs split?**
+> Your dev `veld.db` then has `user_version 3` holding the desktop tables —
+> a numbering this branch now assigns to main's environments migration. No
+> migration path can recover that database; wipe it once
+> (`just dev-db-reset`) and re-import.
 
 Without step 2/3: the dev daemon's embedded UI is at
 `http://127.0.0.1:19898/v2` (or `https://veld-dev.localhost/v2`); once a

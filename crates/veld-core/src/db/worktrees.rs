@@ -3,7 +3,7 @@
 //! A "repo" is a git repository the user imported into Veld Desktop (keyed by
 //! the main checkout root); "worktrees" are its `git worktree` checkouts, each
 //! with a user-editable alias. Rows live in the `repos`/`worktrees` tables
-//! (see the v3 migration). Run state is NOT duplicated here — callers join a
+//! (see the v5 migration). Run state is NOT duplicated here — callers join a
 //! worktree to veld state by path (`worktrees.path` = `projects.root`).
 
 use std::path::Path;
@@ -46,7 +46,9 @@ pub struct DiscoveredWorktree {
 
 // Column order is load-bearing: wt_from_row reads by index, and the INSERT /
 // UPDATE statements in sync_worktrees hand-list the same columns. Adding a
-// field means touching all of them (plus a NEW migration — never edit v5).
+// field means touching all of them (plus a NEW migration — never edit v5) AND
+// the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
+// flattens the new field into the API, but TS ignores unknown fields silently.
 const WT_COLS: &str = "id, repo_root, path, branch, alias, is_main, created_at";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
@@ -164,9 +166,13 @@ impl Db {
                     )
                     .optional()?;
                 if let Some(id) = existing {
+                    // Write only on change: steady-state syncs (the UI polls
+                    // refresh every few seconds) must not take the write path
+                    // and append WAL frames for identical rows.
                     tx.execute(
                         "UPDATE worktrees SET branch = ?1, is_main = ?2, repo_root = ?3
-                         WHERE id = ?4",
+                         WHERE id = ?4
+                           AND (branch != ?1 OR is_main != ?2 OR repo_root != ?3)",
                         params![d.branch, d.is_main as i64, root, id],
                     )?;
                 } else {
@@ -225,7 +231,8 @@ impl Db {
 
 /// Default alias for a branch: the segment after the last `/`, lowercased,
 /// non-alphanumerics collapsed to `-` (`feat/Checkout V2` → `checkout-v2`).
-/// Falls back to `"wt"` when nothing usable remains (e.g. a detached HEAD).
+/// Falls back to `"wt"` when nothing usable remains (all-symbol input
+/// like `///`; a detached checkout's `(detached)` label becomes `detached`).
 pub fn default_alias(branch: &str) -> String {
     let last = branch.rsplit('/').next().unwrap_or(branch);
     let mut out = String::with_capacity(last.len());

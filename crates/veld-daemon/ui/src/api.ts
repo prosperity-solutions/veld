@@ -93,6 +93,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   environments: () => request<EnvironmentList>("/api/environments"),
   repos: () => request<RepoList>("/api/repos"),
+  /**
+   * Reconcile worktree rows with git and return the fresh list — the poll
+   * target. A POST (CSRF-gated) because it spawns git server-side; debounced
+   * by the daemon, so several clients polling stay cheap.
+   */
+  refreshRepos: () => request<RepoList>("/api/repos/refresh", { method: "POST" }),
   importRepo: (path: string) =>
     request<Repo>("/api/repos/import", {
       method: "POST",
