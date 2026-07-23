@@ -1,19 +1,37 @@
 import { type FormEvent, type ReactNode, useState } from "react";
+import {
+  Button,
+  Checkbox,
+  Group,
+  Modal as MantineModal,
+  Stack,
+  Text,
+  TextInput,
+} from "@mantine/core";
 import { api, type Repo } from "../api";
 
+/**
+ * Shared dialog shell on Mantine's Modal (scrim, esc, focus trap, a11y) —
+ * kept as a local wrapper so call sites stay stable and the design-token
+ * offset/size match the handoff.
+ */
 export function Modal(props: {
   title: string;
   onClose: () => void;
   children: ReactNode;
 }) {
   return (
-    <>
-      <div className="scrim" onClick={props.onClose} />
-      <div className="modal" role="dialog" aria-label={props.title}>
-        <h3>{props.title}</h3>
-        {props.children}
-      </div>
-    </>
+    <MantineModal
+      opened
+      onClose={props.onClose}
+      title={props.title}
+      yOffset={88}
+      size={560}
+      radius="lg"
+      overlayProps={{ backgroundOpacity: 0.42 }}
+    >
+      {props.children}
+    </MantineModal>
   );
 }
 
@@ -33,6 +51,15 @@ function useSubmit(action: () => Promise<void>) {
     }
   };
   return { busy, error, submit };
+}
+
+function ErrorText(props: { error: string | null }) {
+  if (!props.error) return null;
+  return (
+    <Text size="sm" c="red" style={{ whiteSpace: "pre-wrap" }}>
+      {props.error}
+    </Text>
+  );
 }
 
 export function ImportRepoDialog(props: {
@@ -59,41 +86,36 @@ export function ImportRepoDialog(props: {
 
   return (
     <Modal title="Import repository" onClose={props.onClose}>
-      <form className="modal-body" onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="repo-path">Repository directory</label>
-          <div style={{ display: "flex", gap: 6 }}>
-            <input
-              id="repo-path"
-              className="mono"
-              style={{ flex: 1 }}
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <Group gap="xs" align="end">
+            <TextInput
+              label="Repository directory"
               placeholder="/Users/you/git/my-project"
-              autoFocus
+              value={path}
+              onChange={(e) => setPath(e.currentTarget.value)}
+              style={{ flex: 1 }}
+              styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+              data-autofocus
             />
-            <button
-              type="button"
-              className="btn"
-              onClick={browse}
-              disabled={picking}
-            >
-              {picking ? "Choosing…" : "Browse…"}
-            </button>
-          </div>
-        </div>
-        <p style={{ margin: 0, fontSize: 11.5, color: "var(--faint)" }}>
-          Any directory inside the repo works — the main checkout and existing
-          worktrees are discovered automatically.
-        </p>
-        {pickError && <div className="error-text">{pickError}</div>}
-        {error && <div className="error-text">{error}</div>}
-        <button
-          className="primary-btn"
-          disabled={busy || picking || !path.trim()}
-        >
-          {busy ? "Importing…" : "Import"}
-        </button>
+            <Button variant="default" onClick={browse} loading={picking}>
+              Browse…
+            </Button>
+          </Group>
+          <Text size="xs" c="dimmed">
+            Any directory inside the repo works — the main checkout and
+            existing worktrees are discovered automatically.
+          </Text>
+          <ErrorText error={pickError} />
+          <ErrorText error={error} />
+          <Button
+            type="submit"
+            loading={busy}
+            disabled={picking || !path.trim()}
+          >
+            Import
+          </Button>
+        </Stack>
       </form>
     </Modal>
   );
@@ -107,27 +129,20 @@ export function RemoveRepoDialog(props: {
   const { busy, error, submit } = useSubmit(() => props.onRemove());
   return (
     <Modal title={`Remove ${props.repo.name}?`} onClose={props.onClose}>
-      <form className="modal-body" onSubmit={submit}>
-        <p style={{ margin: 0, fontSize: 12.5, color: "var(--muted)" }}>
-          Removes the project (and its worktree list) from Veld Desktop only —
-          nothing on disk is touched. You can re-import it anytime.
-        </p>
-        <p className="mono" style={{ margin: 0, fontSize: 11, color: "var(--faint)" }}>
-          {props.repo.root}
-        </p>
-        {error && <div className="error-text">{error}</div>}
-        <button
-          className="btn"
-          style={{
-            color: "var(--danger)",
-            background: "var(--danger-bg)",
-            border: "none",
-            justifyContent: "center",
-          }}
-          disabled={busy}
-        >
-          {busy ? "Removing…" : "Remove project"}
-        </button>
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <Text size="sm" c="dimmed">
+            Removes the project (and its worktree list) from Veld Desktop only
+            — nothing on disk is touched. You can re-import it anytime.
+          </Text>
+          <Text size="xs" c="dimmed" ff="monospace">
+            {props.repo.root}
+          </Text>
+          <ErrorText error={error} />
+          <Button type="submit" color="red" variant="light" loading={busy}>
+            Remove project
+          </Button>
+        </Stack>
       </form>
     </Modal>
   );
@@ -153,47 +168,33 @@ export function NewWorktreeDialog(props: {
   );
   return (
     <Modal title="New worktree" onClose={props.onClose}>
-      <form className="modal-body" onSubmit={submit}>
-        <div className="field">
-          <label htmlFor="wt-branch">Branch</label>
-          <input
-            id="wt-branch"
-            className="mono"
-            value={branch}
-            onChange={(e) => setBranch(e.target.value)}
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <TextInput
+            label="Branch"
             placeholder="feat/checkout-v2"
-            autoFocus
+            value={branch}
+            onChange={(e) => setBranch(e.currentTarget.value)}
+            styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+            data-autofocus
           />
-        </div>
-        <label
-          style={{
-            display: "flex",
-            gap: 7,
-            alignItems: "center",
-            fontSize: 12.5,
-          }}
-        >
-          <input
-            type="checkbox"
+          <Checkbox
+            label="Create this branch (from the repo's current HEAD)"
             checked={createBranch}
-            onChange={(e) => setCreateBranch(e.target.checked)}
+            onChange={(e) => setCreateBranch(e.currentTarget.checked)}
           />
-          Create this branch (from the repo&apos;s current HEAD)
-        </label>
-        <div className="field">
-          <label htmlFor="wt-alias">Alias (optional)</label>
-          <input
-            id="wt-alias"
-            className="mono"
-            value={alias}
-            onChange={(e) => setAlias(e.target.value)}
+          <TextInput
+            label="Alias (optional)"
             placeholder="derived from the branch name"
+            value={alias}
+            onChange={(e) => setAlias(e.currentTarget.value)}
+            styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
           />
-        </div>
-        {error && <div className="error-text">{error}</div>}
-        <button className="primary-btn" disabled={busy || !branch.trim()}>
-          {busy ? "Creating…" : "Create worktree"}
-        </button>
+          <ErrorText error={error} />
+          <Button type="submit" loading={busy} disabled={!branch.trim()}>
+            Create worktree
+          </Button>
+        </Stack>
       </form>
     </Modal>
   );
@@ -215,83 +216,70 @@ export function RenameWorktreeDialog(props: {
   const del = useSubmit(() => props.onDelete(force));
   return (
     <Modal title="Edit worktree" onClose={props.onClose}>
-      <form className="modal-body" onSubmit={rename.submit}>
-        <div className="field">
-          <label htmlFor="wt-rename">Alias</label>
-          <input
-            id="wt-rename"
-            className="mono"
+      <form onSubmit={rename.submit}>
+        <Stack gap="sm">
+          <TextInput
+            label="Alias"
             value={alias}
-            onChange={(e) => setAlias(e.target.value)}
-            autoFocus
+            onChange={(e) => setAlias(e.currentTarget.value)}
+            styles={{ input: { fontFamily: "var(--mantine-font-family-monospace)" } }}
+            data-autofocus={!props.deleteFocus}
           />
-        </div>
-        {rename.error && <div className="error-text">{rename.error}</div>}
-        <button
-          className="primary-btn"
-          disabled={rename.busy || !alias.trim()}
-        >
-          {rename.busy ? "Saving…" : "Save"}
-        </button>
+          <ErrorText error={rename.error} />
+          <Button type="submit" loading={rename.busy} disabled={!alias.trim()}>
+            Save
+          </Button>
+        </Stack>
       </form>
       {!props.isMain && (
-        <div
-          className="modal-body"
+        <Stack
+          gap="sm"
+          mt="md"
+          pt="md"
           style={{ borderTop: "1px solid var(--border)" }}
         >
           {confirmDelete ? (
             <>
-              <p style={{ margin: 0, fontSize: 12, color: "var(--muted)" }}>
+              <Text size="sm" c="dimmed">
                 Removes the checkout from disk (git refuses if it has
                 uncommitted changes). The branch itself is kept. Stop any
                 running environment in this worktree first — removing pulls
                 the directory out from under it.
-              </p>
-              {del.error && <div className="error-text">{del.error}</div>}
+              </Text>
+              <ErrorText error={del.error} />
               {del.error && (
-                <label
-                  style={{
-                    display: "flex",
-                    gap: 7,
-                    alignItems: "center",
-                    fontSize: 12,
-                    color: "var(--danger)",
-                  }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={force}
-                    onChange={(e) => setForce(e.target.checked)}
-                  />
-                  Force remove — discards uncommitted changes
-                </label>
+                <Checkbox
+                  color="red"
+                  label="Force remove — discards uncommitted changes"
+                  checked={force}
+                  onChange={(e) => setForce(e.currentTarget.checked)}
+                />
               )}
-              <button
-                className="btn"
-                style={{
-                  color: "var(--danger)",
-                  background: "var(--danger-bg)",
-                  border: "none",
+              <Button
+                color="red"
+                variant="light"
+                loading={del.busy}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void del.submit(e);
                 }}
-                onClick={del.submit}
-                disabled={del.busy}
               >
-                {del.busy ? "Removing…" : "Really remove worktree"}
-              </button>
+                Really remove worktree
+              </Button>
             </>
           ) : (
-            <button
-              className="btn"
-              style={{ color: "var(--danger)" }}
+            <Button
+              color="red"
+              variant="subtle"
               onClick={(e) => {
                 e.preventDefault();
                 setConfirmDelete(true);
               }}
             >
               Remove worktree…
-            </button>
+            </Button>
           )}
-        </div>
+        </Stack>
       )}
     </Modal>
   );

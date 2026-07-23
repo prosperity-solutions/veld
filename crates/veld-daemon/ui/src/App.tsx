@@ -14,6 +14,9 @@ import {
   worktreeStatus,
 } from "./model";
 import { Wordmark } from "./components/Wordmark";
+import { Loader, MantineProvider, TextInput } from "@mantine/core";
+import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
+import { theme as mantineTheme } from "./theme";
 import {
   ImportRepoDialog,
   Modal,
@@ -21,7 +24,6 @@ import {
   RemoveRepoDialog,
   RenameWorktreeDialog,
 } from "./components/dialogs";
-import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 
 const POLL_MS = 5000;
 
@@ -91,6 +93,26 @@ export function App() {
   useEffect(() => {
     document.body.dataset.theme = theme;
   }, [theme]);
+
+  // Providers live above AppInner so useContextMenu / Mantine hooks work
+  // anywhere below; the color scheme follows our own persisted toggle.
+  return (
+    <MantineProvider
+      theme={mantineTheme}
+      forceColorScheme={theme === "light" ? "light" : "dark"}
+    >
+      <ContextMenuProvider borderRadius="md">
+        <AppInner
+          theme={theme}
+          onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        />
+      </ContextMenuProvider>
+    </MantineProvider>
+  );
+}
+
+function AppInner(props: { theme: string; onToggleTheme: () => void }) {
+  const { theme, onToggleTheme } = props;
 
   // ---- polled server state ------------------------------------------------
   const [repoList, setRepoList] = useState<RepoList | null>(null);
@@ -216,11 +238,34 @@ export function App() {
     | { kind: "search" }
   >({ kind: "none" });
 
-  const [menu, setMenu] = useState<{
-    x: number;
-    y: number;
-    worktree: Worktree;
-  } | null>(null);
+  const { showContextMenu } = useContextMenu();
+  const worktreeMenu = (w: Worktree) =>
+    showContextMenu([
+      {
+        key: "rename",
+        title: "Rename…",
+        onClick: () => setDialog({ kind: "rename", worktree: w }),
+      },
+      {
+        key: "copy-path",
+        title: "Copy path",
+        onClick: () => void navigator.clipboard.writeText(w.path),
+      },
+      {
+        key: "copy-branch",
+        title: "Copy branch",
+        onClick: () => void navigator.clipboard.writeText(w.branch),
+      },
+      { key: "divider" },
+      {
+        key: "remove",
+        title: "Remove worktree…",
+        color: "red",
+        disabled: w.is_main,
+        onClick: () =>
+          setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+      },
+    ]);
   const closeDialog = () => setDialog({ kind: "none" });
 
   useEffect(() => {
@@ -277,7 +322,7 @@ export function App() {
         }
         onSearch={() => setDialog({ kind: "search" })}
         theme={theme}
-        onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
+        onToggleTheme={onToggleTheme}
       />
       {urlsOpen && (
         <UrlsPopover
@@ -325,7 +370,7 @@ export function App() {
       {repoList === null ? (
         // First load: don't flash the empty-state CTA before data arrives.
         <div className="center-page">
-          <div className="spinner" aria-label="Loading" />
+          <Loader size="sm" aria-label="Loading" />
         </div>
       ) : repos.length === 0 ? (
         <div className="center-page">
@@ -353,52 +398,11 @@ export function App() {
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
             onEdit={(w) => setDialog({ kind: "rename", worktree: w })}
-            onMenu={(e, w) => {
-              e.preventDefault();
-              setMenu({ x: e.clientX, y: e.clientY, worktree: w });
-            }}
+            onMenu={(e, w) => worktreeMenu(w)(e)}
           />
           <TerminalPlaceholder worktree={worktree} />
           <UrlLauncher worktree={worktree} urls={urls} />
         </div>
-      )}
-
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          onClose={() => setMenu(null)}
-          items={
-            [
-              {
-                label: "Rename…",
-                onClick: () =>
-                  setDialog({ kind: "rename", worktree: menu.worktree }),
-              },
-              {
-                label: "Copy path",
-                onClick: () =>
-                  void navigator.clipboard.writeText(menu.worktree.path),
-              },
-              {
-                label: "Copy branch",
-                onClick: () =>
-                  void navigator.clipboard.writeText(menu.worktree.branch),
-              },
-              {
-                label: "Remove worktree…",
-                danger: true,
-                disabled: menu.worktree.is_main,
-                onClick: () =>
-                  setDialog({
-                    kind: "rename",
-                    worktree: menu.worktree,
-                    deleteFocus: true,
-                  }),
-              },
-            ] satisfies MenuItem[]
-          }
-        />
       )}
 
       {dialog.kind === "import" && (
@@ -851,13 +855,15 @@ function SearchOverlay(props: {
   const matches = filterWorktrees(props.worktrees, query);
   return (
     <Modal title={`Search ${props.project}`} onClose={props.onClose}>
-      <div className="modal-body">
-        <input
-          className="mono"
+      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+        <TextInput
           placeholder="Search worktrees…"
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          autoFocus
+          onChange={(e) => setQuery(e.currentTarget.value)}
+          styles={{
+            input: { fontFamily: "var(--mantine-font-family-monospace)" },
+          }}
+          data-autofocus
         />
         <div className="section-label">Worktrees</div>
         {matches.map((w) => {

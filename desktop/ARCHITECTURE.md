@@ -22,7 +22,7 @@ deliberately **not** part of this foundation.
 | Electron's role | Supplementary shell | Frameless window, tray icon, later: embedded webviews with isolated sessions, CLI install. The web UI must stay fully usable without it. |
 | Run orchestration | Daemon shells out to the `veld` CLI | The daemon never runs the orchestrator in-process — stop/restart already work by spawning `cd <root> && veld …` in a login shell. Start follows the same pattern. |
 | Theme | Handoff palette (Inter + JetBrains Mono, oklch greens) | Deviates from the classic product tokens in `docs/branding.md`; sanctioned there as the **desktop theme**. Structural branding rules (wordmark, self-contained assets, noindex) still apply. |
-| UI library | None — hand-rolled components on the token CSS | The handoff design is the product identity; a styled kit (Mantine et al.) means overriding its design system forever, and the roadmap components (terminal panes, webviews, rail, palette) aren't kit components anyway. Threshold: if menu/overlay density grows, adopt **headless** primitives (Radix-style) for a11y/positioning — never a styled kit. |
+| UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
 
@@ -216,14 +216,30 @@ runs typecheck + vitest + build for `ui/` and a syntax check for `desktop/`
 (see `.github/workflows/ci.yml`); the Rust build jobs install `ui/` npm deps
 because `veld-daemon`'s build.rs now builds both frontend packages.
 
+## Target shape: one app, two modes
+
+The end state is a single React/Mantine app replacing the hand-written v1
+dashboard, with two modes and a view switcher in the top bar:
+
+- **Runs mode** (served at `/`) — what the v1 management dashboard does
+  today: environments/runs across all projects, health, logs, stats,
+  sharing, feedback.
+- **Worktree mode** (served at `/ide`) — this increment's cockpit: rail,
+  run controls, terminals, previews, scoped to one worktree.
+
+`/v2` is the staging route until runs mode reaches v1 parity; then the app
+takes over `/` + `/ide` and `assets/management-ui.html` is retired. Selection
+already lives in the URL, so modes are just routes.
+
 ## Later increments (explicitly out of scope here)
 
-1. Embedded webviews + isolated sessions (Electron `WebContentsView`,
+1. **Runs mode** (v1-dashboard parity in React/Mantine) + view switcher +
+   `/` / `/ide` routing as above.
+2. Embedded webviews + isolated sessions (Electron `WebContentsView`,
    `session.fromPartition`).
-2. Terminal panes (PTY over WebSocket from the daemon, or node-pty in the
+3. Terminal panes (PTY over WebSocket from the daemon, or node-pty in the
    Electron main process — decision deferred).
-3. Start-run UX beyond preset picking; `veld share` from the UI.
-4. Command palette / fuzzy search beyond the overlay shell.
-5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
-6. Packaging, auto-update, CLI installation from the app.
-7. `/v2` → `/` promotion once at parity with the v1 dashboard.
+4. Start-run UX beyond preset picking; `veld share` from the UI.
+5. Command palette / fuzzy search beyond the overlay shell.
+6. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
+7. Packaging, auto-update, CLI installation from the app.
