@@ -22,6 +22,7 @@ deliberately **not** part of this foundation.
 | Electron's role | Supplementary shell | Frameless window, tray icon, later: embedded webviews with isolated sessions, CLI install. The web UI must stay fully usable without it. |
 | Run orchestration | Daemon shells out to the `veld` CLI | The daemon never runs the orchestrator in-process — stop/restart already work by spawning `cd <root> && veld …` in a login shell. Start follows the same pattern. |
 | Theme | Handoff palette (Inter + JetBrains Mono, oklch greens) | Deviates from the classic product tokens in `docs/branding.md`; sanctioned there as the **desktop theme**. Structural branding rules (wordmark, self-contained assets, noindex) still apply. |
+| UI library | None — hand-rolled components on the token CSS | The handoff design is the product identity; a styled kit (Mantine et al.) means overriding its design system forever, and the roadmap components (terminal panes, webviews, rail, palette) aren't kit components anyway. Threshold: if menu/overlay density grows, adopt **headless** primitives (Radix-style) for a11y/positioning — never a styled kit. |
 
 ### Extraction escape hatch
 

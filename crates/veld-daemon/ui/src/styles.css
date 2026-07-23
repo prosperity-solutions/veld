@@ -615,3 +615,56 @@ select:focus {
   opacity: 0.5;
   cursor: default;
 }
+
+/* ---- context menu --------------------------------------------------------- */
+
+.ctx-menu {
+  position: fixed;
+  z-index: 60;
+  background: var(--panel);
+  border: 1px solid var(--border2);
+  border-radius: 9px;
+  box-shadow: var(--pop);
+  padding: 5px;
+  display: flex;
+  flex-direction: column;
+}
+
+.ctx-item {
+  display: block;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-size: 12px;
+  padding: 5px 9px;
+  border-radius: 6px;
+  height: 28px;
+}
+.ctx-item:hover:not(:disabled) {
+  background: var(--elev);
+}
+.ctx-item.danger {
+  color: var(--danger);
+}
+.ctx-item:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
+/* ---- loading spinner ------------------------------------------------------- */
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  border: 2px solid var(--border2);
+  border-top-color: var(--accent);
+  animation: spin 0.8s linear infinite;
+}

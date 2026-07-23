@@ -204,10 +204,12 @@ export function RenameWorktreeDialog(props: {
   onRename: (alias: string) => Promise<void>;
   onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
+  /** Open with the remove confirmation already expanded (context menu). */
+  deleteFocus: boolean;
   onClose: () => void;
 }) {
   const [alias, setAlias] = useState(props.current);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(props.deleteFocus);
   const [force, setForce] = useState(false);
   const rename = useSubmit(() => props.onRename(alias.trim()));
   const del = useSubmit(() => props.onDelete(force));

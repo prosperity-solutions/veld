@@ -21,6 +21,7 @@ import {
   RemoveRepoDialog,
   RenameWorktreeDialog,
 } from "./components/dialogs";
+import { ContextMenu, type MenuItem } from "./components/ContextMenu";
 
 const POLL_MS = 5000;
 
@@ -210,10 +211,16 @@ export function App() {
     | { kind: "none" }
     | { kind: "import" }
     | { kind: "new-worktree" }
-    | { kind: "rename"; worktree: Worktree }
+    | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
   >({ kind: "none" });
+
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    worktree: Worktree;
+  } | null>(null);
   const closeDialog = () => setDialog({ kind: "none" });
 
   useEffect(() => {
@@ -315,7 +322,12 @@ export function App() {
         </div>
       )}
 
-      {repos.length === 0 ? (
+      {repoList === null ? (
+        // First load: don't flash the empty-state CTA before data arrives.
+        <div className="center-page">
+          <div className="spinner" aria-label="Loading" />
+        </div>
+      ) : repos.length === 0 ? (
         <div className="center-page">
           <Wordmark />
           <p>
@@ -341,10 +353,52 @@ export function App() {
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
             onEdit={(w) => setDialog({ kind: "rename", worktree: w })}
+            onMenu={(e, w) => {
+              e.preventDefault();
+              setMenu({ x: e.clientX, y: e.clientY, worktree: w });
+            }}
           />
           <TerminalPlaceholder worktree={worktree} />
           <UrlLauncher worktree={worktree} urls={urls} />
         </div>
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+          items={
+            [
+              {
+                label: "Rename…",
+                onClick: () =>
+                  setDialog({ kind: "rename", worktree: menu.worktree }),
+              },
+              {
+                label: "Copy path",
+                onClick: () =>
+                  void navigator.clipboard.writeText(menu.worktree.path),
+              },
+              {
+                label: "Copy branch",
+                onClick: () =>
+                  void navigator.clipboard.writeText(menu.worktree.branch),
+              },
+              {
+                label: "Remove worktree…",
+                danger: true,
+                disabled: menu.worktree.is_main,
+                onClick: () =>
+                  setDialog({
+                    kind: "rename",
+                    worktree: menu.worktree,
+                    deleteFocus: true,
+                  }),
+              },
+            ] satisfies MenuItem[]
+          }
+        />
       )}
 
       {dialog.kind === "import" && (
@@ -390,6 +444,7 @@ export function App() {
         <RenameWorktreeDialog
           current={dialog.worktree.alias}
           isMain={dialog.worktree.is_main}
+          deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
           onRename={async (alias) => {
             await api.renameWorktree(dialog.worktree.id, alias);
@@ -582,6 +637,7 @@ function Rail(props: {
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
   onEdit: (w: Worktree) => void;
+  onMenu: (e: React.MouseEvent, w: Worktree) => void;
 }) {
   return (
     <div className={`rail${props.wide ? " wide" : ""}`}>
@@ -606,6 +662,7 @@ function Rail(props: {
               className={`wt-row${props.active?.id === w.id ? " active" : ""}`}
               title={w.branch}
               onClick={() => props.onSelect(w)}
+              onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
               <span className="wt-alias">{w.alias}</span>
