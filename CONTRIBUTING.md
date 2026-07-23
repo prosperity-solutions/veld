@@ -22,9 +22,14 @@ Why? Because that's how this project was built, and it's how we believe modern s
 git clone https://github.com/prosperity-solutions/veld.git
 cd veld
 just setup-frontend   # install Node.js dependencies (once)
+just setup-ui         # deps for the /ide management UI + desktop shell (once)
 just build            # build Rust + frontend
 just test             # run all tests
 ```
+
+For the /ide management UI and the Electron desktop shell, see
+[desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md) (`just dev-ui`,
+`just dev-desktop`).
 
 The workspace has four crates:
 

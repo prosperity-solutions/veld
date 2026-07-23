@@ -62,6 +62,35 @@ the `--bg` page with 1px `--border`, links in `--blue`, primary buttons in
 `--accent` with dark text, errors in `--red`. Header pattern:
 `wordmark / <subtitle>` (see the management UI and gateway pages).
 
+## Desktop theme (management UI v2 / Veld Desktop)
+
+The `/ide` management UI (`crates/veld-daemon/ui/`, wrapped by the Electron
+shell in `desktop/`) is the sanctioned second product theme. It follows the
+Veld Desktop design handoff rather than the classic product palette above:
+dark **and** light themes, a green accent, **Inter** for UI text, and
+**JetBrains Mono** for branches/URLs/aliases/terminal content (an explicit
+exception to the "no marketing fonts on product surfaces" rule below — both
+fonts are bundled into the page, not fetched).
+
+```css
+/* dark — default */
+:root{
+  --bg:#0d0e10;--panel:#141619;--panel2:#1a1d21;--elev:#22262c;
+  --border:#2a2e35;--border2:#363b43;--text:#e7e9ec;--muted:#98a0a9;--faint:#666d76;
+  --live:oklch(0.74 0.14 158);--live-ink:#04140b;--live-bg:rgba(63,191,127,.14);
+  --warn:oklch(0.82 0.13 82);--warn-bg:rgba(230,180,60,.14);
+  --danger:oklch(0.68 0.17 22);--danger-bg:rgba(224,90,80,.14);
+  --accent:oklch(0.74 0.14 158);
+}
+/* light — body[data-theme="light"]; see crates/veld-daemon/ui/src/styles.css */
+```
+
+The structural rules are unchanged for this theme: embedded wordmark with the
+accent dot (here the accent green), fully self-contained single-file bundle
+(fonts inlined), viewport + noindex metas, data-URI favicon. The classic
+palette above remains the default for every *other* product surface (gateway
+pages, v1 dashboard, error pages).
+
 ## Marketing palette (website)
 
 The website (`website/`, a single self-contained `index.html`) uses its own
