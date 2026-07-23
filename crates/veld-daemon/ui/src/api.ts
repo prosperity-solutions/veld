@@ -16,8 +16,16 @@ export interface NodeInfo {
 }
 
 export interface RunInfo {
+  /** Environment name (what `--name` addresses). */
   name: string;
+  /** Status of the environment's latest run. */
   status: RunStatus;
+  /**
+   * Whether the latest run occupies the live slot. History runs (stopped,
+   * crashed) keep their status but are not live — never treat them as
+   * running, and their URLs are stripped server-side.
+   */
+  live: boolean;
   urls: Record<string, string>;
   nodes: NodeInfo[];
 }

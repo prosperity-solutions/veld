@@ -20,8 +20,10 @@ export function runsForWorktree(
 
 /**
  * The run the UI binds its controls to: a running one first, then anything
- * in transition, then the most interesting leftover. `null` = nothing to
- * stop/restart (start is always available when there's a veld config).
+ * in transition. Only live runs qualify — an environment's latest run keeps
+ * its status (stopped, failed) as history, and binding to history would show
+ * a crashed run as active forever. `null` = nothing to stop/restart (start
+ * is always available when there's a veld config).
  */
 export function activeRun(runs: RunInfo[]): RunInfo | null {
   const order: Record<string, number> = {
@@ -32,9 +34,9 @@ export function activeRun(runs: RunInfo[]): RunInfo | null {
     failed: 4,
     stopped: 5,
   };
-  const live = [...runs].sort(
-    (a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9),
-  );
+  const live = runs
+    .filter((r) => r.live)
+    .sort((a, b) => (order[a.status] ?? 9) - (order[b.status] ?? 9));
   const best = live[0];
   if (!best) return null;
   return best.status === "stopped" ? null : best;

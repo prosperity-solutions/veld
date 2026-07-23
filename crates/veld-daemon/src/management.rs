@@ -806,12 +806,6 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
 /// client) to prevent directory traversal; every argument is shell-escaped.
 pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    // Dev override (`just dev-daemon-sandbox`): point the spawned CLI at the
-    // dev-built binary so daemon-triggered lifecycle commands run against the
-    // same sandbox database/schema as the daemon itself. Unset in production —
-    // the login shell resolves the installed `veld` off PATH.
-    let veld_bin =
-        std::env::var("VELD_SPAWN_VELD_BIN").unwrap_or_else(|_| "veld".to_string());
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     // Resolve the veld binary as THIS daemon's sibling (current_exe), by
     // absolute path — a bare `veld` in the login shell resolves via PATH to

@@ -164,37 +164,37 @@ Prereqs: Rust stable, Node 22+, a working `veld` install (`veld doctor`).
 # 0. once: npm deps for ui/ and desktop/
 just setup-ui
 
-# 1. dev daemon in the foreground, on a COPY of the real database
-just dev-daemon-sandbox
+# 1. dev daemon — a full parallel instance alongside the installed one:
+#    own DB (.veld-dev/veld.db), own port (19898), https://veld-dev.localhost
+just dev-daemon
 
-# 2. UI with HMR — vite dev server on :5199, proxies /api → 127.0.0.1:19899
+# 2. UI with HMR — vite dev server on :5199, proxies /api → the dev daemon
 just dev-ui
 
 # 3. Electron shell pointed at the dev server
 just dev-desktop
 ```
 
-**Why the sandbox (step 1) and not `just dev-install-daemon`:** the dev build
-carries schema migrations the released binaries don't know yet. Installing it
-as the real daemon migrates the real `veld.db` on first open — after which
-every *released* `veld` binary refuses the database ("created by a newer veld
-version"), including from unrelated projects. `dev-daemon-sandbox` instead
-snapshots the database to `target/dev-db/veld.db`, temporarily unloads the
-released daemon service, and runs the dev daemon in the foreground against
-the copy — daemon-spawned `veld` commands are routed to the dev CLI on the
-same copy (`VELD_SPAWN_VELD_BIN`, `VELD_DB_PATH`). Ctrl-C restores the
-released daemon; the real database is never touched. Use
-`just dev-install-daemon` only when dev and released schema versions match.
+The dev-instance isolation (see CONTRIBUTING.md → Local development) is what
+makes this safe: this branch adds a schema migration, and a schema-ahead
+binary migrates whatever database it opens — on the real `veld.db` that would
+lock out every released binary until `veld update`. The dev daemon runs on
+its own database copy-free; to rehearse the migration against real data, use
+`just dev-db-from-real` first. Runs started with `just dev` land in the same
+dev instance, so the worktree rail picks them up.
 
-Without step 2/3: the embedded UI is at `http://127.0.0.1:19899/v2` (or
-`https://veld.localhost/v2` when the helper/Caddy is set up) in any browser.
-Without step 3: everything works browser-only; Electron adds the native shell.
+Without step 2/3: the dev daemon's embedded UI is at
+`http://127.0.0.1:19898/v2` (or `https://veld-dev.localhost/v2`); once a
+release ships these endpoints, the installed daemon serves the same at
+`https://veld.localhost/v2`. Without step 3: everything works browser-only;
+Electron adds the native shell (`just dev-desktop-embedded` points it at the
+dev daemon without vite).
 
-`just` recipes: `build-ui`, `test-ui`, `lint-ui`, `dev-desktop` mirror the
-existing frontend recipes. CI runs typecheck + vitest for `ui/` and
-typecheck for `desktop/` (see `.github/workflows/ci.yml`); the Rust build jobs
-install `ui/` npm deps because `veld-daemon`'s build.rs now builds both
-frontend packages.
+`just` recipes: `build-ui`, `test-ui`, `lint-ui`, `dev-desktop`,
+`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes. CI
+runs typecheck + vitest + build for `ui/` and a syntax check for `desktop/`
+(see `.github/workflows/ci.yml`); the Rust build jobs install `ui/` npm deps
+because `veld-daemon`'s build.rs now builds both frontend packages.
 
 ## Later increments (explicitly out of scope here)
 

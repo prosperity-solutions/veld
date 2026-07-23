@@ -176,76 +176,6 @@ dev-install-daemon:
         echo "✗ Daemon not responding — run 'veld doctor'"
     fi
 
-# --- Tier 2b: Sandbox daemon (dev schema, copied database) ---
-
-# Run the dev daemon in the FOREGROUND against a COPY of the real database.
-# Use when: the dev build carries schema migrations the released binaries
-# don't know yet — installing it via dev-install-daemon would migrate the
-# real veld.db and every released binary would then refuse to open it
-# ("created by a newer veld version"). This recipe never touches the real DB:
-#   1. snapshots veld.db → target/dev-db/veld.db (sqlite .backup, atomic)
-#   2. unloads the released daemon service (reloaded automatically on exit)
-#   3. runs the dev daemon in the foreground on the copy; daemon-spawned
-#      `veld` commands use the dev CLI + the same copy (VELD_SPAWN_VELD_BIN,
-#      VELD_DB_PATH). Ctrl-C to stop; the released daemon comes back.
-dev-daemon-sandbox:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd "{{justfile_directory()}}"
-    cargo build -p veld-daemon
-    cargo build
-
-    real_db="$HOME/Library/Application Support/veld/veld.db"
-    [ -f "$real_db" ] || real_db="${XDG_DATA_HOME:-$HOME/.local/share}/veld/veld.db"
-    sandbox_db="{{justfile_directory()}}/target/dev-db/veld.db"
-    mkdir -p "$(dirname "$sandbox_db")"
-    rm -f "$sandbox_db" "$sandbox_db-wal" "$sandbox_db-shm"
-    sqlite3 "$real_db" ".backup '$sandbox_db'"
-    echo "✓ Sandbox DB: $sandbox_db (copy of $real_db)"
-
-    plist="$HOME/Library/LaunchAgents/dev.veld.daemon.plist"
-    unloaded=""
-    daemon_pid=""
-    cleanup() {
-        # Kill the dev daemon explicitly — depending on how the signal
-        # arrived (Ctrl-C via just, kill on the script, terminal close), the
-        # daemon may or may not have received it itself.
-        if [ -n "$daemon_pid" ] && kill -0 "$daemon_pid" 2>/dev/null; then
-            kill -INT "$daemon_pid" 2>/dev/null || true
-            for _ in $(seq 1 20); do
-                kill -0 "$daemon_pid" 2>/dev/null || break
-                sleep 0.5
-            done
-            kill -9 "$daemon_pid" 2>/dev/null || true
-        fi
-        if [ -n "$unloaded" ]; then
-            unloaded=""
-            echo "Restoring released daemon…"
-            launchctl bootstrap "gui/$(id -u)" "$plist" || true
-        fi
-    }
-    # EXIT alone is not enough: bash skips the EXIT trap when it dies on an
-    # untrapped SIGINT/SIGTERM, so trap those to funnel into a normal exit.
-    trap cleanup EXIT
-    trap 'exit 130' INT TERM
-    if [ -f "$plist" ] && launchctl list dev.veld.daemon &>/dev/null; then
-        echo "Unloading released daemon (restored on exit)…"
-        launchctl bootout "gui/$(id -u)/dev.veld.daemon" || true
-        unloaded=1
-    fi
-
-    echo "Dev daemon on http://127.0.0.1:19899 (v2 UI: /v2) — Ctrl-C to stop."
-    VELD_DB_PATH="$sandbox_db" \
-    VELD_SPAWN_VELD_BIN="{{justfile_directory()}}/target/debug/veld" \
-        ./target/debug/veld-daemon &
-    daemon_pid=$!
-    # wait returns >128 when a trapped signal interrupts it — loop until the
-    # daemon is actually gone so the INT/TERM path flows through cleanup once.
-    while kill -0 "$daemon_pid" 2>/dev/null; do
-        wait "$daemon_pid" || true
-    done
-    daemon_pid=""
-
 # --- Tier 3: Install helper (privileged, requires sudo) ---
 
 # Install dev helper and restart Caddy.
@@ -384,13 +314,21 @@ setup-ui:
     cd crates/veld-daemon/ui && npm install
     cd desktop && npm install
 
-# Vite dev server for the /v2 UI (HMR, proxies /api to the daemon on :19899).
+# Vite dev server for the /v2 UI (HMR). Proxies /api to the DEV daemon
+# (port {{dev_daemon_port}}) — start `just dev-daemon` first. Override with
+# VELD_DAEMON_PORT=19899 to develop against the installed daemon instead
+# (only works once its release carries the desktop endpoints).
 dev-ui:
     cd crates/veld-daemon/ui && npm run dev
 
 # Electron shell pointed at the vite dev server (start `just dev-ui` first).
 dev-desktop:
     cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+
+# Electron shell straight at the dev daemon's embedded /v2 (no HMR) —
+# start `just dev-daemon` first.
+dev-desktop-embedded:
+    cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
 
 # Electron shell against the installed daemon's embedded /v2.
 desktop:

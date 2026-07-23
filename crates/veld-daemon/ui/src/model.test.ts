@@ -20,9 +20,14 @@ const wt = (path: string): Worktree => ({
   presets: [],
 });
 
-const run = (name: string, status: RunInfo["status"]): RunInfo => ({
+const run = (
+  name: string,
+  status: RunInfo["status"],
+  live = status !== "stopped" && status !== "failed",
+): RunInfo => ({
   name,
   status,
+  live,
   urls: {},
   nodes: [],
 });
@@ -59,9 +64,19 @@ describe("activeRun / worktreeStatus", () => {
   it("maps to the rail dot states", () => {
     expect(worktreeStatus([run("a", "running")])).toBe("running");
     expect(worktreeStatus([run("a", "starting")])).toBe("partial");
-    expect(worktreeStatus([run("a", "failed")])).toBe("partial");
+    expect(worktreeStatus([run("a", "failed", true)])).toBe("partial");
     expect(worktreeStatus([run("a", "stopped")])).toBe("stopped");
     expect(worktreeStatus([])).toBe("stopped");
+  });
+
+  it("ignores non-live history runs", () => {
+    // An environment's latest run persists as history (live: false) — a
+    // crashed run must not read as active.
+    expect(activeRun([run("a", "failed", false)])).toBeNull();
+    expect(worktreeStatus([run("a", "failed", false)])).toBe("stopped");
+    expect(
+      activeRun([run("a", "failed", false), run("b", "running")])?.name,
+    ).toBe("b");
   });
 });
 

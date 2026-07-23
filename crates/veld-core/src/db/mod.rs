@@ -437,7 +437,6 @@ fn migrate_v2_node_stats(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-<<<<<<< HEAD
 /// v3: split "runs" into environments (the durable named slot) × runs (one
 /// execution instance each, keyed by `run_id`). Stopped/crashed runs become
 /// retention-bounded history instead of being deleted, and `log_lines` gains
