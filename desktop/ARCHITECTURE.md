@@ -110,7 +110,7 @@ own veld project*. The desktop model sits one level above:
   user-editable `alias`. The main checkout itself appears as a worktree row so
   the rail has one list.
 
-Migration v3 (`crates/veld-core/src/db/mod.rs`, `user_version` 2 → 3):
+Migration v5 (`crates/veld-core/src/db/mod.rs`, `user_version` 4 → 5):
 
 ```sql
 CREATE TABLE repos (
@@ -130,8 +130,19 @@ CREATE TABLE worktrees (
 ```
 
 Run/health/URL state is **not** duplicated: the UI joins a worktree to veld
-state by path (`worktrees.path` = veld `projects.root`) via
-`/api/environments`. A worktree without a veld.json simply has no run controls.
+state by path (`worktrees.path` = veld `projects.root`, string equality) via
+`/api/environments`. Both sides are physical (symlink-resolved) paths — git
+porcelain emits them and `veld start` derives roots from `getcwd`; the daemon
+additionally canonicalizes discovered paths at sync time to keep the key
+stable. A worktree without a veld.json simply has no run controls.
+
+Known limitation: a veld.json living in a *subdirectory* of the worktree is
+not detected (`has_veld_config` checks the checkout root only), matching how
+the desktop keys projects; such setups get no run controls.
+
+UI selection state (project, worktree) lives in the URL (`?repo=…&wt=…`) with
+localStorage as fallback — every view is addressable, which is the foundation
+for later multi-window / split layouts (one URL per window).
 
 ## Daemon API additions
 
@@ -141,13 +152,14 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /api/repos` | Repos with their worktrees, each annotated: `has_veld_config`, current runs (name/status/URL count) joined from the registry. |
-| `POST /api/repos/import` `{path}` | Validates the path is a git repo root (`git rev-parse --show-toplevel`), derives the name, registers it, and auto-discovers existing worktrees (`git worktree list --porcelain`). Idempotent re-import re-syncs worktrees. |
-| `DELETE /api/repos/{...}` | Unregisters (never touches the filesystem). |
+| `GET /api/repos` | Repos with their worktrees, each worktree annotated with `has_veld_config` + `presets` (run state is NOT joined here — the UI joins `/api/environments` client-side by path). Reconciles each repo's worktree rows with `git worktree list` on every call, so out-of-app `git worktree add/remove` shows up on the next poll; a repo whose directory is gone keeps its last-known rows and is marked `available: false`. |
+| `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
+| `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
 | `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |
 | `PATCH /api/worktrees/{id}` `{alias}` | Rename the alias (DB only). |
-| `DELETE /api/worktrees/{id}` | `git worktree remove` (+ prune). Refuses a dirty tree unless `{force: true}`. Never deletes the main checkout. |
-| `POST /api/worktrees/{id}/start` `{preset?, run_name?}` | Spawns `veld start --preset <p> --name <n>` with the worktree as cwd — the CLI resolves veld.json from cwd. Default run name: the alias. |
+| `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
+| `POST /api/worktrees/{id}/start` `{preset?, run_name?}` | Spawns `veld start --preset <p> --name <n>` with the worktree as cwd — the CLI resolves veld.json from cwd. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
+| `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
 
 Git subprocesses follow the AGENTS.md daemon rule: resolved user login-shell
 `PATH` via `veld_core::user_path::resolve_user_path()`.

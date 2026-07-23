@@ -44,6 +44,9 @@ pub struct DiscoveredWorktree {
     pub is_main: bool,
 }
 
+// Column order is load-bearing: wt_from_row reads by index, and the INSERT /
+// UPDATE statements in sync_worktrees hand-list the same columns. Adding a
+// field means touching all of them (plus a NEW migration — never edit v5).
 const WT_COLS: &str = "id, repo_root, path, branch, alias, is_main, created_at";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
@@ -123,6 +126,14 @@ impl Db {
         repo_root: &Path,
         discovered: &[DiscoveredWorktree],
     ) -> Result<Vec<WorktreeRecord>, DbError> {
+        // Guard the degenerate case explicitly: an empty `discovered` would
+        // make the prune below `path NOT IN ()` — which SQLite evaluates as
+        // true-for-all, silently wiping every row for the repo. Current
+        // callers always pass ≥1 entry (git lists the main checkout), but a
+        // parse-to-empty regression must not become a wipe.
+        if discovered.is_empty() {
+            return self.list_worktrees(repo_root);
+        }
         let root = root_key(repo_root);
         let mut conn = self.lock();
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -349,6 +360,17 @@ mod tests {
         let mut aliases: Vec<_> = wts.iter().map(|w| w.alias.as_str()).collect();
         aliases.sort();
         assert_eq!(aliases, vec!["login", "login-2"]);
+    }
+
+    #[test]
+    fn sync_with_empty_list_is_a_noop_not_a_wipe() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoE");
+        db.upsert_repo(root, "repo-e").unwrap();
+        db.sync_worktrees(root, &[wt("/tmp/repoE", "main", true)])
+            .unwrap();
+        let wts = db.sync_worktrees(root, &[]).unwrap();
+        assert_eq!(wts.len(), 1, "empty discovery must not delete rows");
     }
 
     #[test]

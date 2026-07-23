@@ -1,4 +1,5 @@
 import { type FormEvent, type ReactNode, useState } from "react";
+import { api, type Repo } from "../api";
 
 export function Modal(props: {
   title: string;
@@ -39,28 +40,90 @@ export function ImportRepoDialog(props: {
   onClose: () => void;
 }) {
   const [path, setPath] = useState("");
+  const [pickError, setPickError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
   const { busy, error, submit } = useSubmit(() => props.onImport(path.trim()));
+
+  const browse = async () => {
+    setPicking(true);
+    setPickError(null);
+    try {
+      const picked = await api.pickDirectory();
+      if (picked) setPath(picked);
+    } catch (e) {
+      setPickError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setPicking(false);
+    }
+  };
+
   return (
     <Modal title="Import repository" onClose={props.onClose}>
       <form className="modal-body" onSubmit={submit}>
         <div className="field">
-          <label htmlFor="repo-path">Absolute path to the repository</label>
-          <input
-            id="repo-path"
-            className="mono"
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="/Users/you/git/my-project"
-            autoFocus
-          />
+          <label htmlFor="repo-path">Repository directory</label>
+          <div style={{ display: "flex", gap: 6 }}>
+            <input
+              id="repo-path"
+              className="mono"
+              style={{ flex: 1 }}
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="/Users/you/git/my-project"
+              autoFocus
+            />
+            <button
+              type="button"
+              className="btn"
+              onClick={browse}
+              disabled={picking}
+            >
+              {picking ? "Choosing…" : "Browse…"}
+            </button>
+          </div>
         </div>
         <p style={{ margin: 0, fontSize: 11.5, color: "var(--faint)" }}>
           Any directory inside the repo works — the main checkout and existing
           worktrees are discovered automatically.
         </p>
+        {pickError && <div className="error-text">{pickError}</div>}
         {error && <div className="error-text">{error}</div>}
         <button className="primary-btn" disabled={busy || !path.trim()}>
           {busy ? "Importing…" : "Import"}
+        </button>
+      </form>
+    </Modal>
+  );
+}
+
+export function RemoveRepoDialog(props: {
+  repo: Repo;
+  onRemove: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const { busy, error, submit } = useSubmit(() => props.onRemove());
+  return (
+    <Modal title={`Remove ${props.repo.name}?`} onClose={props.onClose}>
+      <form className="modal-body" onSubmit={submit}>
+        <p style={{ margin: 0, fontSize: 12.5, color: "var(--muted)" }}>
+          Removes the project (and its worktree list) from Veld Desktop only —
+          nothing on disk is touched. You can re-import it anytime.
+        </p>
+        <p className="mono" style={{ margin: 0, fontSize: 11, color: "var(--faint)" }}>
+          {props.repo.root}
+        </p>
+        {error && <div className="error-text">{error}</div>}
+        <button
+          className="btn"
+          style={{
+            color: "var(--danger)",
+            background: "var(--danger-bg)",
+            border: "none",
+            justifyContent: "center",
+          }}
+          disabled={busy}
+        >
+          {busy ? "Removing…" : "Remove project"}
         </button>
       </form>
     </Modal>
@@ -136,14 +199,15 @@ export function NewWorktreeDialog(props: {
 export function RenameWorktreeDialog(props: {
   current: string;
   onRename: (alias: string) => Promise<void>;
-  onDelete: () => Promise<void>;
+  onDelete: (force: boolean) => Promise<void>;
   isMain: boolean;
   onClose: () => void;
 }) {
   const [alias, setAlias] = useState(props.current);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [force, setForce] = useState(false);
   const rename = useSubmit(() => props.onRename(alias.trim()));
-  const del = useSubmit(() => props.onDelete());
+  const del = useSubmit(() => props.onDelete(force));
   return (
     <Modal title="Edit worktree" onClose={props.onClose}>
       <form className="modal-body" onSubmit={rename.submit}>
@@ -177,6 +241,24 @@ export function RenameWorktreeDialog(props: {
                 uncommitted changes). The branch itself is kept.
               </p>
               {del.error && <div className="error-text">{del.error}</div>}
+              {del.error && (
+                <label
+                  style={{
+                    display: "flex",
+                    gap: 7,
+                    alignItems: "center",
+                    fontSize: 12,
+                    color: "var(--danger)",
+                  }}
+                >
+                  <input
+                    type="checkbox"
+                    checked={force}
+                    onChange={(e) => setForce(e.target.checked)}
+                  />
+                  Force remove — discards uncommitted changes
+                </label>
+              )}
               <button
                 className="btn"
                 style={{

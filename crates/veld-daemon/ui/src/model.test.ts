@@ -64,7 +64,7 @@ describe("activeRun / worktreeStatus", () => {
   it("maps to the rail dot states", () => {
     expect(worktreeStatus([run("a", "running")])).toBe("running");
     expect(worktreeStatus([run("a", "starting")])).toBe("partial");
-    expect(worktreeStatus([run("a", "failed", true)])).toBe("partial");
+    expect(worktreeStatus([run("a", "failed", true)])).toBe("failed");
     expect(worktreeStatus([run("a", "stopped")])).toBe("stopped");
     expect(worktreeStatus([])).toBe("stopped");
   });

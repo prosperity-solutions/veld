@@ -4,7 +4,7 @@
 
 import type { EnvironmentList, RunInfo, Worktree } from "./api";
 
-export type WorktreeStatus = "running" | "partial" | "stopped";
+export type WorktreeStatus = "running" | "partial" | "failed" | "stopped";
 
 /** The veld runs living in a worktree (its path is the project root). */
 export function runsForWorktree(
@@ -42,11 +42,15 @@ export function activeRun(runs: RunInfo[]): RunInfo | null {
   return best.status === "stopped" ? null : best;
 }
 
-/** Rail status dot: running (green, pulsing), partial (amber), stopped. */
+/**
+ * Rail status dot: running (green, pulsing), partial (amber, in transition),
+ * failed (red), stopped (gray).
+ */
 export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
   const run = activeRun(runs);
   if (!run) return "stopped";
   if (run.status === "running") return "running";
+  if (run.status === "failed") return "failed";
   return "partial";
 }
 

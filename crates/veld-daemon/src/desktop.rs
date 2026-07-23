@@ -35,6 +35,100 @@ pub fn routes() -> Router {
             patch(rename_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
+        .route("/api/pick-directory", post(pick_directory))
+}
+
+// ---------------------------------------------------------------------------
+// Native directory picker
+// ---------------------------------------------------------------------------
+
+/// Open the OS folder picker and return the chosen absolute path. The daemon
+/// runs in the user's GUI session (it already opens Terminal.app), so it can
+/// host the dialog for the browser build too — the web platform itself never
+/// exposes absolute paths. Responses: 200 `{path}`, 204 on cancel, 501 when
+/// no picker backend exists on this system.
+async fn pick_directory(
+    headers: axum::http::HeaderMap,
+) -> Result<axum::response::Response, ApiError> {
+    use axum::response::IntoResponse;
+    check_csrf(&headers).map_err(|c| err(c, "missing X-Veld-Request header"))?;
+
+    let path_env = resolve_user_path().await;
+    let run = |cmd: &'static str, args: &'static [&'static str]| {
+        let path_env = path_env.clone();
+        async move {
+            tokio::process::Command::new(cmd)
+                .args(args)
+                .env("PATH", path_env)
+                .output()
+                .await
+        }
+    };
+
+    // 10 minutes: the request intentionally blocks while the dialog is open.
+    let picked = tokio::time::timeout(std::time::Duration::from_secs(600), async {
+        if cfg!(target_os = "macos") {
+            // `activate` pulls the dialog in front of the browser window —
+            // a background process's dialog opens behind it otherwise.
+            let out = run(
+                "osascript",
+                &[
+                    "-e",
+                    "tell application \"System Events\" to activate",
+                    "-e",
+                    "POSIX path of (choose folder with prompt \"Choose a git repository\")",
+                ],
+            )
+            .await;
+            match out {
+                Ok(o) if o.status.success() => {
+                    Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()))
+                }
+                Ok(_) => Some(Err(())), // cancelled
+                Err(_) => None,
+            }
+        } else {
+            // Linux: try zenity, then kdialog. Exit 1 = cancelled.
+            for (cmd, args) in [
+                (
+                    "zenity",
+                    &[
+                        "--file-selection",
+                        "--directory",
+                        "--title=Choose a git repository",
+                    ][..],
+                ),
+                ("kdialog", &["--getexistingdirectory", "."][..]),
+            ] {
+                let out = tokio::process::Command::new(cmd)
+                    .args(args)
+                    .env("PATH", resolve_user_path().await)
+                    .output()
+                    .await;
+                match out {
+                    Ok(o) if o.status.success() => {
+                        return Some(Ok(String::from_utf8_lossy(&o.stdout).trim().to_string()));
+                    }
+                    Ok(_) => return Some(Err(())), // dialog shown, cancelled
+                    Err(_) => continue,            // binary missing — try next
+                }
+            }
+            None
+        }
+    })
+    .await
+    .map_err(|_| err(StatusCode::REQUEST_TIMEOUT, "picker timed out"))?;
+
+    match picked {
+        Some(Ok(path)) if !path.is_empty() => {
+            Ok(Json(serde_json::json!({ "path": path })).into_response())
+        }
+        Some(_) => Ok(StatusCode::NO_CONTENT.into_response()),
+        None => Err(err(
+            StatusCode::NOT_IMPLEMENTED,
+            "no directory picker available on this system",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -128,12 +222,27 @@ fn parse_worktree_list(porcelain: &str) -> Vec<DiscoveredWorktree> {
     out
 }
 
+/// Canonicalize discovered worktree paths before storing them. Git porcelain
+/// already emits physical (symlink-resolved) paths, and `veld start` derives
+/// the project root from `getcwd` (also physical) — canonicalizing here keeps
+/// the UI's join key (`worktrees.path` == `projects.root`, string equality)
+/// stable even when git reports a path through a symlink. Falls back to the
+/// raw path when canonicalization fails (e.g. checkout vanished mid-sync).
+fn canonicalize_discovered(mut discovered: Vec<DiscoveredWorktree>) -> Vec<DiscoveredWorktree> {
+    for d in &mut discovered {
+        if let Ok(p) = std::fs::canonicalize(&d.path) {
+            d.path = p.to_string_lossy().into_owned();
+        }
+    }
+    discovered
+}
+
 /// Discover a repo's worktrees on disk and reconcile the database rows.
 async fn sync_repo_worktrees(db: &Db, repo_root: &FsPath) -> Result<Vec<WorktreeRecord>, ApiError> {
     let porcelain = git(repo_root, &["worktree", "list", "--porcelain"])
         .await
         .map_err(|e| err(StatusCode::BAD_REQUEST, e))?;
-    let discovered = parse_worktree_list(&porcelain);
+    let discovered = canonicalize_discovered(parse_worktree_list(&porcelain));
     db.sync_worktrees(repo_root, &discovered).map_err(db_err)
 }
 
@@ -159,7 +268,10 @@ fn validate_branch(branch: &str) -> Result<(), ApiError> {
 }
 
 fn validate_alias(alias: &str) -> Result<(), ApiError> {
-    if !is_safe_identifier(alias) {
+    // `.`/`..` pass is_safe_identifier but fail validate_run_name later (the
+    // run name defaults to the alias) — reject them here so the dead end
+    // surfaces at rename time, not at start time.
+    if !is_safe_identifier(alias) || alias == "." || alias == ".." {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "alias must be 1-64 characters: letters, digits, '-', '_', '.'",
@@ -181,6 +293,10 @@ struct RepoList {
 struct RepoView {
     #[serde(flatten)]
     repo: RepoRecord,
+    /// False when the repo can't be listed on disk right now (directory
+    /// deleted or git failing) — the worktree rows below are then the last
+    /// known state, not fresh.
+    available: bool,
     worktrees: Vec<WorktreeView>,
 }
 
@@ -215,21 +331,32 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     }
 }
 
-async fn repo_view(db: &Db, repo: RepoRecord) -> Result<RepoView, ApiError> {
+async fn repo_view(db: &Db, repo: RepoRecord, available: bool) -> Result<RepoView, ApiError> {
     let worktrees = db
         .list_worktrees(FsPath::new(&repo.root))
         .map_err(db_err)?
         .into_iter()
         .map(worktree_view)
         .collect();
-    Ok(RepoView { repo, worktrees })
+    Ok(RepoView {
+        repo,
+        available,
+        worktrees,
+    })
 }
 
+/// List repos, reconciling each one's worktree rows with the checkouts git
+/// actually reports — so worktrees added or removed outside the app (plain
+/// `git worktree add/remove`) show up on the next poll without a re-import.
+/// A repo whose directory is gone or whose git call fails keeps its last
+/// known rows and is marked `available: false` instead of failing the list.
 async fn list_repos() -> Result<Json<RepoList>, ApiError> {
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
     for repo in db.list_repos().map_err(db_err)? {
-        repos.push(repo_view(&db, repo).await?);
+        let root = PathBuf::from(&repo.root);
+        let available = sync_repo_worktrees(&db, &root).await.is_ok();
+        repos.push(repo_view(&db, repo, available).await?);
     }
     Ok(Json(RepoList { repos }))
 }
@@ -285,7 +412,7 @@ async fn import_repo(
         .get_repo(&root)
         .map_err(db_err)?
         .ok_or_else(|| db_err("repo vanished after import"))?;
-    Ok(Json(repo_view(&db, repo).await?))
+    Ok(Json(repo_view(&db, repo, true).await?))
 }
 
 #[derive(Deserialize)]
@@ -392,7 +519,10 @@ async fn create_worktree(
     let worktrees = sync_repo_worktrees(&db, &repo_root).await?;
     let created = worktrees
         .into_iter()
-        .find(|w| FsPath::new(&w.path) == checkout_path.as_path())
+        // Compare canonicalized: git records its own realpath'd form, while a
+        // caller-supplied custom path may reach the same checkout through a
+        // symlink or trailing component.
+        .find(|w| std::fs::canonicalize(&w.path).ok() == std::fs::canonicalize(&checkout_path).ok())
         .ok_or_else(|| db_err("created worktree missing after sync"))?;
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
@@ -566,5 +696,86 @@ mod tests {
         assert!(validate_branch("a b").is_err());
         assert!(validate_branch("a..b").is_err());
         assert!(validate_branch("").is_err());
+    }
+
+    #[test]
+    fn alias_validation_rejects_dot_dirs() {
+        assert!(validate_alias("chk").is_ok());
+        assert!(validate_alias("checkout-v2").is_ok());
+        assert!(validate_alias(".").is_err());
+        assert!(validate_alias("..").is_err());
+        assert!(validate_alias("a/b").is_err());
+        assert!(validate_alias("").is_err());
+    }
+
+    // Handler-level guards. These paths reject before any database access, so
+    // they run against the real router with no test DB.
+    mod handler_guards {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn req(method: &str, uri: &str, csrf: bool, body: &str) -> Request<Body> {
+            let mut b = Request::builder()
+                .method(method)
+                .uri(uri)
+                .header("content-type", "application/json");
+            if csrf {
+                b = b.header("x-veld-request", "1");
+            }
+            b.body(Body::from(body.to_owned())).unwrap()
+        }
+
+        #[tokio::test]
+        async fn mutations_without_csrf_header_are_403() {
+            for (method, uri, body) in [
+                ("POST", "/api/repos/import", r#"{"path":"/tmp"}"#),
+                ("DELETE", "/api/repos", r#"{"root":"/tmp"}"#),
+                (
+                    "POST",
+                    "/api/worktrees",
+                    r#"{"repo_root":"/tmp","branch":"b"}"#,
+                ),
+                ("PATCH", "/api/worktrees/1", r#"{"alias":"a"}"#),
+                ("DELETE", "/api/worktrees/1", ""),
+                ("POST", "/api/worktrees/1/start", "{}"),
+            ] {
+                let res = super::super::routes()
+                    .oneshot(req(method, uri, false, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::FORBIDDEN,
+                    "{method} {uri} must require the CSRF header"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn invalid_inputs_are_400_before_side_effects() {
+            for (method, uri, body) in [
+                // relative import path
+                ("POST", "/api/repos/import", r#"{"path":"not/absolute"}"#),
+                // option-injection branch name
+                (
+                    "POST",
+                    "/api/worktrees",
+                    r#"{"repo_root":"/tmp","branch":"-oops"}"#,
+                ),
+                // dot alias
+                ("PATCH", "/api/worktrees/1", r#"{"alias":".."}"#),
+            ] {
+                let res = super::super::routes()
+                    .oneshot(req(method, uri, true, body))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    res.status(),
+                    StatusCode::BAD_REQUEST,
+                    "{method} {uri} must reject invalid input"
+                );
+            }
+        }
     }
 }

@@ -78,4 +78,15 @@ fn main() {
         Path::new(&out_dir).join("management-ui-v2.html"),
     )
     .expect("vite build did not produce index.html");
+    // The embed is include_str! of that ONE file — if the singlefile plugin
+    // ever fails to inline something, vite emits an assets/ dir and the
+    // served page would silently load with missing JS/CSS. Fail the build
+    // instead.
+    let leftover = Path::new(&out_dir).join("assets");
+    assert!(
+        !leftover.exists(),
+        "vite emitted un-inlined assets in {} — the single-file embed would \
+         be broken (check vite-plugin-singlefile / assetsInlineLimit)",
+        leftover.display()
+    );
 }

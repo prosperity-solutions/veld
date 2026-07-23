@@ -56,6 +56,8 @@ export interface Repo {
   root: string;
   name: string;
   created_at: string;
+  /** False when the repo can't be listed on disk right now (moved/deleted). */
+  available: boolean;
   worktrees: Worktree[];
 }
 
@@ -118,6 +120,29 @@ export const api = {
     }),
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
+  /**
+   * Open the OS folder picker (hosted by the daemon — it runs in the user's
+   * GUI session). Resolves to the chosen absolute path, or null on cancel.
+   * Throws on systems without a picker backend (501).
+   */
+  pickDirectory: async (): Promise<string | null> => {
+    const res = await fetch("/api/pick-directory", {
+      method: "POST",
+      headers: { "X-Veld-Request": "1" },
+    });
+    if (res.status === 204) return null;
+    if (!res.ok) {
+      let message = `${res.status} ${res.statusText}`;
+      try {
+        const body = await res.json();
+        if (body && typeof body.error === "string") message = body.error;
+      } catch {
+        // keep status text
+      }
+      throw new Error(message);
+    }
+    return ((await res.json()) as { path: string }).path;
+  },
   startRun: (worktreeId: number, preset: string | null) =>
     request<void>(`/api/worktrees/${worktreeId}/start`, {
       method: "POST",

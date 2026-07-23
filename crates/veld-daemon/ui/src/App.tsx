@@ -18,6 +18,7 @@ import {
   ImportRepoDialog,
   Modal,
   NewWorktreeDialog,
+  RemoveRepoDialog,
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
@@ -32,6 +33,13 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
   const [value, setValue] = useState(
     () => window.localStorage.getItem(key) ?? initial,
   );
+  // useState's initializer runs once per component, not per key — when the
+  // key changes (e.g. the per-worktree preset), re-read the stored value or
+  // the previous key's value silently carries over and overwrites.
+  useEffect(() => {
+    setValue(window.localStorage.getItem(key) ?? initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
   const set = useCallback(
     (v: string) => {
       setValue(v);
@@ -40,6 +48,55 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
     [key],
   );
   return [value, set];
+}
+
+/**
+ * Selection state lives in the URL (`?repo=…&wt=…`) so views are addressable:
+ * a future multi-window Electron layout opens one URL per worktree, browser
+ * tabs deep-link, and reload restores the exact view. localStorage is the
+ * fallback when the URL carries no selection.
+ */
+function useUrlSelection(): {
+  repo: string;
+  wt: string;
+  setRepo: (root: string) => void;
+  setWt: (key: string) => void;
+} {
+  const params = new URLSearchParams(window.location.search);
+  const [repo, setRepoState] = usePersisted("veld.repo", "");
+  const [wt, setWtState] = usePersisted("veld.worktree", "");
+  const [urlRepo, setUrlRepo] = useState(params.get("repo") ?? "");
+  const [urlWt, setUrlWt] = useState(params.get("wt") ?? "");
+
+  const effectiveRepo = urlRepo || repo;
+  const effectiveWt = urlWt || wt;
+
+  useEffect(() => {
+    const p = new URLSearchParams(window.location.search);
+    if (effectiveRepo) p.set("repo", effectiveRepo);
+    else p.delete("repo");
+    if (effectiveWt) p.set("wt", effectiveWt);
+    else p.delete("wt");
+    const query = p.toString();
+    window.history.replaceState(
+      null,
+      "",
+      query ? `?${query}` : window.location.pathname,
+    );
+  }, [effectiveRepo, effectiveWt]);
+
+  return {
+    repo: effectiveRepo,
+    wt: effectiveWt,
+    setRepo: (root) => {
+      setUrlRepo(root);
+      setRepoState(root);
+    },
+    setWt: (key) => {
+      setUrlWt(key);
+      setWtState(key);
+    },
+  };
 }
 
 export function App() {
@@ -74,8 +131,12 @@ export function App() {
   }, [refresh]);
 
   // ---- selection ----------------------------------------------------------
-  const [activeRepoRoot, setActiveRepoRoot] = usePersisted("veld.repo", "");
-  const [activeWtKey, setActiveWtKey] = usePersisted("veld.worktree", "");
+  const {
+    repo: activeRepoRoot,
+    wt: activeWtKey,
+    setRepo: setActiveRepoRoot,
+    setWt: setActiveWtKey,
+  } = useUrlSelection();
 
   const repos = useMemo(() => repoList?.repos ?? [], [repoList]);
   const repo: Repo | null =
@@ -126,6 +187,7 @@ export function App() {
     | { kind: "import" }
     | { kind: "new-worktree" }
     | { kind: "rename"; worktree: Worktree }
+    | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
   >({ kind: "none" });
   const closeDialog = () => setDialog({ kind: "none" });
@@ -165,6 +227,7 @@ export function App() {
           setActiveWtKey("");
         }}
         onImport={() => setDialog({ kind: "import" })}
+        onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
         onStart={() =>
           worktree &&
           void act("start", () => api.startRun(worktree.id, preset || null))
@@ -278,6 +341,19 @@ export function App() {
           }}
         />
       )}
+      {dialog.kind === "remove-repo" && (
+        <RemoveRepoDialog
+          repo={dialog.repo}
+          onClose={closeDialog}
+          onRemove={async () => {
+            await api.removeRepo(dialog.repo.root);
+            setActiveRepoRoot("");
+            setActiveWtKey("");
+            await refresh();
+            closeDialog();
+          }}
+        />
+      )}
       {dialog.kind === "rename" && (
         <RenameWorktreeDialog
           current={dialog.worktree.alias}
@@ -288,8 +364,8 @@ export function App() {
             await refresh();
             closeDialog();
           }}
-          onDelete={async () => {
-            await api.deleteWorktree(dialog.worktree.id, false);
+          onDelete={async (force) => {
+            await api.deleteWorktree(dialog.worktree.id, force);
             await refresh();
             closeDialog();
           }}
@@ -323,12 +399,13 @@ function TopBar(props: {
   onPreset: (p: string) => void;
   running: boolean;
   pending: string | null;
-  run: { name: string } | null;
+  run: { name: string; status: string } | null;
   urlCount: number;
   urlsOpen: boolean;
   onToggleUrls: () => void;
   onSelectRepo: (root: string) => void;
   onImport: () => void;
+  onRemoveRepo: () => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -336,8 +413,14 @@ function TopBar(props: {
   theme: string;
   onToggleTheme: () => void;
 }) {
-  const { worktree } = props;
+  const { worktree, run } = props;
   const canRun = !!worktree?.has_veld_config;
+  const statusColor =
+    run?.status === "running"
+      ? "var(--live)"
+      : run?.status === "failed"
+        ? "var(--danger)"
+        : "var(--warn)";
   return (
     <div className={`topbar${isElectron ? " electron" : ""}`}>
       <Wordmark />
@@ -345,27 +428,25 @@ function TopBar(props: {
         <select
           title="Switch project"
           value={props.repo?.root ?? ""}
-          onChange={(e) =>
-            e.target.value === "__import__"
-              ? props.onImport()
-              : props.onSelectRepo(e.target.value)
-          }
+          onChange={(e) => {
+            if (e.target.value === "__import__") props.onImport();
+            else if (e.target.value === "__remove__") props.onRemoveRepo();
+            else props.onSelectRepo(e.target.value);
+          }}
           style={{ fontWeight: 600 }}
         >
           {props.repos.map((r) => (
             <option key={r.root} value={r.root}>
               {r.name}
+              {r.available ? "" : " (unavailable)"}
             </option>
           ))}
           <option value="__import__">Import repository…</option>
+          {props.repo && <option value="__remove__">Remove project…</option>}
         </select>
       )}
       {worktree && (
         <>
-          <span style={{ color: "var(--faint)" }}>/</span>
-          <span className="mono" style={{ fontSize: 12.5, fontWeight: 600 }}>
-            {worktree.branch}
-          </span>
           <div className="sep" />
           {canRun && worktree.presets.length > 0 && (
             <select
@@ -400,17 +481,31 @@ function TopBar(props: {
               >
                 ⟳
               </button>
-              <button
-                title="Run URLs"
-                className="btn"
-                onClick={props.onToggleUrls}
-              >
-                🌐{" "}
-                <span className="mono" style={{ fontSize: 11, color: "var(--faint)" }}>
-                  {props.urlCount}
-                </span>{" "}
-                ▾
-              </button>
+              {run && (
+                <span
+                  className="mono"
+                  style={{ fontSize: 10.5, color: statusColor }}
+                  title={`Run ${run.name}: ${run.status}`}
+                >
+                  {props.pending ? `${props.pending}…` : run.status}
+                </span>
+              )}
+              {run && (
+                <button
+                  title="Run URLs"
+                  className="btn"
+                  onClick={props.onToggleUrls}
+                >
+                  🌐{" "}
+                  <span
+                    className="mono"
+                    style={{ fontSize: 10.5, color: "var(--faint)" }}
+                  >
+                    {props.urlCount}
+                  </span>{" "}
+                  ▾
+                </button>
+              )}
             </>
           )}
           {!canRun && (
@@ -421,15 +516,6 @@ function TopBar(props: {
         </>
       )}
       <div style={{ flex: 1 }} />
-      {isElectron && (
-        <span
-          className="mono"
-          style={{ fontSize: 10.5, color: "var(--faint)" }}
-          title="Rendered by the desktop shell into the native title bar"
-        >
-          ◆ native title bar
-        </span>
-      )}
       <button title="Search (⌘K)" className="iconbtn" onClick={props.onSearch}>
         ⌕
       </button>
@@ -481,20 +567,21 @@ function Rail(props: {
               <span className={`dot ${status}`} />
               <span className="wt-alias">{w.alias}</span>
               {props.wide && <span className="wt-branch">{w.branch}</span>}
-              {props.wide && (
-                <span
-                  className="wt-edit"
-                  title="Rename / remove"
-                  role="button"
-                  tabIndex={0}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    props.onEdit(w);
-                  }}
-                >
-                  ✎
-                </span>
-              )}
+              {!props.wide && <span style={{ flex: 1 }} />}
+              {/* Row is a <button>; nested controls must be role=button
+                  spans with stopPropagation to avoid button-in-button. */}
+              <span
+                className="wt-edit"
+                title="Rename / remove"
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  props.onEdit(w);
+                }}
+              >
+                ✎
+              </span>
             </button>
           );
         })}
