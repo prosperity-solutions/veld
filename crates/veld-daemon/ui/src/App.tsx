@@ -14,7 +14,31 @@ import {
   worktreeStatus,
 } from "./model";
 import { Wordmark } from "./components/Wordmark";
-import { Loader, MantineProvider, TextInput } from "@mantine/core";
+import {
+  ActionIcon,
+  Button,
+  Loader,
+  MantineProvider,
+  NativeSelect,
+  TextInput,
+  Tooltip,
+} from "@mantine/core";
+import {
+  IconCheck,
+  IconChevronLeft,
+  IconChevronRight,
+  IconCopy,
+  IconExternalLink,
+  IconMoon,
+  IconPencil,
+  IconPlayerPlayFilled,
+  IconPlayerStopFilled,
+  IconPlus,
+  IconRefresh,
+  IconSearch,
+  IconSun,
+  IconWorld,
+} from "@tabler/icons-react";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import {
@@ -519,62 +543,73 @@ function TopBar(props: {
     <div className={`topbar${isElectron ? " electron" : ""}`}>
       <Wordmark />
       {props.repos.length > 0 && (
-        <select
+        <NativeSelect
           title="Switch project"
+          size="xs"
           value={props.repo?.root ?? ""}
           onChange={(e) => {
-            if (e.target.value === "__import__") props.onImport();
-            else if (e.target.value === "__remove__") props.onRemoveRepo();
-            else props.onSelectRepo(e.target.value);
+            const v = e.currentTarget.value;
+            if (v === "__import__") props.onImport();
+            else if (v === "__remove__") props.onRemoveRepo();
+            else props.onSelectRepo(v);
           }}
-          style={{ fontWeight: 600 }}
-        >
-          {props.repos.map((r) => (
-            <option key={r.root} value={r.root}>
-              {r.name}
-              {r.available ? "" : " (unavailable)"}
-            </option>
-          ))}
-          <option value="__import__">Import repository…</option>
-          {props.repo && <option value="__remove__">Remove project…</option>}
-        </select>
+          data={[
+            ...props.repos.map((r) => ({
+              value: r.root,
+              label: r.available ? r.name : `${r.name} (unavailable)`,
+            })),
+            { value: "__import__", label: "Import repository…" },
+            ...(props.repo
+              ? [{ value: "__remove__", label: "Remove project…" }]
+              : []),
+          ]}
+        />
       )}
       {worktree && (
         <>
           <div className="sep" />
           {canRun && worktree.presets.length > 0 && (
-            <select
+            <NativeSelect
               title="Preset"
-              className="mono"
+              size="xs"
               value={props.preset}
-              onChange={(e) => props.onPreset(e.target.value)}
-            >
-              <option value="">default</option>
-              {worktree.presets.map((p) => (
-                <option key={p} value={p}>
-                  {p}
-                </option>
-              ))}
-            </select>
+              onChange={(e) => props.onPreset(e.currentTarget.value)}
+              styles={{
+                input: { fontFamily: "var(--mantine-font-family-monospace)" },
+              }}
+              data={[
+                { value: "", label: "default" },
+                ...worktree.presets.map((p) => ({ value: p, label: p })),
+              ]}
+            />
           )}
           {canRun && (
             <>
-              <button
-                title={props.running ? "Stop run" : "Start run"}
-                className={`iconbtn runbtn ${props.running ? "stop" : "start"}`}
-                disabled={props.pending !== null}
-                onClick={props.running ? props.onStop : props.onStart}
-              >
-                {props.pending ? "…" : props.running ? "■" : "▶"}
-              </button>
-              <button
-                title="Restart"
-                className="iconbtn"
-                disabled={!props.running || props.pending !== null}
-                onClick={props.onRestart}
-              >
-                ⟳
-              </button>
+              <Tooltip label={props.running ? "Stop run" : "Start run"}>
+                <ActionIcon
+                  size="lg"
+                  variant="light"
+                  color={props.running ? "red" : "green"}
+                  loading={props.pending !== null}
+                  onClick={props.running ? props.onStop : props.onStart}
+                >
+                  {props.running ? (
+                    <IconPlayerStopFilled size={15} />
+                  ) : (
+                    <IconPlayerPlayFilled size={15} />
+                  )}
+                </ActionIcon>
+              </Tooltip>
+              <Tooltip label="Restart">
+                <ActionIcon
+                  size="lg"
+                  variant="default"
+                  disabled={!props.running || props.pending !== null}
+                  onClick={props.onRestart}
+                >
+                  <IconRefresh size={15} />
+                </ActionIcon>
+              </Tooltip>
               {run && (
                 <span
                   className="mono"
@@ -585,20 +620,14 @@ function TopBar(props: {
                 </span>
               )}
               {run && (
-                <button
-                  title="Run URLs"
-                  className="btn"
+                <Button
+                  size="compact-sm"
+                  variant="default"
+                  leftSection={<IconWorld size={14} />}
                   onClick={props.onToggleUrls}
                 >
-                  🌐{" "}
-                  <span
-                    className="mono"
-                    style={{ fontSize: 10.5, color: "var(--faint)" }}
-                  >
-                    {props.urlCount}
-                  </span>{" "}
-                  ▾
-                </button>
+                  {props.urlCount}
+                </Button>
               )}
             </>
           )}
@@ -618,12 +647,16 @@ function TopBar(props: {
         </>
       )}
       <div style={{ flex: 1 }} />
-      <button title="Search (⌘K)" className="iconbtn" onClick={props.onSearch}>
-        ⌕
-      </button>
-      <button title="Theme" className="iconbtn" onClick={props.onToggleTheme}>
-        {props.theme === "dark" ? "☀" : "☾"}
-      </button>
+      <Tooltip label="Search (⌘K)">
+        <ActionIcon size="lg" variant="default" onClick={props.onSearch}>
+          <IconSearch size={15} />
+        </ActionIcon>
+      </Tooltip>
+      <Tooltip label="Theme">
+        <ActionIcon size="lg" variant="default" onClick={props.onToggleTheme}>
+          {props.theme === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+        </ActionIcon>
+      </Tooltip>
     </div>
   );
 }
@@ -646,16 +679,23 @@ function Rail(props: {
   return (
     <div className={`rail${props.wide ? " wide" : ""}`}>
       <div className="rail-head">
-        <button
-          className="rail-toggle"
+        <ActionIcon
+          size="sm"
+          variant="default"
           title="Expand / collapse"
           onClick={props.onToggle}
         >
-          {props.wide ? "‹" : "›"}
-        </button>
-        <button className="rail-add" title="New worktree" onClick={props.onAdd}>
-          +
-        </button>
+          {props.wide ? <IconChevronLeft size={13} /> : <IconChevronRight size={13} />}
+        </ActionIcon>
+        <ActionIcon
+          size="sm"
+          variant="subtle"
+          color="gray"
+          title="New worktree"
+          onClick={props.onAdd}
+        >
+          <IconPlus size={14} />
+        </ActionIcon>
       </div>
       <div className="rail-list">
         {props.worktrees.map((w) => {
@@ -684,7 +724,7 @@ function Rail(props: {
                   props.onEdit(w);
                 }}
               >
-                ✎
+                <IconPencil size={12} />
               </span>
             </button>
           );
@@ -775,9 +815,10 @@ function ServiceCard(props: { name: string; url: string }) {
         <span className="name">{props.name}</span>
         <span className="url">{props.url}</span>
       </div>
-      <button
-        className="iconbtn"
-        style={{ border: "none", width: 26, height: 26 }}
+      <ActionIcon
+        size="sm"
+        variant="subtle"
+        color="gray"
         title="Copy URL"
         onClick={() => {
           void navigator.clipboard.writeText(props.url);
@@ -785,11 +826,19 @@ function ServiceCard(props: { name: string; url: string }) {
           window.setTimeout(() => setCopied(false), 1200);
         }}
       >
-        {copied ? "✓" : "⧉"}
-      </button>
-      <a href={props.url} target="_blank" rel="noreferrer" title="Open" style={{ fontWeight: 600 }}>
-        ↗
-      </a>
+        {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
+      </ActionIcon>
+      <ActionIcon
+        size="sm"
+        variant="subtle"
+        component="a"
+        href={props.url}
+        target="_blank"
+        rel="noreferrer"
+        title="Open"
+      >
+        <IconExternalLink size={13} />
+      </ActionIcon>
     </div>
   );
 }
