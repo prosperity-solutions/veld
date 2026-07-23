@@ -95,6 +95,7 @@ export function RunsMode() {
 
   return (
     <div className="runs-mode">
+      <div className="runs-container" style={{ flex: "none" }}>
       <Group gap="sm" px={14} py={8} wrap="wrap">
         {allRuns.length > 0 && (
           <SegmentedControl
@@ -175,7 +176,10 @@ export function RunsMode() {
         </Stack>
       )}
 
+      </div>
+
       <div className="runs-scroll">
+        <div className="runs-container">
         {envs !== null && projects.length === 0 && (
           <div className="center-page">
             <Text fw={600}>No environments yet</Text>
@@ -210,6 +214,7 @@ export function RunsMode() {
             />
           ))}
         </Stack>
+        </div>
       </div>
     </div>
   );

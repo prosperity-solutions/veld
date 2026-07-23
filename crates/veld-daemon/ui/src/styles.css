@@ -489,6 +489,19 @@ select:focus {
   flex: 1;
   overflow-y: auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Centered content column — cards must not sprawl across wide viewports. */
+.runs-container {
+  width: 100%;
+  max-width: 1080px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
 }
 
 .env-card {
