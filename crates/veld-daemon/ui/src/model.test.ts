@@ -28,6 +28,8 @@ const run = (
   name,
   status,
   live,
+  run_id: `${name}-run-id`,
+  short_id: name,
   urls: {},
   nodes: [],
 });

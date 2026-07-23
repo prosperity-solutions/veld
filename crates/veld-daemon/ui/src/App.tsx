@@ -40,7 +40,9 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
+import { SegmentedControl } from "@mantine/core";
 import { theme as mantineTheme } from "./theme";
+import { RunsMode } from "./runs/RunsMode";
 import {
   ImportRepoDialog,
   Modal,
@@ -137,6 +139,21 @@ export function App() {
 
 function AppInner(props: { theme: string; onToggleTheme: () => void }) {
   const { theme, onToggleTheme } = props;
+
+  // View mode: worktree cockpit ("ide") vs runs management ("runs").
+  // Defaults by serving path (the app will also own `/` at v1 parity);
+  // `?view=` overrides and persists across navigation.
+  const [mode, setModeState] = useState<string>(() => {
+    const q = new URLSearchParams(window.location.search).get("view");
+    if (q === "runs" || q === "ide") return q;
+    return window.location.pathname.endsWith("/ide") ? "ide" : "runs";
+  });
+  const setMode = (m: string) => {
+    setModeState(m);
+    const p = new URLSearchParams(window.location.search);
+    p.set("view", m);
+    window.history.replaceState(null, "", `?${p.toString()}`);
+  };
 
   // ---- polled server state ------------------------------------------------
   const [repoList, setRepoList] = useState<RepoList | null>(null);
@@ -307,10 +324,41 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
   const [urlsOpen, setUrlsOpen] = useState(false);
   const [railWide, setRailWide] = useState(false);
 
+  const modeSwitch = (
+    <SegmentedControl
+      size="xs"
+      value={mode}
+      onChange={setMode}
+      data={[
+        { value: "runs", label: "Runs" },
+        { value: "ide", label: "IDE" },
+      ]}
+    />
+  );
+
   // ---- render -------------------------------------------------------------
+  if (mode === "runs") {
+    return (
+      <div className="frame">
+        <div className={`topbar${isElectron ? " electron" : ""}`}>
+          <Wordmark />
+          {modeSwitch}
+          <div style={{ flex: 1 }} />
+          <Tooltip label="Theme">
+            <ActionIcon size="lg" variant="default" onClick={onToggleTheme}>
+              {theme === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+            </ActionIcon>
+          </Tooltip>
+        </div>
+        <RunsMode />
+      </div>
+    );
+  }
+
   return (
     <div className="frame">
       <TopBar
+        modeSwitch={modeSwitch}
         repos={repos}
         repo={repo}
         worktree={worktree}
@@ -507,6 +555,7 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
 // ---------------------------------------------------------------------------
 
 function TopBar(props: {
+  modeSwitch: React.ReactNode;
   repos: Repo[];
   repo: Repo | null;
   worktree: Worktree | null;
@@ -542,6 +591,7 @@ function TopBar(props: {
   return (
     <div className={`topbar${isElectron ? " electron" : ""}`}>
       <Wordmark />
+      {props.modeSwitch}
       {props.repos.length > 0 && (
         <NativeSelect
           title="Switch project"

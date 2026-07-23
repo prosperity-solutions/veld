@@ -8,11 +8,38 @@ export type RunStatus =
   | "stopped"
   | "failed";
 
+export interface ActionInfo {
+  name: string;
+  label: string;
+}
+
 export interface NodeInfo {
   name: string;
   variant: string;
   status: string;
   url?: string | null;
+  pid?: number | null;
+  recovery_count?: number;
+  consecutive_failures?: number;
+  last_liveness_error?: string | null;
+  actions?: ActionInfo[];
+}
+
+export interface HistoryNode {
+  name: string;
+  variant: string;
+  status: string;
+  exit_code?: number | null;
+}
+
+export interface HistoryEntry {
+  run_id: string;
+  short_id: string;
+  status: RunStatus;
+  outcome?: string | null;
+  created_at: string;
+  ended_at?: string | null;
+  nodes: HistoryNode[];
 }
 
 export interface RunInfo {
@@ -26,8 +53,13 @@ export interface RunInfo {
    * running, and their URLs are stripped server-side.
    */
   live: boolean;
+  run_id: string;
+  short_id: string;
+  outcome?: string | null;
+  ended_at?: string | null;
   urls: Record<string, string>;
   nodes: NodeInfo[];
+  history?: HistoryEntry[];
 }
 
 export interface ProjectInfo {
@@ -63,6 +95,71 @@ export interface Repo {
 
 export interface RepoList {
   repos: Repo[];
+}
+
+export interface GatewayPublicUrl {
+  node: string;
+  hostname: string;
+  public_url: string;
+  access?: string | null;
+}
+
+export interface ShareConnectionInfo {
+  node_id: string;
+  label?: string | null;
+  transport: "direct" | "relayed" | "none";
+  via?: string | null;
+  rtt_ms?: number | null;
+}
+
+export interface ShareInfo {
+  id: string;
+  run: string;
+  approve?: "first" | "manual" | "auto" | null;
+  nodes: string[];
+  urls: string[];
+  ticket?: string | null;
+  join_url?: string | null;
+  joiners: number;
+  public_urls: GatewayPublicUrl[];
+  web_password?: string | null;
+  connections: ShareConnectionInfo[];
+}
+
+export interface PendingInfo {
+  id: string;
+  share_id: string;
+  label?: string | null;
+  node_id: string;
+}
+
+export interface SharesList {
+  shares: ShareInfo[];
+  joins: ShareInfo[];
+  pending: PendingInfo[];
+}
+
+export interface NodeLogs {
+  node: string;
+  variant: string;
+  source: string;
+  lines: string[];
+}
+
+export interface LogResponse {
+  nodes: NodeLogs[];
+}
+
+export interface NodeStats {
+  cpu: number;
+  mem: number;
+  procs: number;
+  spark: number[];
+}
+
+/** project_root → run name → "node:variant" → stats */
+export interface StatsResponse {
+  projects: Record<string, Record<string, Record<string, NodeStats>>>;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -164,5 +261,53 @@ export const api = {
   restartRun: (runName: string) =>
     request<void>(`/api/environments/${encodeURIComponent(runName)}/restart`, {
       method: "POST",
+    }),
+  runAction: (runName: string, action: string, node?: string) =>
+    request<void>(`/api/environments/${encodeURIComponent(runName)}/action`, {
+      method: "POST",
+      body: JSON.stringify(node ? { action, node } : { action }),
+    }),
+  openTerminal: (path: string) =>
+    request<void>("/api/open-terminal", {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }),
+  stats: () => request<StatsResponse>("/api/stats"),
+  logs: (run: string, opts: { source?: string; runId?: string } = {}) => {
+    const q = new URLSearchParams({ lines: "500" });
+    if (opts.source && opts.source !== "all") q.set("source", opts.source);
+    if (opts.runId) q.set("run_id", opts.runId);
+    return request<LogResponse>(
+      `/api/logs/${encodeURIComponent(run)}?${q.toString()}`,
+    );
+  },
+  shares: () => request<SharesList>("/api/shares"),
+  startShare: (run: string, opts: { web?: boolean } = {}) =>
+    request<{ join_url?: string }>("/api/shares", {
+      method: "POST",
+      body: JSON.stringify(
+        opts.web ? { run, web: true } : { run, approve: "manual" },
+      ),
+    }),
+  stopShare: (id: string) =>
+    request<void>(`/api/shares/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    }),
+  setShareMode: (id: string, approve: "auto" | "manual") =>
+    request<void>(`/api/shares/${encodeURIComponent(id)}/mode`, {
+      method: "POST",
+      body: JSON.stringify({ approve }),
+    }),
+  approveJoin: (requestId: string) =>
+    request<void>(`/api/shares/requests/${encodeURIComponent(requestId)}/approve`, {
+      method: "POST",
+    }),
+  denyJoin: (requestId: string) =>
+    request<void>(`/api/shares/requests/${encodeURIComponent(requestId)}/deny`, {
+      method: "POST",
+    }),
+  leaveJoin: (joinId: string) =>
+    request<void>(`/api/shares/joins/${encodeURIComponent(joinId)}`, {
+      method: "DELETE",
     }),
 };
