@@ -24,7 +24,10 @@ mod stats;
 mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
-pub use worktrees::{DiscoveredWorktree, RepoRecord, WorktreeRecord, default_alias};
+pub use worktrees::{
+    DiscoveredWorktree, RepoRecord, WORKTREE_EMOJI, WorktreeRecord, default_alias,
+    is_worktree_emoji,
+};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -54,6 +57,9 @@ pub enum DbError {
          (this binary supports up to v{supported}) — run `veld update` to upgrade"
     )]
     NewerSchema { found: i64, supported: i64 },
+
+    #[error("{0:?} is not one of the curated worktree glyphs")]
+    InvalidEmoji(String),
 
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),

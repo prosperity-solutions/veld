@@ -32,8 +32,13 @@ pub struct WorktreeRecord {
     pub branch: String,
     pub alias: String,
     /// Visual identifier for dense UI (collapsed rail): one emoji from
-    /// [`WORKTREE_EMOJI`], unique across ALL repos' worktrees while free
-    /// choices remain. Assigned at insert, preserved across syncs/renames.
+    /// [`WORKTREE_EMOJI`]. Assigned at insert, preserved across syncs and
+    /// renames.
+    ///
+    /// **Not an identity.** Uniqueness is a property of *assignment* only —
+    /// [`pick_emoji`] probes for a free glyph across all repos, but
+    /// [`Db::patch_worktree`] lets the user pick one that is already taken.
+    /// Don't add a `UNIQUE` index, and don't assume one holder per glyph.
     pub emoji: String,
     pub is_main: bool,
     pub created_at: String,
@@ -247,6 +252,37 @@ impl Db {
         Ok(n > 0)
     }
 
+    /// Update alias and/or emoji in ONE statement. Returns whether the row
+    /// existed.
+    ///
+    /// A single `UPDATE … COALESCE` rather than two writes: applied
+    /// separately, a row deleted between them (concurrent `sync_worktrees`
+    /// prune, or `DELETE /api/worktrees/{id}`) commits the rename and then
+    /// reports "not found" — a partial write the API's contract denies.
+    /// `None` leaves a column untouched; both `None` is a no-op write that
+    /// still reports whether the row exists (the HTTP layer rejects an empty
+    /// patch before reaching here).
+    pub fn patch_worktree(
+        &self,
+        id: i64,
+        alias: Option<&str>,
+        emoji: Option<&str>,
+    ) -> Result<bool, DbError> {
+        if let Some(e) = emoji {
+            if !is_worktree_emoji(e) {
+                return Err(DbError::InvalidEmoji(e.to_owned()));
+            }
+        }
+        let conn = self.lock();
+        let n = conn.execute(
+            "UPDATE worktrees
+                SET alias = COALESCE(?1, alias), emoji = COALESCE(?2, emoji)
+              WHERE id = ?3",
+            params![alias, emoji, id],
+        )?;
+        Ok(n > 0)
+    }
+
     /// Delete a worktree row (DB only — `git worktree remove` is the caller's
     /// job). Returns whether the row existed.
     pub fn remove_worktree(&self, id: i64) -> Result<bool, DbError> {
@@ -285,6 +321,21 @@ pub const WORKTREE_EMOJI: &[&str] = &[
     "🦖", "🦕", "🐙", "🦑", "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🐊", "🐅",
     "🐆", "🦓", "🦍", "🦧", "🐘", "🦛", "🦏", "🐪", "🐫", "🦒", "🦘", "🐃", "🐂", "🐄", "🐎", "🐐",
 ];
+
+/// Whether `emoji` is one of the curated glyphs.
+///
+/// An allowlist rather than a "is this a single grapheme?" test: it keeps the
+/// rail visually uniform and leaves no room for a multi-codepoint sequence or
+/// a zero-width payload. Every entry is a single code point, so plain string
+/// equality is sufficient — no normalization surface.
+///
+/// Entries may be **appended but never removed or replaced**: the value is
+/// persisted per worktree, so dropping one orphans every row holding it (the
+/// picker would show no current selection and the glyph could never be
+/// re-picked).
+pub fn is_worktree_emoji(emoji: &str) -> bool {
+    WORKTREE_EMOJI.contains(&emoji)
+}
 
 /// Pick an emoji for a new worktree: hash the alias into the curated list
 /// and probe forward for one not used by ANY worktree row (uniqueness across
@@ -464,6 +515,109 @@ mod tests {
             db.get_worktree(wa[0].id).unwrap().unwrap().emoji,
             wa[0].emoji
         );
+    }
+
+    #[test]
+    fn explicit_emoji_survives_sync_and_rename() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoEmojiSet");
+        db.upsert_repo(root, "set").unwrap();
+        let wts = db
+            .sync_worktrees(root, &[wt("/tmp/repoEmojiSet", "main", true)])
+            .unwrap();
+        let id = wts[0].id;
+
+        // Pick a glyph the assigner did not hand out, so the assertion can't
+        // pass by coincidence.
+        let chosen = WORKTREE_EMOJI
+            .iter()
+            .find(|e| **e != wts[0].emoji)
+            .expect("curated set has more than one glyph");
+        assert!(db.patch_worktree(id, None, Some(chosen)).unwrap());
+        assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
+
+        // Reconciliation backfills only empty emoji — an explicit choice must
+        // not be clobbered by the UI's 5s refresh poll.
+        db.sync_worktrees(root, &[wt("/tmp/repoEmojiSet", "main", true)])
+            .unwrap();
+        assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
+
+        db.rename_worktree(id, "renamed").unwrap();
+        assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
+    }
+
+    #[test]
+    fn patch_rejects_glyphs_outside_the_curated_set() {
+        // The EMOJI rule lives here, not only in the HTTP handler, so a CLI
+        // or IPC caller can't persist an arbitrary glyph. Note the asymmetry:
+        // `alias` is still validated only by the handler (`validate_alias`).
+        let (_dir, db) = test_db();
+        for bad in ["", "🍕", "🦊🦊", "👨‍👩‍👧", "not-an-emoji"] {
+            assert!(
+                matches!(
+                    db.patch_worktree(1, None, Some(bad)),
+                    Err(DbError::InvalidEmoji(_))
+                ),
+                "{bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_emoji_set_has_no_duplicates() {
+        // `pick_emoji`'s uniqueness probe and the picker's React `key` both
+        // assume this; a duplicate would be a silent runtime defect.
+        let unique: std::collections::HashSet<_> = WORKTREE_EMOJI.iter().collect();
+        assert_eq!(unique.len(), WORKTREE_EMOJI.len());
+    }
+
+    #[test]
+    fn patch_worktree_applies_fields_independently_and_atomically() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoPatch");
+        db.upsert_repo(root, "patch").unwrap();
+        let id = db
+            .sync_worktrees(root, &[wt("/tmp/repoPatch", "main", true)])
+            .unwrap()[0]
+            .id;
+        let original = db.get_worktree(id).unwrap().unwrap();
+        let glyph = WORKTREE_EMOJI
+            .iter()
+            .find(|e| **e != original.emoji)
+            .unwrap();
+
+        // None leaves a column untouched.
+        assert!(db.patch_worktree(id, Some("renamed"), None).unwrap());
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.alias, "renamed");
+        assert_eq!(after.emoji, original.emoji);
+
+        assert!(db.patch_worktree(id, None, Some(glyph)).unwrap());
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.alias, "renamed");
+        assert_eq!(&after.emoji, glyph);
+
+        // Both at once.
+        assert!(
+            db.patch_worktree(id, Some("both"), Some(&original.emoji))
+                .unwrap()
+        );
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.alias, "both");
+        assert_eq!(after.emoji, original.emoji);
+
+        // A rejected emoji must not commit the alias that travelled with it.
+        assert!(db.patch_worktree(id, Some("nope"), Some("🍕")).is_err());
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().alias, "both");
+
+        // Neither field: a no-op write that still reports row existence.
+        assert!(db.patch_worktree(id, None, None).unwrap());
+        let after = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(after.alias, "both");
+        assert_eq!(after.emoji, original.emoji);
+
+        assert!(!db.patch_worktree(4242, Some("x"), None).unwrap());
+        assert!(!db.patch_worktree(4242, None, None).unwrap());
     }
 
     #[test]

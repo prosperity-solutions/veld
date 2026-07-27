@@ -79,7 +79,12 @@ export interface Worktree {
   path: string;
   branch: string;
   alias: string;
-  /** Stable one-emoji identifier (animal set), unique across all projects. */
+  /**
+   * One-glyph identifier from a curated animal set. Unique *when assigned*
+   * — the picker lets the user choose a glyph another worktree already holds,
+   * so never treat it as an identity: several worktrees can share one. (An
+   * emoji-keyed index is fine as long as its values are collections.)
+   */
   emoji: string;
   is_main: boolean;
   created_at: string;
@@ -87,6 +92,12 @@ export interface Worktree {
   presets: string[];
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
+}
+
+/** A worktree holding a given emoji — id, because aliases repeat across repos. */
+export interface EmojiHolder {
+  id: number;
+  alias: string;
 }
 
 export interface NodeOption {
@@ -229,11 +240,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  renameWorktree: (id: number, alias: string) =>
+  /** Partial update — send an alias, an emoji, or both. */
+  patchWorktree: (id: number, patch: { alias?: string; emoji?: string }) =>
     request<Worktree>(`/api/worktrees/${id}`, {
       method: "PATCH",
-      body: JSON.stringify({ alias }),
+      body: JSON.stringify(patch),
     }),
+  /**
+   * The glyphs the emoji picker may offer. Served by the daemon rather than
+   * duplicated here so the picker and the server-side allowlist can't drift.
+   */
+  worktreeEmoji: () =>
+    request<{ emoji: string[] }>("/api/worktree-emoji"),
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
   /**

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  type EmojiHolder,
   type EnvironmentList,
   type Repo,
   type RepoList,
@@ -8,10 +9,16 @@ import {
 } from "./api";
 import {
   activeRun,
-  filterWorktrees,
+  bestFuzzyMatch,
+  fuzzyMatch,
+  prunePending,
+  runSignature,
   runsForWorktree,
   sortedUrls,
   worktreeStatus,
+  type PendingAction,
+  type PendingMap,
+  type WorktreeStatus,
 } from "./model";
 import { Wordmark } from "./components/Wordmark";
 import {
@@ -54,10 +61,15 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import {
   StartConfig,
-  type StartSelection,
   defaultStartSelection,
+  parseStartSelection,
+  pruneStartSelection,
+  resolveStartSelection,
+  startBody,
+  startStorageKey,
 } from "./components/StartConfig";
 import {
+  ChangeEmojiDialog,
   ImportRepoDialog,
   Modal,
   NewWorktreeDialog,
@@ -68,6 +80,11 @@ import {
 import { topbarClass } from "./shell";
 
 const POLL_MS = 5000;
+
+/** How long an optimistic pending marker survives without an observed run
+ *  signature change. Several polls' worth, so a slow `veld start` isn't cut
+ *  off. */
+const PENDING_TTL_MS = 60_000;
 
 function usePersisted(key: string, initial: string): [string, (v: string) => void] {
   const [value, setValue] = useState(
@@ -123,10 +140,6 @@ function useUrlSelection(): {
       setWtState(key);
     },
   };
-}
-
-function canRunWorktree(w: Worktree): boolean {
-  return w.has_veld_config;
 }
 
 /**
@@ -234,6 +247,12 @@ function AppInner(props: {
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [offline, setOffline] = useState(false);
 
+  // Known, accepted: refreshes are not sequenced. A poll issued before a
+  // mutation but resolving after it writes the pre-mutation payload back, so
+  // a rename or emoji change can visibly revert for up to one poll before
+  // settling. Fixing it needs a monotonic request counter guarding the
+  // setters; not worth it while every mutation is followed by its own
+  // `refresh()`.
   const refresh = useCallback(async () => {
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
@@ -250,9 +269,16 @@ function AppInner(props: {
     }
   }, []);
 
+  // Tick counter, bumped per poll. Effects that must re-evaluate on a
+  // schedule (not only when the payload changes) depend on it — a failed
+  // refresh leaves `envs`/`repoList` at the same identity.
+  const [poll, setPoll] = useState(0);
   useEffect(() => {
     void refresh();
-    const t = window.setInterval(() => void refresh(), POLL_MS);
+    const t = window.setInterval(() => {
+      setPoll((n) => n + 1);
+      void refresh();
+    }, POLL_MS);
     return () => window.clearInterval(t);
   }, [refresh]);
 
@@ -306,65 +332,111 @@ function AppInner(props: {
   // Start configuration (preset or explicit node selections), remembered
   // per worktree. Falls back to a sensible default: first preset, else all
   // nodes at their default variants.
-  const startKey = worktree ? `veld.start.${worktree.path}` : "veld.start._";
+  // Reactive copy for the top bar's StartConfig; the rail's per-row controls
+  // read the same storage through `resolveStartSelection` instead, since a
+  // hook can't be called per row.
+  const startKey = startStorageKey(worktree?.path ?? "_");
   const [startRaw, setStartRaw] = usePersisted(startKey, "");
-  let startSel: StartSelection | null = null;
-  try {
-    startSel = startRaw ? (JSON.parse(startRaw) as StartSelection) : null;
-  } catch {
-    startSel = null;
-  }
-  // Prune stale stored choices (preset renamed away, node removed).
-  if (startSel && worktree) {
-    if (startSel.kind === "preset" && !worktree.presets.includes(startSel.name)) {
-      startSel = null;
-    }
-    if (startSel?.kind === "nodes") {
-      const valid = new Set(
-        worktree.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
-      );
-      startSel = {
-        kind: "nodes",
-        selections: startSel.selections.filter((s) => valid.has(s)),
-      };
-      if (startSel.selections.length === 0) startSel = null;
-    }
-  }
-  const effectiveStart =
-    startSel ?? (worktree ? defaultStartSelection(worktree) : null);
+  const effectiveStart = worktree
+    ? (pruneStartSelection(worktree, parseStartSelection(startRaw)) ??
+      defaultStartSelection(worktree))
+    : null;
 
-  // Optimistic pending marker while a 202'd start/stop/restart takes effect —
-  // keyed to the worktree it was fired on (NOT a single global flag), so
-  // future per-row controls can't strand a spinner: it clears when THAT
-  // worktree's status changes.
-  const [pending, setPendingState] = useState<{
-    worktreeId: number;
-    label: string;
-    statusAtSet: string;
-  } | null>(null);
+  // Optimistic pending markers while 202'd start/stop/restarts take effect,
+  // keyed by worktree: the rail can fire actions on several rows at once, and
+  // a single global slot would let the second overwrite the first's marker
+  // and strand its spinner. Each entry clears when THAT worktree's run
+  // signature moves off the value it had when the action was fired.
+  const [pending, setPending] = useState<PendingMap>({});
+  // Every loaded worktree, not just the selected repo's: switching projects
+  // mid-action must not look like the worktree vanished, or the marker is
+  // dropped and the re-enabled control invites a double fire.
+  const allWorktrees = useMemo(
+    () => repos.flatMap((r) => r.worktrees),
+    [repos],
+  );
   useEffect(() => {
-    if (!pending) return;
-    const wt = worktrees.find((w) => w.id === pending.worktreeId);
-    const current = wt ? worktreeStatus(runsForWorktree(envs, wt)) : "gone";
-    if (current !== pending.statusAtSet) setPendingState(null);
-  }, [envs, worktrees, pending]);
-  const pendingFor = (w: Worktree | null) =>
-    pending && w && pending.worktreeId === w.id ? pending.label : null;
+    setPending((cur) =>
+      prunePending(cur, Date.now(), (id) => {
+        const wt = allWorktrees.find((w) => w.id === id);
+        return wt ? runSignature(runsForWorktree(envs, wt)) : null;
+      }),
+    );
+    // `poll` is a dependency so the TTL is re-checked on every tick, not only
+    // when the payload changes: a failed refresh leaves `envs` identical, and
+    // without this a marker could never expire while the daemon is down.
+  }, [envs, allWorktrees, poll]);
+  const pendingFor = (w: Worktree | null): PendingAction | null =>
+    w ? (pending[w.id]?.label ?? null) : null;
+
+  /** Run actions make sense only for a worktree of an on-disk repo. */
+  const canRunWorktreeNow = (w: Worktree) =>
+    w.has_veld_config && (repo?.available ?? false);
+
+  /**
+   * Whether ▶ can do anything for this worktree. One predicate for ALL FOUR
+   * entry points (top bar, rail row, context menu, palette) — they disagreed
+   * before: some checked "is anything in flight", others "is there anything
+   * to start", so one surface offered an enabled button whose click was a
+   * silent no-op while another allowed a double-spawned `veld start`.
+   * Declared after `canRunWorktreeNow` on purpose: it closes over it, and
+   * TypeScript does not flag use-before-declaration through a closure.
+   */
+  const canStartWorktree = (w: Worktree) =>
+    canRunWorktreeNow(w) &&
+    pendingFor(w) === null &&
+    resolveStartSelection(w) !== null;
 
   const [actionError, setActionError] = useState<string | null>(null);
-  const act = async (w: Worktree, label: string, fn: () => Promise<void>) => {
+  const act = async (
+    w: Worktree,
+    label: PendingAction,
+    fn: () => Promise<void>,
+  ) => {
     setActionError(null);
-    setPendingState({
-      worktreeId: w.id,
-      label,
-      statusAtSet: worktreeStatus(runsForWorktree(envs, w)),
-    });
+    const sigAtSet = runSignature(runsForWorktree(envs, w));
+    setPending((cur) => ({
+      ...cur,
+      [w.id]: { label, sigAtSet, expiresAt: Date.now() + PENDING_TTL_MS },
+    }));
     try {
       await fn();
     } catch (e) {
-      setPendingState(null);
-      setActionError(e instanceof Error ? e.message : String(e));
+      setPending((cur) => {
+        const next = { ...cur };
+        delete next[w.id];
+        return next;
+      });
+      // Name the worktree: actions now fire from the rail, the context menu
+      // and the palette on ANY row, so an unattributed banner leaves the user
+      // guessing which one failed.
+      const message = e instanceof Error ? e.message : String(e);
+      setActionError(`${w.alias}: ${label} failed — ${message}`);
     }
+  };
+
+  // Run actions for ANY worktree, not just the selected one — the rail rows,
+  // the context menu and the palette all drive these.
+  const startWorktree = (w: Worktree) => {
+    const sel = resolveStartSelection(w);
+    if (!sel) {
+      // Defence in depth: all four ▶ surfaces gate on `canStartWorktree`,
+      // which rejects exactly this case, so this should be unreachable. If a
+      // future caller skips the guard, say what's wrong instead of no-opping.
+      setActionError(
+        `${w.alias}: nothing to start — no presets or startable nodes in its veld.json.`,
+      );
+      return;
+    }
+    void act(w, "start", () => api.startRun(w.id, startBody(sel)));
+  };
+  const stopWorktree = (w: Worktree) => {
+    const r = activeRun(runsForWorktree(envs, w));
+    if (r) void act(w, "stop", () => api.stopRun(r.name));
+  };
+  const restartWorktree = (w: Worktree) => {
+    const r = activeRun(runsForWorktree(envs, w));
+    if (r) void act(w, "restart", () => api.restartRun(r.name));
   };
 
   // ---- dialogs ------------------------------------------------------------
@@ -373,17 +445,66 @@ function AppInner(props: {
     | { kind: "import" }
     | { kind: "new-worktree" }
     | { kind: "rename"; worktree: Worktree; deleteFocus?: boolean }
+    | { kind: "emoji"; worktree: Worktree }
     | { kind: "remove-repo"; repo: Repo }
     | { kind: "search" }
   >({ kind: "none" });
 
+  /**
+   * emoji → every worktree holding it, across all repos. Keyed by id and
+   * carrying ALL holders, not the first alias: aliases are unique only within
+   * a repo (`unique_alias` scopes to one `repo_root`), so two projects both
+   * checked out on `main` — the default case — would otherwise let the picker
+   * mistake another project's glyph for the current worktree's own.
+   */
+  const emojiUsedBy = useMemo(() => {
+    const used: Record<string, EmojiHolder[]> = {};
+    for (const r of repos) {
+      for (const w of r.worktrees) {
+        if (!w.emoji) continue;
+        (used[w.emoji] ??= []).push({ id: w.id, alias: w.alias });
+      }
+    }
+    return used;
+  }, [repos]);
+
   const { showContextMenu } = useContextMenu();
-  const worktreeMenu = (w: Worktree) =>
-    showContextMenu([
+  const worktreeMenu = (w: Worktree) => {
+    const running = worktreeStatus(runsForWorktree(envs, w)) !== "stopped";
+    // Run entries live here as well as on the row, because the collapsed rail
+    // has no space for inline controls and right-click is its only affordance.
+    // `pendingFor` gates every entry: `running` lags a fired action by up to
+    // one poll, so without it the menu keeps offering "Start run" while a
+    // start is already in flight and `veld start` gets spawned twice.
+    const busy = pendingFor(w) !== null;
+    const runItems = canRunWorktreeNow(w)
+      ? [
+          {
+            key: "run",
+            title: running ? "Stop run" : "Start run",
+            disabled: busy || (!running && !canStartWorktree(w)),
+            onClick: () => (running ? stopWorktree(w) : startWorktree(w)),
+          },
+          {
+            key: "restart",
+            title: "Restart run",
+            disabled: busy || !running,
+            onClick: () => restartWorktree(w),
+          },
+          { key: "run-divider" },
+        ]
+      : [];
+    return showContextMenu([
+      ...runItems,
       {
         key: "rename",
         title: "Rename…",
         onClick: () => setDialog({ kind: "rename", worktree: w }),
+      },
+      {
+        key: "emoji",
+        title: "Change emoji…",
+        onClick: () => setDialog({ kind: "emoji", worktree: w }),
       },
       {
         key: "copy-path",
@@ -405,6 +526,7 @@ function AppInner(props: {
           setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
       },
     ]);
+  };
   const closeDialog = () => setDialog({ kind: "none" });
 
   useEffect(() => {
@@ -437,6 +559,171 @@ function AppInner(props: {
       onHover={setSwitchHover}
     />
   );
+
+  /**
+   * Everything ⌘K can reach. Built on demand (only while the palette is open)
+   * rather than memoised: it closes over most of this component's state, and
+   * a correct dependency list would be longer than the function.
+   */
+  const buildPaletteItems = (): PaletteItem[] => {
+    const items: PaletteItem[] = [];
+
+    for (const w of worktrees) {
+      items.push({
+        id: `wt:${w.id}`,
+        group: "Worktrees",
+        label: w.alias,
+        hint: w.branch,
+        alt: [w.branch],
+        emoji: w.emoji,
+        status: worktreeStatus(runsForWorktree(envs, w)),
+        run: () => selectWorktree(w),
+      });
+    }
+
+    if (worktree && canRunWorktreeNow(worktree)) {
+      const w = worktree;
+      const running = status !== "stopped";
+      // Same guard as the rail and the context menu: an action already in
+      // flight must not be offered again a second time.
+      const busy = pendingFor(w) !== null;
+      if (running && !busy) {
+        items.push({
+          id: "run:stop",
+          group: "Run",
+          label: `Stop ${w.alias}`,
+          run: () => stopWorktree(w),
+        });
+        items.push({
+          id: "run:restart",
+          group: "Run",
+          label: `Restart ${w.alias}`,
+          run: () => restartWorktree(w),
+        });
+      } else if (!running && canStartWorktree(w)) {
+        items.push({
+          id: "run:start",
+          group: "Run",
+          label: `Start ${w.alias}`,
+          run: () => startWorktree(w),
+        });
+      }
+      for (const [name, url] of urls) {
+        items.push({
+          id: `url:${name}`,
+          group: "Run",
+          label: `Open ${name}`,
+          hint: url,
+          alt: [url],
+          run: () => window.open(url, "_blank"),
+        });
+      }
+      if (urls.length > 0) {
+        items.push({
+          id: "url:copy-all",
+          group: "Run",
+          label: "Copy all run URLs",
+          run: () =>
+            void navigator.clipboard.writeText(
+              urls.map(([, u]) => u).join("\n"),
+            ),
+        });
+      }
+    }
+
+    if (repo) {
+      items.push({
+        id: "wt:new",
+        group: "Worktree",
+        label: "New worktree…",
+        run: () => setDialog({ kind: "new-worktree" }),
+      });
+    }
+    if (worktree) {
+      const w = worktree;
+      items.push({
+        id: "wt:rename",
+        group: "Worktree",
+        label: `Rename ${w.alias}…`,
+        run: () => setDialog({ kind: "rename", worktree: w }),
+      });
+      items.push({
+        id: "wt:emoji",
+        group: "Worktree",
+        label: `Change emoji for ${w.alias}…`,
+        hint: w.emoji,
+        run: () => setDialog({ kind: "emoji", worktree: w }),
+      });
+      items.push({
+        id: "wt:copy-path",
+        group: "Worktree",
+        label: `Copy path of ${w.alias}`,
+        hint: w.path,
+        alt: [w.path],
+        run: () => void navigator.clipboard.writeText(w.path),
+      });
+      if (!w.is_main) {
+        items.push({
+          id: "wt:remove",
+          group: "Worktree",
+          label: `Remove worktree ${w.alias}…`,
+          run: () =>
+            setDialog({ kind: "rename", worktree: w, deleteFocus: true }),
+        });
+      }
+    }
+
+    for (const r of repos) {
+      if (r.root === repo?.root) continue;
+      items.push({
+        id: `repo:${r.root}`,
+        group: "Projects",
+        label: `Switch to ${r.name}`,
+        hint: r.available ? r.root : "unavailable",
+        alt: [r.root],
+        run: () => {
+          setActiveRepoRoot(r.root);
+          setActiveWtKey("");
+        },
+      });
+    }
+    items.push({
+      id: "repo:import",
+      group: "Projects",
+      label: "Import repository…",
+      run: () => setDialog({ kind: "import" }),
+    });
+    if (repo) {
+      const r = repo;
+      items.push({
+        id: "repo:remove",
+        group: "Projects",
+        label: `Remove project ${r.name}…`,
+        run: () => setDialog({ kind: "remove-repo", repo: r }),
+      });
+    }
+
+    items.push({
+      id: "view:mode",
+      group: "View",
+      label: "Switch to Runs",
+      run: () => setMode("runs"),
+    });
+    items.push({
+      id: "view:rail",
+      group: "View",
+      label: railWide ? "Collapse the worktree rail" : "Expand the worktree rail",
+      run: () => setRailWide((v) => !v),
+    });
+    items.push({
+      id: "view:theme",
+      group: "View",
+      label: "Cycle theme",
+      hint: themePref,
+      run: onCycleTheme,
+    });
+    return items;
+  };
 
   // ---- render -------------------------------------------------------------
   const themeButton = (
@@ -471,7 +758,7 @@ function AppInner(props: {
         repo={repo}
         worktree={worktree}
         startConfig={
-          worktree && canRunWorktree(worktree) ? (
+          worktree && canRunWorktreeNow(worktree) ? (
             <StartConfig
               worktree={worktree}
               value={effectiveStart}
@@ -479,7 +766,7 @@ function AppInner(props: {
             />
           ) : null
         }
-        canStart={effectiveStart !== null}
+        canStart={worktree ? canStartWorktree(worktree) : false}
         running={status !== "stopped"}
         pending={pendingFor(worktree)}
         run={run}
@@ -492,24 +779,9 @@ function AppInner(props: {
         }}
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
-        onStart={() => {
-          if (!worktree || !effectiveStart) return;
-          const body =
-            effectiveStart.kind === "preset"
-              ? { preset: effectiveStart.name }
-              : { selections: effectiveStart.selections };
-          void act(worktree, "start", () => api.startRun(worktree.id, body));
-        }}
-        onStop={() =>
-          run &&
-          worktree &&
-          void act(worktree, "stop", () => api.stopRun(run.name))
-        }
-        onRestart={() =>
-          run &&
-          worktree &&
-          void act(worktree, "restart", () => api.restartRun(run.name))
-        }
+        onStart={() => worktree && startWorktree(worktree)}
+        onStop={() => worktree && stopWorktree(worktree)}
+        onRestart={() => worktree && restartWorktree(worktree)}
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
       />
@@ -567,10 +839,15 @@ function AppInner(props: {
             active={worktree}
             envs={envs}
             wide={railWide}
+            canRun={canRunWorktreeNow}
+            canStart={canStartWorktree}
+            pendingFor={pendingFor}
             onToggle={() => setRailWide((v) => !v)}
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
+            onStart={startWorktree}
+            onStop={stopWorktree}
           />
           <TerminalPlaceholder worktree={worktree} />
           <UrlLauncher worktree={worktree} urls={urls} />
@@ -623,7 +900,7 @@ function AppInner(props: {
           deleteFocus={dialog.deleteFocus ?? false}
           onClose={closeDialog}
           onRename={async (alias) => {
-            await api.renameWorktree(dialog.worktree.id, alias);
+            await api.patchWorktree(dialog.worktree.id, { alias });
             await refresh();
             closeDialog();
           }}
@@ -634,15 +911,24 @@ function AppInner(props: {
           }}
         />
       )}
-      {dialog.kind === "search" && (
-        <SearchOverlay
-          project={repo?.name ?? ""}
-          worktrees={worktrees}
-          envs={envs}
-          onSelect={(w) => {
-            selectWorktree(w);
+      {dialog.kind === "emoji" && (
+        <ChangeEmojiDialog
+          current={dialog.worktree.emoji}
+          alias={dialog.worktree.alias}
+          worktreeId={dialog.worktree.id}
+          usedBy={emojiUsedBy}
+          onClose={closeDialog}
+          onPick={async (emoji) => {
+            await api.patchWorktree(dialog.worktree.id, { emoji });
+            await refresh();
             closeDialog();
           }}
+        />
+      )}
+      {dialog.kind === "search" && (
+        <CommandPalette
+          project={repo?.name ?? ""}
+          items={buildPaletteItems()}
           onClose={closeDialog}
         />
       )}
@@ -654,6 +940,14 @@ function AppInner(props: {
 // Top bar
 // ---------------------------------------------------------------------------
 
+/** A single run's status as one of the rail's `.dot` classes. */
+function runStatusClass(status: string): WorktreeStatus {
+  if (status === "running") return "running";
+  if (status === "failed") return "failed";
+  if (status === "stopped") return "stopped";
+  return "partial";
+}
+
 function TopBar(props: {
   modeSwitch: React.ReactNode;
   repos: Repo[];
@@ -662,7 +956,7 @@ function TopBar(props: {
   startConfig: React.ReactNode;
   canStart: boolean;
   running: boolean;
-  pending: string | null;
+  pending: PendingAction | null;
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
   urlsOpen: boolean;
@@ -681,12 +975,6 @@ function TopBar(props: {
   // No run controls for a repo we can't see on disk — git/veld actions would
   // only fail later with a worse error.
   const canRun = !!worktree?.has_veld_config && repoAvailable;
-  const statusColor =
-    run?.status === "running"
-      ? "var(--live)"
-      : run?.status === "failed"
-        ? "var(--danger)"
-        : "var(--warn)";
   return (
     <div className={topbarClass}>
       {props.modeSwitch}
@@ -738,13 +1026,19 @@ function TopBar(props: {
           {canRun && props.startConfig}
           {canRun && (
             <>
+              {/* The spinner belongs on the button that was pressed. Putting
+                  it on play/stop for every action made a restart look like a
+                  stop in progress. */}
               <Tooltip label={props.running ? "Stop run" : "Start run"}>
                 <ActionIcon
                   size="md"
                   variant="light"
                   color={props.running ? "red" : "green"}
-                  loading={props.pending !== null}
-                  disabled={!props.running && !props.canStart}
+                  loading={props.pending === "start" || props.pending === "stop"}
+                  disabled={
+                    props.pending !== null ||
+                    (!props.running && !props.canStart)
+                  }
                   onClick={props.running ? props.onStop : props.onStart}
                 >
                   {props.running ? (
@@ -758,20 +1052,30 @@ function TopBar(props: {
                 <ActionIcon
                   size="md"
                   variant="default"
+                  loading={props.pending === "restart"}
                   disabled={!props.running || props.pending !== null}
                   onClick={props.onRestart}
                 >
                   <IconRefresh size={13} />
                 </ActionIcon>
               </Tooltip>
+              {/* Status is a dot, not a word: the text was long enough to be
+                  clipped in a crowded bar, and it duplicated what the
+                  start/stop icon already says. */}
               {run && (
-                <span
-                  className="mono"
-                  style={{ fontSize: 10.5, color: statusColor }}
-                  title={`Run ${run.name}: ${run.status}`}
+                <Tooltip
+                  label={
+                    props.pending
+                      ? `Run ${run.name}: ${props.pending}…`
+                      : `Run ${run.name}: ${run.status}`
+                  }
                 >
-                  {props.pending ? `${props.pending}…` : run.status}
-                </span>
+                  <span
+                    className={`dot ${runStatusClass(run.status)}`}
+                    role="img"
+                    aria-label={`Run ${run.name}: ${props.pending ?? run.status}`}
+                  />
+                </Tooltip>
               )}
               {run && (
                 <>
@@ -875,15 +1179,42 @@ function TopBar(props: {
 // Worktree rail
 // ---------------------------------------------------------------------------
 
+/**
+ * Mantine colour for an in-flight action: what it is doing, not where it ends
+ * up — "stop" is red while it runs, restart reads as a (re)start.
+ *
+ * Exhaustive on purpose. Widening [`PendingAction`] (to cover share actions,
+ * say) must fail the build here rather than silently fall through to green —
+ * the same class of bug as the literal comparisons in `TopBar`.
+ */
+function actionColor(label: PendingAction): string {
+  switch (label) {
+    case "stop":
+      return "red";
+    case "start":
+    case "restart":
+      return "green";
+    default: {
+      const exhaustive: never = label;
+      return exhaustive;
+    }
+  }
+}
+
 function Rail(props: {
   worktrees: Worktree[];
   active: Worktree | null;
   envs: EnvironmentList | null;
   wide: boolean;
+  canRun: (w: Worktree) => boolean;
+  canStart: (w: Worktree) => boolean;
+  pendingFor: (w: Worktree) => PendingAction | null;
   onToggle: () => void;
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
+  onStart: (w: Worktree) => void;
+  onStop: (w: Worktree) => void;
 }) {
   return (
     <div className={`rail${props.wide ? " wide" : ""}`}>
@@ -910,36 +1241,99 @@ function Rail(props: {
       <div className="rail-list">
         {props.worktrees.map((w) => {
           const status = worktreeStatus(runsForWorktree(props.envs, w));
+          const running = status !== "stopped";
+          const pending = props.pendingFor(w);
+          // Inline controls are wide-only — a 64px collapsed row has no space
+          // for them. Right-click reaches the same actions in either mode.
+          const showRunControl = props.wide && props.canRun(w);
           return (
-            <button
+            /* A div with role=button, not a <button>: the row carries nested
+               controls of its own, and a <button> inside a <button> violates
+               the content model (the HTML parser closes the OUTER button when
+               it meets the inner start tag; React's createElement path builds
+               the invalid tree instead). Cost of the workaround: role=button
+               takes presentational children, so the nested ▶ and ⋮ are not
+               exposed to assistive tech. The honest fix is role=listbox on
+               .rail-list with role=option rows — deferred, see issue #167. */
+            <div
               key={w.id}
+              role="button"
+              tabIndex={0}
+              /* Selection is "which one am I looking at", not a toggle that
+                 can be un-pressed — aria-current, not aria-pressed. */
+              aria-current={props.active?.id === w.id ? true : undefined}
               className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}`}
               title={`${w.alias} — ${w.branch}`}
               onClick={() => props.onSelect(w)}
+              onKeyDown={(e) => {
+                // Only the row's OWN key events. Keydown bubbles from the
+                // nested buttons, and preventDefault() here would cancel
+                // their native activation — Enter on ▶ would silently select
+                // the row instead of starting the run.
+                if (e.target !== e.currentTarget) return;
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  props.onSelect(w);
+                }
+              }}
               onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
               {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
               {props.wide && <span className="wt-alias">{w.alias}</span>}
               {props.wide && <span className="wt-branch">{w.branch}</span>}
-              {/* Row is a <button>; nested controls must be role=button
-                  spans with stopPropagation to avoid button-in-button.
-                  Same menu as right-click. */}
+              {showRunControl && (
+                <button
+                  type="button"
+                  className={`wt-run${running ? " on" : ""}`}
+                  title={
+                    pending
+                      ? `${pending}…`
+                      : running
+                        ? `Stop ${w.alias}`
+                        : `Start ${w.alias}`
+                  }
+                  aria-label={running ? `Stop ${w.alias}` : `Start ${w.alias}`}
+                  // Mirrors the context menu and the palette. Without the
+                  // start guard the button looked live but its click hit a
+                  // no-op for a worktree with no presets and no nodes.
+                  disabled={
+                    pending !== null || (!running && !props.canStart(w))
+                  }
+                  onClick={(e) => {
+                    // The row is clickable too; without this, starting a run
+                    // would also switch the selection out from under the user.
+                    e.stopPropagation();
+                    if (running) props.onStop(w);
+                    else props.onStart(w);
+                  }}
+                >
+                  {pending ? (
+                    // The spinner carries the action's colour, so a row that
+                    // is stopping reads as stopping and not as starting.
+                    <Loader size={10} color={actionColor(pending)} />
+                  ) : running ? (
+                    <IconPlayerStopFilled size={10} />
+                  ) : (
+                    <IconPlayerPlayFilled size={10} />
+                  )}
+                </button>
+              )}
               {props.wide && (
-                <span
+                <button
+                  type="button"
                   className="wt-edit"
                   title="Worktree menu"
-                  role="button"
-                  tabIndex={0}
+                  aria-label={`Menu for ${w.alias}`}
                   onClick={(e) => {
                     e.stopPropagation();
                     props.onMenu(e, w);
                   }}
                 >
                   <IconDotsVertical size={12} />
-                </span>
+                </button>
               )}
-            </button>
+            </div>
           );
         })}
       </div>
@@ -1060,48 +1454,191 @@ function ServiceCard(props: { name: string; url: string }) {
 // URLs popover + search overlay
 // ---------------------------------------------------------------------------
 
-function SearchOverlay(props: {
+/** Header order for the idle (no-query) list. Also the grouping key. */
+const PALETTE_GROUPS = ["Worktrees", "Run", "Worktree", "Projects", "View"] as const;
+type PaletteGroup = (typeof PALETTE_GROUPS)[number];
+
+/** One ⌘K entry: a worktree to jump to, or an action to run. */
+interface PaletteItem {
+  id: string;
+  /** Must be one of PALETTE_GROUPS — the idle list is sorted by that order,
+   *  so items need not be declared contiguously by group. */
+  group: PaletteGroup;
+  label: string;
+  /** Dim right-hand detail (branch, URL, path). */
+  hint?: string;
+  /** Extra haystacks the query may match, beyond the label. */
+  alt?: string[];
+  emoji?: string;
+  status?: WorktreeStatus;
+  run: () => void;
+}
+
+/** The label with the fuzzy-matched characters marked. */
+function Highlighted(props: { text: string; positions: number[] }) {
+  if (props.positions.length === 0) return <>{props.text}</>;
+  const hit = new Set(props.positions);
+  const parts: React.ReactNode[] = [];
+  let run = "";
+  let runIsHit = hit.has(0);
+  const flush = (key: number) => {
+    if (!run) return;
+    parts.push(runIsHit ? <mark key={key}>{run}</mark> : run);
+    run = "";
+  };
+  for (let i = 0; i < props.text.length; i++) {
+    const isHit = hit.has(i);
+    if (isHit !== runIsHit) {
+      flush(i);
+      runIsHit = isHit;
+    }
+    run += props.text[i];
+  }
+  flush(props.text.length);
+  return <>{parts}</>;
+}
+
+/**
+ * ⌘K palette: fuzzy search over worktrees *and* commands.
+ *
+ * With no query the items stay in their declared order under group headers —
+ * that reads as a menu of what's available. Once the user types, grouping is
+ * dropped for a single score-ordered list (the group becomes the right-hand
+ * hint), because a global ranking is what "I know what I want" wants.
+ */
+function CommandPalette(props: {
   project: string;
-  worktrees: Worktree[];
-  envs: EnvironmentList | null;
-  onSelect: (w: Worktree) => void;
+  items: PaletteItem[];
   onClose: () => void;
 }) {
   const [query, setQuery] = useState("");
-  const matches = filterWorktrees(props.worktrees, query);
+  // Tracked by item id, not index: `items` is rebuilt on every 5s poll, and a
+  // run transition inserts or removes the Stop/Restart entries — an index
+  // would silently slide onto a different command between the user reading
+  // the row and pressing Enter. `null` = "first match".
+  const [cursorId, setCursorId] = useState<string | null>(null);
+  // Only arrow keys should scroll the list. Following the pointer as well
+  // would yank the view out from under a user who is merely moving the mouse
+  // across it.
+  const scrollToCursor = useRef(false);
+
+  const searching = query.trim().length > 0;
+  const matches = searching
+    ? props.items
+        .map((item) => ({
+          item,
+          match: bestFuzzyMatch([item.label, ...(item.alt ?? [])], query),
+          // Highlight only what matched in the label itself; a hit that came
+          // from a branch or URL has no positions to mark here.
+          label: fuzzyMatch(item.label, query),
+        }))
+        .filter((r) => r.match !== null)
+        .sort((a, b) => b.match!.score - a.match!.score)
+    : // Group the idle list explicitly rather than trusting declaration
+      // order: the single `lastGroup` cursor below would emit a duplicate
+      // header for any item appended out of group order.
+      PALETTE_GROUPS.flatMap((g) =>
+        props.items
+          .filter((item) => item.group === g)
+          .map((item) => ({ item, match: null, label: null })),
+      );
+
+  // Resolve the id back to a position; an id that filtered out falls back to
+  // the top match, which is what a user who just typed expects.
+  const found = matches.findIndex((m) => m.item.id === cursorId);
+  const active = found === -1 ? 0 : found;
+
+  const choose = (item: PaletteItem) => {
+    props.onClose();
+    item.run();
+  };
+
+  const move = (delta: number) => {
+    if (matches.length === 0) return;
+    scrollToCursor.current = true;
+    const next = (active + delta + matches.length) % matches.length;
+    setCursorId(matches[next].item.id);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (matches.length === 0) return;
+    if (e.key === "ArrowDown") {
+      e.preventDefault();
+      move(1);
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      move(-1);
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      choose(matches[active].item);
+    }
+  };
+
+  let lastGroup = "";
   return (
-    <Modal title={`Search ${props.project}`} onClose={props.onClose}>
+    <Modal
+      title={props.project ? `Search ${props.project}` : "Search"}
+      onClose={props.onClose}
+    >
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         <TextInput
-          placeholder="Search worktrees…"
+          placeholder="Jump to a worktree, or run a command…"
           value={query}
-          onChange={(e) => setQuery(e.currentTarget.value)}
+          onChange={(e) => {
+            setQuery(e.currentTarget.value);
+            setCursorId(null);
+          }}
+          onKeyDown={onKeyDown}
           styles={{
             input: { fontFamily: "var(--mantine-font-family-monospace)" },
           }}
           data-autofocus
         />
-        <div className="section-label">Worktrees</div>
-        {matches.map((w) => {
-          const status = worktreeStatus(runsForWorktree(props.envs, w));
-          return (
-            <button
-              key={w.id}
-              className="wt-row"
-              onClick={() => props.onSelect(w)}
-            >
-              <span className={`dot ${status}`} />
-              {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
-              <span className="wt-alias">{w.alias}</span>
-              <span className="wt-branch">{w.branch}</span>
-              <span style={{ fontSize: 11, color: "var(--faint)" }}>
-                {status}
-              </span>
-            </button>
-          );
-        })}
+        <div className="palette-list">
+          {matches.map(({ item, label }, i) => {
+            const header = !searching && item.group !== lastGroup;
+            if (header) lastGroup = item.group;
+            return (
+              <div key={item.id}>
+                {header && <div className="section-label">{item.group}</div>}
+                <button
+                  type="button"
+                  className={`wt-row${i === active ? " sel" : ""}`}
+                  style={{ width: "100%" }}
+                  ref={
+                    i === active
+                      ? (el) => {
+                          if (!el || !scrollToCursor.current) return;
+                          scrollToCursor.current = false;
+                          el.scrollIntoView({ block: "nearest" });
+                        }
+                      : undefined
+                  }
+                  /* No onMouseEnter cursor sync: scrollIntoView slides rows
+                     under a stationary pointer, whose mouseenter would drag
+                     the cursor back and stall arrow-key navigation. Enter and
+                     click can't disagree anyway — onClick uses this row's own
+                     item, not matches[active]. Hover is :hover in CSS. */
+                  onClick={() => choose(item)}
+                >
+                  {item.status && <span className={`dot ${item.status}`} />}
+                  {item.emoji && <span className="wt-emoji">{item.emoji}</span>}
+                  <span className="pal-label">
+                    <Highlighted
+                      text={item.label}
+                      positions={label?.positions ?? []}
+                    />
+                  </span>
+                  <span className="pal-hint">
+                    {item.hint ?? (searching ? item.group : "")}
+                  </span>
+                </button>
+              </div>
+            );
+          })}
+        </div>
         {matches.length === 0 && (
-          <div className="note-card">No matching worktrees.</div>
+          <div className="note-card">Nothing matches “{query.trim()}”.</div>
         )}
       </div>
     </Modal>

@@ -27,8 +27,13 @@ use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, val
 /// HTTP server alongside the management routes).
 ///
 /// CSRF is enforced as a LAYER, not per handler: every non-GET request on
-/// this router must carry `X-Veld-Request` (see `check_csrf`), so a future
-/// mutating route cannot ship ungated by forgetting a call.
+/// this router must carry `X-Veld-Request` (see `check_csrf`), so a mutating
+/// route cannot ship ungated by forgetting a per-handler call.
+///
+/// **Add new routes ABOVE the `.layer(...)` call.** axum applies middleware
+/// only to routes registered before it — "Additional routes added after
+/// `layer` is called will not have the middleware added" — so a `.route()`
+/// appended after it would be silently unprotected.
 pub fn routes() -> Router {
     Router::new()
         .route("/api/repos", get(list_repos).delete(remove_repo))
@@ -37,9 +42,10 @@ pub fn routes() -> Router {
         .route("/api/worktrees", post(create_worktree))
         .route(
             "/api/worktrees/{id}",
-            patch(rename_worktree).delete(delete_worktree),
+            patch(patch_worktree).delete(delete_worktree),
         )
         .route("/api/worktrees/{id}/start", post(start_worktree_run))
+        .route("/api/worktree-emoji", get(worktree_emoji))
         .route("/api/pick-directory", post(pick_directory))
         .layer(axum::middleware::from_fn(csrf_layer))
 }
@@ -223,6 +229,29 @@ fn db_err(e: impl std::fmt::Display) -> ApiError {
     err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
 }
 
+/// Like [`db_err`], but reports a rejected value as the client error it is.
+///
+/// The handlers validate before writing, so `InvalidEmoji` shouldn't surface
+/// here — but that makes the handler-side check look redundant, and deleting
+/// it would silently downgrade a helpful 400 into a "database error" 500.
+/// This keeps the DB-layer rejection honest either way.
+fn write_err(e: veld_core::db::DbError) -> ApiError {
+    match e {
+        // Fixed message, value only to the log: the variant's Display
+        // Debug-formats the rejected string, and echoing unbounded
+        // client-supplied input back into a response body is a habit worth
+        // not starting.
+        veld_core::db::DbError::InvalidEmoji(_) => {
+            warn!("rejected worktree emoji: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                "emoji must be one of the curated worktree glyphs",
+            )
+        }
+        other => db_err(other),
+    }
+}
+
 fn open_desktop_db() -> Result<Db, ApiError> {
     open_db().map_err(|code| err(code, "failed to open the veld database"))
 }
@@ -349,6 +378,26 @@ fn validate_alias(alias: &str) -> Result<(), ApiError> {
         return Err(err(
             StatusCode::BAD_REQUEST,
             "alias must be 1-64 characters: letters, digits, '-', '_', '.'",
+        ));
+    }
+    Ok(())
+}
+
+/// The glyphs `validate_emoji` accepts, for the UI's picker. Served rather
+/// than duplicated in TypeScript so the two can never drift; static, so the
+/// picker fetches it once on open instead of riding the 5s poll.
+async fn worktree_emoji() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "emoji": veld_core::db::WORKTREE_EMOJI }))
+}
+
+/// Turn the curated-set check into a 400 before any DB work. The rule itself
+/// lives in `veld_core::db::is_worktree_emoji`, next to the constant — this
+/// is only the HTTP shape of it.
+fn validate_emoji(emoji: &str) -> Result<(), ApiError> {
+    if !veld_core::db::is_worktree_emoji(emoji) {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "emoji must be one of the curated worktree glyphs",
         ));
     }
     Ok(())
@@ -688,18 +737,56 @@ async fn create_worktree(
     Ok(Json(worktree_view(created)))
 }
 
+/// Partial update. Both fields are optional so the alias-only callers that
+/// predate the emoji field stay wire-compatible; at least one must be present
+/// or the request is a no-op worth rejecting.
+///
+/// `deny_unknown_fields` so a client-side typo (`{"emojii": "🦊"}`) is a 422
+/// (axum rejects at deserialization) rather than a silent 200 that changed
+/// nothing — with every field optional there is otherwise no signal at all.
 #[derive(Deserialize)]
-struct RenameBody {
-    alias: String,
+#[serde(deny_unknown_fields)]
+struct PatchWorktreeBody {
+    #[serde(default)]
+    alias: Option<String>,
+    #[serde(default)]
+    emoji: Option<String>,
 }
 
-async fn rename_worktree(
+impl PatchWorktreeBody {
+    /// Derived from the fields, so adding a third can't leave the
+    /// "nothing to update" guard silently behind.
+    fn is_empty(&self) -> bool {
+        let Self { alias, emoji } = self;
+        alias.is_none() && emoji.is_none()
+    }
+}
+
+async fn patch_worktree(
     Path(id): Path<i64>,
-    Json(body): Json<RenameBody>,
+    Json(body): Json<PatchWorktreeBody>,
 ) -> Result<Json<WorktreeView>, ApiError> {
-    validate_alias(&body.alias)?;
+    if body.is_empty() {
+        return Err(err(
+            StatusCode::BAD_REQUEST,
+            "nothing to update: send an alias, an emoji, or both",
+        ));
+    }
+    // Validate everything before touching the database: a request carrying a
+    // good alias and a bad emoji must change neither.
+    if let Some(alias) = &body.alias {
+        validate_alias(alias)?;
+    }
+    if let Some(emoji) = &body.emoji {
+        validate_emoji(emoji)?;
+    }
+
     let db = open_desktop_db()?;
-    if !db.rename_worktree(id, &body.alias).map_err(db_err)? {
+    // One statement for both columns — see `Db::patch_worktree`.
+    let existed = db
+        .patch_worktree(id, body.alias.as_deref(), body.emoji.as_deref())
+        .map_err(write_err)?;
+    if !existed {
         return Err(err(StatusCode::NOT_FOUND, "worktree not found"));
     }
     let wt = db
@@ -871,6 +958,18 @@ mod tests {
         assert!(validate_alias("").is_err());
     }
 
+    #[test]
+    fn emoji_validation_is_an_allowlist() {
+        assert!(validate_emoji(veld_core::db::WORKTREE_EMOJI[0]).is_ok());
+        assert!(validate_emoji("").is_err());
+        // Not in the curated set, though a perfectly valid emoji.
+        assert!(validate_emoji("🍕").is_err());
+        // Multi-codepoint sequences and zero-width payloads stay out.
+        assert!(validate_emoji("🦊🦊").is_err());
+        assert!(validate_emoji("👨‍👩‍👧").is_err());
+        assert!(validate_emoji("🦊\u{200b}").is_err());
+    }
+
     // Handler-level guards. These paths reject before any database access, so
     // they run against the real router with no test DB.
     mod handler_guards {
@@ -922,6 +1021,38 @@ mod tests {
         }
 
         #[tokio::test]
+        async fn misspelled_patch_field_is_rejected_not_silently_ignored() {
+            // Every field is optional, so without `deny_unknown_fields` a
+            // client typo would 200 having changed nothing. axum's Json
+            // extractor rejects at deserialization, hence 422 rather than
+            // the 400 the hand-written guards return.
+            let res = super::super::routes()
+                .oneshot(req("PATCH", "/api/worktrees/1", true, r#"{"emojii":"🦊"}"#))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        }
+
+        #[tokio::test]
+        async fn worktree_emoji_is_a_public_get_returning_the_curated_set() {
+            // Pins the route, the CSRF exemption, and the `emoji` key the UI
+            // destructures (`api.ts` declares `{ emoji: string[] }`) —
+            // renaming either side would otherwise fail silently at runtime.
+            let res = super::super::routes()
+                .oneshot(req("GET", "/api/worktree-emoji", false, ""))
+                .await
+                .unwrap();
+            assert_eq!(res.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            let list = json["emoji"].as_array().expect("`emoji` array");
+            assert_eq!(list.len(), veld_core::db::WORKTREE_EMOJI.len());
+            assert!(veld_core::db::is_worktree_emoji(list[0].as_str().unwrap()));
+        }
+
+        #[tokio::test]
         async fn invalid_inputs_are_400_before_side_effects() {
             for (method, uri, body) in [
                 // relative import path
@@ -934,6 +1065,17 @@ mod tests {
                 ),
                 // dot alias
                 ("PATCH", "/api/worktrees/1", r#"{"alias":".."}"#),
+                // emoji outside the curated set
+                ("PATCH", "/api/worktrees/1", r#"{"emoji":"🍕"}"#),
+                // a valid alias must not smuggle an invalid emoji past
+                // validation — both are checked before any write
+                (
+                    "PATCH",
+                    "/api/worktrees/1",
+                    r#"{"alias":"ok","emoji":"nope"}"#,
+                ),
+                // empty patch
+                ("PATCH", "/api/worktrees/1", "{}"),
             ] {
                 let res = super::super::routes()
                     .oneshot(req(method, uri, true, body))

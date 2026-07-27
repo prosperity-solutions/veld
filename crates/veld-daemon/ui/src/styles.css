@@ -228,7 +228,8 @@ select:focus {
   width: 64px;
 }
 
-/* Collapsed rows: status dot + emoji only, centered. */
+/* Collapsed rows: status dot + emoji only, centered. Height comes from
+   .wt-row's min-height, so rows don't resize when the rail expands. */
 .wt-row.slim {
   justify-content: center;
   padding: 5px 4px;
@@ -267,6 +268,12 @@ select:focus {
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
+  cursor: pointer;
+  /* Fixed so collapsing the rail doesn't reflow the list: expanded rows are
+     as tall as their 17px controls, collapsed ones only as tall as the
+     emoji. Must clear the tallest expanded child plus vertical padding. */
+  min-height: 28px;
+  box-sizing: border-box;
 }
 .wt-row:hover {
   background: var(--panel);
@@ -329,16 +336,63 @@ select:focus {
   flex: 1;
 }
 
+/* Flex-centred, not baseline: an inline SVG in a text box sits on the
+   baseline and rides visibly high against the row's centre. */
 .wt-edit {
   flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
   border: none;
+  border-radius: 5px;
   background: none;
   color: var(--faint);
   font-size: 11px;
   padding: 0;
+  cursor: pointer;
 }
 .wt-edit:hover {
+  background: var(--elev);
   color: var(--text);
+}
+
+/* Per-row run control, coloured by the action it performs: green to start,
+   red to stop. The colour is the affordance — you should not have to hover
+   to learn what the button will do. */
+.wt-run {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 17px;
+  height: 17px;
+  border: none;
+  border-radius: 5px;
+  background: none;
+  color: var(--accent);
+  padding: 0;
+  cursor: pointer;
+}
+.wt-run.on {
+  color: var(--danger);
+}
+.wt-run:hover {
+  background: var(--elev);
+}
+.wt-run:disabled {
+  cursor: default;
+  background: none;
+}
+
+/* The row is a role=button div, so its nested controls can be real buttons
+   without invalid nesting — but they need their own visible focus ring. */
+.wt-row:focus-visible,
+.wt-run:focus-visible,
+.wt-edit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
 }
 
 /* ---- panes ---------------------------------------------------------------- */
@@ -627,6 +681,96 @@ select:focus {
   transform: translateX(-50%);
 }
 
+
+/* ---- emoji picker ---------------------------------------------------------- */
+
+.emoji-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(42px, 1fr));
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.emoji-cell {
+  position: relative;
+  aspect-ratio: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  line-height: 1;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  cursor: pointer;
+}
+.emoji-cell:hover:not(:disabled) {
+  background: var(--panel);
+  border-color: var(--border2);
+}
+.emoji-cell.current {
+  border-color: var(--accent);
+  background: var(--elev);
+}
+.emoji-cell:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.emoji-cell:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* Marks a glyph another worktree already uses — advisory, not a block. */
+.emoji-taken {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--faint);
+}
+
+/* ---- command palette ------------------------------------------------------- */
+
+.palette-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+
+/* Keyboard cursor. Distinct from :hover so moving the mouse across the list
+   doesn't visually compete with the arrow-key position. */
+.wt-row.sel {
+  background: var(--elev);
+  box-shadow: inset 0 0 0 1px var(--border2);
+}
+
+.pal-hint {
+  margin-left: auto;
+  flex: none;
+  padding-left: 10px;
+  font-size: 10.5px;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+.pal-label {
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.pal-label mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 700;
+}
 
 /* Monospace form controls (project switcher etc.) — hard override, not the
    Mantine variable, so the input value is mono regardless of slot styling. */

@@ -1,14 +1,15 @@
-import { type FormEvent, type ReactNode, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
   Group,
+  Loader,
   Modal as MantineModal,
   Stack,
   Text,
   TextInput,
 } from "@mantine/core";
-import { api, type Repo } from "../api";
+import { api, type EmojiHolder, type Repo } from "../api";
 
 /**
  * Shared dialog shell on Mantine's Modal (scrim, esc, focus trap, a11y) —
@@ -196,6 +197,123 @@ export function NewWorktreeDialog(props: {
           </Button>
         </Stack>
       </form>
+    </Modal>
+  );
+}
+
+/**
+ * Emoji picker for a worktree's rail identifier.
+ *
+ * The choices come from the daemon (`/api/worktree-emoji`) rather than a
+ * TypeScript copy, because the same list is the server-side allowlist. Glyphs
+ * already in use elsewhere stay selectable — the assigner keeps them unique,
+ * but an explicit choice is the user's to make — and are only labelled, so
+ * the ambiguity is visible before it's created.
+ */
+export function ChangeEmojiDialog(props: {
+  current: string;
+  alias: string;
+  /** Identifies "this worktree" among the holders — aliases can't, since
+   *  they are unique only within one repo. */
+  worktreeId: number;
+  /** emoji → every worktree holding it, across all projects. */
+  usedBy: Record<string, EmojiHolder[]>;
+  onPick: (emoji: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [choices, setChoices] = useState<string[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .worktreeEmoji()
+      .then((r) => {
+        if (cancelled) return;
+        // A malformed payload would otherwise store `undefined` and leave the
+        // Loader spinning forever with no error and no way out.
+        if (Array.isArray(r?.emoji)) setChoices(r.emoji);
+        else setLoadError("The daemon returned an unexpected emoji list.");
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) {
+          setLoadError(e instanceof Error ? e.message : String(e));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const pick = async (emoji: string) => {
+    setBusy(emoji);
+    setError(null);
+    try {
+      await props.onPick(emoji);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+      setBusy(null);
+    }
+  };
+
+  return (
+    <Modal title={`Emoji for ${props.alias}`} onClose={props.onClose}>
+      <Stack gap="sm">
+        {loadError && <ErrorText error={loadError} />}
+        {!choices && !loadError && (
+          <Group justify="center" py="lg">
+            <Loader size="sm" aria-label="Loading emoji" />
+          </Group>
+        )}
+        {choices && (
+          <div className="emoji-grid">
+            {choices.map((e) => {
+              const isCurrent = e === props.current;
+              // Every holder that isn't this worktree. Compared by id, not
+              // alias, and covering all holders rather than the first: a
+              // collision with another project's identically-named worktree
+              // is precisely what the picker exists to surface.
+              const others = (props.usedBy[e] ?? []).filter(
+                (h) => h.id !== props.worktreeId,
+              );
+              const taken = others.map((h) => h.alias).join(", ");
+              return (
+                <button
+                  key={e}
+                  type="button"
+                  className={`emoji-cell${isCurrent ? " current" : ""}`}
+                  disabled={busy !== null}
+                  aria-pressed={isCurrent}
+                  aria-label={taken ? `${e} — in use by ${taken}` : e}
+                  title={
+                    [
+                      isCurrent ? "Current" : "",
+                      taken ? `In use by ${taken}` : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ") || undefined
+                  }
+                  onClick={() => void pick(e)}
+                >
+                  {busy === e ? (
+                    <Loader size={14} />
+                  ) : (
+                    <span aria-hidden="true">{e}</span>
+                  )}
+                  {taken && <span className="emoji-taken" />}
+                </button>
+              );
+            })}
+          </div>
+        )}
+        <ErrorText error={error} />
+        <Text size="xs" c="dimmed">
+          A dot marks a glyph another worktree already uses. Picking it is
+          allowed — the rail just won&apos;t identify them apart.
+        </Text>
+      </Stack>
     </Modal>
   );
 }
