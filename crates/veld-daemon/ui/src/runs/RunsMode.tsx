@@ -100,15 +100,17 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
       <div className={topbarClass}>
         {props.modeSwitch}
         {allRuns.length > 0 && (
-          <SegmentedControl
-            size="xs"
-            value={view}
-            onChange={setViewPersist}
-            data={[
-              { value: "active", label: `Active (${liveCount})` },
-              { value: "history", label: `History (${endedCount})` },
-            ]}
-          />
+          <div className="topbar-center">
+            <SegmentedControl
+              size="xs"
+              value={view}
+              onChange={setViewPersist}
+              data={[
+                { value: "active", label: `Active (${liveCount})` },
+                { value: "history", label: `History (${endedCount})` },
+              ]}
+            />
+          </div>
         )}
         <div style={{ flex: 1 }} />
         <span
@@ -206,6 +208,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
             </Text>
           </div>
         )}
+        {shown.length > 0 && (
         <Stack gap={10} p={14} pt={14}>
           {shown.map(({ p, r }) => (
             <EnvCard
@@ -218,6 +221,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
             />
           ))}
         </Stack>
+        )}
         </div>
       </div>
     </div>

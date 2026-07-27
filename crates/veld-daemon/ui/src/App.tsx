@@ -38,6 +38,7 @@ import {
   IconRefresh,
   IconSearch,
   IconSun,
+  IconSunMoon,
   IconWorld,
 } from "@tabler/icons-react";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -116,8 +117,15 @@ function useUrlSelection(): {
  * restores the logo. The switcher stays rendered (visibility:hidden) so the
  * bar reserves its width and nothing shifts on hover.
  */
-function LogoModeSwitch(props: { mode: string; onMode: (m: string) => void }) {
-  const [hover, setHover] = useState(false);
+function LogoModeSwitch(props: {
+  mode: string;
+  onMode: (m: string) => void;
+  /** Hover state lives in the parent: this component remounts when the mode
+   *  switches bars, and a local state reset would flash the logo mid-hover. */
+  hover: boolean;
+  onHover: (h: boolean) => void;
+}) {
+  const { hover, onHover: setHover } = props;
   const other = props.mode === "ide" ? "runs" : "ide";
   const otherLabel = other === "runs" ? "Runs" : "IDE";
   return (
@@ -146,10 +154,27 @@ function LogoModeSwitch(props: { mode: string; onMode: (m: string) => void }) {
 }
 
 export function App() {
-  const [theme, setTheme] = usePersisted("veld.theme", "dark");
+  // Three-state preference: auto (follow OS) → light → dark. Stored values
+  // from the two-state era ("dark"/"light") remain valid.
+  const [themePref, setThemePref] = usePersisted("veld.theme", "auto");
+  const [systemDark, setSystemDark] = useState(
+    () => window.matchMedia("(prefers-color-scheme: dark)").matches,
+  );
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = (e: MediaQueryListEvent) => setSystemDark(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
+  const theme =
+    themePref === "auto" ? (systemDark ? "dark" : "light") : themePref;
   useEffect(() => {
     document.body.dataset.theme = theme;
   }, [theme]);
+  const cycleTheme = () =>
+    setThemePref(
+      themePref === "auto" ? "light" : themePref === "light" ? "dark" : "auto",
+    );
 
   // Providers live above AppInner so useContextMenu / Mantine hooks work
   // anywhere below; the color scheme follows our own persisted toggle.
@@ -159,17 +184,18 @@ export function App() {
       forceColorScheme={theme === "light" ? "light" : "dark"}
     >
       <ContextMenuProvider borderRadius="md">
-        <AppInner
-          theme={theme}
-          onToggleTheme={() => setTheme(theme === "dark" ? "light" : "dark")}
-        />
+        <AppInner theme={theme} themePref={themePref} onCycleTheme={cycleTheme} />
       </ContextMenuProvider>
     </MantineProvider>
   );
 }
 
-function AppInner(props: { theme: string; onToggleTheme: () => void }) {
-  const { theme, onToggleTheme } = props;
+function AppInner(props: {
+  theme: string;
+  themePref: string;
+  onCycleTheme: () => void;
+}) {
+  const { theme, themePref, onCycleTheme } = props;
 
   // View mode: worktree cockpit ("ide") vs runs management ("runs").
   // Defaults by serving path (the app will also own `/` at v1 parity);
@@ -355,13 +381,31 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
   const [urlsOpen, setUrlsOpen] = useState(false);
   const [railWide, setRailWide] = useState(false);
 
-  const modeSwitch = <LogoModeSwitch mode={mode} onMode={setMode} />;
+  // Hover lives here so the crossfade survives LogoModeSwitch remounting
+  // when it moves between the runs and IDE bars.
+  const [switchHover, setSwitchHover] = useState(false);
+  const modeSwitch = (
+    <LogoModeSwitch
+      mode={mode}
+      onMode={setMode}
+      hover={switchHover}
+      onHover={setSwitchHover}
+    />
+  );
 
   // ---- render -------------------------------------------------------------
   const themeButton = (
-    <Tooltip label="Theme">
-      <ActionIcon size="md" variant="default" onClick={onToggleTheme}>
-        {theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
+    <Tooltip
+      label={`Theme: ${themePref === "auto" ? `system (${theme})` : themePref} — click to change`}
+    >
+      <ActionIcon size="md" variant="default" onClick={onCycleTheme}>
+        {themePref === "auto" ? (
+          <IconSunMoon size={14} />
+        ) : themePref === "light" ? (
+          <IconSun size={14} />
+        ) : (
+          <IconMoon size={14} />
+        )}
       </ActionIcon>
     </Tooltip>
   );
@@ -412,8 +456,7 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
           void act(worktree, "restart", () => api.restartRun(run.name))
         }
         onSearch={() => setDialog({ kind: "search" })}
-        theme={theme}
-        onToggleTheme={onToggleTheme}
+        themeButton={themeButton}
       />
       {urlsOpen && (
         <UrlsPopover
@@ -592,8 +635,7 @@ function TopBar(props: {
   onStop: () => void;
   onRestart: () => void;
   onSearch: () => void;
-  theme: string;
-  onToggleTheme: () => void;
+  themeButton: React.ReactNode;
 }) {
   const { worktree, run } = props;
   const repoAvailable = props.repo?.available ?? false;
@@ -719,11 +761,7 @@ function TopBar(props: {
           <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
-      <Tooltip label="Theme">
-        <ActionIcon size="md" variant="default" onClick={props.onToggleTheme}>
-          {props.theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
-        </ActionIcon>
-      </Tooltip>
+      {props.themeButton}
     </div>
   );
 }

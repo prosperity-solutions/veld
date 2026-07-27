@@ -637,3 +637,45 @@ select:focus {
 .ls-layer.show {
   opacity: 1;
 }
+
+
+/* ---- centered / empty states ------------------------------------------------ */
+
+.center-page {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  /* Auto margins center within any flex parent, even when an ancestor's
+     flex sizing doesn't stretch this element. */
+  margin: auto;
+}
+
+.center-page p {
+  margin: 0;
+  color: var(--muted);
+  max-width: 420px;
+  line-height: 1.6;
+}
+
+.primary-btn {
+  border: none;
+  background: var(--accent);
+  color: var(--live-ink);
+  font-weight: 600;
+  font-size: 12.5px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+/* Absolutely centered top-bar slot (Active|History in runs mode). */
+.topbar-center {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+}
