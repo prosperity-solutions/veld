@@ -36,6 +36,78 @@ export function defaultStartSelection(w: Worktree): StartSelection | null {
   return null;
 }
 
+/** Parse a stored selection, tolerating anything that isn't one. */
+export function parseStartSelection(raw: string): StartSelection | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as StartSelection;
+    if (parsed?.kind === "preset" && typeof parsed.name === "string") {
+      return parsed;
+    }
+    if (parsed?.kind === "nodes" && Array.isArray(parsed.selections)) {
+      return parsed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Drop stored choices the worktree's config no longer offers (preset renamed
+ * away, node removed) — `veld start` would reject them. `null` means nothing
+ * usable survived and the caller should fall back to
+ * [`defaultStartSelection`].
+ */
+export function pruneStartSelection(
+  w: Worktree,
+  sel: StartSelection | null,
+): StartSelection | null {
+  if (!sel) return null;
+  if (sel.kind === "preset") {
+    return w.presets.includes(sel.name) ? sel : null;
+  }
+  const valid = new Set(
+    w.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
+  );
+  const selections = sel.selections.filter((s) => valid.has(s));
+  return selections.length > 0 ? { kind: "nodes", selections } : null;
+}
+
+/** localStorage key holding a worktree's remembered start configuration. */
+export function startStorageKey(path: string): string {
+  return `veld.start.${path}`;
+}
+
+/**
+ * What ▶ would start for `w`, resolved straight from localStorage. The rail's
+ * per-row controls need this for worktrees other than the selected one, where
+ * the `usePersisted` hook backing the top bar isn't available.
+ */
+export function resolveStartSelection(w: Worktree): StartSelection | null {
+  let raw = "";
+  try {
+    // `globalThis`, not `window`: identical in the browser, but it also lets
+    // this run under the node test environment without pulling in a DOM.
+    raw = globalThis.localStorage?.getItem(startStorageKey(w.path)) ?? "";
+  } catch {
+    // Private-mode / disabled storage: fall through to the default.
+  }
+  return (
+    pruneStartSelection(w, parseStartSelection(raw)) ?? defaultStartSelection(w)
+  );
+}
+
+/** Request body for `POST /api/worktrees/{id}/start`. */
+export function startBody(sel: StartSelection): {
+  preset?: string;
+  selections?: string[];
+} {
+  return sel.kind === "preset"
+    ? { preset: sel.name }
+    : { selections: sel.selections };
+}
+
 export function startSelectionLabel(sel: StartSelection | null): string {
   if (!sel) return "nothing to start";
   if (sel.kind === "preset") return sel.name;

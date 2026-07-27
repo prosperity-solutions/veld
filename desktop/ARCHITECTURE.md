@@ -7,10 +7,11 @@ later increments.
 
 This document covers the foundation increment: what exists, why it's shaped
 this way, and how to run it locally. The visual design source of truth is the
-Claude Design handoff (kept outside the repo under `tmp/`, gitignored); the
-stripped add-ons listed there (command palette, PR badges, extension system,
-isolated browser sessions, pinned agent session, overview board) are
-deliberately **not** part of this foundation.
+Claude Design handoff (kept outside the repo under `tmp/`, gitignored); of the
+stripped add-ons listed there, PR badges, the extension system, isolated
+browser sessions, the pinned agent session and the overview board are
+deliberately **not** part of this foundation. (The command palette was also
+stripped from the foundation, but has since shipped — see below.)
 
 ## Decision log
 
@@ -78,6 +79,37 @@ requests at runtime — branding rule.
 - The v1 dashboard at `/` is untouched until the runs-mode rebuild reaches
   parity and takes it over.
 
+#### Worktree rail and command palette
+
+- **Rail rows** carry inline start/stop controls, but only while the rail is
+  expanded — a 64px collapsed row has no space, so right-click is its
+  affordance in both states. Rows are `div[role=button]`, not `<button>`,
+  because they contain real nested buttons and a button inside a button is
+  invalid HTML that browsers resolve by dropping the inner one. The row's
+  `onKeyDown` must therefore ignore events bubbling from those children, or it
+  cancels their activation. Known cost: `role="button"` takes presentational
+  children, so the nested controls aren't exposed to assistive tech — the
+  honest shape is `role="listbox"` on the rail with `role="option"` rows,
+  deferred to a later increment.
+- **One start predicate.** `canStartWorktree` gates all four surfaces that can
+  fire a run action — top bar, rail row, context menu and palette. They
+  disagreed before: some checked "is anything already in flight", others "is
+  there anything to start", so one surface offered an enabled control whose
+  click was a silent no-op while another allowed a double-spawned
+  `veld start`.
+- **Pending markers** (`prunePending`, `crates/veld-daemon/ui/src/model.ts`)
+  are optimistic per-worktree flags cleared when the worktree's *run signature*
+  (`status:run_id`) moves — status alone is not enough, because `veld restart`
+  returns to `running` and would never register. A 60s TTL bounds an action
+  that 202s and then never lands.
+- **⌘K** fuzzy-searches worktrees *and* commands. With no query the items are
+  grouped in `PALETTE_GROUPS` order; once the user types, grouping gives way to
+  a single score-ordered list. The matcher runs two scans — plain leftmost and
+  one anchoring the query's first character to a word start — and keeps the
+  better: plain greedy alone ranks "Switch to Runs" above "New worktree…" for
+  `wt`, while anchoring alone can strand the rest of the query and drop the
+  item from the list entirely.
+
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
 is an application with a different toolchain (Vite, React, HMR). Two small
@@ -136,6 +168,15 @@ alias, probed to stay unique across ALL repos' worktrees, assigned at
 insert, backfilled for pre-v6 rows on sync, preserved across renames. It is
 the collapsed rail's identifier.
 
+Uniqueness is a property of *assignment*, not an invariant: "Change emoji…"
+lets the user pick a glyph another worktree already holds (the picker marks
+which, so the ambiguity is visible before it's created) — an explicit choice
+outranks the heuristic. Sync only backfills an *empty* emoji, so a chosen one
+survives every later reconciliation **of an unmoved worktree** — `git worktree
+move` changes the path, which is the sync key, so the row is pruned and
+re-inserted with a fresh id, a re-assigned emoji and a default alias (the
+path-keyed `veld.start.<path>` entry is orphaned by the same move).
+
 Run/health/URL state is **not** duplicated: the UI joins a worktree to veld
 state by path (`worktrees.path` = veld `projects.root`, string equality) via
 `/api/environments`. Both sides are physical (symlink-resolved) paths — git
@@ -163,7 +204,8 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
 | `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |
-| `PATCH /api/worktrees/{id}` `{alias}` | Rename the alias (DB only). |
+| `PATCH /api/worktrees/{id}` `{alias?, emoji?}` | Partial update, DB only. Both fields optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
+| `GET /api/worktree-emoji` | The curated glyph list, for the picker. Served rather than duplicated in TypeScript, because the same constant is the server-side allowlist; the picker fetches it once on open instead of riding the 5s poll. |
 | `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
 | `POST /api/worktrees/{id}/start` `{preset?, selections?, run_name?}` | Spawns `veld start` with the worktree as cwd (the CLI resolves veld.json from there). Two mutually-exclusive start modes: `preset` (`--preset <p>`) or explicit `selections` (`node:variant` positionals, validated per half) — a non-TTY bare start fails "No selections provided", so the UI always sends one. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
 | `POST /api/repos/refresh` | The UI's poll target: reconciles every repo's worktree rows with `git worktree list`, then returns the same payload as `GET /api/repos`. POST (CSRF-gated) because it spawns git and writes; debounced daemon-side. The plain GET stays a pure read. |
@@ -247,6 +289,8 @@ already lives in the URL, so modes are just routes.
 3. Terminal panes (PTY over WebSocket from the daemon, or node-pty in the
    Electron main process — decision deferred).
 4. Start-run UX beyond preset picking; `veld share` from the UI.
-5. Command palette / fuzzy search beyond the overlay shell.
-6. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
-7. Packaging, auto-update, CLI installation from the app.
+5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
+6. Packaging, auto-update, CLI installation from the app.
+
+The sequencing and the transport/renderer decisions for these live in
+[issue #167](https://github.com/prosperity-solutions/veld/issues/167).
