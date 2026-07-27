@@ -229,8 +229,12 @@ export function fuzzyMatch(text: string, query: string): FuzzyMatch | null {
     }
   }
 
-  if (!plain) return anchored;
+  // A failed plain scan means no subsequence exists at all, and the anchored
+  // scan starts no earlier — so it cannot rescue one. Returning `anchored`
+  // here would read as if it could, inverting the invariant above.
+  if (!plain) return null;
   if (!anchored) return plain;
+  // Ties keep the anchored positions: same score, better highlight.
   return anchored.score >= plain.score ? anchored : plain;
 }
 

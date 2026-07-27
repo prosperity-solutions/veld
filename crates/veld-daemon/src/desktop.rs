@@ -237,7 +237,17 @@ fn db_err(e: impl std::fmt::Display) -> ApiError {
 /// This keeps the DB-layer rejection honest either way.
 fn write_err(e: veld_core::db::DbError) -> ApiError {
     match e {
-        veld_core::db::DbError::InvalidEmoji(_) => err(StatusCode::BAD_REQUEST, e.to_string()),
+        // Fixed message, value only to the log: the variant's Display
+        // Debug-formats the rejected string, and echoing unbounded
+        // client-supplied input back into a response body is a habit worth
+        // not starting.
+        veld_core::db::DbError::InvalidEmoji(_) => {
+            warn!("rejected worktree emoji: {e}");
+            err(
+                StatusCode::BAD_REQUEST,
+                "emoji must be one of the curated worktree glyphs",
+            )
+        }
         other => db_err(other),
     }
 }
