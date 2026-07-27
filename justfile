@@ -56,7 +56,10 @@ dev-daemon:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
-    cargo build -p veld-daemon
+    # Daemon AND CLI: the daemon spawns its sibling target/debug/veld for
+    # UI-triggered start/stop — a stale (or missing) sibling silently falls
+    # back to the installed CLI, which refuses a schema-ahead dev DB.
+    cargo build -p veld-daemon -p veld
     mkdir -p .veld-dev
     echo "Dev daemon: port {{dev_daemon_port}}, DB {{dev_db}}, dashboard https://veld-dev.localhost"
     VELD_DB_PATH="{{dev_db}}" \
