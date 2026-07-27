@@ -300,6 +300,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "desktop-repos-worktrees",
         apply: migrate_v5_desktop_worktrees,
     },
+    Migration {
+        version: 6,
+        name: "worktree-emoji",
+        apply: migrate_v6_worktree_emoji,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -624,6 +629,14 @@ fn migrate_v5_desktop_worktrees(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX idx_worktrees_repo ON worktrees(repo_root);
         "#,
     )
+}
+
+/// v6: per-worktree emoji identifier for the desktop UI's collapsed rail.
+/// Assigned on insert (unique across all worktrees while free choices
+/// remain); existing rows get one lazily via backfill in the desktop layer —
+/// an empty string means "not assigned yet".
+fn migrate_v6_worktree_emoji(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN emoji TEXT NOT NULL DEFAULT '';")
 }
 
 // ---------------------------------------------------------------------------

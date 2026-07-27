@@ -114,6 +114,39 @@ function useUrlSelection(): {
   };
 }
 
+/**
+ * The Runs|IDE switcher hides behind the wordmark: hover reveals it, unhover
+ * restores the logo. The switcher stays rendered (visibility:hidden) so the
+ * bar reserves its width and nothing shifts on hover.
+ */
+function LogoModeSwitch(props: { mode: string; onMode: (m: string) => void }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div
+      className="logo-switch"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <div style={{ visibility: hover ? "visible" : "hidden", display: "flex" }}>
+        <SegmentedControl
+          size="xs"
+          value={props.mode}
+          onChange={props.onMode}
+          data={[
+            { value: "runs", label: "Runs" },
+            { value: "ide", label: "IDE" },
+          ]}
+        />
+      </div>
+      {!hover && (
+        <div className="logo-switch-overlay">
+          <Wordmark />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function App() {
   const [theme, setTheme] = usePersisted("veld.theme", "dark");
   useEffect(() => {
@@ -324,29 +357,18 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
   const [urlsOpen, setUrlsOpen] = useState(false);
   const [railWide, setRailWide] = useState(false);
 
-  const modeSwitch = (
-    <SegmentedControl
-      size="xs"
-      value={mode}
-      onChange={setMode}
-      data={[
-        { value: "runs", label: "Runs" },
-        { value: "ide", label: "IDE" },
-      ]}
-    />
-  );
+  const modeSwitch = <LogoModeSwitch mode={mode} onMode={setMode} />;
 
   // ---- render -------------------------------------------------------------
   if (mode === "runs") {
     return (
       <div className="frame">
         <div className={`topbar${isElectron ? " electron" : ""}`}>
-          <Wordmark />
           {modeSwitch}
           <div style={{ flex: 1 }} />
           <Tooltip label="Theme">
-            <ActionIcon size="lg" variant="default" onClick={onToggleTheme}>
-              {theme === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+            <ActionIcon size="md" variant="default" onClick={onToggleTheme}>
+              {theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
             </ActionIcon>
           </Tooltip>
         </div>
@@ -590,7 +612,6 @@ function TopBar(props: {
         : "var(--warn)";
   return (
     <div className={`topbar${isElectron ? " electron" : ""}`}>
-      <Wordmark />
       {props.modeSwitch}
       {props.repos.length > 0 && (
         <NativeSelect
@@ -637,27 +658,27 @@ function TopBar(props: {
             <>
               <Tooltip label={props.running ? "Stop run" : "Start run"}>
                 <ActionIcon
-                  size="lg"
+                  size="md"
                   variant="light"
                   color={props.running ? "red" : "green"}
                   loading={props.pending !== null}
                   onClick={props.running ? props.onStop : props.onStart}
                 >
                   {props.running ? (
-                    <IconPlayerStopFilled size={15} />
+                    <IconPlayerStopFilled size={13} />
                   ) : (
-                    <IconPlayerPlayFilled size={15} />
+                    <IconPlayerPlayFilled size={13} />
                   )}
                 </ActionIcon>
               </Tooltip>
               <Tooltip label="Restart">
                 <ActionIcon
-                  size="lg"
+                  size="md"
                   variant="default"
                   disabled={!props.running || props.pending !== null}
                   onClick={props.onRestart}
                 >
-                  <IconRefresh size={15} />
+                  <IconRefresh size={13} />
                 </ActionIcon>
               </Tooltip>
               {run && (
@@ -698,13 +719,13 @@ function TopBar(props: {
       )}
       <div style={{ flex: 1 }} />
       <Tooltip label="Search (⌘K)">
-        <ActionIcon size="lg" variant="default" onClick={props.onSearch}>
-          <IconSearch size={15} />
+        <ActionIcon size="md" variant="default" onClick={props.onSearch}>
+          <IconSearch size={14} />
         </ActionIcon>
       </Tooltip>
       <Tooltip label="Theme">
-        <ActionIcon size="lg" variant="default" onClick={props.onToggleTheme}>
-          {props.theme === "dark" ? <IconSun size={15} /> : <IconMoon size={15} />}
+        <ActionIcon size="md" variant="default" onClick={props.onToggleTheme}>
+          {props.theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
         </ActionIcon>
       </Tooltip>
     </div>
@@ -759,9 +780,9 @@ function Rail(props: {
               onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
+              {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
               <span className="wt-alias">{w.alias}</span>
               {props.wide && <span className="wt-branch">{w.branch}</span>}
-              {!props.wide && <span style={{ flex: 1 }} />}
               {/* Row is a <button>; nested controls must be role=button
                   spans with stopPropagation to avoid button-in-button. */}
               <span
@@ -974,6 +995,7 @@ function SearchOverlay(props: {
               onClick={() => props.onSelect(w)}
             >
               <span className={`dot ${status}`} />
+              {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
               <span className="wt-alias">{w.alias}</span>
               <span className="wt-branch">{w.branch}</span>
               <span style={{ fontSize: 11, color: "var(--faint)" }}>

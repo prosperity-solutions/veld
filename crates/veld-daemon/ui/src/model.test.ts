@@ -14,6 +14,7 @@ const wt = (path: string): Worktree => ({
   path,
   branch: "feat/checkout-v2",
   alias: "chk",
+  emoji: "🦊",
   is_main: false,
   created_at: "2026-01-01T00:00:00Z",
   has_veld_config: true,

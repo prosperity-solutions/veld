@@ -31,6 +31,10 @@ pub struct WorktreeRecord {
     pub path: String,
     pub branch: String,
     pub alias: String,
+    /// Visual identifier for dense UI (collapsed rail): one emoji from
+    /// [`WORKTREE_EMOJI`], unique across ALL repos' worktrees while free
+    /// choices remain. Assigned at insert, preserved across syncs/renames.
+    pub emoji: String,
     pub is_main: bool,
     pub created_at: String,
 }
@@ -49,7 +53,7 @@ pub struct DiscoveredWorktree {
 // field means touching all of them (plus a NEW migration — never edit v5) AND
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
-const WT_COLS: &str = "id, repo_root, path, branch, alias, is_main, created_at";
+const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -58,8 +62,9 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         path: row.get(2)?,
         branch: row.get(3)?,
         alias: row.get(4)?,
-        is_main: row.get::<_, i64>(5)? != 0,
-        created_at: row.get(6)?,
+        emoji: row.get(5)?,
+        is_main: row.get::<_, i64>(6)? != 0,
+        created_at: row.get(7)?,
     })
 }
 
@@ -175,13 +180,35 @@ impl Db {
                            AND (branch != ?1 OR is_main != ?2 OR repo_root != ?3)",
                         params![d.branch, d.is_main as i64, root, id],
                     )?;
+                    // Backfill rows created before the v6 emoji column.
+                    let cur: String = tx.query_row(
+                        "SELECT emoji FROM worktrees WHERE id = ?1",
+                        params![id],
+                        |r| r.get(0),
+                    )?;
+                    if cur.is_empty() {
+                        let emoji = pick_emoji(&tx, &d.branch)?;
+                        tx.execute(
+                            "UPDATE worktrees SET emoji = ?1 WHERE id = ?2",
+                            params![emoji, id],
+                        )?;
+                    }
                 } else {
                     let alias = unique_alias(&tx, &root, &default_alias(&d.branch))?;
+                    let emoji = pick_emoji(&tx, &alias)?;
                     tx.execute(
                         "INSERT INTO worktrees
-                            (repo_root, path, branch, alias, is_main, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        params![root, d.path, d.branch, alias, d.is_main as i64, now_str()],
+                            (repo_root, path, branch, alias, emoji, is_main, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                        params![
+                            root,
+                            d.path,
+                            d.branch,
+                            alias,
+                            emoji,
+                            d.is_main as i64,
+                            now_str()
+                        ],
                     )?;
                 }
             }
@@ -248,6 +275,38 @@ pub fn default_alias(branch: &str) -> String {
     }
     let out = out.trim_end_matches('-').to_string();
     if out.is_empty() { "wt".into() } else { out }
+}
+
+/// Curated animal set for worktree identifiers — memorable, visually
+/// distinct at small sizes, and single-glyph (no multi-codepoint sequences).
+pub const WORKTREE_EMOJI: &[&str] = &[
+    "🦊", "🐻", "🐼", "🐨", "🐯", "🦁", "🐮", "🐷", "🐸", "🐵", "🐔", "🐧", "🐦", "🦆", "🦅", "🦉",
+    "🦇", "🐺", "🐗", "🐴", "🦄", "🐝", "🐛", "🦋", "🐌", "🐞", "🐜", "🦗", "🦂", "🐢", "🐍", "🦎",
+    "🦖", "🦕", "🐙", "🦑", "🦐", "🦞", "🦀", "🐡", "🐠", "🐟", "🐬", "🐳", "🐋", "🦈", "🐊", "🐅",
+    "🐆", "🦓", "🦍", "🦧", "🐘", "🦛", "🦏", "🐪", "🐫", "🦒", "🦘", "🐃", "🐂", "🐄", "🐎", "🐐",
+];
+
+/// Pick an emoji for a new worktree: hash the alias into the curated list
+/// and probe forward for one not used by ANY worktree row (uniqueness across
+/// all projects). When the whole set is taken, fall back to the hash slot —
+/// duplicates beat failing.
+fn pick_emoji(conn: &rusqlite::Connection, seed: &str) -> rusqlite::Result<String> {
+    let mut used = std::collections::HashSet::new();
+    let mut stmt = conn.prepare_cached("SELECT emoji FROM worktrees WHERE emoji != ''")?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    for row in rows {
+        used.insert(row?);
+    }
+    let h = seed
+        .bytes()
+        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+    for i in 0..WORKTREE_EMOJI.len() {
+        let e = WORKTREE_EMOJI[(h + i) % WORKTREE_EMOJI.len()];
+        if !used.contains(e) {
+            return Ok(e.to_string());
+        }
+    }
+    Ok(WORKTREE_EMOJI[h % WORKTREE_EMOJI.len()].to_string())
 }
 
 /// Make `base` unique among a repo's aliases by appending `-2`, `-3`, … as
@@ -378,6 +437,33 @@ mod tests {
             .unwrap();
         let wts = db.sync_worktrees(root, &[]).unwrap();
         assert_eq!(wts.len(), 1, "empty discovery must not delete rows");
+    }
+
+    #[test]
+    fn emoji_assigned_and_unique_across_repos() {
+        let (_dir, db) = test_db();
+        let a = Path::new("/tmp/repoEmojiA");
+        let b = Path::new("/tmp/repoEmojiB");
+        db.upsert_repo(a, "a").unwrap();
+        db.upsert_repo(b, "b").unwrap();
+        // Same branch name in both repos → same hash seed → probing must
+        // still produce distinct emoji.
+        let wa = db
+            .sync_worktrees(a, &[wt("/tmp/repoEmojiA", "main", true)])
+            .unwrap();
+        let wb = db
+            .sync_worktrees(b, &[wt("/tmp/repoEmojiB", "main", true)])
+            .unwrap();
+        assert!(!wa[0].emoji.is_empty());
+        assert!(!wb[0].emoji.is_empty());
+        assert_ne!(wa[0].emoji, wb[0].emoji, "unique across all projects");
+
+        // Rename must not change the emoji (stable identifier).
+        db.rename_worktree(wa[0].id, "renamed").unwrap();
+        assert_eq!(
+            db.get_worktree(wa[0].id).unwrap().unwrap().emoji,
+            wa[0].emoji
+        );
     }
 
     #[test]

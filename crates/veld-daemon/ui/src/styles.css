@@ -262,7 +262,7 @@ select:focus {
 }
 
 .rail-head {
-  height: 34px;
+  height: 30px;
   flex: none;
   display: flex;
   align-items: center;
@@ -296,6 +296,7 @@ select:focus {
 .rail-list {
   flex: 1;
   overflow-y: auto;
+  overflow-x: hidden;
   padding: 10px 8px;
   display: flex;
   flex-direction: column;
@@ -313,6 +314,8 @@ select:focus {
   background: transparent;
   text-align: left;
   min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 .wt-row:hover {
   background: var(--panel);
@@ -352,6 +355,16 @@ select:focus {
   font-weight: 700;
   letter-spacing: 0.02em;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.wt-emoji {
+  flex: none;
+  font-size: 13px;
+  line-height: 1;
 }
 
 .wt-branch {
@@ -366,6 +379,7 @@ select:focus {
 }
 
 .wt-edit {
+  flex: none;
   border: none;
   background: none;
   color: var(--faint);
@@ -594,4 +608,23 @@ select:focus {
 .log-empty {
   color: var(--faint);
   padding: 12px 0;
+}
+
+
+/* ---- logo / mode switch ----------------------------------------------------- */
+
+.logo-switch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.logo-switch-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  pointer-events: none;
 }

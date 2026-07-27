@@ -78,6 +78,8 @@ export interface Worktree {
   path: string;
   branch: string;
   alias: string;
+  /** Stable one-emoji identifier (animal set), unique across all projects. */
+  emoji: string;
   is_main: boolean;
   created_at: string;
   has_veld_config: boolean;
