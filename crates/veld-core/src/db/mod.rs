@@ -21,8 +21,10 @@ mod kv;
 mod logs;
 pub(crate) mod state;
 mod stats;
+mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
+pub use worktrees::{DiscoveredWorktree, RepoRecord, WorktreeRecord, default_alias};
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -292,6 +294,16 @@ const MIGRATIONS: &[Migration] = &[
         version: 4,
         name: "run-graph-snapshot",
         apply: migrate_v4_graph_snapshot,
+    },
+    Migration {
+        version: 5,
+        name: "desktop-repos-worktrees",
+        apply: migrate_v5_desktop_worktrees,
+    },
+    Migration {
+        version: 6,
+        name: "worktree-emoji",
+        apply: migrate_v6_worktree_emoji,
     },
 ];
 
@@ -586,6 +598,45 @@ fn migrate_v3_environments_and_runs(conn: &Connection) -> rusqlite::Result<()> {
 /// URL, secret output) ever lands here.
 fn migrate_v4_graph_snapshot(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE runs ADD COLUMN graph_snapshot TEXT;")
+}
+
+/// v5: the desktop app's repo/worktree registry.
+///
+/// A desktop "repo" is a git repository the user imported (keyed by the main
+/// checkout root); "worktrees" are its `git worktree` checkouts, each with a
+/// user-editable alias. This is deliberately separate from `projects`: veld
+/// keys projects by "any directory containing a veld.json", so every worktree
+/// with a config is its own veld project — the desktop model sits one level
+/// above and joins run state by path (`worktrees.path` = `projects.root`).
+fn migrate_v5_desktop_worktrees(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE repos (
+            root TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        );
+
+        CREATE TABLE worktrees (
+            id INTEGER PRIMARY KEY,
+            repo_root TEXT NOT NULL REFERENCES repos(root) ON DELETE CASCADE,
+            path TEXT NOT NULL UNIQUE,
+            branch TEXT NOT NULL,
+            alias TEXT NOT NULL,
+            is_main INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX idx_worktrees_repo ON worktrees(repo_root);
+        "#,
+    )
+}
+
+/// v6: per-worktree emoji identifier for the desktop UI's collapsed rail.
+/// Assigned on insert (unique across all worktrees while free choices
+/// remain); existing rows get one lazily via backfill in the desktop layer —
+/// an empty string means "not assigned yet".
+fn migrate_v6_worktree_emoji(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN emoji TEXT NOT NULL DEFAULT '';")
 }
 
 // ---------------------------------------------------------------------------

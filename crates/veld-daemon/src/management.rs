@@ -18,8 +18,14 @@ use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
+/// The v2 management UI (React, built by `ui/` via build.rs into a single
+/// self-contained HTML file). Served under /ide (worktree mode); a future
+/// runs mode reaches parity with
+/// the v1 dashboard above; Veld Desktop wraps this page.
+const IDE_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/management-ui-ide.html"));
+
 /// Open the central database, mapping failures to a 500.
-fn open_db() -> Result<Db, StatusCode> {
+pub(super) fn open_db() -> Result<Db, StatusCode> {
     Db::open().map_err(|e| {
         warn!("failed to open veld database: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -33,6 +39,7 @@ pub fn routes() -> Router {
         .route("/", get(dashboard))
         // Same SPA; the join ticket rides in the URL fragment (client-only).
         .route("/join", get(dashboard))
+        .route("/ide", get(ide_ui))
         // Liveness + version probe. `veld update` polls this to confirm the
         // daemon actually restarted onto the new binary (not just that *some*
         // daemon is reachable), mirroring the helper's version check.
@@ -66,6 +73,17 @@ async fn dashboard() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         DASHBOARD_HTML,
+    )
+        .into_response()
+}
+
+async fn ide_ui() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        IDE_HTML,
     )
         .into_response()
 }
@@ -558,7 +576,7 @@ async fn get_logs(
 /// Check that a mutating request has the `X-Veld-Request` header.
 /// Browsers won't send custom headers in cross-origin simple requests,
 /// forcing a CORS preflight that is blocked (no Access-Control-Allow-Origin).
-fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
+pub(super) fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
     if headers.get("x-veld-request").is_some() {
         Ok(())
     } else {
@@ -567,7 +585,7 @@ fn check_csrf(headers: &axum::http::HeaderMap) -> Result<(), StatusCode> {
 }
 
 /// Validate that a run name contains only safe characters.
-fn validate_run_name(name: &str) -> Result<(), StatusCode> {
+pub(super) fn validate_run_name(name: &str) -> Result<(), StatusCode> {
     if name.is_empty()
         || name == "."
         || name == ".."
@@ -613,26 +631,29 @@ async fn open_terminal(
         return StatusCode::FORBIDDEN;
     }
 
+    // tokio::process (NOT std): the reaper must await the exit instead of
+    // blocking a core runtime worker — a Linux terminal emulator child lives
+    // as long as the terminal window.
     let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
+        tokio::process::Command::new("open")
             .arg("-a")
             .arg("Terminal")
             .arg(&body.path)
             .spawn()
     } else {
         // Try common Linux terminal emulators with working-directory support.
-        std::process::Command::new("x-terminal-emulator")
+        tokio::process::Command::new("x-terminal-emulator")
             .arg("--working-directory")
             .arg(&body.path)
             .spawn()
             .or_else(|_| {
-                std::process::Command::new("gnome-terminal")
+                tokio::process::Command::new("gnome-terminal")
                     .arg("--working-directory")
                     .arg(&body.path)
                     .spawn()
             })
             .or_else(|_| {
-                std::process::Command::new("xterm")
+                tokio::process::Command::new("xterm")
                     .arg("-e")
                     .arg(format!(
                         "cd '{}' && $SHELL",
@@ -644,9 +665,10 @@ async fn open_terminal(
 
     match result {
         Ok(mut child) => {
-            // Reap child in background to avoid zombies.
+            // Reap child in background to avoid zombies (async — never
+            // blocks a worker).
             tokio::spawn(async move {
-                let _ = child.wait();
+                let _ = child.wait().await;
             });
             StatusCode::NO_CONTENT
         }
@@ -787,7 +809,7 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
 /// Spawn `veld <args...>` in the project directory via a login shell. The
 /// project_root is looked up from the GlobalRegistry (never supplied by the
 /// client) to prevent directory traversal; every argument is shell-escaped.
-fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
+pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
     let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
     // Resolve the veld binary as THIS daemon's sibling (current_exe), by
@@ -808,16 +830,22 @@ fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
         escaped_args.join(" "),
     );
 
-    match std::process::Command::new(&shell)
+    // tokio::process (NOT std): `veld stop` can call back into THIS daemon's
+    // HTTP API (share teardown) — a synchronous child.wait() here parks a
+    // core runtime worker until the child exits, and with the child waiting
+    // on the daemon that's a circular wait: the daemon plays dead until the
+    // child is killed (observed live, 2026-07-27).
+    match tokio::process::Command::new(&shell)
         .args(["-l", "-c", &cmd])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
-            // Reap child in background to avoid zombies.
+            // Reap child in background to avoid zombies (async — never
+            // blocks a worker).
             tokio::spawn(async move {
-                let _ = child.wait();
+                let _ = child.wait().await;
             });
             StatusCode::ACCEPTED
         }
@@ -830,7 +858,7 @@ fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
 
 /// Allow only conservative identifier characters for action/node names that
 /// originate from the browser, as defence in depth on top of shell escaping.
-fn is_safe_identifier(s: &str) -> bool {
+pub(super) fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()

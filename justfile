@@ -56,8 +56,19 @@ dev-daemon:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}"
-    cargo build -p veld-daemon
+    # Daemon AND CLI: the daemon spawns its sibling target/debug/veld for
+    # UI-triggered start/stop — a stale (or missing) sibling silently falls
+    # back to the installed CLI, which refuses a schema-ahead dev DB.
+    cargo build -p veld-daemon -p veld
     mkdir -p .veld-dev
+    # Claim the veld-dev wrapper for THIS worktree: the wrapper hardcodes a
+    # worktree path (dev-link), and a wrapper pointing at another (possibly
+    # deleted) worktree targets the wrong dev instance — or nothing at all.
+    # Whichever worktree runs the dev daemon is the dev instance.
+    mkdir -p "$HOME/.local/bin"
+    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$HOME/.local/bin/veld-dev"
+    chmod +x "$HOME/.local/bin/veld-dev"
+    echo "✓ veld-dev wrapper → this worktree"
     echo "Dev daemon: port {{dev_daemon_port}}, DB {{dev_db}}, dashboard https://veld-dev.localhost"
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
@@ -274,15 +285,18 @@ dev-restore:
 
 build:
     cd crates/veld-daemon/frontend && npm run build
+    cd crates/veld-daemon/ui && npm run build
     cargo build
 
 test:
     cargo test --workspace
     cd crates/veld-daemon/frontend && npm test
+    cd crates/veld-daemon/ui && npm test
 
 lint:
     cargo clippy --workspace --all-targets
     cd crates/veld-daemon/frontend && npx tsc --noEmit
+    cd crates/veld-daemon/ui && npm run typecheck
 
 build-frontend:
     cd crates/veld-daemon/frontend && npm run build
@@ -295,6 +309,41 @@ lint-frontend:
 
 setup-frontend:
     cd crates/veld-daemon/frontend && npm install
+
+# --- Management UI v2 (crates/veld-daemon/ui) + desktop shell (desktop/) ---
+
+build-ui:
+    cd crates/veld-daemon/ui && npm run build
+
+test-ui:
+    cd crates/veld-daemon/ui && npm test
+
+lint-ui:
+    cd crates/veld-daemon/ui && npm run typecheck
+
+setup-ui:
+    cd crates/veld-daemon/ui && npm install
+    cd desktop && npm install
+
+# Vite dev server for the /ide UI (HMR). Proxies /api to the DEV daemon
+# (port {{dev_daemon_port}}) — start `just dev-daemon` first. Override with
+# VELD_DAEMON_PORT=19899 to develop against the installed daemon instead
+# (only works once its release carries the desktop endpoints).
+dev-ui:
+    cd crates/veld-daemon/ui && npm run dev
+
+# Electron shell pointed at the vite dev server (start `just dev-ui` first).
+dev-desktop:
+    cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
+
+# Electron shell straight at the dev daemon's embedded /ide (no HMR) —
+# start `just dev-daemon` first.
+dev-desktop-embedded:
+    cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
+
+# Electron shell against the installed daemon's embedded /ide.
+desktop:
+    cd desktop && npm start
 
 # --- Licenses ---
 

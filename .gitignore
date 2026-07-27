@@ -21,8 +21,12 @@
 # macOS
 .DS_Store
 
+# Scratch space (design handoffs, local experiments)
+/tmp/
+
 # Frontend build
 node_modules/
+crates/veld-daemon/ui/dist/
 
 # Working documents — RFCs, PRDs, plans, scratch notes. Never tracked (see AGENTS.md).
 /notes/
