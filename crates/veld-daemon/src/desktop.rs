@@ -383,25 +383,56 @@ struct WorktreeView {
     has_veld_config: bool,
     /// Preset names from the checkout's veld.json (empty without a config).
     presets: Vec<String>,
+    /// Startable nodes with their variants — the UI's custom-selection
+    /// source when no preset fits (hidden nodes excluded).
+    nodes: Vec<NodeOptionView>,
+}
+
+#[derive(Serialize)]
+struct NodeOptionView {
+    name: String,
+    variants: Vec<String>,
+    default_variant: Option<String>,
 }
 
 fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     let config_path = FsPath::new(&wt.path).join("veld.json");
     let has_veld_config = config_path.is_file();
-    let mut presets: Vec<String> = if has_veld_config {
-        veld_core::config::load_config(&config_path)
-            .ok()
-            .and_then(|c| c.presets)
-            .map(|p| p.keys().cloned().collect())
-            .unwrap_or_default()
+    let cfg = if has_veld_config {
+        veld_core::config::load_config(&config_path).ok()
     } else {
-        Vec::new()
+        None
     };
+    let mut presets: Vec<String> = cfg
+        .as_ref()
+        .and_then(|c| c.presets.as_ref())
+        .map(|p| p.keys().cloned().collect())
+        .unwrap_or_default();
     presets.sort();
+    let mut nodes: Vec<NodeOptionView> = cfg
+        .as_ref()
+        .map(|c| {
+            c.nodes
+                .iter()
+                .filter(|(_, n)| !n.hidden.unwrap_or(false))
+                .map(|(name, n)| {
+                    let mut variants: Vec<String> = n.variants.keys().cloned().collect();
+                    variants.sort();
+                    NodeOptionView {
+                        name: name.clone(),
+                        variants,
+                        default_variant: n.default_variant.clone(),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    nodes.sort_by(|a, b| a.name.cmp(&b.name));
     WorktreeView {
         worktree: wt,
         has_veld_config,
         presets,
+        nodes,
     }
 }
 
@@ -728,6 +759,12 @@ async fn delete_worktree(
 struct StartBody {
     #[serde(default)]
     preset: Option<String>,
+    /// Explicit `node:variant` selections — the alternative to a preset for
+    /// configs without presets (or custom picks). Mutually exclusive with
+    /// `preset`; with neither, a non-TTY `veld start` fails "No selections
+    /// provided", so the UI always sends one of the two.
+    #[serde(default)]
+    selections: Vec<String>,
     /// Run name; defaults to the worktree alias.
     #[serde(default)]
     run_name: Option<String>,
@@ -756,7 +793,20 @@ async fn start_worktree_run(
 
     let run_name = body.run_name.clone().unwrap_or_else(|| wt.alias.clone());
     validate_run_name(&run_name).map_err(|c| err(c, "invalid run name"))?;
-    let mut args = vec!["start".to_owned(), "--name".to_owned(), run_name];
+    let mut args = vec!["start".to_owned()];
+    for sel in &body.selections {
+        // `node:variant` — both halves identifier-safe.
+        let valid = match sel.split_once(':') {
+            Some((n, v)) => is_safe_identifier(n) && is_safe_identifier(v),
+            None => is_safe_identifier(sel),
+        };
+        if !valid {
+            return Err(err(StatusCode::BAD_REQUEST, "invalid node selection"));
+        }
+        args.push(sel.clone());
+    }
+    args.push("--name".to_owned());
+    args.push(run_name);
     if let Some(preset) = &body.preset {
         if !is_safe_identifier(preset) {
             return Err(err(StatusCode::BAD_REQUEST, "invalid preset name"));

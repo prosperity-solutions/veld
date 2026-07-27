@@ -84,6 +84,14 @@ export interface Worktree {
   created_at: string;
   has_veld_config: boolean;
   presets: string[];
+  /** Startable nodes (hidden excluded) for custom selections. */
+  nodes: NodeOption[];
+}
+
+export interface NodeOption {
+  name: string;
+  variants: string[];
+  default_variant?: string | null;
 }
 
 export interface Repo {
@@ -251,10 +259,13 @@ export const api = {
     }
     return ((await res.json()) as { path: string }).path;
   },
-  startRun: (worktreeId: number, preset: string | null) =>
+  startRun: (
+    worktreeId: number,
+    start: { preset?: string; selections?: string[] },
+  ) =>
     request<void>(`/api/worktrees/${worktreeId}/start`, {
       method: "POST",
-      body: JSON.stringify(preset ? { preset } : {}),
+      body: JSON.stringify(start),
     }),
   stopRun: (runName: string) =>
     request<void>(`/api/environments/${encodeURIComponent(runName)}/stop`, {

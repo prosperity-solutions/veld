@@ -45,6 +45,11 @@ import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import {
+  StartConfig,
+  type StartSelection,
+  defaultStartSelection,
+} from "./components/StartConfig";
+import {
   ImportRepoDialog,
   Modal,
   NewWorktreeDialog,
@@ -110,6 +115,10 @@ function useUrlSelection(): {
       setWtState(key);
     },
   };
+}
+
+function canRunWorktree(w: Worktree): boolean {
+  return w.has_veld_config;
 }
 
 /**
@@ -286,11 +295,35 @@ function AppInner(props: {
   const urls = sortedUrls(run);
   const status = worktreeStatus(runs);
 
-  // Preset choice, remembered per worktree.
-  const presetKey = worktree ? `veld.preset.${worktree.path}` : "veld.preset._";
-  const [presetChoice, setPresetChoice] = usePersisted(presetKey, "");
-  const preset =
-    worktree && worktree.presets.includes(presetChoice) ? presetChoice : "";
+  // Start configuration (preset or explicit node selections), remembered
+  // per worktree. Falls back to a sensible default: first preset, else all
+  // nodes at their default variants.
+  const startKey = worktree ? `veld.start.${worktree.path}` : "veld.start._";
+  const [startRaw, setStartRaw] = usePersisted(startKey, "");
+  let startSel: StartSelection | null = null;
+  try {
+    startSel = startRaw ? (JSON.parse(startRaw) as StartSelection) : null;
+  } catch {
+    startSel = null;
+  }
+  // Prune stale stored choices (preset renamed away, node removed).
+  if (startSel && worktree) {
+    if (startSel.kind === "preset" && !worktree.presets.includes(startSel.name)) {
+      startSel = null;
+    }
+    if (startSel?.kind === "nodes") {
+      const valid = new Set(
+        worktree.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
+      );
+      startSel = {
+        kind: "nodes",
+        selections: startSel.selections.filter((s) => valid.has(s)),
+      };
+      if (startSel.selections.length === 0) startSel = null;
+    }
+  }
+  const effectiveStart =
+    startSel ?? (worktree ? defaultStartSelection(worktree) : null);
 
   // Optimistic pending marker while a 202'd start/stop/restart takes effect —
   // keyed to the worktree it was fired on (NOT a single global flag), so
@@ -425,8 +458,16 @@ function AppInner(props: {
         repos={repos}
         repo={repo}
         worktree={worktree}
-        preset={preset}
-        onPreset={setPresetChoice}
+        startConfig={
+          worktree && canRunWorktree(worktree) ? (
+            <StartConfig
+              worktree={worktree}
+              value={effectiveStart}
+              onChange={(sel) => setStartRaw(JSON.stringify(sel))}
+            />
+          ) : null
+        }
+        canStart={effectiveStart !== null}
         running={status !== "stopped"}
         pending={pendingFor(worktree)}
         run={run}
@@ -439,12 +480,14 @@ function AppInner(props: {
         }}
         onImport={() => setDialog({ kind: "import" })}
         onRemoveRepo={() => repo && setDialog({ kind: "remove-repo", repo })}
-        onStart={() =>
-          worktree &&
-          void act(worktree, "start", () =>
-            api.startRun(worktree.id, preset || null),
-          )
-        }
+        onStart={() => {
+          if (!worktree || !effectiveStart) return;
+          const body =
+            effectiveStart.kind === "preset"
+              ? { preset: effectiveStart.name }
+              : { selections: effectiveStart.selections };
+          void act(worktree, "start", () => api.startRun(worktree.id, body));
+        }}
         onStop={() =>
           run &&
           worktree &&
@@ -620,8 +663,8 @@ function TopBar(props: {
   repos: Repo[];
   repo: Repo | null;
   worktree: Worktree | null;
-  preset: string;
-  onPreset: (p: string) => void;
+  startConfig: React.ReactNode;
+  canStart: boolean;
   running: boolean;
   pending: string | null;
   run: { name: string; status: string } | null;
@@ -677,21 +720,7 @@ function TopBar(props: {
       {worktree && (
         <>
           <div className="sep" />
-          {canRun && worktree.presets.length > 0 && (
-            <NativeSelect
-              title="Preset"
-              size="xs"
-              value={props.preset}
-              onChange={(e) => props.onPreset(e.currentTarget.value)}
-              styles={{
-                input: { fontFamily: "var(--mantine-font-family-monospace)" },
-              }}
-              data={[
-                { value: "", label: "default" },
-                ...worktree.presets.map((p) => ({ value: p, label: p })),
-              ]}
-            />
-          )}
+          {canRun && props.startConfig}
           {canRun && (
             <>
               <Tooltip label={props.running ? "Stop run" : "Start run"}>
@@ -700,6 +729,7 @@ function TopBar(props: {
                   variant="light"
                   color={props.running ? "red" : "green"}
                   loading={props.pending !== null}
+                  disabled={!props.running && !props.canStart}
                   onClick={props.running ? props.onStop : props.onStart}
                 >
                   {props.running ? (
