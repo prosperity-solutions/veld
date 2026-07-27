@@ -258,7 +258,13 @@ select:focus {
   width: 236px;
 }
 .rail:not(.wide) {
-  width: 112px;
+  width: 64px;
+}
+
+/* Collapsed rows: status dot + emoji only, centered. */
+.wt-row.slim {
+  justify-content: center;
+  padding: 5px 4px;
 }
 
 .rail-head {
@@ -614,17 +620,20 @@ select:focus {
 /* ---- logo / mode switch ----------------------------------------------------- */
 
 .logo-switch {
-  position: relative;
-  display: flex;
+  display: grid;
   align-items: center;
   flex: none;
 }
 
-.logo-switch-overlay {
-  position: absolute;
-  inset: 0;
+/* Both layers share the grid cell — the wider one reserves the space, the
+   crossfade never shifts the bar. */
+.ls-layer {
+  grid-area: 1 / 1;
   display: flex;
   align-items: center;
-  justify-content: flex-start;
-  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+.ls-layer.show {
+  opacity: 1;
 }

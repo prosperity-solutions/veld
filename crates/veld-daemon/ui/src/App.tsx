@@ -24,13 +24,14 @@ import {
   Tooltip,
 } from "@mantine/core";
 import {
+  IconArrowsExchange,
   IconCheck,
   IconChevronLeft,
   IconChevronRight,
   IconCopy,
+  IconDotsVertical,
   IconExternalLink,
   IconMoon,
-  IconPencil,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
   IconPlus,
@@ -40,7 +41,6 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
-import { SegmentedControl } from "@mantine/core";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import {
@@ -51,12 +51,9 @@ import {
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
-const POLL_MS = 5000;
+import { topbarClass } from "./shell";
 
-// The Electron shell loads /ide?shell=electron: the top bar then doubles as
-// the frameless window's native title bar (drag region, traffic-light inset).
-const isElectron =
-  new URLSearchParams(window.location.search).get("shell") === "electron";
+const POLL_MS = 5000;
 
 function usePersisted(key: string, initial: string): [string, (v: string) => void] {
   const [value, setValue] = useState(
@@ -121,28 +118,29 @@ function useUrlSelection(): {
  */
 function LogoModeSwitch(props: { mode: string; onMode: (m: string) => void }) {
   const [hover, setHover] = useState(false);
+  const other = props.mode === "ide" ? "runs" : "ide";
+  const otherLabel = other === "runs" ? "Runs" : "IDE";
   return (
     <div
       className="logo-switch"
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <div style={{ visibility: hover ? "visible" : "hidden", display: "flex" }}>
-        <SegmentedControl
-          size="xs"
-          value={props.mode}
-          onChange={props.onMode}
-          data={[
-            { value: "runs", label: "Runs" },
-            { value: "ide", label: "IDE" },
-          ]}
-        />
+      <div className={`ls-layer${hover ? " show" : ""}`}>
+        <Tooltip label={`Switch to ${otherLabel}`}>
+          <Button
+            size="compact-xs"
+            variant="default"
+            leftSection={<IconArrowsExchange size={13} />}
+            onClick={() => props.onMode(other)}
+          >
+            {otherLabel}
+          </Button>
+        </Tooltip>
       </div>
-      {!hover && (
-        <div className="logo-switch-overlay">
-          <Wordmark />
-        </div>
-      )}
+      <div className={`ls-layer${hover ? "" : " show"}`} style={{ pointerEvents: "none" }}>
+        <Wordmark />
+      </div>
     </div>
   );
 }
@@ -360,19 +358,18 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
   const modeSwitch = <LogoModeSwitch mode={mode} onMode={setMode} />;
 
   // ---- render -------------------------------------------------------------
+  const themeButton = (
+    <Tooltip label="Theme">
+      <ActionIcon size="md" variant="default" onClick={onToggleTheme}>
+        {theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
+      </ActionIcon>
+    </Tooltip>
+  );
+
   if (mode === "runs") {
     return (
       <div className="frame">
-        <div className={`topbar${isElectron ? " electron" : ""}`}>
-          {modeSwitch}
-          <div style={{ flex: 1 }} />
-          <Tooltip label="Theme">
-            <ActionIcon size="md" variant="default" onClick={onToggleTheme}>
-              {theme === "dark" ? <IconSun size={14} /> : <IconMoon size={14} />}
-            </ActionIcon>
-          </Tooltip>
-        </div>
-        <RunsMode />
+        <RunsMode modeSwitch={modeSwitch} themeButton={themeButton} />
       </div>
     );
   }
@@ -491,7 +488,6 @@ function AppInner(props: { theme: string; onToggleTheme: () => void }) {
             onToggle={() => setRailWide((v) => !v)}
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
-            onEdit={(w) => setDialog({ kind: "rename", worktree: w })}
             onMenu={(e, w) => worktreeMenu(w)(e)}
           />
           <TerminalPlaceholder worktree={worktree} />
@@ -611,7 +607,7 @@ function TopBar(props: {
         ? "var(--danger)"
         : "var(--warn)";
   return (
-    <div className={`topbar${isElectron ? " electron" : ""}`}>
+    <div className={topbarClass}>
       {props.modeSwitch}
       {props.repos.length > 0 && (
         <NativeSelect
@@ -744,7 +740,6 @@ function Rail(props: {
   onToggle: () => void;
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
-  onEdit: (w: Worktree) => void;
   onMenu: (e: React.MouseEvent, w: Worktree) => void;
 }) {
   return (
@@ -752,7 +747,8 @@ function Rail(props: {
       <div className="rail-head">
         <ActionIcon
           size="sm"
-          variant="default"
+          variant="subtle"
+          color="gray"
           title="Expand / collapse"
           onClick={props.onToggle}
         >
@@ -774,29 +770,32 @@ function Rail(props: {
           return (
             <button
               key={w.id}
-              className={`wt-row${props.active?.id === w.id ? " active" : ""}`}
-              title={w.branch}
+              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}`}
+              title={`${w.alias} — ${w.branch}`}
               onClick={() => props.onSelect(w)}
               onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
               {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
-              <span className="wt-alias">{w.alias}</span>
+              {props.wide && <span className="wt-alias">{w.alias}</span>}
               {props.wide && <span className="wt-branch">{w.branch}</span>}
               {/* Row is a <button>; nested controls must be role=button
-                  spans with stopPropagation to avoid button-in-button. */}
-              <span
-                className="wt-edit"
-                title="Rename / remove"
-                role="button"
-                tabIndex={0}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  props.onEdit(w);
-                }}
-              >
-                <IconPencil size={12} />
-              </span>
+                  spans with stopPropagation to avoid button-in-button.
+                  Same menu as right-click. */}
+              {props.wide && (
+                <span
+                  className="wt-edit"
+                  title="Worktree menu"
+                  role="button"
+                  tabIndex={0}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    props.onMenu(e, w);
+                  }}
+                >
+                  <IconDotsVertical size={12} />
+                </span>
+              )}
             </button>
           );
         })}

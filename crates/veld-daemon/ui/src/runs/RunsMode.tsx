@@ -14,6 +14,8 @@ import {
   type StatsResponse,
 } from "../api";
 import { EnvCard } from "./EnvCard";
+import { topbarClass } from "../shell";
+import type { ReactNode } from "react";
 
 /**
  * Runs mode — the v1 management dashboard rebuilt on React/Mantine:
@@ -21,7 +23,7 @@ import { EnvCard } from "./EnvCard";
  * logs, stats, and sharing. Polls: envs+shares 3s, stats 5s (stats live in
  * separate state so their churn re-renders only the stat cells).
  */
-export function RunsMode() {
+export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode }) {
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [shares, setShares] = useState<SharesList | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
@@ -95,8 +97,8 @@ export function RunsMode() {
 
   return (
     <div className="runs-mode">
-      <div className="runs-container" style={{ flex: "none" }}>
-      <Group gap="sm" px={14} py={8} wrap="wrap">
+      <div className={topbarClass}>
+        {props.modeSwitch}
         {allRuns.length > 0 && (
           <SegmentedControl
             size="xs"
@@ -116,8 +118,10 @@ export function RunsMode() {
         <Text size="xs" c="dimmed">
           {meta}
         </Text>
-      </Group>
+        {props.themeButton}
+      </div>
 
+      <div className="runs-container" style={{ flex: "none" }}>
       {(pending.length > 0 || joins.length > 0) && (
         <Stack gap={6} px={14} pb={8}>
           {pending.map((p) => (
@@ -202,7 +206,7 @@ export function RunsMode() {
             </Text>
           </div>
         )}
-        <Stack gap={10} p={14} pt={4}>
+        <Stack gap={10} p={14} pt={14}>
           {shown.map(({ p, r }) => (
             <EnvCard
               key={`${p.project_root}::${r.name}`}
