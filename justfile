@@ -61,6 +61,14 @@ dev-daemon:
     # back to the installed CLI, which refuses a schema-ahead dev DB.
     cargo build -p veld-daemon -p veld
     mkdir -p .veld-dev
+    # Claim the veld-dev wrapper for THIS worktree: the wrapper hardcodes a
+    # worktree path (dev-link), and a wrapper pointing at another (possibly
+    # deleted) worktree targets the wrong dev instance — or nothing at all.
+    # Whichever worktree runs the dev daemon is the dev instance.
+    mkdir -p "$HOME/.local/bin"
+    printf '#!/usr/bin/env bash\nexport VELD_DB_PATH="{{dev_db}}"\nexport VELD_DAEMON_PORT="{{dev_daemon_port}}"\nexport VELD_DAEMON_SOCK="{{justfile_directory()}}/.veld-dev/daemon.sock"\nexec "{{justfile_directory()}}/target/debug/veld" "$@"\n' > "$HOME/.local/bin/veld-dev"
+    chmod +x "$HOME/.local/bin/veld-dev"
+    echo "✓ veld-dev wrapper → this worktree"
     echo "Dev daemon: port {{dev_daemon_port}}, DB {{dev_db}}, dashboard https://veld-dev.localhost"
     VELD_DB_PATH="{{dev_db}}" \
     VELD_DAEMON_PORT="{{dev_daemon_port}}" \
