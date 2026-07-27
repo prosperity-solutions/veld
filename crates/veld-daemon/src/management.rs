@@ -631,26 +631,29 @@ async fn open_terminal(
         return StatusCode::FORBIDDEN;
     }
 
+    // tokio::process (NOT std): the reaper must await the exit instead of
+    // blocking a core runtime worker — a Linux terminal emulator child lives
+    // as long as the terminal window.
     let result = if cfg!(target_os = "macos") {
-        std::process::Command::new("open")
+        tokio::process::Command::new("open")
             .arg("-a")
             .arg("Terminal")
             .arg(&body.path)
             .spawn()
     } else {
         // Try common Linux terminal emulators with working-directory support.
-        std::process::Command::new("x-terminal-emulator")
+        tokio::process::Command::new("x-terminal-emulator")
             .arg("--working-directory")
             .arg(&body.path)
             .spawn()
             .or_else(|_| {
-                std::process::Command::new("gnome-terminal")
+                tokio::process::Command::new("gnome-terminal")
                     .arg("--working-directory")
                     .arg(&body.path)
                     .spawn()
             })
             .or_else(|_| {
-                std::process::Command::new("xterm")
+                tokio::process::Command::new("xterm")
                     .arg("-e")
                     .arg(format!(
                         "cd '{}' && $SHELL",
@@ -662,9 +665,10 @@ async fn open_terminal(
 
     match result {
         Ok(mut child) => {
-            // Reap child in background to avoid zombies.
+            // Reap child in background to avoid zombies (async — never
+            // blocks a worker).
             tokio::spawn(async move {
-                let _ = child.wait();
+                let _ = child.wait().await;
             });
             StatusCode::NO_CONTENT
         }
@@ -826,16 +830,22 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
         escaped_args.join(" "),
     );
 
-    match std::process::Command::new(&shell)
+    // tokio::process (NOT std): `veld stop` can call back into THIS daemon's
+    // HTTP API (share teardown) — a synchronous child.wait() here parks a
+    // core runtime worker until the child exits, and with the child waiting
+    // on the daemon that's a circular wait: the daemon plays dead until the
+    // child is killed (observed live, 2026-07-27).
+    match tokio::process::Command::new(&shell)
         .args(["-l", "-c", &cmd])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
     {
         Ok(mut child) => {
-            // Reap child in background to avoid zombies.
+            // Reap child in background to avoid zombies (async — never
+            // blocks a worker).
             tokio::spawn(async move {
-                let _ = child.wait();
+                let _ = child.wait().await;
             });
             StatusCode::ACCEPTED
         }
