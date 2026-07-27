@@ -47,6 +47,13 @@ export function LogsPanel(props: {
   // The card's history selection scopes which run "latest" means.
   const effectiveRunId = runFilter || props.histSel || "";
 
+  // Reset the accumulated node list when the viewed run changes — otherwise
+  // the node filter (and the multi-node tag heuristic) carries nodes from
+  // previously viewed runs.
+  useEffect(() => {
+    knownNodes.current.clear();
+  }, [props.run, effectiveRunId]);
+
   useEffect(() => {
     if (!props.visible) return;
     let cancelled = false;

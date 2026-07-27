@@ -128,7 +128,11 @@ export function EnvCard(props: {
   const [flash, setFlash] = useState<string | null>(null);
 
   const history: HistoryEntry[] = run.history ?? [];
-  const selected = history.find((h) => h.run_id === histSel) ?? null;
+  // History selection only applies to ended runs — guard against a future
+  // always-mounted card showing a stale historical run for a live env.
+  const selected = run.live
+    ? null
+    : (history.find((h) => h.run_id === histSel) ?? null);
   const shownStatus = selected?.status ?? run.status;
   const shownOutcome = selected ? (selected.outcome ?? selected.status) : run.outcome;
   const shownEndedAt = selected?.ended_at ?? run.ended_at;

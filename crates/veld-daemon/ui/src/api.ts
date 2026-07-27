@@ -29,7 +29,8 @@ export interface HistoryNode {
   name: string;
   variant: string;
   status: string;
-  exit_code?: number | null;
+  /** Serialized as a string by the backend ("Exit code where observable"). */
+  exit_code?: string | null;
 }
 
 export interface HistoryEntry {
