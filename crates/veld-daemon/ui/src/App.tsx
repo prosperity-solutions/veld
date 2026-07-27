@@ -17,11 +17,16 @@ import { Wordmark } from "./components/Wordmark";
 import {
   ActionIcon,
   Button,
+  Group,
   Loader,
   MantineProvider,
-  NativeSelect,
-  TextInput,
+  Menu,
+  Popover,
+  ScrollArea,
+  Select,
+  Text,
   Tooltip,
+  TextInput,
 } from "@mantine/core";
 import {
   IconArrowsExchange,
@@ -29,7 +34,9 @@ import {
   IconChevronLeft,
   IconChevronRight,
   IconCopy,
+  IconDots,
   IconDotsVertical,
+  IconFolderPlus,
   IconExternalLink,
   IconMoon,
   IconPlayerPlayFilled,
@@ -37,6 +44,7 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconTrash,
   IconSun,
   IconSunMoon,
   IconWorld,
@@ -471,9 +479,9 @@ function AppInner(props: {
         running={status !== "stopped"}
         pending={pendingFor(worktree)}
         run={run}
-        urlCount={urls.length}
+        urls={urls}
         urlsOpen={urlsOpen}
-        onToggleUrls={() => setUrlsOpen((v) => !v)}
+        onUrlsOpen={setUrlsOpen}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
@@ -501,13 +509,6 @@ function AppInner(props: {
         onSearch={() => setDialog({ kind: "search" })}
         themeButton={themeButton}
       />
-      {urlsOpen && (
-        <UrlsPopover
-          runName={run?.name ?? null}
-          urls={urls}
-          onClose={() => setUrlsOpen(false)}
-        />
-      )}
 
       {offline && (
         <div
@@ -668,9 +669,9 @@ function TopBar(props: {
   running: boolean;
   pending: string | null;
   run: { name: string; status: string } | null;
-  urlCount: number;
+  urls: Array<[string, string]>;
   urlsOpen: boolean;
-  onToggleUrls: () => void;
+  onUrlsOpen: (open: boolean) => void;
   onSelectRepo: (root: string) => void;
   onImport: () => void;
   onRemoveRepo: () => void;
@@ -695,28 +696,47 @@ function TopBar(props: {
     <div className={topbarClass}>
       {props.modeSwitch}
       {props.repos.length > 0 && (
-        <NativeSelect
+        <Select
           title="Switch project"
           size="xs"
-          value={props.repo?.root ?? ""}
-          onChange={(e) => {
-            const v = e.currentTarget.value;
-            if (v === "__import__") props.onImport();
-            else if (v === "__remove__") props.onRemoveRepo();
-            else props.onSelectRepo(v);
+          w={170}
+          allowDeselect={false}
+          value={props.repo?.root ?? null}
+          onChange={(v) => v && props.onSelectRepo(v)}
+          data={props.repos.map((r) => ({
+            value: r.root,
+            label: r.available ? r.name : `${r.name} (unavailable)`,
+          }))}
+          comboboxProps={{ width: 240, position: "bottom-start" }}
+          styles={{
+            input: { fontFamily: "var(--mantine-font-family-monospace)" },
+            option: { fontFamily: "var(--mantine-font-family-monospace)" },
           }}
-          data={[
-            ...props.repos.map((r) => ({
-              value: r.root,
-              label: r.available ? r.name : `${r.name} (unavailable)`,
-            })),
-            { value: "__import__", label: "Import repository…" },
-            ...(props.repo
-              ? [{ value: "__remove__", label: "Remove project…" }]
-              : []),
-          ]}
         />
       )}
+      <Menu position="bottom-start" width={200}>
+        <Menu.Target>
+          <ActionIcon size="md" variant="default" title="Project actions">
+            <IconDots size={14} />
+          </ActionIcon>
+        </Menu.Target>
+        <Menu.Dropdown>
+          <Menu.Item
+            leftSection={<IconFolderPlus size={14} />}
+            onClick={props.onImport}
+          >
+            Import repository…
+          </Menu.Item>
+          <Menu.Item
+            color="red"
+            leftSection={<IconTrash size={14} />}
+            disabled={!props.repo}
+            onClick={props.onRemoveRepo}
+          >
+            Remove project…
+          </Menu.Item>
+        </Menu.Dropdown>
+      </Menu>
       {worktree && (
         <>
           <div className="sep" />
@@ -759,14 +779,65 @@ function TopBar(props: {
                 </span>
               )}
               {run && (
-                <Button
-                  size="compact-sm"
-                  variant="default"
-                  leftSection={<IconWorld size={14} />}
-                  onClick={props.onToggleUrls}
+                <Popover
+                  opened={props.urlsOpen}
+                  onChange={props.onUrlsOpen}
+                  position="bottom-end"
+                  width={420}
+                  shadow="md"
                 >
-                  {props.urlCount}
-                </Button>
+                  <Popover.Target>
+                    <Button
+                      size="compact-sm"
+                      variant="default"
+                      leftSection={<IconWorld size={14} />}
+                      onClick={() => props.onUrlsOpen(!props.urlsOpen)}
+                    >
+                      {props.urls.length}
+                    </Button>
+                  </Popover.Target>
+                  <Popover.Dropdown p="xs">
+                    <Group gap="xs" pb={6}>
+                      <Text size="xs">
+                        Run <b className="mono">{run.name}</b> ·{" "}
+                        {props.urls.length} URLs
+                      </Text>
+                      <div style={{ flex: 1 }} />
+                      {props.urls.length > 0 && (
+                        <Button
+                          size="compact-xs"
+                          variant="subtle"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(
+                              props.urls.map(([, u]) => u).join("\n"),
+                            );
+                            props.onUrlsOpen(false);
+                          }}
+                        >
+                          Copy all
+                        </Button>
+                      )}
+                    </Group>
+                    <ScrollArea.Autosize mah={280}>
+                      <div
+                        style={{
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 5,
+                        }}
+                      >
+                        {props.urls.map(([name, url]) => (
+                          <ServiceCard key={name} name={name} url={url} />
+                        ))}
+                        {props.urls.length === 0 && (
+                          <div className="note-card">
+                            Start a run to see its URLs here.
+                          </div>
+                        )}
+                      </div>
+                    </ScrollArea.Autosize>
+                  </Popover.Dropdown>
+                </Popover>
               )}
             </>
           )}
@@ -984,52 +1055,6 @@ function ServiceCard(props: { name: string; url: string }) {
 // ---------------------------------------------------------------------------
 // URLs popover + search overlay
 // ---------------------------------------------------------------------------
-
-function UrlsPopover(props: {
-  runName: string | null;
-  urls: Array<[string, string]>;
-  onClose: () => void;
-}) {
-  return (
-    <div className="popover">
-      <div className="popover-head">
-        <span>
-          {props.runName ? (
-            <>
-              Run <span className="mono">{props.runName}</span> ·{" "}
-              {props.urls.length} URLs
-            </>
-          ) : (
-            "No active run"
-          )}
-        </span>
-        <div style={{ flex: 1 }} />
-        {props.urls.length > 0 && (
-          <button
-            className="btn"
-            style={{ border: "none", color: "var(--accent)", padding: "2px 6px" }}
-            onClick={() => {
-              void navigator.clipboard.writeText(
-                props.urls.map(([, u]) => u).join("\n"),
-              );
-              props.onClose();
-            }}
-          >
-            Copy all
-          </button>
-        )}
-      </div>
-      <div className="popover-list">
-        {props.urls.map(([name, url]) => (
-          <ServiceCard key={name} name={name} url={url} />
-        ))}
-        {props.urls.length === 0 && (
-          <div className="note-card">Start a run to see its URLs here.</div>
-        )}
-      </div>
-    </div>
-  );
-}
 
 function SearchOverlay(props: {
   project: string;

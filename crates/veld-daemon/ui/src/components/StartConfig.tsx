@@ -2,11 +2,12 @@ import { useState } from "react";
 import {
   Button,
   Checkbox,
-  Divider,
+  Grid,
   Group,
+  Modal,
   NativeSelect,
-  Popover,
   Radio,
+  ScrollArea,
   Stack,
   Text,
 } from "@mantine/core";
@@ -43,8 +44,9 @@ export function startSelectionLabel(sel: StartSelection | null): string {
 }
 
 /**
- * Compact popover choosing between presets (quick picks) and a custom
- * per-node variant selection — covers configs with no presets at all.
+ * Start-configuration modal: presets as one-click picks (left panel), custom
+ * per-node variant selection (right panel). A modal, not a popover — real
+ * configs carry dozens of presets/nodes and need independent scrolling.
  */
 export function StartConfig(props: {
   worktree: Worktree;
@@ -54,6 +56,7 @@ export function StartConfig(props: {
   const [opened, setOpened] = useState(false);
   const w = props.worktree;
   const sel = props.value ?? defaultStartSelection(w);
+  const hasPresets = w.presets.length > 0;
 
   const selectedVariant = (node: string): string | null => {
     if (sel?.kind !== "nodes") return null;
@@ -72,48 +75,13 @@ export function StartConfig(props: {
     });
   };
 
-  return (
-    <Popover
-      opened={opened}
-      onChange={setOpened}
-      position="bottom-start"
-      shadow="md"
-      width={280}
-    >
-      <Popover.Target>
-        <Button
-          size="compact-sm"
-          variant="default"
-          rightSection={<IconChevronDown size={12} />}
-          onClick={() => setOpened((v) => !v)}
-          styles={{
-            label: { fontFamily: "var(--mantine-font-family-monospace)" },
-          }}
-        >
-          {startSelectionLabel(sel)}
-        </Button>
-      </Popover.Target>
-      <Popover.Dropdown p="sm">
-        <Stack gap="sm">
-          {w.presets.length > 0 && (
-            <>
-              <Radio.Group
-                label="Preset"
-                value={sel?.kind === "preset" ? sel.name : null}
-                onChange={(name) => {
-                  props.onChange({ kind: "preset", name });
-                  setOpened(false);
-                }}
-              >
-                <Stack gap={6} pt={4}>
-                  {w.presets.map((p) => (
-                    <Radio key={p} value={p} label={p} size="xs" />
-                  ))}
-                </Stack>
-              </Radio.Group>
-              <Divider label="or custom" labelPosition="center" />
-            </>
-          )}
+  const customPanel = (
+    <Stack gap={0} style={{ minWidth: 0 }}>
+      <Text size="xs" fw={600} c="dimmed" tt="uppercase" pb={6}>
+        Custom selection
+      </Text>
+      <ScrollArea.Autosize mah={380}>
+        <Stack gap={8} pr={8}>
           {w.nodes.length === 0 && (
             <Text size="xs" c="dimmed">
               No startable nodes in this config.
@@ -136,7 +104,7 @@ export function StartConfig(props: {
                       fontFamily: "var(--mantine-font-family-monospace)",
                     },
                   }}
-                  style={{ flex: 1 }}
+                  style={{ flex: 1, minWidth: 0 }}
                 />
                 {n.variants.length > 1 && (
                   <NativeSelect
@@ -158,7 +126,78 @@ export function StartConfig(props: {
             );
           })}
         </Stack>
-      </Popover.Dropdown>
-    </Popover>
+      </ScrollArea.Autosize>
+    </Stack>
+  );
+
+  return (
+    <>
+      <Button
+        size="compact-sm"
+        variant="default"
+        rightSection={<IconChevronDown size={12} />}
+        onClick={() => setOpened(true)}
+        styles={{
+          label: { fontFamily: "var(--mantine-font-family-monospace)" },
+        }}
+      >
+        {startSelectionLabel(sel)}
+      </Button>
+      <Modal
+        opened={opened}
+        onClose={() => setOpened(false)}
+        title="Start configuration"
+        size={hasPresets ? 680 : 440}
+        yOffset={88}
+        radius="lg"
+        overlayProps={{ backgroundOpacity: 0.42 }}
+      >
+        {hasPresets ? (
+          <Grid gutter="lg">
+            <Grid.Col span={6}>
+              <Stack gap={0}>
+                <Text size="xs" fw={600} c="dimmed" tt="uppercase" pb={6}>
+                  Presets
+                </Text>
+                <ScrollArea.Autosize mah={380}>
+                  <Radio.Group
+                    value={sel?.kind === "preset" ? sel.name : null}
+                    onChange={(name) => {
+                      props.onChange({ kind: "preset", name });
+                      setOpened(false);
+                    }}
+                  >
+                    <Stack gap={7} pr={8}>
+                      {w.presets.map((p) => (
+                        <Radio
+                          key={p}
+                          value={p}
+                          label={p}
+                          size="xs"
+                          styles={{
+                            label: {
+                              fontFamily:
+                                "var(--mantine-font-family-monospace)",
+                            },
+                          }}
+                        />
+                      ))}
+                    </Stack>
+                  </Radio.Group>
+                </ScrollArea.Autosize>
+              </Stack>
+            </Grid.Col>
+            <Grid.Col span={6}>{customPanel}</Grid.Col>
+          </Grid>
+        ) : (
+          customPanel
+        )}
+        <Group justify="end" pt="md">
+          <Button size="compact-sm" onClick={() => setOpened(false)}>
+            Done
+          </Button>
+        </Group>
+      </Modal>
+    </>
   );
 }
