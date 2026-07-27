@@ -21,7 +21,7 @@ import {
   Loader,
   MantineProvider,
   Menu,
-  Popover,
+  Modal as MantineModal,
   ScrollArea,
   Select,
   Text,
@@ -774,51 +774,39 @@ function TopBar(props: {
                 </span>
               )}
               {run && (
-                <Popover
-                  opened={props.urlsOpen}
-                  onChange={props.onUrlsOpen}
-                  position="bottom-end"
-                  width={420}
-                  shadow="md"
-                >
-                  <Popover.Target>
-                    <Button
-                      size="compact-sm"
-                      variant="default"
-                      leftSection={<IconWorld size={14} />}
-                      onClick={() => props.onUrlsOpen(!props.urlsOpen)}
-                    >
-                      {props.urls.length}
-                    </Button>
-                  </Popover.Target>
-                  <Popover.Dropdown p="xs">
-                    <Group gap="xs" pb={6}>
-                      <Text size="xs">
+                <>
+                  <Button
+                    size="compact-sm"
+                    variant="default"
+                    leftSection={<IconWorld size={14} />}
+                    onClick={() => props.onUrlsOpen(true)}
+                  >
+                    {props.urls.length}
+                  </Button>
+                  <MantineModal
+                    opened={props.urlsOpen}
+                    onClose={() => props.onUrlsOpen(false)}
+                    title={
+                      <Text size="sm">
                         Run <b className="mono">{run.name}</b> ·{" "}
                         {props.urls.length} URLs
                       </Text>
-                      <div style={{ flex: 1 }} />
-                      {props.urls.length > 0 && (
-                        <Button
-                          size="compact-xs"
-                          variant="subtle"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(
-                              props.urls.map(([, u]) => u).join("\n"),
-                            );
-                            props.onUrlsOpen(false);
-                          }}
-                        >
-                          Copy all
-                        </Button>
-                      )}
-                    </Group>
-                    <ScrollArea.Autosize mah={280}>
+                    }
+                    size={640}
+                    yOffset={88}
+                    radius="lg"
+                    overlayProps={{ backgroundOpacity: 0.42 }}
+                    styles={{
+                      header: { borderBottom: "1px solid var(--border)" },
+                      body: { paddingTop: "var(--mantine-spacing-md)" },
+                    }}
+                  >
+                    <ScrollArea.Autosize mah={420}>
                       <div
                         style={{
                           display: "flex",
                           flexDirection: "column",
-                          gap: 5,
+                          gap: 6,
                         }}
                       >
                         {props.urls.map(([name, url]) => (
@@ -831,8 +819,29 @@ function TopBar(props: {
                         )}
                       </div>
                     </ScrollArea.Autosize>
-                  </Popover.Dropdown>
-                </Popover>
+                    {props.urls.length > 0 && (
+                      <Group
+                        justify="end"
+                        pt="md"
+                        mt="md"
+                        style={{ borderTop: "1px solid var(--border)" }}
+                      >
+                        <Button
+                          size="compact-sm"
+                          variant="default"
+                          onClick={() => {
+                            void navigator.clipboard.writeText(
+                              props.urls.map(([, u]) => u).join("\n"),
+                            );
+                            props.onUrlsOpen(false);
+                          }}
+                        >
+                          Copy all
+                        </Button>
+                      </Group>
+                    )}
+                  </MantineModal>
+                </>
               )}
             </>
           )}
