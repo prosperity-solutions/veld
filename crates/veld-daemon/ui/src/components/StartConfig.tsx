@@ -153,7 +153,7 @@ export function StartConfig(props: {
         overlayProps={{ backgroundOpacity: 0.42 }}
       >
         {hasPresets ? (
-          <Grid gutter="lg">
+          <Grid gap="lg">
             <Grid.Col span={6}>
               <Stack gap={0}>
                 <Text size="xs" fw={600} c="dimmed" tt="uppercase" pb={6}>
