@@ -46,7 +46,7 @@ import {
   IconSearch,
   IconTrash,
   IconSun,
-  IconSunMoon,
+  IconDeviceDesktop,
   IconWorld,
 } from "@tabler/icons-react";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
@@ -445,7 +445,7 @@ function AppInner(props: {
     >
       <ActionIcon size="md" variant="default" onClick={onCycleTheme}>
         {themePref === "auto" ? (
-          <IconSunMoon size={14} />
+          <IconDeviceDesktop size={14} />
         ) : themePref === "light" ? (
           <IconSun size={14} />
         ) : (
