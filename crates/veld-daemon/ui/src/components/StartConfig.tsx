@@ -100,15 +100,23 @@ export function StartConfig(props: {
                     toggleNode(n.name, fallback, e.currentTarget.checked)
                   }
                   styles={{
+                    body: { alignItems: "center" },
+                    labelWrapper: { minWidth: 0 },
                     label: {
                       fontFamily: "var(--mantine-font-family-monospace)",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                      display: "block",
                     },
                   }}
-                  style={{ flex: 1, minWidth: 0 }}
+                  style={{ flex: 1, minWidth: 0, overflow: "hidden" }}
                 />
                 {n.variants.length > 1 && (
                   <NativeSelect
                     size="xs"
+                    w={130}
+                    style={{ flex: "none" }}
                     value={variant ?? fallback}
                     disabled={variant === null}
                     onChange={(e) =>
@@ -151,6 +159,10 @@ export function StartConfig(props: {
         yOffset={88}
         radius="lg"
         overlayProps={{ backgroundOpacity: 0.42 }}
+        styles={{
+          header: { borderBottom: "1px solid var(--border)" },
+          body: { paddingTop: "var(--mantine-spacing-md)" },
+        }}
       >
         {hasPresets ? (
           <Grid gap="lg">
@@ -192,7 +204,12 @@ export function StartConfig(props: {
         ) : (
           customPanel
         )}
-        <Group justify="end" pt="md">
+        <Group
+          justify="end"
+          pt="md"
+          mt="md"
+          style={{ borderTop: "1px solid var(--border)" }}
+        >
           <Button size="compact-sm" onClick={() => setOpened(false)}>
             Done
           </Button>

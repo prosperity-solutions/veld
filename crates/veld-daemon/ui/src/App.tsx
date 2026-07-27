@@ -420,7 +420,11 @@ function AppInner(props: {
   }, []);
 
   const [urlsOpen, setUrlsOpen] = useState(false);
-  const [railWide, setRailWide] = useState(false);
+  // Rail expanded by default; the choice sticks across reloads/windows.
+  const [railWideRaw, setRailWideRaw] = usePersisted("veld.railWide", "1");
+  const railWide = railWideRaw === "1";
+  const setRailWide = (fn: (v: boolean) => boolean) =>
+    setRailWideRaw(fn(railWide) ? "1" : "0");
 
   // Hover lives here so the crossfade survives LogoModeSwitch remounting
   // when it moves between the runs and IDE bars.
@@ -552,18 +556,9 @@ function AppInner(props: {
         </div>
       ) : repos.length === 0 ? (
         <div className="center-page">
-          <Wordmark />
-          <p>
-            Import a git repository to manage its worktrees and drive veld runs
-            from here. Terminals and embedded previews arrive in later
-            increments.
-          </p>
-          <button
-            className="primary-btn"
-            onClick={() => setDialog({ kind: "import" })}
-          >
-            Import repository…
-          </button>
+          <Button size="md" onClick={() => setDialog({ kind: "import" })}>
+            Import your first project
+          </Button>
         </div>
       ) : (
         <div className="workspace">
@@ -708,8 +703,8 @@ function TopBar(props: {
             label: r.available ? r.name : `${r.name} (unavailable)`,
           }))}
           comboboxProps={{ width: 240, position: "bottom-start" }}
+          className="mono-field"
           styles={{
-            input: { fontFamily: "var(--mantine-font-family-monospace)" },
             option: { fontFamily: "var(--mantine-font-family-monospace)" },
           }}
         />

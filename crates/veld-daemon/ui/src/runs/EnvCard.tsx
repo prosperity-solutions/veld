@@ -379,8 +379,15 @@ export function EnvCard(props: {
 
       <SegmentedControl
         size="xs"
-        ml={12}
+        fullWidth
+        mx={12}
         mb={6}
+        styles={{
+          root: {
+            background: "var(--bg)",
+            border: "1px solid var(--border)",
+          },
+        }}
         value={tab}
         onChange={(v) => {
           setTab(v);

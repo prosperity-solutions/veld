@@ -103,6 +103,12 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
           <div className="topbar-center">
             <SegmentedControl
               size="xs"
+              styles={{
+                root: {
+                  background: "var(--bg)",
+                  border: "1px solid var(--border2)",
+                },
+              }}
               value={view}
               onChange={setViewPersist}
               data={[
