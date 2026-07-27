@@ -111,7 +111,7 @@ own veld project*. The desktop model sits one level above:
   user-editable `alias`. The main checkout itself appears as a worktree row so
   the rail has one list.
 
-Migration v5 (`crates/veld-core/src/db/mod.rs`, `user_version` 4 → 5):
+Migrations v5 + v6 (`crates/veld-core/src/db/mod.rs`, `user_version` 4 → 6):
 
 ```sql
 CREATE TABLE repos (
@@ -125,10 +125,16 @@ CREATE TABLE worktrees (
   path       TEXT NOT NULL UNIQUE,      -- absolute checkout path
   branch     TEXT NOT NULL,
   alias      TEXT NOT NULL,
+  emoji      TEXT NOT NULL DEFAULT '',  -- v6: stable visual identifier
   is_main    INTEGER NOT NULL DEFAULT 0,-- 1 = the repo's main checkout
   created_at TEXT NOT NULL
 );
 ```
+
+The `emoji` (v6) is one glyph from a curated animal set — hash-seeded by
+alias, probed to stay unique across ALL repos' worktrees, assigned at
+insert, backfilled for pre-v6 rows on sync, preserved across renames. It is
+the collapsed rail's identifier.
 
 Run/health/URL state is **not** duplicated: the UI joins a worktree to veld
 state by path (`worktrees.path` = veld `projects.root`, string equality) via
@@ -153,13 +159,13 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config` + `presets` (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
+| `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config`, `presets`, and `nodes` (startable nodes with variants + default variant — the custom-selection source) (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
 | `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |
 | `PATCH /api/worktrees/{id}` `{alias}` | Rename the alias (DB only). |
 | `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
-| `POST /api/worktrees/{id}/start` `{preset?, run_name?}` | Spawns `veld start --preset <p> --name <n>` with the worktree as cwd — the CLI resolves veld.json from cwd. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
+| `POST /api/worktrees/{id}/start` `{preset?, selections?, run_name?}` | Spawns `veld start` with the worktree as cwd (the CLI resolves veld.json from there). Two mutually-exclusive start modes: `preset` (`--preset <p>`) or explicit `selections` (`node:variant` positionals, validated per half) — a non-TTY bare start fails "No selections provided", so the UI always sends one. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
 | `POST /api/repos/refresh` | The UI's poll target: reconciles every repo's worktree rows with `git worktree list`, then returns the same payload as `GET /api/repos`. POST (CSRF-gated) because it spawns git and writes; debounced daemon-side. The plain GET stays a pure read. |
 | `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `409` while a picker is already open (single-flight), `408` after the 10-minute timeout, `500` on backend failure (no GUI session / permission denial), `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
 

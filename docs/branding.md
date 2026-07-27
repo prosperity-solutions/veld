@@ -31,7 +31,7 @@ origin app produces and the gateway merely proxies are the app's own.
 | Asset | Canonical source | Notes |
 |-------|------------------|-------|
 | Icon logo (`V.`) | `logo.svg` (repo root) | White `V` + accent-green dot, 32×32 viewBox |
-| Wordmark (`veld.`) | `crates/veld-daemon/assets/management-ui.html` (header SVG) and `crates/veld-gateway/src/pages.rs` (`WORDMARK_SVG`) | Letters take `var(--text)`, the final dot path takes `var(--accent)` |
+| Wordmark (`veld.`) | `crates/veld-daemon/assets/management-ui.html` (header SVG), `crates/veld-gateway/src/pages.rs` (`WORDMARK_SVG`), and `crates/veld-daemon/ui/src/components/Wordmark.tsx` (desktop theme) | Letters take `var(--text)`, the final dot path takes `var(--accent)` |
 | Favicon | data-URI SVG in `website/index.html` and `crates/veld-gateway/src/pages.rs` | Rounded dark square, white `V`, accent dot |
 
 The wordmark's trailing dot is always the accent green — that is the brand's
