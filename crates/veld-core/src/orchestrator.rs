@@ -1577,10 +1577,26 @@ impl Orchestrator {
         let resolved_cmd = match on_stop_cmd.interpolate(&ctx) {
             Ok(cmd) => cmd,
             Err(e) => {
+                // A teardown hook that cannot be resolved does not run, and the
+                // user is about to be told the environment stopped cleanly. That
+                // combination is how containers leak, so say it loudly on the
+                // stream the user actually reads rather than burying it in a
+                // tracing warning. `veld start`/`veld lint` catch the common cause
+                // (an unknown `${veld.*}` name — see `check_builtin_names`), but
+                // this path stays reachable for a config edited after start.
+                eprintln!(
+                    "  ! teardown hook for {}:{} was SKIPPED: {e}\n    \
+                     The command was: {}\n    \
+                     Anything it was meant to clean up (containers, volumes, \
+                     temp state) has been left behind.",
+                    node_state.node_name,
+                    node_state.variant,
+                    on_stop_cmd.display(),
+                );
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
-                    "failed to resolve on_stop command variables"
+                    "failed to resolve on_stop command variables — hook skipped"
                 );
                 return;
             }
@@ -2866,12 +2882,21 @@ mod tests {
     /// F0.2 exit gate: an output named like a builtin must not shadow it.
     ///
     /// The `on_stop` path used to inject every node output into the *builtins*
-    /// map, so a node with an output called `port` made `${veld.port}` resolve to
-    /// the output during teardown and to the allocated port everywhere else —
-    /// the same string, two values. Outputs now live in `${output.*}` /
-    /// `${nodes.*}` only. This also covers F0.3 on the stop path.
+    /// map, so a node with an output called `run` made `${veld.run}` resolve to
+    /// the output during teardown and to the run name everywhere else — the same
+    /// string, two values.
+    ///
+    /// `run` is the probe here, not `port`: on the old code `set_builtin("port",
+    /// …)` ran *after* the outputs loop and overwrote it, so `port` was never
+    /// actually shadowable. The genuinely shadowable builtins were the ones set
+    /// before the loop — `run`, `branch`, `worktree`, `root`, `project`, `name`,
+    /// `username`. `port` is kept below as a control: it must still resolve to
+    /// the allocated port, and the output must still be reachable as
+    /// `${output.port}`.
+    ///
+    /// This also covers F0.3 on the stop path (`${veld.node}`/`${veld.variant}`).
     #[tokio::test]
-    async fn output_named_port_does_not_shadow_builtin() {
+    async fn output_does_not_shadow_builtin() {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path();
         let marker = project_root.join("resolved");
@@ -2885,7 +2910,7 @@ mod tests {
                         "local": {{
                             "type": "start_server",
                             "command": "sleep 30",
-                            "on_stop": "printf '%s' \"${{veld.port}}|${{veld.node}}|${{veld.variant}}|${{output.port}}|${{nodes.svc.port}}\" > {}"
+                            "on_stop": "printf '%s' \"${{veld.run}}|${{veld.port}}|${{veld.node}}|${{veld.variant}}|${{output.run}}|${{output.port}}\" > {}"
                         }}
                     }}}}
                 }}
@@ -2902,7 +2927,9 @@ mod tests {
         ns.status = NodeStatus::Healthy;
         // The allocated port…
         ns.port = Some(12345);
-        // …and a node output that happens to be called `port`.
+        // …and node outputs that happen to be named like builtins. `run` was
+        // genuinely shadowable before F0.2; `port` never was (see above).
+        ns.outputs.insert("run".to_owned(), "SHADOW".to_owned());
         ns.outputs.insert("port".to_owned(), "9999".to_owned());
         run.nodes.insert(key.clone(), ns);
         run.execution_order.push(key);
@@ -2912,9 +2939,9 @@ mod tests {
 
         let resolved = std::fs::read_to_string(&marker).expect("on_stop must have run");
         assert_eq!(
-            resolved, "12345|svc|local|9999|9999",
-            "${{veld.port}} must stay the allocated port; the output is reachable \
-             only as ${{output.port}} / ${{nodes.svc.port}}"
+            resolved, "testrun|12345|svc|local|SHADOW|9999",
+            "${{veld.run}} must stay the run name and ${{veld.port}} the allocated \
+             port; the same-named outputs are reachable only as ${{output.*}}"
         );
     }
 

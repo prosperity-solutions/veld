@@ -720,11 +720,23 @@ This is especially useful for `command` nodes that provision external resources 
 ```
 
 The `on_stop` command receives the same variable context that was available during start:
-- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, etc.)
-- All outputs produced by this node (e.g. `${veld.exit_code}`, custom outputs)
+- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, `${veld.node}`, etc. — see [Built-in Variables](#built-in-variables-veld))
+- This node's outputs as `${output.KEY}`, and any node's as `${nodes.<node>.KEY}` (including the automatic `exit_code` of a `command` node)
 - Environment variables from the variant's `env` block
 
+> **Changed:** node outputs used to *also* be reachable as `${veld.KEY}` here — and only
+> here. That let an output named like a built-in (`run`, `branch`, `port`) shadow it during
+> teardown but nowhere else, so the same string resolved to two different values. `veld.*`
+> is now a closed set. Rewrite `${veld.exit_code}` as `${output.exit_code}` and
+> `${veld.MY_OUTPUT}` as `${output.MY_OUTPUT}`. `veld lint` and `veld start` reject any
+> `${veld.*}` name that is not a built-in, so this is caught before a run starts rather
+> than at teardown.
+
 If the `on_stop` command fails (non-zero exit code or execution error), Veld logs a warning but continues tearing down the remaining nodes. A failing teardown hook never blocks the stop operation.
+
+If `on_stop` references a variable that cannot be resolved, the hook is **skipped** — Veld
+prints a prominent warning naming the command and what it was meant to clean up, because
+whatever it would have removed has been left behind.
 
 `on_stop` works with both `command` and `start_server` variants:
 

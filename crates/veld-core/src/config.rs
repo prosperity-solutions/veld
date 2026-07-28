@@ -179,6 +179,22 @@ pub struct VeldConfig {
 
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
+
+    /// Problems found while *parsing* that must not fail the load.
+    ///
+    /// Some defects are only visible in the raw text — a duplicate key, which
+    /// `serde_json` silently resolves last-wins, is the motivating case. They
+    /// still have to be errors (F1), but making them *load* errors would put a
+    /// new failure on the path `veld stop` / `status` / `logs` and the daemon
+    /// monitor use, and F0.1 forbids exactly that: `on_stop` is read from the
+    /// on-disk config at stop time, so a config that will not load means
+    /// teardown never runs and containers leak with no way to clean up.
+    ///
+    /// So [`parse_config_str`] records them here and [`validate`] reports them.
+    /// `veld start` and `veld lint` refuse; everything else keeps working on the
+    /// last-wins interpretation, which is what it did before this existed.
+    #[serde(skip)]
+    pub deferred_findings: Vec<Finding>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,18 +1578,31 @@ pub fn parse_config_str(contents: &str, path: &Path) -> Result<VeldConfig, Confi
         detail: e.to_string(),
     })?;
 
-    // Before deserializing: serde_json is silently last-wins on duplicate keys,
-    // which would drop one of two `variants` blocks (or, once one file may
-    // define several nodes, one of two same-named nodes) without a word.
-    crate::jsonc::reject_duplicate_keys(&json).map_err(|e| ConfigError::ParseError {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+    let mut config: VeldConfig =
+        serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
 
-    serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
-        path: path.to_path_buf(),
-        source: e,
-    })
+    // serde_json is silently last-wins on duplicate keys, which drops one of two
+    // `variants` blocks — or, once one file may define several nodes, one of two
+    // same-named nodes — without a word. It must be an error (F1), but NOT a load
+    // error: a duplicate key leaves the document perfectly interpretable
+    // (last-wins is deterministic), and failing here would strand `veld stop`
+    // against a running environment. Deferred to `validate`; see
+    // [`VeldConfig::deferred_findings`].
+    if let Err(e) = crate::jsonc::reject_duplicate_keys(&json) {
+        config.deferred_findings.push(Finding::error(
+            "duplicate-key",
+            path.display().to_string(),
+            format!(
+                "{e}. serde_json keeps the last value, so one of the two is being \
+                 silently ignored"
+            ),
+        ));
+    }
+
+    Ok(config)
 }
 
 /// **Validate** an already-parsed config: every semantic rule, reported as
@@ -1585,13 +1614,139 @@ pub fn parse_config_str(contents: &str, path: &Path) -> Result<VeldConfig, Confi
 /// subcommand that must keep working against a broken config. Callers:
 /// `veld start` (refuses on any [`Severity::Error`]), `veld lint` (prints
 /// everything), and the share flow (which emits proxy headers over the wire).
+#[must_use = "validate reports problems; ignoring the findings defeats the point"]
 pub fn validate(config: &VeldConfig) -> Vec<Finding> {
-    let mut findings = Vec::new();
+    // Problems the parser saw in the raw text but deliberately did not fail on.
+    let mut findings = config.deferred_findings.clone();
     check_proxy_headers(config, &mut findings);
     check_depends_on_literal(config, &mut findings);
     check_exactly_one_command(config, &mut findings);
-    findings.sort_by(|a, b| (a.severity, &a.location).cmp(&(b.severity, &b.location)));
+    check_builtin_names(config, &mut findings);
+    // Total ordering, including `message`: several findings can share a
+    // `location` (two bad `depends_on` entries in one variant), and `depends_on`
+    // is a `HashMap`, so a partial sort would leave `veld lint --json` output
+    // order varying run to run and any golden-file CI diff flapping.
+    findings.sort_by(|a, b| {
+        (a.severity, &a.location, &a.rule, &a.message).cmp(&(
+            b.severity,
+            &b.location,
+            &b.rule,
+            &b.message,
+        ))
+    });
     findings
+}
+
+/// The complete `veld.*` namespace — a **closed** set.
+///
+/// Node outputs are deliberately absent: they live in `${output.*}` (own node)
+/// and `${nodes.<node>.<field>}` (any node). Injecting them here let an output
+/// named `port`, `run`, or `branch` shadow the builtin on some paths and not
+/// others, so the same string resolved to different values (F0.2).
+///
+/// Availability is not uniform, and [`check_builtin_names`] deliberately does not
+/// model that — it only rejects names that are not builtins at all:
+/// - `port` / `url` / `url.*` exist only for a `start_server` node.
+/// - `node` / `variant` are absent in project-level `setup` / `teardown` steps.
+pub const BUILTIN_VARS: &[&str] = &[
+    "run",
+    "run_id",
+    "root",
+    "project",
+    "name",
+    "worktree",
+    "branch",
+    "username",
+    "node",
+    "variant",
+    "port",
+    "url",
+    "url.hostname",
+    "url.host",
+    "url.origin",
+    "url.scheme",
+    "url.port",
+];
+
+/// Reject `${veld.<name>}` references to names that are not builtins.
+///
+/// This is the guard for the F0.2 namespace closure. Before it, writing
+/// `${veld.exit_code}` in an `on_stop` hook — which veld's own docs used to
+/// recommend — produced `VariableError::UnknownBuiltin` at *teardown* time, where
+/// `run_on_stop_hook` could only log a warning and skip the hook: the container
+/// never got removed and `veld stop` still reported success. Catching the name
+/// here turns a silent teardown skip into a refusal at `veld start`, before
+/// anything is running that would need tearing down.
+fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const RULE: &str = "unknown-builtin-var";
+
+    fn check(loc: &str, s: &str, out: &mut Vec<Finding>) {
+        for name in builtin_refs(s) {
+            if BUILTIN_VARS.contains(&name.as_str()) {
+                continue;
+            }
+            // Point at the namespace that almost certainly holds it: an author
+            // writing `${veld.DB_HOST}` means this node's output.
+            out.push(Finding::error(
+                RULE,
+                loc,
+                format!(
+                    "`${{veld.{name}}}` is not a built-in variable. `veld.*` is a closed set \
+                     ({}). If {name} is a node output, use `${{output.{name}}}` (this node) \
+                     or `${{nodes.<node>.{name}}}` (another node)",
+                    BUILTIN_VARS.join(", ")
+                ),
+            ));
+        }
+    }
+
+    fn check_cmd(loc: &str, spec: Option<CommandSpec>, out: &mut Vec<Finding>) {
+        match spec {
+            Some(CommandSpec::Argv(argv)) => {
+                for a in &argv {
+                    check(loc, a, out);
+                }
+            }
+            Some(CommandSpec::Shell(s)) => check(loc, &s, out),
+            None => {}
+        }
+    }
+
+    for (key, value) in config.env.iter().flatten() {
+        check(&format!("env.{key}"), value, out);
+    }
+    for (node_name, node) in &config.nodes {
+        for (key, value) in node.env.iter().flatten() {
+            check(&format!("nodes.{node_name}.env.{key}"), value, out);
+        }
+        for (variant_name, variant) in &node.variants {
+            let base = format!("nodes.{node_name}.variants.{variant_name}");
+            check_cmd(&base, variant.cmd.spec(), out);
+            check_cmd(&format!("{base}.on_stop"), variant.on_stop.clone(), out);
+            check_cmd(&format!("{base}.skip_if"), variant.skip_if.clone(), out);
+            for (key, value) in variant.env.iter().flatten() {
+                check(&format!("{base}.env.{key}"), value, out);
+            }
+        }
+    }
+}
+
+/// Every `${veld.<name>}` reference in `s`, in order of appearance.
+fn builtin_refs(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${veld.") {
+        let after = &rest[start + "${veld.".len()..];
+        match after.find('}') {
+            // An unclosed `${` is a different problem; interpolation reports it.
+            None => break,
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out
 }
 
 /// Every place that runs something must declare **exactly one** of `argv` /
@@ -2163,6 +2318,75 @@ mod tests {
         assert!(validate(&config).is_empty());
     }
 
+    /// The guard for F0.2's namespace closure.
+    ///
+    /// `${veld.exit_code}` in an `on_stop` hook is the case that made this
+    /// necessary: veld's own docs used to recommend it, and after the closure it
+    /// resolved to nothing — `run_on_stop_hook` could only log and skip the hook,
+    /// so the container never got removed while `veld stop` reported success.
+    /// Catching the *name* here turns a silent teardown skip into a refusal at
+    /// `veld start`, before anything exists that would need tearing down.
+    #[test]
+    fn unknown_builtin_var_is_error_and_names_the_replacement() {
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "2",
+                "name": "t",
+                "nodes": { "db": { "variants": { "dev": {
+                    "type": "command",
+                    "shell": "true",
+                    "outputs": ["CONTAINER"],
+                    "on_stop": "docker rm -f ${veld.CONTAINER}-${veld.exit_code}"
+                }}}}
+            }"#,
+        )
+        .unwrap();
+
+        let findings = validate(&config);
+        let hits: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "unknown-builtin-var")
+            .collect();
+        assert_eq!(hits.len(), 2, "both bad names: {findings:?}");
+        assert!(hits.iter().all(|f| f.severity == Severity::Error));
+        assert!(
+            hits.iter()
+                .all(|f| f.location == "nodes.db.variants.dev.on_stop"),
+            "{hits:?}"
+        );
+        // The message has to say what to write instead, or the author is stuck.
+        let msg = &hits[0].message;
+        assert!(msg.contains("${output."), "{msg}");
+        assert!(msg.contains("${nodes.<node>."), "{msg}");
+    }
+
+    /// Every real builtin passes the same rule — otherwise it would reject the
+    /// configs it is meant to protect.
+    #[test]
+    fn all_builtin_vars_are_accepted() {
+        let refs: String = BUILTIN_VARS
+            .iter()
+            .map(|n| format!("${{veld.{n}}} "))
+            .collect();
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "2",
+                "name": "t",
+                "nodes": {{ "a": {{ "variants": {{ "dev": {{
+                    "type": "start_server",
+                    "shell": "echo {}"
+                }}}}}}}}
+            }}"#,
+            refs.trim()
+        ))
+        .unwrap();
+        let findings = validate(&config);
+        assert!(
+            !findings.iter().any(|f| f.rule == "unknown-builtin-var"),
+            "{findings:?}"
+        );
+    }
+
     // -- F1: JSONC -------------------------------------------------------------
 
     /// A commented, trailing-comma'd config loads, and a syntax error *after* the
@@ -2215,29 +2439,54 @@ mod tests {
         );
     }
 
+    /// A duplicate key is an error (F1) — but a *validation* error, not a load
+    /// error (F0.1).
+    ///
+    /// Two nodes with the same name is the case that matters: `nodes` is a map, so
+    /// `serde_json` silently keeps the last and one whole node vanishes with no
+    /// diagnostic. (A duplicated *struct field* like two `variants` blocks is
+    /// already a parse error from `serde_derive`; that is pre-existing and
+    /// unchanged.)
+    ///
+    /// It must not fail the load, because the loader runs on `veld stop`, which
+    /// reads `on_stop` from the on-disk config: failing here would mean teardown
+    /// never runs and containers leak. The document is still perfectly
+    /// interpretable — last-wins is deterministic — so `stop` proceeds on that
+    /// reading while `start` and `lint` refuse.
     #[test]
-    fn duplicate_key_within_file_is_error() {
+    fn duplicate_key_within_file_is_validation_error_not_load_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("veld.json");
-        // Two `variants` blocks: serde_json would silently keep the last, so
-        // the `dev` variant would vanish with no diagnostic.
         std::fs::write(
             &path,
             r#"{
                 "schemaVersion": "2",
                 "name": "dup",
-                "nodes": { "api": {
-                    "variants": { "dev": { "type": "command", "command": "a" } },
-                    "variants": { "ci":  { "type": "command", "command": "b" } }
-                }}
+                "nodes": {
+                    "api": { "variants": { "dev": { "type": "command", "shell": "first" } } },
+                    "api": { "variants": { "dev": { "type": "command", "shell": "second" } } }
+                }
             }"#,
         )
         .unwrap();
-        let err = parse_config(&path).unwrap_err();
-        assert!(
-            err.to_string().contains("duplicate key \"variants\""),
-            "{err}"
+
+        // Loads — so `stop` / `status` / `logs` and the daemon monitor keep working.
+        let config = parse_config(&path).expect("a duplicate key must not fail the load");
+        assert_eq!(
+            config.nodes["api"].variants["dev"].cmd.shell.as_deref(),
+            Some("second"),
+            "serde_json's last-wins reading is what the rest of veld sees"
         );
+
+        // …and is still an error, on the paths that can afford to refuse.
+        let findings = validate(&config);
+        let dup = findings
+            .iter()
+            .find(|f| f.rule == "duplicate-key")
+            .unwrap_or_else(|| panic!("expected a duplicate-key finding, got {findings:?}"));
+        assert_eq!(dup.severity, Severity::Error);
+        assert!(dup.message.contains("duplicate key \"api\""), "{dup:?}");
+        assert!(error_summary(&findings).is_some());
     }
 
     #[test]

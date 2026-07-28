@@ -560,6 +560,7 @@ mod tests {
             sharing: None,
             setup: None,
             teardown: None,
+            deferred_findings: Vec::new(),
             nodes: HashMap::from([
                 (
                     "db".into(),

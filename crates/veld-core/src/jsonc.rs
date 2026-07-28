@@ -7,11 +7,16 @@
 //! line numbers, and columns of everything that remains are unchanged, so
 //! `serde_json::Error::line()` / `column()` still point at the real position in
 //! the file the user is editing. That is the whole reason not to reach for a CST
-//! or a span map: there is no comment-preserving writer to feed, because nothing
-//! in veld writes `veld.json`.
+//! or a span map: nothing veld does today *rewrites* an existing `veld.json`, so
+//! there is no comment-preserving writer to feed. (`veld init` writes one, but
+//! only when none exists.) The one planned exception is `veld config --migrate
+//! --write`, which MUST NOT round-trip through `serde` — that would silently
+//! delete every comment this module exists to allow.
 //!
-//! There is no `.jsonc` extension requirement — every veld config file accepts
-//! comments, whatever it is called.
+//! There is no `.jsonc` extension requirement: the file is always `veld.json` and
+//! it accepts comments as it is. Note that editors do not know that — a
+//! `veld.json` carrying a `$schema` is validated by their strict JSON parser, so
+//! a `files.associations` mapping to `jsonc` is needed to stop the red squiggles.
 //!
 //! [`reject_duplicate_keys`] closes the other half of the hole: `serde_json` is
 //! silently last-wins, so a config with two `variants` blocks (or two nodes of
@@ -190,12 +195,17 @@ impl<'de> Visitor<'de> for NoDupVisitor {
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
         let mut seen: HashSet<String> = HashSet::new();
         while let Some(key) = map.next_key::<String>()? {
-            map.next_value::<NoDupKeys>()?;
+            // Error BEFORE consuming the value: serde's reported position is
+            // wherever the parser currently sits, so recursing first would point
+            // at the object's closing brace — hundreds of lines from the
+            // duplicate in a large `nodes` block, which defeats the whole
+            // blank-don't-delete premise of this module.
             if !seen.insert(key.clone()) {
                 return Err(de::Error::custom(format!(
                     "duplicate key \"{key}\" — the later value would silently win"
                 )));
             }
+            map.next_value::<NoDupKeys>()?;
         }
         Ok(NoDupKeys)
     }
@@ -220,14 +230,11 @@ impl<'de> Visitor<'de> for NoDupVisitor {
     fn visit_str<E>(self, _: &str) -> Result<Self::Value, E> {
         Ok(NoDupKeys)
     }
-    fn visit_none<E>(self) -> Result<Self::Value, E> {
-        Ok(NoDupKeys)
-    }
+    // `visit_unit` is what serde_json's `deserialize_any` calls for `null`.
+    // `visit_none`/`visit_some` are deliberately absent: they belong to
+    // `deserialize_option`, which this type never goes through.
     fn visit_unit<E>(self) -> Result<Self::Value, E> {
         Ok(NoDupKeys)
-    }
-    fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
-        Deserialize::deserialize(d)
     }
 }
 
