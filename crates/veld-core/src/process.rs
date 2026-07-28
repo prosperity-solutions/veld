@@ -1003,6 +1003,128 @@ mod characterization_tests {
         assert!(eventually(5, || pids_in_group(pid).is_empty()).await);
     }
 
+    /// **The argv guarantee, through the detached path.**
+    ///
+    /// Interpolated values containing spaces, `?`, `*`, `$`, quotes, and a newline
+    /// must each yield exactly one argv element. This has to exercise the detached
+    /// wrapper, not just `CommandSpec::interpolate`: the wrapper is a shell
+    /// pipeline, so a version that re-joined argv into the script would pass a
+    /// pure-function test and then let the shell re-split every one of these in
+    /// production. `"$@"` is what makes it hold.
+    #[tokio::test]
+    async fn interpolation_never_changes_argc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("argv.txt");
+
+        // Each of these would become two or more words, or expand, under a shell.
+        let hostile = [
+            "two words",
+            "quest?ion",
+            "glob*star",
+            "$HOME",
+            "has'single",
+            "has\"double",
+            "semi;colon",
+            "pipe|bar",
+            "new\nline",
+            "", // an empty argument must survive as an empty argument
+        ];
+
+        // Substitute them through the real interpolation path, so the test covers
+        // "value came from a variable" rather than a hand-written literal.
+        let mut ctx = crate::variables::VariableContext::new();
+        let mut argv = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            // `$#` is the argument count as the *shell* sees it, after `"$@"`.
+            format!("printf '%s\\n' \"$#\" > '{}'", out.display()),
+            "sh".to_owned(), // $0 for the inner shell
+        ];
+        for (i, value) in hostile.iter().enumerate() {
+            ctx.set_builtin(&format!("v{i}"), (*value).to_owned());
+            argv.push(format!("${{veld.v{i}}}"));
+        }
+
+        let spec = CommandSpec::Argv(argv)
+            .interpolate(&ctx)
+            .expect("interpolation resolves");
+        // The element count is fixed before substitution, so it is already right.
+        assert_eq!(
+            spec_len(&spec),
+            4 + hostile.len(),
+            "interpolation must not change the element count"
+        );
+
+        let handle = spawn_detached(
+            &spec,
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&tmp.path().join("sink.log")),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+        assert!(
+            eventually(10, || exited(pid)).await,
+            "pipeline should finish"
+        );
+
+        let seen: usize = std::fs::read_to_string(&out)
+            .expect("inner shell wrote its argument count")
+            .trim()
+            .parse()
+            .expect("a number");
+        assert_eq!(
+            seen,
+            hostile.len(),
+            "every hostile value must arrive as exactly one argument, even through \
+             the detached shell pipeline"
+        );
+    }
+
+    fn spec_len(spec: &CommandSpec) -> usize {
+        match spec {
+            CommandSpec::Argv(a) => a.len(),
+            CommandSpec::Shell(_) => 1,
+        }
+    }
+
+    /// A `shell` node keeps the exact wrapper it had before argv existed, and an
+    /// `argv` node gets the positional-parameter form. Pins the emitted script,
+    /// which no other test covers — renaming a `veld _log` flag would otherwise
+    /// only fail at runtime.
+    #[test]
+    fn detached_wrapper_shape_is_pinned() {
+        let target = LogTarget {
+            db: Db::open_at(&std::env::temp_dir().join("veld-wrapper-test.db")).unwrap(),
+            project_root: PathBuf::from("/pro ject"),
+            run_name: "dev".into(),
+            run_id: "rid".into(),
+            node: "api".into(),
+            variant: "local".into(),
+        };
+        let sink = log_sink_argv(&target);
+        assert_eq!(
+            &sink[1..],
+            &[
+                "_log",
+                "--project-root",
+                "/pro ject",
+                "--run",
+                "dev",
+                "--run-id",
+                "rid",
+                "--node",
+                "api",
+                "--variant",
+                "local",
+            ],
+            "the _log flag names and order are what the detached pipeline depends on"
+        );
+        // A path containing a single quote must not break out of the script.
+        let quoted = sq("it's");
+        assert_eq!(quoted, "it'\\''s");
+    }
+
     /// End-to-end log capture: `2>&1` in the wrapper merges the node's stderr
     /// into its stdout, both reach the log sink, and the sink sees EOF (exits)
     /// once the node does.

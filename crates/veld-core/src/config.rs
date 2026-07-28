@@ -27,8 +27,20 @@ pub enum ConfigError {
     #[error("unsupported schema version \"{0}\" — run `veld update` to get the latest version")]
     UnsupportedSchemaVersion(String),
 
-    #[error("failed to parse veld.json at {path}: {detail}")]
+    #[error("invalid JSONC in {path}: {detail}")]
     Jsonc { path: PathBuf, detail: String },
+
+    #[error(
+        "{path} declares schemaVersion \"3\", where `command` has been replaced by \
+         `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). \
+         Found the old form at: {}. Run `veld config --migrate` to convert this file \
+         (dry-run by default; `--write` to apply).",
+        locations.join(", ")
+    )]
+    LegacyCommandInV3 {
+        path: PathBuf,
+        locations: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -1555,13 +1567,73 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     })?;
     let config = parse_config_str(&contents, path)?;
 
-    if config.schema_version != "1" && config.schema_version != "2" {
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&config.schema_version.as_str()) {
         return Err(ConfigError::UnsupportedSchemaVersion(
             config.schema_version.clone(),
         ));
     }
 
     Ok(config)
+}
+
+/// Schema versions this build can load. `"1"` and `"2"` keep today's semantics
+/// forever — there is no flag day.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["1", "2", "3"];
+
+/// In a `schemaVersion: "3"` document, `command` is gone: every place that runs
+/// something says `argv` or `shell`.
+///
+/// This is a **structural** rule, not a semantic one — it is about which keys the
+/// document may use for the version it declares, in the same class as a wrong
+/// field type — so it belongs in the loader. That does mean a v3 document using
+/// `command` fails `veld stop` too; the mitigation is that no such document has
+/// ever run, because it cannot start either. A v1/v2 document is untouched.
+///
+/// Walking the raw value rather than the typed model catches every position at
+/// once (variants, probes, actions, setup/teardown steps, value sources) without
+/// enumerating them, and cannot drift as positions are added: no v3 schema
+/// position uses the key at all.
+fn reject_v3_legacy_commands(value: &serde_json::Value, path: &Path) -> Result<(), ConfigError> {
+    fn walk(v: &serde_json::Value, at: &str, found: &mut Vec<String>) {
+        match v {
+            serde_json::Value::Object(map) => {
+                for (key, child) in map {
+                    let here = if at.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{at}.{key}")
+                    };
+                    if key == "command" {
+                        found.push(here.clone());
+                    }
+                    // `on_stop` / `skip_if` took a bare shell string in v1/v2;
+                    // in v3 they carry an { argv | shell } object like everything
+                    // else.
+                    if (key == "on_stop" || key == "skip_if") && child.is_string() {
+                        found.push(here.clone());
+                    }
+                    walk(child, &here, found);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for (i, child) in items.iter().enumerate() {
+                    walk(child, &format!("{at}[{i}]"), found);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut found = Vec::new();
+    walk(value, "", &mut found);
+    if found.is_empty() {
+        return Ok(());
+    }
+    found.sort();
+    Err(ConfigError::LegacyCommandInV3 {
+        path: path.to_path_buf(),
+        locations: found,
+    })
 }
 
 /// Parse one config document from its text. Accepts JSONC (comments, trailing
@@ -1578,8 +1650,19 @@ pub fn parse_config_str(contents: &str, path: &Path) -> Result<VeldConfig, Confi
         detail: e.to_string(),
     })?;
 
-    let mut config: VeldConfig =
+    // Read once as a generic value so the v3 key gate can inspect the document as
+    // written, before the typed model erases which spelling was used.
+    let value: serde_json::Value =
         serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+    if value.get("schemaVersion").and_then(|v| v.as_str()) == Some("3") {
+        reject_v3_legacy_commands(&value, path)?;
+    }
+
+    let mut config: VeldConfig =
+        serde_json::from_value(value).map_err(|e| ConfigError::ParseError {
             path: path.to_path_buf(),
             source: e,
         })?;
@@ -2385,6 +2468,120 @@ mod tests {
             !findings.iter().any(|f| f.rule == "unknown-builtin-var"),
             "{findings:?}"
         );
+    }
+
+    // -- F5: the v3 command gate ----------------------------------------------
+
+    /// A v3 document containing `command` fails to load, and the message names
+    /// `veld config --migrate`.
+    #[test]
+    fn v3_rejects_legacy_command_and_names_migrate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schemaVersion": "3",
+                "name": "t",
+                "setup": [ { "name": "s", "command": "echo setup" } ],
+                "nodes": { "api": { "variants": { "dev": {
+                    "type": "start_server",
+                    "command": "pnpm dev",
+                    "on_stop": "docker rm -f x"
+                }}}}
+            }"#,
+        )
+        .unwrap();
+
+        let err = parse_config(&path).unwrap_err();
+        let ConfigError::LegacyCommandInV3 { locations, .. } = &err else {
+            panic!("expected LegacyCommandInV3, got {err:?}");
+        };
+        // Every offending position is named, so a large config can be fixed in
+        // one pass rather than one error at a time.
+        assert_eq!(
+            locations,
+            &[
+                "nodes.api.variants.dev.command".to_owned(),
+                // A bare-string `on_stop` is the v1/v2 form too.
+                "nodes.api.variants.dev.on_stop".to_owned(),
+                "setup[0].command".to_owned(),
+            ]
+        );
+        let msg = err.to_string();
+        assert!(msg.contains("veld config --migrate"), "{msg}");
+        assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
+    }
+
+    /// The same document in v3 form loads, and v1/v2 documents keep loading with
+    /// `command` — there is no flag day.
+    #[test]
+    fn v3_accepts_argv_and_shell_while_v1_v2_keep_command() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let v3 = dir.path().join("v3.json");
+        std::fs::write(
+            &v3,
+            r#"{
+                "schemaVersion": "3",
+                "name": "t",
+                "setup": [ { "name": "s", "argv": ["echo", "setup"] } ],
+                "nodes": { "api": { "variants": { "dev": {
+                    "type": "start_server",
+                    "argv": ["pnpm", "dev"],
+                    "on_stop": { "shell": "docker rm -f x" }
+                }}}}
+            }"#,
+        )
+        .unwrap();
+        let cfg = parse_config(&v3).expect("v3 argv/shell must load");
+        assert_eq!(
+            cfg.nodes["api"].variants["dev"].cmd.spec(),
+            Some(CommandSpec::Argv(vec!["pnpm".into(), "dev".into()]))
+        );
+        assert_eq!(
+            cfg.nodes["api"].variants["dev"].on_stop,
+            Some(CommandSpec::Shell("docker rm -f x".into()))
+        );
+        assert!(!validate(&cfg).iter().any(|f| f.severity == Severity::Error));
+
+        for version in ["1", "2"] {
+            let p = dir.path().join(format!("v{version}.json"));
+            std::fs::write(
+                &p,
+                format!(
+                    r#"{{
+                        "schemaVersion": "{version}",
+                        "name": "t",
+                        "nodes": {{ "api": {{ "variants": {{ "dev": {{
+                            "type": "start_server",
+                            "command": "pnpm dev",
+                            "on_stop": "docker rm -f x"
+                        }}}}}}}}
+                    }}"#
+                ),
+            )
+            .unwrap();
+            let cfg = parse_config(&p)
+                .unwrap_or_else(|e| panic!("v{version} must keep loading unchanged: {e}"));
+            // Both legacy spellings resolve to the same shell command they always
+            // ran, with no new warning.
+            assert_eq!(
+                cfg.nodes["api"].variants["dev"].cmd.spec(),
+                Some(CommandSpec::Shell("pnpm dev".into())),
+                "v{version}"
+            );
+            assert_eq!(
+                cfg.nodes["api"].variants["dev"].on_stop,
+                Some(CommandSpec::Shell("docker rm -f x".into())),
+                "v{version}"
+            );
+            assert!(
+                validate(&cfg).is_empty(),
+                "v{version} must produce no findings: {:?}",
+                validate(&cfg)
+            );
+        }
     }
 
     // -- F1: JSONC -------------------------------------------------------------
