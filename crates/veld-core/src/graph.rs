@@ -33,8 +33,35 @@ pub type ExecutionPlan = Vec<Stage>;
 
 #[derive(Debug, Error)]
 pub enum GraphError {
-    #[error("unknown node \"{0}\"")]
-    UnknownNode(String),
+    /// Under `include` globs, "unknown node" has four distinct causes: never
+    /// defined, defined but not matched by a glob, its file renamed out of a glob,
+    /// or its file present but unparseable. A bare name cannot tell them apart, so
+    /// the error carries what the reader needs to: the nodes that *do* exist, and
+    /// a pointer at `veld config --files` for the glob→file→node chain.
+    #[error(
+        "unknown node \"{name}\"{}{}",
+        if known.is_empty() {
+            "\n  No nodes are defined at all.".to_owned()
+        } else {
+            format!("\n  Defined nodes: {}", known.join(", "))
+        },
+        if *split {
+            "\n  This project's config is split across files — run \
+             `veld config --files` to see which glob matched which file, and which \
+             nodes each defines. A node can go missing because its file was renamed \
+             out of an `include` glob."
+                .to_owned()
+        } else {
+            String::new()
+        }
+    )]
+    UnknownNode {
+        name: String,
+        /// Every defined node name, sorted.
+        known: Vec<String>,
+        /// Whether the config uses `include`, which changes what the likely cause is.
+        split: bool,
+    },
 
     #[error("node \"{node}\" has no variant \"{variant}\"")]
     UnknownVariant { node: String, variant: String },
@@ -70,6 +97,19 @@ pub enum GraphError {
 // Parsing selection strings
 // ---------------------------------------------------------------------------
 
+/// Build an [`GraphError::UnknownNode`] carrying enough context to diagnose it.
+fn unknown_node(name: &str, config: &VeldConfig) -> GraphError {
+    let mut known: Vec<String> = config.nodes.keys().cloned().collect();
+    known.sort();
+    GraphError::UnknownNode {
+        name: name.to_owned(),
+        known,
+        // `include` is only recorded on the loaded document, so infer from whether
+        // the caller kept the file list; absent that, assume single-file.
+        split: config.loaded_from_multiple_files,
+    }
+}
+
 /// Parse a `"node:variant"` selection string.
 pub fn parse_selection(s: &str) -> Result<NodeSelection, GraphError> {
     if let Some((node, variant)) = s.split_once(':') {
@@ -97,7 +137,7 @@ pub fn resolve_selections(
             let node_cfg = config
                 .nodes
                 .get(&sel.node)
-                .ok_or_else(|| GraphError::UnknownNode(sel.node.clone()))?;
+                .ok_or_else(|| unknown_node(&sel.node, config))?;
 
             let variant = if sel.variant.is_empty() {
                 node_cfg
@@ -202,7 +242,7 @@ fn collect_all_nodes(
         let node_cfg = config
             .nodes
             .get(&sel.node)
-            .ok_or_else(|| GraphError::UnknownNode(sel.node.clone()))?;
+            .ok_or_else(|| unknown_node(&sel.node, config))?;
         if !node_cfg.variants.contains_key(&sel.variant) {
             return Err(GraphError::UnknownVariant {
                 node: sel.node.clone(),
@@ -219,7 +259,7 @@ fn collect_all_nodes(
                 let dep_node_cfg = config
                     .nodes
                     .get(dep_node)
-                    .ok_or_else(|| GraphError::UnknownNode(dep_node.clone()))?;
+                    .ok_or_else(|| unknown_node(dep_node, config))?;
                 if !dep_node_cfg.variants.contains_key(dep_variant) {
                     return Err(GraphError::UnknownVariant {
                         node: dep_node.clone(),
@@ -576,6 +616,9 @@ mod tests {
             setup: None,
             teardown: None,
             vars: None,
+            hooks: None,
+            ui: None,
+            loaded_from_multiple_files: false,
             deferred_findings: Vec::new(),
             nodes: HashMap::from([
                 (

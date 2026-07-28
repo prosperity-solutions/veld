@@ -2,9 +2,36 @@ use crate::output;
 
 /// `veld nodes [--json]`
 pub async fn run(json: bool) -> i32 {
-    let Some((_config_path, config)) = super::parse_config(json) else {
+    let Some((config_path, _)) = super::parse_config(json) else {
         return 1;
     };
+    // Re-load with provenance: under `include` globs, "which file is this node in"
+    // is the first question anyone asks, and a name alone cannot answer it.
+    let loaded = match veld_core::config::parse_config_with_files(&config_path) {
+        Ok(l) => l,
+        Err(e) => {
+            output::print_error(&format!("Failed to load config: {e}"), json);
+            return 1;
+        }
+    };
+    let config = &loaded.config;
+    // node name -> "file:line"
+    let defined_in: std::collections::HashMap<&str, String> = loaded
+        .files
+        .iter()
+        .flat_map(|f| {
+            f.nodes.iter().map(move |(name, line)| {
+                (
+                    name.as_str(),
+                    if *line > 0 {
+                        format!("{}:{line}", f.relative.display())
+                    } else {
+                        f.relative.display().to_string()
+                    },
+                )
+            })
+        })
+        .collect();
 
     // Filter out hidden nodes.
     let visible_nodes: Vec<(&String, &veld_core::config::NodeConfig)> = config
@@ -23,6 +50,7 @@ pub async fn run(json: bool) -> i32 {
                     "name": name,
                     "variants": variants,
                     "default_variant": node_cfg.default_variant,
+                    "defined_in": defined_in.get(name.as_str()),
                 })
             })
             .collect();
@@ -48,9 +76,10 @@ pub async fn run(json: bool) -> i32 {
                     .collect::<Vec<_>>()
                     .join(", "),
                 node_cfg.default_variant.clone().unwrap_or_default(),
+                defined_in.get(name.as_str()).cloned().unwrap_or_default(),
             ]);
         }
-        output::print_table(&["NODE", "VARIANTS", "DEFAULT"], &rows);
+        output::print_table(&["NODE", "VARIANTS", "DEFAULT", "DEFINED IN"], &rows);
     }
 
     0

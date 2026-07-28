@@ -258,6 +258,11 @@ enum Command {
         #[arg(long)]
         path: bool,
 
+        /// List each include glob, the files it matched, and the nodes each
+        /// defines. The fastest way to find out why a node seems missing.
+        #[arg(long)]
+        files: bool,
+
         /// Explain one effective value and where it was defined, e.g.
         /// `nodes.api.variants.dev.env.DATABASE_URL`. A value declared `secret`
         /// is described, never printed.
@@ -646,7 +651,12 @@ async fn main() {
 
         Command::Presets { json } => commands::presets::run(json).await,
 
-        Command::Config { path, why, json } => commands::config::run(path, why, json).await,
+        Command::Config {
+            path,
+            files,
+            why,
+            json,
+        } => commands::config::run(path, files, why, json).await,
 
         Command::Lint { json } => commands::lint::run(json).await,
 

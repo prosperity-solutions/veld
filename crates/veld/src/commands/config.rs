@@ -6,7 +6,7 @@ use crate::output;
 ///
 /// Print the resolved veld.json contents. With `--path`, print only the file
 /// path. With `--why`, print one effective value and where it came from.
-pub async fn run(path_only: bool, why: Option<String>, json: bool) -> i32 {
+pub async fn run(path_only: bool, files: bool, why: Option<String>, json: bool) -> i32 {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -26,6 +26,16 @@ pub async fn run(path_only: bool, why: Option<String>, json: bool) -> i32 {
     if path_only {
         println!("{}", config_path.display());
         return 0;
+    }
+
+    if files {
+        return match config::parse_config_with_files(&config_path) {
+            Ok(loaded) => list_files(&loaded, json),
+            Err(e) => {
+                output::print_error(&format!("{e}"), json);
+                1
+            }
+        };
     }
 
     if let Some(pointer) = why {
@@ -167,5 +177,101 @@ fn explain(config: &VeldConfig, pointer: &str, json: bool) -> i32 {
             );
         }
     }
+    0
+}
+
+/// `veld config --files`
+///
+/// Lists each include glob, the files it matched, and the nodes each defines.
+///
+/// This is the answer to the four different causes of "unknown node" once a config
+/// is split: never defined, defined but not matched by a glob, file renamed out of
+/// a glob, or file present but unparseable. Seeing the glob→file→node chain tells
+/// them apart immediately; a node name on its own never can.
+fn list_files(loaded: &veld_core::include::LoadedConfig, json: bool) -> i32 {
+    if json {
+        let globs: Vec<serde_json::Value> = loaded
+            .globs
+            .iter()
+            .map(|glob| {
+                let matched: Vec<serde_json::Value> = loaded
+                    .files
+                    .iter()
+                    .filter(|f| f.matched_by.as_deref() == Some(glob.as_str()))
+                    .map(|f| {
+                        serde_json::json!({
+                            "file": f.relative,
+                            "nodes": f.nodes.keys().collect::<Vec<_>>(),
+                        })
+                    })
+                    .collect();
+                serde_json::json!({ "glob": glob, "matched": matched })
+            })
+            .collect();
+        let root = loaded.files.first();
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "root": root.map(|f| &f.relative),
+                "root_nodes": root.map(|f| f.nodes.keys().collect::<Vec<_>>()),
+                "config_hash": loaded.config_hash,
+                "include": globs,
+            }))
+            .unwrap()
+        );
+        return 0;
+    }
+
+    let describe = |f: &veld_core::include::LoadedFile| {
+        if f.nodes.is_empty() {
+            output::dim("(no nodes)")
+        } else {
+            f.nodes
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    };
+
+    if let Some(root) = loaded.files.first() {
+        println!("{} {}", output::bold("root:"), root.relative.display());
+        println!("      {}", describe(root));
+    }
+
+    if loaded.globs.is_empty() {
+        println!();
+        println!(
+            "{}",
+            output::dim("No `include` globs — this project is a single config file.")
+        );
+        return 0;
+    }
+
+    for glob in &loaded.globs {
+        println!();
+        println!("{} {}", output::bold("include:"), glob);
+        let matched: Vec<&veld_core::include::LoadedFile> = loaded
+            .files
+            .iter()
+            .filter(|f| f.matched_by.as_deref() == Some(glob.as_str()))
+            .collect();
+        if matched.is_empty() {
+            // The likeliest cause of a "missing" node: the glob matches nothing,
+            // usually because a directory was renamed.
+            println!("  {}", output::yellow("matched no files"));
+            continue;
+        }
+        for f in matched {
+            println!("  {}", f.relative.display());
+            println!("      {}", describe(f));
+        }
+    }
+    println!();
+    println!(
+        "{} {}",
+        output::dim("config hash:"),
+        output::dim(&loaded.config_hash[..12])
+    );
     0
 }

@@ -202,8 +202,28 @@ mod tests {
     use super::*;
     use std::net::TcpListener;
 
+    /// Serializes the tests that bind real ports.
+    ///
+    /// `cargo test` runs a crate's tests in one process on many threads, and every
+    /// `PortAllocator::new()` scans the same range from the same start. Two tests
+    /// running concurrently therefore race for the same port number — most visibly
+    /// in the window between `reservation.release()` and re-binding to prove the
+    /// port is free, where a sibling test can legitimately take it first. That is a
+    /// test-harness artefact, not a bug in the allocator, so the tests take a lock
+    /// rather than the allocator growing a global.
+    static PORT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Take the port lock, recovering from a poisoned mutex so one failing test
+    /// does not cascade into every other port test failing too.
+    fn port_guard() -> std::sync::MutexGuard<'static, ()> {
+        PORT_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     #[test]
     fn test_available_port_is_detected() {
+        let _guard = port_guard();
         // Port 0 lets the OS pick a free port; use it to find one that's free.
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -214,6 +234,7 @@ mod tests {
 
     #[test]
     fn test_occupied_port_is_detected() {
+        let _guard = port_guard();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         // Port is still held — should NOT be available.
@@ -223,6 +244,7 @@ mod tests {
 
     #[test]
     fn test_wildcard_occupied_port_is_detected() {
+        let _guard = port_guard();
         let listener = TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], 0))).unwrap();
         let port = listener.local_addr().unwrap().port();
         // Wildcard binding occupies the port on all interfaces.
@@ -232,6 +254,7 @@ mod tests {
 
     #[test]
     fn test_allocator_skips_occupied_ports() {
+        let _guard = port_guard();
         // Find the first port the allocator would pick, then occupy it.
         let allocator = PortAllocator::new();
         let first_reservation = allocator.allocate().unwrap();
@@ -247,8 +270,47 @@ mod tests {
         drop(listener);
     }
 
+    /// F6: an explicitly requested port is never substituted.
+    ///
+    /// `allocate` may pick any free port; `reserve_fixed` may not. A debugger or
+    /// client pointed at 9229 must reach the process that asked for 9229, so a
+    /// taken port is an error naming it rather than a silent move to 9230.
+    #[test]
+    fn test_reserve_fixed_refuses_to_substitute() {
+        let _guard = port_guard();
+
+        // Find a port that is genuinely free, then forget it: `allocate` records
+        // the port in the allocator's own set, and asking the *same* allocator for
+        // it again is legitimately "already in use".
+        let free_port = {
+            let scout = PortAllocator::new();
+            let reservation = scout.allocate().expect("a port is free");
+            reservation.release()
+        };
+
+        let allocator = PortAllocator::new();
+        let reservation = allocator
+            .reserve_fixed(free_port)
+            .expect("a free fixed port is reserved");
+        assert_eq!(reservation.port, free_port, "never a different port");
+        let taken = free_port;
+
+        // Asking again while it is held fails, naming the port.
+        let err = allocator.reserve_fixed(taken).unwrap_err();
+        assert!(matches!(err, PortError::AlreadyInUse(p) if p == taken));
+        assert!(
+            err.to_string().contains(&taken.to_string()),
+            "the message must name the port: {err}"
+        );
+        // …and suggests the alternative rather than just refusing.
+        assert!(err.to_string().contains("auto"), "{err}");
+
+        reservation.release();
+    }
+
     #[test]
     fn test_reservation_holds_port() {
+        let _guard = port_guard();
         let allocator = PortAllocator::new();
         let reservation = allocator.allocate().unwrap();
         let port = reservation.port;

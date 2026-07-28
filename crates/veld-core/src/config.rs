@@ -31,6 +31,40 @@ pub enum ConfigError {
     Jsonc { path: PathBuf, detail: String },
 
     #[error(
+        "{path} is the root config, so it must declare \"{key}\". Every other key is \
+         optional in every file — only the root file needs \"schemaVersion\" and \"name\""
+    )]
+    MissingRootKey { path: PathBuf, key: &'static str },
+
+    #[error(
+        "node \"{node}\" is defined in two files: {first} and {second}. A node is defined \
+         in exactly one file — there is deliberately no precedence rule to fall back on. \
+         Delete one, or rename it"
+    )]
+    DuplicateNode {
+        node: String,
+        first: String,
+        second: String,
+    },
+
+    #[error(
+        "{kind} \"{name}\" is defined in two files: {first} and {second}. Names are global \
+         — no shadowing, no file-local scope, no ordering dependency"
+    )]
+    DuplicateDefinition {
+        kind: &'static str,
+        name: String,
+        first: String,
+        second: String,
+    },
+
+    #[error(
+        "{path} declares \"include\", but only the root config may. Nested includes would \
+         make load order — and so error messages — depend on a graph nobody can see"
+    )]
+    NestedInclude { path: PathBuf },
+
+    #[error(
         "{path} declares schemaVersion \"3\", where `command` has been replaced by \
          `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). \
          Found the old form at: {}. Run `veld config --migrate` to convert this file \
@@ -208,6 +242,34 @@ pub struct VeldConfig {
 
     /// The dependency graph nodes.
     pub nodes: HashMap<String, NodeConfig>,
+
+    /// **Reserved.** Repo-declared lifecycle hooks, keyed by event
+    /// (`worktree.created`, `project.created`, `run.stopped`). Parsed into an
+    /// opaque value, stored, and **not executed by this version** — `veld lint`
+    /// says so.
+    ///
+    /// Reserved now so the desktop app's extension work does not later distort the
+    /// node model. Hooks are **not nodes**: they never join the dependency graph,
+    /// get no allocated port, and have no probes. If something needs readiness or
+    /// a port, it is a node. And they are **repo-declared only** — a hook may
+    /// never arrive from a fetched extension, because hooks run arbitrary code on
+    /// a developer machine and keeping them in reviewed repo files is what
+    /// preserves the no-remote-execution guarantee.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<serde_json::Value>,
+
+    /// **Reserved.** JSON-defined UI extensions for the desktop app and the IDE
+    /// view. Parsed, stored, not executed. See [`Self::hooks`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui: Option<serde_json::Value>,
+
+    /// Whether this config was assembled from more than one file.
+    ///
+    /// Only used to phrase diagnostics: "unknown node" has different likely causes
+    /// in a split config (a file renamed out of an `include` glob) than in a single
+    /// one (a typo), and the error should say the right thing.
+    #[serde(skip)]
+    pub loaded_from_multiple_files: bool,
 
     /// Problems found while *parsing* that must not fail the load.
     ///
@@ -722,7 +784,7 @@ pub struct SetupStep {
     pub failure_message: Option<String>,
 }
 
-fn default_url_template() -> String {
+pub(crate) fn default_url_template() -> String {
     "{service}.{run}.{project}.localhost".to_owned()
 }
 
@@ -2072,19 +2134,41 @@ pub fn discover_config(start: &Path) -> Result<PathBuf, ConfigError> {
 /// Semantic checks belong in [`validate`], which only `veld start`, `veld lint`,
 /// and the share flow call.
 pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
-    let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let config = parse_config_str(&contents, path)?;
+    parse_config_with_files(path).map(|loaded| loaded.config)
+}
 
-    if !SUPPORTED_SCHEMA_VERSIONS.contains(&config.schema_version.as_str()) {
-        return Err(ConfigError::UnsupportedSchemaVersion(
-            config.schema_version.clone(),
-        ));
+/// [`parse_config`], but keeping the per-file provenance: which files were loaded,
+/// which glob matched each, which nodes each defines, and the hash over all of
+/// them.
+///
+/// Callers that only need the effective config use [`parse_config`]. `veld nodes`,
+/// `veld config --files`, and the run snapshot need the provenance — under
+/// `include` globs, "unknown node" has four different causes (never defined,
+/// defined but not matched by a glob, file renamed out of a glob, file present but
+/// unparseable) and a bare name cannot tell them apart.
+pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConfig, ConfigError> {
+    let mut loaded = crate::include::load(path)?;
+
+    // Deferred (non-fatal) findings are collected per file — see
+    // `VeldConfig::deferred_findings` for why a duplicate key must not fail the
+    // load.
+    for file in &loaded.files {
+        if let Ok(text) = std::fs::read_to_string(&file.path) {
+            if let Ok(json) = crate::jsonc::strip(&text) {
+                if let Err(e) = crate::jsonc::reject_duplicate_keys(&json) {
+                    loaded.config.deferred_findings.push(Finding::error(
+                        "duplicate-key",
+                        file.relative.display().to_string(),
+                        format!(
+                            "{e}. serde_json keeps the last value, so one of the two is \
+                             being silently ignored"
+                        ),
+                    ));
+                }
+            }
+        }
     }
-
-    Ok(config)
+    Ok(loaded)
 }
 
 /// Schema versions this build can load. `"1"` and `"2"` keep today's semantics
@@ -2104,7 +2188,10 @@ pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["1", "2", "3"];
 /// once (variants, probes, actions, setup/teardown steps, value sources) without
 /// enumerating them, and cannot drift as positions are added: no v3 schema
 /// position uses the key at all.
-fn reject_v3_legacy_commands(value: &serde_json::Value, path: &Path) -> Result<(), ConfigError> {
+pub(crate) fn reject_v3_legacy_commands(
+    value: &serde_json::Value,
+    path: &Path,
+) -> Result<(), ConfigError> {
     fn walk(v: &serde_json::Value, at: &str, found: &mut Vec<String>) {
         match v {
             serde_json::Value::Object(map) => {
