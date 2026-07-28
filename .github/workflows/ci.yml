@@ -263,22 +263,26 @@ jobs:
             (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" lint)
           done
 
-      - name: Verify a v3 config round-trips through migrate
+      - name: Reject a v1/v2 config with the upgrade instructions
         run: |
           set -e
           work=$(mktemp -d)
-          cp testproject/veld.json "$work/veld.json"
+          # veld reads only schemaVersion 3, and the rejection message *is* the
+          # migration guide — there is no converter to fall back on, so a message
+          # that regresses leaves an upgrading user with nothing.
+          sed 's/"schemaVersion": "3"/"schemaVersion": "2"/' testproject/veld.json \
+            > "$work/veld.json"
           cd "$work"
-          # Dry run must not touch the file …
-          before=$(sha256sum veld.json | cut -d' ' -f1)
-          "$GITHUB_WORKSPACE/target/debug/veld" config --migrate > /dev/null
-          after=$(sha256sum veld.json | cut -d' ' -f1)
-          [ "$before" = "$after" ] || { echo "--migrate wrote without --write"; exit 1; }
-          # … and the written result must load and lint clean.
-          "$GITHUB_WORKSPACE/target/debug/veld" config --migrate --write > /dev/null
-          "$GITHUB_WORKSPACE/target/debug/veld" lint
-          grep -q '"schemaVersion": "3"' veld.json
-          echo "migrate round-trip verified."
+          out=$("$GITHUB_WORKSPACE/target/debug/veld" lint 2>&1) && {
+            echo "a schemaVersion 2 config must not load"; exit 1
+          }
+          echo "$out"
+          for needle in 'no longer supported' 'argv' 'shell' 'docs/migrating-to-v3.md' 'veld lint'; do
+            echo "$out" | grep -q -- "$needle" || {
+              echo "rejection message lost: $needle"; exit 1
+            }
+          done
+          echo "v2 rejection message verified."
 
       - name: Verify setup subcommands exist
         run: |
