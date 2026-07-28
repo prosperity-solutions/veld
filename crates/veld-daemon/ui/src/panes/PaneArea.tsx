@@ -2,9 +2,12 @@
  * The dock region of IDE mode: two tab hosts side by side with a draggable
  * split. See `model.ts` for why this replaced the fixed columns.
  *
- * Content types are added by extending `PaneKind` and `renderTab` below —
- * the embedded browser (#167 batch 3) and run diagnostics (batch 4) are meant
- * to land as tabs here rather than as new columns.
+ * The embedded browser (#167 batch 3) and run diagnostics (batch 4) are meant to
+ * land as tabs here rather than as new columns. Adding a content type touches
+ * exactly four places: `PANE_KINDS` in `model.ts` (which is also what validates
+ * a restored layout), the `active?.kind === …` branches in `DockView`'s body
+ * below, the `+` menu beside them, and — if it needs one — a label rule like
+ * `terminalLabel`.
  */
 
 import { ActionIcon, Menu } from "@mantine/core";
@@ -19,7 +22,10 @@ import {
 import { useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
+  DEFAULT_RATIO,
   type DockIndex,
+  MAX_RATIO,
+  MIN_RATIO,
   type PaneLayout,
   type PaneTab,
   SERVICES_TAB_ID,
@@ -49,6 +55,7 @@ const TAB_MIME = "application/x-veld-pane-tab";
 import {
   focusTerminal,
   mountTerminal,
+  reconnectTerminal,
   restartTerminal,
   subscribeTerminal,
   terminalStatus,
@@ -111,8 +118,28 @@ export function PaneArea(props: {
                 role="separator"
                 aria-orientation="vertical"
                 aria-label="Resize panes"
+                // Focusable with the aria-value triple, so `separator` is not
+                // advertising an affordance that only a mouse can reach — and so
+                // the `:focus-visible` style is reachable at all.
+                tabIndex={0}
+                aria-valuenow={Math.round(layout.ratio * 100)}
+                aria-valuemin={Math.round(MIN_RATIO * 100)}
+                aria-valuemax={Math.round(MAX_RATIO * 100)}
                 onPointerDown={onSplitterDown}
-                onDoubleClick={() => onLayout(setRatio(layout, 0.5))}
+                onDoubleClick={() => onLayout(setRatio(layout, DEFAULT_RATIO))}
+                onKeyDown={(e) => {
+                  const step = e.shiftKey ? 0.1 : 0.02;
+                  if (e.key === "ArrowLeft") {
+                    onLayout(setRatio(layout, layout.ratio - step));
+                  } else if (e.key === "ArrowRight") {
+                    onLayout(setRatio(layout, layout.ratio + step));
+                  } else if (e.key === "Home") {
+                    onLayout(setRatio(layout, DEFAULT_RATIO));
+                  } else {
+                    return;
+                  }
+                  e.preventDefault();
+                }}
               />
             )}
             <DockView
@@ -193,7 +220,11 @@ function DockView(props: {
 
   return (
     <section
-      className={`dock${layout.focused === index ? " focused" : ""}`}
+      // No focus class: which dock has the keyboard is styled with
+      // `.dock:focus-within` (styles.css), because `layout.focused` only records
+      // where the *next* tab would open, not where focus actually is. Hanging a
+      // focus style off a class driven by that field is the trap to avoid.
+      className="dock"
       style={{ width: props.width }}
       onFocus={() => onLayout(focusDock(layout, index))}
       aria-label={index === 0 ? "Primary pane" : "Secondary pane"}
@@ -420,6 +451,11 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
   const { state, detail } = terminalStatus(id);
   const dead = state === "ended" || state === "error";
   const restart = useCallback(() => restartTerminal(id), [id]);
+  const reconnect = useCallback(() => reconnectTerminal(id), [id]);
+  // `error` means the pipe broke, not that the shell did — the session very
+  // likely survives on the daemon (that is what the detach grace is for), so
+  // offer to reattach before offering to replace it.
+  const canReconnect = state === "error";
 
   return (
     <div className="term-pane">
@@ -432,7 +468,16 @@ function TerminalPane(props: { id: string; worktreeId: number; takeFocus: boolea
       {dead && (
         <div className="term-status">
           <span>{detail || "session ended"}</span>
-          <button className="btn" onClick={restart}>
+          {canReconnect && (
+            <button className="btn" onClick={reconnect} title="Reattach to the same shell">
+              Reconnect
+            </button>
+          )}
+          <button
+            className="btn"
+            onClick={restart}
+            title="End this shell and start a new one"
+          >
             Restart
           </button>
         </div>

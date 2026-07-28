@@ -29,6 +29,15 @@ mod desktop;
 #[path = "pty.rs"]
 mod pty;
 
+/// Hang up every live terminal session.
+///
+/// Re-exported for the daemon's shutdown path: terminal shells are our children
+/// but live in their own sessions, so a restart (`veld update` hard-restarts the
+/// daemon) would otherwise leave them running with nothing able to reattach.
+pub async fn shutdown_terminal_sessions() {
+    pty::shutdown_sessions().await;
+}
+
 // The feedback HTTP server listens on this instance's daemon port —
 // `veld_core::instance::daemon_port()` (19899 for the installed instance;
 // a dev instance overrides via VELD_DAEMON_PORT).

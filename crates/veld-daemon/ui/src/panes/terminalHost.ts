@@ -17,8 +17,27 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
+import { LAYOUT_STORAGE_KEY, parseLayouts, terminalIds } from "./model";
 
-export type TerminalState = "connecting" | "live" | "ended" | "error";
+/**
+ * Terminal ids this page expects to *resume*, captured once at module load.
+ *
+ * Read here rather than threaded down from the app so the knowledge lives beside
+ * the code that needs it. It answers a question the daemon's `resumed: false`
+ * cannot: was this a brand-new terminal, or one whose shell we expected to still
+ * be there? Without it, a daemon restart (`veld update`) silently replaces a
+ * running build with an empty prompt.
+ */
+const EXPECTED_RESUMES: Set<string> = (() => {
+  try {
+    const layouts = parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
+    return new Set(Object.values(layouts).flatMap(terminalIds));
+  } catch {
+    return new Set<string>();
+  }
+})();
+
+export type TerminalState = "absent" | "connecting" | "live" | "ended" | "error";
 
 interface Session {
   id: string;
@@ -158,25 +177,64 @@ function flash(s: Session, detail: string): void {
   }, TRANSIENT_MS);
 }
 
-/** Subscribe to a session's connection state. Returns an unsubscribe. */
+/**
+ * Listeners for sessions that don't exist yet.
+ *
+ * Subscribing before the session exists is the normal case for anything that
+ * works from the layout rather than from a mounted pane — a top-bar indicator,
+ * a status column. Returning a silent no-op for an unknown id (as this did)
+ * makes such a caller receive nothing, forever, with no error to notice.
+ */
+const pending = new Map<string, Set<() => void>>();
+
+/** Subscribe to a session's connection state. Returns an unsubscribe.
+ *
+ *  Safe to call before the session exists: the listener is held and attached
+ *  when it is created. */
 export function subscribeTerminal(id: string, fn: () => void): () => void {
   const s = sessions.get(id);
-  if (!s) return () => {};
-  s.listeners.add(fn);
+  if (s) {
+    s.listeners.add(fn);
+    return () => s.listeners.delete(fn);
+  }
+  const waiting = pending.get(id) ?? new Set();
+  waiting.add(fn);
+  pending.set(id, waiting);
   return () => {
-    s.listeners.delete(fn);
+    waiting.delete(fn);
+    if (waiting.size === 0) pending.delete(id);
+    sessions.get(id)?.listeners.delete(fn);
   };
 }
 
+/**
+ * A session's state, or `absent` when no shell has been started for this tab
+ * yet (nothing has mounted it).
+ *
+ * `absent` is distinct from `connecting` on purpose: reporting an unopened
+ * terminal as "connecting…" makes every not-yet-mounted tab look like it is
+ * hanging.
+ */
 export function terminalStatus(id: string): { state: TerminalState; detail: string } {
   const s = sessions.get(id);
-  return s ? { state: s.state, detail: s.detail } : { state: "connecting", detail: "" };
+  return s ? { state: s.state, detail: s.detail } : { state: "absent", detail: "" };
 }
 
 /** Create the session (idempotent) without touching the DOM. */
 function ensure(id: string, worktreeId: number): Session {
   const existing = sessions.get(id);
-  if (existing) return existing;
+  if (existing) {
+    // The daemon refuses a cross-worktree resume with a 409; mirror that here,
+    // because a stale or hand-edited sessionStorage holding one tab id under two
+    // worktrees would otherwise show worktree A's shell inside worktree B's pane
+    // with nothing said. Loud, since it means our own state is inconsistent.
+    if (existing.worktreeId !== worktreeId) {
+      throw new Error(
+        `terminal ${id} belongs to worktree ${existing.worktreeId}, not ${worktreeId}`,
+      );
+    }
+    return existing;
+  }
 
   const term = new Terminal({
     allowProposedApi: true,
@@ -189,6 +247,18 @@ function ensure(id: string, worktreeId: number): Session {
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+
+  // Let the command palette's second accelerator through to the app.
+  //
+  // xterm consumes the keys it handles (preventDefault + stopPropagation on its
+  // own textarea), so a focused terminal would otherwise swallow anything the
+  // app binds. Returning false here makes xterm ignore the event *before* it
+  // cancels, so it keeps propagating to the window listener in App.tsx.
+  // Ctrl/⌘+Shift+P specifically, and not Ctrl+K: that one is readline's
+  // kill-to-end-of-line and belongs to the shell.
+  term.attachCustomKeyEventHandler(
+    (e) => !(e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyP"),
+  );
 
   const container = document.createElement("div");
   container.className = "term-host";
@@ -211,6 +281,12 @@ function ensure(id: string, worktreeId: number): Session {
     listeners: new Set(),
   };
   sessions.set(id, s);
+  // Adopt anything that subscribed before this session existed.
+  const waiting = pending.get(id);
+  if (waiting) {
+    for (const fn of waiting) s.listeners.add(fn);
+    pending.delete(id);
+  }
 
   /** Whether the terminal may send right now. */
   const canSend = () => s.ws?.readyState === WebSocket.OPEN && !s.replaying;
@@ -258,7 +334,15 @@ async function connect(s: Session): Promise<void> {
   try {
     // The tab id *is* the daemon session id, so this reattaches to a surviving
     // shell when there is one and starts a fresh one otherwise.
-    ticket = (await api.ptyTicket(s.worktreeId, s.id)).ticket;
+    const minted = await api.ptyTicket(s.worktreeId, s.id);
+    ticket = minted.ticket;
+    // A tab restored from sessionStorage expected its shell to still be there.
+    // If it isn't (the daemon restarted, or the detach grace expired) say so —
+    // otherwise a running build is silently replaced by an empty prompt, which
+    // is exactly what the docs promise won't happen.
+    if (!minted.resumed && EXPECTED_RESUMES.delete(s.id)) {
+      writeNotice(s, "the previous shell is gone — this is a new one");
+    }
   } catch (e) {
     if (s.generation !== generation) return;
     setState(s, "error", e instanceof Error ? e.message : String(e));
@@ -272,10 +356,13 @@ async function connect(s: Session): Promise<void> {
   const ws = new WebSocket(attachUrl(ticket, s.term.cols, s.term.rows));
   ws.binaryType = "arraybuffer";
   s.ws = ws;
+  // Per-connection, so a reconnect's close is judged on its own attempt.
+  let everReady = false;
 
   ws.onmessage = (ev) => {
     if (s.generation !== generation) return;
     if (typeof ev.data === "string") {
+      if (ev.data.includes('"ready"')) everReady = true;
       handleControl(s, ev.data);
       return;
     }
@@ -299,11 +386,19 @@ async function connect(s: Session): Promise<void> {
   ws.onclose = () => {
     if (s.generation !== generation) return;
     s.ws = null;
-    // A close with no `exit` frame is an abnormal drop — the daemon stopped,
-    // the upgrade was refused, or the network went away.
-    if (s.state !== "ended") {
+    if (s.state === "ended") return;
+    // A close with no `exit` frame is an abnormal drop. Which kind depends on
+    // whether the session ever came up: a browser cannot read the status or body
+    // of a failed handshake, so a refused upgrade (no shell available, at
+    // capacity, a stale ticket) is indistinguishable from a network drop *except*
+    // by never having reached `ready`. Saying which one it was is the difference
+    // between a user retrying and a user checking the daemon log.
+    if (everReady) {
       setState(s, "error", "connection lost");
       writeNotice(s, "connection lost");
+    } else {
+      setState(s, "error", "could not open a terminal — see the daemon log");
+      writeNotice(s, "could not open a terminal — see the daemon log");
     }
   };
 }
@@ -369,10 +464,39 @@ function endReplayIfDone(s: Session): void {
  * Only for terminals whose shell is **gone** (exited, disconnected, taken
  * over). Never narrate at a live shell: it is very likely a full-screen program
  * mid-redraw (Claude Code, vim, top) and an injected line corrupts its display.
- * Live conditions belong on the pane's status chip instead.
+ * Live conditions belong on the pane's status chip — use [`flash`].
+ *
+ * That rule is enforced here rather than only documented, because the natural
+ * way to report a new live-shell condition is to add a `writeNotice` call
+ * beside the existing ones and the damage is invisible until someone happens to
+ * have a TUI open.
  */
 function writeNotice(s: Session, text: string): void {
+  if (s.state === "live") {
+    if (import.meta.env?.DEV) {
+      console.warn(`[veld] refusing to write "${text}" into a live terminal; use flash()`);
+    }
+    return;
+  }
   s.term.write(`\r\n\x1b[2m[veld] ${text}\x1b[0m\r\n`);
+}
+
+/**
+ * Reattach to the *same* shell after the socket dropped.
+ *
+ * The non-destructive counterpart to [`restartTerminal`], and the one that
+ * matches what the detach grace exists for: the shell is still running, we just
+ * lost the pipe to it (the machine slept, the daemon was restarted mid-`veld
+ * update`, a proxy timed out). Offering only Restart there would delete a live
+ * session — including the build the grace was protecting.
+ */
+export function reconnectTerminal(id: string): void {
+  const s = sessions.get(id);
+  if (!s) return;
+  s.generation += 1;
+  s.ws?.close();
+  s.ws = null;
+  void connect(s);
 }
 
 /**

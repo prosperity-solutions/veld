@@ -63,6 +63,7 @@ import { PaneArea } from "./panes/PaneArea";
 import {
   DEFAULT_RATIO,
   LAYOUT_STORAGE_KEY,
+  loadLayouts,
   type PaneLayout,
   SERVICES_TAB_ID,
   activateTab,
@@ -72,7 +73,6 @@ import {
   defaultLayout,
   hasTab,
   newTerminalId,
-  parseLayouts,
   serializeLayouts,
   terminalIds,
 } from "./panes/model";
@@ -562,15 +562,26 @@ function AppInner(props: {
   // current value comes through a ref instead.
   const dialogRef = useRef(dialog);
   dialogRef.current = dialog;
+  // Key routing with a terminal on screen, since it is not what it looks like:
+  // xterm binds keydown on its own textarea and calls preventDefault +
+  // stopPropagation for every key it consumes, so for a focused terminal this
+  // window listener (bubble phase, no capture) runs *after* xterm's and never
+  // sees those keys at all. Consequences, both deliberate:
+  //   - Escape reaches the shell, not this handler. vim, less and TUI menus keep
+  //     working. The dialog guard below therefore only matters when focus is
+  //     outside a terminal.
+  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. That
+  //     leaves the palette unreachable from a focused terminal on Linux/Windows
+  //     (⌘K survives, because xterm doesn't claim meta combos), which is why
+  //     Ctrl/⌘+Shift+P exists as a second accelerator — terminalHost lets that
+  //     one through explicitly.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
         e.preventDefault();
         setDialog({ kind: "search" });
       }
-      // Only swallow Escape when there is something to close. A terminal pane
-      // needs it (vim, less, menus in TUIs), and this listener sees the event
-      // before xterm's does.
       if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
     };
     window.addEventListener("keydown", onKey);
@@ -583,9 +594,7 @@ function AppInner(props: {
   // session id, to the same running shells. Read with a lazy initialiser
   // rather than in an effect: an empty first render would prune every restored
   // session before the restore landed.
-  const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
-    parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY)),
-  );
+  const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(loadLayouts);
   const layout = worktree ? layouts[worktree.id] : undefined;
 
   useEffect(() => {

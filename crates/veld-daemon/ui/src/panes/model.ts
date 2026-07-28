@@ -14,8 +14,21 @@
  * the React side owns only the state cell and the rendering.
  */
 
-/** What a tab shows. New content types extend this union. */
-export type PaneKind = "services" | "terminal";
+/**
+ * What a tab shows.
+ *
+ * **One source of truth**: the runtime array, because a restored layout has to
+ * be validated against the same set (`parseTab` below). A second hardcoded list
+ * there would let a new kind work perfectly until the first reload, then vanish
+ * silently — `parseLayouts` discards anything it doesn't recognise by design.
+ */
+export const PANE_KINDS = ["services", "terminal"] as const;
+
+export type PaneKind = (typeof PANE_KINDS)[number];
+
+function isPaneKind(v: unknown): v is PaneKind {
+  return typeof v === "string" && (PANE_KINDS as readonly string[]).includes(v);
+}
 
 export interface PaneTab {
   /** Stable across re-renders and worktree switches — it keys the live
@@ -280,6 +293,19 @@ export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
   return JSON.stringify(layouts);
 }
 
+/** Read the stored layouts, tolerating storage being unavailable.
+ *
+ *  `sessionStorage` *access* throws outright in some privacy configurations —
+ *  not just `setItem` — and this runs in a `useState` initialiser, where an
+ *  exception white-screens the whole app before anything renders. */
+export function loadLayouts(): Record<number, PaneLayout> {
+  try {
+    return parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Restore layouts, discarding anything that isn't the shape we wrote.
  *
@@ -314,7 +340,7 @@ function parseTab(value: unknown): PaneTab | null {
   if (typeof t.id !== "string" || t.id === "") return null;
   // The id doubles as the daemon session id, which has a charset.
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(t.id)) return null;
-  if (t.kind !== "services" && t.kind !== "terminal") return null;
+  if (!isPaneKind(t.kind)) return null;
   return {
     id: t.id,
     kind: t.kind,

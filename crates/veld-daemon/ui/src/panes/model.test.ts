@@ -4,6 +4,7 @@ import {
   type DockIndex,
   MAX_RATIO,
   MIN_RATIO,
+  PANE_KINDS,
   type PaneLayout,
   type PaneTab,
   SERVICES_TAB_ID,
@@ -400,6 +401,24 @@ describe("persistence", () => {
     const layout = defaultLayout();
     const ok = parseLayouts(JSON.stringify({ abc: layout, 3: layout }));
     expect(Object.keys(ok)).toEqual(["3"]);
+  });
+
+  it("accepts every declared pane kind", () => {
+    // PANE_KINDS and the restore validator must agree, or a new content type
+    // works until the first reload and then vanishes silently.
+    for (const kind of PANE_KINDS) {
+      const raw = JSON.stringify({
+        1: {
+          docks: [
+            { tabs: [{ id: "a", kind, title: "t" }], activeId: "a" },
+            { tabs: [], activeId: null },
+          ],
+          ratio: 0.5,
+          focused: 0,
+        },
+      });
+      expect(parseLayouts(raw)[1]?.docks[0].tabs[0].kind).toBe(kind);
+    }
   });
 
   it("drops tabs with an unusable kind or id", () => {

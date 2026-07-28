@@ -93,14 +93,29 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// process plus file descriptors, a task and a scrollback buffer; without a cap
 /// a scripted client (or a UI bug in a render loop) forks until the machine
 /// gives up.
-const MAX_SESSIONS: usize = 24;
+///
+/// Sized for how the UI actually allocates: selecting a worktree opens a
+/// terminal in its default layout, and that shell stays alive while the page
+/// does — so *browsing* the worktree rail spends this budget, one shell per
+/// worktree visited, not just deliberately opening terminals. Hitting the cap
+/// is therefore an ordinary outcome rather than an attack, which is why
+/// [`mint_ticket`] reports it as a readable error instead of leaving the client
+/// to infer it from a failed handshake.
+const MAX_SESSIONS: usize = 48;
 
 /// How long a session with nobody attached keeps running.
 ///
 /// This is the reload window, and it is deliberately generous: a page reload
 /// reattaches in under a second, but a laptop that slept mid-build should still
-/// find its build when it wakes. Closing a tab does not wait for this — that
-/// path deletes the session outright.
+/// find its build when it wakes. (`Instant` not advancing across a macOS sleep
+/// only helps here — the session survives the nap either way.) Closing a
+/// terminal does not wait for this: that path deletes the session outright.
+///
+/// It is also the bound on the one leak the model can't avoid. Closing the
+/// browser window drops the `sessionStorage` that held the session ids, so
+/// those shells can never be reattached — but they *are* detached, so this is
+/// what collects them. Quoted as "30 minutes" in `README.md` and
+/// `website/llms-full.txt`; change it in all three places.
 const DETACH_GRACE: Duration = Duration::from_secs(30 * 60);
 
 /// How often the reaper looks for sessions past [`DETACH_GRACE`].
@@ -123,6 +138,10 @@ const EXIT_DRAIN: Duration = Duration::from_millis(250);
 /// Grace between hanging up the terminal's process group and killing it.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
+/// How long daemon shutdown waits for each session's pump to deliver its
+/// hangup. Short: this is on the path of every `veld update`.
+const SHUTDOWN_HANGUP_GRACE: Duration = Duration::from_millis(500);
+
 /// Upper bound on a resize request, so a hostile or buggy client cannot ask
 /// the kernel for an absurd winsize. Comfortably past any real display.
 const MAX_DIMENSION: u16 = 1000;
@@ -130,6 +149,10 @@ const MAX_DIMENSION: u16 = 1000;
 /// Read buffer for PTY output. One page: big enough that a `cat` of a large
 /// file doesn't syscall per line, small enough to stay responsive.
 const READ_BUF: usize = 4096;
+
+/// Cap on a single WebSocket message. Comfortably past any realistic paste, and
+/// far below the 64 MiB the transport would otherwise buffer per frame.
+const MAX_FRAME_BYTES: usize = 1024 * 1024;
 
 /// The vite dev server that serves `/ide` during `just dev-ui`. Only trusted
 /// on a dev instance (see [`allowed_origins`]).
@@ -161,7 +184,7 @@ pub fn spawn_session_reaper() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(REAP_INTERVAL).await;
-            reap_detached().await;
+            reap_detached(DETACH_GRACE).await;
         }
     });
 }
@@ -248,6 +271,14 @@ struct Session {
     /// When the last socket went away, or `None` while one is attached.
     /// Drives [`DETACH_GRACE`].
     detached_since: Mutex<Option<Instant>>,
+    /// Set when the session is being ended deliberately.
+    ///
+    /// The hangup and the SIGKILL escalation then happen inside `pump_output`,
+    /// which is the only place still holding the **unreaped** child. Escalating
+    /// from [`end_session`] instead would race `child.wait()`: the moment the
+    /// child is reaped its pid is free for reuse, and a `killpg` fired after
+    /// that could signal an unrelated process group.
+    closing: watch::Sender<bool>,
     pid: i32,
     /// Held for the session's lifetime so the [`MAX_SESSIONS`] budget is
     /// released exactly when the session is dropped.
@@ -307,28 +338,35 @@ fn valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// Hang up a session and remove it from the registry.
+/// End a session: take it out of the registry and tell its pump to hang the
+/// shell up.
+///
+/// The signalling deliberately happens in `pump_output` rather than here — see
+/// [`Session::closing`]. This function must not signal the pid itself.
 async fn end_session(id: &str, reason: &str) -> bool {
     let session = SESSIONS.lock().await.remove(id);
     let Some(session) = session else {
         return false;
     };
     info!(session = %session.id, worktree = %session.label, reason, "terminal session ended");
-    // Waking the reader is what lets its task finish and drop the descriptors;
-    // the session's own `Arc` goes away with the last holder.
-    hangup(session.pid);
-    let pid = session.pid;
-    tokio::spawn(async move {
-        tokio::time::sleep(KILL_GRACE).await;
-        // SAFETY of the pid is checked inside; a reaped pid yields ESRCH.
-        kill(pid);
-    });
+    // `send_replace`, not `send`: the pump is the only receiver and may already
+    // have finished (a shell that exited on its own), in which case `send`
+    // would drop the flag and there is nothing left to hang up anyway.
+    session.closing.send_replace(true);
     true
 }
 
-/// Collect sessions that have had nobody attached for [`DETACH_GRACE`], plus
-/// any whose shell has exited and whose client never came back to see it.
-async fn reap_detached() {
+/// Collect sessions that have had nobody attached for `grace`.
+///
+/// An exited shell gets the same grace as a live one on purpose. Its scrollback,
+/// its exit notice and its exit code are exactly the post-mortem the detach
+/// model exists to preserve — "the socket dropped while I was away and then the
+/// build died" is the case worth answering, and a short grace would collect the
+/// answer before anyone could read it.
+///
+/// The policy lives in [`is_reapable`] so it can be tested without waiting
+/// [`DETACH_GRACE`] and without touching the process-global registry.
+async fn reap_detached(grace: Duration) {
     let now = Instant::now();
     let stale: Vec<String> = {
         let sessions = SESSIONS.lock().await;
@@ -336,20 +374,7 @@ async fn reap_detached() {
             .values()
             .filter(|s| {
                 let detached = *s.detached_since.lock().expect("detach clock poisoned");
-                match detached {
-                    Some(since) => {
-                        // An exited shell has nothing left to produce, so it
-                        // only needs to survive long enough for a reload to
-                        // show the exit notice.
-                        let grace = if s.exited().is_some() {
-                            EXIT_DRAIN + Duration::from_secs(60)
-                        } else {
-                            DETACH_GRACE
-                        };
-                        now.duration_since(since) > grace
-                    }
-                    None => false,
-                }
+                is_reapable(detached, now, grace)
             })
             .map(|s| s.id.clone())
             .collect()
@@ -357,6 +382,40 @@ async fn reap_detached() {
     for id in stale {
         end_session(&id, "detached past its grace period").await;
     }
+}
+
+/// Whether a session is past its grace and may be collected.
+///
+/// `None` means a socket is attached, which is never reapable however long it
+/// has been open — somebody is looking at it.
+fn is_reapable(detached_since: Option<Instant>, now: Instant, grace: Duration) -> bool {
+    detached_since.is_some_and(|since| {
+        // `checked_duration_since`: a stamp that appears to be in the future
+        // (read across cores) must not panic here.
+        now.checked_duration_since(since).unwrap_or_default() > grace
+    })
+}
+
+/// Hang up every live session. Called on daemon shutdown: the shells are our
+/// children but live in their own sessions, so without this a restart (`veld
+/// update` hard-restarts the daemon) leaves them orphaned — and any grandchild
+/// that escaped the terminal's process group outlives even the kernel's
+/// hangup-on-master-close.
+pub async fn shutdown_sessions() {
+    let ids: Vec<String> = SESSIONS.lock().await.keys().cloned().collect();
+    if ids.is_empty() {
+        return;
+    }
+    let count = ids.len();
+    for id in ids {
+        end_session(&id, "daemon shutting down").await;
+    }
+    // `end_session` only raises the `closing` flag; the SIGHUP itself happens in
+    // each session's `pump_output`, which is a separate task. Without yielding
+    // to them the process would exit first and the flag would never be acted on,
+    // so the shells we are trying not to orphan would be orphaned anyway.
+    info!(count, "hanging up terminal sessions");
+    tokio::time::sleep(SHUTDOWN_HANGUP_GRACE).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -438,10 +497,26 @@ async fn mint_ticket(
         None => false,
     };
 
+    // Capacity is checked *here*, not only at attach time, because this is the
+    // last point whose body a browser can read: the WebSocket API exposes
+    // neither the status nor the body of a failed handshake, so a 503 on the
+    // upgrade reaches the UI as an indistinguishable "connection lost". The
+    // claim at attach time remains as the race backstop — this check is
+    // advisory by construction, since nothing holds a slot between the two.
+    if !resumed && LIVE_SESSIONS.load(Ordering::Acquire) >= MAX_SESSIONS {
+        return Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "too many terminal sessions ({MAX_SESSIONS}) — close a terminal pane to free one"
+            ),
+        ));
+    }
+
     let cwd = PathBuf::from(&wt.path);
-    // Only a new session needs the directory to exist; a resumed one already
-    // has its shell running there (and `git worktree remove` on a live
-    // checkout shouldn't retroactively break the terminal watching it).
+    // Only a new session needs the directory to exist. A resumed one already has
+    // its shell running there, and re-checking would refuse an attach to a live
+    // process for no benefit — the shell's cwd is the kernel's business by then,
+    // not ours.
     if !resumed && !cwd.is_dir() {
         return Err(err(
             StatusCode::CONFLICT,
@@ -597,9 +672,15 @@ async fn attach(
         pixel_height: 0,
     };
 
-    // Resolve (or create) the session before upgrading, so a failure is an
-    // HTTP status the client can read rather than an immediate close of a
-    // socket it has just opened.
+    // Resolve (or create) the session before upgrading, so a failure is a real
+    // HTTP status rather than an immediate close of a socket just opened.
+    //
+    // Note what this does *not* buy: a browser cannot read the status or body of
+    // a failed WebSocket handshake, so for the UI these all collapse into an
+    // abnormal close. The failures a legitimate client can actually provoke are
+    // therefore pre-checked in `mint_ticket`, whose JSON body it does read;
+    // reaching one here means a race or a broken environment, and the daemon log
+    // is the record. Non-browser clients and the tests below do see the status.
     let (session, resumed) = match obtain_session(&ticket, size).await {
         Ok(s) => s,
         Err(SessionError::AtCapacity) => {
@@ -620,9 +701,14 @@ async fn attach(
         }
     };
 
-    ws.on_upgrade(move |socket| async move {
-        serve_socket(socket, session, size, resumed).await;
-    })
+    // Terminal traffic is keystrokes and screen updates. The default ceiling is
+    // tungstenite's 64 MiB, which the daemon would buffer per frame per socket;
+    // a paste, even a large one, fits in a fraction of this.
+    ws.max_message_size(MAX_FRAME_BYTES)
+        .max_frame_size(MAX_FRAME_BYTES)
+        .on_upgrade(move |socket| async move {
+            serve_socket(socket, session, size, resumed).await;
+        })
 }
 
 enum SessionError {
@@ -657,6 +743,7 @@ async fn obtain_session(
     let (output, _) = broadcast::channel(OUTPUT_CHANNEL);
     let (exit, _) = watch::channel(None);
     let (attach_epoch, _) = watch::channel(0u64);
+    let (closing, _) = watch::channel(false);
     let session = Arc::new(Session {
         id: ticket.session_id.clone(),
         worktree_id: ticket.worktree_id,
@@ -671,6 +758,7 @@ async fn obtain_session(
         // Starts detached: `serve_socket` marks it attached, and if the socket
         // never arrives the reaper must still be able to collect it.
         detached_since: Mutex::new(Some(Instant::now())),
+        closing,
         pid,
         _slot: slot,
     });
@@ -704,6 +792,15 @@ async fn pump_output(
     // is never the one that fires.
     let drain = tokio::time::sleep(Duration::from_secs(3600));
     tokio::pin!(drain);
+    let mut closing = session.closing.subscribe();
+    // Seeded from the current value, not `false`: `subscribe()` marks whatever
+    // is already there as seen, so a `DELETE` that lands between the session
+    // being registered and this task's first poll would set the flag, never fire
+    // `changed()`, and leave the shell running with nothing left to hang it up.
+    let mut asked_to_close = *closing.borrow_and_update();
+    if asked_to_close {
+        hangup(pid);
+    }
 
     loop {
         tokio::select! {
@@ -716,9 +813,18 @@ async fn pump_output(
                 Ok(0) => break,
                 Ok(n) => {
                     let chunk = Bytes::copy_from_slice(&buf[..n]);
-                    session.scrollback.lock().expect("scrollback poisoned").push(&chunk);
+                    // Recorded and broadcast under ONE lock. Released in
+                    // between, a chunk could land in the scrollback, be picked
+                    // up by an attach snapshotting it, and then also arrive live
+                    // on that attach's subscription — rendered twice, possibly
+                    // splitting an escape sequence. `serve_socket` takes the
+                    // same lock across subscribe+snapshot, so the two are
+                    // ordered against each other.
+                    let mut sb = session.scrollback.lock().expect("scrollback poisoned");
+                    sb.push(&chunk);
                     // Errors here mean nothing is attached, which is normal.
                     let _ = session.output.send(chunk);
+                    drop(sb);
                 }
                 // Linux reports the same hangup as EIO rather than EOF.
                 Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
@@ -747,15 +853,26 @@ async fn pump_output(
             },
 
             _ = &mut drain, if exit_code.is_some() => break,
+
+            // `end_session` asked for this shell to go away. Hanging up here
+            // rather than there is what keeps the escalation safe: this task
+            // owns the unreaped child, so the pid cannot have been recycled
+            // under us. See Session::closing.
+            Ok(()) = closing.changed(), if !asked_to_close => {
+                if *closing.borrow_and_update() {
+                    asked_to_close = true;
+                    hangup(pid);
+                }
+            },
         }
     }
 
-    // The read loop can also end because the session was killed out from under
-    // it (an explicit close, or the reaper), in which case the shell is on its
-    // way out and the wait below collects it.
     let code = match exit_code {
         Some(c) => c,
         None => {
+            // The read loop ended without the shell exiting: it was closed out
+            // from under us, or a descriptor error broke the loop. Hang up (idem-
+            // potent if `closing` already did) and escalate if it holds out.
             hangup(pid);
             match tokio::time::timeout(KILL_GRACE, &mut waiter).await {
                 Ok(Ok(Ok(s))) => s.exit_code(),
@@ -860,14 +977,15 @@ impl ServerControl {
 async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, resumed: bool) {
     let (mut ws_tx, ws_rx) = socket.split();
 
-    // Subscribe before replaying, so output produced between the snapshot and
-    // the first live frame is queued rather than lost.
-    let mut output = session.output.subscribe();
-    let replay = session
-        .scrollback
-        .lock()
-        .expect("scrollback poisoned")
-        .snapshot();
+    // Subscribe and snapshot under the SAME scrollback lock. Subscribing after
+    // the snapshot would lose whatever arrived in between; subscribing before it
+    // without the lock would deliver such a chunk twice (once replayed, once
+    // live). Holding the lock across both makes the cut exact — `pump_output`
+    // records and broadcasts under that same lock.
+    let (mut output, replay) = {
+        let sb = session.scrollback.lock().expect("scrollback poisoned");
+        (session.output.subscribe(), sb.snapshot())
+    };
 
     // Claim the session: any socket already attached sees this and leaves.
     // Subscribe first, so a takeover that lands between the claim and the
@@ -911,8 +1029,9 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
     // Input runs in its own task: if it shared this one, a shell that stops
     // reading (`yes` filling the input buffer while flooding output) would
     // block the loop that is supposed to be draining that output — a deadlock
-    // between the two directions.
-    let mut input = tokio::spawn(pump_input(ws_rx, session.clone()));
+    // between the two directions. It carries its own epoch so it enforces the
+    // one-writer rule itself rather than relying on this loop to abort it.
+    let mut input = tokio::spawn(pump_input(ws_rx, session.clone(), epoch));
 
     let mut exit_rx = session.exit.subscribe();
     // An exit that happened before this attach is reported immediately, so a
@@ -926,9 +1045,12 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
     }
 
     loop {
+        // Deliberately NOT `biased`: with output first in a biased select, a
+        // shell producing continuously (a build, a `yes`) keeps that branch
+        // ready forever and the exit, takeover and socket-closed branches are
+        // never polled. Random polling costs at most a reordered final chunk —
+        // the exit branch drains what is pending before reporting.
         tokio::select! {
-            biased;
-
             chunk = output.recv() => match chunk {
                 Ok(bytes) => {
                     if ws_tx.send(Message::Binary(bytes)).await.is_err() {
@@ -941,7 +1063,12 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
                         break;
                     }
                 }
-                // The pump ended; the exit branch reports the status.
+                // Unreachable in practice: `Session` owns the sender and this
+                // task holds an `Arc<Session>` for the whole loop, so the
+                // channel cannot close under us. Handled rather than
+                // `unreachable!()` so a future change that does drop the sender
+                // degrades into reporting the exit instead of panicking — do not
+                // rely on this as the exit-detection path; that is `exit_rx`.
                 Err(broadcast::error::RecvError::Closed) => {
                     if let Some(code) = session.exited() {
                         let _ = ws_tx.send(ServerControl::Exit { code }.frame()).await;
@@ -1019,11 +1146,21 @@ fn resize_session(session: &Session, cols: u16, rows: u16) {
 }
 
 /// Forward client frames to the PTY until the socket ends.
+///
+/// `epoch` is this socket's claim on the session. It is re-checked before every
+/// write rather than trusting `serve_socket` to abort this task: that loop can
+/// be busy forwarding a flood of output when a takeover lands, and until it
+/// notices, a displaced socket would still be writing into the shell — two
+/// writers on one input stream, which the module's contract rules out.
 async fn pump_input(
     mut ws_rx: futures_util::stream::SplitStream<WebSocket>,
     session: Arc<Session>,
+    epoch: u64,
 ) {
     while let Some(Ok(msg)) = ws_rx.next().await {
+        if *session.attach_epoch.borrow() != epoch {
+            return;
+        }
         match msg {
             Message::Binary(data) => {
                 if pty_write(&session.write_fd, &data).await.is_err() {
@@ -1350,6 +1487,36 @@ mod tests {
         let snap = sb.snapshot();
         assert!(!snap.is_empty(), "tail must survive");
         assert!(snap.len() <= SCROLLBACK_BYTES);
+    }
+
+    #[test]
+    fn only_detached_sessions_past_their_grace_are_reapable() {
+        let now = Instant::now();
+        let grace = Duration::from_secs(60);
+
+        // Attached: never reapable, however long it has been open. Somebody is
+        // looking at it — this is the guard that keeps the reaper from killing
+        // a terminal a user is typing into.
+        assert!(!is_reapable(None, now, grace));
+
+        // Detached, still inside the reload/sleep window.
+        assert!(!is_reapable(Some(now), now, grace));
+        assert!(!is_reapable(
+            Some(now - Duration::from_secs(59)),
+            now,
+            grace
+        ));
+        // Exactly at the grace is not yet past it.
+        assert!(!is_reapable(Some(now - grace), now, grace));
+
+        assert!(is_reapable(Some(now - Duration::from_secs(61)), now, grace));
+
+        // A stamp that reads as being in the future must not panic (and must not
+        // be treated as infinitely old).
+        assert!(!is_reapable(Some(now + Duration::from_secs(5)), now, grace));
+
+        // A zero grace still exempts an attached session.
+        assert!(!is_reapable(None, now, Duration::ZERO));
     }
 
     #[test]
@@ -1937,6 +2104,78 @@ mod tests {
                 );
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
+        }
+
+        /// The regression this module's `send_replace` comment describes.
+        ///
+        /// A shell that exits while **nothing is attached** has no `watch`
+        /// receivers, and `watch::Sender::send` returns early without storing in
+        /// that case — so the exit code was silently lost and the next attach
+        /// presented a dead shell as a live prompt. The sibling test below exits
+        /// while a socket is attached, which keeps a receiver alive and passes
+        /// either way; only this ordering pins the invariant.
+        #[tokio::test]
+        async fn an_exit_while_detached_is_still_reported_on_return() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+            // Queue a delayed exit, then leave before it happens. Deliberately
+            // not a signal: an *interactive* shell ignores SIGTERM, so
+            // `kill -TERM $$` waits forever on a shell that never dies.
+            ws.send(WsMessage::Binary(b"sleep 2; exit 5\n".to_vec().into()))
+                .await
+                .unwrap();
+            drop(ws);
+            tokio::time::sleep(Duration::from_secs(5)).await;
+
+            let mut again = open(addr, &sid, dir.path(), "").await;
+            let exit = read_control(&mut again, "exit").await;
+            assert_eq!(
+                exit["code"], 5,
+                "the exit of a shell that died while detached must survive"
+            );
+            end_session(&sid, "test cleanup").await;
+        }
+
+        /// Dropping a socket must start the detach clock — the reaper's only
+        /// input. `a_session_survives_losing_its_socket` proves the shell lives;
+        /// this proves it becomes collectable.
+        #[tokio::test]
+        async fn losing_a_socket_starts_the_detach_clock() {
+            let addr = serve().await;
+            let dir = tempfile::tempdir().unwrap();
+            let sid = session_id();
+
+            let mut ws = open(addr, &sid, dir.path(), "").await;
+            read_control(&mut ws, "ready").await;
+            {
+                let live = SESSIONS.lock().await;
+                let s = live.get(&sid).expect("session registered");
+                assert!(
+                    s.detached_since.lock().unwrap().is_none(),
+                    "an attached session must have no detach clock running"
+                );
+            }
+
+            drop(ws);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let stamped = {
+                    let live = SESSIONS.lock().await;
+                    live.get(&sid)
+                        .map(|s| s.detached_since.lock().unwrap().is_some())
+                        .unwrap_or(false)
+                };
+                if stamped {
+                    break;
+                }
+                assert!(Instant::now() < deadline, "detach clock never started");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            end_session(&sid, "test cleanup").await;
         }
 
         /// A reattach after the shell has already exited reports the exit

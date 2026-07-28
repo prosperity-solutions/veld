@@ -218,6 +218,12 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Hang up terminal shells before anything else. They are the only children
+    // that outlive us on their own (own session, own controlling terminal), so a
+    // restart would otherwise leave orphans no client can ever reattach to.
+    // Ordered before the aborts because it needs the runtime to still be turning.
+    feedback_server::shutdown_terminal_sessions().await;
+
     // Abort background tasks.
     monitor_handle.abort();
     gc_handle.abort();
