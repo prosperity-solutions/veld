@@ -2023,6 +2023,13 @@ fn mark_sensitive(keys: &mut Vec<String>, add: impl IntoIterator<Item = String>)
 /// tainted, so this narrows an existing leak rather than pretending to close every
 /// path. `sensitive` is matched against both the bare key (how a `shell` template
 /// reads an env value, `$KEY`) and the `${output.KEY}` / `${nodes.N.KEY}` forms.
+///
+/// Known limit: taint is not transitive within one `outputs` map. Each template is
+/// judged against the sensitivity known *before* the map is resolved, so a synthetic
+/// output deriving from another synthetic output that is itself only tainted-by-
+/// derivation is not marked. That is currently unreachable — the interpolation
+/// context holds the *captured* outputs, not siblings being computed in the same
+/// pass — but it is the thing to fix first if sibling references ever resolve.
 fn template_is_tainted(tmpl: &str, sensitive: &[String], secret_vars: &[String]) -> bool {
     let is_sensitive = |name: &str| sensitive.iter().any(|s| s == name);
 

@@ -743,7 +743,15 @@
           "$ref": "#/$defs/outputs"
         },
         "on_stop": {
-          "$ref": "#/$defs/commandObject"
+          "anyOf": [
+            {
+              "$ref": "#/$defs/commandObject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default teardown hook for every variant of this node, run in reverse dependency order during `veld stop`. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine."
         },
         "share": {
           "$ref": "#/$defs/share"
