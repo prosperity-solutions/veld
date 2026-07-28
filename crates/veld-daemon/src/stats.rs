@@ -264,9 +264,13 @@ mod tests {
             "tee".to_owned(),
             tmp.path().join("sink.log").to_string_lossy().into_owned(),
         ];
-        let handle =
-            veld_core::process::spawn_detached("sleep 30", tmp.path(), &HashMap::new(), &sink)
-                .expect("detached spawn");
+        let handle = veld_core::process::spawn_detached(
+            &veld_core::config::CommandSpec::Shell("sleep 30".to_owned()),
+            tmp.path(),
+            &HashMap::new(),
+            &sink,
+        )
+        .expect("detached spawn");
         let pid = handle.pid();
 
         // Give both stages time to fork and exec.

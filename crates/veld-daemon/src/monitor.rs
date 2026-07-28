@@ -451,15 +451,15 @@ async fn run_single_liveness_check(
 
     match liveness.check_type.as_str() {
         "command" | "bash" => {
-            if let Some(ref cmd) = liveness.command {
+            if let Some(cmd) = liveness.cmd.spec() {
                 // Timeout command checks to prevent hanging the monitor loop.
                 // Inject the resolved user PATH so probes find tools like
                 // pg_isready even when the daemon starts at boot.
+                let Ok(mut command) = veld_core::process::tokio_command(&cmd) else {
+                    return Err("liveness probe declares an empty argv".to_owned());
+                };
                 let result = tokio::time::timeout(Duration::from_secs(30), async {
-                    let mut command = tokio::process::Command::new("sh");
                     command
-                        .arg("-c")
-                        .arg(cmd)
                         .current_dir(working_dir)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped())

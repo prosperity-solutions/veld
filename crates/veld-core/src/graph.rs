@@ -321,10 +321,16 @@ fn validate_variable_references(
         let node_cfg = &config.nodes[&sel.node];
         let variant_cfg = &node_cfg.variants[&sel.variant];
 
-        let mut strings_to_check: Vec<&str> = Vec::new();
-        if let Some(cmd) = &variant_cfg.command {
-            strings_to_check.push(cmd);
+        // The command's own strings: for `argv`, every element (each is
+        // interpolated independently); for `shell`, the whole string.
+        let mut owned_strings: Vec<String> = Vec::new();
+        if let Some(spec) = variant_cfg.cmd.spec() {
+            match spec {
+                crate::config::CommandSpec::Argv(argv) => owned_strings.extend(argv),
+                crate::config::CommandSpec::Shell(sh) => owned_strings.push(sh),
+            }
         }
+        let mut strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
         if let Some(env_map) = &node_cfg.env {
             for v in env_map.values() {
                 strings_to_check.push(v);
@@ -473,7 +479,10 @@ mod tests {
         // db -> api -> frontend (dependency chain)
         let db_variant = VariantConfig {
             step_type: StepType::Command,
-            command: Some("echo db".into()),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo db".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,
@@ -493,7 +502,10 @@ mod tests {
         };
         let api_variant = VariantConfig {
             step_type: StepType::StartServer,
-            command: Some("echo api".into()),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo api".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,
@@ -513,7 +525,10 @@ mod tests {
         };
         let frontend_variant = VariantConfig {
             step_type: StepType::StartServer,
-            command: Some("echo fe".into()),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo fe".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,

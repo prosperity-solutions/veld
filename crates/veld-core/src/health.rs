@@ -5,7 +5,7 @@ use thiserror::Error;
 use tokio::net::TcpStream;
 use tokio::time::{sleep, timeout};
 
-use crate::config::HealthCheck;
+use crate::config::{CommandSpec, HealthCheck};
 
 /// Callback invoked on each health check retry with the attempt number.
 pub type AttemptNotifier = Box<dyn Fn(u32) + Send + Sync>;
@@ -161,7 +161,7 @@ pub async fn wait_for_http(
 
 /// Run a command as a health check. Exit 0 = healthy.
 pub async fn wait_for_command_check(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     hc: &HealthCheck,
     on_attempt: Option<&AttemptNotifier>,
@@ -169,7 +169,7 @@ pub async fn wait_for_command_check(
     let deadline = Duration::from_secs(hc.timeout_seconds);
     let interval = Duration::from_millis(hc.interval_ms);
 
-    let cmd = command.to_owned();
+    let cmd = command.clone();
     let dir = working_dir.to_path_buf();
 
     let result = timeout(deadline, async {
@@ -179,26 +179,35 @@ pub async fn wait_for_command_check(
             if let Some(f) = &on_attempt {
                 f(attempt);
             }
-            let status = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .current_dir(&dir)
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await;
+            // Rebuilt each attempt: a `Command` is consumed by `status()`.
+            let status = match crate::process::tokio_command(&cmd) {
+                Ok(mut c) => {
+                    c.current_dir(&dir)
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status()
+                        .await
+                }
+                Err(e) => {
+                    // An unrunnable probe (empty argv) can never become healthy;
+                    // let the deadline report it rather than spinning silently.
+                    tracing::debug!(error = %e, "command health check: unrunnable probe");
+                    sleep(interval).await;
+                    continue;
+                }
+            };
 
             match status {
                 Ok(s) if s.success() => return Ok(()),
                 Ok(s) => {
                     tracing::debug!(
-                        command = cmd,
+                        command = cmd.display(),
                         exit_code = s.code().unwrap_or(-1),
                         "command health check: not yet healthy"
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(command = cmd, error = %e, "command health check: command error");
+                    tracing::debug!(command = cmd.display(), error = %e, "command health check: command error");
                 }
             }
             sleep(interval).await;
@@ -252,9 +261,12 @@ pub async fn run_health_check(
             tracing::info!(url = direct_url, "health check phase 2: HTTP check passed");
         }
         "command" | "bash" => {
-            if let Some(cmd) = &hc.command {
-                tracing::info!(command = cmd, "health check phase 2: running command check");
-                wait_for_command_check(cmd, working_dir, hc, None).await?;
+            if let Some(cmd) = hc.cmd.spec() {
+                tracing::info!(
+                    command = cmd.display(),
+                    "health check phase 2: running command check"
+                );
+                wait_for_command_check(&cmd, working_dir, hc, None).await?;
                 tracing::info!("health check phase 2: command check passed");
             }
         }

@@ -167,11 +167,10 @@ fn build_graph_snapshot(
         let Some(variant_cfg) = node_cfg.variants.get(&sel.variant) else {
             continue;
         };
-        let command = variant_cfg
-            .script
-            .as_ref()
-            .map(|s| format!("script:{s}"))
-            .or_else(|| variant_cfg.command.clone());
+        let command = match &variant_cfg.script {
+            Some(script) => Some(crate::state::CommandSnapshot::Script(script.clone())),
+            None => variant_cfg.cmd.spec().map(Into::into),
+        };
         let mut env_keys: Vec<String> = config::resolve_env(
             config.env.as_ref(),
             node_cfg.env.as_ref(),
@@ -981,12 +980,14 @@ impl Orchestrator {
             &self.project_root,
             &var_ctx,
         )?;
-        let raw_cmd = if let Some(ref script) = variant_cfg.script {
-            format!("sh {}", self.project_root.join(script).display())
-        } else {
-            variant_cfg.command.clone().unwrap_or_default()
+        let raw_cmd = match &variant_cfg.script {
+            Some(script) => config::CommandSpec::script(&self.project_root.join(script)),
+            None => variant_cfg
+                .cmd
+                .spec()
+                .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
         };
-        let resolved_cmd = crate::variables::interpolate(&raw_cmd, &var_ctx)?;
+        let resolved_cmd = raw_cmd.interpolate(&var_ctx)?;
         let merged_env = config::resolve_env(
             self.config.env.as_ref(),
             node_cfg.env.as_ref(),
@@ -998,7 +999,7 @@ impl Orchestrator {
 
         // Idempotency: if skip_if passes, skip the run entirely (exit 0).
         if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
-            let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, &var_ctx)?;
+            let skip_if_resolved = skip_if_cmd.interpolate(&var_ctx)?;
             if let Ok(out) = process::run_command(&skip_if_resolved, &working_dir, &env, None).await
             {
                 if out.exit_code == 0 {
@@ -1531,7 +1532,7 @@ impl Orchestrator {
             None => return,
         };
 
-        let on_stop_cmd = match variant_cfg.on_stop.as_deref() {
+        let on_stop_cmd = match variant_cfg.on_stop.as_ref() {
             Some(cmd) => cmd,
             None => return,
         };
@@ -1573,7 +1574,7 @@ impl Orchestrator {
             ctx.set_builtin("port", port.to_string());
         }
 
-        let resolved_cmd = match crate::variables::interpolate(on_stop_cmd, &ctx) {
+        let resolved_cmd = match on_stop_cmd.interpolate(&ctx) {
             Ok(cmd) => cmd,
             Err(e) => {
                 tracing::warn!(
@@ -1687,7 +1688,19 @@ impl Orchestrator {
             });
 
             let started = std::time::Instant::now();
-            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+            let Some(step_cmd) = step.cmd.spec() else {
+                let reason = "step declares no command — set \"argv\" or \"shell\"".to_owned();
+                self.emit(ProgressEvent::SetupStepFailed {
+                    name: step.name.clone(),
+                    error: reason.clone(),
+                });
+                return Err(OrchestratorError::SetupFailed {
+                    name: step.name.clone(),
+                    reason,
+                    failure_message: step.failure_message.clone(),
+                });
+            };
+            let resolved_cmd = match step_cmd.interpolate(&ctx) {
                 Ok(cmd) => cmd,
                 Err(e) => {
                     let reason = format!("variable resolution failed: {e}");
@@ -1760,7 +1773,14 @@ impl Orchestrator {
                 total,
             });
 
-            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+            let Some(step_cmd) = step.cmd.spec() else {
+                tracing::warn!(
+                    step = step.name,
+                    "teardown step declares no command — set \"argv\" or \"shell\""
+                );
+                continue;
+            };
+            let resolved_cmd = match step_cmd.interpolate(&ctx) {
                 Ok(cmd) => cmd,
                 Err(e) => {
                     tracing::warn!(
@@ -2116,15 +2136,18 @@ async fn execute_start_server_isolated(
     )?;
 
     // Resolve command.
-    let command = variant_cfg.command.as_deref().unwrap_or_default();
-    let resolved_cmd = crate::variables::interpolate(command, var_ctx)?;
+    let command = variant_cfg
+        .cmd
+        .spec()
+        .unwrap_or_else(|| config::CommandSpec::Shell(String::new()));
+    let resolved_cmd = command.interpolate(var_ctx)?;
     debug_log_free(
         &ctx.debug_writer,
         &format!(
             "{}:{} — resolved command: {} (cwd: {})",
             sel.node,
             sel.variant,
-            resolved_cmd,
+            resolved_cmd.display(),
             working_dir.display()
         ),
     )
@@ -2362,9 +2385,9 @@ async fn execute_start_server_isolated(
                     health::wait_for_http(&direct_url, &hc, Some(&phase2_notifier)).await
                 }
                 "command" | "bash" => {
-                    if let Some(cmd) = &hc.command {
+                    if let Some(cmd) = hc.cmd.spec() {
                         health::wait_for_command_check(
-                            cmd,
+                            &cmd,
                             &working_dir,
                             &hc,
                             Some(&phase2_notifier),
@@ -2463,12 +2486,14 @@ async fn execute_command_isolated(
     )?;
 
     // Resolve command or script.
-    let raw_cmd = if let Some(ref script) = variant_cfg.script {
-        format!("sh {}", ctx.project_root.join(script).display())
-    } else {
-        variant_cfg.command.clone().unwrap_or_default()
+    let raw_cmd = match &variant_cfg.script {
+        Some(script) => config::CommandSpec::script(&ctx.project_root.join(script)),
+        None => variant_cfg
+            .cmd
+            .spec()
+            .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
     };
-    let resolved_cmd = crate::variables::interpolate(&raw_cmd, var_ctx)?;
+    let resolved_cmd = raw_cmd.interpolate(var_ctx)?;
 
     // Build env (variant > node > project).
     let merged_env = config::resolve_env(
@@ -2480,7 +2505,7 @@ async fn execute_command_isolated(
 
     // Idempotency check (skip_if).
     if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
-        let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, var_ctx)?;
+        let skip_if_resolved = skip_if_cmd.interpolate(var_ctx)?;
         let skip_if_result =
             process::run_command(&skip_if_resolved, &working_dir, &env, None).await;
         if let Ok(ref out) = skip_if_result {
@@ -2571,8 +2596,8 @@ async fn execute_command_isolated(
             let notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
             let probe_result = match hc.check_type.as_str() {
                 "command" | "bash" => {
-                    if let Some(cmd) = &hc.command {
-                        health::wait_for_command_check(cmd, &working_dir, &hc, Some(&notifier))
+                    if let Some(cmd) = hc.cmd.spec() {
+                        health::wait_for_command_check(&cmd, &working_dir, &hc, Some(&notifier))
                             .await
                     } else {
                         Ok(())

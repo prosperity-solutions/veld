@@ -31,7 +31,7 @@ async fn streaming_interrupt_reports_130() {
     let out = veld_core::process::run_command_streaming(
         // Traps and ignores SIGINT/SIGTERM briefly, so a code of 130 can only
         // come from veld's own normalization, not from the child's exit status.
-        "trap '' INT; sleep 30",
+        &veld_core::config::CommandSpec::Shell("trap '' INT; sleep 30".to_owned()),
         &std::env::temp_dir(),
         &HashMap::new(),
         None,

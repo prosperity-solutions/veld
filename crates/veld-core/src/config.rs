@@ -182,6 +182,190 @@ pub struct VeldConfig {
 }
 
 // ---------------------------------------------------------------------------
+// Commands — one vocabulary for every place veld runs something
+// ---------------------------------------------------------------------------
+
+/// One command veld runs, in exactly one of two forms.
+///
+/// | Form | Meaning |
+/// |---|---|
+/// | `argv` | An array, spawned directly. No shell, no word splitting, no globbing. |
+/// | `shell` | A string, run via `sh -c`. The author owns quoting. |
+///
+/// **The argv guarantee:** interpolation runs per element, *after* the array is
+/// fixed (see [`CommandSpec::interpolate`]), so a value containing spaces, globs,
+/// quotes, or newlines can never change the argument count. That is the whole
+/// point of the form — `["psql", "${vars.db_url}"]` stays two arguments whatever
+/// the URL contains.
+///
+/// `shell` is not a deprecated fallback: it is permanently supported, and it is
+/// what makes this a safe breaking change. Any node that misbehaves under `argv`
+/// can be reverted to a string by its author with no veld change and no config
+/// version change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSpec {
+    Argv(Vec<String>),
+    Shell(String),
+}
+
+impl CommandSpec {
+    /// Resolve the effective command from the keys a carrier object may set.
+    ///
+    /// `argv` wins over `shell` wins over the legacy `command`, deterministically
+    /// — declaring more than one is a validation error
+    /// ([`check_exactly_one_command`]), and this ordering only decides what runs
+    /// while the author still has an invalid config in front of them.
+    pub fn from_keys(keys: &CommandKeys) -> Option<Self> {
+        if let Some(argv) = &keys.argv {
+            return Some(CommandSpec::Argv(argv.clone()));
+        }
+        if let Some(shell) = &keys.shell {
+            return Some(CommandSpec::Shell(shell.clone()));
+        }
+        keys.command.clone().map(CommandSpec::Shell)
+    }
+
+    /// Interpolate `${…}` references. For `argv`, **per element** — the element
+    /// count is fixed before any value is substituted.
+    pub fn interpolate(
+        &self,
+        ctx: &crate::variables::VariableContext,
+    ) -> Result<Self, crate::variables::VariableError> {
+        match self {
+            CommandSpec::Argv(argv) => argv
+                .iter()
+                .map(|a| crate::variables::interpolate(a, ctx))
+                .collect::<Result<Vec<_>, _>>()
+                .map(CommandSpec::Argv),
+            CommandSpec::Shell(s) => crate::variables::interpolate(s, ctx).map(CommandSpec::Shell),
+        }
+    }
+
+    /// A human-readable rendering for logs, progress lines, and error messages.
+    /// Never re-parsed — it is display only, and an `argv` is shown in its list
+    /// form precisely so `["a", "b c"]` does not read like `a b c`.
+    pub fn display(&self) -> String {
+        match self {
+            CommandSpec::Argv(argv) => format!("{argv:?}"),
+            CommandSpec::Shell(s) => s.clone(),
+        }
+    }
+
+    /// True when there is nothing to run (an empty argv or an empty string).
+    pub fn is_empty(&self) -> bool {
+        match self {
+            CommandSpec::Argv(argv) => argv.iter().all(|a| a.is_empty()) || argv.is_empty(),
+            CommandSpec::Shell(s) => s.trim().is_empty(),
+        }
+    }
+
+    /// A `shell` command wrapping a script file — how `script:` entries run.
+    pub fn script(path: &Path) -> Self {
+        CommandSpec::Shell(format!("sh {}", path.display()))
+    }
+}
+
+impl Serialize for CommandSpec {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut m = s.serialize_map(Some(1))?;
+        match self {
+            // Always the object form, even for a command that was written as a
+            // bare v1/v2 string: the deserializer accepts both, so a round-trip
+            // stays loadable by every schema version, and only the object form
+            // is valid in v3.
+            CommandSpec::Argv(argv) => m.serialize_entry("argv", argv)?,
+            CommandSpec::Shell(sh) => m.serialize_entry("shell", sh)?,
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(d)? {
+            // The v1/v2 form: a bare shell string. Still accepted here so a v1/v2
+            // document keeps loading; `parse_config` rejects it for v3 documents
+            // and points at `veld config --migrate`.
+            serde_json::Value::String(s) => Ok(CommandSpec::Shell(s)),
+            serde_json::Value::Object(map) => {
+                let keys: CommandKeys = serde_json::from_value(serde_json::Value::Object(map))
+                    .map_err(D::Error::custom)?;
+                let set = keys.count_set();
+                if set == 0 {
+                    return Err(D::Error::custom(
+                        "a command needs exactly one of \"argv\" (array) or \"shell\" (string)",
+                    ));
+                }
+                if set > 1 {
+                    return Err(D::Error::custom(format!(
+                        "a command must set exactly one of \"argv\" or \"shell\", found {set}"
+                    )));
+                }
+                Ok(CommandSpec::from_keys(&keys).expect("exactly one key is set"))
+            }
+            _ => Err(D::Error::custom(
+                "a command must be an { argv } or { shell } object",
+            )),
+        }
+    }
+}
+
+/// The command keys as they appear side by side on whatever object carries a
+/// command — a variant, a setup step, an action, a probe, a value source.
+///
+/// Flattened into each carrier rather than nested, because "two keys, exactly
+/// one of them" is the vocabulary: a variant *is* the thing that runs, so it
+/// carries `argv`/`shell` directly rather than wrapping them in another object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandKeys {
+    /// Argument vector, spawned directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argv: Option<Vec<String>>,
+
+    /// Shell string, run via `sh -c`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell: Option<String>,
+
+    /// The v1/v2 shell string. **Removed in `schemaVersion: "3"`** — a v3
+    /// document containing it is a load error naming `veld config --migrate`
+    /// (see [`reject_v3_legacy_commands`]). Kept on the type so v1 and v2
+    /// documents keep loading with today's semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+impl CommandKeys {
+    /// How many of the three mutually-exclusive keys are set.
+    pub fn count_set(&self) -> usize {
+        self.argv.is_some() as usize
+            + self.shell.is_some() as usize
+            + self.command.is_some() as usize
+    }
+
+    /// The effective command, if any.
+    pub fn spec(&self) -> Option<CommandSpec> {
+        CommandSpec::from_keys(self)
+    }
+
+    /// Names of the keys that are set, for error messages.
+    fn set_names(&self) -> Vec<&'static str> {
+        let mut v = Vec::new();
+        if self.argv.is_some() {
+            v.push("argv");
+        }
+        if self.shell.is_some() {
+            v.push("shell");
+        }
+        if self.command.is_some() {
+            v.push("command");
+        }
+        v
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Setup / Teardown steps
 // ---------------------------------------------------------------------------
 
@@ -193,8 +377,9 @@ pub struct SetupStep {
     /// Human-readable name for progress reporting.
     pub name: String,
 
-    /// Shell command to execute.
-    pub command: String,
+    /// The command to execute: `argv` or `shell` (or the v1/v2 `command`).
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
 
     /// Optional message shown when the command fails (non-zero exit).
     /// Primarily useful for setup steps that validate prerequisites.
@@ -339,8 +524,28 @@ pub enum SecretSource {
     Env(String),
     /// Path to a file whose (trimmed) contents are the secret.
     File(String),
-    /// A shell command whose (trimmed) stdout is the secret.
+    /// A shell command whose (trimmed) stdout is the secret — the v1/v2 `command`
+    /// key. Rejected in v3 documents, which use `argv`/`shell` like everywhere
+    /// else.
     Command(String),
+    /// An argument vector, spawned directly; its (trimmed) stdout is the secret.
+    Argv(Vec<String>),
+    /// A shell string; its (trimmed) stdout is the secret.
+    Shell(String),
+}
+
+impl SecretSource {
+    /// The command this source runs, if it runs one. `None` for the
+    /// literal/env/file forms, which read a value rather than execute anything.
+    pub fn command(&self) -> Option<CommandSpec> {
+        match self {
+            SecretSource::Command(s) | SecretSource::Shell(s) => {
+                Some(CommandSpec::Shell(s.clone()))
+            }
+            SecretSource::Argv(argv) => Some(CommandSpec::Argv(argv.clone())),
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for SecretSource {
@@ -353,6 +558,8 @@ impl std::fmt::Debug for SecretSource {
             SecretSource::Env(v) => f.debug_tuple("Env").field(v).finish(),
             SecretSource::File(p) => f.debug_tuple("File").field(p).finish(),
             SecretSource::Command(c) => f.debug_tuple("Command").field(c).finish(),
+            SecretSource::Argv(a) => f.debug_tuple("Argv").field(a).finish(),
+            SecretSource::Shell(c) => f.debug_tuple("Shell").field(c).finish(),
         }
     }
 }
@@ -377,6 +584,16 @@ impl Serialize for SecretSource {
                 m.serialize_entry("command", v)?;
                 m.end()
             }
+            SecretSource::Argv(v) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("argv", v)?;
+                m.end()
+            }
+            SecretSource::Shell(v) => {
+                let mut m = s.serialize_map(Some(1))?;
+                m.serialize_entry("shell", v)?;
+                m.end()
+            }
         }
     }
 }
@@ -397,11 +614,31 @@ fn secret_source_from_value(value: serde_json::Value) -> Result<SecretSource, St
         serde_json::Value::Object(map) => {
             if map.len() != 1 {
                 return Err(
-                    "token object must have exactly one of \"env\", \"file\", or \"command\""
+                    "token object must have exactly one of \"env\", \"file\", \"argv\", or \
+                     \"shell\""
                         .to_owned(),
                 );
             }
             let (key, val) = map.into_iter().next().expect("len checked == 1");
+            // `argv` is the one array-valued source, so it is read before the
+            // shared string coercion below.
+            if key == "argv" {
+                let arr = val
+                    .as_array()
+                    .ok_or("token \"argv\" must be an array of strings")?;
+                let argv: Vec<String> = arr
+                    .iter()
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "token \"argv\" must contain only strings".to_owned())
+                    })
+                    .collect::<Result<_, _>>()?;
+                if argv.is_empty() {
+                    return Err("token \"argv\" must not be empty".to_owned());
+                }
+                return Ok(SecretSource::Argv(argv));
+            }
             let s = val
                 .as_str()
                 .ok_or_else(|| format!("token \"{key}\" must be a string"))?
@@ -409,13 +646,16 @@ fn secret_source_from_value(value: serde_json::Value) -> Result<SecretSource, St
             match key.as_str() {
                 "env" => Ok(SecretSource::Env(s)),
                 "file" => Ok(SecretSource::File(s)),
+                "shell" => Ok(SecretSource::Shell(s)),
+                // The v1/v2 spelling of `shell`.
                 "command" => Ok(SecretSource::Command(s)),
                 other => Err(format!(
-                    "unknown token source \"{other}\"; expected \"env\", \"file\", or \"command\""
+                    "unknown token source \"{other}\"; expected \"env\", \"file\", \"argv\", or \
+                     \"shell\""
                 )),
             }
         }
-        _ => Err("token must be a string or an { env | file | command } object".to_owned()),
+        _ => Err("token must be a string or an { env | file | argv | shell } object".to_owned()),
     }
 }
 
@@ -718,12 +958,15 @@ pub struct ActionConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 
-    /// Shell command to execute. Supports `${veld.*}`, `${output.KEY}` (this
-    /// node's live outputs), `${param.KEY}` (this action's parameters), and
-    /// `${nodes.name.field}` substitution. The same values are also exported as
-    /// environment variables (`$KEY` for outputs, `$KEY` for parameters), so
-    /// shell-style references work too.
-    pub command: String,
+    /// The command to execute: `argv` or `shell` (or the v1/v2 `command`).
+    /// Supports `${veld.*}`, `${output.KEY}` (this node's live outputs),
+    /// `${param.KEY}` (this action's parameters), and `${nodes.name.field}`
+    /// substitution. The same values are also exported as environment variables
+    /// (`$KEY` for outputs and parameters), so shell-style references work too —
+    /// in a `shell` command. Under `argv` they do not, since there is no shell to
+    /// expand them; use `${param.KEY}` there.
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
 
     /// Static key/value parameters baked into the action. Available to the
     /// command as `${param.KEY}` and as `$KEY` environment variables. Values
@@ -761,9 +1004,10 @@ pub struct VariantConfig {
     #[serde(rename = "type")]
     pub step_type: StepType,
 
-    /// Inline command string.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    /// What this variant runs: `argv` or `shell` (or the v1/v2 `command`).
+    /// A variant *is* the thing that runs, so the keys sit on it directly.
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
 
     /// Path to script file (relative to veld.json).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -806,7 +1050,7 @@ pub struct VariantConfig {
     /// Idempotency check — skip this command step if this command exits 0.
     /// Previously named `verify` (still accepted for backward compatibility).
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "verify")]
-    pub skip_if: Option<String>,
+    pub skip_if: Option<CommandSpec>,
 
     /// Optional URL template override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -815,7 +1059,7 @@ pub struct VariantConfig {
     /// Teardown command to run when the environment is stopped.
     /// Executed in reverse dependency order during `veld stop`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_stop: Option<String>,
+    pub on_stop: Option<CommandSpec>,
 
     /// Client-side log levels override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1153,9 +1397,10 @@ pub struct HealthCheck {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_status: Option<u16>,
 
-    /// Command for type "command".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    /// The command run for `type: "command"`: `argv` or `shell` (or the v1/v2
+    /// `command`).
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
 
     /// Maximum seconds to wait for health (default 60).
     #[serde(default = "default_timeout")]
@@ -1201,9 +1446,10 @@ pub struct LivenessProbe {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expect_status: Option<u16>,
 
-    /// Command for type "command".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    /// The command run for `type: "command"`: `argv` or `shell` (or the v1/v2
+    /// `command`).
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
 
     /// Milliseconds between liveness checks (default 5000).
     #[serde(default = "default_liveness_interval")]
@@ -1343,8 +1589,89 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
     check_proxy_headers(config, &mut findings);
     check_depends_on_literal(config, &mut findings);
+    check_exactly_one_command(config, &mut findings);
     findings.sort_by(|a, b| (a.severity, &a.location).cmp(&(b.severity, &b.location)));
     findings
+}
+
+/// Every place that runs something must declare **exactly one** of `argv` /
+/// `shell` (or, in a v1/v2 document, `command`).
+///
+/// Declaring two is ambiguous — `CommandSpec::from_keys` has to pick one, and
+/// whichever it picks is a coin toss from the author's point of view. Declaring
+/// none means a step that silently does nothing. Both are caught here rather
+/// than at spawn time, so the author learns before the run starts.
+fn check_exactly_one_command(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const RULE: &str = "exactly-one-command";
+
+    fn check(loc: String, keys: &CommandKeys, required: bool, out: &mut Vec<Finding>) {
+        match keys.count_set() {
+            0 if required => out.push(Finding::error(
+                RULE,
+                loc,
+                "declares no command — set exactly one of \"argv\" or \"shell\"",
+            )),
+            0 | 1 => {}
+            _ => out.push(Finding::error(
+                RULE,
+                loc,
+                format!(
+                    "declares {} at once ({}) — set exactly one of \"argv\" or \"shell\"",
+                    keys.count_set(),
+                    keys.set_names().join(", ")
+                ),
+            )),
+        }
+    }
+
+    for (i, step) in config.setup.iter().flatten().enumerate() {
+        check(format!("setup[{i}] ({})", step.name), &step.cmd, true, out);
+    }
+    for (i, step) in config.teardown.iter().flatten().enumerate() {
+        check(
+            format!("teardown[{i}] ({})", step.name),
+            &step.cmd,
+            true,
+            out,
+        );
+    }
+    for (node_name, node) in &config.nodes {
+        for action in node.actions.iter().flatten() {
+            check(
+                format!("nodes.{node_name}.actions.{}", action.name),
+                &action.cmd,
+                true,
+                out,
+            );
+        }
+        for (variant_name, variant) in &node.variants {
+            let base = format!("nodes.{node_name}.variants.{variant_name}");
+            // A variant may instead point at a `script`, so a command is only
+            // required when there is no script.
+            check(base.clone(), &variant.cmd, variant.script.is_none(), out);
+            if let Some(probes) = &variant.probes {
+                if let Some(readiness) = &probes.readiness {
+                    // Only a `command`-type probe runs anything; an http/port
+                    // probe legitimately declares none.
+                    let needs = matches!(readiness.check_type.as_str(), "command" | "bash");
+                    check(
+                        format!("{base}.probes.readiness"),
+                        &readiness.cmd,
+                        needs,
+                        out,
+                    );
+                }
+                if let Some(liveness) = &probes.liveness {
+                    let needs = matches!(liveness.check_type.as_str(), "command" | "bash");
+                    check(format!("{base}.probes.liveness"), &liveness.cmd, needs, out);
+                }
+            }
+            if let Some(hc) = &variant.health_check {
+                let needs = matches!(hc.check_type.as_str(), "command" | "bash");
+                check(format!("{base}.health_check"), &hc.cmd, needs, out);
+            }
+        }
+    }
 }
 
 /// `depends_on` node and variant names must be literal — no `${…}`.
@@ -1646,18 +1973,95 @@ mod tests {
             response: None,
         });
         let findings = validate(&config);
-        assert_eq!(findings.len(), 1, "{findings:?}");
-        assert_eq!(findings[0].severity, Severity::Error);
-        assert_eq!(findings[0].location, "proxy.request");
+        let proxy: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "proxy-header-syntax")
+            .collect();
+        assert_eq!(proxy.len(), 1, "{findings:?}");
+        assert_eq!(proxy[0].severity, Severity::Error);
+        assert_eq!(proxy[0].location, "proxy.request");
         assert!(error_summary(&findings).is_some());
 
-        // A valid config passes.
+        // With a valid header, the proxy rule goes quiet. (The fixture's variant
+        // declares no command, so `exactly-one-command` still fires — that is a
+        // different rule, asserted separately.)
         config.proxy = Some(ProxyConfig {
             request: Some(rules(&["Origin"], &[("X-Ok", "value")])),
             response: None,
         });
-        assert!(validate(&config).is_empty());
-        assert!(error_summary(&validate(&config)).is_none());
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "proxy-header-syntax")
+        );
+    }
+
+    /// F5: every place that runs something declares exactly one of
+    /// `argv` / `shell` (or the v1/v2 `command`).
+    #[test]
+    fn exactly_one_command_is_required() {
+        // Two at once is ambiguous: `from_keys` would have to pick one.
+        let both: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type": "command", "argv": ["true"], "shell": "true"
+            }}}}}"#,
+        )
+        .unwrap();
+        let f = validate(&both);
+        let hit = f.iter().find(|f| f.rule == "exactly-one-command").unwrap();
+        assert!(hit.message.contains("argv, shell"), "{hit:?}");
+
+        // None at all is a step that silently does nothing.
+        let neither: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type": "command"
+            }}}}}"#,
+        )
+        .unwrap();
+        assert!(
+            validate(&neither)
+                .iter()
+                .any(|f| f.rule == "exactly-one-command"
+                    && f.message.contains("declares no command"))
+        );
+
+        // Exactly one — in either spelling — is quiet, and a `script` variant
+        // needs no command at all.
+        for variant in [
+            r#"{"type":"command","argv":["echo","hi"]}"#,
+            r#"{"type":"command","shell":"echo hi"}"#,
+            r#"{"type":"command","command":"echo hi"}"#,
+            r#"{"type":"command","script":"scripts/x.sh"}"#,
+        ] {
+            let cfg: VeldConfig = serde_json::from_str(&format!(
+                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{variant}}}}}}}}}"#
+            ))
+            .unwrap();
+            assert!(
+                !validate(&cfg)
+                    .iter()
+                    .any(|f| f.rule == "exactly-one-command"),
+                "{variant} should be accepted: {:?}",
+                validate(&cfg)
+            );
+        }
+
+        // An http probe legitimately declares no command; a command probe must.
+        let probe: VeldConfig = serde_json::from_str(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type": "start_server", "shell": "x",
+                "probes": { "readiness": { "type": "http", "path": "/z" },
+                            "liveness":  { "type": "command" } }
+            }}}}}"#,
+        )
+        .unwrap();
+        let probe_findings = validate(&probe);
+        let locs: Vec<&str> = probe_findings
+            .iter()
+            .filter(|f| f.rule == "exactly-one-command")
+            .map(|f| f.location.as_str())
+            .collect();
+        assert_eq!(locs, vec!["nodes.a.variants.dev.probes.liveness"]);
     }
 
     // -- F0.1: the parse / validate split -------------------------------------
@@ -1686,8 +2090,8 @@ mod tests {
 
         let config = parse_config(&path).expect("structurally valid config must parse");
         assert_eq!(
-            config.nodes["a"].variants["local"].on_stop.as_deref(),
-            Some("echo bye"),
+            config.nodes["a"].variants["local"].on_stop,
+            Some(CommandSpec::Shell("echo bye".to_owned())),
             "the on_stop hook stop needs must still be readable"
         );
 
@@ -1789,7 +2193,7 @@ mod tests {
         let config = parse_config(&good).expect("JSONC must load");
         assert_eq!(config.name, "commented");
         assert_eq!(
-            config.nodes["api"].variants["dev"].command.as_deref(),
+            config.nodes["api"].variants["dev"].cmd.command.as_deref(),
             Some("echo //not-a-comment")
         );
 
@@ -2117,7 +2521,8 @@ mod tests {
         let json = r#"{"name": "docker", "command": "docker info", "failureMessage": "Docker must be running"}"#;
         let step: SetupStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.name, "docker");
-        assert_eq!(step.command, "docker info");
+        assert_eq!(step.cmd.shell.as_deref(), None);
+        assert_eq!(step.cmd.command.as_deref(), Some("docker info"));
         assert_eq!(
             step.failure_message.as_deref(),
             Some("Docker must be running")
@@ -2129,7 +2534,10 @@ mod tests {
         let json = r#"{"name": "network", "command": "docker network create veld"}"#;
         let step: SetupStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.name, "network");
-        assert_eq!(step.command, "docker network create veld");
+        assert_eq!(
+            step.cmd.command.as_deref(),
+            Some("docker network create veld")
+        );
         assert!(step.failure_message.is_none());
     }
 
@@ -2217,7 +2625,7 @@ mod tests {
 
         let liveness = probes.liveness.unwrap();
         assert_eq!(liveness.check_type, "command");
-        assert_eq!(liveness.command.as_deref(), Some("pg_isready"));
+        assert_eq!(liveness.cmd.command.as_deref(), Some("pg_isready"));
         assert_eq!(liveness.interval_ms, 5000);
         assert_eq!(liveness.failure_threshold, 5);
         assert_eq!(liveness.max_recoveries, 2);
@@ -2242,7 +2650,10 @@ mod tests {
             "skip_if": "test -f /tmp/done"
         }"#;
         let v: VariantConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(v.skip_if.as_deref(), Some("test -f /tmp/done"));
+        assert_eq!(
+            v.skip_if,
+            Some(CommandSpec::Shell("test -f /tmp/done".to_owned()))
+        );
     }
 
     #[test]
@@ -2253,7 +2664,10 @@ mod tests {
             "verify": "test -f /tmp/done"
         }"#;
         let v: VariantConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(v.skip_if.as_deref(), Some("test -f /tmp/done"));
+        assert_eq!(
+            v.skip_if,
+            Some(CommandSpec::Shell("test -f /tmp/done".to_owned()))
+        );
     }
 
     // -- Schema version tests --------------------------------------------------
@@ -2295,7 +2709,7 @@ mod tests {
         let json = r#"{"name": "psql", "command": "psql $DB_URL"}"#;
         let action: ActionConfig = serde_json::from_str(json).unwrap();
         assert_eq!(action.name, "psql");
-        assert_eq!(action.command, "psql $DB_URL");
+        assert_eq!(action.cmd.command.as_deref(), Some("psql $DB_URL"));
         // label falls back to name; no params or gating by default.
         assert_eq!(action.display_label(), "psql");
         assert!(action.parameters.is_none());

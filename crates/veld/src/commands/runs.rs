@@ -227,7 +227,7 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
                 println!();
                 println!("  {} {}", output::cyan(key), output::dim(&n.step_type));
                 if let Some(cmd) = &n.command {
-                    println!("    {} {}", output::dim("command:"), cmd);
+                    println!("    {} {}", output::dim("command:"), cmd.display());
                 }
                 if let Some(cwd) = &n.cwd {
                     println!("    {} {}", output::dim("cwd:"), cwd);
@@ -445,7 +445,13 @@ fn diff_snapshots(
                 });
             }
         };
-        push("command", &o.command, &n.command);
+        // Rendered structurally: `["a","b c"]` must not read the same as
+        // `["a","b","c"]`, or a real command change diffs as no change.
+        push(
+            "command",
+            &o.command.as_ref().map(|c| c.display()),
+            &n.command.as_ref().map(|c| c.display()),
+        );
         push("cwd", &o.cwd, &n.cwd);
         push("url_template", &o.url_template, &n.url_template);
         if o.step_type != n.step_type {
@@ -487,7 +493,7 @@ mod tests {
     fn node(cmd: &str, env: &[&str]) -> NodeSnapshot {
         NodeSnapshot {
             step_type: "start_server".into(),
-            command: Some(cmd.into()),
+            command: Some(veld_core::state::CommandSnapshot::Shell(cmd.into())),
             cwd: None,
             env_keys: env.iter().map(|s| s.to_string()).collect(),
             url_template: None,

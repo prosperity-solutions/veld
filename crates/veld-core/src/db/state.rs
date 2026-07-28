@@ -1041,7 +1041,7 @@ mod tests {
                 "web:local".to_string(),
                 crate::state::NodeSnapshot {
                     step_type: "start_server".into(),
-                    command: Some("npm run dev".into()),
+                    command: Some(crate::state::CommandSnapshot::Shell("npm run dev".into())),
                     cwd: None,
                     env_keys: vec!["PORT".into()],
                     url_template: Some("{service}.{run}.localhost".into()),
@@ -1056,7 +1056,11 @@ mod tests {
         let snap = loaded.graph_snapshot.as_ref().unwrap();
         assert_eq!(snap.config_hash, "abc123");
         assert_eq!(
-            snap.nodes["web:local"].command.as_deref(),
+            snap.nodes["web:local"]
+                .command
+                .as_ref()
+                .map(|c| c.display())
+                .as_deref(),
             Some("npm run dev")
         );
 

@@ -224,14 +224,112 @@ pub struct GraphSnapshot {
     pub nodes: std::collections::BTreeMap<String, NodeSnapshot>,
 }
 
+/// How a run's node command was expressed, preserved **structurally**.
+///
+/// Not a joined string: `["psql", "a b"]` and `["psql", "a", "b"]` would be
+/// diff-identical once flattened, so `veld runs diff` could not tell one from the
+/// other — and those are two different commands. Keeping the argv boundaries is
+/// the whole reason this is an enum.
+///
+/// Reads are deliberately lenient: rows written before this existed hold a plain
+/// string, and a `veld runs` listing must never fail on one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommandSnapshot {
+    /// An argument vector, spawned directly.
+    Argv(Vec<String>),
+    /// A shell string, run via `sh -c`.
+    Shell(String),
+    /// A script file, run via `sh <path>`.
+    Script(String),
+}
+
+impl CommandSnapshot {
+    /// Rendering for `veld runs show` / `diff`. An `argv` keeps its list form so
+    /// a boundary change is visible in the diff rather than smoothed away.
+    pub fn display(&self) -> String {
+        match self {
+            CommandSnapshot::Argv(argv) => format!("{argv:?}"),
+            CommandSnapshot::Shell(s) => s.clone(),
+            CommandSnapshot::Script(p) => format!("script:{p}"),
+        }
+    }
+}
+
+impl From<crate::config::CommandSpec> for CommandSnapshot {
+    fn from(spec: crate::config::CommandSpec) -> Self {
+        match spec {
+            crate::config::CommandSpec::Argv(a) => CommandSnapshot::Argv(a),
+            crate::config::CommandSpec::Shell(s) => CommandSnapshot::Shell(s),
+        }
+    }
+}
+
+impl Serialize for CommandSnapshot {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut m = s.serialize_map(Some(1))?;
+        match self {
+            CommandSnapshot::Argv(a) => m.serialize_entry("argv", a)?,
+            CommandSnapshot::Shell(sh) => m.serialize_entry("shell", sh)?,
+            CommandSnapshot::Script(p) => m.serialize_entry("script", p)?,
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for CommandSnapshot {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(d)? {
+            // Pre-migration rows: a plain string, with script paths marked by a
+            // `script:` prefix. Tolerated forever so an old row still lists and
+            // diffs (RC4) — the migration rewrites them, but a database restored
+            // from an older backup must not break `veld runs`.
+            serde_json::Value::String(s) => Ok(match s.strip_prefix("script:") {
+                Some(path) => CommandSnapshot::Script(path.to_owned()),
+                None => CommandSnapshot::Shell(s),
+            }),
+            serde_json::Value::Object(map) => {
+                let (key, val) = map
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| D::Error::custom("empty command snapshot"))?;
+                match key.as_str() {
+                    "argv" => {
+                        let argv: Vec<String> =
+                            serde_json::from_value(val).map_err(D::Error::custom)?;
+                        Ok(CommandSnapshot::Argv(argv))
+                    }
+                    "shell" => Ok(CommandSnapshot::Shell(
+                        val.as_str()
+                            .ok_or_else(|| D::Error::custom("\"shell\" must be a string"))?
+                            .to_owned(),
+                    )),
+                    "script" => Ok(CommandSnapshot::Script(
+                        val.as_str()
+                            .ok_or_else(|| D::Error::custom("\"script\" must be a string"))?
+                            .to_owned(),
+                    )),
+                    other => Err(D::Error::custom(format!(
+                        "unknown command snapshot form \"{other}\""
+                    ))),
+                }
+            }
+            _ => Err(D::Error::custom(
+                "command snapshot must be a string or an { argv | shell | script } object",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeSnapshot {
     /// `command` or `start_server`.
     pub step_type: String,
-    /// Raw command string with `${...}` placeholders intact (or the script
-    /// path, prefixed `script:`), exactly as configured — never interpolated.
+    /// The command with `${...}` placeholders intact, exactly as configured —
+    /// never interpolated, and never flattened (see [`CommandSnapshot`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
+    pub command: Option<CommandSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     /// Configured env variable NAMES (sorted). Values are never stored —

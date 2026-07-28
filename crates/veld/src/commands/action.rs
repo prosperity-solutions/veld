@@ -96,7 +96,14 @@ pub async fn run(
     // Build the interpolation context + environment from the node's live state.
     let ctx = build_context(&cfg, &run_name, &project_root, node_state, action);
 
-    let resolved_command = match variables::interpolate(&action.command, &ctx) {
+    let Some(action_cmd) = action.cmd.spec() else {
+        output::print_error(
+            &format!("Action '{action_name}' declares no command — set \"argv\" or \"shell\"."),
+            json,
+        );
+        return 1;
+    };
+    let resolved_command = match action_cmd.interpolate(&ctx) {
         Ok(c) => c,
         Err(e) => {
             output::print_error(&format!("Failed to resolve action command: {e}"), json);
@@ -121,7 +128,7 @@ pub async fn run(
     }
 
     if print {
-        println!("{resolved_command}");
+        println!("{}", resolved_command.display());
         return 0;
     }
 
@@ -149,13 +156,26 @@ pub async fn run(
         output::dim(&format!("(run: {run_name}, node: {node_key})")),
     ));
 
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
-    let status = std::process::Command::new(&shell)
-        .arg("-c")
-        .arg(&resolved_command)
-        .current_dir(&working_dir)
-        .envs(env)
-        .status();
+    // An `argv` action is spawned directly. A `shell` action keeps running under
+    // the user's `$SHELL` rather than `sh`: an action is an interactive
+    // convenience (open a DB client, tail a queue), so the author's aliases and
+    // shell functions are part of what they wrote.
+    let spawn = match &resolved_command {
+        veld_core::config::CommandSpec::Shell(script) => {
+            let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_owned());
+            let mut c = std::process::Command::new(&shell);
+            c.arg("-c").arg(script);
+            Ok(c)
+        }
+        argv => veld_core::process::std_command(argv),
+    };
+    let status = match spawn {
+        Ok(mut c) => c.current_dir(&working_dir).envs(env).status(),
+        Err(e) => {
+            output::print_error(&format!("Failed to run action '{action_name}': {e}"), json);
+            return 1;
+        }
+    };
 
     match status {
         Ok(s) => s.code().unwrap_or(if s.success() { 0 } else { 1 }),
@@ -397,7 +417,10 @@ mod tests {
             name: name.to_owned(),
             label: None,
             description: None,
-            command: "echo hi".to_owned(),
+            cmd: veld_core::config::CommandKeys {
+                shell: Some("echo hi".to_owned()),
+                ..Default::default()
+            },
             parameters: None,
             requires_outputs: if requires.is_empty() {
                 None
