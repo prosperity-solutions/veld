@@ -1316,8 +1316,52 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
 pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     let mut findings = Vec::new();
     check_proxy_headers(config, &mut findings);
+    check_depends_on_literal(config, &mut findings);
     findings.sort_by(|a, b| (a.severity, &a.location).cmp(&(b.severity, &b.location)));
     findings
+}
+
+/// `depends_on` node and variant names must be literal — no `${…}`.
+///
+/// The dependency graph is read in [`crate::graph`] *before* any
+/// `VariableContext` exists (and `${veld.port}` is only set after port
+/// allocation, which itself runs after `build_execution_plan`), so an
+/// interpolated dependency key would need a two-stage evaluator. Reject it with
+/// a clear message instead of resolving it to a node name that does not exist.
+fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const RULE: &str = "depends-on-literal";
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            let Some(deps) = &variant.depends_on else {
+                continue;
+            };
+            for (dep_node, dep_variant) in deps {
+                let loc = format!("nodes.{node_name}.variants.{variant_name}.depends_on");
+                if dep_node.contains("${") {
+                    out.push(Finding::error(
+                        RULE,
+                        &loc,
+                        format!(
+                            "dependency name {dep_node:?} contains an interpolation — \
+                             `depends_on` is read before any variable exists, so node and \
+                             variant names must be written literally"
+                        ),
+                    ));
+                }
+                if dep_variant.contains("${") {
+                    out.push(Finding::error(
+                        RULE,
+                        &loc,
+                        format!(
+                            "dependency variant {dep_variant:?} (of {dep_node:?}) contains an \
+                             interpolation — `depends_on` is read before any variable exists, \
+                             so node and variant names must be written literally"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Reject syntactically invalid proxy header names/values, once and loudly.
@@ -1628,6 +1672,65 @@ mod tests {
             findings.iter().any(|f| f.severity == Severity::Error),
             "validate must still reject it: {findings:?}"
         );
+    }
+
+    // -- F0.4: depends_on keys stay literal -----------------------------------
+
+    #[test]
+    fn interpolated_depends_on_key_is_error() {
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "2",
+                "name": "t",
+                "nodes": {
+                    "api": { "variants": { "dev": {
+                        "type": "start_server", "command": "true",
+                        "depends_on": { "db-${veld.branch}": "local" }
+                    }}},
+                    "web": { "variants": { "dev": {
+                        "type": "start_server", "command": "true",
+                        "depends_on": { "api": "${veld.variant}" }
+                    }}}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let findings = validate(&config);
+        let deps: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "depends-on-literal")
+            .collect();
+        assert_eq!(deps.len(), 2, "both the key and the variant: {findings:?}");
+        assert!(deps.iter().all(|f| f.severity == Severity::Error));
+        // The message must name the offending value so the fix is obvious.
+        assert!(
+            deps.iter().any(|f| f.message.contains("db-${veld.branch}")),
+            "{deps:?}"
+        );
+        assert!(
+            deps.iter().any(|f| f.message.contains("${veld.variant}")),
+            "{deps:?}"
+        );
+    }
+
+    #[test]
+    fn literal_depends_on_is_accepted() {
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "2",
+                "name": "t",
+                "nodes": {
+                    "db": { "variants": { "local": { "type": "command", "command": "true" }}},
+                    "api": { "variants": { "dev": {
+                        "type": "start_server", "command": "true",
+                        "depends_on": { "db": "local" }
+                    }}}
+                }
+            }"#,
+        )
+        .unwrap();
+        assert!(validate(&config).is_empty());
     }
 
     /// Parse failures are strictly structural: unreadable file, malformed JSON,

@@ -205,6 +205,54 @@ fn build_graph_snapshot(
     crate::state::GraphSnapshot { config_hash, nodes }
 }
 
+/// The inputs every `veld.*` builtin is derived from.
+///
+/// One constructor for all three interpolation paths (startup stage, `--oneshot`
+/// terminal node, `on_stop` teardown) so the same `${veld.…}` string cannot
+/// resolve differently — or fail — depending on which path expanded it. Before
+/// this, `${veld.node}` existed only in the action context and each path
+/// hand-rolled a slightly different set.
+///
+/// `veld.*` is a **closed** set: node outputs are NOT injected here. They live
+/// in `${output.*}` (own node) and `${nodes.<node>.<field>}` (any node). Merging
+/// them into builtins let an output named `port`, `url`, `run`, `node`, or
+/// `branch` shadow the builtin of the same name — silently, and only on the
+/// paths that did the merging.
+struct BuiltinScope<'a> {
+    run_name: &'a str,
+    /// Stringified run-instance UUID. `None` only where no run exists yet.
+    run_id: Option<String>,
+    project_root: &'a Path,
+    project_name: &'a str,
+    /// Raw worktree directory name; slugified on the way in.
+    worktree: &'a str,
+    /// Raw git branch; slugified on the way in.
+    branch: &'a str,
+    username: &'a str,
+    /// Node and variant this context belongs to, when it is node-scoped.
+    /// `None` for project-level setup/teardown steps, which belong to no node.
+    node: Option<(&'a str, &'a str)>,
+}
+
+impl BuiltinScope<'_> {
+    fn apply(&self, ctx: &mut VariableContext) {
+        ctx.set_builtin("run", self.run_name.to_owned());
+        if let Some(id) = &self.run_id {
+            ctx.set_builtin("run_id", id.clone());
+        }
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        ctx.set_builtin("project", self.project_name.to_owned());
+        ctx.set_builtin("name", self.project_name.to_owned());
+        ctx.set_builtin("worktree", url::slugify(self.worktree));
+        ctx.set_builtin("branch", url::slugify(self.branch));
+        ctx.set_builtin("username", self.username.to_owned());
+        if let Some((node, variant)) = self.node {
+            ctx.set_builtin("node", node.to_owned());
+            ctx.set_builtin("variant", variant.to_owned());
+        }
+    }
+}
+
 /// Machine-readable outcome detail for a failed start.
 fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
     let mut detail = EndDetail::default();
@@ -904,14 +952,17 @@ impl Orchestrator {
         let username = whoami_username();
 
         let mut var_ctx = VariableContext::new();
-        var_ctx.set_builtin("run", run_name.to_owned());
-        var_ctx.set_builtin("run_id", run.run_id.to_string());
-        var_ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        var_ctx.set_builtin("project", self.config.name.clone());
-        var_ctx.set_builtin("name", self.config.name.clone());
-        var_ctx.set_builtin("worktree", url::slugify(&worktree));
-        var_ctx.set_builtin("branch", url::slugify(&branch));
-        var_ctx.set_builtin("username", username);
+        BuiltinScope {
+            run_name,
+            run_id: Some(run.run_id.to_string()),
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: &worktree,
+            branch: &branch,
+            username: &username,
+            node: Some((&sel.node, &sel.variant)),
+        }
+        .apply(&mut var_ctx);
 
         // Clone (not take) the stashed dependency outputs so a defensive
         // re-invocation still resolves `${nodes.X.*}` rather than silently
@@ -1252,6 +1303,10 @@ impl Orchestrator {
             .begin_ending(&run.run_id, EndReason::Stopped, None)?;
         run.status = RunStatus::Stopping;
 
+        // Captured before the loop borrows `run` mutably; `${veld.run_id}` must
+        // resolve in `on_stop` exactly as it did in the node's own command.
+        let run_id = run.run_id;
+
         // Stop in reverse execution order (dependencies last). Fall back to
         // HashMap keys for runs created before execution_order was tracked.
         let node_keys: Vec<String> = if run.execution_order.is_empty() {
@@ -1292,7 +1347,8 @@ impl Orchestrator {
 
                 // Run on_stop hook if defined (skip nodes that never ran).
                 if node_state.status != NodeStatus::Pending {
-                    self.run_on_stop_hook(run_name, node_state).await;
+                    self.run_on_stop_hook(run_name, Some(run_id), node_state)
+                        .await;
                 }
 
                 node_state.status = NodeStatus::Stopped;
@@ -1459,7 +1515,12 @@ impl Orchestrator {
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
-    async fn run_on_stop_hook(&self, run_name: &str, node_state: &NodeState) {
+    async fn run_on_stop_hook(
+        &self,
+        run_name: &str,
+        run_id: Option<uuid::Uuid>,
+        node_state: &NodeState,
+    ) {
         let variant_cfg = match self
             .config
             .nodes
@@ -1483,27 +1544,29 @@ impl Orchestrator {
 
         // Build variable context matching what was available at start time.
         let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
-        ctx.set_builtin(
-            "worktree",
-            url::slugify(
-                self.project_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("default"),
-            ),
-        );
-        ctx.set_builtin(
-            "branch",
-            url::slugify(&url::detect_git_branch(&self.project_root)),
-        );
-        ctx.set_builtin("username", whoami_username());
+        BuiltinScope {
+            run_name,
+            run_id: run_id.map(|id| id.to_string()),
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: self
+                .project_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default"),
+            branch: &url::detect_git_branch(&self.project_root),
+            username: &whoami_username(),
+            node: Some((&node_state.node_name, &node_state.variant)),
+        }
+        .apply(&mut ctx);
 
+        // Outputs are reachable as `${output.KEY}` (this node) and
+        // `${nodes.<node>.KEY}` (any node) — deliberately NOT as `${veld.KEY}`.
+        // Injecting them into the builtins let an output named `port`, `url`,
+        // `run`, `node`, or `branch` shadow the builtin here but nowhere else,
+        // so the same string resolved differently in `command` and `on_stop`.
         for (k, v) in &node_state.outputs {
-            ctx.set_builtin(k, v.clone());
+            ctx.set_output(k, v.clone());
             ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
         }
         if let Some(port) = node_state.port {
@@ -1577,6 +1640,30 @@ impl Orchestrator {
         }
     }
 
+    /// Build the interpolation context for a project-level lifecycle step
+    /// (`setup` / `teardown`). Same closed `veld.*` set as a node context minus
+    /// `node`/`variant`, so `${veld.branch}` does not silently work in a node
+    /// command and fail in a setup step.
+    fn project_step_context(&self, run_name: &str) -> VariableContext {
+        let mut ctx = VariableContext::new();
+        BuiltinScope {
+            run_name,
+            run_id: None,
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: self
+                .project_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default"),
+            branch: &url::detect_git_branch(&self.project_root),
+            username: &whoami_username(),
+            node: None,
+        }
+        .apply(&mut ctx);
+        ctx
+    }
+
     // -----------------------------------------------------------------------
     // Setup / Teardown lifecycle steps
     // -----------------------------------------------------------------------
@@ -1590,11 +1677,7 @@ impl Orchestrator {
         };
 
         let total = steps.len();
-        let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
+        let ctx = self.project_step_context(run_name);
 
         for (i, step) in steps.iter().enumerate() {
             self.emit(ProgressEvent::SetupStepStarting {
@@ -1668,11 +1751,7 @@ impl Orchestrator {
         };
 
         let total = steps.len();
-        let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
+        let ctx = self.project_step_context(run_name);
 
         for (i, step) in steps.iter().enumerate() {
             self.emit(ProgressEvent::TeardownStepRunning {
@@ -1842,14 +1921,17 @@ async fn execute_node_isolated(
 
     // Build variable context.
     let mut var_ctx = VariableContext::new();
-    var_ctx.set_builtin("run", ctx.run_name.clone());
-    var_ctx.set_builtin("run_id", ctx.run_id.to_string());
-    var_ctx.set_builtin("root", ctx.project_root.to_string_lossy().into_owned());
-    var_ctx.set_builtin("project", ctx.config.name.clone());
-    var_ctx.set_builtin("name", ctx.config.name.clone());
-    var_ctx.set_builtin("worktree", url::slugify(&ctx.worktree));
-    var_ctx.set_builtin("branch", url::slugify(&ctx.branch));
-    var_ctx.set_builtin("username", ctx.username.clone());
+    BuiltinScope {
+        run_name: &ctx.run_name,
+        run_id: Some(ctx.run_id.to_string()),
+        project_root: &ctx.project_root,
+        project_name: &ctx.config.name,
+        worktree: &ctx.worktree,
+        branch: &ctx.branch,
+        username: &ctx.username,
+        node: Some((&sel.node, &sel.variant)),
+    }
+    .apply(&mut var_ctx);
 
     // Populate node output references from already-executed nodes.
     for (node_key, outputs) in ctx.all_outputs.as_ref() {
@@ -2705,6 +2787,110 @@ mod tests {
             terminal_node: None,
             terminal_outputs: Some(HashMap::new()),
         }
+    }
+
+    /// F0.3: one builtin set, so `${veld.node}` (and every sibling) resolves the
+    /// same way on the start, terminal, and stop paths. Before this, `node` and
+    /// `variant` existed only in the action context.
+    #[test]
+    fn builtin_scope_is_one_closed_set() {
+        let root = std::path::Path::new("/projects/app");
+        let mut ctx = VariableContext::new();
+        BuiltinScope {
+            run_name: "dev",
+            run_id: Some("abc".to_owned()),
+            project_root: root,
+            project_name: "app",
+            worktree: "My Worktree",
+            branch: "feature/Thing",
+            username: "sam",
+            node: Some(("api", "local")),
+        }
+        .apply(&mut ctx);
+
+        let got = |k: &str| ctx.builtins.get(k).cloned().unwrap_or_default();
+        assert_eq!(got("run"), "dev");
+        assert_eq!(got("run_id"), "abc");
+        assert_eq!(got("root"), "/projects/app");
+        assert_eq!(got("project"), "app");
+        assert_eq!(got("name"), "app");
+        assert_eq!(got("node"), "api");
+        assert_eq!(got("variant"), "local");
+        assert_eq!(got("username"), "sam");
+        // worktree/branch are slugified for URL safety.
+        assert_eq!(got("worktree"), url::slugify("My Worktree"));
+        assert_eq!(got("branch"), url::slugify("feature/Thing"));
+
+        // A project-level step has no node, and must not invent one.
+        let mut project_ctx = VariableContext::new();
+        BuiltinScope {
+            run_name: "dev",
+            run_id: None,
+            project_root: root,
+            project_name: "app",
+            worktree: "app",
+            branch: "main",
+            username: "sam",
+            node: None,
+        }
+        .apply(&mut project_ctx);
+        assert!(!project_ctx.builtins.contains_key("node"));
+        assert!(!project_ctx.builtins.contains_key("variant"));
+    }
+
+    /// F0.2 exit gate: an output named like a builtin must not shadow it.
+    ///
+    /// The `on_stop` path used to inject every node output into the *builtins*
+    /// map, so a node with an output called `port` made `${veld.port}` resolve to
+    /// the output during teardown and to the allocated port everywhere else —
+    /// the same string, two values. Outputs now live in `${output.*}` /
+    /// `${nodes.*}` only. This also covers F0.3 on the stop path.
+    #[tokio::test]
+    async fn output_named_port_does_not_shadow_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("resolved");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "2",
+                "name": "testcfg",
+                "nodes": {{
+                    "svc": {{ "default_variant": "local", "variants": {{
+                        "local": {{
+                            "type": "start_server",
+                            "command": "sleep 30",
+                            "on_stop": "printf '%s' \"${{veld.port}}|${{veld.node}}|${{veld.variant}}|${{output.port}}|${{nodes.svc.port}}\" > {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let key = RunState::node_key("svc", "local");
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new("svc", "local");
+        ns.status = NodeStatus::Healthy;
+        // The allocated port…
+        ns.port = Some(12345);
+        // …and a node output that happens to be called `port`.
+        ns.outputs.insert("port".to_owned(), "9999".to_owned());
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key);
+        orch.save_state(&run).unwrap();
+
+        orch.stop("testrun").await.expect("stop");
+
+        let resolved = std::fs::read_to_string(&marker).expect("on_stop must have run");
+        assert_eq!(
+            resolved, "12345|svc|local|9999|9999",
+            "${{veld.port}} must stay the allocated port; the output is reachable \
+             only as ${{output.port}} / ${{nodes.svc.port}}"
+        );
     }
 
     /// F0.1 exit gate: `veld stop` must work against a running environment whose
