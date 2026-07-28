@@ -169,6 +169,65 @@ for example in "$REPO_ROOT"/schema/v3/examples/*.json; do
 done
 
 echo
+echo "4) Doc example gate: no documented example uses a form that cannot load"
+echo
+# Docs rot silently: an example keeps looking plausible long after the parser stops
+# accepting it. This whole batch of files shipped v1/v2 examples for a while, and
+# nothing caught it — a doc example is not covered by the schema examples above,
+# and no test parses prose. So the legacy forms are grepped for directly.
+#
+# `docs/migrating-to-v3.md` is exempt by design: it has to show the old form next
+# to the new one, which is the entire point of the page.
+LEGACY_PATTERNS=(
+  # `"command":` used as a KEY (a legacy command). `"type": "command"` is a node
+  # kind and stays legal, so the pattern requires `command` on the left of the colon.
+  '"command"[[:space:]]*:[[:space:]]*"'
+  # A bare-string on_stop / skip_if / verify — the v1/v2 form.
+  '"(on_stop|skip_if|verify)"[[:space:]]*:[[:space:]]*"'
+  # An unsupported schemaVersion in an example.
+  '"schemaVersion"[[:space:]]*:[[:space:]]*"[12]"'
+)
+DOC_FILES=$(git -C "$REPO_ROOT" ls-files '*.md' '*.html' '*.txt' \
+  | grep -vE '^(docs/migrating-to-v3\.md|CHANGELOG\.md)$' \
+  | grep -vE '(^|/)node_modules/')
+for pattern in "${LEGACY_PATTERNS[@]}"; do
+  hits=$(cd "$REPO_ROOT" && grep -nE "$pattern" $DOC_FILES 2>/dev/null || true)
+  echo -n "  no matches for /$pattern/ ... "
+  if [[ -z "$hits" ]]; then
+    echo "OK"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL"
+    echo "$hits" | sed 's/^/      /'
+    FAIL=$((FAIL + 1))
+  fi
+done
+
+echo
+echo "5) Doc example gate: every complete documented config loads and lints clean"
+echo
+# The grep above catches a fragment using a dead form. This catches a whole example
+# that is broken some other way — `docs/scenarios.md` shipped 18 examples with brace
+# typos that made them invalid JSON, which no test noticed. Needs a built binary, so
+# it is skipped (not failed) when there isn't one.
+VELD_BIN="$REPO_ROOT/target/debug/veld"
+[[ -x "$VELD_BIN" ]] || VELD_BIN="$REPO_ROOT/target/release/veld"
+if [[ -x "$VELD_BIN" ]]; then
+  if python3 "$REPO_ROOT/tests/validate-doc-examples.py" "$VELD_BIN"; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+  fi
+elif [[ -n "${CI:-}" ]]; then
+  # Never silently skip in CI: a gate that quietly does nothing reads as a pass.
+  # The job that runs this must build a binary first (see ci.yml).
+  echo "  FAIL (no veld binary — this gate must not be skipped in CI)"
+  FAIL=$((FAIL + 1))
+else
+  echo "  SKIP (no veld binary at target/{debug,release}/veld — run cargo build)"
+fi
+
+echo
 echo "=== Results: $PASS passed, $FAIL failed ==="
 
 if [[ $FAIL -gt 0 ]]; then

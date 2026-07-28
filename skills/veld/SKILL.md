@@ -107,7 +107,7 @@ port and password never have to be copied by hand.
       "label": "psql",
       "description": "Open a psql shell to the DB clone",
       "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"],
-      "command": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
+      "shell": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
     }
   ]
 }
@@ -201,7 +201,7 @@ shell; not an enforceable floor). The daemon binds one iroh endpoint per relay
 policy on demand, so shares on different relays run concurrently. A self-hosted
 relay can require an auth token: write the relay as `{ "url": ..., "token": ... }`
 where `token` is a literal string or `{ "env": ... }` / `{ "file": ... }` /
-`{ "command": ... }` (resolved on the daemon at share time; keep secrets out of
+`{ "argv": [...] }` / `{ "shell": "..." }` (resolved on the daemon at share time; keep secrets out of
 `veld.json` with the non-literal forms). A joiner auto-confines to the relay(s) in
 the ticket (a custom-relay share is never joined over public relays); to reach a
 token-gated relay it is prompted for the token (browser overlay / `veld join`

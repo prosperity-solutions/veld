@@ -75,8 +75,8 @@ Interpolation in an `argv` runs **per element after the array is fixed**, so
 contains. In a nested position the pair is wrapped:
 `"on_stop": { "argv": [...] }`.
 
-In `schemaVersion` 1 and 2, `command` (a shell string) is also accepted. A v3
-document containing it fails to load.
+`command` — the v1/v2 shell-string form — is gone. A document containing it fails
+to load, with every offending position named.
 
 ## Splitting across files (`include`, v3)
 
@@ -169,15 +169,16 @@ Project-level lifecycle steps. Not nodes — no variants, no health checks, no d
 
 ```json
 "setup": [
-  { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
-  { "name": "network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+  { "name": "docker", "argv": ["docker", "info"], "failureMessage": "Docker must be running" },
+  { "name": "network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" }
 ],
 "teardown": [
-  { "name": "network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+  { "name": "network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
 ]
 ```
 
-Step fields: `name` (required), `command` (required), `failureMessage` (optional).
+Step fields: `name` (required), `argv` or `shell` (required, exactly one),
+`failureMessage` (optional).
 
 Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars (`${veld.port}`, `${nodes.*}`).
 
@@ -190,7 +191,7 @@ Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or l
 ```json
 {
   "type": "start_server",
-  "command": "npm run dev -- --port ${veld.port}",
+  "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
   "probes": {
     "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 },
     "liveness": { "type": "http", "path": "/health", "interval_ms": 5000 }
@@ -199,7 +200,7 @@ Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or l
   "env": { "DATABASE_URL": "${nodes.database.DATABASE_URL}" },
   "outputs": { "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app" },
   "sensitive_outputs": ["DATABASE_URL"],
-  "on_stop": "docker rm -f container-name"
+  "on_stop": { "argv": ["docker", "rm", "-f", "container-name"] }
 }
 ```
 
@@ -218,9 +219,9 @@ guide for details.
   "type": "command",
   "script": "./scripts/clone-db.sh",
   "outputs": ["DATABASE_URL", "DB_NAME"],
-  "skip_if": "./scripts/verify-db.sh",
+  "skip_if": { "argv": ["./scripts/verify-db.sh"] },
   "probes": {
-    "liveness": { "type": "command", "command": "pg_isready", "interval_ms": 5000 }
+    "liveness": { "type": "command", "argv": ["pg_isready"], "interval_ms": 5000 }
   }
 }
 ```
@@ -234,7 +235,7 @@ Every `start_server` variant requires a readiness probe. Use `probes.readiness` 
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 15 }
-{ "type": "command", "command": "./scripts/check-ready.sh", "timeout_seconds": 45 }
+{ "type": "command", "argv": ["./scripts/check-ready.sh"], "timeout_seconds": 45 }
 ```
 
 - `http`: Two-phase — TCP port check first, then HTTP. Default status: 200, path: `/`.
@@ -250,7 +251,7 @@ Runs continuously after a node becomes healthy. Available for both `command` and
 "probes": {
   "liveness": {
     "type": "command",
-    "command": "pg_isready -h localhost -p 5432",
+    "argv": ["pg_isready", "-h", "localhost", "-p", "5432"],
     "interval_ms": 5000,
     "failure_threshold": 3,
     "max_recoveries": 3
@@ -280,10 +281,10 @@ Actions are **node-scoped**: each action belongs to the node it's declared under
       "label": "psql",
       "description": "Open a psql shell to the DB clone",
       "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME", "DB_USER", "DB_PASS"],
-      "command": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
+      "shell": "PGPASSWORD=$DB_PASS psql -h $DB_HOST -p $DB_PORT -U $DB_USER $DB_NAME"
     }
   ],
-  "variants": { "dblab": { "type": "start_server", "command": "..." } }
+  "variants": { "dblab": { "type": "start_server", "shell": "..." } }
 }
 ```
 
@@ -351,7 +352,7 @@ A service is shareable only if its variant declares `share.expose` — `veld sha
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer"] } }
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
   }
@@ -359,7 +360,7 @@ A service is shareable only if its variant declares `share.expose` — `veld sha
 ```
 
 - `sharing.relays` — **must be opted into explicitly (no default):** `"public"` (n0's relays) or an array of self-hosted relay entries (confines share traffic for compliance). `veld share` is refused if unset (and no `VELD_SHARE_RELAY` env). Config wins over the env var. **`"public"` is dev/testing only** — n0's public relays are rate-limited, best-effort, no uptime/throughput guarantees; use self-hosted relays for production or high-volume sharing (n0 fair-use guidance, not a license restriction — iroh is MIT/Apache-2.0). The daemon binds one iroh endpoint per relay policy, so shares on different relays run concurrently (no restart).
-  - A relay entry is a bare URL string, or `{ "url": ..., "token": ... }` to send an `Authorization: Bearer` token to a relay that requires one. `token` = a literal string (inline; lands in config), or `{ "env": "VAR" }` / `{ "file": "/path" }` / `{ "command": "op read ..." }` to resolve it on the daemon at share time without storing the secret. `command` runs with the user's login-shell PATH (like liveness probes), so user-installed CLIs (`op`, `vault`) are found even though the daemon itself has a bare launchd PATH — but only PATH is inherited, not other shell-exported vars or aliases; `env` still reads the daemon's environment, not your shell. A token that fails to resolve fails the share (never connects unauthenticated). `VELD_SHARE_RELAY_TOKEN` pairs a literal token with the `VELD_SHARE_RELAY` env override.
+  - A relay entry is a bare URL string, or `{ "url": ..., "token": ... }` to send an `Authorization: Bearer` token to a relay that requires one. `token` = a literal string (inline; lands in config), or `{ "env": "VAR" }` / `{ "file": "/path" }` / `{ "argv": ["op", "read", "..."] }` to resolve it on the daemon at share time without storing the secret. A source `argv`/`shell` runs with the user's login-shell PATH (like liveness probes), so user-installed CLIs (`op`, `vault`) are found even though the daemon itself has a bare launchd PATH — but only PATH is inherited, not other shell-exported vars or aliases; `env` still reads the daemon's environment, not your shell. A token that fails to resolve fails the share (never connects unauthenticated). `VELD_SHARE_RELAY_TOKEN` pairs a literal token with the `VELD_SHARE_RELAY` env override.
   - **Join side:** a joiner auto-uses the ticket's relay(s) (a custom-relay share is never joined over public relays). For a token-gated relay the token resolves by priority (highest first): prompt-entered > ticket-embedded > local cache (the central veld database, `<data_dir>/veld/veld.db`, 0600) > `VELD_SHARE_RELAY`+`VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay). If none works, the joiner is prompted (browser overlay / `veld join` terminal; `--json` returns `needs_relay_token` instead) and the entered token is cached; a wrong token re-prompts.
 - `sharing.dangerouslyEmbedRelayTokensInTicket` — **DANGER, default false.** Embeds the resolved relay token(s) in the share ticket so joiners need no token setup. Ships the relay secret in every share link (Slack, email, history) — disposable per-project tokens only, never a shared org secret. camelCase (à la React's `dangerouslySetInnerHTML`) to flag the danger.
 - `sharing.gateway` — the public web gateway `veld share --web` registers with: a bare URL, or `{ "url": ..., "token": ... }` where `token` is a secret source (same forms as relay tokens) for the gateway's required registration auth. Env override: `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` on the daemon. The gateway is a self-hosted container (`ghcr.io/prosperity-solutions/veld-gateway`); operator guide: `docs/gateway.md`.

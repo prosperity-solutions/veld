@@ -50,14 +50,14 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 ```json
 {
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "name": "my-app",
   "nodes": {
     "backend": {
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "health_check": { "type": "http", "path": "/health" }
         }
       }
@@ -323,7 +323,7 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 | Field            | Type   | Required | Description |
 |------------------|--------|----------|-------------|
 | `name`           | string | Yes      | Human-readable name for progress reporting and error messages |
-| `argv` / `shell` | array / string | Yes (exactly one) | What to run. See [`argv` and `shell`](#argv-and-shell). In `schemaVersion` 1 and 2, `command` (a shell string) is also accepted |
+| `argv` / `shell` | array / string | Yes (exactly one) | What to run. See [`argv` and `shell`](#argv-and-shell) |
 | `failureMessage` | string | No       | Message shown when the command fails (non-zero exit) |
 
 #### Variable availability
@@ -395,7 +395,7 @@ When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes 
   "variants": {
     "default": {
       "type": "command",
-      "command": "./scripts/generate-certs.sh"
+      "argv": ["./scripts/generate-certs.sh"]
     }
   }
 }
@@ -460,7 +460,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | Field               | Type             | Required | Applies To     | Description                                           |
 |---------------------|------------------|----------|----------------|-------------------------------------------------------|
 | `type`              | string           | Yes      | All            | `"command"` or `"start_server"`                          |
-| `command`           | string           | Varies   | All            | Inline shell command to execute                       |
+| `argv` / `shell`    | array / string   | Yes (exactly one) | All   | What to run — `argv` is spawned directly, `shell` runs via `sh -c` |
 | `script`            | string           | Varies   | `command` only    | Path to script file, relative to `veld.json`          |
 | `health_check`      | object           | No       | `start_server` | Legacy readiness probe. Deprecated: use `probes.readiness` |
 | `probes`            | object           | No       | All            | Readiness and liveness probe configuration            |
@@ -469,8 +469,8 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
-| `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
-| `skip_if`           | string           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
+| `on_stop`           | object           | No       | All            | Teardown command (`{ "argv": … }` / `{ "shell": … }`) run when the environment is stopped |
+| `skip_if`           | object           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
 | `proxy`             | object           | No       | `start_server` | Reverse-proxy header rules override for this variant (see [Proxy](#proxy)) |
@@ -483,7 +483,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 Runs a shell command or script to completion. Used for setup tasks such as database cloning, seeding, data migration, or exporting remote service URLs.
 
 - The working directory defaults to `${veld.root}` (the directory containing `veld.json`)
-- Must specify either `command` or `script` (mutually exclusive)
+- Must specify exactly one of `argv`, `shell`, or `script`
 - Can declare outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged — exposes values in terminal/logs)
 - Built-in output: `exit_code`
 - Supports the `skip_if` field for idempotency
@@ -491,7 +491,7 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 ```json
 {
   "type": "command",
-  "command": "echo 'DATABASE_URL=postgresql://localhost:5432/mydb' >> \"$VELD_OUTPUT_FILE\"",
+  "shell": "echo 'DATABASE_URL=postgresql://localhost:5432/mydb' >> \"$VELD_OUTPUT_FILE\"",
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -501,10 +501,10 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
 
 - The working directory defaults to `${veld.root}`
-- Must specify `command` (required)
+- Must specify exactly one of `argv` or `shell` (required)
 - The process **must** bind to `${veld.port}` -- if it does not, the health check fails with a clear error
 - Built-in outputs: `url` (the full HTTPS URL) and `port` (the allocated port number)
-- Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `command`, `env`, and `outputs` templates
+- Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `argv`/`shell`, `env`, and `outputs` templates
 - Ports and URLs are **pre-computed** before any node executes, so `${nodes.X.url}` and `${nodes.X.port}` for any `start_server` node are available everywhere -- no dependency edge required
 - Requires a readiness probe: use `probes.readiness` (preferred) or the legacy `health_check` field
 - Users never see or deal with port numbers -- only clean HTTPS URLs
@@ -512,7 +512,7 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 ```json
 {
   "type": "start_server",
-  "command": "pnpm --filter backend dev --port ${veld.port}",
+  "argv": ["pnpm", "--filter", "backend", "dev", "--port", "${veld.port}"],
   "health_check": { "type": "http", "path": "/health" }
 }
 ```
@@ -637,7 +637,7 @@ Runs a shell command and checks the exit code. Exit code `0` means healthy.
 ```json
 "health_check": {
   "type": "command",
-  "command": "./scripts/check-db-ready.sh",
+  "argv": ["./scripts/check-db-ready.sh"],
   "timeout_seconds": 45,
   "interval_ms": 2000
 }
@@ -656,7 +656,7 @@ Configures readiness and liveness probes for a variant. Available for both `comm
   },
   "liveness": {
     "type": "command",
-    "command": "pg_isready -h localhost -p 5432",
+    "argv": ["pg_isready", "-h", "localhost", "-p", "5432"],
     "interval_ms": 5000,
     "failure_threshold": 3,
     "max_recoveries": 3
@@ -754,7 +754,7 @@ Defines synthetic outputs whose values are string templates interpolated after t
 ```json
 {
   "type": "start_server",
-  "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+  "argv": ["docker", "run", "--rm", "-p", "${veld.port}:5432", "postgres:16"],
   "health_check": { "type": "port" },
   "outputs": {
     "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app",
@@ -805,7 +805,7 @@ The `skip_if` command receives the previous run's output variables as environmen
 {
   "type": "command",
   "script": "./scripts/clone-db.sh",
-  "skip_if": "./scripts/verify-db.sh",
+  "skip_if": { "argv": ["./scripts/verify-db.sh"] },
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -819,8 +819,8 @@ This is especially useful for `command` nodes that provision external resources 
 ```json
 {
   "type": "command",
-  "command": "docker run -d --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16",
-  "on_stop": "docker rm -f veld-db-${veld.run}",
+  "argv": ["docker", "run", "-d", "--name", "veld-db-${veld.run}", "-p", "${veld.port}:5432", "postgres:16"],
+  "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -849,8 +849,8 @@ whatever it would have removed has been left behind.
 ```json
 {
   "type": "start_server",
-  "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7",
-  "on_stop": "docker stop veld-redis-${veld.run}",
+  "argv": ["docker", "run", "--rm", "--name", "veld-redis-${veld.run}", "-p", "${veld.port}:6379", "redis:7"],
+  "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
   "health_check": { "type": "port" }
 }
 ```
@@ -874,7 +874,7 @@ Sharing has two config surfaces: an environment-wide `sharing` block (relays and
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev",
+          "argv": ["npm", "run", "dev"],
           "share": { "expose": ["peer"] }
         }
       }
@@ -906,7 +906,7 @@ Give a relay entry a `token` to send one:
       { "url": "https://lit.acme.internal",  "token": "the-shared-secret" },
       { "url": "https://env.acme.internal",  "token": { "env": "VELD_RELAY_TOKEN" } },
       { "url": "https://file.acme.internal", "token": { "file": "/run/secrets/relay-token" } },
-      { "url": "https://op.acme.internal",   "token": { "command": "op read op://vault/relay/token" } }
+      { "url": "https://op.acme.internal",   "token": { "argv": ["op", "read", "op://vault/relay/token"] } }
     ]
   }
 }
@@ -919,7 +919,7 @@ Give a relay entry a `token` to send one:
 | `"a-string"` | Literal token, inline in config | Quick local setup — but it lands the secret in `veld.json` (and version control) |
 | `{ "env": "VAR" }` | Read environment variable `VAR` **from the daemon's process environment, not your shell** (so `export VAR=… && veld share` won't work — a running daemon doesn't inherit it) | 12-factor / CI secret injection |
 | `{ "file": "/path" }` | Read the file's contents (trailing whitespace trimmed). Use an absolute path — a relative one resolves against the daemon's working directory, not your project | Docker / Kubernetes secret mounts (`/run/secrets/…`) |
-| `{ "command": "…" }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed). Runs with your login-shell `PATH`, so user-installed CLIs (`op`, `vault`, brew tools) are found even though the command executes on the daemon — but *only* `PATH` is inherited, not other shell-exported variables or aliases | 1Password, Vault, or any secret-manager CLI |
+| `{ "argv": ["…"] }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed). Runs with your login-shell `PATH`, so user-installed CLIs (`op`, `vault`, brew tools) are found even though the command executes on the daemon — but *only* `PATH` is inherited, not other shell-exported variables or aliases | 1Password, Vault, or any secret-manager CLI |
 
 All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
 
@@ -943,7 +943,7 @@ There is no `veld.json` path for a joiner's relay token.
 ```json
 {
   "sharing": {
-    "relays": [{ "url": "https://relay.acme.internal", "token": { "command": "op read op://vault/relay/token" } }],
+    "relays": [{ "url": "https://relay.acme.internal", "token": { "argv": ["op", "read", "op://vault/relay/token"] } }],
     "dangerouslyEmbedRelayTokensInTicket": true
   }
 }
@@ -965,7 +965,7 @@ The public web gateway this environment registers `web` shares with (used by `ve
 }
 ```
 
-`token` is a secret source exactly like [relay auth tokens](#relay-auth-tokens) — a literal string, `{ "env": … }`, `{ "file": … }`, or `{ "command": … }` — resolved on the daemon when the share starts, Debug-redacted, and required (the gateway never accepts unauthenticated registrations). Without config, the `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` env vars (on the **daemon's** environment) work as an ad-hoc override; config wins when both are present.
+`token` is a secret source exactly like [relay auth tokens](#relay-auth-tokens) — a literal string, `{ "env": … }`, `{ "file": … }`, `{ "argv": [ … ] }`, or `{ "shell": … }` — resolved on the daemon when the share starts, Debug-redacted, and required (the gateway never accepts unauthenticated registrations). Without config, the `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` env vars (on the **daemon's** environment) work as an ad-hoc override; config wins when both are present.
 
 The gateway itself is one self-hosted container — see the [gateway operator guide](gateway.md) for deployment (DNS, TLS, env vars).
 
@@ -1499,7 +1499,7 @@ Veld validates all variable references for ambiguity at graph resolution time an
 ```json
 {
   "type": "start_server",
-  "command": "pnpm --filter frontend dev",
+  "argv": ["pnpm", "--filter", "frontend", "dev"],
   "depends_on": { "backend": "local", "database": "docker" },
   "env": {
     "PORT": "${veld.port}",
@@ -1633,7 +1633,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 ```json
 {
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
 
@@ -1649,15 +1649,15 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         "local": {
           "type": "command",
           "script": "./scripts/clone-db.sh",
-          "skip_if": "./scripts/verify-db.sh",
-          "on_stop": "./scripts/drop-db.sh",
+          "skip_if": { "argv": ["./scripts/verify-db.sh"] },
+          "on_stop": { "argv": ["./scripts/drop-db.sh"] },
           "outputs": ["DATABASE_URL"],
           "sensitive_outputs": ["DATABASE_URL"]
         },
         "docker": {
           "type": "start_server",
-          "command": "docker run -d --name veld-db-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
-          "on_stop": "docker rm -f veld-db-${veld.run}",
+          "argv": ["docker", "run", "-d", "--name", "veld-db-${veld.run}", "-e", "POSTGRES_PASSWORD=veld", "-p", "${veld.port}:5432", "postgres:16"],
+          "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
           "health_check": {
             "type": "port",
             "timeout_seconds": 30
@@ -1674,8 +1674,8 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "default": {
           "type": "command",
-          "command": "./scripts/generate-dev-certs.sh",
-          "skip_if": "test -f ./certs/dev.pem"
+          "argv": ["./scripts/generate-dev-certs.sh"],
+          "skip_if": { "argv": ["test", "-f", "./certs/dev.pem"] }
         }
       }
     },
@@ -1685,7 +1685,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter backend dev --port ${veld.port}",
+          "argv": ["pnpm", "--filter", "backend", "dev", "--port", "${veld.port}"],
           "health_check": {
             "type": "http",
             "path": "/health",
@@ -1703,7 +1703,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "command",
-          "command": "echo 'BACKEND_URL=https://api.staging.my-project.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'BACKEND_URL=https://api.staging.my-project.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["BACKEND_URL"]
         }
       }
@@ -1714,7 +1714,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter frontend dev",
+          "argv": ["pnpm", "--filter", "frontend", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1729,7 +1729,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "start_server",
-          "command": "pnpm --filter frontend dev",
+          "argv": ["pnpm", "--filter", "frontend", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1750,7 +1750,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter admin dev",
+          "argv": ["pnpm", "--filter", "admin", "dev"],
           "health_check": {
             "type": "http",
             "path": "/",
@@ -1766,7 +1766,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "start_server",
-          "command": "pnpm --filter admin dev",
+          "argv": ["pnpm", "--filter", "admin", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1844,7 +1844,7 @@ veld start e2e --oneshot
       "variants": {
         "local": {
           "type": "command",
-          "command": "playwright test --reporter=line",
+          "argv": ["playwright", "test", "--reporter=line"],
           "env": { "BASE_URL": "${nodes.web.url}" },
           "depends_on": { "web": "local", "api": "local" }
         }

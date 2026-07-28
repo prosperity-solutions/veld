@@ -45,7 +45,7 @@ point at the gateway:
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev",
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"],
                    "share": { "expose": ["web"] } }
       }
     }
@@ -62,7 +62,7 @@ Web shares are **password-protected by default** — see
 out with `"share": { "expose": ["web"], "web": { "access": "link" } }`.
 
 **Injecting the token into the daemon.** `{ "env": … }` / `{ "file": … }` /
-`{ "command": … }` are read by the veld **daemon** process (launchd/systemd/the
+`{ "argv": [ … ] }` / `{ "shell": … }` are read by the veld **daemon** process (launchd/systemd/the
 foreground `veld` you started), never your interactive shell. A literal token
 in `veld.json` always works but lands in version control; a `file` under
 `/run/secrets` is the usual production choice; for `env`, set the variable in

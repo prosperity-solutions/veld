@@ -92,7 +92,7 @@ cargo build --release
 ```json
 {
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "nodes": {
@@ -101,7 +101,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 } }
         }
       }
@@ -111,7 +111,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/", "timeout_seconds": 30 } },
           "depends_on": { "backend": "local" },
           "env": { "NEXT_PUBLIC_API_URL": "${nodes.backend.url}" }
@@ -195,11 +195,11 @@ Project-level lifecycle steps that run outside the dependency graph. Setup steps
 ```json
 {
   "setup": [
-    { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
-    { "name": "veld-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+    { "name": "docker", "argv": ["docker", "info"], "failureMessage": "Docker must be running" },
+    { "name": "veld-network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" }
   ],
   "teardown": [
-    { "name": "veld-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+    { "name": "veld-network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
   ]
 }
 ```
@@ -211,7 +211,7 @@ Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
-{ "type": "command", "command": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "command", "argv": ["curl", "-sf", "http://localhost:${veld.port}/ready"] }
 ```
 
 ### URL template variables
@@ -372,7 +372,7 @@ Share a running environment with a colleague so they open the **same** URLs on t
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer"] } }
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
   }
@@ -399,7 +399,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 > **n0's public relays are for development and testing, not production.** They're a free community service shared across all iroh users worldwide — rate-limited, best-effort, and carry no uptime or throughput guarantees (a share stuck on `relayed` is capped by that relay). Per [iroh's own guidance](https://docs.iroh.computer/concepts/relays), production or high-volume sharing should run on **self-hosted relays** (`"relays": ["https://relay.example.com"]`, one Docker container — see [Relay auth tokens](docs/configuration.md#relay-auth-tokens)) or n0's managed relays. This is n0's fair-use recommendation, not a licensing restriction — iroh is dual-licensed MIT/Apache-2.0 and free to use commercially.
 
-A self-hosted relay can require an **authorization token** so it isn't open to anyone. Write a relay as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token can be a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "command": "op read op://vault/relay/token" }` (1Password/Vault CLI). It's resolved on the daemon at share time; if it can't be resolved, the share fails rather than connecting unauthenticated. Config tokens apply to **hosting** only. The join side derives the relay from the ticket automatically; if that relay is token-gated, the joiner is **prompted** for the token (browser overlay or `veld join` terminal prompt) and it's **cached** per relay so future joins don't re-ask. A wrong token re-prompts. The token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when it matches the ticket's relay), or — to skip joiner setup entirely — the host can set `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket, which is **dangerous** (the relay secret then travels in every share link; disposable tokens only). See [Relay auth tokens](docs/configuration.md#relay-auth-tokens).
+A self-hosted relay can require an **authorization token** so it isn't open to anyone. Write a relay as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token can be a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "argv": ["op", "read", "op://vault/relay/token"] }` (1Password/Vault CLI). It's resolved on the daemon at share time; if it can't be resolved, the share fails rather than connecting unauthenticated. Config tokens apply to **hosting** only. The join side derives the relay from the ticket automatically; if that relay is token-gated, the joiner is **prompted** for the token (browser overlay or `veld join` terminal prompt) and it's **cached** per relay so future joins don't re-ask. A wrong token re-prompts. The token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when it matches the ticket's relay), or — to skip joiner setup entirely — the host can set `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket, which is **dangerous** (the relay secret then travels in every share link; disposable tokens only). See [Relay auth tokens](docs/configuration.md#relay-auth-tokens).
 
 `share.expose` is a list of audiences. `peer` (Veld-to-Veld, described above) reproduces the origin URL verbatim. `web` exposes a service to **anyone with a browser** — no Veld required — via a self-hosted gateway.
 
@@ -417,7 +417,7 @@ Point the environment at your org's gateway and opt services into the `web` audi
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer", "web"] } }
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
       }
     }
   }

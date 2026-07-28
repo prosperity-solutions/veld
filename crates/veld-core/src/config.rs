@@ -2823,10 +2823,11 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
             // `argv` element and a `shell` string both end up in the process
             // table, where every other user on the machine can read them, and in
             // any shell history or CI log that echoes the command.
+            // No `secrets.is_empty()` early exit: a `${nodes.<other>.KEY}` leak is
+            // declared by the *producing* node, so a variant with no secrets of its
+            // own can still leak one. Skipping here meant the consuming side — the
+            // only side that puts the value on a command line — was never scanned.
             let secrets = secret_refs(config, node, variant);
-            if secrets.is_empty() {
-                continue;
-            }
             let r = resolve_variant(config, node, variant);
             // EVERY command position, not just the variant's own. Actions are where
             // `${output.*}` is actually in scope, and a probe command runs on the
@@ -2869,15 +2870,47 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                             .into_iter()
                             .map(|n| format!("vars.{n}")),
                     );
-                    // `${nodes.<node>.KEY}` — take the trailing field.
-                    names.extend(
-                        builtin_refs_in(part, "nodes.")
-                            .into_iter()
-                            .filter_map(|r| r.rsplit('.').next().map(str::to_owned)),
-                    );
+                    // `${nodes.<other>.KEY}` is resolved against **that** node's
+                    // sensitivity, not this one's. Taking the trailing field and
+                    // matching it here made a name sensitive project-wide the moment
+                    // any single node declared it: a config reading
+                    // `${nodes.postgres.DATABASE_URL}` was rejected because some
+                    // *other* node happened to call one of its own outputs
+                    // `DATABASE_URL`, and the message claimed the value was declared
+                    // secret when it never was. A false positive on a security rule
+                    // is expensive — it teaches people to work around the linter.
+                    for r in builtin_refs_in(part, "nodes.") {
+                        let mut it = r.splitn(2, '.');
+                        let (Some(other), Some(key)) = (it.next(), it.next()) else {
+                            continue;
+                        };
+                        if other == node_name {
+                            // Its own outputs are already covered by `output.KEY`.
+                            continue;
+                        }
+                        if let Some(other_node) = config.nodes.get(other) {
+                            // The producing variant is not known until start, so any
+                            // variant declaring the key sensitive is enough. Erring
+                            // toward flagging is the right direction here.
+                            let sensitive = other_node.variants.values().any(|ov| {
+                                resolve_variant(config, other_node, ov)
+                                    .sensitive_outputs
+                                    .iter()
+                                    .flatten()
+                                    .any(|k| k == key)
+                            });
+                            if sensitive {
+                                names.push(format!("nodes.{other}.{key}"));
+                            }
+                        }
+                    }
                     names.extend(env_refs(part));
                     for name in names {
-                        if secrets.contains(&name) {
+                        // A `nodes.<other>.KEY` name is only ever pushed above once
+                        // that node's own declaration has been checked, so it is
+                        // already known sensitive and does not belong in `secrets`
+                        // (which describes *this* variant).
+                        if secrets.contains(&name) || name.starts_with("nodes.") {
                             out.push(Finding::error(
                                 "secret-in-command",
                                 format!("{base}{suffix}"),
@@ -2898,6 +2931,17 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                                              outputs to its own process) rather than \
                                              interpolating ${{output.{out}}} into the \
                                              command line"
+                                        )
+                                    } else if let Some(rest) = name.strip_prefix("nodes.") {
+                                        // Another node's output: veld does not export it
+                                        // here, so the author has to route it explicitly.
+                                        format!(
+                                            "put it in this variant's `env` as \
+                                             `{{ \"SOME_NAME\": \"${{nodes.{rest}}}\" }}` and \
+                                             have the program read SOME_NAME from its \
+                                             environment, or deliver it with `files` — \
+                                             veld does not export another node's outputs \
+                                             into this process automatically"
                                         )
                                     } else {
                                         format!(
@@ -4229,6 +4273,68 @@ mod tests {
             }"#,
         );
         assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
+    }
+
+    /// `${nodes.<other>.KEY}` is judged by **that** node's declaration.
+    ///
+    /// The rule used to take the trailing field of a cross-node reference and match
+    /// it against the *current* variant's secret set, so one node calling an output
+    /// `DATABASE_URL` made every other node's `DATABASE_URL` unusable in a command —
+    /// and said it "is declared secret" about a value nobody declared. A doc example
+    /// in `docs/scenarios.md` tripped it. Both directions are pinned here: a false
+    /// positive on a security rule teaches people to route around the linter, and
+    /// under-reporting hides a real leak.
+    #[test]
+    fn cross_node_output_refs_follow_the_producing_node() {
+        // `pg` publishes a plain URL; `clone` marks its *own* same-named output
+        // sensitive. Reading `${nodes.pg.DATABASE_URL}` is fine.
+        let shared_name = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": {
+                    "pg": { "variants": { "dev": {
+                        "type": "start_server", "shell": "postgres",
+                        "probes": { "readiness": { "type": "port" } },
+                        "outputs": { "DATABASE_URL": "postgres://localhost:${veld.port}/x" }
+                    }}},
+                    "clone": { "variants": { "dev": {
+                        "type": "command",
+                        "shell": "pg_dump | psql ${nodes.pg.DATABASE_URL}",
+                        "outputs": ["DATABASE_URL"],
+                        "sensitive_outputs": ["DATABASE_URL"]
+                    }}}
+                }
+            }"#,
+        );
+        assert!(
+            !shared_name.iter().any(|f| f.rule == "secret-in-command"),
+            "same output name in another node must not be treated as secret: {shared_name:?}"
+        );
+
+        // But when the *producing* node marks it sensitive, the reference is a leak.
+        let real_leak = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": {
+                    "vault": { "variants": { "dev": {
+                        "type": "command", "shell": "issue-token",
+                        "outputs": ["TOKEN"],
+                        "sensitive_outputs": ["TOKEN"]
+                    }}},
+                    "app": { "variants": { "dev": {
+                        "type": "command",
+                        "argv": ["deploy", "--token", "${nodes.vault.TOKEN}"]
+                    }}}
+                }
+            }"#,
+        );
+        let leak = real_leak
+            .iter()
+            .find(|f| f.rule == "secret-in-command")
+            .unwrap_or_else(|| panic!("expected a leak finding, got {real_leak:?}"));
+        assert!(leak.location.starts_with("nodes.app"), "{leak:?}");
+        // The remedy must not claim veld already exports another node's output.
+        assert!(leak.message.contains("nodes.vault.TOKEN"), "{leak:?}");
     }
 
     /// **warn** — a credential-shaped literal, marked or not.
