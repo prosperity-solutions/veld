@@ -18,7 +18,7 @@ pub async fn run(
     all_logs: bool,
     _debug: bool,
 ) -> i32 {
-    let Some((config_path, config)) = super::load_config(false) else {
+    let Some((config_path, config)) = super::parse_config(false) else {
         return 1;
     };
 

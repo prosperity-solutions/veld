@@ -191,7 +191,7 @@ fn is_zero(v: &u32) -> bool {
 /// Load a project's config (veld.json) for action lookup. Returns `None` if the
 /// project has no readable config — the dashboard then simply shows no actions.
 fn load_project_config(project_root: &std::path::Path) -> Option<config::VeldConfig> {
-    config::load_config(&project_root.join("veld.json")).ok()
+    config::parse_config(&project_root.join("veld.json")).ok()
 }
 
 /// Compute the actions available for a running node: every action declared on

@@ -263,6 +263,13 @@ enum Command {
         json: bool,
     },
 
+    /// Check veld.json for semantic problems (CI-friendly).
+    Lint {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Initialise a new veld.json in the current directory.
     Init,
 
@@ -634,6 +641,8 @@ async fn main() {
         Command::Presets { json } => commands::presets::run(json).await,
 
         Command::Config { path, json } => commands::config::run(path, json).await,
+
+        Command::Lint { json } => commands::lint::run(json).await,
 
         Command::Init => commands::init::run().await,
 

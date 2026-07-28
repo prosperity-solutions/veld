@@ -21,7 +21,7 @@ pub async fn run(
     print: bool,
     json: bool,
 ) -> i32 {
-    let Some((config_path, cfg)) = super::load_config(json) else {
+    let Some((config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -168,7 +168,7 @@ pub async fn run(
 
 /// `veld actions [--json]` — list the actions configured across all nodes.
 pub async fn list(json: bool) -> i32 {
-    let Some((_config_path, cfg)) = super::load_config(json) else {
+    let Some((_config_path, cfg)) = super::parse_config(json) else {
         return 1;
     };
 

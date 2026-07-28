@@ -82,7 +82,7 @@ pub async fn run(opts: LogsOptions) -> i32 {
         previous,
         all_runs,
     } = opts;
-    let Some((config_path, _cfg)) = super::load_config(json) else {
+    let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);

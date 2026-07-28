@@ -559,7 +559,7 @@ fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
     if !config_path.exists() {
         return None;
     }
-    config::load_config(&config_path).ok()
+    config::parse_config(&config_path).ok()
 }
 
 /// Find the veld CLI binary path.

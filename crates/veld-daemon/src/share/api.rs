@@ -14,8 +14,7 @@ use axum::{Json, response::IntoResponse};
 use chrono::Utc;
 use uuid::Uuid;
 use veld_core::config::{
-    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, load_config, resolve_proxy,
-    validate_proxy_headers,
+    ExposeMode, GatewayRef, SharePolicy, VeldConfig, WebAccessMode, parse_config, resolve_proxy,
 };
 use veld_core::share::{
     ApprovalMode, Capability, GatewayAccessPolicy, JoinRequest, JoinResponse, ShareManifest,
@@ -536,7 +535,7 @@ fn build_manifest(
         .ok_or((StatusCode::NOT_FOUND, format!("run '{run_name}' not found")))?;
     let run_state = &run_state;
 
-    let config = load_config(&project_root.join("veld.json")).map_err(|e| {
+    let config = parse_config(&project_root.join("veld.json")).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             format!("could not load veld.json for run '{run_name}': {e}"),
@@ -544,9 +543,11 @@ fn build_manifest(
     })?;
 
     // Reject invalid proxy headers before they travel to the gateway in the
-    // manifest (validated on the emitting path only — load_config stays lenient
-    // so unrelated commands aren't blocked; see validate_proxy_headers).
-    validate_proxy_headers(&config).map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+    // manifest. Validation runs on the emitting path only — `parse_config` stays
+    // lenient so unrelated commands aren't blocked; see `config::validate`.
+    if let Some(msg) = veld_core::config::error_summary(&veld_core::config::validate(&config)) {
+        return Err((StatusCode::BAD_REQUEST, msg));
+    }
 
     // Track why URL-bearing nodes were excluded, so the error can point the user
     // at the opt-in they are missing rather than a bare "nothing to share".

@@ -4,7 +4,7 @@ use crate::output;
 
 /// `veld graph [node:variant...]`
 pub async fn run(selections: Vec<String>) -> i32 {
-    let Some((_config_path, config)) = super::load_config(false) else {
+    let Some((_config_path, config)) = super::parse_config(false) else {
         return 1;
     };
 

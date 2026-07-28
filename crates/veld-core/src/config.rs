@@ -26,9 +26,90 @@ pub enum ConfigError {
 
     #[error("unsupported schema version \"{0}\" — run `veld update` to get the latest version")]
     UnsupportedSchemaVersion(String),
+}
 
-    #[error("invalid proxy header at {location}: {detail}")]
-    InvalidProxyHeader { location: String, detail: String },
+// ---------------------------------------------------------------------------
+// Validation findings
+// ---------------------------------------------------------------------------
+
+/// How serious a [`Finding`] is.
+///
+/// `Error` blocks `veld start`; `Warning` is reported by `veld lint` and never
+/// blocks anything. Nothing here is reachable from [`parse_config`] — see the
+/// module note on the parse/validate split.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+impl std::fmt::Display for Severity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Severity::Error => f.write_str("error"),
+            Severity::Warning => f.write_str("warning"),
+        }
+    }
+}
+
+/// One semantic problem found in an already-parsed config.
+///
+/// `location` is a dotted path into the document (`nodes.api.variants.dev.env`)
+/// so the reader can go straight to the line — under `include` globs a bare
+/// field name is not enough to find anything.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Finding {
+    pub severity: Severity,
+    pub location: String,
+    pub message: String,
+    /// Which rule produced this, for `veld lint --json` consumers.
+    pub rule: String,
+}
+
+impl std::fmt::Display for Finding {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}: {}", self.severity, self.location, self.message)
+    }
+}
+
+impl Finding {
+    fn error(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: location.into(),
+            message: message.into(),
+            rule: rule.to_owned(),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn warning(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Warning,
+            location: location.into(),
+            message: message.into(),
+            rule: rule.to_owned(),
+        }
+    }
+}
+
+/// A single message summarising every `Error`-severity finding, or `None` when
+/// there are none. This is what a command that must refuse to proceed prints.
+pub fn error_summary(findings: &[Finding]) -> Option<String> {
+    let errors: Vec<String> = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Error)
+        .map(|f| format!("  {}: {}", f.location, f.message))
+        .collect();
+    if errors.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{} problem(s) in veld.json:\n{}",
+        errors.len(),
+        errors.join("\n")
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,8 +1273,17 @@ pub fn discover_config(start: &Path) -> Result<PathBuf, ConfigError> {
     }
 }
 
-/// Load and parse the config from a discovered path.
-pub fn load_config(path: &Path) -> Result<VeldConfig, ConfigError> {
+/// **Parse** a config file: structure only — file readable, JSON well-formed,
+/// field types right, schema version supported.
+///
+/// This is the loader that runs on **every** subcommand (`stop`, `status`,
+/// `logs`, …) and inside the daemon monitor, so it must succeed for any document
+/// veld can still interpret. Never add a semantic check here: `on_stop` is read
+/// from the on-disk config at stop time, so a config that fails to load means
+/// teardown commands never run and containers leak with no way to clean up.
+/// Semantic checks belong in [`validate`], which only `veld start`, `veld lint`,
+/// and the share flow call.
+pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     let contents = std::fs::read_to_string(path).map_err(|e| ConfigError::ReadError {
         path: path.to_path_buf(),
         source: e,
@@ -1214,73 +1304,95 @@ pub fn load_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     Ok(config)
 }
 
+/// **Validate** an already-parsed config: every semantic rule, reported as
+/// [`Finding`]s rather than a single error so `veld lint` can show all of them
+/// at once.
+///
+/// Deliberately separate from [`parse_config`] and returning a *different* type
+/// than [`ConfigError`], so no diagnostic added here can ever reach a
+/// subcommand that must keep working against a broken config. Callers:
+/// `veld start` (refuses on any [`Severity::Error`]), `veld lint` (prints
+/// everything), and the share flow (which emits proxy headers over the wire).
+pub fn validate(config: &VeldConfig) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    check_proxy_headers(config, &mut findings);
+    findings.sort_by(|a, b| (a.severity, &a.location).cmp(&(b.severity, &b.location)));
+    findings
+}
+
 /// Reject syntactically invalid proxy header names/values, once and loudly.
 /// Both proxies otherwise skip invalid headers silently (the gateway) or hand
 /// them to Caddy verbatim (the local proxy), so a typo like `"X Frame Options"`
 /// would no-op with no diagnostic — and an unvalidated value reaching the
 /// persisted Caddy route could poison the shared config reload.
-///
-/// NOT called from [`load_config`] on purpose: that runs on every subcommand
-/// (`stop`, `status`, `logs`, …) and inside the daemon monitor, so failing there
-/// would strand teardown/inspection and disable health checks over an unrelated
-/// typo. Instead it is invoked only on the paths that actually emit headers —
-/// `veld start` (the orchestrator) and the share flow — matching how the graph
-/// validates cycles/selections only at start.
-pub fn validate_proxy_headers(config: &VeldConfig) -> Result<(), ConfigError> {
-    fn check_side(location: &str, side: &str, rules: &HeaderRules) -> Result<(), ConfigError> {
-        let invalid = |detail: String| ConfigError::InvalidProxyHeader {
-            location: format!("{location}.{side}"),
-            detail,
-        };
+fn check_proxy_headers(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const RULE: &str = "proxy-header-syntax";
+
+    fn check_side(location: &str, side: &str, rules: &HeaderRules, out: &mut Vec<Finding>) {
+        let loc = format!("{location}.{side}");
         for name in &rules.remove {
-            reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| invalid(format!("invalid header name to remove: {name:?}")))?;
+            if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                out.push(Finding::error(
+                    RULE,
+                    &loc,
+                    format!("invalid header name to remove: {name:?}"),
+                ));
+            }
         }
         for (name, value) in &rules.set {
-            reqwest::header::HeaderName::from_bytes(name.as_bytes())
-                .map_err(|_| invalid(format!("invalid header name to set: {name:?}")))?;
-            reqwest::header::HeaderValue::from_str(value)
-                .map_err(|_| invalid(format!("invalid value for header {name:?}: {value:?}")))?;
+            if reqwest::header::HeaderName::from_bytes(name.as_bytes()).is_err() {
+                out.push(Finding::error(
+                    RULE,
+                    &loc,
+                    format!("invalid header name to set: {name:?}"),
+                ));
+            }
+            if reqwest::header::HeaderValue::from_str(value).is_err() {
+                out.push(Finding::error(
+                    RULE,
+                    &loc,
+                    format!("invalid value for header {name:?}: {value:?}"),
+                ));
+            }
         }
-        Ok(())
     }
-    fn check(location: &str, proxy: &ProxyConfig) -> Result<(), ConfigError> {
+    fn check(location: &str, proxy: &ProxyConfig, out: &mut Vec<Finding>) {
         if let Some(rules) = &proxy.request {
-            check_side(location, "request", rules)?;
+            check_side(location, "request", rules, out);
         }
         if let Some(rules) = &proxy.response {
-            check_side(location, "response", rules)?;
+            check_side(location, "response", rules, out);
         }
-        Ok(())
     }
 
     if let Some(proxy) = &config.proxy {
-        check("proxy", proxy)?;
+        check("proxy", proxy, out);
     }
     for (node_name, node) in &config.nodes {
         if let Some(proxy) = &node.proxy {
-            check(&format!("nodes.{node_name}.proxy"), proxy)?;
+            check(&format!("nodes.{node_name}.proxy"), proxy, out);
         }
         for (variant_name, variant) in &node.variants {
             if let Some(proxy) = &variant.proxy {
                 check(
                     &format!("nodes.{node_name}.variants.{variant_name}.proxy"),
                     proxy,
-                )?;
+                    out,
+                );
             }
         }
     }
-    Ok(())
 }
 
-/// Convenience: discover from CWD and load.
-pub fn load_config_from_cwd() -> Result<(PathBuf, VeldConfig), ConfigError> {
+/// Convenience: discover from CWD and parse (no semantic validation — see
+/// [`parse_config`]).
+pub fn parse_config_from_cwd() -> Result<(PathBuf, VeldConfig), ConfigError> {
     let cwd = std::env::current_dir().map_err(|e| ConfigError::ReadError {
         path: PathBuf::from("."),
         source: e,
     })?;
     let path = discover_config(&cwd)?;
-    let config = load_config(&path)?;
+    let config = parse_config(&path)?;
     Ok((path, config))
 }
 
@@ -1454,7 +1566,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_proxy_headers_rejects_bad_names_and_values() {
+    fn validate_rejects_bad_proxy_header_names_and_values() {
         let mut config: VeldConfig = serde_json::from_str(
             r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#,
         )
@@ -1463,15 +1575,89 @@ mod tests {
             request: Some(rules(&["X Frame Options"], &[])),
             response: None,
         });
-        let err = validate_proxy_headers(&config).unwrap_err();
-        assert!(matches!(err, ConfigError::InvalidProxyHeader { .. }));
+        let findings = validate(&config);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].severity, Severity::Error);
+        assert_eq!(findings[0].location, "proxy.request");
+        assert!(error_summary(&findings).is_some());
 
         // A valid config passes.
         config.proxy = Some(ProxyConfig {
             request: Some(rules(&["Origin"], &[("X-Ok", "value")])),
             response: None,
         });
-        assert!(validate_proxy_headers(&config).is_ok());
+        assert!(validate(&config).is_empty());
+        assert!(error_summary(&validate(&config)).is_none());
+    }
+
+    // -- F0.1: the parse / validate split -------------------------------------
+
+    /// A semantically-broken config must still *parse*. This is the property
+    /// `veld stop` / `status` / `logs` depend on: they read the on-disk config
+    /// (for `on_stop` hooks and node metadata) and would otherwise be stranded
+    /// by an unrelated typo, leaking containers with no way to clean them up.
+    #[test]
+    fn parse_accepts_config_that_validate_rejects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schemaVersion": "2",
+                "name": "t",
+                "proxy": { "request": { "remove": ["X Frame Options"] } },
+                "nodes": { "a": { "variants": { "local": {
+                    "type": "start_server", "command": "true",
+                    "on_stop": "echo bye"
+                } } } }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config(&path).expect("structurally valid config must parse");
+        assert_eq!(
+            config.nodes["a"].variants["local"].on_stop.as_deref(),
+            Some("echo bye"),
+            "the on_stop hook stop needs must still be readable"
+        );
+
+        // …and the semantic problem is still caught, just on the paths that
+        // emit headers rather than on every subcommand.
+        let findings = validate(&config);
+        assert!(
+            findings.iter().any(|f| f.severity == Severity::Error),
+            "validate must still reject it: {findings:?}"
+        );
+    }
+
+    /// Parse failures are strictly structural: unreadable file, malformed JSON,
+    /// wrong types, unsupported schema version. Nothing else.
+    #[test]
+    fn parse_rejects_only_structural_problems() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let malformed = dir.path().join("malformed.json");
+        std::fs::write(&malformed, "{ not json").unwrap();
+        assert!(matches!(
+            parse_config(&malformed),
+            Err(ConfigError::ParseError { .. })
+        ));
+
+        let bad_version = dir.path().join("version.json");
+        std::fs::write(
+            &bad_version,
+            r#"{"schemaVersion":"99","name":"t","nodes":{}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            parse_config(&bad_version),
+            Err(ConfigError::UnsupportedSchemaVersion(_))
+        ));
+
+        assert!(matches!(
+            parse_config(&dir.path().join("nope.json")),
+            Err(ConfigError::ReadError { .. })
+        ));
     }
 
     #[test]

@@ -5,6 +5,7 @@ pub mod feedback;
 pub mod gc;
 pub mod graph;
 pub mod init;
+pub mod lint;
 pub mod list;
 pub mod logs;
 pub mod nodes;
@@ -121,10 +122,14 @@ pub fn resolve_run_name(
     None
 }
 
-/// Load the project configuration from the current working directory.
+/// Parse the project configuration from the current working directory.
 /// On failure prints an error and returns `None`.
-pub fn load_config(json: bool) -> Option<(std::path::PathBuf, veld_core::config::VeldConfig)> {
-    match veld_core::config::load_config_from_cwd() {
+///
+/// Structural parsing only — see [`veld_core::config::parse_config`]. Never add
+/// a semantic check to this path: it runs on `stop`, `status`, and `logs`, which
+/// must keep working against a config that has since been broken.
+pub fn parse_config(json: bool) -> Option<(std::path::PathBuf, veld_core::config::VeldConfig)> {
+    match veld_core::config::parse_config_from_cwd() {
         Ok(pair) => Some(pair),
         Err(e) => {
             output::print_error(&format!("Failed to load config: {e}"), json);

@@ -7,7 +7,7 @@ use crate::output;
 /// instance, newest first. Without `--name`, all environments' runs grouped
 /// by environment.
 pub async fn list(name: Option<&str>, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::load_config(json) else {
+    let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -125,7 +125,7 @@ fn colorize_outcome(run: &RunState) -> String {
 /// `veld runs show <id-prefix> [--json]` — one run in full: identity,
 /// outcome, node results, and the graph snapshot it was started with.
 pub async fn show(id_prefix: &str, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::load_config(json) else {
+    let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);
@@ -249,7 +249,7 @@ pub async fn show(id_prefix: &str, json: bool) -> i32 {
 /// between two runs. With one id, the run is compared against its
 /// predecessor in the same environment.
 pub async fn diff(a: &str, b: Option<&str>, json: bool) -> i32 {
-    let Some((config_path, _cfg)) = super::load_config(json) else {
+    let Some((config_path, _cfg)) = super::parse_config(json) else {
         return 1;
     };
     let project_root = config::project_root(&config_path);

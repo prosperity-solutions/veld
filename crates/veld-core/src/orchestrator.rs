@@ -74,6 +74,12 @@ pub enum OrchestratorError {
 
     #[error("environment '{0}' was replaced by another `veld start` while starting")]
     Superseded(String),
+
+    /// Semantic config problems, from `config::validate`. Reachable only from
+    /// `start` — never from the loader, so `stop`/`status`/`logs` still work
+    /// against a config that has since been broken.
+    #[error("{0}")]
+    ConfigInvalid(String),
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +402,7 @@ impl Orchestrator {
 
     /// Convenience: discover config from CWD and build the orchestrator.
     pub fn from_cwd() -> Result<Self, OrchestratorError> {
-        let (path, cfg) = config::load_config_from_cwd()?;
+        let (path, cfg) = config::parse_config_from_cwd()?;
         Self::new(path, cfg)
     }
 
@@ -411,10 +417,13 @@ impl Orchestrator {
         selections: &[NodeSelection],
         run_name: &str,
     ) -> Result<RunState, OrchestratorError> {
-        // Fail loudly on an invalid proxy header before it reaches Caddy (a bad
-        // value baked into a persisted route can poison the whole config reload).
-        // Done here, not in load_config, so a typo doesn't strand `veld stop`.
-        config::validate_proxy_headers(&self.config)?;
+        // Semantic validation runs HERE, not in `parse_config`: a typo must not
+        // strand `veld stop` against a running environment (its `on_stop` hooks
+        // are read from the on-disk config at stop time). `veld lint` runs the
+        // same rules and additionally reports warnings.
+        if let Some(msg) = config::error_summary(&config::validate(&self.config)) {
+            return Err(OrchestratorError::ConfigInvalid(msg));
+        }
 
         // Clean up any runs whose processes have all died. This catches
         // orphaned runs from previous sessions (crash, kill -9, etc.).
@@ -2696,6 +2705,69 @@ mod tests {
             terminal_node: None,
             terminal_outputs: Some(HashMap::new()),
         }
+    }
+
+    /// F0.1 exit gate: `veld stop` must work against a running environment whose
+    /// config is semantically invalid — **and its `on_stop` hooks must still
+    /// execute**.
+    ///
+    /// This is the whole reason validation lives in `config::validate` (called
+    /// from `start`) rather than in the loader: `on_stop` is read from the
+    /// on-disk config at stop time, so a config error that failed the load would
+    /// mean teardown commands never run and containers leak with no way to clean
+    /// them up.
+    #[tokio::test]
+    async fn stop_succeeds_with_invalid_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("on-stop-ran");
+
+        // An invalid proxy header name: parses fine, `validate` rejects it.
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "2",
+                "name": "testcfg",
+                "proxy": {{ "request": {{ "remove": ["X Frame Options"] }} }},
+                "nodes": {{
+                    "svc": {{ "default_variant": "local", "variants": {{
+                        "local": {{
+                            "type": "start_server",
+                            "command": "sleep 30",
+                            "on_stop": "touch {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+        assert!(
+            !config::validate(&config).is_empty(),
+            "fixture must be semantically invalid"
+        );
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let sel = NodeSelection {
+            node: "svc".to_owned(),
+            variant: "local".to_owned(),
+        };
+        let key = RunState::node_key(&sel.node, &sel.variant);
+
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new(&sel.node, &sel.variant);
+        // Anything other than `Pending` — a node that never ran gets no hook.
+        ns.status = NodeStatus::Healthy;
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key);
+        orch.save_state(&run).unwrap();
+
+        let result = orch.stop("testrun").await.expect("stop must not fail");
+        assert_eq!(result, StopResult::Stopped);
+        assert!(
+            marker.exists(),
+            "the on_stop hook must still run for an invalid config"
+        );
     }
 
     /// The core `--oneshot` contract: a non-zero terminal exit is returned (not

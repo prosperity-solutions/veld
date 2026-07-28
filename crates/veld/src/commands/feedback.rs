@@ -248,7 +248,7 @@ fn resolve(
     name: Option<String>,
     json: bool,
 ) -> Option<(veld_core::db::Db, std::path::PathBuf, String)> {
-    let (config_path, _config) = super::load_config(json)?;
+    let (config_path, _config) = super::parse_config(json)?;
     let project_root = veld_core::config::project_root(&config_path);
 
     let db = super::open_db(json)?;
