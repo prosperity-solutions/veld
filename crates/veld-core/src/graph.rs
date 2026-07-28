@@ -575,6 +575,7 @@ mod tests {
             sharing: None,
             setup: None,
             teardown: None,
+            vars: None,
             deferred_findings: Vec::new(),
             nodes: HashMap::from([
                 (

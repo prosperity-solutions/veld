@@ -36,6 +36,10 @@ pub struct VariableContext {
     /// Static action parameters, referenced as `${param.KEY}`. Only populated
     /// in action contexts.
     pub params: HashMap<String, String>,
+
+    /// Project `vars`, referenced as `${vars.NAME}` (F4). Resolved once per run,
+    /// so every use site of a value sees the same one.
+    pub vars: HashMap<String, String>,
 }
 
 impl VariableContext {
@@ -63,6 +67,11 @@ impl VariableContext {
     pub fn set_param(&mut self, key: &str, value: String) {
         self.params.insert(key.to_owned(), value);
     }
+
+    /// Set a project var, referenced as `${vars.NAME}`.
+    pub fn set_var(&mut self, key: &str, value: String) {
+        self.vars.insert(key.to_owned(), value);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -73,6 +82,7 @@ impl VariableContext {
 ///
 /// Supported forms:
 /// - `${veld.port}`, `${veld.url}`, `${veld.run}`, etc.
+/// - `${vars.name}` — a project var (one definition point per value)
 /// - `${veld.url.hostname}`, `${veld.url.host}`, `${veld.url.origin}`, `${veld.url.scheme}`, `${veld.url.port}`
 /// - `${nodes.name.field}`, `${nodes.name:variant.field}`
 /// - `${nodes.name.url.hostname}`, `${nodes.name.url.host}`, etc.
@@ -116,6 +126,14 @@ fn resolve_reference(reference: &str, ctx: &VariableContext) -> Result<String, V
             .get(param_key)
             .cloned()
             .ok_or_else(|| VariableError::Unresolved(format!("${{{reference}}}")))
+    } else if let Some(var_key) = reference.strip_prefix("vars.") {
+        ctx.vars.get(var_key).cloned().ok_or_else(|| {
+            // `validate` catches an unknown var before a run starts and lists the
+            // declared names; reaching here means a config edited mid-run.
+            VariableError::Unresolved(format!(
+                "${{{reference}}} — no var named \"{var_key}\" is declared"
+            ))
+        })
     } else if reference.starts_with("nodes.") {
         ctx.node_outputs
             .get(reference)

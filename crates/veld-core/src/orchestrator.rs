@@ -315,6 +315,9 @@ struct NodeExecutionContext {
     username: String,
     /// Snapshot of all outputs from prior stages for variable resolution.
     all_outputs: Arc<HashMap<String, HashMap<String, String>>>,
+    /// Project `vars`, resolved once for the whole run so two use sites of the
+    /// same value can never disagree.
+    vars: Arc<HashMap<String, String>>,
     /// Shared run state for PID checkpointing. Uses `std::sync::Mutex`
     /// (not tokio) so the lock is acquired without an `.await` point —
     /// this makes the spawn→checkpoint sequence cancellation-safe.
@@ -374,6 +377,10 @@ pub struct Orchestrator {
     /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
     /// the run (see `veld start --oneshot`).
     terminal_node: Option<NodeSelection>,
+    /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
+    /// the `on_stop` path reuse the same values rather than re-running a source
+    /// command — two resolutions of a rotating credential would disagree.
+    resolved_vars: Option<Arc<HashMap<String, String>>>,
     /// Dependency outputs captured at the end of `start` when a terminal node
     /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
     /// exact values the stages produced (no reconstruction drift).
@@ -409,6 +416,7 @@ impl Orchestrator {
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
+            resolved_vars: None,
             terminal_outputs: None,
         })
     }
@@ -788,6 +796,12 @@ impl Orchestrator {
         self.debug_log("Run persisted as 'starting' before first stage executes")
             .await;
 
+        // Resolve project `vars` before anything spawns: a var may be backed by a
+        // file or a command, and a broken source must fail the start rather than
+        // surface as an empty value inside a service.
+        let shared_vars = Arc::new(crate::values::resolve_vars(self.config.vars.as_ref()).await?);
+        self.resolved_vars = Some(Arc::clone(&shared_vars));
+
         // Wrap immutable data in Arc once for all stages.
         let shared_config = Arc::new(self.config.clone());
         let shared_project_root = Arc::new(self.project_root.clone());
@@ -812,6 +826,7 @@ impl Orchestrator {
                         &worktree,
                         &username,
                         &mut all_outputs,
+                        &shared_vars,
                         total_nodes,
                         &mut node_index,
                         &shared_config,
@@ -1026,6 +1041,10 @@ impl Orchestrator {
         }
         .apply(&mut var_ctx);
 
+        for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
+            var_ctx.set_var(name, value.clone());
+        }
+
         // Clone (not take) the stashed dependency outputs so a defensive
         // re-invocation still resolves `${nodes.X.*}` rather than silently
         // getting an empty map.
@@ -1193,6 +1212,7 @@ impl Orchestrator {
         worktree: &str,
         username: &str,
         all_outputs: &mut HashMap<String, HashMap<String, String>>,
+        vars: &Arc<HashMap<String, String>>,
         total_nodes: usize,
         node_index: &mut usize,
         shared_config: &Arc<VeldConfig>,
@@ -1214,6 +1234,7 @@ impl Orchestrator {
             worktree: worktree.to_owned(),
             username: username.to_owned(),
             all_outputs: Arc::new(all_outputs.clone()),
+            vars: Arc::clone(vars),
             checkpoint: Arc::new(std::sync::Mutex::new(CheckpointState {
                 run: run.clone(),
                 project_root: self.project_root.clone(),
@@ -1372,6 +1393,22 @@ impl Orchestrator {
         // resolve in `on_stop` exactly as it did in the node's own command.
         let run_id = run.run_id;
 
+        // `on_stop` may reference `${vars.*}`. Reuse `start`'s values when this is
+        // the same process; otherwise (`veld stop` as its own invocation) resolve
+        // once for the whole teardown. A failing source must not abort the stop —
+        // teardown running is more important than every hook interpolating — so
+        // this degrades to no vars and the affected hooks report being skipped.
+        let stop_vars: Arc<HashMap<String, String>> = match &self.resolved_vars {
+            Some(v) => Arc::clone(v),
+            None => match crate::values::resolve_vars(self.config.vars.as_ref()).await {
+                Ok(v) => Arc::new(v),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
+                    Arc::new(HashMap::new())
+                }
+            },
+        };
+
         // Stop in reverse execution order (dependencies last). Fall back to
         // HashMap keys for runs created before execution_order was tracked.
         let node_keys: Vec<String> = if run.execution_order.is_empty() {
@@ -1412,7 +1449,7 @@ impl Orchestrator {
 
                 // Run on_stop hook if defined (skip nodes that never ran).
                 if node_state.status != NodeStatus::Pending {
-                    self.run_on_stop_hook(run_name, Some(run_id), node_state)
+                    self.run_on_stop_hook(run_name, Some(run_id), &stop_vars, node_state)
                         .await;
                 }
 
@@ -1584,6 +1621,7 @@ impl Orchestrator {
         &self,
         run_name: &str,
         run_id: Option<uuid::Uuid>,
+        vars: &HashMap<String, String>,
         node_state: &NodeState,
     ) {
         let variant_cfg = match self
@@ -1624,6 +1662,10 @@ impl Orchestrator {
             node: Some((&node_state.node_name, &node_state.variant)),
         }
         .apply(&mut ctx);
+
+        for (name, value) in vars {
+            ctx.set_var(name, value.clone());
+        }
 
         // Outputs are reachable as `${output.KEY}` (this node) and
         // `${nodes.<node>.KEY}` (any node) — deliberately NOT as `${veld.KEY}`.
@@ -1736,6 +1778,9 @@ impl Orchestrator {
     /// command and fail in a setup step.
     fn project_step_context(&self, run_name: &str) -> VariableContext {
         let mut ctx = VariableContext::new();
+        for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
+            ctx.set_var(name, value.clone());
+        }
         BuiltinScope {
             run_name,
             run_id: None,
@@ -2045,6 +2090,10 @@ async fn execute_node_isolated(
         node: Some((&sel.node, &sel.variant)),
     }
     .apply(&mut var_ctx);
+
+    for (name, value) in ctx.vars.as_ref() {
+        var_ctx.set_var(name, value.clone());
+    }
 
     // Populate node output references from already-executed nodes.
     for (node_key, outputs) in ctx.all_outputs.as_ref() {
@@ -2963,6 +3012,7 @@ mod tests {
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
+            resolved_vars: None,
             terminal_outputs: Some(HashMap::new()),
         }
     }

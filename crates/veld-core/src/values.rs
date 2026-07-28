@@ -188,6 +188,30 @@ pub async fn resolve_env_values(
     Ok(out)
 }
 
+/// Resolve every project `var` once per run.
+///
+/// Once, not per use site: a var whose source is a command must run that command
+/// exactly one time, or two references to `${vars.db_url}` could disagree — and
+/// with a rotating credential they would.
+pub async fn resolve_vars(
+    vars: Option<&HashMap<String, ConfigValue>>,
+) -> Result<HashMap<String, String>, ValueError> {
+    let mut out = HashMap::new();
+    let Some(vars) = vars else {
+        return Ok(out);
+    };
+    let mut names: Vec<&String> = vars.keys().collect();
+    names.sort();
+    for name in names {
+        let value = &vars[name];
+        out.insert(
+            name.clone(),
+            resolve_value(value, &format!("vars.{name}")).await?,
+        );
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

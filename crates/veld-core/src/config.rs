@@ -174,6 +174,23 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<NullableMap<ConfigValue>>,
 
+    /// One definition point per value, referenced by name at every use site as
+    /// `${vars.<name>}` (F4).
+    ///
+    /// **The key never leaves the node that uses it.** A var holds a *value*, not
+    /// a config fragment: `${vars.db_url}` is written where `DATABASE_URL` is set,
+    /// so `rg DATABASE_URL` still finds the line and a reader of that node still
+    /// sees which keys it has. That is the difference between deduplicating values
+    /// and deduplicating structure, and it is why a var is a
+    /// [`ConfigValue`] — a scalar or a single value source, never an object, never
+    /// a probe block, never an `env` map. If a body could be stored in a var this
+    /// would be a template system.
+    ///
+    /// A var may not reference another var: one hop, always, so provenance is a
+    /// single lookup (`veld config --why`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vars: Option<HashMap<String, ConfigValue>>,
+
     /// Environment sharing policy: which relays to use, and where the public
     /// web gateway lives. Per-service opt-in lives on each variant (`share`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2201,6 +2218,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_builtin_names(config, &mut findings);
     check_resolved_variants(config, &mut findings);
     check_secret_usage(config, &mut findings);
+    check_vars(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld lint --json` output
@@ -2214,6 +2232,107 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
         ))
     });
     findings
+}
+
+/// The four `vars` rules (F4). They are the whole design, so all of them are
+/// enforced rather than documented and hoped for.
+///
+/// Rule 1 — *a var is a scalar or a single value source, never an object* — is
+/// enforced by the type: `vars` is a map of [`ConfigValue`], which cannot hold a
+/// probe block or an `env` map. There is nothing to check here for it.
+///
+/// Rule 3 — *a duplicate var name is a hard error* — is enforced by the
+/// duplicate-key check, since two entries of the same name in one `vars` object
+/// is exactly that. Across files it becomes F2's problem.
+fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let declared: BTreeMap<&str, &ConfigValue> = config
+        .vars
+        .iter()
+        .flatten()
+        .map(|(k, v)| (k.as_str(), v))
+        .collect();
+
+    // Rule 2: a var may not reference another var. One hop, always — provenance
+    // stays a single lookup, and there is no ordering or cycle to reason about.
+    for (name, value) in &declared {
+        if let Some(literal) = value.as_literal() {
+            for referenced in builtin_refs_in(literal, "vars.") {
+                out.push(Finding::error(
+                    "vars-cannot-nest",
+                    format!("vars.{name}"),
+                    format!(
+                        "references `${{vars.{referenced}}}`. A var may not reference another \
+                         var — one hop, always, so the value has exactly one definition \
+                         point. Inline the value, or reference both vars at the use site"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Rule 4: an unknown `${vars.x}` is a hard error listing the declared names,
+    // because the overwhelmingly likely cause is a typo and the fix is to see the
+    // real list.
+    let names: Vec<&str> = declared.keys().copied().collect();
+    let report = |loc: String, referenced: &str, out: &mut Vec<Finding>| {
+        if declared.contains_key(referenced) {
+            return;
+        }
+        out.push(Finding::error(
+            "unknown-var",
+            loc,
+            if names.is_empty() {
+                format!("`${{vars.{referenced}}}` is referenced but no `vars` are declared")
+            } else {
+                format!(
+                    "no var named \"{referenced}\" is declared. Declared vars: {}",
+                    names.join(", ")
+                )
+            },
+        ));
+    };
+
+    let check_str = |loc: String, s: &str, out: &mut Vec<Finding>| {
+        for referenced in builtin_refs_in(s, "vars.") {
+            report(loc.clone(), &referenced, out);
+        }
+    };
+
+    for (key, value) in config.env.iter().flatten() {
+        if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+            check_str(format!("env.{key}"), literal, out);
+        }
+    }
+    for (node_name, node) in &config.nodes {
+        for (key, value) in node.env.iter().flatten() {
+            if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                check_str(format!("nodes.{node_name}.env.{key}"), literal, out);
+            }
+        }
+        for (variant_name, variant) in &node.variants {
+            let base = format!("nodes.{node_name}.variants.{variant_name}");
+            for (key, value) in variant.env.iter().flatten() {
+                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                    check_str(format!("{base}.env.{key}"), literal, out);
+                }
+            }
+            let r = resolve_variant(config, node, variant);
+            for (suffix, spec) in [
+                ("", r.command.as_ref()),
+                (".on_stop", r.on_stop.as_ref()),
+                (".skip_if", r.skip_if.as_ref()),
+            ] {
+                let Some(spec) = spec else { continue };
+                let parts = match spec {
+                    CommandSpec::Argv(a) => a.clone(),
+                    CommandSpec::Shell(sh) => vec![sh.clone()],
+                };
+                for part in &parts {
+                    check_str(format!("{base}{suffix}"), part, out);
+                }
+            }
+        }
+    }
 }
 
 /// Does this literal *look* like a credential that was pasted into the config?
@@ -2516,6 +2635,12 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// model that — it only rejects names that are not builtins at all:
 /// - `port` / `url` / `url.*` exist only for a `start_server` node.
 /// - `node` / `variant` are absent in project-level `setup` / `teardown` steps.
+///
+/// One family is **not** listed here because it is per-node rather than fixed:
+/// `ports.<name>`, one per entry in the node's `ports` map (F6).
+/// [`check_builtin_names`] validates those against what the node actually
+/// declares, which gives a better error than "unknown builtin" — it can say which
+/// port names exist.
 pub const BUILTIN_VARS: &[&str] = &[
     "run",
     "run_id",
@@ -2548,9 +2673,36 @@ pub const BUILTIN_VARS: &[&str] = &[
 fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     const RULE: &str = "unknown-builtin-var";
 
-    fn check(loc: &str, s: &str, out: &mut Vec<Finding>) {
+    /// `declared_ports` is the node's `ports` map, so `${veld.ports.debug}`
+    /// resolves iff the node declares a port called `debug`.
+    fn check(loc: &str, s: &str, declared_ports: &[String], out: &mut Vec<Finding>) {
         for name in builtin_refs(s) {
             if BUILTIN_VARS.contains(&name.as_str()) {
+                continue;
+            }
+            // `ports.<name>` is per-node, so it is checked against the node.
+            if let Some(port_name) = name.strip_prefix("ports.") {
+                if declared_ports.iter().any(|p| p == port_name) {
+                    continue;
+                }
+                out.push(Finding::error(
+                    RULE,
+                    loc,
+                    if declared_ports.is_empty() {
+                        format!(
+                            "`${{veld.ports.{port_name}}}` refers to a named port, but this \
+                             node declares no `ports` map. Add one — \
+                             `\"ports\": {{ \"{port_name}\": \"auto\" }}` — or use \
+                             `${{veld.port}}` for the single allocated port"
+                        )
+                    } else {
+                        format!(
+                            "this node declares no port named \"{port_name}\". \
+                             Declared ports: {}",
+                            declared_ports.join(", ")
+                        )
+                    },
+                ));
                 continue;
             }
             // Point at the namespace that almost certainly holds it: an author
@@ -2568,14 +2720,19 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
     }
 
-    fn check_cmd(loc: &str, spec: Option<CommandSpec>, out: &mut Vec<Finding>) {
+    fn check_cmd(
+        loc: &str,
+        spec: Option<CommandSpec>,
+        declared_ports: &[String],
+        out: &mut Vec<Finding>,
+    ) {
         match spec {
             Some(CommandSpec::Argv(argv)) => {
                 for a in &argv {
-                    check(loc, a, out);
+                    check(loc, a, declared_ports, out);
                 }
             }
-            Some(CommandSpec::Shell(s)) => check(loc, &s, out),
+            Some(CommandSpec::Shell(s)) => check(loc, &s, declared_ports, out),
             None => {}
         }
     }
@@ -2584,23 +2741,46 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
         // A `null` value erases an inherited key, and only an inline literal is
         // interpolated — a fetched value is used verbatim.
         if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-            check(&format!("env.{key}"), literal, out);
+            check(&format!("env.{key}"), literal, &[], out);
         }
     }
     for (node_name, node) in &config.nodes {
+        // A node-level `env` value is inherited by every variant, so it may only
+        // reference a port the node itself declares.
+        let node_ports: Vec<String> = resolve_ports(node.ports.as_ref(), None)
+            .map(|p| p.ports.keys().cloned().collect())
+            .unwrap_or_default();
         for (key, value) in node.env.iter().flatten() {
             if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                check(&format!("nodes.{node_name}.env.{key}"), literal, out);
+                check(
+                    &format!("nodes.{node_name}.env.{key}"),
+                    literal,
+                    &node_ports,
+                    out,
+                );
             }
         }
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
-            check_cmd(&base, variant.cmd.spec(), out);
-            check_cmd(&format!("{base}.on_stop"), variant.on_stop.clone(), out);
-            check_cmd(&format!("{base}.skip_if"), variant.skip_if.clone(), out);
+            let ports: Vec<String> = resolve_ports(node.ports.as_ref(), variant.ports.as_ref())
+                .map(|p| p.ports.keys().cloned().collect())
+                .unwrap_or_default();
+            check_cmd(&base, variant.cmd.spec(), &ports, out);
+            check_cmd(
+                &format!("{base}.on_stop"),
+                variant.on_stop.clone(),
+                &ports,
+                out,
+            );
+            check_cmd(
+                &format!("{base}.skip_if"),
+                variant.skip_if.clone(),
+                &ports,
+                out,
+            );
             for (key, value) in variant.env.iter().flatten() {
                 if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                    check(&format!("{base}.env.{key}"), literal, out);
+                    check(&format!("{base}.env.{key}"), literal, &ports, out);
                 }
             }
         }
@@ -3269,6 +3449,133 @@ mod tests {
         assert!(
             !findings.iter().any(|f| f.rule == "unknown-builtin-var"),
             "{findings:?}"
+        );
+    }
+
+    // -- F4: vars (a failing case per rule) ------------------------------------
+
+    /// Rule 1: a var is a scalar or a single value source — never an object.
+    /// Enforced by the type, so this asserts the type actually refuses.
+    #[test]
+    fn vars_cannot_hold_object() {
+        // A probe block in a var would make this a template system.
+        for body in [
+            r#"{ "probes": { "readiness": { "type": "http" } } }"#,
+            r#"{ "type": "http", "path": "/z" }"#,
+            r#"[1, 2, 3]"#,
+        ] {
+            let json =
+                format!(r#"{{"schemaVersion":"2","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
+            assert!(
+                serde_json::from_str::<VeldConfig>(&json).is_err(),
+                "a var must not accept {body}"
+            );
+        }
+        // …while every legitimate form is accepted.
+        for body in [
+            r#""https://api.example.com""#,
+            r#"{ "value": "devpassword", "secret": true }"#,
+            r#"{ "env": "TOKEN", "secret": true }"#,
+            r#"{ "file": ".secrets/k" }"#,
+            r#"{ "argv": ["secret-tool", "read", "p"], "secret": true }"#,
+        ] {
+            let json =
+                format!(r#"{{"schemaVersion":"2","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
+            serde_json::from_str::<VeldConfig>(&json)
+                .unwrap_or_else(|e| panic!("{body} should be a valid var: {e}"));
+        }
+    }
+
+    /// Rule 2: one hop, always.
+    #[test]
+    fn vars_cannot_nest() {
+        let f = findings_for(
+            r#"{"schemaVersion":"2","name":"t",
+                "vars":{"base":"https://api.example.com","derived":"${vars.base}/v1"},
+                "nodes":{}}"#,
+        );
+        let hit = f
+            .iter()
+            .find(|f| f.rule == "vars-cannot-nest")
+            .unwrap_or_else(|| panic!("expected the rule to fire: {f:?}"));
+        assert_eq!(hit.severity, Severity::Error);
+        assert_eq!(hit.location, "vars.derived");
+        assert!(hit.message.contains("one hop"), "{hit:?}");
+    }
+
+    /// Rule 3: a duplicate var name is a hard error. Two entries of the same name
+    /// in one `vars` object is exactly the duplicate-key case.
+    #[test]
+    fn vars_duplicate_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            r#"{
+                "schemaVersion": "2", "name": "t",
+                "vars": { "api": "https://one.example.com", "api": "https://two.example.com" },
+                "nodes": {}
+            }"#,
+        )
+        .unwrap();
+        let cfg = parse_config(&path).expect("still loads — see F0.1");
+        let f = validate(&cfg);
+        assert!(
+            f.iter()
+                .any(|f| f.rule == "duplicate-key" && f.message.contains("\"api\"")),
+            "{f:?}"
+        );
+    }
+
+    /// Rule 4: an unknown reference is a hard error listing the declared names —
+    /// the cause is almost always a typo, and the fix is seeing the real list.
+    #[test]
+    fn vars_unknown_is_error() {
+        let f = findings_for(
+            r#"{"schemaVersion":"2","name":"t",
+                "vars":{"remote_api":"https://api.example.com","health_path":"/healthz"},
+                "nodes":{"a":{"variants":{"dev":{
+                  "type":"command",
+                  "shell":"curl ${vars.remote_apo}${vars.health_path}"
+                }}}}}"#,
+        );
+        let hit = f
+            .iter()
+            .find(|f| f.rule == "unknown-var")
+            .unwrap_or_else(|| panic!("expected the rule to fire: {f:?}"));
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(hit.message.contains("remote_apo"), "{hit:?}");
+        // The declared names, so the typo is obvious.
+        assert!(hit.message.contains("health_path"), "{hit:?}");
+        assert!(hit.message.contains("remote_api"), "{hit:?}");
+        // The correctly-spelled one does not fire.
+        assert_eq!(
+            f.iter().filter(|f| f.rule == "unknown-var").count(),
+            1,
+            "{f:?}"
+        );
+    }
+
+    /// A var referenced from every position that supports it resolves quietly.
+    #[test]
+    fn declared_vars_are_accepted_everywhere() {
+        let f = findings_for(
+            r#"{"schemaVersion":"2","name":"t",
+                "vars":{"api":"https://api.example.com","pw":{"value":"dev","secret":true}},
+                "env":{"PROJECT_API":"${vars.api}"},
+                "nodes":{"a":{
+                  "env":{"NODE_API":"${vars.api}"},
+                  "variants":{"dev":{
+                    "type":"command",
+                    "env":{"VARIANT_API":"${vars.api}"},
+                    "argv":["curl","${vars.api}"],
+                    "on_stop":{"shell":"echo ${vars.api}"},
+                    "skip_if":{"shell":"test -n '${vars.api}'"}
+                  }}}}}"#,
+        );
+        assert!(
+            !f.iter().any(|f| f.rule == "unknown-var"),
+            "declared vars must be accepted: {f:?}"
         );
     }
 

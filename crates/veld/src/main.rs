@@ -258,6 +258,12 @@ enum Command {
         #[arg(long)]
         path: bool,
 
+        /// Explain one effective value and where it was defined, e.g.
+        /// `nodes.api.variants.dev.env.DATABASE_URL`. A value declared `secret`
+        /// is described, never printed.
+        #[arg(long, value_name = "POINTER")]
+        why: Option<String>,
+
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -640,7 +646,7 @@ async fn main() {
 
         Command::Presets { json } => commands::presets::run(json).await,
 
-        Command::Config { path, json } => commands::config::run(path, json).await,
+        Command::Config { path, why, json } => commands::config::run(path, why, json).await,
 
         Command::Lint { json } => commands::lint::run(json).await,
 
