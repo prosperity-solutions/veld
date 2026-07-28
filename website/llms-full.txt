@@ -160,6 +160,8 @@ All CLI/daemon state (run state, project registry, service logs, feedback thread
 
 An experimental second-generation management UI is served at `/ide` on the same daemon (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, drive veld runs per worktree). It is also the web core of Veld Desktop, an Electron shell that wraps it.
 
+That UI has terminal panes: real shells in the selected worktree's directory, arranged in a dock of two tab strips that can be split and rearranged. The PTY is spawned by the daemon and bridged to the browser over a WebSocket rather than run inside Electron, so terminals work in a plain browser too. Sessions outlive the page — a reload reattaches to the same shells with their scrollback, and output produced while the page was gone is replayed, so a build survives a refresh. Closing a terminal pane ends its shell; closing the window only detaches, and an abandoned session is hung up after 30 minutes. Up to 48 sessions can be live at once. Since the endpoint hands out a shell, it is gated by a single-use ticket from a CSRF-protected request plus an `Origin` allowlist, because a WebSocket handshake cannot carry the custom header the rest of the API relies on.
+
 ### Environments and runs
 
 An **environment** is the durable named slot `--name` addresses; a **run** is one execution instance of it. Ended runs — stopped, failed, crashed, replaced, or completed (`--oneshot`) — persist as history (last 10 per environment, up to 7 days) with their logs, an explicit end reason, and machine-readable failure detail, so "why did last night's run die?" stays answerable after the fact. `veld runs` lists the history; `veld logs --run <id-prefix>` (or `-p` for the previous run) reads a past run's logs; `veld status`/`veld runs --json` expose `end_reason`/`end_detail` for agents. Crashes are detected by the daemon and recorded as `crashed` — distinguishable from a clean stop. The dashboard defaults to live environments (a top-level Active | History switcher); ended environments live under History with their last outcome, a run picker in the Logs tab, and one-click Restart. Each run also stores a **graph snapshot** taken at start — raw pre-interpolation command strings, env variable names (never values), cwd, URL templates, and a veld.json hash — so `veld runs show <id>` reconstructs what a run was started with and `veld runs diff` answers "what changed in the config between the run that worked and the run that didn't?"
@@ -241,7 +243,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 - **Collision** — if the consumer already runs the same environment, the local URL wins: that node is skipped and reported as a warning
 - **Fail-closed** — shares are held in the daemon's memory; if the daemon stops, shares stop
-- **Auto-teardown** — stopping the run (`veld stop`) auto-unshares its shares, and a consumer's join self-tears-down when the tunnel closes
+- **Auto-teardown** — stopping the run (`veld stop`) auto-unshares its shares, and so does `veld restart` (a restart mints a new run, so the old share would point at torn-down ports; re-running `veld start` over a live same-named environment does not yet, issue #171); a consumer's join self-tears-down when the tunnel closes
 - **Optional ids** — `veld unshare` and `veld leave` take the id optionally, resolving the sole active share/join when omitted
 - **TTL** — shares expire after `--ttl` seconds (default 7200)
 

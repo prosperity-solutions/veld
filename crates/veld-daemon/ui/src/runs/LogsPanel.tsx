@@ -8,7 +8,7 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { api, type HistoryEntry, type LogResponse } from "../api";
+import { api, type HistoryEntry, type LogResponse, type RunRef } from "../api";
 import { extractMsg, extractTs, fmtTs, fmtWhen, nodeColor } from "./util";
 
 interface Entry {
@@ -27,7 +27,8 @@ interface Entry {
  * is hidden so filters/scroll/cache survive tab switches.
  */
 export function LogsPanel(props: {
-  run: string;
+  /** Project-scoped run address — a bare name is ambiguous across repos. */
+  run: RunRef;
   history: HistoryEntry[];
   /** Card's history selection — scopes the default run picker option. */
   histSel: string | null;
@@ -50,9 +51,13 @@ export function LogsPanel(props: {
   // Reset the accumulated node list when the viewed run changes — otherwise
   // the node filter (and the multi-node tag heuristic) carries nodes from
   // previously viewed runs.
+  // Depend on the RunRef's FIELDS, not the object: `runRef()` mints a fresh
+  // object on every parent render, so `[props.run]` would re-run this (and the
+  // poll effect below) on every 3s environments poll and every 5s stats poll —
+  // clearing the node filter and tearing down the 2s log interval each time.
   useEffect(() => {
     knownNodes.current.clear();
-  }, [props.run, effectiveRunId]);
+  }, [props.run.name, props.run.projectRoot, effectiveRunId]);
 
   useEffect(() => {
     if (!props.visible) return;
@@ -80,7 +85,14 @@ export function LogsPanel(props: {
       cancelled = true;
       window.clearInterval(t);
     };
-  }, [props.visible, props.run, sourceFilter, effectiveRunId]);
+    // Scalar deps only — see the note on the effect above.
+  }, [
+    props.visible,
+    props.run.name,
+    props.run.projectRoot,
+    sourceFilter,
+    effectiveRunId,
+  ]);
 
   // Auto-scroll management: stick to bottom while armed; manual scroll-up
   // disarms; returning within 40px of the bottom re-arms (v1 behavior).

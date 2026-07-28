@@ -75,6 +75,7 @@ async fn start(
         ExposeMode::Peer
     };
     let run = resolve_run(req.run.clone(), &headers);
+    let project = resolve_project(req.project_root.clone(), &headers);
     let ResolvedShare {
         manifest,
         relay,
@@ -82,7 +83,13 @@ async fn start(
         gateway,
         warnings,
         web_access,
-    } = build_manifest(run.as_deref(), req.nodes.as_deref(), req.ttl_secs, mode)?;
+    } = build_manifest(
+        run.as_deref(),
+        project.as_deref(),
+        req.nodes.as_deref(),
+        req.ttl_secs,
+        mode,
+    )?;
     let node_names: Vec<String> = manifest.nodes.iter().map(|n| n.node.clone()).collect();
     let expires_at = manifest.expires_at;
 
@@ -126,14 +133,42 @@ async fn start(
 /// active. Direct callers (the CLI) carry no such header and keep the
 /// "only run" resolution downstream.
 fn resolve_run(explicit: Option<String>, headers: &HeaderMap) -> Option<String> {
-    explicit.or_else(|| {
-        headers
-            .get("x-veld-run")
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
-    })
+    // Trimmed: a run name is an identifier (`validate_run_name` bans whitespace
+    // outright), so surrounding space is noise, never data.
+    explicit.or_else(|| header_value(headers, "x-veld-run").map(|v| v.trim().to_owned()))
+}
+
+/// The project half of the address, resolved the same way: body first, then
+/// the `X-Veld-Project` header Caddy injects alongside `X-Veld-Run`. Without
+/// it the run name is matched against every project, which is ambiguous
+/// whenever two projects run the same name — see [`StartShareRequest::project_root`].
+fn resolve_project(explicit: Option<String>, headers: &HeaderMap) -> Option<String> {
+    // NOT trimmed — unlike the run name, this is a filesystem path compared for
+    // equality downstream, and `Path` normalizes trailing slashes but not
+    // whitespace. Rewriting it would 404 with a message showing the requested
+    // and actual roots as identical. Matches
+    // `feedback_server::project_header`, and the body-supplied `project_root`,
+    // which isn't trimmed either.
+    explicit.or_else(|| header_value(headers, "x-veld-project"))
+}
+
+/// A non-empty header value, read as UTF-8.
+///
+/// Deliberately not `HeaderValue::to_str()`: that rejects every byte >= 0x80, and
+/// `X-Veld-Project` carries a filesystem path, so a project under
+/// `/Users/José/app` yields a valid header `to_str()` refuses to read — which
+/// would silently drop the scope and fall back to machine-wide matching. Run
+/// names are ASCII by `validate_run_name`, but they share this reader.
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(name)?;
+    let value = std::str::from_utf8(raw.as_bytes()).ok()?;
+    // Trim to test emptiness, return verbatim. Callers decide whether their
+    // header is an identifier (trim it) or a path (don't) — see `resolve_run`
+    // and `resolve_project`.
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
 }
 
 /// The web path of `start`: mint a share scoped to the `web`-opted nodes,
@@ -510,6 +545,7 @@ struct ResolvedShare {
 /// opted-in set — it can never widen it.
 fn build_manifest(
     run: Option<&str>,
+    project: Option<&str>,
     nodes_filter: Option<&[String]>,
     ttl_secs: Option<i64>,
     mode: ExposeMode,
@@ -517,22 +553,67 @@ fn build_manifest(
     let db = veld_core::db::Db::open().map_err(internal)?;
     let registry = db.registry().map_err(internal)?;
 
+    // Scope BOTH halves by the project, not just the lookup below: an unscoped
+    // "only run" picks a name the caller never typed, and the lookup would then
+    // reject it against the caller's own project — reporting a run they never
+    // asked for as missing from a project they never mentioned it in.
     let run_name = match run {
         Some(r) => r.to_string(),
-        None => sole_run(&registry)?,
+        None => sole_run(&registry, project)?,
     };
 
-    let project_root = registry
-        .projects
-        .values()
-        .find(|e| e.runs.contains_key(&run_name))
-        .map(|e| e.project_root.clone())
-        .ok_or((StatusCode::NOT_FOUND, format!("run '{run_name}' not found")))?;
+    let project_root = resolve_share_project(&registry, project, &run_name)?;
 
     let run_state = db
         .get_run(&project_root, &run_name)
         .map_err(internal)?
         .ok_or((StatusCode::NOT_FOUND, format!("run '{run_name}' not found")))?;
+
+    // `Db::registry()` carries every environment's LATEST run whatever its
+    // status, so everything above resolves stopped and crashed runs too — and
+    // the node states keep their `url`/`port` as history, which is all the
+    // manifest builder below reads. Sharing one would mint a tunnel, or a public
+    // gateway URL, pointing at ports that are gone and that another process can
+    // reuse. Gate here rather than filtering the resolution, so the error can
+    // say *why* a run the user can see in `veld status` was refused.
+    //
+    // `Running`, not `is_live()`: that also admits `Starting`, and node URLs are
+    // written per node as each one comes up — so a share taken mid-startup
+    // exposes only the nodes up so far, silently and with no warning, or reports
+    // the misleading "no shareable (URL-bearing) nodes" when none are. It admits
+    // `Stopping` too, where minting a tunnel is pointless.
+    if run_state.status != veld_core::state::RunStatus::Running {
+        return Err((StatusCode::CONFLICT, {
+            use veld_core::state::RunStatus;
+            // The remedy has to match the status. "Start it" is wrong for a
+            // run that is already coming up — and that case is reachable
+            // from the overlay's Share button, because Caddy routes and the
+            // injected overlay go live per node as each one comes up, while
+            // `Running` is only set once every node is healthy. A multi-node
+            // project therefore serves a shareable-looking page for the
+            // whole startup window.
+            //
+            // Not `outcome_label()` for the transitional states: its
+            // no-end_reason fallback returns "stopping" for ANY non-live
+            // status, so a stopped run with a NULL end_reason would report
+            // "(stopping)".
+            let (state, remedy) = match run_state.status {
+                RunStatus::Starting => ("still starting", "wait for it to finish starting"),
+                RunStatus::Stopping => ("shutting down", "wait for it to stop"),
+                _ => {
+                    return Err((
+                        StatusCode::CONFLICT,
+                        format!(
+                            "run '{run_name}' is not running ({}) — start it \
+                             before sharing",
+                            run_state.outcome_label()
+                        ),
+                    ));
+                }
+            };
+            format!("run '{run_name}' is {state} — {remedy} before sharing")
+        }));
+    }
     let run_state = &run_state;
 
     let config = parse_config(&project_root.join("veld.json")).map_err(|e| {
@@ -787,16 +868,142 @@ fn mode_name(mode: ExposeMode) -> &'static str {
     }
 }
 
-/// When no run is named, use the only running one; error if ambiguous.
-fn sole_run(registry: &GlobalRegistry) -> Result<String, ApiError> {
-    let mut names = registry.projects.values().flat_map(|e| e.runs.keys());
+/// Resolve which project's `run_name` is being shared.
+///
+/// A named `project` is **authoritative**: the run must be in it, or this fails.
+///
+/// The tempting alternative — treat the project as a hint and fall back to a
+/// machine-wide match when it doesn't hold the name — was tried and reverted. It
+/// meant `cd repoA && veld share main`, where A has no `main`, silently shared
+/// *B's* `main`; with `--web` that publishes URLs while the output names neither
+/// project nor run. The apparent capability it preserved (sharing any project's
+/// run from any directory) was never a designed feature: it was an artifact of
+/// the global first-match scan this module exists to remove. And it contradicted
+/// [`sole_run`] directly, which refuses to cross the project boundary — leaving
+/// the vaguer command stricter than the more specific one.
+///
+/// So: naming a project that doesn't run the name is an error that says where it
+/// *does* run. `cd` is the remedy, and it's in the message. Callers with no
+/// project at all (a `veld share` outside any project) pass `None` and get
+/// machine-wide matching, where **more than one match is a hard error** rather
+/// than a guess.
+///
+/// The returned root is always the registry's own `PathBuf`, never the caller's
+/// string — the daemon reads `veld.json` from it.
+fn resolve_share_project(
+    registry: &GlobalRegistry,
+    project: Option<&str>,
+    run_name: &str,
+) -> Result<std::path::PathBuf, ApiError> {
+    let mut holders: Vec<&std::path::Path> = registry
+        .projects
+        .values()
+        .filter(|e| e.runs.contains_key(run_name))
+        .map(|e| e.project_root.as_path())
+        .collect();
+    // Deterministic order: `registry.projects` is a `HashMap`, and an error
+    // message whose contents shuffle between runs is the same class of defect
+    // as the resolution bug this module is fixing.
+    holders.sort_unstable();
+    let roots = || {
+        holders
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    if let Some(project) = project {
+        let requested = std::path::Path::new(project);
+        if let Some(hit) = holders.iter().find(|p| **p == requested) {
+            return Ok(hit.to_path_buf());
+        }
+        // No fallthrough — see the doc above. Say where it does run, so the
+        // remedy (`cd`) is obvious and the answer never surprises.
+        return Err((
+            StatusCode::NOT_FOUND,
+            if holders.is_empty() {
+                format!("run '{run_name}' not found")
+            } else {
+                format!(
+                    "run '{run_name}' is not in {project} — it runs in: {}",
+                    roots()
+                )
+            },
+        ));
+    }
+
+    match holders.as_slice() {
+        [only] => Ok(only.to_path_buf()),
+        [] => Err((StatusCode::NOT_FOUND, format!("run '{run_name}' not found"))),
+        // Name the candidates and a remedy that exists: there is no
+        // `--project-root` flag on `veld share`, so `cd` is the answer.
+        _ => Err((
+            StatusCode::CONFLICT,
+            format!(
+                "run '{run_name}' exists in more than one project ({}) — run \
+                 `veld share` from the directory of the one you mean",
+                roots()
+            ),
+        )),
+    }
+}
+
+/// When no run is named, use the only *environment*; error if ambiguous.
+///
+/// Not "the only running one": `Db::registry()` keeps every environment's latest
+/// run whatever its status, so what this resolves may well be stopped —
+/// `build_manifest`'s liveness gate is what refuses it, with a message that says
+/// so. Filtering here instead would report a stopped environment as absent.
+///
+/// Scoped to `project` when the caller supplied one, so "the only run" means
+/// the only run *of this project*. Unscoped it stays machine-wide, which is
+/// what a `veld share` invoked outside any project can offer.
+fn sole_run(registry: &GlobalRegistry, project: Option<&str>) -> Result<String, ApiError> {
+    let requested = project.map(std::path::Path::new);
+    let scoped = || {
+        registry
+            .projects
+            .values()
+            .filter(move |e| requested.is_none_or(|p| e.project_root == p))
+    };
+    let mut names = scoped().flat_map(|e| e.runs.keys());
     match (names.next(), names.next()) {
         (Some(only), None) => Ok(only.clone()),
-        (None, _) => Err((StatusCode::NOT_FOUND, "no active runs to share".to_string())),
-        (Some(_), Some(_)) => Err((
-            StatusCode::BAD_REQUEST,
-            "multiple runs active; specify one with `veld share <run>`".to_string(),
+        (None, _) => Err((
+            StatusCode::NOT_FOUND,
+            match project {
+                Some(p) => format!("no environments to share in {p}"),
+                None => "no environments to share".to_string(),
+            },
         )),
+        (Some(_), Some(_)) => {
+            // Name the candidates: with the project scope applied these are
+            // this project's own environments, so the list is short and the
+            // user can copy one straight into the command.
+            // Deduplicated, and qualified by project when unscoped: across two
+            // projects both running `main`, a bare list reads "dev, main, main"
+            // and the remedy it suggests (`veld share main`) then 409s.
+            let mut candidates: Vec<String> = scoped()
+                .flat_map(|e| {
+                    e.runs.keys().map(move |name| match project {
+                        Some(_) => name.clone(),
+                        None => format!("{name} in {}", e.project_root.display()),
+                    })
+                })
+                .collect();
+            candidates.sort_unstable();
+            candidates.dedup();
+            // "environments", not "active runs": the registry keeps stopped and
+            // crashed ones, so some of these may not be running.
+            Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "several environments here ({}) — name one: `veld share <run>`",
+                    candidates.join(", ")
+                ),
+            ))
+        }
     }
 }
 
@@ -841,6 +1048,152 @@ mod tests {
         // Empty/whitespace header is ignored (falls through to "only run").
         assert_eq!(resolve_run(None, &hdr("   ")), None);
         assert_eq!(resolve_run(None, &HeaderMap::new()), None);
+    }
+
+    #[test]
+    fn header_values_survive_non_ascii_project_paths() {
+        // `HeaderValue::to_str()` rejects every byte >= 0x80, and this header
+        // carries a filesystem path — so reading it that way silently dropped
+        // the scope for any project under e.g. /Users/José. Caddy transmits the
+        // raw UTF-8 bytes happily (Go only rejects CTLs), so the daemon must
+        // parse bytes, not visible ASCII.
+        let path = "/Users/José/项目/app";
+        let mut h = HeaderMap::new();
+        h.insert("x-veld-project", path.parse().unwrap());
+        assert!(
+            h.get("x-veld-project").unwrap().to_str().is_err(),
+            "precondition: to_str must reject this, or the test proves nothing"
+        );
+        assert_eq!(resolve_project(None, &h), Some(path.to_owned()));
+    }
+
+    #[test]
+    fn resolve_project_prefers_body_then_caddy_header() {
+        let mut h = HeaderMap::new();
+        h.insert("x-veld-project", " /repos/from-page ".parse().unwrap());
+        assert_eq!(
+            resolve_project(Some("/repos/from-cli".into()), &h),
+            Some("/repos/from-cli".into())
+        );
+        // Verbatim, NOT trimmed: this is a path compared for equality, and
+        // `Path` does not normalize whitespace. Contrast `resolve_run` above,
+        // which does trim because a run name is an identifier.
+        assert_eq!(resolve_project(None, &h), Some(" /repos/from-page ".into()));
+        assert_eq!(resolve_project(None, &HeaderMap::new()), None);
+    }
+
+    fn run_info(name: &str) -> veld_core::state::RegistryRunInfo {
+        veld_core::state::RegistryRunInfo {
+            run_id: Uuid::new_v4(),
+            name: name.to_owned(),
+            status: veld_core::state::RunStatus::Running,
+            urls: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Two projects each running an environment called `main`.
+    fn colliding_registry() -> GlobalRegistry {
+        let entry = |root: &str, name: &str| {
+            let mut runs = std::collections::HashMap::new();
+            runs.insert("main".to_owned(), run_info("main"));
+            (
+                root.to_owned(),
+                veld_core::state::RegistryEntry {
+                    project_root: std::path::PathBuf::from(root),
+                    project_name: name.to_owned(),
+                    runs,
+                },
+            )
+        };
+        GlobalRegistry {
+            projects: std::collections::HashMap::from([
+                entry("/repos/alpha", "alpha"),
+                entry("/repos/beta", "beta"),
+            ]),
+        }
+    }
+
+    #[test]
+    fn a_named_project_is_authoritative() {
+        // A scope that holds the name wins outright — the actual fix.
+        let reg = colliding_registry();
+        assert_eq!(
+            resolve_share_project(&reg, Some("/repos/beta"), "main").unwrap(),
+            std::path::PathBuf::from("/repos/beta")
+        );
+        assert_eq!(
+            resolve_share_project(&reg, Some("/repos/alpha"), "main").unwrap(),
+            std::path::PathBuf::from("/repos/alpha")
+        );
+
+        // A scope that does NOT hold the name is an error, even when the name is
+        // unambiguous elsewhere. Falling through was tried and reverted: it made
+        // `cd repoA && veld share main` publish repoB's run, and it left this
+        // path laxer than `sole_run`, which never crosses the boundary.
+        let mut solo = colliding_registry();
+        solo.projects.remove("/repos/beta");
+        let (code, msg) = resolve_share_project(&solo, Some("/repos/gamma"), "main").unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        // …but it must say where the run does live, so `cd` is the obvious fix.
+        assert!(
+            msg.contains("/repos/gamma") && msg.contains("/repos/alpha"),
+            "{msg}"
+        );
+
+        // A name nothing runs is a plain "not found" — nowhere to point at.
+        let (code, msg) = resolve_share_project(&reg, Some("/repos/alpha"), "nope").unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(!msg.contains("it runs in"), "{msg}");
+    }
+
+    #[test]
+    fn sole_run_is_scoped_to_the_project_when_one_is_given() {
+        let mut reg = colliding_registry();
+        // Give beta a second environment so "sole run" is ambiguous globally
+        // but unambiguous within alpha.
+        reg.projects
+            .get_mut("/repos/beta")
+            .unwrap()
+            .runs
+            .insert("extra".to_owned(), run_info("extra"));
+
+        // Scoped: alpha's only run, even though the machine has three.
+        assert_eq!(sole_run(&reg, Some("/repos/alpha")).unwrap(), "main");
+
+        // Unscoped, this would pick some other project's name and the lookup
+        // would then reject it against alpha. Scoped, an empty project says so.
+        let (code, msg) = sole_run(&reg, Some("/repos/gamma")).unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        assert!(msg.contains("/repos/gamma"), "{msg}");
+
+        // Unscoped stays machine-wide, and names the candidates.
+        let (code, msg) = sole_run(&reg, None).unwrap_err();
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("extra") && msg.contains("main"), "{msg}");
+    }
+
+    #[test]
+    fn share_without_a_project_rejects_an_ambiguous_name() {
+        let reg = colliding_registry();
+        let (code, msg) = resolve_share_project(&reg, None, "main").unwrap_err();
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(
+            msg.contains("/repos/alpha") && msg.contains("/repos/beta"),
+            "{msg}"
+        );
+        // The remedy named must exist: `veld share` has no project flag.
+        assert!(!msg.contains("--project"), "{msg}");
+
+        // Unambiguous names still resolve without a project — an older CLI, or
+        // `veld share` run from outside a project, keeps working.
+        let (code, _) = resolve_share_project(&reg, None, "nope").unwrap_err();
+        assert_eq!(code, StatusCode::NOT_FOUND);
+        let mut solo = colliding_registry();
+        solo.projects.remove("/repos/beta");
+        assert_eq!(
+            resolve_share_project(&solo, None, "main").unwrap(),
+            std::path::PathBuf::from("/repos/alpha")
+        );
     }
 
     #[test]

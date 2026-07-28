@@ -325,10 +325,15 @@ setup-ui:
     cd crates/veld-daemon/ui && npm install
     cd desktop && npm install
 
-# Vite dev server for the /ide UI (HMR). Proxies /api to the DEV daemon
-# (port {{dev_daemon_port}}) — start `just dev-daemon` first. Override with
-# VELD_DAEMON_PORT=19899 to develop against the installed daemon instead
-# (only works once its release carries the desktop endpoints).
+# Vite dev server for the /ide UI (HMR). Proxies /api — including the terminal
+# WebSocket upgrade — to the DEV daemon (port {{dev_daemon_port}}); start
+# `just dev-daemon` first.
+#
+# Pointing this at the INSTALLED daemon (VELD_DAEMON_PORT=19899) leaves the rest
+# of the UI working but breaks terminals: the daemon only trusts vite's origin
+# when it is a dev instance, so the installed one on the default port refuses the
+# upgrade (see `allowed_origins` in crates/veld-daemon/src/pty.rs). Deliberate —
+# a dev server must not be able to open a shell through the installed daemon.
 dev-ui:
     cd crates/veld-daemon/ui && npm run dev
 

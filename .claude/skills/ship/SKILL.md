@@ -30,16 +30,25 @@ State the feature/scope in your own words if it isn't already clear, then use
 `AskUserQuestion` for the settings below (skip any the maintainer already stated
 in their request):
 
-1. **Review depth**
-   - *Full loop (recommended)* — repeated 5-angle adversarial review per
-     `docs/agentic-review.md`; fix, re-review on the post-fix diff, loop until a
-     round is clean.
-   - *Trivial (3-angle, round cap 2)* — counterfactual + what-isn't-here +
-     self-consistency, for a small / mechanical change. Still loops (Step 4), just
-     with the lower cap the review doc's tuning note allows for low-risk diffs.
+1. **Review depth** — sets the `SPAWNS` / `ROUNDS` caps of the autonomous review
+   loop in [docs/agentic-review.md](../../../docs/agentic-review.md). Everything
+   else about the loop (staging, model routing, ledger, exit criteria) is the
+   doc's, not yours to negotiate.
+   - *Standard loop (recommended)* — the doc as written: `SPAWNS: 14` (max 6
+     opus), `ROUNDS: auto` (2 low-risk / 3 default / 5 stakes-elevated).
+   - *Deep* — raise the caps (`SPAWNS: 24`, `ROUNDS: 5`) for a change the
+     maintainer flags as expensive-if-wrong beyond what §3.3 auto-detects.
+   - *Light (`SPAWNS: 6`, `ROUNDS: 2`)* — for a small / mechanical change. The
+     doc's own trivia clause (§11) still applies underneath: a sub-50-line,
+     no-stakes diff with a green pre-pass gets angles 4+5 at sonnet, one round.
    - *None* — skip review. AGENTS.md makes the multi-angle review **mandatory for
      every change**, so this is the maintainer explicitly overriding that step;
      confirm they mean it and note the risk in the PR body.
+
+   The stakes override (§3.3 — privileged helper, secrets/relay tokens, gateway
+   auth, proxy headers, daemon API, SQLite migrations) is **not** downgradable by
+   this answer. If *Light* is chosen and the diff turns out to touch one of those
+   paths, run the standard loop and say so in the final report.
 2. **Merge policy** (AGENTS.md's default posture is **ask-first**; bypass is the
    exception and requires the maintainer's explicit upfront authorization, which
    this questionnaire captures)
@@ -88,19 +97,35 @@ call either way. When the change is website-facing, prefer serving it locally
 (`veld start website:local`) and collaborating through `veld feedback` before
 shipping.
 
-## Step 4 — Review rounds
+## Step 4 — Review loop
 
-Run the review at the depth chosen in Step 0, following
-[docs/agentic-review.md](../../../docs/agentic-review.md):
+Run the **autonomous multi-angle review loop** in
+[docs/agentic-review.md](../../../docs/agentic-review.md) at the depth chosen in
+Step 0. That doc is the operative spec — follow it end to end rather than
+improvising a review. The parts most easily skipped, and therefore worth naming
+here:
 
-- Spawn the review angles as **parallel background sub-agents**, `model: opus`,
-  one angle each. Give every angle the exact diff target
-  (`git diff origin/main...HEAD`), the intent in 1-3 sentences, and where to read
-  the real dependency source.
-- Verify every critical/major yourself before acting. Fix all 🔴/🟠 (and cheap
-  🟡). Re-run the angles on the post-fix diff — fixes introduce their own
-  defects. Loop until a round is clean or the round cap hits.
-- Report a deduped, severity-sorted summary — not the raw agent output.
+- **Pre-pass first** (§1.1) — `rustup update stable`, clippy, `cargo fmt --check`,
+  tests, plus the UI checks when `crates/veld-daemon/ui` is touched. Red pre-pass
+  → fix before spawning anything. Its output is out of scope for every subagent.
+- **Build the context pack once** (§1) and hand the same one to every angle:
+  diff target, intent, in/out of scope paths, change shape, and the pinned
+  dependency source paths (`~/.cargo/registry/src/...`).
+- **Stages A → B → C** (§5), angles blind to each other within a stage,
+  `run_in_background: true`, `model:` set explicitly per the §3.2 routing table —
+  not opus for everything.
+- **Verify every 🔴/🟠 yourself before fixing** (§8.3). No unverified finding gets
+  fixed — under autonomy that's how a hallucination becomes a commit.
+- **Ledger** at `notes/review/ledger.md` (gitignored), updated every round —
+  it's your memory across compaction. Keep it out of your commits.
+- **Report once, at the end**, in the §10 format. No per-round narration, no raw
+  subagent dumps.
+
+The loop's hard stops (§2) are the *review's* escalation points and they compose
+with this skill's **When to involve the human** list — a redesign-class 🔴 or a
+deadlock halts the run and comes back to the maintainer; a `DECISION-REQUIRED`
+finding does not halt the loop but must appear in the final report and, if it
+gates the PR, in the PR body.
 
 ## Step 5 — PR
 

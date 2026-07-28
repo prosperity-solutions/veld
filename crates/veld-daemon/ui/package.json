@@ -17,6 +17,8 @@
     "@mantine/core": "^9.4.2",
     "@mantine/hooks": "^9.4.2",
     "@tabler/icons-react": "^3.45.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "mantine-contextmenu": "^9.4.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"

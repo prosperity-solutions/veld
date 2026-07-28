@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  runRef,
   type EmojiHolder,
   type EnvironmentList,
   type Repo,
@@ -59,6 +60,28 @@ import {
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
+import { PaneArea } from "./panes/PaneArea";
+import {
+  DEFAULT_RATIO,
+  LAYOUT_STORAGE_KEY,
+  loadLayouts,
+  type PaneLayout,
+  SERVICES_TAB_ID,
+  activateTab,
+  activeTab,
+  addTabToFocused,
+  closeTab,
+  defaultLayout,
+  hasTab,
+  newTerminalId,
+  serializeLayouts,
+  terminalIds,
+} from "./panes/model";
+import {
+  applyTerminalTheme,
+  pruneTerminals,
+  restartTerminal,
+} from "./panes/terminalHost";
 import {
   StartConfig,
   defaultStartSelection,
@@ -200,6 +223,12 @@ export function App() {
     themePref === "auto" ? (systemDark ? "dark" : "light") : themePref;
   useEffect(() => {
     document.body.dataset.theme = theme;
+    // Pushed from *this* effect, immediately after the attribute above, and
+    // not from a child: xterm can't read CSS variables, so it resolves the
+    // theme tokens off `document.body` — and React runs child effects before
+    // the parent's, so doing this in AppInner read the outgoing palette and
+    // left open terminals on the old colours.
+    applyTerminalTheme(theme === "light" ? "light" : "dark");
   }, [theme]);
   const cycleTheme = () =>
     setThemePref(
@@ -430,13 +459,16 @@ function AppInner(props: {
     }
     void act(w, "start", () => api.startRun(w.id, startBody(sel)));
   };
+  // `w.path` is the run's project root — every worktree with a veld.json is
+  // its own project (see `runsForWorktree`), and the run name alone would be
+  // ambiguous across repos.
   const stopWorktree = (w: Worktree) => {
     const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "stop", () => api.stopRun(r.name));
+    if (r) void act(w, "stop", () => api.stopRun(runRef(w.path, r)));
   };
   const restartWorktree = (w: Worktree) => {
     const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "restart", () => api.restartRun(r.name));
+    if (r) void act(w, "restart", () => api.restartRun(runRef(w.path, r)));
   };
 
   // ---- dialogs ------------------------------------------------------------
@@ -529,17 +561,99 @@ function AppInner(props: {
   };
   const closeDialog = () => setDialog({ kind: "none" });
 
+  // `dialog` is read inside the listener but deliberately not a dependency —
+  // rebinding a window listener on every dialog change is wasteful, so the
+  // current value comes through a ref instead.
+  const dialogRef = useRef(dialog);
+  dialogRef.current = dialog;
+  // Key routing with a terminal on screen, since it is not what it looks like:
+  // xterm binds keydown on its own textarea and calls preventDefault +
+  // stopPropagation for every key it consumes, so for a focused terminal this
+  // window listener (bubble phase, no capture) runs *after* xterm's and never
+  // sees those keys at all. Consequences, both deliberate:
+  //   - Escape reaches the shell, not this handler. vim, less and TUI menus keep
+  //     working. The dialog guard below therefore only matters when focus is
+  //     outside a terminal.
+  //   - Ctrl+K is readline's kill-to-end-of-line and stays with the shell. That
+  //     leaves the palette unreachable from a focused terminal on Linux/Windows
+  //     (⌘K survives, because xterm doesn't claim meta combos), which is why
+  //     Ctrl/⌘+Shift+P exists as a second accelerator — terminalHost lets that
+  //     one through explicitly.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && (e.key === "k" || ((e.key === "P" || e.key === "p") && e.shiftKey))) {
         e.preventDefault();
         setDialog({ kind: "search" });
       }
-      if (e.key === "Escape") closeDialog();
+      if (e.key === "Escape" && dialogRef.current.kind !== "none") closeDialog();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // ---- Panes -------------------------------------------------------------
+  // One layout per worktree, restored from sessionStorage so a reload comes
+  // back to the same tabs — and, because a terminal tab's id is its daemon
+  // session id, to the same running shells. Read with a lazy initialiser
+  // rather than in an effect: an empty first render would prune every restored
+  // session before the restore landed.
+  const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(loadLayouts);
+  const layout = worktree ? layouts[worktree.id] : undefined;
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(LAYOUT_STORAGE_KEY, serializeLayouts(layouts));
+    } catch {
+      // Storage disabled or full: the app keeps working, only the reload
+      // continuity is lost, and there is nothing useful to tell the user.
+    }
+  }, [layouts]);
+
+  // Give a newly selected worktree a layout. New worktrees inherit the split
+  // of one already open, so the proportions the user chose carry across
+  // instead of snapping back to 50/50 on every new worktree.
+  useEffect(() => {
+    if (!worktree) return;
+    setLayouts((prev) => {
+      if (prev[worktree.id]) return prev;
+      const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
+      return { ...prev, [worktree.id]: defaultLayout(seed) };
+    });
+  }, [worktree?.id]);
+
+  const setLayout = useCallback(
+    (next: PaneLayout) => {
+      if (!worktree) return;
+      setLayouts((prev) =>
+        prev[worktree.id] === next ? prev : { ...prev, [worktree.id]: next },
+      );
+    },
+    [worktree?.id],
+  );
+
+  // Drop layouts for worktrees that no longer exist, so their terminals get
+  // collected below. Skipped while the repo list is empty — a failed poll
+  // must not read as "everything was deleted".
+  useEffect(() => {
+    if (repos.length === 0) return;
+    const alive = new Set(repos.flatMap((r) => r.worktrees.map((w) => w.id)));
+    setLayouts((prev) => {
+      const kept = Object.entries(prev).filter(([id]) => alive.has(Number(id)));
+      return kept.length === Object.keys(prev).length
+        ? prev
+        : Object.fromEntries(kept);
+    });
+  }, [repos]);
+
+  // Terminals live outside React (see panes/terminalHost.ts), so nothing
+  // unmounts them. The layouts are the whole record of which should exist;
+  // anything else is a shell nobody can see, still holding one of the
+  // daemon's session slots. Disposal also tells the daemon to hang the shell
+  // up, which closing the socket deliberately does not.
+  useEffect(() => {
+    pruneTerminals(Object.values(layouts).flatMap(terminalIds));
+  }, [layouts]);
 
   const [urlsOpen, setUrlsOpen] = useState(false);
   // Rail expanded by default; the choice sticks across reloads/windows.
@@ -703,6 +817,52 @@ function AppInner(props: {
       });
     }
 
+    // ---- Panes -----------------------------------------------------------
+    if (layout) {
+      items.push({
+        id: "pane:new-terminal",
+        group: "Panes",
+        label: "New terminal",
+        alt: ["shell", "pty"],
+        hint: worktree?.alias,
+        run: () =>
+          setLayout(
+            addTabToFocused(layout, {
+              id: newTerminalId(),
+              kind: "terminal",
+              title: "terminal",
+            }),
+          ),
+      });
+      const focused = activeTab(layout, layout.focused);
+      if (focused) {
+        items.push({
+          id: "pane:close",
+          group: "Panes",
+          label: `Close the ${focused.title} pane`,
+          run: () => setLayout(closeTab(layout, focused.id)),
+        });
+      }
+      if (focused?.kind === "terminal") {
+        items.push({
+          id: "pane:restart-terminal",
+          group: "Panes",
+          label: "Restart this terminal",
+          hint: "keeps the scrollback",
+          run: () => restartTerminal(focused.id),
+        });
+      }
+      if (hasTab(layout, SERVICES_TAB_ID)) {
+        items.push({
+          id: "pane:services",
+          group: "Panes",
+          label: "Show services",
+          alt: ["urls"],
+          run: () => setLayout(activateTab(layout, SERVICES_TAB_ID)),
+        });
+      }
+    }
+
     items.push({
       id: "view:mode",
       group: "View",
@@ -849,8 +1009,16 @@ function AppInner(props: {
             onStart={startWorktree}
             onStop={stopWorktree}
           />
-          <TerminalPlaceholder worktree={worktree} />
-          <UrlLauncher worktree={worktree} urls={urls} />
+          {worktree && layout && (
+            <PaneArea
+              layout={layout}
+              onLayout={setLayout}
+              worktreeId={worktree.id}
+              renderServices={() => (
+                <UrlLauncher worktree={worktree} urls={urls} />
+              )}
+            />
+          )}
         </div>
       )}
 
@@ -1342,41 +1510,18 @@ function Rail(props: {
 }
 
 // ---------------------------------------------------------------------------
-// Panes (foundation: terminal is a placeholder, browser pane is the launcher)
+// Pane content (the terminal pane lives in panes/PaneArea.tsx)
 // ---------------------------------------------------------------------------
 
-function TerminalPlaceholder(props: { worktree: Worktree | null }) {
-  return (
-    <div className="terminal-pane">
-      <div className="pane-tabs">
-        <span className="chip">terminal</span>
-        <div style={{ flex: 1 }} />
-      </div>
-      <div
-        className="terminal-body"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "center",
-        }}
-      >
-        <span className="placeholder-chip">
-          terminal panes — later increment
-          {props.worktree ? ` · ${props.worktree.path}` : ""}
-        </span>
-      </div>
-    </div>
-  );
-}
-
+/** The services tab: the run's live URLs. Rendered inside a dock, so it
+ *  carries no tab strip of its own — the dock supplies that. */
 function UrlLauncher(props: {
   worktree: Worktree | null;
   urls: Array<[string, string]>;
 }) {
   return (
     <div className="launcher">
-      <div className="pane-tabs">
-        <span>Run URLs</span>
+      <div className="launcher-head">
         <span className="chip">opens in your browser</span>
         <div style={{ flex: 1 }} />
         {props.urls.length > 1 && (
@@ -1455,7 +1600,7 @@ function ServiceCard(props: { name: string; url: string }) {
 // ---------------------------------------------------------------------------
 
 /** Header order for the idle (no-query) list. Also the grouping key. */
-const PALETTE_GROUPS = ["Worktrees", "Run", "Worktree", "Projects", "View"] as const;
+const PALETTE_GROUPS = ["Worktrees", "Run", "Panes", "Worktree", "Projects", "View"] as const;
 type PaletteGroup = (typeof PALETTE_GROUPS)[number];
 
 /** One ⌘K entry: a worktree to jump to, or an action to run. */

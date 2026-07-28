@@ -23,6 +23,11 @@ stripped from the foundation, but has since shipped — see below.)
 | Electron's role | Supplementary shell | Frameless window, tray icon, later: embedded webviews with isolated sessions, CLI install. The web UI must stay fully usable without it. |
 | Run orchestration | Daemon shells out to the `veld` CLI | The daemon never runs the orchestrator in-process — stop/restart already work by spawning `cd <root> && veld …` in a login shell. Start follows the same pattern. |
 | Theme | Handoff palette (Inter + JetBrains Mono, oklch greens) | Deviates from the classic product tokens in `docs/branding.md`; sanctioned there as the **desktop theme**. Structural branding rules (wordmark, self-contained assets, noindex) still apply. |
+| Terminal transport | **PTY spawned daemon-side (`portable-pty`) over a WebSocket** | Not `node-pty` in the Electron main process: the browser build needs a daemon route regardless, so Electron would mean two implementations of one feature and would break the "usable without Electron" invariant above. Also avoids node-pty's native-rebuild churn across Electron versions. |
+| Terminal auth | Single-use ticket from a CSRF-gated `POST`, plus an `Origin` allowlist | The daemon's CSRF gate is custom-header-only, and a WebSocket handshake can carry neither a custom header nor a CORS preflight — so the usual gate is structurally unreachable on an endpoint that hands out a shell. Loopback is not the mitigation either: the helper publishes the daemon at `veld.localhost`. Both gates are kept deliberately; see the module docs in `crates/veld-daemon/src/pty.rs`. |
+| Terminal session lifetime | Sessions outlive their socket; explicit `DELETE` ends one | A terminal is not re-creatable state — dropping it kills the shell and everything in it — and a reload drops the socket. So a socket closing means "come back later" (scrollback is buffered and replayed on reattach) while closing a *pane* means "done". Two consequences are accepted rather than solved: selecting a worktree opens a terminal in its default layout and that shell lives as long as the page, so browsing the rail spends the session budget (hence a cap of 48 and a readable error on hitting it); and closing the browser window discards the `sessionStorage` holding the session ids, leaving shells that can never be reattached — the detach grace is what collects those. Disconnecting a hidden pane and reattaching on return would fix both, and is cheap *because* reattach is lossless, but it is a behaviour change worth its own increment. |
+| Terminal renderer | **xterm.js**, with `ghostty-web` a fast-follow candidate | `ghostty-web` is the better emulator but pre-1.0, with an unverified addon story (fit-addon is required for resize) and a ~400 KB WASM blob that `vite-plugin-singlefile` would base64-inline into the daemon binary. It is API-compatible with xterm.js, so swapping stays cheap and this does not gate the terminal work. |
+| Pane layout | Two docks of tabs with a draggable split | The terminal, the embedded browser and run diagnostics all want the same region; each one added as another fixed column makes the window unusable. A tab kind per content type means the next increment is a renderer, not a layout rewrite. Layouts persist per worktree in `sessionStorage` — per browser tab, since a layout names live shells and two tabs must not claim the same one. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -52,6 +57,10 @@ client, not surgery.
 │  PATCH/DELETE /api/worktrees/{id}               │
 │  POST /api/worktrees/{id}/start → `veld start`  │
 │  POST /api/environments/{run}/stop|restart      │
+│       ?project_root=… (run names repeat!)       │
+│  POST /api/pty/tickets   → attach ticket        │
+│  GET  /api/pty/attach    → terminal WebSocket   │
+│  DEL  /api/pty/sessions/{id} → end a shell      │
 └──────────────────────┬──────────────────────────┘
                        │ rusqlite (WAL)
 ┌──────────────────────▼──────────────────────────┐
@@ -109,6 +118,41 @@ requests at runtime — branding rule.
   better: plain greedy alone ranks "Switch to Runs" above "New worktree…" for
   `wt`, while anchoring alone can strand the rest of the query and drop the
   item from the list entirely.
+
+#### Panes and terminals (`ui/src/panes/`)
+
+- **Layout is a pure module** (`panes/model.ts`): two docks, each a tab list
+  with an active tab, plus a split ratio. Every mutation is a function on that
+  value, so the layout rules are unit-testable without a DOM and the React side
+  holds only the state cell.
+- **Terminals live outside React** (`panes/terminalHost.ts`). Unmounting a
+  terminal would close its socket and kill the shell, and React unmounts freely
+  — on a tab switch, and on every worktree switch, since each worktree has its
+  own layout. So the xterm instance and its container element sit in a
+  module-level registry keyed by tab id, and the component only *reparents* that
+  element into itself. This is also why a tab id must be unique for longer than
+  the page: it doubles as the daemon session id.
+- **Never write into a live shell.** A `[veld] …` notice injected into a running
+  terminal lands in the middle of whatever full-screen program is redrawing
+  (Claude Code, vim, top) and corrupts it. Notices are for shells that have
+  *ended*; anything about a live one goes on the pane's status chip.
+- **Replayed scrollback is bracketed, and input is gated inside the bracket.**
+  Recorded output can contain queries the shell once made (device attributes,
+  cursor position, colour). Parsing them again makes the emulator answer them
+  again, and that answer reaches a shell that asked nothing — arriving as
+  keystrokes. The symptom was a `1;2c` fragment at the prompt after every
+  reload. The gate lifts on xterm's `write` completion callback rather than on
+  `replay_end`, because the answers are emitted while parsing, not on receipt.
+- **`fit-addon` sizes the grid from the computed height of the terminal's
+  parent element**, which with border-box sizing includes that parent's own
+  padding. Padding there therefore buys a row that doesn't fit and the bottom
+  line renders off-pane; the padding belongs on the wrapper *outside* the
+  measured element (`.term-slot`, not `.term-host`).
+- **Focus** is shown with `:focus-within` on the dock rather than the layout's
+  `focused` field — that field only says where a new tab would open, while the
+  CSS tracks real DOM focus and picks up xterm's hidden textarea for free. Only
+  the focused dock's terminal claims the keyboard on mount; both docks mount on
+  load, so focusing unconditionally handed it to whichever mounted last.
 
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
@@ -203,20 +247,85 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config`, `presets`, and `nodes` (startable nodes with variants + default variant — the custom-selection source) (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
-| `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |
-| `PATCH /api/worktrees/{id}` `{alias?, emoji?}` | Partial update, DB only. Both fields optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
+| `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. An explicit `alias` a sibling already holds is a `409`. The check runs *before* `git worktree add`, so the common case creates nothing; it is a plain read though, so a create that races another one (or a sibling on disk not yet synced) still 409s on the authoritative check after the checkout exists — what survives then is a registered worktree under its branch-derived alias, not an orphan. |
+| `PATCH /api/worktrees/{id}` `{alias?, emoji?}` | Partial update, DB only. Both fields optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. An alias a sibling checkout of the same repo already holds is a `409`: `unique_alias` establishes that invariant at insert and the rename path must not be a hole in it, since the alias becomes the default run name. The check and the write share one transaction, so two concurrent renames can't both win. Cross-repo duplicate aliases stay legal — forbidding them would break importing two repos that are both on `main`. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
 | `GET /api/worktree-emoji` | The curated glyph list, for the picker. Served rather than duplicated in TypeScript, because the same constant is the server-side allowlist; the picker fetches it once on open instead of riding the 5s poll. |
 | `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
 | `POST /api/worktrees/{id}/start` `{preset?, selections?, run_name?}` | Spawns `veld start` with the worktree as cwd (the CLI resolves veld.json from there). Two mutually-exclusive start modes: `preset` (`--preset <p>`) or explicit `selections` (`node:variant` positionals, validated per half) — a non-TTY bare start fails "No selections provided", so the UI always sends one. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
 | `POST /api/repos/refresh` | The UI's poll target: reconciles every repo's worktree rows with `git worktree list`, then returns the same payload as `GET /api/repos`. POST (CSRF-gated) because it spawns git and writes; debounced daemon-side. The plain GET stays a pure read. |
 | `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `409` while a picker is already open (single-flight), `408` after the 10-minute timeout, `500` on backend failure (no GUI session / permission denial), `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
 
+Terminals live in their own module (`crates/veld-daemon/src/pty.rs`) rather than
+the `desktop` one, because they cannot use that router's CSRF layer — a
+WebSocket upgrade is a GET, which a method-keyed layer waves through, and a
+handshake can carry neither a custom header nor a CORS preflight.
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /api/pty/tickets` `{worktree_id, session_id}` | CSRF-gated, and the only place a worktree id is resolved to a directory — so the socket below never accepts a path from the client. Returns a single-use ticket (122 bits from the OS CSPRNG, 30s TTL) plus `resumed`, true when a live session already answers to `session_id`. The client names the session (`crypto.randomUUID()`), which is what lets a reload ask for the same shell; the name is an identifier, not a credential. `409` if that session belongs to a different worktree. |
+| `GET /api/pty/attach?ticket=&cols=&rows=` | The WebSocket. Requires an allowlisted `Origin`, failing closed when absent, **and** an unredeemed ticket; a rejected origin does not burn the ticket. Binary frames are terminal bytes in both directions, text frames are JSON control (`resize` up; `replay_begin`/`replay_end`/`ready`/`exit`/`taken_over`/`lagged` down). A second attach takes the session over and tells the displaced socket why. Note that a browser can read neither the status nor the body of a *failed* handshake, so anything a legitimate client can trip over (capacity, a missing directory) is pre-checked at ticket time instead; the client distinguishes a refused upgrade from a dropped connection by whether `ready` ever arrived. |
+| `DELETE /api/pty/sessions/{id}` | CSRF-gated. Ends the shell now — the distinction the detach model rests on, since a socket closing means "come back later". `204` even when the session is already gone. |
+
+The shell is the user's `$SHELL -l`, which is this module's stated exception to
+the AGENTS.md `resolve_user_path()` rule: that helper *is* a login shell
+spawned to scrape `PATH`, so calling it here would add a second shell's startup
+cost to every terminal to compute what this one computes anyway.
+
 Git subprocesses follow the AGENTS.md daemon rule: resolved user login-shell
 `PATH` via `veld_core::user_path::resolve_user_path()`.
 
-Stop/restart reuse the existing `/api/environments/{run}` endpoints (runs are
-keyed per project root, and each worktree is its own project root — no
-collisions).
+Stop/restart reuse the existing `/api/environments/{run}` endpoints, which
+take the target project as a **required** `?project_root=` query parameter.
+
+Runs are keyed per project root in the database (`UNIQUE(project_root, name)`),
+but the *name* is not globally unique, and the endpoints originally took the
+name alone: the daemon resolved it by scanning the registry and taking the
+first project that held it. Two repos both checked out on `main` each default
+to an environment called `main` (the start endpoint derives the run name from
+the alias, and `unique_alias` de-duplicates only within one repo), so a stop on
+one could tear down the other — see issue #168. The UI sends the worktree path,
+which is already its join key into `/api/environments`; a project that does not
+run the named environment is a `404`. `/api/logs/{run}` and
+`/api/environments/{run}/action` take the same parameter.
+
+`POST /api/shares` takes `project_root` too, but **optional** rather than
+required, because its callers are separately-invoked binaries (the CLI) and a
+browser overlay rather than JS compiled into this daemon: the CLI sends its own
+project root, the overlay rides Caddy's `X-Veld-Project` header, and a request
+with neither still resolves by name — rejecting an ambiguous one with a `409`
+instead of publishing an unrelated project's URLs. When a project *is* named it
+is authoritative: a run that project doesn't hold is a `404` naming where it does
+run, never a silent fallback to another project (that fallback was tried and
+reverted — with `--web` it published a project the caller never named). Sharing
+additionally requires a live run, since `Db::registry()` carries each
+environment's latest run whatever its status.
+
+The corollary for anything else that needs global identity: use `worktrees.id`,
+the checkout path, or a `run_id` — never an alias or a run name.
+
+The name-addressed endpoints above are the deliberate exception, not a
+counter-example: `veld stop --name` / `veld restart --name` is the CLI's own
+contract, so the daemon spawns the CLI *in the project directory* and lets the
+cwd disambiguate rather than inventing a second addressing scheme. That also
+makes the address instance-agnostic — a stop re-resolves the name inside the
+project, so it acts on whatever run is current, not necessarily the instance the
+user was looking at. Harmless while an environment has at most one live run
+(`idx_runs_one_live` enforces that), but it is the reason, and it is why the
+share *responses* report each share's `run_id`, so a UI attaches a share to the
+exact instance it was minted from rather than to whatever run currently answers
+to the name. (The share *request* is name+project addressed like the others —
+`POST /api/shares` resolves the project's latest run.)
+
+One layer below this is still name-keyed and tracked separately: Caddy route ids
+are `veld-{run_name}-{node}-{variant}`, so two projects running the same name
+collide in the proxy store and in GC (issue #170). Related follow-ups: shares can
+outlive their run with no UI affordance to stop them (#171), and the Electron
+tray's project-name labels (#172 — that issue's feedback-store half is fixed
+here: a caller-supplied `?project=` is registry-validated, while Caddy's
+server-set header stays verbatim). The emoji
+picker compares worktree ids for exactly this reason, and `/api/shares` now
+reports each share's `run_id` so the dashboards attach a share to its own run
+card instead of to a same-named run in another repo.
 
 ## Local dev setup
 
@@ -285,9 +394,9 @@ already lives in the URL, so modes are just routes.
 1. **Runs mode** (v1-dashboard parity in React/Mantine) + view switcher +
    `/` / `/ide` routing as above.
 2. Embedded webviews + isolated sessions (Electron `WebContentsView`,
-   `session.fromPartition`).
-3. Terminal panes (PTY over WebSocket from the daemon, or node-pty in the
-   Electron main process — decision deferred).
+   `session.fromPartition`). These are meant to arrive as a new `PaneKind` in
+   the dock (`crates/veld-daemon/ui/src/panes/`), not as another column.
+3. ~~Terminal panes~~ — shipped; see the decision log above.
 4. Start-run UX beyond preset picking; `veld share` from the UI.
 5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
 6. Packaging, auto-update, CLI installation from the app.

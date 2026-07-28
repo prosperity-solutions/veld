@@ -181,6 +181,15 @@ impl ShareTicket {
 pub struct StartShareRequest {
     /// Run name to share. `None` means "the only run", resolved by the daemon.
     pub run: Option<String>,
+    /// Project the run belongs to. Run names are unique per project, not
+    /// globally — two repos both on `main` each have an environment called
+    /// `main` — so a name alone can resolve to the wrong project's URLs, and
+    /// this is a *share*: the wrong resolution publishes them. Callers that
+    /// know their project root (the CLI, and the overlay via Caddy's
+    /// `X-Veld-Project` header) send it; `None` falls back to name-only
+    /// resolution, which the daemon rejects when the name is ambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_root: Option<String>,
     /// Node names to share; `None` shares all of the run's `peer`-opted-in
     /// URL-bearing nodes. A filter narrows within that opted-in set.
     pub nodes: Option<Vec<String>>,
@@ -269,10 +278,19 @@ pub struct JoinResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShareInfo {
     pub id: String,
-    /// Run name this share exposes (empty for joins). Used to attach a hosted
-    /// share to its run card in the dashboard.
+    /// Run name this share exposes (empty for joins).
+    ///
+    /// Retained for wire compatibility only — no current consumer reads it. Both
+    /// dashboards attach a share to its run via [`ShareInfo::run_id`], because a
+    /// name repeats across projects. Don't reach for this one.
     #[serde(default)]
     pub run: String,
+    /// Run instance this share was minted from (`None` for joins). What the
+    /// dashboards attach a hosted share to its run card by: run *names* repeat
+    /// across projects (two repos both on `main`), so name-keyed attachment
+    /// hangs a share off an unrelated project's card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<Uuid>,
     /// Approval mode of a hosted share (`first`/`manual`/`auto`).
     #[serde(default)]
     pub approve: Option<ApprovalMode>,

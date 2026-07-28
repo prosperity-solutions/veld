@@ -136,7 +136,10 @@ export interface ShareConnectionInfo {
 
 export interface ShareInfo {
   id: string;
+  /** Display only — attach a share to its run via {@link ShareInfo.run_id}. */
   run: string;
+  /** Run instance the share was minted from; absent on joins. */
+  run_id?: string | null;
   approve?: "first" | "manual" | "auto" | null;
   nodes: string[];
   urls: string[];
@@ -183,6 +186,47 @@ export interface NodeStats {
 export interface StatsResponse {
   projects: Record<string, Record<string, Record<string, NodeStats>>>;
 }
+
+/** One-shot credential for opening a terminal WebSocket. */
+export interface PtyTicket {
+  ticket: string;
+  expires_in_ms: number;
+  /** True when a live session with this id was waiting — i.e. the shell
+   *  survived whatever disconnected us, and attaching resumes it. */
+  resumed: boolean;
+}
+
+/**
+ * A run address. **The name alone is not one.**
+ *
+ * Environments are unique per project, not globally: two repos both checked
+ * out on `main` each get an environment called `main` (the desktop start
+ * endpoint derives the run name from the worktree alias, and aliases are only
+ * de-duplicated within one repo). The daemon used to resolve a bare name
+ * against every project and take the first hit, so stopping one repo's `main`
+ * could tear down another's — it now requires the project and 404s on a
+ * mismatch. Every run-addressed call takes this pair.
+ *
+ * `projectRoot` is the `project_root` of the `/api/environments` project the
+ * run was read from — for a desktop worktree, its checkout path (see
+ * `runsForWorktree`).
+ */
+export interface RunRef {
+  name: string;
+  projectRoot: string;
+}
+
+/** `{ name, projectRoot }` for a run listed under a project. */
+export function runRef(projectRoot: string, run: { name: string }): RunRef {
+  return { name: run.name, projectRoot };
+}
+
+/** Path segment for a run's name. */
+export const runPath = (run: RunRef) => encodeURIComponent(run.name);
+
+/** The `project_root=…` query string every run-addressed call must carry. */
+export const runScope = (run: RunRef) =>
+  new URLSearchParams({ project_root: run.projectRoot }).toString();
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
@@ -286,40 +330,72 @@ export const api = {
       method: "POST",
       body: JSON.stringify(start),
     }),
-  stopRun: (runName: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/stop`, {
+  stopRun: (run: RunRef) =>
+    request<void>(`/api/environments/${runPath(run)}/stop?${runScope(run)}`, {
       method: "POST",
     }),
-  restartRun: (runName: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/restart`, {
+  restartRun: (run: RunRef) =>
+    request<void>(`/api/environments/${runPath(run)}/restart?${runScope(run)}`, {
       method: "POST",
     }),
-  runAction: (runName: string, action: string, node?: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/action`, {
+  runAction: (run: RunRef, action: string, node?: string) =>
+    request<void>(`/api/environments/${runPath(run)}/action?${runScope(run)}`, {
       method: "POST",
       body: JSON.stringify(node ? { action, node } : { action }),
     }),
+  /** Launch the *operating system's* terminal app at a path. Unrelated to the
+   *  in-app terminal panes below, which never leave the browser. */
   openTerminal: (path: string) =>
     request<void>("/api/open-terminal", {
       method: "POST",
       body: JSON.stringify({ path }),
     }),
+  /**
+   * Mint a single-use ticket for an in-app terminal in a worktree.
+   *
+   * The WebSocket that follows cannot carry the `X-Veld-Request` CSRF header
+   * (handshakes can't set custom headers), so this CSRF-gated POST is what
+   * proves the request came from this page — see `crates/veld-daemon/src/pty.rs`.
+   * The ticket is good for one connection and expires in `expires_in_ms`;
+   * mint a new one per connect, including every reconnect.
+   *
+   * `sessionId` names the shell. Passing the id of a session that is still
+   * running reattaches to it — that is how a reload gets its terminal back —
+   * and any other id starts a new one.
+   */
+  ptyTicket: (worktreeId: number, sessionId: string) =>
+    request<PtyTicket>("/api/pty/tickets", {
+      method: "POST",
+      body: JSON.stringify({ worktree_id: worktreeId, session_id: sessionId }),
+    }),
+  /**
+   * End a terminal session now.
+   *
+   * Required, because dropping the socket deliberately does *not* kill the
+   * shell (that is what makes a reload survivable). Closing a tab without this
+   * leaves the shell running until the daemon's detach grace expires.
+   */
+  closePtySession: (sessionId: string) =>
+    request<void>(`/api/pty/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
+    }),
   stats: () => request<StatsResponse>("/api/stats"),
-  logs: (run: string, opts: { source?: string; runId?: string } = {}) => {
+  logs: (run: RunRef, opts: { source?: string; runId?: string } = {}) => {
     const q = new URLSearchParams({ lines: "500" });
+    q.set("project_root", run.projectRoot);
     if (opts.source && opts.source !== "all") q.set("source", opts.source);
     if (opts.runId) q.set("run_id", opts.runId);
-    return request<LogResponse>(
-      `/api/logs/${encodeURIComponent(run)}?${q.toString()}`,
-    );
+    return request<LogResponse>(`/api/logs/${runPath(run)}?${q.toString()}`);
   },
   shares: () => request<SharesList>("/api/shares"),
-  startShare: (run: string, opts: { web?: boolean } = {}) =>
+  startShare: (run: RunRef, opts: { web?: boolean } = {}) =>
     request<{ join_url?: string }>("/api/shares", {
       method: "POST",
-      body: JSON.stringify(
-        opts.web ? { run, web: true } : { run, approve: "manual" },
-      ),
+      body: JSON.stringify({
+        run: run.name,
+        project_root: run.projectRoot,
+        ...(opts.web ? { web: true } : { approve: "manual" }),
+      }),
     }),
   stopShare: (id: string) =>
     request<void>(`/api/shares/${encodeURIComponent(id)}`, {
