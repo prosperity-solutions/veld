@@ -1338,8 +1338,12 @@ model:
    extension — hooks run arbitrary code on a developer machine, and keeping them
    in reviewed repo files is what preserves Veld's no-remote-execution guarantee.
 
-Every **other** unknown top-level key remains a hard error, so typos are still
-caught.
+Every **other** unknown top-level key is an **error reported by `veld lint` and
+`veld start`** — not a load failure. A typo is still caught, but it cannot strand
+`veld stop`, whose job is to tear down an environment that is already running (see
+[the parse/validate split](#veld-lint)). If you are upgrading a config that used
+the pre-JSONC `"//": "…"` comment idiom, that key now reports a finding telling you
+to make it a real comment.
 
 ---
 

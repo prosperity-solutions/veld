@@ -246,3 +246,10 @@ Created with its mode (default `0600`), so it is never briefly world-readable.
 Set `schemaVersion` back to `"2"` and revert the `argv`/`shell` conversions —
 or just `git checkout` the file, which is why `--migrate` is a dry run by
 default. v1 and v2 loading is unchanged, so there is nothing else to undo.
+
+One thing worth knowing before you upgrade veld itself, independent of migrating a
+config: an unrecognised top-level key — most often the pre-JSONC `"//": "…"`
+comment idiom — used to be ignored silently and is now reported by `veld lint` and
+refused by `veld start`. It is deliberately **not** a load error, so `veld stop`
+keeps working against an already-running environment. Run `veld lint` once after
+upgrading; if it is quiet, nothing here affects you.

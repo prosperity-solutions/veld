@@ -152,6 +152,35 @@ impl Finding {
         }
     }
 
+    /// An unrecognised top-level key.
+    ///
+    /// An error, because the cause is nearly always a typo and silently ignoring
+    /// it is how `"noeds"` costs someone an afternoon. But a *reported* error, not
+    /// a load failure: see [`crate::include::Document`] for why the loader must
+    /// stay lenient about this.
+    pub(crate) fn unknown_top_level_key(location: &str, key: &str) -> Self {
+        // `"//"` was the way to comment a JSON config before veld accepted real
+        // comments, so it is the single likeliest unknown key in an older project.
+        // Say what to do instead rather than only refusing.
+        let hint = if key == "//" || key.starts_with("//") {
+            " Veld now accepts real `//` comments in every config file, so this \
+             key can simply become a comment."
+                .to_owned()
+        } else {
+            String::new()
+        };
+        Self {
+            severity: Severity::Error,
+            location: location.to_owned(),
+            message: format!(
+                "unknown top-level key \"{key}\". Expected one of: {}. (`hooks` and `ui` \
+                 are reserved and parsed but not executed.){hint}",
+                KNOWN_TOP_LEVEL_KEYS.join(", ")
+            ),
+            rule: "unknown-top-level-key".to_owned(),
+        }
+    }
+
     fn notice(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Notice,
@@ -2310,6 +2339,31 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
 /// forever — there is no flag day.
 pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["1", "2", "3"];
 
+/// Every recognised top-level config key, for the unknown-key diagnostic.
+///
+/// Kept in sync with [`crate::include::Document`]'s fields by
+/// `known_top_level_keys_matches_document`, because a list that drifts turns a
+/// helpful error into a misleading one.
+pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "$schema",
+    "schemaVersion",
+    "name",
+    "include",
+    "url_template",
+    "presets",
+    "client_log_levels",
+    "features",
+    "proxy",
+    "env",
+    "vars",
+    "sharing",
+    "setup",
+    "teardown",
+    "nodes",
+    "hooks",
+    "ui",
+];
+
 /// In a `schemaVersion: "3"` document, `command` is gone: every place that runs
 /// something says `argv` or `shell`.
 ///
@@ -3836,9 +3890,14 @@ mod tests {
         assert!(error_summary(&findings).is_none());
     }
 
-    /// Reserving two keys must not open the door to every other typo.
+    /// Reserving two keys must not open the door to every other typo — but the
+    /// diagnostic is a **finding**, not a load failure.
+    ///
+    /// `deny_unknown_fields` would put the failure on the loader that `veld stop`
+    /// uses, and would be a regression for v1/v2 documents which previously
+    /// ignored an unknown key silently. See `crate::include::Document`.
     #[test]
-    fn unknown_top_level_key_is_still_an_error() {
+    fn unknown_top_level_key_is_reported_not_fatal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("veld.json");
         std::fs::write(
@@ -3846,8 +3905,19 @@ mod tests {
             r#"{ "schemaVersion": "3", "name": "t", "hoks": {}, "nodes": {} }"#,
         )
         .unwrap();
-        let err = parse_config(&path).unwrap_err();
-        assert!(err.to_string().contains("hoks"), "{err}");
+
+        let config = parse_config(&path).expect("a typo must not strand `veld stop`");
+        let findings = validate(&config);
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "unknown-top-level-key")
+            .unwrap_or_else(|| panic!("expected the rule to fire: {findings:?}"));
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(hit.message.contains("\"hoks\""), "{hit:?}");
+        // Names `hooks` among the valid keys, so the typo is obvious.
+        assert!(hit.message.contains("hooks"), "{hit:?}");
+        // …and it blocks `veld start`.
+        assert!(error_summary(&findings).is_some());
     }
 
     // -- F4: vars (a failing case per rule) ------------------------------------

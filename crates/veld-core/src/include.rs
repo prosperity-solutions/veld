@@ -32,11 +32,20 @@ use crate::config::{
 /// One veld config file, as written.
 ///
 /// Every field is optional: this is the shape of *any* config file, root or
-/// included. `deny_unknown_fields` is deliberate — F8 reserves `hooks` and `ui`
-/// as known-but-unexecuted keys precisely so that everything *else* unknown stays
-/// a hard error and a typo is still caught.
+/// included.
+///
+/// **Unknown top-level keys are captured, not rejected.** F8 wants a typo in a
+/// top-level key to be an error — but `deny_unknown_fields` would make it a
+/// *load* error, and the loader runs on `veld stop`, `status`, `logs`, and in the
+/// daemon monitor (F0.1). Worse, it would be a **new** failure for v1 and v2
+/// documents, which previously ignored an unknown key silently: a project with a
+/// stray `"//": "comment"` (the pre-JSONC idiom) would upgrade into a config that
+/// cannot be stopped, so its teardown hooks never run.
+///
+/// So unknown keys land in [`Self::unknown`] and become deferred findings —
+/// `veld start` and `veld lint` refuse, everything else keeps working. Same
+/// mechanism as duplicate keys; see [`crate::config::VeldConfig::deferred_findings`].
 #[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Document {
     #[serde(rename = "$schema", default)]
     pub schema: Option<String>,
@@ -80,6 +89,13 @@ pub struct Document {
     /// **Reserved, parsed and held, never executed** (F8).
     #[serde(default)]
     pub ui: Option<serde_json::Value>,
+
+    /// Every top-level key that is not one of the above.
+    ///
+    /// Captured rather than rejected so a typo is still caught (as a finding) but
+    /// cannot strand `veld stop` — see the type's doc comment.
+    #[serde(flatten)]
+    pub unknown: BTreeMap<String, serde_json::Value>,
 }
 
 /// Where one loaded file came from, and what it contributed.
@@ -185,8 +201,21 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
         }
     }
 
+    // Unknown top-level keys: an error, but reported rather than fatal. Collected
+    // before `merge` consumes the documents.
+    let unknown_findings: Vec<crate::config::Finding> = docs
+        .iter()
+        .flat_map(|(file_index, doc)| {
+            let where_ = files[*file_index].relative.display().to_string();
+            doc.unknown
+                .keys()
+                .map(move |key| crate::config::Finding::unknown_top_level_key(&where_, key))
+        })
+        .collect();
+
     let mut config = merge(schema_version, name, &docs, &files)?;
     config.loaded_from_multiple_files = files.len() > 1;
+    config.deferred_findings.extend(unknown_findings);
 
     Ok(LoadedConfig {
         config,
@@ -686,15 +715,105 @@ mod tests {
         assert!(matches!(err, ConfigError::ParseError { .. }), "{err:?}");
     }
 
-    /// An unknown top-level key stays an error even in an included file, so a typo
-    /// is still caught rather than silently ignored (F8 rule 2).
+    /// An unknown top-level key is an error — but a **reported** one, not a load
+    /// failure (F8 rule 2 reconciled with F0.1).
+    ///
+    /// `deny_unknown_fields` would have been the obvious implementation and is
+    /// wrong twice over: it puts a new failure on the loader that `veld stop`
+    /// uses, and it is a *regression for v1/v2 documents*, which previously
+    /// ignored an unknown key silently. A project with a stray key would upgrade
+    /// into a config that cannot be stopped, so its teardown never runs.
     #[test]
-    fn unknown_top_level_key_in_included_file_is_error() {
+    fn unknown_top_level_key_is_reported_not_fatal() {
         let dir = project(&[
             ("veld.json", ROOT_WITH_INCLUDE),
+            ("services/api/veld.node.json", &node_file("api")),
             ("veld.d/typo.jsonc", r#"{ "noeds": {} }"#),
         ]);
-        assert!(load(&dir.path().join("veld.json")).is_err());
+        let loaded =
+            load(&dir.path().join("veld.json")).expect("an unknown key must not fail the load");
+
+        // The rest of the config is intact — the typo did not eat the run.
+        assert!(loaded.config.nodes.contains_key("api"));
+
+        let finding = loaded
+            .config
+            .deferred_findings
+            .iter()
+            .find(|f| f.rule == "unknown-top-level-key")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected a finding, got {:?}",
+                    loaded.config.deferred_findings
+                )
+            });
+        assert_eq!(finding.severity, crate::config::Severity::Error);
+        assert!(finding.message.contains("\"noeds\""), "{finding:?}");
+        // Names the file, so a typo in one of twenty included files is findable.
+        assert_eq!(finding.location, "veld.d/typo.jsonc");
+        // Lists the real keys, since the cause is a typo.
+        assert!(finding.message.contains("nodes"), "{finding:?}");
+
+        // …and `validate` surfaces it, so `veld start` / `veld lint` refuse.
+        let findings = crate::config::validate(&loaded.config);
+        assert!(findings.iter().any(|f| f.rule == "unknown-top-level-key"));
+        assert!(crate::config::error_summary(&findings).is_some());
+    }
+
+    /// The regression that made the above necessary: a v1/v2 config carrying the
+    /// pre-JSONC `"//"` comment idiom must still load, and the diagnostic must say
+    /// that real comments now exist.
+    #[test]
+    fn legacy_comment_key_still_loads_and_suggests_a_real_comment() {
+        let dir = project(&[(
+            "veld.json",
+            r#"{
+                "//": "a comment, the pre-JSONC way",
+                "schemaVersion": "2",
+                "name": "legacy",
+                "nodes": { "api": { "default_variant": "dev", "variants": { "dev": {
+                    "type": "command", "command": "true"
+                } } } }
+            }"#,
+        )]);
+        let loaded = load(&dir.path().join("veld.json"))
+            .expect("a v1/v2 config with a stray key must keep loading");
+        assert!(loaded.config.nodes.contains_key("api"));
+
+        let finding = loaded
+            .config
+            .deferred_findings
+            .iter()
+            .find(|f| f.rule == "unknown-top-level-key")
+            .expect("still reported");
+        assert!(
+            finding.message.contains("`//` comments"),
+            "must point at the replacement: {finding:?}"
+        );
+    }
+
+    /// `KNOWN_TOP_LEVEL_KEYS` powers the unknown-key error message, so a list that
+    /// drifts from the real fields turns a helpful diagnostic into a misleading
+    /// one — it would name a key as valid that serde rejects, or omit a valid one.
+    #[test]
+    fn known_top_level_keys_matches_document() {
+        // Every advertised key must actually deserialize into a field rather than
+        // landing in `unknown`.
+        for key in crate::config::KNOWN_TOP_LEVEL_KEYS {
+            let value = match *key {
+                "schemaVersion" | "name" | "url_template" | "$schema" => "\"x\"".to_owned(),
+                "include" | "client_log_levels" => "[]".to_owned(),
+                "setup" | "teardown" => "[]".to_owned(),
+                _ => "{}".to_owned(),
+            };
+            let doc: Document =
+                serde_json::from_str(&format!("{{ {} : {value} }}", format_args!("\"{key}\"")))
+                    .unwrap_or_else(|e| panic!("{key} should be a known field: {e}"));
+            assert!(
+                doc.unknown.is_empty(),
+                "{key} is advertised as known but landed in `unknown`"
+            );
+        }
     }
 
     /// `hooks` and `ui` are reserved, so they parse anywhere — and are not

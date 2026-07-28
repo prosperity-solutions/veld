@@ -318,6 +318,11 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld lint` emits a notice. |
 | `ui` | project (any file) | **Reserved.** Parsed and stored, NOT rendered by this version. |
+
+Any **other** top-level key is an error reported by `veld lint` and `veld start`
+(rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
+strand `veld stop`. The pre-JSONC `"//": "…"` comment idiom lands here; make it a
+real `//` comment.
 | `cwd` | node, variant | Working directory. Relative paths resolve from project root. Variant overrides node. Supports `${...}` substitution. |
 | `hidden` | node | Hide from `veld nodes` output |
 | `client_log_levels` | project, node, variant | Browser log levels: `["log", "warn", "error", "info", "debug"]`. Exceptions always captured. |
