@@ -118,6 +118,8 @@ echo "=== JSON Schema Validation ==="
 echo
 
 echo "1) Meta-schema: validating schema files against JSON Schema draft 2020-12"
+# v1 and v2 are retained only so an older veld can still validate an unmigrated
+# config; this veld does not load them.
 run_check "schema/v1/veld.schema.json is valid" \
   $CHECK --check-metaschema "$SCHEMA_V1"
 run_check "schema/v2/veld.schema.json is valid" \
@@ -136,16 +138,18 @@ while IFS= read -r config; do
   plain="$WORK/$(echo "$rel" | tr '/' '_')"
   strip_jsonc "$config" > "$plain"
 
-  # Pick the schema based on the file's schemaVersion field.
-  version=$(python3 -c "import json; print(json.load(open('$plain')).get('schemaVersion', '1'))" 2>/dev/null || echo "1")
-  case "$version" in
-    3) schema="$SCHEMA_V3" ;;
-    2) schema="$SCHEMA_V2" ;;
-    *) schema="$SCHEMA_V1" ;;
-  esac
+  # Only v3 is supported, so every tracked config must declare it — a config still
+  # on v1/v2 would fail to load at runtime, and this catches it in CI instead.
+  version=$(python3 -c "import json; print(json.load(open('$plain')).get('schemaVersion', 'missing'))" 2>/dev/null || echo "unreadable")
+  if [[ "$version" != "3" ]]; then
+    echo -n "  $rel ... "
+    echo "FAIL (schemaVersion is \"$version\"; only \"3\" is supported — run \`veld config --migrate\`)"
+    FAIL=$((FAIL + 1))
+    continue
+  fi
 
   run_check "$rel (v$version)" \
-    $CHECK --schemafile "$schema" "$plain"
+    $CHECK --schemafile "$SCHEMA_V3" "$plain"
 done < <(find "$REPO_ROOT" -name "veld.json" \
   -not -path "*/node_modules/*" \
   -not -path "*/target/*" \

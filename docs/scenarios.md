@@ -35,8 +35,8 @@ For the full field reference, see [configuration.md](./configuration.md).
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "shopfront",
   "url_template": "{service}.{branch ?? run}.shopfront.localhost",
 
@@ -45,7 +45,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=shopfront -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=shopfront -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -59,7 +59,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @shopfront/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @shopfront/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "database": "docker" },
           "env": {
@@ -74,7 +74,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @shopfront/web dev",
+          "shell": "pnpm --filter @shopfront/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "local" },
           "env": {
@@ -98,8 +98,8 @@ For the full field reference, see [configuration.md](./configuration.md).
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "portal",
   "url_template": "{service}.{branch ?? run}.portal.localhost",
 
@@ -108,7 +108,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @portal/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @portal/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "env": {
             "CORS_ORIGIN": "${nodes.frontend.url}",
@@ -122,7 +122,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @portal/web dev",
+          "shell": "pnpm --filter @portal/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "env": {
             "PORT": "${veld.port}",
@@ -136,7 +136,7 @@ For the full field reference, see [configuration.md](./configuration.md).
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @portal/admin dev",
+          "shell": "pnpm --filter @portal/admin dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "env": {
             "PORT": "${veld.port}",
@@ -161,8 +161,8 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "taskboard",
   "url_template": "{service}.{branch ?? run}.taskboard.localhost",
 
@@ -171,11 +171,11 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=taskboard -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=taskboard -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": {
             "type": "command",
-            "command": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
+            "shell": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
             "timeout_seconds": 30,
             "interval_ms": 2000
           } },
@@ -190,11 +190,11 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
+          "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": "docker stop veld-redis-${veld.run}",
           "probes": { "readiness": {
             "type": "command",
-            "command": "docker exec veld-redis-${veld.run} redis-cli ping",
+            "shell": "docker exec veld-redis-${veld.run} redis-cli ping",
             "timeout_seconds": 15
           } },
           "outputs": {
@@ -208,7 +208,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin taskboard-api -- --port ${veld.port}",
+          "shell": "cargo run --bin taskboard-api -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } } },
           "depends_on": {
             "postgres": "docker",
@@ -235,8 +235,8 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "dashboard",
   "url_template": "{service}.{branch ?? run}.dashboard.localhost",
 
@@ -250,7 +250,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=dashboard -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=dashboard -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -265,7 +265,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @dashboard/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @dashboard/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "database": "docker" },
           "env": {
@@ -274,7 +274,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
         },
         "staging": {
           "type": "command",
-          "command": "echo 'BACKEND_URL=https://api.staging.dashboard.example.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'BACKEND_URL=https://api.staging.dashboard.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["BACKEND_URL"]
         }
       }
@@ -285,7 +285,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @dashboard/web dev",
+          "shell": "pnpm --filter @dashboard/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "local" },
           "env": {
@@ -295,7 +295,7 @@ Note: This pre-computation only applies to the built-in `url` and `port` outputs
         },
         "staging": {
           "type": "start_server",
-          "command": "pnpm --filter @dashboard/web dev",
+          "shell": "pnpm --filter @dashboard/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "staging" },
           "env": {
@@ -324,8 +324,8 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "analytics",
   "url_template": "{service}.{branch ?? run}.analytics.localhost",
 
@@ -334,11 +334,11 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 -v veld-pg-data-${veld.run}:/var/lib/postgresql/data postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 -v veld-pg-data-${veld.run}:/var/lib/postgresql/data postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": {
             "type": "command",
-            "command": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
+            "shell": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
             "timeout_seconds": 30
           } },
           "outputs": {
@@ -353,7 +353,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "default": {
           "type": "command",
-          "command": "pg_dump $SOURCE_DB_URL | psql ${nodes.postgres.DATABASE_URL}",
+          "shell": "pg_dump $SOURCE_DB_URL | psql ${nodes.postgres.DATABASE_URL}",
           "skip_if": "psql ${nodes.postgres.DATABASE_URL} -c 'SELECT 1 FROM users LIMIT 1'",
           "depends_on": { "postgres": "docker" },
           "env": {
@@ -369,7 +369,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @analytics/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @analytics/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "clone-db": "default" },
           "env": {
@@ -392,8 +392,8 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "rideshare",
   "url_template": "{service}.{branch ?? run}.rideshare.localhost",
 
@@ -408,7 +408,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -422,7 +422,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
+          "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": "docker stop veld-redis-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } } },
           "outputs": {
@@ -436,7 +436,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin rider-service -- --port ${veld.port}",
+          "shell": "cargo run --bin rider-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } } },
           "depends_on": { "postgres": "docker", "redis": "docker" },
           "env": {
@@ -452,7 +452,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin driver-service -- --port ${veld.port}",
+          "shell": "cargo run --bin driver-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } } },
           "depends_on": { "postgres": "docker", "redis": "docker" },
           "env": {
@@ -467,7 +467,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin pricing-service -- --port ${veld.port}",
+          "shell": "cargo run --bin pricing-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } } },
           "depends_on": { "redis": "docker" },
           "env": {
@@ -481,7 +481,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin notification-service -- --port ${veld.port}",
+          "shell": "cargo run --bin notification-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } } },
           "depends_on": { "redis": "docker" },
           "env": {
@@ -495,7 +495,7 @@ Note the qualified form `${nodes.backend:local.url}` and `${nodes.backend:stagin
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin gateway -- --port ${veld.port}",
+          "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "rider-service": "local",
@@ -535,8 +535,8 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "enterprise-app",
   "url_template": "{service}.{branch ?? run}.enterprise-app.localhost",
 
@@ -545,11 +545,11 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=enterprise -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=enterprise -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": {
             "type": "command",
-            "command": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
+            "shell": "docker exec veld-pg-${veld.run} pg_isready -U postgres",
             "timeout_seconds": 30
           } },
           "outputs": {
@@ -564,7 +564,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "default": {
           "type": "command",
-          "command": "./scripts/generate-dev-certs.sh",
+          "shell": "./scripts/generate-dev-certs.sh",
           "skip_if": "test -f ./certs/dev.pem && test -f ./certs/dev-key.pem",
           "outputs": ["CERT_PATH", "KEY_PATH"]
         }
@@ -576,7 +576,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "default": {
           "type": "command",
-          "command": "pnpm --filter @enterprise/db migrate:dev",
+          "shell": "pnpm --filter @enterprise/db migrate:dev",
           "depends_on": { "postgres": "docker" },
           "env": {
             "DATABASE_URL": "${nodes.postgres.DATABASE_URL}"
@@ -591,7 +591,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "default": {
           "type": "command",
-          "command": "pnpm --filter @enterprise/db seed",
+          "shell": "pnpm --filter @enterprise/db seed",
           "depends_on": { "migrate-db": "default" },
           "env": {
             "DATABASE_URL": "${nodes.postgres.DATABASE_URL}"
@@ -605,7 +605,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @enterprise/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @enterprise/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "seed-db": "default",
@@ -624,7 +624,7 @@ The presets let you run subsets: `--preset riders-only` starts only the rider se
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @enterprise/web dev",
+          "shell": "pnpm --filter @enterprise/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "local" },
           "env": {
@@ -656,8 +656,8 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "search-platform",
   "url_template": "{service}.{branch ?? run}.search-platform.localhost",
 
@@ -666,7 +666,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=search_platform -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=search_platform -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -681,7 +681,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine --appendonly yes",
+          "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine --appendonly yes",
           "on_stop": "docker stop veld-redis-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } } },
           "outputs": {
@@ -697,7 +697,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-es-${veld.run} -e discovery.type=single-node -e xpack.security.enabled=false -e ES_JAVA_OPTS='-Xms512m -Xmx512m' -p ${veld.port}:9200 elasticsearch:8.13.0",
+          "shell": "docker run --rm --name veld-es-${veld.run} -e discovery.type=single-node -e xpack.security.enabled=false -e ES_JAVA_OPTS='-Xms512m -Xmx512m' -p ${veld.port}:9200 elasticsearch:8.13.0",
           "on_stop": "docker stop veld-es-${veld.run}",
           "probes": { "readiness": {
             "type": "http",
@@ -716,7 +716,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @search-platform/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @search-platform/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "postgres": "docker",
@@ -747,8 +747,8 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "crm",
   "url_template": "{service}.{branch ?? run}.crm.localhost",
 
@@ -757,7 +757,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.branch}-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=crm_${veld.branch} -p ${veld.port}:5432 -v veld-pg-${veld.branch}:/var/lib/postgresql/data postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.branch}-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=crm_${veld.branch} -p ${veld.port}:5432 -v veld-pg-${veld.branch}:/var/lib/postgresql/data postgres:16",
           "on_stop": "docker stop veld-pg-${veld.branch}-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -771,7 +771,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @crm/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @crm/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "database": "docker" },
           "env": {
@@ -785,7 +785,7 @@ The `skip_if` commands on the setup nodes make subsequent `veld start` calls fas
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @crm/web dev",
+          "shell": "pnpm --filter @crm/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "local" },
           "env": {
@@ -815,8 +815,8 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "inventory",
   "url_template": "{service}.{username}.{branch ?? run}.inventory.localhost",
 
@@ -825,7 +825,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "go run ./cmd/server --port ${veld.port}",
+          "shell": "go run ./cmd/server --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/healthz" } } },
           "env": {
             "FRONTEND_URL": "${nodes.frontend.url}"
@@ -838,7 +838,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @inventory/web dev",
+          "shell": "pnpm --filter @inventory/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "env": {
             "PORT": "${veld.port}",
@@ -861,8 +861,8 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "fintech",
   "url_template": "{service}.{branch ?? run}.fintech.localhost",
 
@@ -886,7 +886,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
       "variants": {
         "default": {
           "type": "command",
-          "command": "vault read -format=json secret/dev/payment-gateway | jq -r '.data | to_entries[] | \"\\(.key)=\\(.value)\"' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "vault read -format=json secret/dev/payment-gateway | jq -r '.data | to_entries[] | \"\\(.key)=\\(.value)\"' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"],
           "sensitive_outputs": ["STRIPE_SECRET_KEY", "STRIPE_WEBHOOK_SECRET"]
         }
@@ -897,7 +897,7 @@ Each branch also gets its own Docker volume (`veld-pg-${veld.branch}`) and datab
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @fintech/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @fintech/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "provision-db": "default",
@@ -931,8 +931,8 @@ The `api` node receives the secrets as environment variables at runtime.
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "saas-platform",
   "url_template": "{service}.{branch ?? run}.saas-platform.test",
 
@@ -941,7 +941,7 @@ The `api` node receives the secrets as environment variables at runtime.
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "go run ./cmd/api --port ${veld.port}",
+          "shell": "go run ./cmd/api --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "env": {
             "COOKIE_DOMAIN": ".saas-platform.test",
@@ -955,7 +955,7 @@ The `api` node receives the secrets as environment variables at runtime.
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @saas/web dev",
+          "shell": "pnpm --filter @saas/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "env": {
             "PORT": "${veld.port}",
@@ -970,7 +970,7 @@ The `api` node receives the secrets as environment variables at runtime.
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @saas/admin dev",
+          "shell": "pnpm --filter @saas/admin dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "env": {
             "PORT": "${veld.port}",
@@ -997,8 +997,8 @@ The `admin` node uses a node-level `url_template` override to produce a differen
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "marketplace",
   "url_template": "{service}.{branch ?? run}.marketplace.localhost",
 
@@ -1014,12 +1014,12 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin user-service -- --port ${veld.port}",
+          "shell": "cargo run --bin user-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
         "staging": {
           "type": "command",
-          "command": "echo 'SERVICE_URL=https://user-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'SERVICE_URL=https://user-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1030,12 +1030,12 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin catalog-service -- --port ${veld.port}",
+          "shell": "cargo run --bin catalog-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
         "staging": {
           "type": "command",
-          "command": "echo 'SERVICE_URL=https://catalog-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'SERVICE_URL=https://catalog-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1046,12 +1046,12 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin payment-service -- --port ${veld.port}",
+          "shell": "cargo run --bin payment-service -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 60 } }
         },
         "staging": {
           "type": "command",
-          "command": "echo 'SERVICE_URL=https://payment-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'SERVICE_URL=https://payment-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1062,7 +1062,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "staging": {
           "type": "command",
-          "command": "echo 'SERVICE_URL=https://notification-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'SERVICE_URL=https://notification-service.staging.marketplace.example.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["SERVICE_URL"]
         }
       }
@@ -1072,7 +1072,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run --bin gateway -- --port ${veld.port}",
+          "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "user-service": "staging",
@@ -1089,7 +1089,7 @@ The `admin` node uses a node-level `url_template` override to produce a differen
         },
         "local-full": {
           "type": "start_server",
-          "command": "cargo run --bin gateway -- --port ${veld.port}",
+          "shell": "cargo run --bin gateway -- --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "user-service": "local",
@@ -1122,8 +1122,8 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "docs-site",
   "url_template": "{service}.{branch ?? run}.docs-site.localhost",
 
@@ -1133,7 +1133,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "default": {
           "type": "command",
-          "command": "pnpm --filter @docs-site/content build",
+          "shell": "pnpm --filter @docs-site/content build",
           "skip_if": "test -d ./packages/content/dist && test ./packages/content/dist/index.html -nt ./packages/content/src/index.md"
         }
       }
@@ -1144,7 +1144,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "default": {
           "type": "command",
-          "command": "cargo build --release --bin docs-api",
+          "shell": "cargo build --release --bin docs-api",
           "skip_if": "test -f ./target/release/docs-api && test ./target/release/docs-api -nt ./src/main.rs"
         }
       }
@@ -1154,7 +1154,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "./target/release/docs-api --port ${veld.port}",
+          "shell": "./target/release/docs-api --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "build-api": "default" }
         }
@@ -1165,7 +1165,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "python3 -m http.server ${veld.port} --directory ./packages/content/dist",
+          "shell": "python3 -m http.server ${veld.port} --directory ./packages/content/dist",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "build-docs": "default" }
         }
@@ -1185,8 +1185,8 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "jobrunner",
   "url_template": "{service}.{branch ?? run}.jobrunner.localhost",
 
@@ -1200,7 +1200,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=jobrunner -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=jobrunner -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -1214,7 +1214,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
+          "shell": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7-alpine",
           "on_stop": "docker stop veld-redis-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 15 } } },
           "outputs": {
@@ -1228,7 +1228,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @jobrunner/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @jobrunner/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "postgres": "docker",
@@ -1247,7 +1247,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @jobrunner/worker start --port ${veld.port} --concurrency 5",
+          "shell": "pnpm --filter @jobrunner/worker start --port ${veld.port} --concurrency 5",
           "probes": { "readiness": { "type": "http", "path": "/status" } } },
           "depends_on": {
             "postgres": "docker",
@@ -1266,7 +1266,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @jobrunner/scheduler start --port ${veld.port}",
+          "shell": "pnpm --filter @jobrunner/scheduler start --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": {
             "redis": "docker"
@@ -1300,8 +1300,8 @@ All three application nodes are `start_server` with health check endpoints, so V
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "polyglot",
   "url_template": "{service}.{branch ?? run}.polyglot.localhost",
 
@@ -1310,7 +1310,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=polyglot -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=polyglot -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -1325,7 +1325,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cd services/auth && go run . --port ${veld.port}",
+          "shell": "cd services/auth && go run . --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/healthz" } } },
           "depends_on": { "postgres": "docker" },
           "env": {
@@ -1339,7 +1339,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cd services/billing && ./gradlew bootRun --args='--server.port=${veld.port}'",
+          "shell": "cd services/billing && ./gradlew bootRun --args='--server.port=${veld.port}'",
           "probes": { "readiness": {
             "type": "http",
             "path": "/actuator/health",
@@ -1360,7 +1360,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cd services/recommendations && uvicorn main:app --host 0.0.0.0 --port ${veld.port}",
+          "shell": "cd services/recommendations && uvicorn main:app --host 0.0.0.0 --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "postgres": "docker" },
           "env": {
@@ -1374,7 +1374,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @polyglot/web dev",
+          "shell": "pnpm --filter @polyglot/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": {
             "auth-service": "local",
@@ -1404,8 +1404,8 @@ All three application nodes are `start_server` with health check endpoints, so V
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "e2e-suite",
   "url_template": "{service}.{branch ?? run}.e2e-suite.localhost",
 
@@ -1419,7 +1419,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=e2e -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} -e POSTGRES_PASSWORD=veld -e POSTGRES_DB=e2e -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -1434,7 +1434,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "default": {
           "type": "command",
-          "command": "pnpm --filter @e2e-suite/db seed:test",
+          "shell": "pnpm --filter @e2e-suite/db seed:test",
           "depends_on": { "postgres": "docker" },
           "env": {
             "DATABASE_URL": "${nodes.postgres.DATABASE_URL}"
@@ -1447,7 +1447,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @e2e-suite/api dev --port ${veld.port}",
+          "shell": "pnpm --filter @e2e-suite/api dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "seed-test-data": "default" },
           "env": {
@@ -1462,7 +1462,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter @e2e-suite/web dev",
+          "shell": "pnpm --filter @e2e-suite/web dev",
           "probes": { "readiness": { "type": "http", "path": "/" } } },
           "depends_on": { "backend": "local" },
           "env": {
@@ -1477,7 +1477,7 @@ All three application nodes are `start_server` with health check endpoints, so V
       "variants": {
         "default": {
           "type": "command",
-          "command": "pnpm --filter @e2e-suite/tests playwright test",
+          "shell": "pnpm --filter @e2e-suite/tests playwright test",
           "depends_on": { "frontend": "local" },
           "env": {
             "BASE_URL": "${nodes.frontend.url}",
@@ -1512,20 +1512,20 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "platform",
   "url_template": "{service}.{branch ?? run}.platform.localhost",
 
   "setup": [
-    { "name": "docker", "command": "docker info > /dev/null 2>&1", "failureMessage": "Docker must be running — start Docker Desktop and try again" },
-    { "name": "node-version", "command": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Node >= 20 is required — run `nvm use 20`" },
-    { "name": "platform-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" },
-    { "name": "cache-dir", "command": "mkdir -p ${veld.root}/.cache/veld" }
+    { "name": "docker", "shell": "docker info > /dev/null 2>&1", "failureMessage": "Docker must be running — start Docker Desktop and try again" },
+    { "name": "node-version", "shell": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Node >= 20 is required — run `nvm use 20`" },
+    { "name": "platform-network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" },
+    { "name": "cache-dir", "shell": "mkdir -p ${veld.root}/.cache/veld" }
   ],
 
   "teardown": [
-    { "name": "platform-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+    { "name": "platform-network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
   ],
 
   "nodes": {
@@ -1533,7 +1533,7 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm --name veld-pg-${veld.run} --network ${veld.project}-net -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm --name veld-pg-${veld.run} --network ${veld.project}-net -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
           "on_stop": "docker stop veld-pg-${veld.run}",
           "probes": { "readiness": { "type": "port", "timeout_seconds": 30 } } },
           "outputs": {
@@ -1546,7 +1546,7 @@ With `--preset dev`, only the frontend and its dependencies start (no test runne
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter backend dev --port ${veld.port}",
+          "shell": "pnpm --filter backend dev --port ${veld.port}",
           "probes": { "readiness": { "type": "http", "path": "/health" } } },
           "depends_on": { "postgres": "docker" },
           "env": { "DATABASE_URL": "${nodes.postgres.DATABASE_URL}" }

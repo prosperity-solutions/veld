@@ -38,3 +38,6 @@ crates/veld-daemon/ui/dist/
 *.key
 .claude/settings.local.json
 /package-lock.json
+
+# Review scaffolding (context pack, ledger) — never committed.
+.review/

@@ -55,9 +55,9 @@ unreadable.
 **Only the root file needs `schemaVersion` and `name`** — every other key is
 optional in every file, so an included file is just `{ "nodes": { … } }`.
 
-`schemaVersion` may be `"1"`, `"2"`, or `"3"`. v1/v2 keep working unchanged; in v3
-the `command` key is replaced by `argv`/`shell`. Migrate with
-`veld config --migrate` (dry run) then `--write`.
+`schemaVersion` must be `"3"` — `"1"` and `"2"` are not supported and fail to load.
+Convert with `veld config --migrate` (dry run) then `--write`. The `command` key is
+replaced by `argv`/`shell`.
 
 ## Running something: `argv` or `shell`
 

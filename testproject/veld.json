@@ -1,6 +1,6 @@
 {
   "$schema": "../../schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "name": "testproject",
   "url_template": "{service}.{run}.testproject.localhost",
   "nodes": {
@@ -11,13 +11,13 @@
           "name": "health",
           "label": "Health check",
           "description": "Curl the backend health endpoint",
-          "command": "curl -fsS ${veld.url}/health"
+          "argv": ["curl","-fsS","${veld.url}/health"]
         }
       ],
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "python3 backend/server.py ${veld.port}",
+          "argv": ["python3","backend/server.py","${veld.port}"],
           "health_check": { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
         }
       }
@@ -27,7 +27,7 @@
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "python3 frontend/server.py ${veld.port}",
+          "argv": ["python3","frontend/server.py","${veld.port}"],
           "health_check": { "type": "http", "path": "/", "expect_status": 200, "timeout_seconds": 30 },
           "depends_on": { "backend": "local" },
           "proxy": {
@@ -41,7 +41,7 @@
       "variants": {
         "local": {
           "type": "command",
-          "command": "echo \"running e2e against ${nodes.frontend.url}\"; curl -fsS ${nodes.backend.url}/health >/dev/null && echo '  ✓ backend healthy'; echo '  ✓ homepage loads'; echo; echo '2 passed, 0 failed'",
+          "shell": "echo \"running e2e against ${nodes.frontend.url}\"; curl -fsS ${nodes.backend.url}/health >/dev/null && echo '  ✓ backend healthy'; echo '  ✓ homepage loads'; echo; echo '2 passed, 0 failed'",
           "depends_on": { "frontend": "local" }
         }
       }
@@ -51,7 +51,7 @@
       "variants": {
         "local": {
           "type": "command",
-          "command": "echo boom; exit 3"
+          "shell": "echo boom; exit 3"
         }
       }
     }

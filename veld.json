@@ -1,6 +1,6 @@
 {
   "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
-  "schemaVersion": "1",
+  "schemaVersion": "3",
   "name": "veld",
   "url_template": "{service}.{run}.veld.localhost",
   "nodes": {
@@ -9,7 +9,7 @@
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npx --yes browser-sync start --server website --watch --port ${veld.port} --no-open --no-ui",
+          "argv": ["npx","--yes","browser-sync","start","--server","website","--watch","--port","${veld.port}","--no-open","--no-ui"],
           "health_check": { "type": "http", "path": "/index.html", "timeout_seconds": 30 }
         }
       }

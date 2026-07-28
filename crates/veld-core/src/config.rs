@@ -24,7 +24,16 @@ pub enum ConfigError {
         source: serde_json::Error,
     },
 
-    #[error("unsupported schema version \"{0}\" — run `veld update` to get the latest version")]
+    #[error(
+        "schemaVersion \"{0}\" is no longer supported — this veld reads only \"3\".\n  \
+         Run `veld config --migrate` to convert this config (a dry run; add `--write` to \
+         apply), then `veld lint` to check the result.\n  \
+         What changes: `command` becomes `argv` (an array, spawned directly) or `shell` (a \
+         string, run via sh -c); a bare-string `on_stop`/`skip_if` becomes \
+         `{{ \"argv\": … }}`; and a node output referenced as `${{veld.KEY}}` becomes \
+         `${{output.KEY}}`.\n  \
+         See docs/migrating-to-v3.md."
+    )]
     UnsupportedSchemaVersion(String),
 
     #[error("invalid JSONC in {path}: {detail}")]
@@ -1080,7 +1089,7 @@ impl std::fmt::Debug for RelayEntry {
 ///
 /// - `{ "env": "VAR" }` — read from the daemon's environment (12-factor).
 /// - `{ "file": "/path" }` — read from a file (Docker/Kubernetes secret mounts).
-/// - `{ "command": "op read op://vault/relay/token" }` — run a shell command and
+/// - `{ "shell": "op read op://vault/relay/token" }` — run a shell command and
 ///   use its stdout (1Password / Vault / any secret-manager CLI). Runs with the
 ///   user's login-shell `PATH` ([`crate::user_path`]) so those CLIs are found
 ///   even though resolution happens on a daemon with a bare service `PATH`.
@@ -1094,7 +1103,7 @@ impl std::fmt::Debug for RelayEntry {
 /// the `Debug` redaction below, `resolve_secret` in `veld-share`
 /// (`endpoint.rs`, which resolves `Command` via [`crate::user_path`]), and the
 /// `SecretSource` `$def` in
-/// `schema/v2/veld.schema.json` (hand-maintained — no compiler check ties it to
+/// `schema/v3/veld.schema.json` (hand-maintained — no compiler check ties it to
 /// this enum).
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum SecretSource {
@@ -2371,9 +2380,14 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
     Ok(loaded)
 }
 
-/// Schema versions this build can load. `"1"` and `"2"` keep today's semantics
-/// forever — there is no flag day.
-pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["1", "2", "3"];
+/// Schema versions this build can load.
+///
+/// **Only `"3"`.** v1 and v2 are not supported: a config must be migrated, which is
+/// what `veld config --migrate` is for. Keeping two readings alive was tried and
+/// abandoned — every rule then needed a severity that depended on the document's
+/// version, every new field was silently live in an old document, and the result
+/// was two config languages sharing one parser. One reading is the feature.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["3"];
 
 /// Every recognised top-level config key, for the unknown-key diagnostic.
 ///
@@ -2400,14 +2414,14 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "ui",
 ];
 
-/// In a `schemaVersion: "3"` document, `command` is gone: every place that runs
-/// something says `argv` or `shell`.
+/// `command` is gone: every place that runs something says `argv` or `shell`.
 ///
-/// This is a **structural** rule, not a semantic one — it is about which keys the
-/// document may use for the version it declares, in the same class as a wrong
-/// field type — so it belongs in the loader. That does mean a v3 document using
-/// `command` fails `veld stop` too; the mitigation is that no such document has
-/// ever run, because it cannot start either. A v1/v2 document is untouched.
+/// This is a **structural** rule, not a semantic one — it is about which keys a
+/// config may use at all, in the same class as a wrong field type — so it belongs
+/// in the loader. That does mean such a document fails `veld stop` too; the
+/// mitigation is that it has never run, because it cannot start either. (A config
+/// that ran under an older veld declared `schemaVersion` 1 or 2, and now fails
+/// earlier, at the version check, with a message pointing at `--migrate`.)
 ///
 /// Walking the raw value rather than the typed model catches every position at
 /// once (variants, probes, actions, setup/teardown steps, value sources) without
@@ -3003,15 +3017,14 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
             // v3 document (which is opting into the new rules), a warning in v1/v2
             // (surfaced by `veld lint`, never blocking a run).
             if r.step_type == StepType::StartServer && r.readiness.is_none() {
-                let message = "a `start_server` with no readiness probe is reported healthy as \
-                     soon as its port opens, so dependents start before it can serve. Add \
+                out.push(Finding::error(
+                    "start-server-needs-readiness",
+                    &loc,
+                    "a `start_server` with no readiness probe is reported healthy as soon as \
+                     its port opens, so dependents start before it can serve. Add \
                      `probes.readiness` — `{ \"type\": \"http\", \"path\": \"/…\" }`, or \
-                     `{ \"type\": \"port\" }` to accept the port-open check as readiness";
-                out.push(if config.schema_version == "3" {
-                    Finding::error("start-server-needs-readiness", &loc, message)
-                } else {
-                    Finding::warning("start-server-needs-readiness", &loc, message)
-                });
+                     `{ \"type\": \"port\" }` to accept the port-open check as readiness",
+                ));
             }
         }
     }
@@ -3585,7 +3598,7 @@ mod tests {
     #[test]
     fn validate_rejects_bad_proxy_header_names_and_values() {
         let mut config: VeldConfig = serde_json::from_str(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#,
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"local":{"type":"start_server"}}}}}"#,
         )
         .unwrap();
         config.proxy = Some(ProxyConfig {
@@ -3622,7 +3635,7 @@ mod tests {
     fn exactly_one_command_is_required() {
         // Two at once is ambiguous: `from_keys` would have to pick one.
         let both: VeldConfig = serde_json::from_str(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type": "command", "argv": ["true"], "shell": "true"
             }}}}}"#,
         )
@@ -3633,7 +3646,7 @@ mod tests {
 
         // None at all is a step that silently does nothing.
         let neither: VeldConfig = serde_json::from_str(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type": "command"
             }}}}}"#,
         )
@@ -3650,11 +3663,11 @@ mod tests {
         for variant in [
             r#"{"type":"command","argv":["echo","hi"]}"#,
             r#"{"type":"command","shell":"echo hi"}"#,
-            r#"{"type":"command","command":"echo hi"}"#,
+            r#"{"type":"command","shell": "echo hi"}"#,
             r#"{"type":"command","script":"scripts/x.sh"}"#,
         ] {
             let cfg: VeldConfig = serde_json::from_str(&format!(
-                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{variant}}}}}}}}}"#
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{variant}}}}}}}}}"#
             ))
             .unwrap();
             assert!(
@@ -3668,7 +3681,7 @@ mod tests {
 
         // An http probe legitimately declares no command; a command probe must.
         let probe: VeldConfig = serde_json::from_str(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type": "start_server", "shell": "x",
                 "probes": { "readiness": { "type": "http", "path": "/z" },
                             "liveness":  { "type": "command" } }
@@ -3697,12 +3710,12 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "t",
                 "proxy": { "request": { "remove": ["X Frame Options"] } },
                 "nodes": { "a": { "variants": { "local": {
-                    "type": "start_server", "command": "true",
-                    "on_stop": "echo bye"
+                    "type": "start_server", "shell": "true",
+                    "on_stop": { "shell": "echo bye" }
                 } } } }
             }"#,
         )
@@ -3730,15 +3743,15 @@ mod tests {
     fn interpolated_depends_on_key_is_error() {
         let config: VeldConfig = serde_json::from_str(
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "t",
                 "nodes": {
                     "api": { "variants": { "dev": {
-                        "type": "start_server", "command": "true",
+                        "type": "start_server", "shell": "true",
                         "depends_on": { "db-${veld.branch}": "local" }
                     }}},
                     "web": { "variants": { "dev": {
-                        "type": "start_server", "command": "true",
+                        "type": "start_server", "shell": "true",
                         "depends_on": { "api": "${veld.variant}" }
                     }}}
                 }
@@ -3768,12 +3781,12 @@ mod tests {
     fn literal_depends_on_is_accepted() {
         let config: VeldConfig = serde_json::from_str(
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "t",
                 "nodes": {
-                    "db": { "variants": { "local": { "type": "command", "command": "true" }}},
+                    "db": { "variants": { "local": { "type": "command", "shell": "true" }}},
                     "api": { "variants": { "dev": {
-                        "type": "start_server", "command": "true",
+                        "type": "start_server", "shell": "true",
                         "depends_on": { "db": "local" }
                     }}}
                 }
@@ -3799,7 +3812,7 @@ mod tests {
     fn unknown_builtin_var_is_error_and_names_the_replacement() {
         let config: VeldConfig = serde_json::from_str(
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "t",
                 "nodes": { "db": { "variants": { "dev": {
                     "type": "command",
@@ -3839,7 +3852,7 @@ mod tests {
             .collect();
         let config: VeldConfig = serde_json::from_str(&format!(
             r#"{{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "t",
                 "nodes": {{ "a": {{ "variants": {{ "dev": {{
                     "type": "start_server",
@@ -4027,7 +4040,7 @@ mod tests {
             r#"[1, 2, 3]"#,
         ] {
             let json =
-                format!(r#"{{"schemaVersion":"2","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
+                format!(r#"{{"schemaVersion":"3","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
             assert!(
                 serde_json::from_str::<VeldConfig>(&json).is_err(),
                 "a var must not accept {body}"
@@ -4042,7 +4055,7 @@ mod tests {
             r#"{ "argv": ["secret-tool", "read", "p"], "secret": true }"#,
         ] {
             let json =
-                format!(r#"{{"schemaVersion":"2","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
+                format!(r#"{{"schemaVersion":"3","name":"t","vars":{{"x":{body}}},"nodes":{{}}}}"#);
             serde_json::from_str::<VeldConfig>(&json)
                 .unwrap_or_else(|e| panic!("{body} should be a valid var: {e}"));
         }
@@ -4052,7 +4065,7 @@ mod tests {
     #[test]
     fn vars_cannot_nest() {
         let f = findings_for(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "vars":{"base":"https://api.example.com","derived":"${vars.base}/v1"},
                 "nodes":{}}"#,
         );
@@ -4074,7 +4087,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-                "schemaVersion": "2", "name": "t",
+                "schemaVersion": "3", "name": "t",
                 "vars": { "api": "https://one.example.com", "api": "https://two.example.com" },
                 "nodes": {}
             }"#,
@@ -4094,7 +4107,7 @@ mod tests {
     #[test]
     fn vars_unknown_is_error() {
         let f = findings_for(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "vars":{"remote_api":"https://api.example.com","health_path":"/healthz"},
                 "nodes":{"a":{"variants":{"dev":{
                   "type":"command",
@@ -4122,7 +4135,7 @@ mod tests {
     #[test]
     fn declared_vars_are_accepted_everywhere() {
         let f = findings_for(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "vars":{"api":"https://api.example.com","pw":{"value":"dev","secret":true}},
                 "env":{"PROJECT_API":"${vars.api}"},
                 "nodes":{"a":{
@@ -4158,7 +4171,7 @@ mod tests {
         // string, plus `on_stop`.
         let bad = findings_for(
             r#"{
-                "schemaVersion": "2", "name": "t",
+                "schemaVersion": "3", "name": "t",
                 "nodes": { "db": { "variants": { "dev": {
                     "type": "command",
                     "env": { "PGPASSWORD": { "value": "devpw", "secret": true } },
@@ -4180,7 +4193,7 @@ mod tests {
         // and read by the program — the sanctioned route.
         let good = findings_for(
             r#"{
-                "schemaVersion": "2", "name": "t",
+                "schemaVersion": "3", "name": "t",
                 "nodes": { "db": { "variants": { "dev": {
                     "type": "command",
                     "env": { "PGPASSWORD": { "value": "devpw", "secret": true } },
@@ -4197,7 +4210,7 @@ mod tests {
         // not off the name.
         let plain = findings_for(
             r#"{
-                "schemaVersion": "2", "name": "t",
+                "schemaVersion": "3", "name": "t",
                 "nodes": { "db": { "variants": { "dev": {
                     "type": "command",
                     "env": { "REGION": "eu-central-1" },
@@ -4221,7 +4234,7 @@ mod tests {
             "AKIAIOSFODNN7EXAMPLE",
         ] {
             let f = findings_for(&format!(
-                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
                     "type":"command","shell":"true","env":{{"TOKEN":{}}}
                 }}}}}}}}}}"#,
                 serde_json::to_string(shaped).unwrap()
@@ -4237,7 +4250,7 @@ mod tests {
         // marked. Silent — this is how local dev works and nagging about it
         // trains people to ignore the warning.
         let quiet = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"command","shell":"true",
                 "env":{"PG_PASSWORD":{"value":"devpassword","secret":true}}
             }}}}}"#,
@@ -4255,7 +4268,7 @@ mod tests {
             "debug",
         ] {
             let f = findings_for(&format!(
-                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
                     "type":"command","shell":"true","env":{{"V":{}}}
                 }}}}}}}}}}"#,
                 serde_json::to_string(benign).unwrap()
@@ -4267,10 +4280,10 @@ mod tests {
         }
     }
 
-    /// **error** — a `start_server` with no readiness probe (v3; a warning in
-    /// v1/v2, see the rule's own comment).
+    /// **error** — a `start_server` with no readiness probe. One schema version, so
+    /// one severity.
     #[test]
-    fn start_server_without_readiness_is_error_in_v3_and_warning_before() {
+    fn start_server_without_readiness_is_error() {
         let v3 = findings_for(
             r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"serve"
@@ -4281,20 +4294,6 @@ mod tests {
             .find(|f| f.rule == "start-server-needs-readiness")
             .unwrap();
         assert_eq!(hit.severity, Severity::Error);
-
-        let v2 = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
-                "type":"start_server","shell":"serve"
-            }}}}}"#,
-        );
-        assert_eq!(
-            v2.iter()
-                .find(|f| f.rule == "start-server-needs-readiness")
-                .unwrap()
-                .severity,
-            Severity::Warning,
-            "a v1/v2 config must keep starting"
-        );
 
         // Passing fixture: either probe form satisfies it.
         for probe in [
@@ -4317,7 +4316,7 @@ mod tests {
     #[test]
     fn ambiguous_primary_port_is_error() {
         let f = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x",
                 "probes":{"readiness":{"type":"port"}},
                 "ports":{"grpc":"auto","metrics":"auto"}
@@ -4333,7 +4332,7 @@ mod tests {
 
         // Naming one `http` resolves it.
         let ok = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x",
                 "probes":{"readiness":{"type":"port"}},
                 "ports":{"http":"auto","metrics":"auto"}
@@ -4345,7 +4344,7 @@ mod tests {
     #[test]
     fn missing_step_type_is_error() {
         let f = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "shell":"x"
             }}}}}"#,
         );
@@ -4353,7 +4352,7 @@ mod tests {
 
         // Declared once on the node covers every variant.
         let ok = findings_for(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "type":"command",
                 "variants":{"dev":{"shell":"x"},"ci":{"shell":"y"}}
             }}}"#,
@@ -4404,15 +4403,48 @@ mod tests {
         assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
     }
 
-    /// The same document in v3 form loads, and v1/v2 documents keep loading with
-    /// `command` — there is no flag day.
+    /// v3 is the only supported version, and the message has to be the upgrade
+    /// instructions — this is the error every existing user meets exactly once.
     #[test]
-    fn v3_accepts_argv_and_shell_while_v1_v2_keep_command() {
+    fn v1_and_v2_are_rejected_with_migration_instructions() {
         let dir = tempfile::tempdir().unwrap();
+        for version in ["1", "2"] {
+            let path = dir.path().join(format!("v{version}.json"));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{
+                        "schemaVersion": "{version}",
+                        "name": "t",
+                        "nodes": {{ "api": {{ "variants": {{ "dev": {{
+                            "type": "start_server", "command": "pnpm dev"
+                        }}}}}}}}
+                    }}"#
+                ),
+            )
+            .unwrap();
+            let err = parse_config(&path).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::UnsupportedSchemaVersion(ref v) if v == version),
+                "v{version}: {err:?}"
+            );
+            let msg = err.to_string();
+            // The message is the whole upgrade path, so it must carry the command
+            // and say what changes.
+            assert!(msg.contains("veld config --migrate"), "{msg}");
+            assert!(msg.contains("--write"), "{msg}");
+            assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
+            assert!(msg.contains("docs/migrating-to-v3.md"), "{msg}");
+        }
+    }
 
-        let v3 = dir.path().join("v3.json");
+    /// A v3 document using `argv`/`shell` loads and validates.
+    #[test]
+    fn v3_accepts_argv_and_shell() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
         std::fs::write(
-            &v3,
+            &path,
             r#"{
                 "schemaVersion": "3",
                 "name": "t",
@@ -4426,7 +4458,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        let cfg = parse_config(&v3).expect("v3 argv/shell must load");
+        let cfg = parse_config(&path).expect("v3 argv/shell must load");
         assert_eq!(
             cfg.nodes["api"].variants["dev"].cmd.spec(),
             Some(CommandSpec::Argv(vec!["pnpm".into(), "dev".into()]))
@@ -4436,52 +4468,6 @@ mod tests {
             Some(CommandSpec::Shell("docker rm -f x".into()))
         );
         assert!(!validate(&cfg).iter().any(|f| f.severity == Severity::Error));
-
-        for version in ["1", "2"] {
-            let p = dir.path().join(format!("v{version}.json"));
-            std::fs::write(
-                &p,
-                format!(
-                    r#"{{
-                        "schemaVersion": "{version}",
-                        "name": "t",
-                        "nodes": {{ "api": {{ "variants": {{ "dev": {{
-                            "type": "start_server",
-                            "command": "pnpm dev",
-                            "on_stop": "docker rm -f x"
-                        }}}}}}}}
-                    }}"#
-                ),
-            )
-            .unwrap();
-            let cfg = parse_config(&p)
-                .unwrap_or_else(|e| panic!("v{version} must keep loading unchanged: {e}"));
-            // Both legacy spellings resolve to the same shell command they always
-            // ran, with no new warning.
-            assert_eq!(
-                cfg.nodes["api"].variants["dev"].cmd.spec(),
-                Some(CommandSpec::Shell("pnpm dev".into())),
-                "v{version}"
-            );
-            assert_eq!(
-                cfg.nodes["api"].variants["dev"].on_stop,
-                Some(CommandSpec::Shell("docker rm -f x".into())),
-                "v{version}"
-            );
-            // No *errors* — a v1/v2 config must still start. The probeless
-            // `start_server` warning is deliberate and never blocks a run.
-            let findings = validate(&cfg);
-            assert!(
-                !findings.iter().any(|f| f.severity == Severity::Error),
-                "v{version} must produce no errors: {findings:?}"
-            );
-            assert!(
-                findings
-                    .iter()
-                    .all(|f| f.rule == "start-server-needs-readiness"),
-                "v{version} must gain no unrelated findings: {findings:?}"
-            );
-        }
     }
 
     // -- F1: JSONC -------------------------------------------------------------
@@ -4497,14 +4483,14 @@ mod tests {
             &good,
             r#"{
   // The project this config describes.
-  "schemaVersion": "2",
+  "schemaVersion": "3",
   "name": "commented", /* trailing block comment */
   "nodes": {
     "api": {
       "default_variant": "dev",
       "variants": {
         // A comment-like string must survive: https://example.com//x
-        "dev": { "type": "command", "command": "echo //not-a-comment", },
+        "dev": { "type": "command", "shell": "echo //not-a-comment", },
       },
     },
   },
@@ -4514,7 +4500,7 @@ mod tests {
         let config = parse_config(&good).expect("JSONC must load");
         assert_eq!(config.name, "commented");
         assert_eq!(
-            config.nodes["api"].variants["dev"].cmd.command.as_deref(),
+            config.nodes["api"].variants["dev"].cmd.shell.as_deref(),
             Some("echo //not-a-comment")
         );
 
@@ -4557,7 +4543,7 @@ mod tests {
         std::fs::write(
             &path,
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "dup",
                 "nodes": {
                     "api": { "variants": { "dev": { "type": "command", "shell": "first" } } },
@@ -4873,11 +4859,11 @@ mod tests {
 
     #[test]
     fn test_setup_step_deserialization() {
-        let json = r#"{"name": "docker", "command": "docker info", "failureMessage": "Docker must be running"}"#;
+        let json = r#"{"name": "docker", "shell": "docker info", "failureMessage": "Docker must be running"}"#;
         let step: SetupStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.name, "docker");
-        assert_eq!(step.cmd.shell.as_deref(), None);
-        assert_eq!(step.cmd.command.as_deref(), Some("docker info"));
+        assert_eq!(step.cmd.command.as_deref(), None);
+        assert_eq!(step.cmd.shell.as_deref(), Some("docker info"));
         assert_eq!(
             step.failure_message.as_deref(),
             Some("Docker must be running")
@@ -4886,11 +4872,11 @@ mod tests {
 
     #[test]
     fn test_setup_step_without_failure_message() {
-        let json = r#"{"name": "network", "command": "docker network create veld"}"#;
+        let json = r#"{"name": "network", "shell": "docker network create veld"}"#;
         let step: SetupStep = serde_json::from_str(json).unwrap();
         assert_eq!(step.name, "network");
         assert_eq!(
-            step.cmd.command.as_deref(),
+            step.cmd.shell.as_deref(),
             Some("docker network create veld")
         );
         assert!(step.failure_message.is_none());
@@ -4899,21 +4885,21 @@ mod tests {
     #[test]
     fn test_config_with_setup_and_teardown() {
         let json = r#"{
-            "schemaVersion": "1",
+            "schemaVersion": "3",
             "name": "test-project",
             "setup": [
-                {"name": "check", "command": "echo ok", "failureMessage": "Check failed"},
-                {"name": "init", "command": "mkdir -p /tmp/test"}
+                {"name": "check", "shell": "echo ok", "failureMessage": "Check failed"},
+                {"name": "init", "shell": "mkdir -p /tmp/test"}
             ],
             "teardown": [
-                {"name": "cleanup", "command": "rm -rf /tmp/test"}
+                {"name": "cleanup", "shell": "rm -rf /tmp/test"}
             ],
             "nodes": {
                 "app": {
                     "variants": {
                         "local": {
                             "type": "start_server",
-                            "command": "echo start"
+                            "shell": "echo start"
                         }
                     }
                 }
@@ -4935,14 +4921,14 @@ mod tests {
     #[test]
     fn test_config_without_setup_teardown() {
         let json = r#"{
-            "schemaVersion": "1",
+            "schemaVersion": "3",
             "name": "test-project",
             "nodes": {
                 "app": {
                     "variants": {
                         "local": {
                             "type": "start_server",
-                            "command": "echo start"
+                            "shell": "echo start"
                         }
                     }
                 }
@@ -4966,7 +4952,7 @@ mod tests {
             },
             "liveness": {
                 "type": "command",
-                "command": "pg_isready",
+                "shell": "pg_isready",
                 "interval_ms": 5000,
                 "failure_threshold": 5,
                 "max_recoveries": 2
@@ -4980,7 +4966,7 @@ mod tests {
 
         let liveness = probes.liveness.unwrap().unwrap();
         assert_eq!(liveness.check_type, "command");
-        assert_eq!(liveness.cmd.command.as_deref(), Some("pg_isready"));
+        assert_eq!(liveness.cmd.shell.as_deref(), Some("pg_isready"));
         assert_eq!(liveness.interval_ms, 5000);
         assert_eq!(liveness.failure_threshold, 5);
         assert_eq!(liveness.max_recoveries, 2);
@@ -4988,7 +4974,7 @@ mod tests {
 
     #[test]
     fn test_liveness_probe_defaults() {
-        let json = r#"{"type": "command", "command": "true"}"#;
+        let json = r#"{"type": "command", "shell": "true"}"#;
         let liveness: LivenessProbe = serde_json::from_str(json).unwrap();
         assert_eq!(liveness.interval_ms, 5000);
         assert_eq!(liveness.failure_threshold, 3);
@@ -5001,7 +4987,7 @@ mod tests {
     fn test_skip_if_field() {
         let json = r#"{
             "type": "command",
-            "command": "echo run",
+            "shell": "echo run",
             "skip_if": "test -f /tmp/done"
         }"#;
         let v: VariantConfig = serde_json::from_str(json).unwrap();
@@ -5015,7 +5001,7 @@ mod tests {
     fn test_verify_alias_for_skip_if() {
         let json = r#"{
             "type": "command",
-            "command": "echo run",
+            "shell": "echo run",
             "verify": "test -f /tmp/done"
         }"#;
         let v: VariantConfig = serde_json::from_str(json).unwrap();
@@ -5028,20 +5014,20 @@ mod tests {
     // -- Schema version tests --------------------------------------------------
 
     #[test]
-    fn test_schema_version_2_accepted() {
+    fn test_probes_parse_on_a_v3_document() {
         let json = r#"{
-            "schemaVersion": "2",
+            "schemaVersion": "3",
             "name": "test-project",
             "nodes": {
                 "db": {
                     "variants": {
                         "local": {
                             "type": "command",
-                            "command": "echo start",
+                            "shell": "echo start",
                             "probes": {
                                 "liveness": {
                                     "type": "command",
-                                    "command": "pg_isready"
+                                    "shell": "pg_isready"
                                 }
                             }
                         }
@@ -5050,7 +5036,7 @@ mod tests {
             }
         }"#;
         let config: VeldConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.schema_version, "2");
+        assert_eq!(config.schema_version, "3");
         let variant = &config.nodes["db"].variants["local"];
         assert!(variant.probes.is_some());
         let liveness = variant
@@ -5068,10 +5054,10 @@ mod tests {
 
     #[test]
     fn test_action_minimal_deserialization() {
-        let json = r#"{"name": "psql", "command": "psql $DB_URL"}"#;
+        let json = r#"{"name": "psql", "shell": "psql $DB_URL"}"#;
         let action: ActionConfig = serde_json::from_str(json).unwrap();
         assert_eq!(action.name, "psql");
-        assert_eq!(action.cmd.command.as_deref(), Some("psql $DB_URL"));
+        assert_eq!(action.cmd.shell.as_deref(), Some("psql $DB_URL"));
         // label falls back to name; no params or gating by default.
         assert_eq!(action.display_label(), "psql");
         assert!(action.parameters.is_none());
@@ -5084,7 +5070,7 @@ mod tests {
             "name": "postico",
             "label": "Postico",
             "description": "Open the database in Postico",
-            "command": "open -a Postico \"postgresql://${output.DB_USER}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\"",
+            "shell": "open -a Postico \"postgresql://${output.DB_USER}@${output.DB_HOST}:${output.DB_PORT}/${output.DB_NAME}\"",
             "parameters": {"app": "Postico"},
             "requires_outputs": ["DB_HOST", "DB_PORT", "DB_NAME"]
         }"#;
@@ -5111,9 +5097,9 @@ mod tests {
     #[test]
     fn test_node_config_with_actions() {
         let json = r#"{
-            "variants": {"dblab": {"type": "start_server", "command": "ssh -L ..."}},
+            "variants": {"dblab": {"type": "start_server", "shell": "ssh -L ..."}},
             "actions": [
-                {"name": "postico", "command": "open -a Postico", "requires_outputs": ["DB_HOST"]}
+                {"name": "postico", "shell": "open -a Postico", "requires_outputs": ["DB_HOST"]}
             ]
         }"#;
         let node: NodeConfig = serde_json::from_str(json).unwrap();
@@ -5139,7 +5125,7 @@ mod tests {
     fn readiness_precedence_within_and_across_levels() {
         // Variant `probes.readiness` wins over variant `health_check`.
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x",
                 "health_check":{"type":"port"},
                 "probes":{"readiness":{"type":"http","path":"/ready"}}
@@ -5151,7 +5137,7 @@ mod tests {
 
         // Variant `health_check` alone still works (v1/v2 configs).
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x","health_check":{"type":"port"}
             }}}}}"#,
             "a",
@@ -5161,7 +5147,7 @@ mod tests {
 
         // Hoisted to the node, inherited by a silent variant.
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "probes":{"readiness":{"type":"http","path":"/hoisted"}},
                 "variants":{"dev":{"type":"start_server","shell":"x"}}
             }}}"#,
@@ -5183,7 +5169,7 @@ mod tests {
     #[test]
     fn probes_are_replaced_wholesale_not_merged() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "probes":{"readiness":{"type":"http","path":"/from-node","expect_status":204}},
                 "variants":{"dev":{
                     "type":"start_server","shell":"x",
@@ -5206,7 +5192,7 @@ mod tests {
     #[test]
     fn variant_can_erase_an_inherited_probe() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "probes":{"liveness":{"type":"command","shell":"pg_isready"}},
                 "variants":{"dev":{
                     "type":"start_server","shell":"x",
@@ -5224,7 +5210,7 @@ mod tests {
     #[test]
     fn maps_are_additive_per_key_and_null_erases() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "env":{"FROM_PROJECT":"p","SHARED":"p"},
                 "nodes":{
                   "db":{"variants":{"local":{"type":"command","shell":"x"}}},
@@ -5275,7 +5261,7 @@ mod tests {
     #[test]
     fn features_merge_per_field() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "features":{"feedback_overlay":false,"client_logs":false},
                 "nodes":{"a":{
                   "features":{"client_logs":true},
@@ -5297,7 +5283,7 @@ mod tests {
     #[test]
     fn share_and_outputs_replace_wholesale() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "share":{"expose":["peer","web"]},
                 "outputs":{"URL":"${veld.url}","EXTRA":"x"},
                 "variants":{"dev":{"type":"start_server","shell":"x",
@@ -5321,7 +5307,7 @@ mod tests {
 
         // `null` erases the node-level opt-in entirely.
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "share":{"expose":["peer"]},
                 "variants":{"dev":{"type":"start_server","shell":"x","share":null}}
             }}}"#,
@@ -5336,7 +5322,7 @@ mod tests {
     #[test]
     fn scalars_and_commands_replace() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "type":"start_server",
                 "shell":"node-level",
                 "on_stop":{"shell":"node-stop"},
@@ -5353,7 +5339,7 @@ mod tests {
         assert_eq!(r.on_stop, Some(CommandSpec::Shell("node-stop".into())));
 
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
                 "type":"start_server",
                 "shell":"node-level",
                 "on_stop":{"shell":"node-stop"},
@@ -5376,7 +5362,7 @@ mod tests {
     #[test]
     fn proxy_row_of_merge_table_is_unchanged() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t",
+            r#"{"schemaVersion":"3","name":"t",
                 "proxy":{"request":{"remove":["Origin"],"set":{"X-A":"p","X-B":"p"}}},
                 "nodes":{"a":{
                   "proxy":{"request":{"remove":["Referer"],"set":{"X-B":"n"}}},
@@ -5398,7 +5384,7 @@ mod tests {
     #[test]
     fn two_named_ports_both_declared_and_primary_resolves() {
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x",
                 "ports":{"http":"auto","debug":"auto"}
             }}}}}"#,
@@ -5411,7 +5397,7 @@ mod tests {
 
         // A single named port is the primary whatever it is called.
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x","ports":{"grpc":"auto"}
             }}}}}"#,
             "a",
@@ -5421,7 +5407,7 @@ mod tests {
 
         // No `ports` at all keeps the pre-F6 behaviour: one allocated port.
         let r = resolve(
-            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
                 "type":"start_server","shell":"x"
             }}}}}"#,
             "a",
@@ -5516,7 +5502,7 @@ mod tests {
             { "url": "https://lit.example.com", "token": "s3cret" },
             { "url": "https://env.example.com", "token": { "env": "RELAY_TOKEN" } },
             { "url": "https://file.example.com", "token": { "file": "/run/secrets/relay" } },
-            { "url": "https://cmd.example.com", "token": { "command": "op read op://v/t" } }
+            { "url": "https://cmd.example.com", "token": { "shell": "op read op://v/t" } }
         ]"#;
         let p: RelayPolicy = serde_json::from_str(json).unwrap();
         assert_eq!(
@@ -5537,7 +5523,7 @@ mod tests {
                 },
                 RelayEntry {
                     url: "https://cmd.example.com".into(),
-                    token: Some(SecretSource::Command("op read op://v/t".into())),
+                    token: Some(SecretSource::Shell("op read op://v/t".into())),
                 },
             ])
         );
@@ -5646,14 +5632,14 @@ mod tests {
     #[test]
     fn test_variant_share_defaults_to_none() {
         let v: VariantConfig =
-            serde_json::from_str(r#"{ "type": "start_server", "command": "x" }"#).unwrap();
+            serde_json::from_str(r#"{ "type": "start_server", "shell": "x" }"#).unwrap();
         assert!(v.share.is_none());
     }
 
     #[test]
     fn test_sharing_config_parses_on_veld_config() {
         let json = r#"{
-            "schemaVersion": "2",
+            "schemaVersion": "3",
             "name": "demo",
             "sharing": {
                 "relays": ["https://relay.acme.internal"],
@@ -5664,7 +5650,7 @@ mod tests {
                     "variants": {
                         "local": {
                             "type": "start_server",
-                            "command": "npm start",
+                            "shell": "npm start",
                             "share": { "expose": ["peer"] }
                         }
                     }

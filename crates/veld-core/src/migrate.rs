@@ -448,13 +448,11 @@ mod tests {
     } } }
   }
 }"#;
+        // The v2 original can no longer be loaded — v2 is not a supported version,
+        // which is the whole reason `--migrate` exists. So this asserts the
+        // *migrated* config resolves to the values the v2 text described, rather
+        // than diffing two loaded configs.
         let dir = tempfile::tempdir().unwrap();
-        let before_path = dir.path().join("before/veld.json");
-        std::fs::create_dir_all(before_path.parent().unwrap()).unwrap();
-        std::fs::write(&before_path, src).unwrap();
-        let before = crate::config::parse_config(&before_path).unwrap();
-        let before_resolved = before.resolved("api", "dev").unwrap();
-
         let m = plan_text(src);
         let after_path = dir.path().join("after/veld.json");
         std::fs::create_dir_all(after_path.parent().unwrap()).unwrap();
@@ -464,31 +462,26 @@ mod tests {
 
         // The command means the same thing, expressed the safer way.
         assert_eq!(
-            before_resolved.command,
-            Some(crate::config::CommandSpec::Shell("node server.js".into()))
-        );
-        assert_eq!(
             after_resolved.command,
             Some(crate::config::CommandSpec::Argv(vec![
                 "node".into(),
                 "server.js".into()
             ]))
         );
-        // Everything else is untouched.
-        assert_eq!(before_resolved.step_type, after_resolved.step_type);
+        // Everything the v2 text described survives, unchanged in meaning.
         assert_eq!(
-            before_resolved.env.as_ref().map(|e| e.len()),
-            after_resolved.env.as_ref().map(|e| e.len())
+            after_resolved.step_type,
+            crate::config::StepType::StartServer
         );
+        assert_eq!(after_resolved.env.as_ref().map(|e| e.len()), Some(2));
         assert_eq!(
-            before_resolved.readiness.as_ref().map(|p| &p.check_type),
-            after_resolved.readiness.as_ref().map(|p| &p.check_type)
+            after_resolved
+                .readiness
+                .as_ref()
+                .map(|p| p.check_type.as_str()),
+            Some("port")
         );
         // `on_stop` is converted too — same words, safer form.
-        assert_eq!(
-            before_resolved.on_stop,
-            Some(crate::config::CommandSpec::Shell("docker rm -f api".into()))
-        );
         assert_eq!(
             after_resolved.on_stop,
             Some(crate::config::CommandSpec::Argv(vec![

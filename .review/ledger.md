@@ -50,3 +50,21 @@ angles §3.3 names for the stakes override (3 and 7) both got opus.
 | T14 | endpoint.rs:617 | 🟡 | 7 | open | `run_token_command` lacks `.stdin(Stdio::null())` unlike the new `run_source_command`; can read/steal the tty instead of failing at its timeout. |
 | T15 | config.rs:521 | 🟡 | 7 | open | `parsed_mode` accepts setuid/setgid and world-readable modes on a `secret: true` delivery with no cross-check. |
 | T16 | values.rs:91 | 🟡 | 7 | open | `files` literal content is not interpolated while `env` literal content is — `"PORT=${veld.port}"` writes the placeholder text silently. |
+
+## Round 1 complete — Stage A only. HALTED per §2(b).
+
+Spawns: 5 opus / 0 sonnet / 0 haiku — 5 of 14. Opus 5 of 6.
+Stage A ran 4 angles (1 twice, after a RECLASSIFY): 1, 4, 6, 7.
+Stages B (2, 3) and C (5) NOT RUN.
+
+Fixed & verified-fixed this round: F1, M-A, M-B, T1, T2, T4, T5, T7, T9, T11,
+T12, C2, C3, I4, I5, M8, M9, M14, M15.
+
+Deferred (real, out of this diff's minimal-fix scope): T3, T6, T8, T13, T14,
+T15, T16, C1, C4, C5, C9, C10, C11, C12, C13, C14, C15, C16, I6, I7, I8, I9,
+I10, I11, M-remaining.
+
+HALT REASON — §2(b), one interlocking product decision blocks a coherent fix
+for I1 + I2 + I3: **how strictly does v3 validation apply to a v1/v2 document?**
+Every option changes what an existing user sees on upgrade, so it is not mine
+to guess.

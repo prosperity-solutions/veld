@@ -49,7 +49,7 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "2",
   "name": "my-app",
   "nodes": {
@@ -106,26 +106,24 @@ The name is available as the `{project}` variable in URL templates and as `${vel
 
 ### `schemaVersion`
 
-Must be `"1"`, `"2"`, or `"3"`. Required in the root config file; every other key
-is optional in every file.
-
-| Version | What it gives you |
-|---|---|
-| `"3"` | Everything below, plus: [`include`](#splitting-the-config-across-files) to split the config across files, [node-level defaults](#node-level-defaults), [`vars`](#vars), [value sources and `secret`](#value-sources), [named `ports`](#ports), [`files`](#files), and [reserved `hooks`/`ui`](#reserved-hooks-and-ui). **`command` is replaced by [`argv`/`shell`](#argv-and-shell)** |
-| `"2"` | `probes` and `skip_if` |
-| `"1"` | Legacy `health_check` and `verify` |
+Must be `"3"`. Required in the root config file; every other key is optional in
+every file.
 
 ```json
 "schemaVersion": "3"
 ```
 
-**v1 and v2 configs keep loading unchanged, indefinitely — there is no flag day.**
-Comments, trailing commas, and `veld lint` work at every version. To move a project
-forward, run `veld config --migrate` (a dry run; add `--write` to apply) and read
+**`"1"` and `"2"` are not supported.** A config declaring either fails to load with
+a message pointing at `veld config --migrate`, which converts it — a dry run by
+default, showing the diff before it writes anything. See
 [docs/migrating-to-v3.md](migrating-to-v3.md).
 
-A `schemaVersion: "3"` document containing `command` fails to load, with a message
-naming every offending position and pointing at `veld config --migrate`.
+Supporting two readings was tried and abandoned: every rule then needed a severity
+that depended on the document's version, and every new field was silently live in an
+old document that had never opted into it. One reading is the feature.
+
+A document containing `command` fails to load, with a message naming every offending
+position.
 
 ### `url_template`
 
@@ -1633,7 +1631,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "2",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
@@ -1906,7 +1904,7 @@ Veld provides a JSON Schema for editor autocompletion and validation. Add the `$
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   ...
 }
 ```

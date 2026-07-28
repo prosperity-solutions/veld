@@ -266,8 +266,7 @@ The short version, because the wrong instinct here is expensive:
 Comments and trailing commas are legal in every config file. Editors need
 `"files.associations": {"veld.json": "jsonc"}` to stop flagging them.
 
-Quick reference for the two node types (`schemaVersion: "3"` form; in v1/v2 the
-command key is `command`, a shell string):
+Quick reference for the two node types :
 
 **`start_server`** — long-running process. Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or legacy `health_check`).
 ```jsonc
@@ -409,7 +408,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
 - **`outputs` shape** — a map (`{"KEY": "template"}`) publishes computed values, an array (`["KEY"]`) declares names captured from the node's own output. Both work on both node types now; on a `command` node the map is interpolated *after* the command runs, with its captured outputs in scope
 - **`veld lint` is the fast feedback loop** — it reports every semantic problem at once and exits 1 on any error. `veld start` refuses on the same errors, but only one at a time
-- **`command` is gone in `schemaVersion: "3"`** — use `argv` (array, spawned directly) or `shell` (string, via `sh -c`), exactly one. A v3 config containing `command` fails to load. `veld config --migrate` converts (dry run; `--write` applies). v1/v2 keep working unchanged
+- **`schemaVersion` must be `"3"`; `command` is gone** — use `argv` (array, spawned directly) or `shell` (string, via `sh -c`), exactly one. A `"1"`/`"2"` config, or a config containing `command`, fails to load. `veld config --migrate` converts it (dry run; `--write` applies)
 - **`veld.*` is a closed set** — node outputs are `${output.KEY}` / `${nodes.<node>.KEY}`, never `${veld.KEY}`. This changed: `${veld.<OUTPUT>}` used to work inside `on_stop` and now fails, which would silently skip the teardown hook — `veld lint` catches it
 - **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
 - **Relative paths resolve from the project root**, never from the file that declares them, even in an included file

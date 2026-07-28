@@ -134,7 +134,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     let project_root = crate::config::project_root(root_path);
 
     let root_text = read(root_path)?;
-    let root_doc = parse_document(&root_text, root_path, None)?;
+    let root_doc = parse_document(&root_text, root_path)?;
 
     // The two keys only the root file must have. Everything else is optional
     // everywhere, which is what makes it one document type.
@@ -208,7 +208,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
                     continue;
                 }
             };
-            let mut doc = match parse_document(&text, &path, Some(&schema_version)) {
+            let mut doc = match parse_document(&text, &path) {
                 Ok(doc) => doc,
                 Err(e) => {
                     file_findings.push(crate::config::Finding::unparseable_include(
@@ -288,17 +288,12 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 
 /// Parse one file: JSONC front end, then the shared document shape.
 ///
-/// `project_version` is the version the **root** file declared, or `None` when
-/// parsing the root file itself (its own `schemaVersion` is read from the result).
-/// The v3 legacy-command gate keys off the project's version rather than the
-/// file's: an included file legitimately omits `schemaVersion`, so a per-file check
-/// left every included file in a v3 project free to keep using `command` — exactly
-/// where F2 puts the node bodies.
-fn parse_document(
-    text: &str,
-    path: &Path,
-    project_version: Option<&str>,
-) -> Result<Document, ConfigError> {
+/// The legacy-command gate runs on every file unconditionally: only one schema
+/// version is supported, so `command` is never valid, and an included file
+/// legitimately omits `schemaVersion` — a per-file version check would have left
+/// every included file free to keep the old form, which is exactly where the node
+/// bodies live.
+fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
     let json = crate::jsonc::strip(text).map_err(|e| ConfigError::Jsonc {
         path: path.to_path_buf(),
         detail: e.to_string(),
@@ -308,11 +303,23 @@ fn parse_document(
             path: path.to_path_buf(),
             source: e,
         })?;
-    // Checked per file so the error names the file the author has to edit, but
-    // gated on the *project's* version.
-    let effective_version =
-        project_version.or_else(|| value.get("schemaVersion").and_then(|v| v.as_str()));
-    if effective_version == Some("3") {
+    // The legacy-command gate, but **after** the version question is settled.
+    //
+    // A document that declares an unsupported `schemaVersion` must get the
+    // "run `veld config --migrate`" error, not "`command` has been replaced" —
+    // those are the same fix, and the version error is the one that explains it.
+    // So skip the gate for a document whose own version is unsupported and let the
+    // caller's version check produce the better message.
+    //
+    // A file with no `schemaVersion` is an included file: its project's root was
+    // already version-checked, so the gate applies. Checking per file is what makes
+    // the error name the file to edit, and is why this is not a per-file *version*
+    // check — an included file legitimately omits the key, which would have left
+    // every included file free to keep the old form.
+    let own_version = value.get("schemaVersion").and_then(|v| v.as_str());
+    let version_is_supported =
+        own_version.is_none_or(|v| crate::config::SUPPORTED_SCHEMA_VERSIONS.contains(&v));
+    if version_is_supported {
         crate::config::reject_v3_legacy_commands(&value, path)?;
     }
     // Deserialize from the **text**, not the already-parsed `Value`:
@@ -852,10 +859,10 @@ mod tests {
             "veld.json",
             r#"{
                 "//": "a comment, the pre-JSONC way",
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "legacy",
                 "nodes": { "api": { "default_variant": "dev", "variants": { "dev": {
-                    "type": "command", "command": "true"
+                    "type": "command", "shell": "true"
                 } } } }
             }"#,
         )]);
@@ -1013,10 +1020,10 @@ mod tests {
         let dir = project(&[(
             "veld.json",
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "classic",
                 "nodes": { "api": { "default_variant": "dev", "variants": { "dev": {
-                    "type": "command", "command": "echo hi"
+                    "type": "command", "shell": "echo hi"
                 } } } }
             }"#,
         )]);

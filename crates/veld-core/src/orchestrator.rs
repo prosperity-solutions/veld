@@ -3151,13 +3151,13 @@ mod tests {
 
         let config: VeldConfig = serde_json::from_str(&format!(
             r#"{{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "testcfg",
                 "nodes": {{
                     "svc": {{ "default_variant": "local", "variants": {{
                         "local": {{
                             "type": "start_server",
-                            "command": "sleep 30",
+                            "shell": "sleep 30",
                             "on_stop": "printf '%s' \"${{veld.run}}|${{veld.port}}|${{veld.node}}|${{veld.variant}}|${{output.run}}|${{output.port}}\" > {}"
                         }}
                     }}}}
@@ -3211,14 +3211,14 @@ mod tests {
         // An invalid proxy header name: parses fine, `validate` rejects it.
         let config: VeldConfig = serde_json::from_str(&format!(
             r#"{{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "testcfg",
                 "proxy": {{ "request": {{ "remove": ["X Frame Options"] }} }},
                 "nodes": {{
                     "svc": {{ "default_variant": "local", "variants": {{
                         "local": {{
                             "type": "start_server",
-                            "command": "sleep 30",
+                            "shell": "sleep 30",
                             "on_stop": "touch {}"
                         }}
                     }}}}
@@ -3266,12 +3266,12 @@ mod tests {
 
         let config: VeldConfig = serde_json::from_str(
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "testcfg",
                 "url_template": "{service}.{run}.{project}.localhost",
                 "nodes": {
                     "task": { "default_variant": "local", "variants": {
-                        "local": { "type": "command", "command": "echo running; exit 7" }
+                        "local": { "type": "command", "shell": "echo running; exit 7" }
                     }}
                 }
             }"#,

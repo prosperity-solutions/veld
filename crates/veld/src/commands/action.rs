@@ -403,9 +403,9 @@ mod tests {
     use veld_core::config::NodeConfig;
 
     fn config_with_actions(node: &str, actions: Vec<ActionConfig>) -> VeldConfig {
-        let json = r#"{"schemaVersion":"2","name":"test","nodes":{}}"#;
+        let json = r#"{"schemaVersion":"3","name":"test","nodes":{}}"#;
         let mut cfg: VeldConfig = serde_json::from_str(json).unwrap();
-        let node_json = r#"{"variants":{"local":{"type":"start_server","command":"x"}}}"#;
+        let node_json = r#"{"variants":{"local":{"type":"start_server","shell": "x"}}}"#;
         let mut node_cfg: NodeConfig = serde_json::from_str(node_json).unwrap();
         node_cfg.actions = Some(actions);
         cfg.nodes.insert(node.to_owned(), node_cfg);
@@ -481,7 +481,7 @@ mod tests {
     fn ambiguous_across_nodes_needs_filter() {
         let mut cfg = config_with_actions("primary", vec![action("psql", &[])]);
         let mut replica: NodeConfig =
-            serde_json::from_str(r#"{"variants":{"local":{"type":"start_server","command":"x"}}}"#)
+            serde_json::from_str(r#"{"variants":{"local":{"type":"start_server","shell": "x"}}}"#)
                 .unwrap();
         replica.actions = Some(vec![action("psql", &[])]);
         cfg.nodes.insert("replica".to_owned(), replica);

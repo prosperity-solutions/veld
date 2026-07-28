@@ -1,8 +1,13 @@
 # Migrating a config to `schemaVersion: "3"`
 
-**You do not have to.** `schemaVersion: "1"` and `"2"` keep loading with today's
-semantics, indefinitely. There is no flag day. Migrate a project when you want
-what v3 adds, not because a deadline is coming.
+**You have to.** This veld reads `schemaVersion: "3"` only — a `"1"` or `"2"`
+config fails to load with a message pointing here. Migrating is one command and
+the tool shows you the diff before it writes anything.
+
+Supporting two readings was tried and abandoned. Every rule needed a severity that
+depended on the document's version, every new field was silently live in an old
+document that had never opted into it, and the result was two config languages
+sharing one parser — more confusing than the migration it was meant to avoid.
 
 Start with the tool:
 
@@ -19,9 +24,10 @@ look at.
 
 ---
 
-## The one breaking change that affects v1 and v2 too
+## The change that is easy to miss
 
-Everything else in v3 is opt-in. This is not.
+`--migrate` handles the mechanical rewrites. This one needs your eyes, because it
+is a *semantic* change the tool cannot always see:
 
 **Node outputs are no longer reachable as `${veld.<OUTPUT>}` inside `on_stop`.**
 
@@ -48,8 +54,8 @@ so this is caught **before a run starts** rather than at teardown — which
 matters, because a teardown hook that fails to interpolate does not run, and
 whatever it was going to clean up gets left behind.
 
-Run `veld lint` on your existing config now, before migrating anything. If it is
-quiet, this does not affect you.
+After migrating, `veld lint` reports any `${veld.*}` name that is not a built-in,
+so you will be told rather than discovering it at teardown.
 
 ---
 
@@ -243,9 +249,9 @@ Created with its mode (default `0600`), so it is never briefly world-readable.
 
 ## Rollback
 
-Set `schemaVersion` back to `"2"` and revert the `argv`/`shell` conversions —
-or just `git checkout` the file, which is why `--migrate` is a dry run by
-default. v1 and v2 loading is unchanged, so there is nothing else to undo.
+`git checkout` the config — which is why `--migrate` is a dry run by default and
+writes only with `--write`. Note that rolling the *config* back means rolling
+*veld* back too, since this version reads only `schemaVersion: "3"`.
 
 One thing worth knowing before you upgrade veld itself, independent of migrating a
 config: an unrecognised top-level key — most often the pre-JSONC `"//": "…"`

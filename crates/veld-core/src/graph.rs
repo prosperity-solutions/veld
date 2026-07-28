@@ -662,7 +662,7 @@ mod tests {
 
         VeldConfig {
             schema: None,
-            schema_version: "2".into(),
+            schema_version: "3".into(),
             name: "test".into(),
             url_template: "{service}.{run}.{project}.localhost".into(),
             presets: None,

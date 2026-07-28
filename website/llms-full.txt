@@ -56,8 +56,8 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "nodes": {
@@ -66,7 +66,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health", "timeout_seconds": 30 }
         }
       }
@@ -76,7 +76,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/", "timeout_seconds": 30 },
           "depends_on": { "backend": "local" }
         }
@@ -231,7 +231,7 @@ Two gates protect every share: a capability token embedded in the ticket, plus h
 - **`first`** (default with `--json`) — auto-approves and pins the first token-valid joiner, rejecting the rest
 - **`auto`** — approves any token-valid joiner
 
-Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees URLs or content. Relay selection is a config compliance control and must be opted into explicitly — there is no implicit default, so nothing is routed over n0's public relays by accident: set `sharing.relays` in `veld.json` to `"public"` (n0's relays) or to an array of self-hosted relay URLs to keep share traffic on relays you run. `veld share` is refused if no relay is configured. n0's public relays are a free community service intended for development and testing — rate-limited, best-effort, no uptime or throughput guarantees; per [iroh's guidance](https://docs.iroh.computer/concepts/relays) production or high-volume sharing should run on self-hosted relays. (A fair-use recommendation from n0, not a licensing restriction — iroh is dual-licensed MIT/Apache-2.0 and free for commercial use.) Config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor). The custom-relay guarantee covers both legs: the joining side automatically confines to the relay(s) advertised in the ticket, so a custom-relay share is never joined over n0's public relays; a joiner only sets `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` to supply a token for a token-gated relay. The daemon binds one iroh endpoint per relay policy on demand, so shares on different relays (e.g. public and a self-hosted relay) run concurrently without conflict. A self-hosted relay can require an authorization token so it isn't an open relay: write a relay entry as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token is a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "command": "op read op://vault/relay/token" }` (secret-manager CLI; runs with the user's login-shell PATH, so `op` etc. are found even though the daemon has a bare service PATH); it is resolved on the daemon at share time, and a token that fails to resolve fails the share rather than connecting unauthenticated. On the join side, a token-gated relay prompts the joiner for the token (browser overlay or `veld join` terminal), caches it per relay in the central veld database (`<data_dir>/veld/veld.db`, 0600) so future joins don't re-ask, and re-prompts on a wrong token; the token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay), or the host sets `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket so joiners need no setup — dangerous, since the relay secret then rides in every share link, so disposable per-project tokens only.
+Traffic is end-to-end encrypted between the two velds; a relay only forwards sealed bytes and never sees URLs or content. Relay selection is a config compliance control and must be opted into explicitly — there is no implicit default, so nothing is routed over n0's public relays by accident: set `sharing.relays` in `veld.json` to `"public"` (n0's relays) or to an array of self-hosted relay URLs to keep share traffic on relays you run. `veld share` is refused if no relay is configured. n0's public relays are a free community service intended for development and testing — rate-limited, best-effort, no uptime or throughput guarantees; per [iroh's guidance](https://docs.iroh.computer/concepts/relays) production or high-volume sharing should run on self-hosted relays. (A fair-use recommendation from n0, not a licensing restriction — iroh is dual-licensed MIT/Apache-2.0 and free for commercial use.) Config wins over the legacy `VELD_SHARE_RELAY` env var (read from the daemon's process environment, not your shell, and not an enforceable floor). The custom-relay guarantee covers both legs: the joining side automatically confines to the relay(s) advertised in the ticket, so a custom-relay share is never joined over n0's public relays; a joiner only sets `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` to supply a token for a token-gated relay. The daemon binds one iroh endpoint per relay policy on demand, so shares on different relays (e.g. public and a self-hosted relay) run concurrently without conflict. A self-hosted relay can require an authorization token so it isn't an open relay: write a relay entry as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token is a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "shell": "op read op://vault/relay/token" }` (secret-manager CLI; runs with the user's login-shell PATH, so `op` etc. are found even though the daemon has a bare service PATH); it is resolved on the daemon at share time, and a token that fails to resolve fails the share rather than connecting unauthenticated. On the join side, a token-gated relay prompts the joiner for the token (browser overlay or `veld join` terminal), caches it per relay in the central veld database (`<data_dir>/veld/veld.db`, 0600) so future joins don't re-ask, and re-prompts on a wrong token; the token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (attached only to the matching ticket relay), or the host sets `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket so joiners need no setup — dangerous, since the relay secret then rides in every share link, so disposable per-project tokens only.
 
 ### Public web sharing
 
@@ -315,7 +315,7 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `$schema` | string | No | JSON Schema URL for editor autocompletion |
-| `schemaVersion` | string | Yes (root file only) | `"1"`, `"2"`, or `"3"`. Use `"3"` for new projects. v1/v2 keep working unchanged — there is no flag day |
+| `schemaVersion` | string | Yes (root file only) | Must be `"3"`. `"1"` and `"2"` are not supported and fail to load with a message pointing at `veld config --migrate`, which converts a config (dry run by default) |
 | `include` | string[] | No | v3: globs of further config files, relative to the root file. Splits a large config across per-directory files. A node is defined in exactly one file |
 | `vars` | object | No | v3: one definition point per value, referenced as `${vars.name}`. A scalar or a single value source — never a config fragment |
 | `name` | string | Yes | Project name (used in URLs) |
@@ -337,11 +337,11 @@ Project-level lifecycle steps that run outside the dependency graph. Not nodes �
 
 ```json
 "setup": [
-  { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
-  { "name": "network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+  { "name": "docker", "shell": "docker info", "failureMessage": "Docker must be running" },
+  { "name": "network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" }
 ],
 "teardown": [
-  { "name": "network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+  { "name": "network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
 ]
 ```
 
@@ -364,7 +364,7 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 ```json
 {
   "type": "start_server",
-  "command": "npm run dev -- --port ${veld.port}",
+  "shell": "npm run dev -- --port ${veld.port}",
   "health_check": { "type": "http", "path": "/health" }
 }
 ```
@@ -395,7 +395,7 @@ Two-phase: (1) TCP port check, (2) HTTP endpoint check. Three strategies:
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
-{ "type": "command", "command": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "command", "shell": "curl -sf http://localhost:${veld.port}/ready" }
 ```
 
 ### Dependencies
@@ -542,8 +542,8 @@ Usage: `veld start --preset fullstack --name my-feature`
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "myproject",
   "url_template": "{service}.{run}.myproject.localhost",
   "presets": {
@@ -556,7 +556,7 @@ Usage: `veld start --preset fullstack --name my-feature`
       "variants": {
         "docker": {
           "type": "start_server",
-          "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+          "shell": "docker run --rm -p ${veld.port}:5432 postgres:16",
           "health_check": { "type": "port", "timeout_seconds": 15 },
           "outputs": {
             "DATABASE_URL": "postgres://dev:dev@localhost:${veld.port}/app"
@@ -569,7 +569,7 @@ Usage: `veld start --preset fullstack --name my-feature`
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "cargo run -- --port ${veld.port}",
+          "shell": "cargo run -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/health" },
           "depends_on": { "database": "docker" },
           "env": {
@@ -583,7 +583,7 @@ Usage: `veld start --preset fullstack --name my-feature`
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "shell": "npm run dev -- --port ${veld.port}",
           "health_check": { "type": "http", "path": "/" },
           "depends_on": { "backend": "local" },
           "env": {

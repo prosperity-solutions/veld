@@ -29,7 +29,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
 - **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`); a preset can compose others with `@name`
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
-- **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json`; split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. v1 and v2 configs keep working unchanged; see [docs/migrating-to-v3.md](docs/migrating-to-v3.md)
+- **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json`; split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — `veld config --migrate` converts an older config (dry run by default). See [docs/migrating-to-v3.md](docs/migrating-to-v3.md)
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
 - **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
 - **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
@@ -91,7 +91,7 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "2",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
