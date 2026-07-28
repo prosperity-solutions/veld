@@ -29,7 +29,9 @@
         "debug": {
           "argv": ["node", "--inspect=${veld.ports.debug}", "server.js"],
           "probes": { "liveness": null, "readiness": { "type": "port", "port": "http" } },
-          "share": null
+          "share": null,
+          "on_stop": null,
+          "verify": { "argv": ["true"] }
         }
       }
     }

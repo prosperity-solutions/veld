@@ -1997,6 +1997,22 @@ async fn debug_log_free(writer: &Option<LogWriter>, message: &str) {
     }
 }
 
+/// Record sensitive keys **without discarding the ones already there**.
+///
+/// The whole bug class this replaces was an `=` where an extend belonged: three
+/// separate places contribute keys (declared `sensitive_outputs`, secret `env`
+/// values, tainted synthetic outputs) and whichever ran last silently won. A
+/// command node using both a secret `env` value and `sensitive_outputs` stopped
+/// masking the env value. Additive-and-idempotent is the only safe shape here, so
+/// it gets a name and a test rather than being open-coded at each site.
+fn mark_sensitive(keys: &mut Vec<String>, add: impl IntoIterator<Item = String>) {
+    for key in add {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+}
+
 /// Does this synthetic-output template read anything sensitive?
 ///
 /// Reuses `config`'s reference parsers rather than re-scanning for `${...}` here:
@@ -2175,8 +2191,14 @@ async fn execute_node_isolated(
     };
 
     // Mark sensitive output keys.
+    //
+    // Extend, never assign. Both branches above already put keys here — the
+    // `start_server` path adds secret `env` keys, and `execute_command_isolated`
+    // adds those plus any tainted synthetic output — so assigning discarded them.
+    // For a `command` node that used both a secret `env` value and
+    // `sensitive_outputs`, the env value silently stopped being masked.
     if let Some(sensitive) = sensitive_outputs {
-        node_state.sensitive_keys = sensitive;
+        mark_sensitive(&mut node_state.sensitive_keys, sensitive);
     }
 
     // Emit completion event.
@@ -2404,7 +2426,7 @@ async fn execute_start_server_isolated(
             }
             node_state.outputs.insert(okey.clone(), val);
         }
-        node_state.sensitive_keys.extend(tainted);
+        mark_sensitive(&mut node_state.sensitive_keys, tainted);
     }
 
     // Start the process.
@@ -2869,10 +2891,32 @@ async fn execute_command_isolated(
         for (key, value) in &node_state.outputs {
             var_ctx.set_output(key, value.clone());
         }
+        // Taint propagation, as on the `start_server` path — and this is the sharper
+        // case: these templates are interpolated *after* the command ran, with its
+        // captured outputs in scope, so `${output.TOKEN}` where `TOKEN` is declared
+        // sensitive is not hypothetical, it is the intended usage.
+        //
+        // `resolved.sensitive_outputs` is consulted directly because the caller
+        // applies it to `node_state` only after this function returns.
+        let mut sensitive: Vec<String> = node_state.sensitive_keys.clone();
+        sensitive.extend(resolved.sensitive_outputs.iter().flatten().cloned());
+        let secret_vars: Vec<String> = ctx
+            .config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut tainted: Vec<String> = Vec::new();
         for (key, template) in map {
             let value = crate::variables::interpolate(template, var_ctx)?;
+            if template_is_tainted(template, &sensitive, &secret_vars) {
+                tainted.push(key.clone());
+            }
             node_state.outputs.insert(key.clone(), value);
         }
+        mark_sensitive(&mut node_state.sensitive_keys, tainted);
     }
 
     if result.exit_code == 0 {
@@ -3365,6 +3409,32 @@ mod tests {
         assert!(
             reloaded.execution_order.contains(&key),
             "terminal node must be appended to execution_order for teardown"
+        );
+    }
+
+    /// Recording sensitive keys is additive and idempotent.
+    ///
+    /// This existed as `node_state.sensitive_keys = sensitive`, so for a `command`
+    /// node the declared `sensitive_outputs` overwrote the secret `env` keys the
+    /// execution path had already recorded — the env value simply stopped being
+    /// masked, with nothing to indicate it. Three independent sources contribute
+    /// keys, so the only correct shape is union.
+    #[test]
+    fn marking_sensitive_keys_never_drops_existing_ones() {
+        let mut keys = vec!["ENV_SECRET".to_owned()];
+        mark_sensitive(&mut keys, ["DECLARED_OUTPUT".to_owned()]);
+        assert!(
+            keys.contains(&"ENV_SECRET".to_owned()),
+            "a later source must not discard an earlier one: {keys:?}"
+        );
+        assert!(keys.contains(&"DECLARED_OUTPUT".to_owned()));
+
+        // Idempotent: the same key arriving twice must not accumulate.
+        mark_sensitive(&mut keys, ["ENV_SECRET".to_owned()]);
+        assert_eq!(
+            keys.iter().filter(|k| *k == "ENV_SECRET").count(),
+            1,
+            "{keys:?}"
         );
     }
 
