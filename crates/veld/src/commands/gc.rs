@@ -62,14 +62,22 @@ pub async fn run() -> i32 {
                 let mut run = run.clone();
                 // Clean up Caddy routes and DNS entries.
                 for ns in run.nodes.values() {
-                    let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+                    // Same two keys, same reasons, as the daemon's GC pass
+                    // (`veld-daemon/src/gc.rs`): the pre-#170 id needs no URL and
+                    // is the only key that reaches a route whose `url` checkpoint
+                    // never landed; the hostname-keyed id (#170) needs one.
+                    let legacy =
+                        veld_core::url::legacy_run_route_id(run_name, &ns.node_name, &ns.variant);
+                    if helper.remove_route(&legacy).await.is_ok() {
+                        routes_cleaned += 1;
+                    }
+                    let Some(ref url_str) = ns.url else { continue };
+                    let hostname = veld_core::url::hostname_of_url(url_str);
+                    let route_id = veld_core::url::run_route_id(hostname);
                     if helper.remove_route(&route_id).await.is_ok() {
                         routes_cleaned += 1;
                     }
-                    if let Some(ref url_str) = ns.url {
-                        let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                        let _ = helper.remove_host(hostname).await;
-                    }
+                    let _ = helper.remove_host(hostname).await;
                 }
 
                 // Same guarded one-step finalize as the daemon: record final

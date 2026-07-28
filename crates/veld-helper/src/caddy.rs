@@ -60,9 +60,15 @@ struct RouteStore {
 impl CaddyManager {
     pub fn new(https_port: u16, http_port: u16, caddy_bin: Option<std::path::PathBuf>) -> Self {
         let store_path = routes_store_path(&caddy_bin);
-        let routes = load_route_store(&store_path);
+        let mut routes = load_route_store(&store_path);
         if !routes.is_empty() {
             info!(count = routes.len(), "restored persisted Caddy routes");
+        }
+        // Bring routes stored by a pre-#170 helper onto the hostname-keyed id
+        // format. Safe to run on every boot: the canonical id is a function of
+        // the entry's own hostname, so re-keying is idempotent.
+        if canonicalize_route_keys(&mut routes) > 0 {
+            write_route_store_blocking(&store_path, &routes);
         }
         Self {
             inner: Arc::new(Mutex::new(CaddyState { child_pid: None })),
@@ -602,6 +608,148 @@ fn load_route_store(path: &Path) -> HashMap<String, serde_json::Value> {
             HashMap::new()
         }),
         Err(_) => HashMap::new(),
+    }
+}
+
+/// Route ids the startup canonicalisation must leave alone.
+///
+/// - `veld-join-` — share-join routes. The daemon keeps `(hostname, route_id)`
+///   pairs in memory and removes by the *stored* id, so re-keying one behind its
+///   back would leak the route when the joiner leaves.
+/// - `veld-mgmt-{host}` — a dev instance's management route, added and removed by
+///   the daemon under an id it recomputes from `VELD_MANAGEMENT_HOST`.
+/// - `veld-management` / `veld-sentinel` — part of the base config, never stored,
+///   listed defensively.
+///
+/// Matched **structurally**, not by bare prefix: a legacy run route id is
+/// `veld-{run_name}-{node}-{variant}` and run names are nearly unconstrained
+/// (`is_safe_identifier`), so a run called `join-feature` or `mgmt-2` produces a
+/// key that a prefix test would mistake for a reserved one — and skipping it
+/// would leave a stale entry to out-sort the canonical route for its hostname.
+///
+/// - `veld-mgmt-{host}` is self-verifying: the suffix *is* the route's own host.
+/// - `veld-join-{join_id}-{node}` uses `join_` + 8 hex (`share::manager::gen_id`),
+///   which no plausible `{run_name}-{node}-{variant}` reproduces.
+fn is_reserved_route_id(id: &str, route: &serde_json::Value) -> bool {
+    if id == "veld-management" || id == "veld-sentinel" {
+        return true;
+    }
+    if let Some(host) = id.strip_prefix("veld-mgmt-") {
+        if stored_route_hostname(route) == Some(host) {
+            return true;
+        }
+    }
+    if let Some(tail) = id
+        .strip_prefix("veld-join-")
+        .and_then(|rest| rest.strip_prefix("join_"))
+    {
+        // 8 ASCII hex characters then the node separator. The hex check keeps
+        // byte index 8 on a char boundary.
+        let is_join_id = tail.len() > 8
+            && tail[..8].chars().all(|c| c.is_ascii_hexdigit())
+            && tail.as_bytes()[8] == b'-';
+        if is_join_id {
+            return true;
+        }
+    }
+    false
+}
+
+/// Read a stored route's hostname back out of the route JSON itself
+/// (`match[0].host[0]`, as `build_route_json` writes it).
+fn stored_route_hostname(route: &serde_json::Value) -> Option<&str> {
+    route.get("match")?.get(0)?.get("host")?.get(0)?.as_str()
+}
+
+/// Re-key persisted routes to `veld_core::url::run_route_id(hostname)`,
+/// returning how many entries moved.
+///
+/// This is the whole compatibility story for #170: routes written by an older
+/// helper are keyed `veld-{run}-{node}-{variant}`, which collides across
+/// projects. Because the new id derives from the hostname — and every stored
+/// route carries its own hostname — the store can migrate itself with no
+/// version marker, no dual-read window, and no information from the caller.
+///
+/// Several entries claiming one hostname collapse into one, with a warning:
+/// Caddy matches on host, so such a set had no defined winner to begin with
+/// (`build_full_config` orders by `@id`). An id that is already occupied is
+/// never overwritten — the occupant was either written by a current helper or
+/// reached first in sorted key order, so the survivor is the same on every boot.
+fn canonicalize_route_keys(routes: &mut HashMap<String, serde_json::Value>) -> usize {
+    let mut keys: Vec<String> = routes.keys().cloned().collect();
+    keys.sort();
+
+    let mut moved = 0;
+    for key in keys {
+        let Some(route) = routes.get(&key) else {
+            continue;
+        };
+        if is_reserved_route_id(&key, route) {
+            continue;
+        }
+        let Some(hostname) = stored_route_hostname(route) else {
+            warn!(
+                route_id = %key,
+                "persisted route has no host match — leaving its id alone"
+            );
+            continue;
+        };
+        // Normalised exactly as the add and removal sides do: a `urlTemplate` can
+        // carry a literal port or path (`app.localhost:3000`), and re-keying to an
+        // id derived from the un-normalised host would produce an entry no
+        // teardown path can ever recompute. Two such hosts differing only in port
+        // do collapse onto one id — correctly: Caddy's host matcher compares
+        // against the request's host with the port already split off, so a `host`
+        // match carrying a port never matched anything to begin with.
+        let canonical = veld_core::url::run_route_id(veld_core::url::hostname_of_url(hostname));
+        if canonical == key {
+            continue;
+        }
+        if routes.contains_key(&canonical) {
+            warn!(
+                route_id = %key,
+                canonical_id = %canonical,
+                hostname = %hostname,
+                "dropping a persisted route whose hostname is already claimed"
+            );
+            routes.remove(&key);
+            moved += 1;
+            continue;
+        }
+        let Some(mut route) = routes.remove(&key) else {
+            continue;
+        };
+        route["@id"] = serde_json::json!(&canonical);
+        routes.insert(canonical, route);
+        moved += 1;
+    }
+
+    if moved > 0 {
+        info!(count = moved, "re-keyed persisted Caddy routes by hostname");
+    }
+    moved
+}
+
+/// Blocking twin of [`persist_route_store`], for the one caller that runs before
+/// the store is behind its async lock: `CaddyManager::new`.
+fn write_route_store_blocking(path: &Path, routes: &HashMap<String, serde_json::Value>) {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let json = match serde_json::to_vec_pretty(routes) {
+        Ok(j) => j,
+        Err(e) => {
+            warn!(error = %e, "failed to serialize re-keyed routes");
+            return;
+        }
+    };
+    let tmp = path.with_extension(format!("json.tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, &json) {
+        warn!(error = %e, path = %tmp.display(), "failed to write re-keyed routes store");
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        warn!(error = %e, "failed to move re-keyed routes store into place");
     }
 }
 
@@ -1498,6 +1646,218 @@ mod tests {
 
         let loaded = load_route_store(&path);
         assert_eq!(loaded, routes);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Route-key canonicalisation (#170 compatibility)
+    // -----------------------------------------------------------------------
+
+    /// A route as a pre-#170 helper persisted it: id keyed by run name.
+    fn legacy_entry(
+        run: &str,
+        node: &str,
+        variant: &str,
+        hostname: &str,
+    ) -> (String, serde_json::Value) {
+        let id = format!("veld-{run}-{node}-{variant}");
+        let route = build_route_json(
+            &id,
+            hostname,
+            "localhost:3000",
+            None,
+            &veld_core::config::ResolvedProxy::default(),
+        );
+        (id, route)
+    }
+
+    #[test]
+    fn canonicalize_rekeys_legacy_ids_by_hostname() {
+        let mut routes = HashMap::new();
+        let (id, route) = legacy_entry("main", "web", "local", "web.main.repo-a.localhost");
+        routes.insert(id.clone(), route);
+
+        assert_eq!(canonicalize_route_keys(&mut routes), 1);
+
+        let canonical = veld_core::url::run_route_id("web.main.repo-a.localhost");
+        assert!(!routes.contains_key(&id), "legacy key survived");
+        // The inner @id moves with the key — `build_full_config` reads the value,
+        // not the map key, so a stale @id would serve under the old id.
+        assert_eq!(routes[&canonical]["@id"], canonical);
+    }
+
+    #[test]
+    fn canonicalize_separates_two_projects_that_shared_a_run_name() {
+        // The #170 collision as it looks on disk: repo A's route was overwritten
+        // by repo B's, so only one entry exists. After canonicalisation the two
+        // hostnames can coexist, which is the whole point.
+        let mut routes = HashMap::new();
+        let (id_a, route_a) = legacy_entry("main", "web", "local", "web.main.repo-a.localhost");
+        routes.insert(id_a, route_a);
+        canonicalize_route_keys(&mut routes);
+
+        let (id_b, route_b) = legacy_entry("main", "web", "local", "web.main.repo-b.localhost");
+        routes.insert(id_b, route_b);
+        canonicalize_route_keys(&mut routes);
+
+        assert_eq!(routes.len(), 2);
+        assert!(routes.contains_key(&veld_core::url::run_route_id("web.main.repo-a.localhost")));
+        assert!(routes.contains_key(&veld_core::url::run_route_id("web.main.repo-b.localhost")));
+    }
+
+    #[test]
+    fn canonicalize_normalises_a_host_carrying_a_port() {
+        // `{service}.localhost:{port}` is a documented urlTemplate shape, so a
+        // stored host can carry a port. The re-keyed id must match what the add
+        // and teardown paths compute from the same URL, or the entry becomes
+        // unremovable.
+        let mut routes = HashMap::new();
+        let (id, route) = legacy_entry("main", "web", "local", "web.main.app.localhost:9000");
+        routes.insert(id, route);
+
+        canonicalize_route_keys(&mut routes);
+        assert!(routes.contains_key(&veld_core::url::run_route_id("web.main.app.localhost")));
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() {
+        let mut routes = HashMap::new();
+        let (id, route) = legacy_entry("main", "web", "local", "web.main.app.localhost");
+        routes.insert(id, route);
+
+        assert_eq!(canonicalize_route_keys(&mut routes), 1);
+        let after_first = routes.clone();
+        // Every helper boot runs this; a second pass must be a no-op or the
+        // store would churn (and re-persist) forever.
+        assert_eq!(canonicalize_route_keys(&mut routes), 0);
+        assert_eq!(routes, after_first);
+    }
+
+    #[test]
+    fn canonicalize_leaves_reserved_ids_alone() {
+        let mut routes = HashMap::new();
+        // A join route: the daemon removes this by the id it holds in memory.
+        // `join_` + 8 hex is `share::manager::gen_id("join")`'s shape.
+        routes.insert(
+            "veld-join-join_a1b2c3d4-app".to_string(),
+            build_route_json(
+                "veld-join-join_a1b2c3d4-app",
+                "app.joined.localhost",
+                "localhost:3000",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+        // A dev instance's management route, likewise removed by a recomputed id.
+        routes.insert(
+            "veld-mgmt-veld-dev.localhost".to_string(),
+            build_route_json(
+                "veld-mgmt-veld-dev.localhost",
+                "veld-dev.localhost",
+                "localhost:19898",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+        let before = routes.clone();
+
+        assert_eq!(canonicalize_route_keys(&mut routes), 0);
+        assert_eq!(routes, before);
+    }
+
+    #[test]
+    fn canonicalize_rekeys_run_names_that_look_reserved() {
+        // Run names are nearly unconstrained, so `join-feature` and `mgmt-2`
+        // produce legacy ids that a bare prefix test would read as reserved.
+        // Skipping them would leave a stale entry that OUT-SORTS the canonical
+        // route for the same hostname (`build_full_config` orders by `@id`, and
+        // `veld-join-…` < `veld-run-…`), so the dead upstream would win.
+        for (run, host) in [
+            ("join-feature", "web.join-feature.app.localhost"),
+            ("mgmt-2", "web.mgmt-2.app.localhost"),
+            ("join", "web.join.app.localhost"),
+            ("management", "web.management.app.localhost"),
+            ("sentinel", "web.sentinel.app.localhost"),
+        ] {
+            let mut routes = HashMap::new();
+            let (id, route) = legacy_entry(run, "web", "local", host);
+            routes.insert(id.clone(), route);
+
+            assert_eq!(
+                canonicalize_route_keys(&mut routes),
+                1,
+                "run `{run}` must be re-keyed, not mistaken for a reserved id"
+            );
+            assert!(routes.contains_key(&veld_core::url::run_route_id(host)));
+        }
+    }
+
+    #[test]
+    fn canonicalize_leaves_a_mgmt_route_alone_only_when_it_owns_its_host() {
+        // `veld-mgmt-{host}` is self-verifying: the suffix IS the route's host.
+        let mut routes = HashMap::new();
+        routes.insert(
+            "veld-mgmt-veld-dev.localhost".to_string(),
+            build_route_json(
+                "veld-mgmt-veld-dev.localhost",
+                "veld-dev.localhost",
+                "localhost:19898",
+                None,
+                &veld_core::config::ResolvedProxy::default(),
+            ),
+        );
+        assert_eq!(canonicalize_route_keys(&mut routes), 0);
+
+        // A legacy run route whose id merely starts the same way does not own it.
+        let mut routes = HashMap::new();
+        let (id, route) = legacy_entry("mgmt", "web", "local", "web.mgmt.app.localhost");
+        routes.insert(id, route);
+        assert_eq!(canonicalize_route_keys(&mut routes), 1);
+    }
+
+    #[test]
+    fn canonicalize_collapses_two_entries_claiming_one_hostname() {
+        // Two run names, one hostname (a url_template without `{run}`): Caddy
+        // matches on host, so this pair never had a defined winner.
+        let mut routes = HashMap::new();
+        let (id_a, route_a) = legacy_entry("alpha", "web", "local", "web.app.localhost");
+        let (id_b, route_b) = legacy_entry("beta", "web", "local", "web.app.localhost");
+        routes.insert(id_a, route_a);
+        routes.insert(id_b, route_b);
+
+        assert_eq!(canonicalize_route_keys(&mut routes), 2);
+        assert_eq!(routes.len(), 1);
+        assert!(routes.contains_key(&veld_core::url::run_route_id("web.app.localhost")));
+    }
+
+    #[test]
+    fn canonicalize_keeps_an_entry_it_cannot_read_a_hostname_from() {
+        // Don't discard what we don't understand — an unrecognised shape keeps
+        // serving under its existing id rather than vanishing.
+        let mut routes = HashMap::new();
+        routes.insert(
+            "veld-weird".to_string(),
+            serde_json::json!({"@id": "veld-weird"}),
+        );
+        let before = routes.clone();
+
+        assert_eq!(canonicalize_route_keys(&mut routes), 0);
+        assert_eq!(routes, before);
+    }
+
+    #[test]
+    fn write_route_store_blocking_is_readable_by_load() {
+        let path =
+            std::env::temp_dir().join(format!("veld-routes-rekey-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let mut routes = HashMap::new();
+        let (id, route) = legacy_entry("main", "web", "local", "web.main.app.localhost");
+        routes.insert(id, route);
+        canonicalize_route_keys(&mut routes);
+        write_route_store_blocking(&path, &routes);
+
+        assert_eq!(load_route_store(&path), routes);
         let _ = std::fs::remove_file(&path);
     }
 

@@ -356,11 +356,13 @@ impl ShareManager {
 
     /// Periodically remove shares past their TTL, closing them fail-closed.
     ///
-    /// TTL is the only trigger here. `veld stop`/`veld restart` release a run's
-    /// shares explicitly and the GC pass unshares runs it finds dead, but a run
-    /// that leaves the live slot by any other route keeps its share until it
-    /// expires — and neither dashboard surfaces a share whose run is gone.
-    /// Tracked as #171.
+    /// TTL is the only trigger here. `veld stop`, `veld restart` and a
+    /// `veld start` that replaces a live run release that run's shares
+    /// explicitly, and the GC pass unshares runs it finds dead — so a share
+    /// reaches this reaper only if its run left the live slot by some other
+    /// route (e.g. a crash the monitor finalized before GC saw it). Both
+    /// dashboards list a hosted share whose run they don't know about, so such a
+    /// share stays stoppable from the UI while it waits here.
     fn spawn_reaper(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {

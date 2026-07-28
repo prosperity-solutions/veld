@@ -668,6 +668,11 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
                 .multi
                 .println(format!("  {} {}", output::checkmark(), name,));
         }
+        ProgressEvent::Notice { message } => {
+            let _ = ctx
+                .multi
+                .println(format!("  {} {message}", output::dim("»")));
+        }
     }
 }
 

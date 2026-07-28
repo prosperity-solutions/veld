@@ -61,6 +61,113 @@ pub fn slugify(input: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Caddy route ids
+// ---------------------------------------------------------------------------
+
+/// Prefix of every per-node run route id. Reserved namespaces the helper must
+/// never re-key: `veld-join-*` (share joins, whose ids the daemon holds in
+/// memory and removes verbatim), `veld-mgmt-*` (an instance's management
+/// route), and the base config's `veld-management` / `veld-sentinel`.
+pub const RUN_ROUTE_PREFIX: &str = "veld-run-";
+
+/// Extract the bare hostname from a node URL (`https://web.dev.app.localhost:18443`
+/// → `web.dev.app.localhost`). Scheme, port and path are dropped.
+///
+/// Every route-removal site needs this anyway (to remove the DNS host), and
+/// [`run_route_id`] is derived from it — so both sides of the route lifecycle
+/// must agree on exactly one implementation. That is this one.
+///
+/// # Examples
+/// ```
+/// # use veld_core::url::hostname_of_url;
+/// assert_eq!(hostname_of_url("https://web.dev.app.localhost:18443"), "web.dev.app.localhost");
+/// assert_eq!(hostname_of_url("web.dev.app.localhost"), "web.dev.app.localhost");
+/// ```
+pub fn hostname_of_url(url: &str) -> &str {
+    let no_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let no_path = no_scheme.split('/').next().unwrap_or(no_scheme);
+    no_path.split(':').next().unwrap_or(no_path)
+}
+
+/// The Caddy route id for a node served at `hostname`.
+///
+/// Keyed by the **hostname**, not by the run name (which is unique per project
+/// only, so two repos both on `main` collided — issue #170) and not by the
+/// globally-unique `run_id` (which would mint a fresh id on every start, so a
+/// crashed run's entry could never be overwritten by the next start of the same
+/// environment and would linger in the helper's durable store, shadowing the
+/// live route for that hostname).
+///
+/// The invariant this buys: **one hostname ⇒ one route id ⇒ one store entry.**
+/// Caddy matches on host, so two entries for one hostname have no defined
+/// winner; keying by hostname makes that state unrepresentable. Two hostnames
+/// that are genuinely equal (two clones of one repo, same run name) do collide
+/// here — deliberately, because they cannot both be served. `veld start`
+/// refuses that case up front instead of silently overwriting.
+///
+/// The hash suffix is load-bearing: `slugify` truncates at 48 characters, so
+/// long hostnames sharing a 40-character prefix would otherwise alias.
+///
+/// # Examples
+/// ```
+/// # use veld_core::url::run_route_id;
+/// let id = run_route_id("web.dev.app.localhost");
+/// assert!(id.starts_with("veld-run-web-dev-app-localhost-"));
+/// assert_eq!(id, run_route_id("WEB.dev.app.localhost")); // hostnames are case-insensitive
+/// ```
+pub fn run_route_id(hostname: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let lower = hostname.to_ascii_lowercase();
+    let digest = Sha256::digest(lower.as_bytes());
+    // 8 hex characters (32 bits) — enough to separate the handful of hostnames
+    // one machine serves, short enough to keep the id readable in logs.
+    let mut hash = String::with_capacity(8);
+    for byte in &digest[..4] {
+        use std::fmt::Write as _;
+        let _ = write!(hash, "{byte:02x}");
+    }
+
+    let mut label = slugify(&lower);
+    // slugify already caps at 48; trim further so id length stays predictable.
+    if label.len() > 40 {
+        label.truncate(40);
+        label = label.trim_end_matches('-').to_owned();
+    }
+    if label.is_empty() {
+        // No ASCII alphanumerics in the hostname at all — the hash alone still
+        // identifies it uniquely.
+        return format!("{RUN_ROUTE_PREFIX}{hash}");
+    }
+    format!("{RUN_ROUTE_PREFIX}{label}-{hash}")
+}
+
+/// The pre-#170 route id format, kept only so teardown can also delete a route
+/// stored by an older helper.
+///
+/// The helper canonicalises its whole store to [`run_route_id`] on startup, so
+/// this matters in one window: `veld update` installed new binaries but the *old*
+/// helper is still running (see `veld update`'s warning for the modes where it
+/// cannot restart itself). Without this, stopping such a run would leave its
+/// legacy entry behind to shadow the hostname forever.
+///
+/// The mirror-image window is a **downgrade** (`VELD_VERSION=<older>`): an older
+/// helper only ever removes the legacy id, so every `veld-run-*` entry this build
+/// persisted becomes a store orphan it will replay but never clean up. Nothing
+/// prunes it automatically — delete `caddy-data/veld-routes.json` (the helper
+/// rebuilds it from the next `veld start`) if a downgrade leaves stale routes.
+///
+/// Only ever call it on a **removal** path. Deleting a legacy id before adding
+/// ours would re-create #170's start collision, since the legacy id may belong
+/// to another project's live run.
+pub fn legacy_run_route_id(run_name: &str, node: &str, variant: &str) -> String {
+    format!("veld-{run_name}-{node}-{variant}")
+}
+
+// ---------------------------------------------------------------------------
 // Git helpers
 // ---------------------------------------------------------------------------
 
@@ -415,6 +522,96 @@ mod tests {
         assert!(!is_localhost_domain("notlocalhost"));
         assert!(!is_localhost_domain("foo.localhost.evil.com"));
         assert!(!is_localhost_domain(""));
+    }
+
+    // -- route ids --
+
+    #[test]
+    fn hostname_of_url_strips_scheme_port_and_path() {
+        assert_eq!(
+            hostname_of_url("https://web.dev.app.localhost:18443"),
+            "web.dev.app.localhost"
+        );
+        assert_eq!(
+            hostname_of_url("https://web.dev.app.localhost"),
+            "web.dev.app.localhost"
+        );
+        assert_eq!(
+            hostname_of_url("http://web.dev.app.localhost:3000/path"),
+            "web.dev.app.localhost"
+        );
+        // Already bare (what the helper reads back out of a stored route).
+        assert_eq!(hostname_of_url("app.localhost"), "app.localhost");
+        assert_eq!(hostname_of_url(""), "");
+    }
+
+    #[test]
+    fn route_id_separates_projects_that_share_a_run_name() {
+        // #170: `veld-{run}-{node}-{variant}` made these two identical.
+        let a = run_route_id("web.main.repo-a.localhost");
+        let b = run_route_id("web.main.repo-b.localhost");
+        assert_ne!(a, b);
+        assert!(a.starts_with(RUN_ROUTE_PREFIX), "{a}");
+    }
+
+    #[test]
+    fn route_id_is_stable_and_case_insensitive() {
+        let host = "web.dev.app.localhost";
+        assert_eq!(run_route_id(host), run_route_id(host));
+        assert_eq!(run_route_id(host), run_route_id("WEB.DEV.APP.LOCALHOST"));
+        // Pinned so a format change is a deliberate, reviewed act: every
+        // existing install's persisted routes are keyed by this exact string
+        // (the helper re-keys on startup, but only because it can recompute it).
+        assert_eq!(
+            run_route_id(host),
+            "veld-run-web-dev-app-localhost-367906bb"
+        );
+    }
+
+    #[test]
+    fn route_id_hash_separates_hostnames_that_slug_identically() {
+        // The reason the hash suffix exists: slugify truncates, so two long
+        // hostnames sharing a 40-char prefix would otherwise collide.
+        let a = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc.dddddddddd.one.localhost";
+        let b = "aaaaaaaaaa.bbbbbbbbbb.cccccccccc.dddddddddd.two.localhost";
+        assert_eq!(slugify(a)[..40], slugify(b)[..40]);
+        assert_ne!(run_route_id(a), run_route_id(b));
+    }
+
+    #[test]
+    fn route_id_survives_a_hostname_with_no_alphanumerics() {
+        let id = run_route_id("...");
+        assert_eq!(id, format!("{RUN_ROUTE_PREFIX}ab5df625"));
+        assert_ne!(id, run_route_id(".."));
+    }
+
+    #[test]
+    fn route_id_never_lands_in_a_reserved_namespace() {
+        // The helper's startup canonicalisation skips these prefixes, so a
+        // generated run route id must never look like one of them.
+        for host in [
+            "join.app.localhost",
+            "mgmt.app.localhost",
+            "management.localhost",
+            "sentinel.localhost",
+        ] {
+            let id = run_route_id(host);
+            assert!(id.starts_with(RUN_ROUTE_PREFIX), "{id}");
+            assert!(!id.starts_with("veld-join-"), "{id}");
+            assert!(!id.starts_with("veld-mgmt-"), "{id}");
+            assert_ne!(id, "veld-management");
+            assert_ne!(id, "veld-sentinel");
+        }
+    }
+
+    #[test]
+    fn legacy_route_id_matches_the_pre_170_format() {
+        // Teardown deletes this id too, so it must stay byte-identical to what
+        // shipped before #170 — a stale entry is only removable by its old key.
+        assert_eq!(
+            legacy_run_route_id("main", "web", "local"),
+            "veld-main-web-local"
+        );
     }
 
     // -- generate_run_name (integration tests using real git) --

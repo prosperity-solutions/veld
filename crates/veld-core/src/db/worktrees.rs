@@ -260,8 +260,8 @@ impl Db {
     /// still reports whether the row exists (the HTTP layer rejects an empty
     /// patch before reaching here).
     ///
-    /// A new alias must be free among the row's repo siblings, the same
-    /// invariant [`unique_alias`] establishes at insert.
+    /// A new alias's **slug** must be free among the row's repo siblings, the
+    /// same invariant [`unique_alias`] establishes at insert.
     ///
     /// Why per-repo rather than global: the alias becomes the default run name,
     /// and the run name feeds the hostname
@@ -293,11 +293,16 @@ impl Db {
         // different connections and race exactly like two processes would. The
         // connection mutex serializes nothing between them. Read-then-write as
         // two statements would let both observe the alias free; the loser of an
-        // IMMEDIATE race waits out `busy_timeout` instead. There is no `UNIQUE(repo_root,
-        // alias)` index to lean on, because adding one needs a de-duplicating
-        // migration first: a database that already broke the invariant through
-        // the rename hole this check closes would fail the index creation and
-        // brick on upgrade.
+        // IMMEDIATE race waits out `busy_timeout` instead. There is no
+        // `UNIQUE(repo_root, alias)` index to lean on, and adding a `slug`
+        // column with a unique index — the SQL-checkable version of the
+        // invariant below — was considered and rejected for #172: a database
+        // that already holds `main-2` and `main_2` (both legal before that
+        // check) would fail the index creation and brick on upgrade, and the
+        // alternative, de-duplicating inside the migration, silently rewrites
+        // the user's aliases. Enforcing it at the two write paths (here and
+        // [`unique_alias`]), both already serialized by IMMEDIATE, holds the
+        // invariant going forward and leaves existing rows untouched.
         //
         // One residual path is left open deliberately: `sync_worktrees` can
         // move a row to a different `repo_root` (the `UPDATE … SET repo_root`
@@ -311,32 +316,34 @@ impl Db {
             // Scoped to the row's own repo, and excluding the row itself so
             // renaming a worktree to the alias it already has stays a no-op
             // rather than a self-collision.
-            // COLLATE NOCASE because `Main` and `main` are two legal aliases
-            // (`is_safe_identifier` allows A-Z) that produce the SAME hostname:
-            // `slugify` lowercases (see `veld_core::url`), so the two don't
-            // merely differ in case, they come out byte-identical. A
-            // case-sensitive check would report both as free and the collision
-            // would still happen. (SQLite's NOCASE folds ASCII only, which is
-            // exactly the legal alias space — `is_safe_identifier` is ASCII.)
             //
-            // Residual gap, deliberately not closed here and tracked in #172:
-            // `slugify` also maps every non-alphanumeric to `-`, so `main-2`,
-            // `main_2` and `main.2` are three distinct aliases with one
-            // hostname, and this check reports all three as free. Closing it
-            // means comparing slugs, not aliases (or storing a slug column) —
-            // the same question as #170, so likely one change.
-            let taken: bool = tx.query_row(
-                "SELECT EXISTS (
-                     SELECT 1 FROM worktrees sibling
-                      WHERE sibling.alias = ?1 COLLATE NOCASE
-                        AND sibling.id != ?2
+            // Compared as SLUGS, not as aliases (#172): the invariant is about
+            // the hostname, and the hostname is `slugify(alias)`. `slugify`
+            // lowercases AND maps every non-alphanumeric to `-`, so `Main`,
+            // `main`, `main-2`, `main_2` and `main.2` are five legal aliases
+            // (`is_safe_identifier` allows A-Z, `-`, `_`, `.`) minting exactly
+            // two hostnames — `main` and `main-2`. An alias comparison — even
+            // `COLLATE NOCASE` — reports the separator variants as free and the
+            // collision in Caddy still happens.
+            //
+            // Done in Rust rather than SQL because SQLite cannot slugify. The
+            // sibling set of one repo is small (checkouts of one repo), and the
+            // read shares this IMMEDIATE transaction with the write, so it is
+            // exactly as atomic as the `EXISTS` query it replaces.
+            let sibling_aliases: Vec<String> = tx
+                .prepare(
+                    "SELECT alias FROM worktrees sibling
+                      WHERE sibling.id != ?1
                         AND sibling.repo_root =
-                            (SELECT repo_root FROM worktrees WHERE id = ?2)
-                 )",
-                params![alias, id],
-                |r| r.get(0),
-            )?;
-            if taken {
+                            (SELECT repo_root FROM worktrees WHERE id = ?1)",
+                )?
+                .query_map(params![id], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            let slug = crate::url::slugify(alias);
+            if sibling_aliases
+                .iter()
+                .any(|s| crate::url::slugify(s) == slug)
+            {
                 return Err(DbError::AliasTaken(alias.to_owned()));
             }
         }
@@ -427,6 +434,11 @@ fn pick_emoji(conn: &rusqlite::Connection, seed: &str) -> rusqlite::Result<Strin
     Ok(WORKTREE_EMOJI[h % WORKTREE_EMOJI.len()].to_string())
 }
 
+/// Longest slug a numbered alias candidate may start from. `slugify` caps output
+/// at 48 characters, so leaving 8 spare keeps `-2` … `-9999999` visible in the
+/// slug — which is what makes [`unique_alias`]'s search terminate.
+const SUFFIXABLE_SLUG_LEN: usize = 40;
+
 /// Make `base` unique among a repo's aliases by appending `-2`, `-3`, … as
 /// needed. Runs inside the sync transaction.
 fn unique_alias(
@@ -434,25 +446,33 @@ fn unique_alias(
     repo_root: &str,
     base: &str,
 ) -> rusqlite::Result<String> {
-    let taken = |alias: &str| -> rusqlite::Result<bool> {
-        // COLLATE NOCASE to match `Db::patch_worktree`'s check — the two must
-        // agree on what "taken" means, or insert and rename disagree. They agree
-        // on case; neither compares slugs, so the separator gap documented on
-        // `patch_worktree` applies to both.
-        let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM worktrees
-              WHERE repo_root = ?1 AND alias = ?2 COLLATE NOCASE",
-            params![repo_root, alias],
-            |r| r.get(0),
-        )?;
-        Ok(n > 0)
-    };
-    if !taken(base)? {
+    // Slug comparison, matching `Db::patch_worktree` — the two must agree on
+    // what "taken" means, or insert and rename disagree. Fetched once: the
+    // candidate loop below would otherwise re-query per attempt, and the
+    // sibling set cannot change inside the caller's transaction.
+    let sibling_slugs: Vec<String> = conn
+        .prepare("SELECT alias FROM worktrees WHERE repo_root = ?1")?
+        .query_map(params![repo_root], |r| r.get::<_, String>(0))?
+        .map(|a| a.map(|a| crate::url::slugify(&a)))
+        .collect::<rusqlite::Result<_>>()?;
+    let taken = |alias: &str| -> bool { sibling_slugs.contains(&crate::url::slugify(alias)) };
+    if !taken(base) {
         return Ok(base.to_string());
     }
+    // The numbered candidates must have DISTINCT slugs, or this loop cannot
+    // finish: `slugify` truncates at 48 characters, so appending `-2` to a base
+    // that already slugs to 48 produces the same slug forever — and this runs
+    // inside the caller's IMMEDIATE transaction, so spinning here would hold the
+    // SQLite write lock and wedge the daemon. Shorten the stem until the suffix
+    // survives truncation. Bases short enough to be unaffected (the normal case)
+    // are left exactly as they were.
+    let mut stem = base.to_string();
+    while crate::url::slugify(&stem).len() > SUFFIXABLE_SLUG_LEN {
+        stem.pop();
+    }
     for i in 2.. {
-        let candidate = format!("{base}-{i}");
-        if !taken(&candidate)? {
+        let candidate = format!("{stem}-{i}");
+        if !taken(&candidate) {
             return Ok(candidate);
         }
     }
@@ -629,6 +649,123 @@ mod tests {
         let e = db.rename_worktree(other.id, "MAIN").unwrap_err();
         assert!(matches!(e, DbError::AliasTaken(_)), "got {e:?}");
         assert!(db.rename_worktree(other.id, "main-2").unwrap());
+    }
+
+    #[test]
+    fn alias_uniqueness_compares_slugs_not_separators() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAliasSlug");
+        db.upsert_repo(root, "slug").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasSlug", "main-2", true),
+                    wt("/tmp/wts/slug-other", "feat/other", false),
+                ],
+            )
+            .unwrap();
+        let other = wts.iter().find(|w| !w.is_main).unwrap();
+        assert_eq!(
+            wts.iter().find(|w| w.is_main).unwrap().alias,
+            "main-2",
+            "precondition: the main checkout holds `main-2`"
+        );
+
+        // `is_safe_identifier` allows `-`, `_` and `.`, and `slugify` maps all
+        // three to `-`: these mint the SAME hostname as `main-2` (#172).
+        for taken in ["main_2", "main.2", "MAIN_2", "main-2"] {
+            let e = db.rename_worktree(other.id, taken).unwrap_err();
+            assert!(
+                matches!(e, DbError::AliasTaken(_)),
+                "{taken} should collide with main-2, got {e:?}"
+            );
+        }
+        // A genuinely different slug is still free.
+        assert!(db.rename_worktree(other.id, "main_3").unwrap());
+    }
+
+    #[test]
+    fn generated_aliases_skip_slug_variants_too() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAliasGen");
+        db.upsert_repo(root, "gen").unwrap();
+        // Set up a repo holding `main` and `main_2`: the main checkout keeps
+        // `main`, a sibling is renamed to `main_2` (legal, and it mints the
+        // hostname `main-2`).
+        let seeded = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasGen", "main", true),
+                    wt("/tmp/wts/gen-a", "feat/a", false),
+                ],
+            )
+            .unwrap();
+        let a = seeded.iter().find(|w| !w.is_main).unwrap();
+        db.rename_worktree(a.id, "main_2").unwrap();
+
+        // A third checkout on `main` derives the alias `main`: taken. `main-2`
+        // is the next candidate, and it must be skipped too — `main_2` already
+        // mints that hostname.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasGen", "main", true),
+                    wt("/tmp/wts/gen-a", "feat/a", false),
+                    wt("/tmp/wts/gen-b", "main", false),
+                ],
+            )
+            .unwrap();
+        let generated = wts
+            .iter()
+            .find(|w| w.path == "/tmp/wts/gen-b")
+            .expect("third checkout");
+        assert_eq!(generated.alias, "main-3", "must skip the `main_2` slug");
+    }
+
+    #[test]
+    fn long_branch_names_still_produce_a_unique_alias() {
+        // Regression: comparing SLUGS means `{base}-2` is not automatically a new
+        // name — `slugify` truncates at 48 chars, so for a base that already
+        // slugs to 48 every numbered candidate slugs identically. The suffix
+        // search used to spin forever on that, inside the IMMEDIATE transaction.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAliasLong");
+        db.upsert_repo(root, "long").unwrap();
+        let long = "feature/".to_owned() + &"a".repeat(54);
+
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasLong", &long, true),
+                    wt("/tmp/wts/long-b", &long, false),
+                    wt("/tmp/wts/long-c", &long, false),
+                ],
+            )
+            .unwrap();
+
+        let slugs: std::collections::HashSet<String> =
+            wts.iter().map(|w| crate::url::slugify(&w.alias)).collect();
+        assert_eq!(
+            slugs.len(),
+            3,
+            "each checkout needs its own hostname: {slugs:?}"
+        );
+        // Only the *suffixed* candidates are bounded by `SUFFIXABLE_SLUG_LEN`.
+        // The first holder keeps `base` verbatim, and `default_alias` has no
+        // length cap of its own — an uncapped default is pre-existing and tracked
+        // separately, so assert what this change is responsible for.
+        let base = default_alias(&long);
+        for w in wts.iter().filter(|w| w.alias != base) {
+            assert!(
+                w.alias.len() <= 64,
+                "a generated alias must stay a legal identifier: {}",
+                w.alias
+            );
+        }
     }
 
     #[test]

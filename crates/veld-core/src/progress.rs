@@ -101,6 +101,14 @@ pub enum ProgressEvent {
         variant: String,
         lines: Vec<String>,
     },
+
+    /// A one-line, run-level message the user needs to see but which belongs to
+    /// no node — e.g. shares released because a live run was replaced.
+    ///
+    /// Rendered as a plain line by the TTY renderer and as
+    /// `{"type":"notice","message":"…"}` in the NDJSON progress stream. Not for
+    /// diagnostics: those are `tracing` (stderr) and stay out of this channel.
+    Notice { message: String },
 }
 
 #[cfg(test)]

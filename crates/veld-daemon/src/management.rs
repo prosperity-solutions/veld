@@ -857,6 +857,124 @@ fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCod
     )
 }
 
+/// Longest stderr tail kept from a failed spawned command. A `veld start`
+/// streams its whole progress to stderr and only the end of it says why the
+/// command failed.
+const STDERR_TAIL_BYTES: u64 = 4096;
+
+/// Create the file a spawned command's stderr is redirected to.
+///
+/// Under `~/.veld/spawn-logs` (owner-only), never a world-writable temp
+/// directory, and with `create_new` so an existing path — including a symlink
+/// another local user planted — is a hard failure rather than a write-through.
+/// `None` means "no capture": the caller falls back to `Stdio::null()`, which is
+/// what this always did before, so a failure here never blocks the command.
+fn spawn_stderr_file() -> Option<(std::fs::File, std::path::PathBuf)> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let dir = spawn_log_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    // Timestamp as well as pid+counter: a daemon killed between spawn and reap
+    // leaves its file behind (the reaper died with it), and a pid+counter alone
+    // would collide with that leftover after pid reuse — `create_new` would then
+    // fail and capture would be silently off for the rest of that daemon's life.
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = dir.join(format!(
+        "{}-{}-{}.err",
+        std::process::id(),
+        stamp,
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    // Owner-only: a spawned command's stderr can carry whatever its output
+    // contains, and the database next to it is 0o600 for the same reason.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
+        opts.mode(0o600);
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let file = opts.open(&path).ok()?;
+    Some((file, path))
+}
+
+/// Where a spawned command's stderr is captured. Owner-only, alongside the
+/// daemon's socket and database rather than in a world-writable temp directory.
+fn spawn_log_dir() -> Option<std::path::PathBuf> {
+    Some(dirs::home_dir()?.join(".veld").join("spawn-logs"))
+}
+
+/// Delete leftover capture files at daemon start.
+///
+/// The reaper task unlinks its own file, but it dies with the daemon — a SIGKILL
+/// or a `veld update` between spawn and reap leaves the file named on disk, and
+/// nothing else in veld collects this directory (`veld gc` prunes per-project
+/// logs, not this).
+///
+/// Only files whose owning daemon is **gone** are removed. `$HOME` is shared by
+/// every veld instance (a source-built dev daemon runs alongside the installed
+/// one — see `veld_core::instance`), so a blanket sweep would delete the other
+/// daemon's in-flight capture and lose its diagnostics. The pid is read back out
+/// of the filename for exactly this.
+pub fn sweep_spawn_logs() {
+    let Some(dir) = spawn_log_dir() else { return };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    let mut swept = 0usize;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "err") {
+            continue;
+        }
+        // `<pid>-<stamp>-<seq>.err`. An unparseable name is not ours to judge.
+        let owner = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.split('-').next())
+            .and_then(|pid| pid.parse::<i32>().ok());
+        let Some(pid) = owner else { continue };
+        if pid > 0 && unsafe { libc::kill(pid, 0) } == 0 {
+            continue; // that daemon is still running — its file, not ours.
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            swept += 1;
+        }
+    }
+    if swept > 0 {
+        warn!(count = swept, "removed orphaned spawn-log files");
+    }
+}
+
+/// The last [`STDERR_TAIL_BYTES`] of a spawned command's captured stderr.
+fn stderr_tail(path: &std::path::Path) -> String {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let Ok(file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut file = file.take(STDERR_TAIL_BYTES);
+    if len > STDERR_TAIL_BYTES
+        && file
+            .get_mut()
+            .seek(SeekFrom::End(-(STDERR_TAIL_BYTES as i64)))
+            .is_err()
+    {
+        return String::new();
+    }
+    let mut buf = Vec::new();
+    if file.read_to_end(&mut buf).is_err() {
+        return String::new();
+    }
+    // Lossy: a tail can start mid-character, and this is a diagnostic.
+    String::from_utf8_lossy(&buf).trim().to_owned()
+}
+
 /// Spawn `veld <args...>` in the project directory via a login shell. The
 /// project_root is looked up from the GlobalRegistry (never supplied by the
 /// client) to prevent directory traversal; every argument is shell-escaped.
@@ -886,17 +1004,59 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
     // core runtime worker until the child exits, and with the child waiting
     // on the daemon that's a circular wait: the daemon plays dead until the
     // child is killed (observed live, 2026-07-27).
+    // stderr is captured, not discarded: the reply is always `202 ACCEPTED`
+    // (the child outlives this request), so a command that fails outright —
+    // `veld start` refusing a hostname another project already serves, a
+    // missing preset, an unparseable veld.json — would otherwise leave no
+    // trace anywhere and the UI would just never show a run.
+    //
+    // Captured to a FILE, not a pipe. A pipe would have to be drained to keep
+    // from blocking the child, would not reach EOF when the shell exits (setup
+    // steps and actions inherit stderr via `process::run_command`, so anything
+    // they background holds the write end open), and closing the read end on
+    // such a survivor would hand it EPIPE/SIGPIPE and kill it — a process the
+    // user started. A file blocks nobody, stays writable for any descendant
+    // that inherited it, and needs no reader at all.
+    let (stderr_sink, stderr_path) = match spawn_stderr_file() {
+        Some((file, path)) => (std::process::Stdio::from(file), Some(path)),
+        None => (std::process::Stdio::null(), None),
+    };
     match tokio::process::Command::new(&shell)
         .args(["-l", "-c", &cmd])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(stderr_sink)
         .spawn()
     {
         Ok(mut child) => {
-            // Reap child in background to avoid zombies (async — never
-            // blocks a worker).
+            let label = args.join(" ");
+            // Reap the child in the background so nothing waits on it here (a
+            // synchronous wait would deadlock against a `veld stop` that calls
+            // back into this daemon). The tail read and unlink below are blocking
+            // `std::fs`, but bounded to one 4 KiB read of a local file.
             tokio::spawn(async move {
-                let _ = child.wait().await;
+                let waited = child.wait().await;
+                // Logged whether or not capture is available: an exit code with no
+                // stderr is still the difference between a visible failure and a
+                // `202 ACCEPTED` that leaves no trace anywhere.
+                if let Ok(status) = &waited {
+                    if !status.success() {
+                        warn!(
+                            command = %label,
+                            code = status.code().unwrap_or(-1),
+                            stderr = %stderr_path.as_deref().map(stderr_tail).unwrap_or_default(),
+                            "spawned veld command failed"
+                        );
+                    }
+                }
+                if let Some(path) = stderr_path {
+                    // A descendant still holding the fd keeps writing to the
+                    // now-nameless inode; its blocks are reclaimed when that
+                    // descendant exits, so the growth is bounded by its lifetime
+                    // and invisible to the directory. A daemon killed before this
+                    // runs leaves the file named — `sweep_spawn_logs` collects
+                    // those at the next start.
+                    let _ = std::fs::remove_file(&path);
+                }
             });
             StatusCode::ACCEPTED
         }
