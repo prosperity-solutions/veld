@@ -25,6 +25,14 @@
      which left a selected tab indistinguishable from the strip behind it. */
   --tab-strip: #0a0b0d;
   --tab-active: #22262c;
+  /* Top edge of the open tab in a pane that does NOT have the keyboard. Its own
+     token because the obvious candidate (--border2) is within a few percent of
+     --tab-strip in the light theme, which left an unfocused tab with no visible
+     edge at all. */
+  --tab-idle-edge: #3f454e;
+  /* Terminal surface. Separate from --bg so the light theme can go near-white
+     for legible monospace contrast without lightening the whole app chrome. */
+  --term-bg: #0d0e10;
 }
 
 body[data-theme="light"] {
@@ -49,6 +57,8 @@ body[data-theme="light"] {
   --pop: 0 22px 54px -20px rgba(30, 40, 50, 0.32);
   --tab-strip: #dbdee2;
   --tab-active: #ffffff;
+  --tab-idle-edge: #a4abb4;
+  --term-bg: #ffffff;
 }
 
 * {
@@ -537,7 +547,7 @@ select:focus {
   /* Muted edge: still identifiable as the open tab, clearly not the one with
      the keyboard. */
   box-shadow:
-    inset 0 2px 0 var(--border2),
+    inset 0 2px 0 var(--tab-idle-edge),
     inset -1px 0 0 var(--border);
 }
 
@@ -599,7 +609,7 @@ select:focus {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  background: var(--bg);
+  background: var(--term-bg);
 }
 
 /* The slot React owns; the element inside it is the live terminal, reparented

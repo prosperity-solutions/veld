@@ -130,12 +130,17 @@ function token(name: string, fallback: string): string {
 function xtermTheme() {
   const dark = currentTheme === "dark";
   const fg = token("--text", dark ? "#e7e9ec" : "#171a1d");
+  // `--term-bg`, not `--bg`: the terminal gets its own surface so the light
+  // theme can be near-white for monospace contrast without lightening the app
+  // chrome around it. Must match `.term-pane`'s background or the pane shows a
+  // seam wherever the grid doesn't reach the edge.
+  const bg = token("--term-bg", dark ? "#0d0e10" : "#ffffff");
   return {
     ...(dark ? ANSI_DARK : ANSI_LIGHT),
-    background: token("--bg", dark ? "#0d0e10" : "#eceef0"),
+    background: bg,
     foreground: fg,
     cursor: token("--accent", dark ? "#3fbf7f" : "#28965f"),
-    cursorAccent: token("--bg", dark ? "#0d0e10" : "#eceef0"),
+    cursorAccent: bg,
     // xterm needs alpha on the selection or it hides the glyphs under it.
     selectionBackground: dark ? "rgba(90, 162, 224, 0.35)" : "rgba(47, 111, 181, 0.25)",
   };
