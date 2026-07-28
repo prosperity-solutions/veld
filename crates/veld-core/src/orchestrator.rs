@@ -799,7 +799,10 @@ impl Orchestrator {
         // Resolve project `vars` before anything spawns: a var may be backed by a
         // file or a command, and a broken source must fail the start rather than
         // surface as an empty value inside a service.
-        let shared_vars = Arc::new(crate::values::resolve_vars(self.config.vars.as_ref()).await?);
+        let shared_vars = Arc::new(
+            crate::values::resolve_vars(self.config.vars.as_ref(), Some(&self.project_root))
+                .await?,
+        );
         self.resolved_vars = Some(Arc::clone(&shared_vars));
 
         // Wrap immutable data in Arc once for all stages.
@@ -1074,6 +1077,7 @@ impl Orchestrator {
             resolved.env.as_ref(),
             &var_ctx,
             &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+            &self.project_root,
         )
         .await?;
 
@@ -1400,7 +1404,12 @@ impl Orchestrator {
         // this degrades to no vars and the affected hooks report being skipped.
         let stop_vars: Arc<HashMap<String, String>> = match &self.resolved_vars {
             Some(v) => Arc::clone(v),
-            None => match crate::values::resolve_vars(self.config.vars.as_ref()).await {
+            None => match crate::values::resolve_vars(
+                self.config.vars.as_ref(),
+                Some(&self.project_root),
+            )
+            .await
+            {
                 Ok(v) => Arc::new(v),
                 Err(e) => {
                     tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
@@ -1634,7 +1643,17 @@ impl Orchestrator {
             None => return,
         };
 
-        let on_stop_cmd = match variant_cfg.on_stop.as_ref() {
+        // Resolved, not raw: `on_stop` is hoistable to node level (F3), and reading
+        // the variant directly meant a node-level teardown hook never ran — the
+        // exact container-leak failure this feature exists to prevent.
+        let resolved = match self
+            .config
+            .resolved(&node_state.node_name, &node_state.variant)
+        {
+            Some(r) => r,
+            None => return,
+        };
+        let on_stop_cmd = match resolved.on_stop.as_ref() {
             Some(cmd) => cmd,
             None => return,
         };
@@ -1710,11 +1729,7 @@ impl Orchestrator {
 
         // Build env (variant > node > project).
         let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
-        let merged_env = config::resolve_env(
-            self.config.env.as_ref(),
-            node_cfg_opt.and_then(|n| n.env.as_ref()),
-            variant_cfg.env.as_ref(),
-        );
+        let merged_env = resolved.env.clone();
         let env = match build_env(
             merged_env.as_ref(),
             &ctx,
@@ -1722,6 +1737,7 @@ impl Orchestrator {
                 "nodes.{}.variants.{}",
                 node_state.node_name, node_state.variant
             ),
+            &self.project_root,
         )
         .await
         {
@@ -2304,6 +2320,7 @@ async fn execute_start_server_isolated(
         resolved.env.as_ref(),
         var_ctx,
         &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        &ctx.project_root,
     )
     .await?;
     // Env keys declared `secret: true` are masked and encrypted at rest just like
@@ -2691,6 +2708,7 @@ async fn execute_command_isolated(
         resolved.env.as_ref(),
         var_ctx,
         &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        &ctx.project_root,
     )
     .await?;
     node_state.sensitive_keys.extend(env_secret_keys);
@@ -2951,6 +2969,7 @@ async fn build_env(
     env_config: Option<&HashMap<String, config::ConfigValue>>,
     ctx: &VariableContext,
     at_prefix: &str,
+    project_root: &Path,
 ) -> Result<(HashMap<String, String>, Vec<String>), OrchestratorError> {
     let mut env = HashMap::new();
     let mut secret_keys = Vec::new();
@@ -2965,7 +2984,14 @@ async fn build_env(
         let value = &map[key];
         let resolved = match value.as_literal() {
             Some(tmpl) => crate::variables::interpolate(tmpl, ctx)?,
-            None => crate::values::resolve_value(value, &format!("{at_prefix}.env.{key}")).await?,
+            None => {
+                crate::values::resolve_value(
+                    value,
+                    &format!("{at_prefix}.env.{key}"),
+                    Some(project_root),
+                )
+                .await?
+            }
         };
         env.insert(key.clone(), resolved);
         if value.secret {

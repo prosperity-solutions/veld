@@ -281,10 +281,16 @@ impl<'de> Deserialize<'de> for CommandSnapshot {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
         match serde_json::Value::deserialize(d)? {
-            // Pre-migration rows: a plain string, with script paths marked by a
-            // `script:` prefix. Tolerated forever so an old row still lists and
-            // diffs (RC4) — the migration rewrites them, but a database restored
-            // from an older backup must not break `veld runs`.
+            // Rows written before this enum existed: a plain string, with script
+            // paths marked by a `script:` prefix.
+            //
+            // **There is no migration that rewrites these, and this arm is
+            // therefore load-bearing forever — do not delete it.** A rewrite
+            // migration was considered and skipped: the format change is confined
+            // to one JSON column read only by `veld runs show`/`diff`, so a lenient
+            // read costs nothing, while a data-rewriting migration over every
+            // historical row is risk with no payoff. A database restored from an
+            // older backup also has to keep working.
             serde_json::Value::String(s) => Ok(match s.strip_prefix("script:") {
                 Some(path) => CommandSnapshot::Script(path.to_owned()),
                 None => CommandSnapshot::Shell(s),

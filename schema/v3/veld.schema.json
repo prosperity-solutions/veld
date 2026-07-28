@@ -283,7 +283,11 @@
       "type": "object",
       "properties": {
         "remove": { "type": "array", "items": { "type": "string" } },
-        "set": { "type": "object", "additionalProperties": { "$ref": "#/$defs/value" } }
+        "set": {
+          "type": "object",
+          "description": "Header name -> value. Plain strings only: these values travel to Caddy and to the public gateway as part of a route, so the value-source/`secret` forms are NOT yet supported here. Do not put a credential in a header value — see the follow-up noted in docs/configuration.md.",
+          "additionalProperties": { "type": "string" }
+        }
       }
     },
     "proxy": {
@@ -303,7 +307,7 @@
         "type": { "type": "string", "enum": ["http", "port", "command"] },
         "path": { "type": "string", "description": "For type http." },
         "expect_status": { "type": "integer", "description": "For type http. Default 200." },
-        "port": { "type": "string", "description": "Which named port from `ports` to check. Default: the primary. A multi-port node's readiness is rarely 'any port is open' — a debugger port opens long before the app is listening." },
+        "port": { "type": "string", "description": "READINESS ONLY. Which named port from `ports` to check; default is the primary. A multi-port node's readiness is rarely 'any port is open' — a debugger port opens long before the app is listening. Not yet supported on a liveness probe, which always watches the primary port." },
         "argv": { "$ref": "#/$defs/argv" },
         "shell": { "type": "string" },
         "timeout_seconds": { "type": "integer", "default": 60 },
@@ -375,8 +379,8 @@
         "shell": { "type": "string" },
         "parameters": {
           "type": "object",
-          "description": "Static values available as ${param.KEY} and as environment variables.",
-          "additionalProperties": { "$ref": "#/$defs/value" }
+          "description": "Static values available as ${param.KEY} and as environment variables. Plain strings only — the value-source/`secret` forms are not yet supported here.",
+          "additionalProperties": { "type": "string" }
         },
         "requires_outputs": {
           "type": "array",

@@ -134,7 +134,7 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     let project_root = crate::config::project_root(root_path);
 
     let root_text = read(root_path)?;
-    let root_doc = parse_document(&root_text, root_path)?;
+    let root_doc = parse_document(&root_text, root_path, None)?;
 
     // The two keys only the root file must have. Everything else is optional
     // everywhere, which is what makes it one document type.
@@ -171,6 +171,21 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
     }];
     let mut docs: Vec<(usize, Document)> = vec![(0, root_doc)];
 
+    // Problems in *included* files are reported, never fatal.
+    //
+    // F0.1 is absolute: no new failure may be reachable from the loader, because
+    // `veld stop` reads `on_stop` from the on-disk config at stop time and a config
+    // that will not load means teardown never runs. That applies to a broken
+    // included file exactly as it applies to a duplicate key — a developer who
+    // copies a node file while an environment is running must still be able to
+    // stop it.
+    //
+    // "Never a silently absent node" is still honoured: the node is absent, but
+    // loudly — `veld start` and `veld lint` refuse with a finding naming the file,
+    // and `veld config --files` shows the gap. Silent was always the enemy, not
+    // non-fatal.
+    let mut file_findings: Vec<crate::config::Finding> = Vec::new();
+
     for glob in &globs {
         // Sorted, so error messages and load order are deterministic across
         // machines and filesystems.
@@ -182,17 +197,36 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
             if path == root_path {
                 continue;
             }
-            let text = read(&path)?;
-            // A parse failure here is named and fatal. Skipping the file would
-            // turn a typo into "unknown node", which is the single worst
-            // diagnostic this feature could produce.
-            let doc = parse_document(&text, &path)?;
-            if doc.include.is_some() {
-                return Err(ConfigError::NestedInclude { path: path.clone() });
+            let relative = relative_to(&project_root, &path);
+            let text = match read(&path) {
+                Ok(text) => text,
+                Err(e) => {
+                    file_findings.push(crate::config::Finding::unreadable_include(
+                        &relative.display().to_string(),
+                        &e.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            let mut doc = match parse_document(&text, &path, Some(&schema_version)) {
+                Ok(doc) => doc,
+                Err(e) => {
+                    file_findings.push(crate::config::Finding::unparseable_include(
+                        &relative.display().to_string(),
+                        &e.to_string(),
+                    ));
+                    continue;
+                }
+            };
+            if doc.include.take().is_some() {
+                // Ignored rather than fatal, and reported so it is not silent.
+                file_findings.push(crate::config::Finding::nested_include(
+                    &relative.display().to_string(),
+                ));
             }
-            hash_inputs.push((relative_to(&project_root, &path), text.clone().into_bytes()));
+            hash_inputs.push((relative.clone(), text.clone().into_bytes()));
             files.push(LoadedFile {
-                relative: relative_to(&project_root, &path),
+                relative,
                 matched_by: Some(glob.clone()),
                 nodes: node_lines(&text, &doc),
                 path,
@@ -213,9 +247,10 @@ pub fn load(root_path: &Path) -> Result<LoadedConfig, ConfigError> {
         })
         .collect();
 
-    let mut config = merge(schema_version, name, &docs, &files)?;
+    let mut config = merge(schema_version, name, &docs, &files, &mut file_findings);
     config.loaded_from_multiple_files = files.len() > 1;
     config.deferred_findings.extend(unknown_findings);
+    config.deferred_findings.extend(file_findings);
 
     Ok(LoadedConfig {
         config,
@@ -252,7 +287,18 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
 }
 
 /// Parse one file: JSONC front end, then the shared document shape.
-fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
+///
+/// `project_version` is the version the **root** file declared, or `None` when
+/// parsing the root file itself (its own `schemaVersion` is read from the result).
+/// The v3 legacy-command gate keys off the project's version rather than the
+/// file's: an included file legitimately omits `schemaVersion`, so a per-file check
+/// left every included file in a v3 project free to keep using `command` — exactly
+/// where F2 puts the node bodies.
+fn parse_document(
+    text: &str,
+    path: &Path,
+    project_version: Option<&str>,
+) -> Result<Document, ConfigError> {
     let json = crate::jsonc::strip(text).map_err(|e| ConfigError::Jsonc {
         path: path.to_path_buf(),
         detail: e.to_string(),
@@ -262,12 +308,19 @@ fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
             path: path.to_path_buf(),
             source: e,
         })?;
-    // A v3 document may not use the legacy `command` spellings; checked per file
-    // so the error names the file the author has to edit.
-    if value.get("schemaVersion").and_then(|v| v.as_str()) == Some("3") {
+    // Checked per file so the error names the file the author has to edit, but
+    // gated on the *project's* version.
+    let effective_version =
+        project_version.or_else(|| value.get("schemaVersion").and_then(|v| v.as_str()));
+    if effective_version == Some("3") {
         crate::config::reject_v3_legacy_commands(&value, path)?;
     }
-    serde_json::from_value(value).map_err(|e| ConfigError::ParseError {
+    // Deserialize from the **text**, not the already-parsed `Value`:
+    // `serde_json::from_value` discards positions, so every typed error (`unknown
+    // variant`, `invalid type`, a bad field) would report line 0 — losing exactly
+    // the accuracy that stripping comments in place rather than deleting them
+    // exists to preserve. The `Value` above is kept only for the v3 key gate.
+    serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
         path: path.to_path_buf(),
         source: e,
     })
@@ -299,7 +352,8 @@ fn merge(
     name: String,
     docs: &[(usize, Document)],
     files: &[LoadedFile],
-) -> Result<VeldConfig, ConfigError> {
+    findings: &mut Vec<crate::config::Finding>,
+) -> VeldConfig {
     let mut nodes: HashMap<String, NodeConfig> = HashMap::new();
     let mut node_origin: HashMap<String, usize> = HashMap::new();
     let mut presets: HashMap<String, Vec<String>> = HashMap::new();
@@ -321,12 +375,17 @@ fn merge(
         for (node_name, node) in doc.nodes.iter().flatten() {
             if let Some(previous) = node_origin.get(node_name) {
                 // Both files named, because "which one wins" is not a question
-                // this config system answers — it refuses.
-                return Err(ConfigError::DuplicateNode {
-                    node: node_name.clone(),
-                    first: here(previous),
-                    second: here(file_index),
-                });
+                // this config system answers. It refuses — but as a *finding*, not
+                // a load failure: F0.1 forbids a new stop-fatal error, and someone
+                // who copies a node file while an environment is running still has
+                // to be able to tear it down.
+                findings.push(crate::config::Finding::duplicate_definition(
+                    "node",
+                    node_name,
+                    &here(previous),
+                    &here(file_index),
+                ));
+                continue;
             }
             node_origin.insert(node_name.clone(), *file_index);
             nodes.insert(node_name.clone(), node.clone());
@@ -334,12 +393,13 @@ fn merge(
 
         for (preset_name, items) in doc.presets.iter().flatten() {
             if let Some(previous) = preset_origin.get(preset_name) {
-                return Err(ConfigError::DuplicateDefinition {
-                    kind: "preset",
-                    name: preset_name.clone(),
-                    first: here(previous),
-                    second: here(file_index),
-                });
+                findings.push(crate::config::Finding::duplicate_definition(
+                    "preset",
+                    preset_name,
+                    &here(previous),
+                    &here(file_index),
+                ));
+                continue;
             }
             preset_origin.insert(preset_name.clone(), *file_index);
             presets.insert(preset_name.clone(), items.clone());
@@ -347,12 +407,13 @@ fn merge(
 
         for (var_name, value) in doc.vars.iter().flatten() {
             if let Some(previous) = var_origin.get(var_name) {
-                return Err(ConfigError::DuplicateDefinition {
-                    kind: "var",
-                    name: var_name.clone(),
-                    first: here(previous),
-                    second: here(file_index),
-                });
+                findings.push(crate::config::Finding::duplicate_definition(
+                    "var",
+                    var_name,
+                    &here(previous),
+                    &here(file_index),
+                ));
+                continue;
             }
             var_origin.insert(var_name.clone(), *file_index);
             vars.insert(var_name.clone(), value.clone());
@@ -373,7 +434,7 @@ fn merge(
         }
     }
 
-    Ok(VeldConfig {
+    VeldConfig {
         schema: root.schema.clone(),
         schema_version,
         name,
@@ -395,7 +456,7 @@ fn merge(
         ui,
         loaded_from_multiple_files: false,
         deferred_findings: Vec::new(),
-    })
+    }
 }
 
 /// Shallow-merge two reserved (`hooks` / `ui`) objects by top-level key.
@@ -658,7 +719,11 @@ mod tests {
     }
 
     /// The rule that removes precedence entirely: two files, one node name, both
-    /// files named in the error.
+    /// files named.
+    ///
+    /// Reported, **not fatal** — F0.1 again. Someone who copies a node file while
+    /// an environment is running must still be able to `veld stop` it, so this is a
+    /// finding that blocks `start`/`lint` rather than a load error.
     #[test]
     fn duplicate_node_across_files_names_both_files() {
         let dir = project(&[
@@ -666,12 +731,21 @@ mod tests {
             ("services/a/veld.node.json", &node_file("api")),
             ("services/b/veld.node.json", &node_file("api")),
         ]);
-        let err = load(&dir.path().join("veld.json")).unwrap_err();
-        let msg = err.to_string();
-        assert!(matches!(err, ConfigError::DuplicateNode { .. }), "{err:?}");
+        let loaded = load(&dir.path().join("veld.json"))
+            .expect("a duplicate node must not strand `veld stop`");
+        let finding = loaded
+            .config
+            .deferred_findings
+            .iter()
+            .find(|f| f.rule == "duplicate-definition")
+            .unwrap_or_else(|| panic!("expected a finding: {:?}", loaded.config.deferred_findings));
+        assert_eq!(finding.severity, crate::config::Severity::Error);
+        let msg = &finding.message;
         assert!(msg.contains("services/a/veld.node.json"), "{msg}");
         assert!(msg.contains("services/b/veld.node.json"), "{msg}");
         assert!(msg.contains("\"api\""), "{msg}");
+        // …and it blocks a run.
+        assert!(crate::config::error_summary(&crate::config::validate(&loaded.config)).is_some());
     }
 
     #[test]
@@ -685,12 +759,15 @@ mod tests {
                 ("veld.d/one.jsonc", body),
                 ("veld.d/two.jsonc", body),
             ]);
-            let err = load(&dir.path().join("veld.json")).unwrap_err();
-            let msg = err.to_string();
-            assert!(
-                matches!(&err, ConfigError::DuplicateDefinition { kind: k, .. } if *k == kind),
-                "{kind}: {err:?}"
-            );
+            let loaded = load(&dir.path().join("veld.json")).expect("reported, not fatal");
+            let finding = loaded
+                .config
+                .deferred_findings
+                .iter()
+                .find(|f| f.rule == "duplicate-definition")
+                .unwrap_or_else(|| panic!("{kind}: expected a finding"));
+            let msg = &finding.message;
+            assert!(msg.contains(kind), "{msg}");
             assert!(msg.contains("veld.d/one.jsonc"), "{msg}");
             assert!(msg.contains("veld.d/two.jsonc"), "{msg}");
         }
@@ -705,14 +782,20 @@ mod tests {
             ("services/api/veld.node.json", &node_file("api")),
             ("services/broken/veld.node.json", "{ \"nodes\": { oops }"),
         ]);
-        let err = load(&dir.path().join("veld.json")).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("services/broken/veld.node.json"),
-            "the error must name the file to fix: {msg}"
-        );
-        // And it is fatal — `api` must NOT quietly load without its sibling.
-        assert!(matches!(err, ConfigError::ParseError { .. }), "{err:?}");
+        let loaded = load(&dir.path().join("veld.json"))
+            .expect("a broken included file must not strand `veld stop`");
+        let finding = loaded
+            .config
+            .deferred_findings
+            .iter()
+            .find(|f| f.rule == "unparseable-include")
+            .unwrap_or_else(|| panic!("expected a finding: {:?}", loaded.config.deferred_findings));
+        assert_eq!(finding.severity, crate::config::Severity::Error);
+        assert_eq!(finding.location, "services/broken/veld.node.json");
+        // Not silent, which was always the real requirement: `veld start` refuses.
+        assert!(crate::config::error_summary(&crate::config::validate(&loaded.config)).is_some());
+        // The healthy sibling still loaded, so `stop` can still find its node.
+        assert!(loaded.config.nodes.contains_key("api"));
     }
 
     /// An unknown top-level key is an error — but a **reported** one, not a load
@@ -920,15 +1003,6 @@ mod tests {
         assert!(matches!(
             load(&dir.path().join("veld.json")),
             Err(ConfigError::MissingRootKey { key: "name", .. })
-        ));
-
-        let dir = project(&[
-            ("veld.json", ROOT_WITH_INCLUDE),
-            ("veld.d/nested.jsonc", r#"{ "include": ["deeper/*.json"] }"#),
-        ]);
-        assert!(matches!(
-            load(&dir.path().join("veld.json")),
-            Err(ConfigError::NestedInclude { .. })
         ));
     }
 

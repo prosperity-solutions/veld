@@ -37,34 +37,6 @@ pub enum ConfigError {
     MissingRootKey { path: PathBuf, key: &'static str },
 
     #[error(
-        "node \"{node}\" is defined in two files: {first} and {second}. A node is defined \
-         in exactly one file — there is deliberately no precedence rule to fall back on. \
-         Delete one, or rename it"
-    )]
-    DuplicateNode {
-        node: String,
-        first: String,
-        second: String,
-    },
-
-    #[error(
-        "{kind} \"{name}\" is defined in two files: {first} and {second}. Names are global \
-         — no shadowing, no file-local scope, no ordering dependency"
-    )]
-    DuplicateDefinition {
-        kind: &'static str,
-        name: String,
-        first: String,
-        second: String,
-    },
-
-    #[error(
-        "{path} declares \"include\", but only the root config may. Nested includes would \
-         make load order — and so error messages — depend on a graph nobody can see"
-    )]
-    NestedInclude { path: PathBuf },
-
-    #[error(
         "{path} declares schemaVersion \"3\", where `command` has been replaced by \
          `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). \
          Found the old form at: {}. Run `veld config --migrate` to convert this file \
@@ -178,6 +150,70 @@ impl Finding {
                 KNOWN_TOP_LEVEL_KEYS.join(", ")
             ),
             rule: "unknown-top-level-key".to_owned(),
+        }
+    }
+
+    /// A name defined in two files (a node, a preset, or a var).
+    ///
+    /// Both files are named, because "which one wins" is not a question this
+    /// config system answers. It refuses — but as a **finding**, not a load
+    /// failure: F0.1 forbids a new stop-fatal error, and someone who copies a node
+    /// file while an environment is running still has to be able to tear it down.
+    /// The last definition wins for the purposes of a `veld stop` that has to
+    /// proceed anyway.
+    pub(crate) fn duplicate_definition(kind: &str, name: &str, first: &str, second: &str) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: second.to_owned(),
+            message: format!(
+                "{kind} \"{name}\" is defined in two files: {first} and {second}. A {kind} is \
+                 defined in exactly one file — there is deliberately no precedence rule to \
+                 fall back on. Delete one, or rename it"
+            ),
+            rule: "duplicate-definition".to_owned(),
+        }
+    }
+
+    /// An included file that could not be parsed.
+    ///
+    /// Reported rather than fatal, for the same F0.1 reason. "Never a silently
+    /// absent node" still holds: the node is absent, but loudly — `veld start` and
+    /// `veld lint` refuse and name the file.
+    pub(crate) fn unparseable_include(location: &str, detail: &str) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: location.to_owned(),
+            message: format!(
+                "this included file could not be parsed, so the nodes it defines are \
+                 missing: {detail}"
+            ),
+            rule: "unparseable-include".to_owned(),
+        }
+    }
+
+    /// An included file that could not be read at all.
+    pub(crate) fn unreadable_include(location: &str, detail: &str) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: location.to_owned(),
+            message: format!(
+                "this included file matched a glob but could not be read, so the nodes it \
+                 defines are missing: {detail}"
+            ),
+            rule: "unreadable-include".to_owned(),
+        }
+    }
+
+    /// `include` in a file that is not the root config.
+    pub(crate) fn nested_include(location: &str) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: location.to_owned(),
+            message: "only the root config may declare \"include\"; this one was ignored. \
+                      Nested includes would make load order — and so error messages — \
+                      depend on a graph nobody can see"
+                .to_owned(),
+            rule: "nested-include".to_owned(),
         }
     }
 
@@ -330,7 +366,7 @@ pub struct VeldConfig {
     /// on-disk config at stop time, so a config that will not load means
     /// teardown never runs and containers leak with no way to clean up.
     ///
-    /// So [`parse_config_str`] records them here and [`validate`] reports them.
+    /// So the loader records them here and [`validate`] reports them.
     /// `veld start` and `veld lint` refuse; everything else keeps working on the
     /// last-wins interpretation, which is what it did before this existed.
     #[serde(skip)]
@@ -2390,6 +2426,15 @@ pub(crate) fn reject_v3_legacy_commands(
                     } else {
                         format!("{at}.{key}")
                     };
+                    // `hooks` and `ui` are reserved and **opaque** (F8): veld does
+                    // not interpret their contents, so it must not police their key
+                    // names either. A UI extension declaring a `command` key is its
+                    // own business — treating it as veld's legacy key made the whole
+                    // config unloadable, and had `--migrate` rewriting a blob it is
+                    // explicitly not supposed to understand.
+                    if at.is_empty() && (key == "hooks" || key == "ui") {
+                        continue;
+                    }
                     if key == "command" {
                         found.push(here.clone());
                     }
@@ -2421,58 +2466,6 @@ pub(crate) fn reject_v3_legacy_commands(
         path: path.to_path_buf(),
         locations: found,
     })
-}
-
-/// Parse one config document from its text. Accepts JSONC (comments, trailing
-/// commas) and rejects duplicate keys within the document.
-///
-/// `path` is only used to label errors. Split out from [`parse_config`] so a
-/// document that is not (yet) its own file can go through exactly the same
-/// front end.
-pub fn parse_config_str(contents: &str, path: &Path) -> Result<VeldConfig, ConfigError> {
-    // Comments and trailing commas are blanked in place, so every line and
-    // column serde reports below still points at the real file.
-    let json = crate::jsonc::strip(contents).map_err(|e| ConfigError::Jsonc {
-        path: path.to_path_buf(),
-        detail: e.to_string(),
-    })?;
-
-    // Read once as a generic value so the v3 key gate can inspect the document as
-    // written, before the typed model erases which spelling was used.
-    let value: serde_json::Value =
-        serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-    if value.get("schemaVersion").and_then(|v| v.as_str()) == Some("3") {
-        reject_v3_legacy_commands(&value, path)?;
-    }
-
-    let mut config: VeldConfig =
-        serde_json::from_value(value).map_err(|e| ConfigError::ParseError {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
-
-    // serde_json is silently last-wins on duplicate keys, which drops one of two
-    // `variants` blocks — or, once one file may define several nodes, one of two
-    // same-named nodes — without a word. It must be an error (F1), but NOT a load
-    // error: a duplicate key leaves the document perfectly interpretable
-    // (last-wins is deterministic), and failing here would strand `veld stop`
-    // against a running environment. Deferred to `validate`; see
-    // [`VeldConfig::deferred_findings`].
-    if let Err(e) = crate::jsonc::reject_duplicate_keys(&json) {
-        config.deferred_findings.push(Finding::error(
-            "duplicate-key",
-            path.display().to_string(),
-            format!(
-                "{e}. serde_json keeps the last value, so one of the two is being \
-                 silently ignored"
-            ),
-        ));
-    }
-
-    Ok(config)
 }
 
 /// **Validate** an already-parsed config: every semantic rule, reported as
@@ -2714,16 +2707,49 @@ fn looks_like_a_credential(value: &str) -> bool {
 /// file — never an `argv` element, never a `shell` string, never a log, never
 /// `--json` output, never the share payload.
 fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
-    /// Names of the env keys, per node+variant, whose values are secret.
-    fn secret_env_keys(config: &VeldConfig, node: &NodeConfig, v: &VariantConfig) -> Vec<String> {
-        resolve_env(config.env.as_ref(), node.env.as_ref(), v.env.as_ref())
-            .map(|env| {
-                env.into_iter()
-                    .filter(|(_, value)| value.secret)
-                    .map(|(k, _)| k)
-                    .collect()
-            })
-            .unwrap_or_default()
+    /// Every name that, if interpolated into a command, would put a secret in the
+    /// process table — paired with the reference forms that would do it.
+    ///
+    /// Three sources, because a secret can arrive by three routes and missing any
+    /// one of them makes `secret: true` a false promise:
+    /// - a `secret` **env** key, reachable as `${ENV_KEY}` in a shell command;
+    /// - a `secret` **var**, reachable as `${vars.NAME}` anywhere;
+    /// - a **sensitive output**, reachable as `${output.KEY}` and
+    ///   `${nodes.<node>.KEY}` — `on_stop` and `actions` genuinely have these in
+    ///   scope.
+    fn secret_refs(config: &VeldConfig, node: &NodeConfig, v: &VariantConfig) -> Vec<String> {
+        let mut refs: Vec<String> = Vec::new();
+
+        for (key, value) in resolve_env(config.env.as_ref(), node.env.as_ref(), v.env.as_ref())
+            .into_iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+        {
+            let _ = value;
+            // A shell command reaches an env value as `$KEY` / `${KEY}`.
+            refs.push(key);
+        }
+
+        for name in config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+            .map(|(name, _)| name)
+        {
+            // `${vars.NAME}` is expanded by veld itself, in every position.
+            refs.push(format!("vars.{name}"));
+        }
+
+        // `sensitive_outputs` predates the `secret` flag and means the same thing
+        // for this rule's purposes.
+        let resolved = resolve_variant(config, node, v);
+        for key in resolved.sensitive_outputs.iter().flatten() {
+            refs.push(format!("output.{key}"));
+            refs.push(key.clone());
+        }
+
+        refs
     }
 
     for (node_name, node) in &config.nodes {
@@ -2773,41 +2799,98 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
             // `argv` element and a `shell` string both end up in the process
             // table, where every other user on the machine can read them, and in
             // any shell history or CI log that echoes the command.
-            let secrets = secret_env_keys(config, node, variant);
+            let secrets = secret_refs(config, node, variant);
             if secrets.is_empty() {
                 continue;
             }
             let r = resolve_variant(config, node, variant);
-            let commands: [(&str, Option<&CommandSpec>); 3] = [
-                ("", r.command.as_ref()),
-                (".on_stop", r.on_stop.as_ref()),
-                (".skip_if", r.skip_if.as_ref()),
-            ];
-            for (suffix, spec) in commands {
-                let Some(spec) = spec else { continue };
+            // EVERY command position, not just the variant's own. Actions are where
+            // `${output.*}` is actually in scope, and a probe command runs on the
+            // same machine with the same visibility — scanning only the variant left
+            // the reachable positions unchecked.
+            let mut commands: Vec<(String, CommandSpec)> = Vec::new();
+            if let Some(c) = r.command.clone() {
+                commands.push((String::new(), c));
+            }
+            if let Some(c) = r.on_stop.clone() {
+                commands.push((".on_stop".to_owned(), c));
+            }
+            if let Some(c) = r.skip_if.clone() {
+                commands.push((".skip_if".to_owned(), c));
+            }
+            if let Some(c) = r.readiness.as_ref().and_then(|p| p.cmd.spec()) {
+                commands.push((".probes.readiness".to_owned(), c));
+            }
+            if let Some(c) = r.liveness.as_ref().and_then(|p| p.cmd.spec()) {
+                commands.push((".probes.liveness".to_owned(), c));
+            }
+            for action in node.actions.iter().flatten() {
+                if let Some(c) = action.cmd.spec() {
+                    commands.push((format!(" (action {})", action.name), c));
+                }
+            }
+            for (suffix, spec) in &commands {
                 let parts: Vec<String> = match spec {
                     CommandSpec::Argv(a) => a.clone(),
                     CommandSpec::Shell(sh) => vec![sh.clone()],
                 };
                 for part in &parts {
-                    for name in builtin_refs_in(part, "output.")
+                    // Every reference form a secret can arrive through.
+                    let mut names = builtin_refs_in(part, "output.")
                         .into_iter()
-                        .chain(env_refs(part))
-                    {
+                        .map(|n| format!("output.{n}"))
+                        .collect::<Vec<_>>();
+                    names.extend(
+                        builtin_refs_in(part, "vars.")
+                            .into_iter()
+                            .map(|n| format!("vars.{n}")),
+                    );
+                    // `${nodes.<node>.KEY}` — take the trailing field.
+                    names.extend(
+                        builtin_refs_in(part, "nodes.")
+                            .into_iter()
+                            .filter_map(|r| r.rsplit('.').next().map(str::to_owned)),
+                    );
+                    names.extend(env_refs(part));
+                    for name in names {
                         if secrets.contains(&name) {
                             out.push(Finding::error(
                                 "secret-in-command",
                                 format!("{base}{suffix}"),
-                                format!(
-                                    "{name} is declared `secret: true`, so it must not be \
-                                     interpolated into a command — an argv element and a \
-                                     shell string both appear in the process table, where \
-                                     any user on the machine can read them. veld already \
-                                     passes it to the process as the environment variable \
-                                     {name}; reference it there instead (`${{{name}}}` \
-                                     inside a `shell` command, or have the program read it \
-                                     from the environment)"
-                                ),
+                                {
+                                    // The remedy differs by form, so name the right
+                                    // one rather than telling a `vars` author about
+                                    // an environment variable that does not exist.
+                                    let remedy = if let Some(var) = name.strip_prefix("vars.") {
+                                        format!(
+                                            "put it in `env` as \
+                                             `{{ \"SOME_NAME\": \"${{vars.{var}}}\" }}` and \
+                                             have the program read SOME_NAME from its \
+                                             environment, or deliver it with `files`"
+                                        )
+                                    } else if let Some(out) = name.strip_prefix("output.") {
+                                        format!(
+                                            "pass it through `env` (veld exports a node's \
+                                             outputs to its own process) rather than \
+                                             interpolating ${{output.{out}}} into the \
+                                             command line"
+                                        )
+                                    } else {
+                                        format!(
+                                            "veld already passes it to the process as the \
+                                             environment variable {name}, so have the program \
+                                             read it from the environment instead of taking \
+                                             it as an argument"
+                                        )
+                                    };
+                                    format!(
+                                        "{name} is declared secret, so it must not be \
+                                         interpolated into a command — an argv element and a \
+                                         shell string both appear in the process table, where \
+                                         any user on the machine can read them, and in CI logs \
+                                         that echo the command. Instead: {remedy}"
+                                    )
+                                },
                             ));
                         }
                     }
@@ -3167,9 +3250,20 @@ fn check_exactly_one_command(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
-            // A variant may instead point at a `script`, so a command is only
-            // required when there is no script.
-            check(base.clone(), &variant.cmd, variant.script.is_none(), out);
+            // Required-ness comes from the **resolved** variant: `argv`/`shell` is
+            // hoistable to node level, so a variant that states nothing is correct
+            // as long as its node does. Judging the raw variant made node-level
+            // hoisting fail its own linter.
+            //
+            // The >1 check stays per level, so node `shell` + variant `argv` remains
+            // a legal override rather than a conflict.
+            let resolved_has_command = resolve_variant(config, node, variant).command.is_some();
+            check(
+                base.clone(),
+                &variant.cmd,
+                !resolved_has_command && variant.script.is_none(),
+                out,
+            );
             if let Some(probes) = &variant.probes {
                 if let Some(Some(readiness)) = &probes.readiness {
                     // Only a `command`-type probe runs anything; an http/port

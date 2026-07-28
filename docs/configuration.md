@@ -1211,9 +1211,15 @@ optional `secret` flag.
 which command is your business. There is no provider table and no vendor name in
 the schema.
 
-Allowed in: `env.*`, `vars.*`, `actions[].parameters.*`,
-`sharing.relays[].token`, `sharing.gateway.token`, `proxy.*.set.*`, and
-[`files`](#files).
+Allowed in: `env.*`, `vars.*`, `sharing.relays[].token`,
+`sharing.gateway.token`, and [`files`](#files).
+
+**Not yet supported** in `proxy.*.set.*` or `actions[].parameters.*` — those take
+plain strings. Both are on the list because a proxy `Authorization` header is one
+of the likeliest real secrets in a config, but the resolved proxy travels to Caddy
+and to the public web gateway inside a route, so marking one secret means teaching
+those paths to carry and scrub it. Until then, **do not put a credential in a proxy
+header value**: it is sent to every joiner of a share and to the gateway verbatim.
 
 Refused in `argv`/`shell` elements, `cwd`, `depends_on`, `url_template`, `type`,
 and `include` — those must be statically known for graph building and linting.

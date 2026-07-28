@@ -71,6 +71,13 @@ pub enum ValueError {
     #[error("{at}: source command produced output that is not valid UTF-8")]
     CommandNotUtf8 { at: String },
 
+    #[error(
+        "{at}: \"{path}\" is outside the project. A delivered file must be a relative path \
+         inside the project root — an absolute path or one containing `..` is refused, because \
+         the payload is usually a credential and the destination should be reviewable"
+    )]
+    FileOutsideProject { at: String, path: String },
+
     #[error("{at}: could not write {path}: {source}")]
     FileUnwritable {
         at: String,
@@ -86,21 +93,35 @@ pub enum ValueError {
 /// CLI almost always ends its output with a newline and a token with a trailing
 /// `\n` fails in ways that are miserable to debug. An inline literal is trimmed
 /// the same way for consistency.
-pub async fn resolve_value(value: &ConfigValue, at: &str) -> Result<String, ValueError> {
+pub async fn resolve_value(
+    value: &ConfigValue,
+    at: &str,
+    project_root: Option<&std::path::Path>,
+) -> Result<String, ValueError> {
     match &value.source {
         SecretSource::Literal(v) => Ok(v.clone()),
         SecretSource::Env(var) => std::env::var(var).map_err(|_| ValueError::MissingEnv {
             at: at.to_owned(),
             var: var.clone(),
         }),
-        SecretSource::File(path) => tokio::fs::read_to_string(path)
-            .await
-            .map(|s| s.trim_end().to_owned())
-            .map_err(|source| ValueError::FileUnreadable {
-                at: at.to_owned(),
-                path: path.clone(),
-                source,
-            }),
+        SecretSource::File(path) => {
+            // Relative to the **project root**, as documented — not to the process
+            // cwd. A run started from the management UI or the desktop app is
+            // spawned by the daemon, whose cwd is nothing to do with the project,
+            // so a cwd-relative read would work from a terminal and fail there.
+            let resolved = match project_root {
+                Some(root) => root.join(path),
+                None => std::path::PathBuf::from(path),
+            };
+            tokio::fs::read_to_string(&resolved)
+                .await
+                .map(|s| s.trim_end().to_owned())
+                .map_err(|source| ValueError::FileUnreadable {
+                    at: at.to_owned(),
+                    path: resolved.display().to_string(),
+                    source,
+                })
+        }
         other => {
             let spec = other
                 .command()
@@ -158,43 +179,6 @@ async fn run_source_command(spec: &CommandSpec, at: &str) -> Result<String, Valu
         .map_err(|_| ValueError::CommandNotUtf8 { at: at.to_owned() })
 }
 
-/// One node's resolved environment, plus which of its keys hold secrets.
-#[derive(Debug, Clone, Default)]
-pub struct ResolvedEnv {
-    pub values: HashMap<String, String>,
-    /// Keys whose values were declared `secret: true`. Carried separately so the
-    /// values themselves stay plain `String` — the share manifest and run-state
-    /// wire types must remain serde-lenient, so sensitivity is a flag beside the
-    /// value, never a wrapper type around it.
-    pub secret_keys: Vec<String>,
-}
-
-/// Resolve every value in one node's environment.
-///
-/// Resolution is **eager and fail-fast**: a missing `env` source or a hanging
-/// helper is reported before anything spawns, rather than surfacing as an
-/// inexplicable application error minutes into a run.
-pub async fn resolve_env_values(
-    env: &HashMap<String, ConfigValue>,
-    at_prefix: &str,
-) -> Result<ResolvedEnv, ValueError> {
-    let mut out = ResolvedEnv::default();
-    // Sorted so an error is deterministic: with two broken sources, the same one
-    // is reported every time.
-    let mut keys: Vec<&String> = env.keys().collect();
-    keys.sort();
-    for key in keys {
-        let value = &env[key];
-        let at = format!("{at_prefix}.env.{key}");
-        out.values
-            .insert(key.clone(), resolve_value(value, &at).await?);
-        if value.secret {
-            out.secret_keys.push(key.clone());
-        }
-    }
-    Ok(out)
-}
-
 /// Write every declared file for one node, before its process starts (F9.1).
 ///
 /// Paths are resolved from the project root, like every other relative path in a
@@ -216,16 +200,32 @@ pub async fn deliver_files(
     for rel in paths {
         let delivery = &files[rel];
         let at = format!("{at_prefix}.files.{rel}");
-        let content = resolve_value(&delivery.value, &at).await?;
+        let content = resolve_value(&delivery.value, &at, Some(project_root)).await?;
         let mode = delivery
             .parsed_mode()
             .expect("the mode was validated at parse time");
 
-        let path = if std::path::Path::new(rel).is_absolute() {
-            std::path::PathBuf::from(rel)
-        } else {
-            project_root.join(rel)
-        };
+        // Confine the path. A config author already has code execution via `argv`,
+        // so this is not an escalation — but the docs promise "relative to the
+        // project root", and silently writing to `../../.ssh/authorized_keys`
+        // breaks that promise in the one place where the payload is a credential.
+        let rel_path = std::path::Path::new(rel);
+        if rel_path.is_absolute() {
+            return Err(ValueError::FileOutsideProject {
+                at: at.clone(),
+                path: rel.clone(),
+            });
+        }
+        if rel_path
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return Err(ValueError::FileOutsideProject {
+                at: at.clone(),
+                path: rel.clone(),
+            });
+        }
+        let path = project_root.join(rel_path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|source| ValueError::FileUnwritable {
                 at: at.clone(),
@@ -235,10 +235,20 @@ pub async fn deliver_files(
         }
         let write = |content: &str| -> std::io::Result<()> {
             use std::io::Write as _;
+            // `OpenOptions::mode` applies **only when the file is created**, so
+            // writing over an existing file would silently keep its old mode — and
+            // the common case is exactly that: the second run, or a path that is
+            // checked in at 0644. Remove it first so the create-with-mode is real,
+            // which also drops a symlink rather than following it and truncating
+            // whatever it points at.
+            match std::fs::symlink_metadata(&path) {
+                Ok(_) => std::fs::remove_file(&path)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
             let mut f = std::fs::OpenOptions::new()
                 .write(true)
-                .create(true)
-                .truncate(true)
+                .create_new(true)
                 .mode(mode)
                 .open(&path)?;
             f.write_all(content.as_bytes())
@@ -260,6 +270,7 @@ pub async fn deliver_files(
 /// with a rotating credential they would.
 pub async fn resolve_vars(
     vars: Option<&HashMap<String, ConfigValue>>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<HashMap<String, String>, ValueError> {
     let mut out = HashMap::new();
     let Some(vars) = vars else {
@@ -271,7 +282,7 @@ pub async fn resolve_vars(
         let value = &vars[name];
         out.insert(
             name.clone(),
-            resolve_value(value, &format!("vars.{name}")).await?,
+            resolve_value(value, &format!("vars.{name}"), project_root).await?,
         );
     }
     Ok(out)
@@ -288,13 +299,16 @@ mod tests {
     #[tokio::test]
     async fn literal_and_object_literal_resolve() {
         assert_eq!(
-            resolve_value(&cv(r#""plain""#), "at").await.unwrap(),
+            resolve_value(&cv(r#""plain""#), "at", None).await.unwrap(),
             "plain"
         );
         // The object form exists so an inline literal can carry `secret: true`.
         let secret = cv(r#"{ "value": "devpassword", "secret": true }"#);
         assert!(secret.secret);
-        assert_eq!(resolve_value(&secret, "at").await.unwrap(), "devpassword");
+        assert_eq!(
+            resolve_value(&secret, "at", None).await.unwrap(),
+            "devpassword"
+        );
     }
 
     /// The issue's requirement: missing at start is an error naming the node and
@@ -304,6 +318,7 @@ mod tests {
         let err = resolve_value(
             &cv(r#"{ "env": "VELD_TEST_DEFINITELY_UNSET_VAR" }"#),
             "nodes.api.variants.dev.env.DATABASE_URL",
+            None,
         )
         .await
         .unwrap_err();
@@ -327,11 +342,11 @@ mod tests {
             r#"{{ "file": {}, "secret": true }}"#,
             serde_json::to_string(&path.to_string_lossy()).unwrap()
         ));
-        assert_eq!(resolve_value(&value, "at").await.unwrap(), "s3cret");
+        assert_eq!(resolve_value(&value, "at", None).await.unwrap(), "s3cret");
 
         let missing = cv(r#"{ "file": "/definitely/not/here" }"#);
         assert!(matches!(
-            resolve_value(&missing, "at").await,
+            resolve_value(&missing, "at", None).await,
             Err(ValueError::FileUnreadable { .. })
         ));
     }
@@ -339,13 +354,13 @@ mod tests {
     #[tokio::test]
     async fn command_sources_resolve_in_both_forms() {
         assert_eq!(
-            resolve_value(&cv(r#"{ "shell": "printf 'from-shell\n'" }"#), "at")
+            resolve_value(&cv(r#"{ "shell": "printf 'from-shell\n'" }"#), "at", None)
                 .await
                 .unwrap(),
             "from-shell"
         );
         assert_eq!(
-            resolve_value(&cv(r#"{ "argv": ["printf", "from-argv"] }"#), "at")
+            resolve_value(&cv(r#"{ "argv": ["printf", "from-argv"] }"#), "at", None)
                 .await
                 .unwrap(),
             "from-argv"
@@ -357,6 +372,7 @@ mod tests {
         let err = resolve_value(
             &cv(r#"{ "shell": "echo nope 1>&2; exit 3" }"#),
             "nodes.db.variants.dev.env.PASSWORD",
+            None,
         )
         .await
         .unwrap_err();
@@ -400,60 +416,10 @@ mod tests {
     async fn source_command_with_no_stdin_does_not_hang() {
         // stdin is /dev/null, so `cat` sees EOF immediately instead of waiting
         // for input that would never come under a daemon.
-        let out = resolve_value(&cv(r#"{ "argv": ["cat"] }"#), "at")
+        let out = resolve_value(&cv(r#"{ "argv": ["cat"] }"#), "at", None)
             .await
             .expect("a helper reading stdin must not hang");
         assert_eq!(out, "");
-    }
-
-    #[tokio::test]
-    async fn resolve_env_values_collects_secret_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("k");
-        std::fs::write(&path, "filevalue").unwrap();
-        let env: HashMap<String, ConfigValue> = HashMap::from([
-            ("PLAIN".to_owned(), cv(r#""visible""#)),
-            (
-                "SECRET".to_owned(),
-                cv(r#"{ "value": "hidden", "secret": true }"#),
-            ),
-            (
-                "FROM_FILE".to_owned(),
-                cv(&format!(
-                    r#"{{ "file": {}, "secret": true }}"#,
-                    serde_json::to_string(&path.to_string_lossy()).unwrap()
-                )),
-            ),
-        ]);
-        let resolved = resolve_env_values(&env, "nodes.a.variants.dev")
-            .await
-            .unwrap();
-        assert_eq!(resolved.values.get("PLAIN").unwrap(), "visible");
-        assert_eq!(resolved.values.get("SECRET").unwrap(), "hidden");
-        assert_eq!(resolved.values.get("FROM_FILE").unwrap(), "filevalue");
-        let mut secrets = resolved.secret_keys.clone();
-        secrets.sort();
-        assert_eq!(secrets, vec!["FROM_FILE", "SECRET"]);
-    }
-
-    #[test]
-    fn value_forms_round_trip_and_reject_ambiguity() {
-        // The terse form stays terse on the way out.
-        assert_eq!(
-            serde_json::to_string(&ConfigValue::literal("x")).unwrap(),
-            r#""x""#
-        );
-        // A secret literal has to use the object form to carry the flag.
-        assert_eq!(
-            serde_json::to_string(&cv(r#"{ "value": "x", "secret": true }"#)).unwrap(),
-            r#"{"value":"x","secret":true}"#
-        );
-        // Two sources at once is ambiguous.
-        assert!(serde_json::from_str::<ConfigValue>(r#"{ "env": "A", "file": "/b" }"#).is_err());
-        // No source at all says nothing.
-        assert!(serde_json::from_str::<ConfigValue>(r#"{ "secret": true }"#).is_err());
-        // An unknown source key is a typo, not a new provider.
-        assert!(serde_json::from_str::<ConfigValue>(r#"{ "vault": "x" }"#).is_err());
     }
 
     /// F9.1: a value can be delivered to disk, for a process that can only read a
