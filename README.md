@@ -336,6 +336,12 @@ Open it with `veld ui` or visit the URL directly.
 
 An experimental second-generation management UI is served at `/ide` (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
 
+It has **terminal panes**: real shells in the selected worktree's directory, in a dock of two tab strips you can split, reorder and drag tabs between. The shell runs in the daemon and reaches the browser over a WebSocket, so terminals work in a plain browser and not only in the Electron app.
+
+Sessions outlive the page. Reloading (or Electron reloading its window) reattaches to the same shells with their scrollback intact, and output produced while you were away is replayed — a build keeps running and keeps logging. **Closing a terminal pane** is what ends a shell; closing the browser window or quitting the app only detaches, and a session nobody comes back to is hung up after 30 minutes (restarting the daemon, as `veld update` does, ends them immediately — the terminal says so instead of quietly handing you a fresh shell). Opening the same terminal in a second window takes it over rather than mirroring it, so there is only ever one writer. Up to 48 sessions can be live at once; past that, opening a terminal reports the limit and closing a pane frees a slot.
+
+Because a terminal is a shell on your machine, `/api/pty/attach` is gated more tightly than the rest of the daemon's API: WebSocket handshakes cannot carry the `X-Veld-Request` CSRF header, so an attach needs a single-use ticket minted through a CSRF-gated `POST` **and** an `Origin` on the allowlist, failing closed when `Origin` is absent. Details and the reasoning are in `crates/veld-daemon/src/pty.rs`.
+
 ### Hammerspoon (macOS)
 
 If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar widget that shows running environments at a glance.

@@ -20,6 +20,19 @@
   --accent: oklch(0.74 0.14 158);
   --shadow: 0 20px 50px -20px rgba(0, 0, 0, 0.6);
   --pop: 0 24px 60px -18px rgba(0, 0, 0, 0.7);
+  /* Pane tab strip. Its own tokens because the existing surface tokens are
+     nearly identical in the light theme (--elev and --panel2 differ by ~4%),
+     which left a selected tab indistinguishable from the strip behind it. */
+  --tab-strip: #0a0b0d;
+  --tab-active: #22262c;
+  /* Top edge of the open tab in a pane that does NOT have the keyboard. Its own
+     token because the obvious candidate (--border2) is within a few percent of
+     --tab-strip in the light theme, which left an unfocused tab with no visible
+     edge at all. */
+  --tab-idle-edge: #3f454e;
+  /* Terminal surface. Separate from --bg so the light theme can go near-white
+     for legible monospace contrast without lightening the whole app chrome. */
+  --term-bg: #0d0e10;
 }
 
 body[data-theme="light"] {
@@ -42,6 +55,10 @@ body[data-theme="light"] {
   --accent: oklch(0.58 0.13 158);
   --shadow: 0 18px 44px -22px rgba(30, 40, 50, 0.28);
   --pop: 0 22px 54px -20px rgba(30, 40, 50, 0.32);
+  --tab-strip: #dbdee2;
+  --tab-active: #ffffff;
+  --tab-idle-edge: #a4abb4;
+  --term-bg: #ffffff;
 }
 
 * {
@@ -402,41 +419,235 @@ select:focus {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  background: var(--panel2);
+  /* No gap: tabs sit edge to edge and are separated by their own 1px inset
+     border, the way a tab strip reads. The flex spacer holds the `+` off. */
+  gap: 0;
+  padding: 0 10px 0 0;
+  background: var(--tab-strip);
   border-bottom: 1px solid var(--border);
   font-size: 11.5px;
   font-weight: 600;
 }
 
-.terminal-pane {
-  width: 46%;
+/* Tabs inside a dock's strip. The label and the close button are siblings —
+   a button nested in a button is invalid, and the rail's div[role=button]
+   workaround hides its inner controls from assistive tech. */
+.pane-tab {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  align-self: stretch;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  /* Separator between adjacent tabs, so a strip of unselected tabs still
+     reads as distinct targets. */
+  box-shadow: inset -1px 0 0 var(--border);
+}
+
+/* The selected tab takes the colour of the body below it and grows an accent
+   edge, so it reads as attached to its content rather than as one more chip. */
+.pane-tab.sel {
+  background: var(--tab-active);
+  color: var(--text);
+  box-shadow:
+    inset 0 2px 0 var(--accent),
+    inset -1px 0 0 var(--border);
+}
+
+.pane-tab:hover {
+  color: var(--text);
+}
+
+.pane-tab.drop-before::before,
+.pane-tab.drop-after::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--accent);
+}
+
+.pane-tab.drop-before::before {
+  left: -1px;
+}
+
+.pane-tab.drop-after::after {
+  right: -1px;
+}
+
+.pane-tab.dragging {
+  opacity: 0.4;
+}
+
+.pane-tab-label,
+.pane-tab-close {
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0 4px 0 10px;
+  align-self: stretch;
+}
+
+.pane-tab-close {
+  padding: 0 8px 0 2px;
+  display: inline-flex;
+  align-items: center;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+/* Revealed on hover or focus. Focus matters: a keyboard user must be able to
+   see the control they have landed on. */
+.pane-tab:hover .pane-tab-close,
+.pane-tab-close:focus-visible {
+  opacity: 0.75;
+}
+
+.pane-tab-close:hover {
+  opacity: 1;
+  color: var(--danger);
+}
+
+/* ---- docks --------------------------------------------------------------- */
+
+.dock-area {
+  flex: 1;
   display: flex;
-  flex-direction: column;
-  border-right: 1px solid var(--border);
   min-width: 0;
 }
 
-.terminal-body {
-  flex: 1;
+.dock {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
   background: var(--bg);
-  padding: 14px 16px;
-  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-  font-size: 12px;
-  line-height: 1.85;
-  color: var(--muted);
+}
+
+/* Which pane is receiving keystrokes.
+   `:focus-within` rather than the layout's `focused` field: that field only
+   says where a new tab would open, while this tracks real DOM focus — and it
+   picks up the terminal's hidden textarea for free. Without it there is no way
+   to tell a focused terminal from one that will swallow nothing you type. */
+.dock:focus-within .pane-tabs {
+  background: var(--panel2);
+}
+
+.dock:focus-within .pane-tab.sel {
+  color: var(--text);
+  box-shadow:
+    inset 0 2px 0 var(--accent),
+    inset -1px 0 0 var(--border);
+}
+
+.dock:not(:focus-within) .pane-tab.sel {
+  /* Muted edge: still identifiable as the open tab, clearly not the one with
+     the keyboard. */
+  box-shadow:
+    inset 0 2px 0 var(--tab-idle-edge),
+    inset -1px 0 0 var(--border);
+}
+
+.term-pane {
+  box-shadow: inset 0 0 0 1px transparent;
+  transition: box-shadow 0.12s;
+}
+
+.dock:focus-within .term-pane:focus-within {
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+
+.dock-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
-.placeholder-chip {
+.dock-empty {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.dock-splitter {
+  position: relative;
+  flex: none;
+  width: 1px;
+  cursor: col-resize;
+  background: var(--border);
+}
+
+/* Widen only the pointer target. Doing this with transparent borders plus
+   background-clip instead leaves the border box painting the page background
+   through — a pale band beside the line, which is not what a divider is. */
+.dock-splitter::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+
+.dock-splitter:hover,
+.dock-splitter:focus-visible {
+  background: var(--accent);
+  outline: none;
+}
+
+/* ---- terminal ------------------------------------------------------------ */
+
+.term-pane {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--term-bg);
+}
+
+/* The slot React owns; the element inside it is the live terminal, reparented
+   here by panes/terminalHost.ts.
+   The padding MUST live on the slot, not on .term-host: fit-addon sizes the
+   grid from the computed height of the terminal's parent element (which is
+   .term-host), and with border-box sizing that height still includes the
+   parent's own padding. Padding there therefore bought a row that doesn't fit,
+   and the bottom line — a status bar, a prompt — rendered off the pane. Here
+   it insets the absolutely-positioned .term-host instead, so what fit measures
+   is exactly what is visible. */
+.term-slot,
+.term-host {
+  position: absolute;
+  inset: 0;
+}
+
+.term-slot {
+  padding: 6px 8px;
+}
+
+.term-status {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-  font-size: 12px;
-  color: var(--faint);
+  font-size: 11.5px;
+  color: var(--muted);
   background: var(--panel);
-  padding: 8px 14px;
-  border-radius: 8px;
   border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  box-shadow: var(--shadow);
 }
 
 .launcher {
@@ -444,6 +655,16 @@ select:focus {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  background: var(--panel);
+}
+
+.launcher-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px 0;
+  font-size: 11.5px;
 }
 
 .launcher-list {

@@ -26,6 +26,18 @@ mod management;
 #[path = "desktop.rs"]
 mod desktop;
 
+#[path = "pty.rs"]
+mod pty;
+
+/// Hang up every live terminal session.
+///
+/// Re-exported for the daemon's shutdown path: terminal shells are our children
+/// but live in their own sessions, so a restart (`veld update` hard-restarts the
+/// daemon) would otherwise leave them running with nothing able to reattach.
+pub async fn shutdown_terminal_sessions() {
+    pty::shutdown_sessions().await;
+}
+
 // The feedback HTTP server listens on this instance's daemon port —
 // `veld_core::instance::daemon_port()` (19899 for the installed instance;
 // a dev instance overrides via VELD_DAEMON_PORT).
@@ -86,7 +98,16 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // because management routes are stateless.
         .merge(management::routes())
         .merge(desktop::routes())
+        // Terminal sockets. Kept out of desktop::routes() because that
+        // router's CSRF layer cannot gate a WebSocket upgrade — see pty.rs.
+        .merge(pty::routes())
         .merge(crate::share::api::routes(share_manager));
+
+    // Terminal sessions outlive their socket (so a page reload keeps its
+    // shell), which means something has to collect the ones nobody comes back
+    // for. Started here rather than in pty::routes() so that building a router
+    // in a test doesn't leave a timer running.
+    pty::spawn_session_reaper();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));
     info!("feedback server listening on {addr}");
