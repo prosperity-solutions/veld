@@ -168,9 +168,14 @@ and several were paid for in this codebase already.
   config file, at every `schemaVersion`. Anything in this repo that reads a
   `veld.json` as strict JSON — a CI script, a `jq` pipeline, a test helper — must
   strip comments first (`tests/validate-schema.sh` shows the pattern, mirroring
-  `veld_core::jsonc::strip`). Nothing may *rewrite* a config through serde:
-  `veld config --migrate --write` is textual and surgical precisely so comments
-  survive.
+  `veld_core::jsonc::strip`).
+- **veld does not rewrite a user's config.** `veld init` writes one when none
+  exists; nothing else edits one. A serde round-trip deletes every comment, and
+  the byte-level alternative cannot see structure — which is exactly how the
+  removed `veld config --migrate --write` ended up editing the `hooks`/`ui` blobs
+  veld promises not to interpret. If a change seems to need a config rewriter,
+  emit a precise diagnostic instead and let the author (or their agent) apply it;
+  `veld lint` is the verification step.
 - Domain: `veld.oss.life.li` (not `veld.dev`)
 - Install URL: `https://veld.oss.life.li/get`
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`

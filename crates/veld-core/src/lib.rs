@@ -9,7 +9,6 @@ pub mod include;
 pub mod instance;
 pub mod jsonc;
 pub mod logging;
-pub mod migrate;
 pub mod orchestrator;
 pub mod paths;
 pub mod port;

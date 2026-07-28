@@ -7,11 +7,13 @@
 //! line numbers, and columns of everything that remains are unchanged, so
 //! `serde_json::Error::line()` / `column()` still point at the real position in
 //! the file the user is editing. That is the whole reason not to reach for a CST
-//! or a span map: nothing veld does today *rewrites* an existing `veld.json`, so
-//! there is no comment-preserving writer to feed. (`veld init` writes one, but
-//! only when none exists.) The one planned exception is `veld config --migrate
-//! --write`, which MUST NOT round-trip through `serde` — that would silently
-//! delete every comment this module exists to allow.
+//! or a span map: veld never *rewrites* an existing `veld.json`, so there is no
+//! comment-preserving writer to feed. (`veld init` writes one, but only when none
+//! exists.) veld did briefly ship a config rewriter — `veld config --migrate
+//! --write` — and it is instructive that it could not round-trip through `serde`
+//! without deleting every comment this module exists to allow, so it edited bytes
+//! instead, and editing bytes is precisely why it could not tell that `hooks` and
+//! `ui` are opaque. Anything proposing to rewrite a config should read that twice.
 //!
 //! There is no `.jsonc` extension requirement: the file is always `veld.json` and
 //! it accepts comments as it is. Note that editors do not know that — a

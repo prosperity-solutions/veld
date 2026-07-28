@@ -1,33 +1,52 @@
 # Migrating a config to `schemaVersion: "3"`
 
 **You have to.** This veld reads `schemaVersion: "3"` only — a `"1"` or `"2"`
-config fails to load with a message pointing here. Migrating is one command and
-the tool shows you the diff before it writes anything.
+config fails to load with a message pointing here.
 
 Supporting two readings was tried and abandoned. Every rule needed a severity that
 depended on the document's version, every new field was silently live in an old
 document that had never opted into it, and the result was two config languages
 sharing one parser — more confusing than the migration it was meant to avoid.
 
-Start with the tool:
+This page is the complete rule set. There are three mechanical rewrites and one
+semantic change, and the whole thing is usually a handful of lines.
 
-```sh
-veld config --migrate          # dry run: shows a diff, writes nothing
-veld config --migrate --write  # apply it
-veld lint                      # check the result before starting anything
+## The fastest way: hand this page to your coding agent
+
+```
+Migrate my veld.json to schemaVersion "3", following the rules in
+https://github.com/prosperity-solutions/veld/blob/main/docs/migrating-to-v3.md
+Then run `veld lint` and fix everything it reports.
 ```
 
-The dry run is the default on purpose. Turning a shell string into an argv is a
-heuristic — `sh -c "a | b"` and `["a", "|", "b"]` are different programs — so
-anything with shell syntax in it is deliberately left alone and listed for you to
-look at.
+`veld lint` is the check that makes this safe to delegate: it reads the migrated
+config with the real parser and reports every remaining problem with a file, line,
+and rule name. Verify the result, don't trust the rewrite.
+
+### Why veld does not do this for you
+
+veld shipped a `veld config --migrate` and removed it. Preserving your comments
+ruled out a serde round-trip, so it rewrote bytes — and a byte-level rewriter
+cannot see structure, so it could not honour the rule that `hooks` and `ui` are
+opaque blobs veld promises not to interpret. It rewrote a `command` key inside
+them anyway. Making it structural would have deleted the comments it existed to
+protect.
+
+The other half: choosing `argv` or `shell` for a given string is a judgment, and
+the tool's tokenizer resolved every doubt by picking `shell` — permanently baking
+in a `sh -c` that was not needed. Something that can read the command and reason
+about it does better.
+
+What veld keeps is the half a program is good at: **detection**. Loading a config
+with any legacy form fails with every offending position named, exactly, with no
+heuristics involved.
 
 ---
 
 ## The change that is easy to miss
 
-`--migrate` handles the mechanical rewrites. This one needs your eyes, because it
-is a *semantic* change the tool cannot always see:
+Three of the four changes below are mechanical find-and-replace. This one is a
+*semantic* change — the shape stays legal, the meaning moves:
 
 **Node outputs are no longer reachable as `${veld.<OUTPUT>}` inside `on_stop`.**
 
@@ -54,12 +73,9 @@ so this is caught **before a run starts** rather than at teardown — which
 matters, because a teardown hook that fails to interpolate does not run, and
 whatever it was going to clean up gets left behind.
 
-After migrating, `veld lint` reports any `${veld.*}` name that is not a built-in,
-so you will be told rather than discovering it at teardown.
-
 ---
 
-## What `--migrate` changes
+## The rewrites
 
 ### `command` becomes `argv` or `shell`
 
@@ -71,8 +87,8 @@ of them:
 | `"argv": ["pnpm", "dev"]` | An array, spawned directly. No shell, no word splitting, no globbing. |
 | `"shell": "pnpm dev \| tee out.log"` | A string, run via `sh -c`. You own the quoting. |
 
-`--migrate` converts to `argv` when the string is safely tokenizable and leaves
-it as `shell` otherwise:
+Use `argv` when the string is a program plus arguments. Keep it as `shell` when it
+needs a shell:
 
 ```jsonc
 "command": "node server.js --port ${veld.port}"
@@ -82,10 +98,13 @@ it as `shell` otherwise:
 // → "shell": "tail -f app.log | grep ERROR"   (a pipeline needs a shell)
 ```
 
-A string stays `shell` if it contains any of `| & ; < > ( ) \` " ' * ? [ ] { } ~
-# \` , a newline, a `VAR=value` prefix, or a bare `$VAR`. Note that
-`${veld.port}` is *veld's* interpolation, not the shell's, so it survives into an
-argv element.
+**`shell` is required** if the string contains any of `| & ; < > ( ) * ? [ ] { } ~
+#`, a backtick, a quote, a newline, a `VAR=value` prefix, or a bare `$VAR` — every
+one of those is something the shell does, and `argv` has no shell. When in doubt,
+`shell` is the answer that cannot change behaviour.
+
+Note that `${veld.port}` is *veld's* interpolation, not the shell's, so it survives
+into an `argv` element unchanged. Do not treat it as shell syntax.
 
 **Why prefer `argv`?** Interpolation runs per element, *after* the array is
 fixed, so a value containing spaces, globs, quotes, or newlines can never change
@@ -108,20 +127,25 @@ change.
 // → "on_stop": { "argv": ["docker", "rm", "-f", "api"] }
 ```
 
-Same rule everywhere: probes, `actions[]`, `setup`/`teardown` steps.
+Same rule everywhere: probes, `actions[]`, `setup`/`teardown` steps, and the
+command form of a value source (`{ "command": "op read …" }` → `{ "shell": "op
+read …" }`).
 
 ### `schemaVersion` becomes `"3"`
 
-Which is also the switch that makes `command` a load error. A v3 document
-containing `command` fails to load, and the message names every offending
-position and points back at `veld config --migrate`.
+Do this **last**. It is the switch that makes every legacy form a load error, so
+flipping it first only means the config stops loading before you have finished
+fixing it. Once flipped, a remaining `command` fails to load with every offending
+position named — which is a useful final check in its own right.
 
-### What `--migrate` does *not* touch
+### What to leave alone
 
-- **Comments and formatting.** The rewrite is textual and surgical rather than a
-  serde round-trip, precisely so your comments survive.
+- **`hooks` and `ui`.** Opaque to veld. A `command` key *inside* them is not
+  veld's key and must not be touched — the loader deliberately does not look
+  there. (This is the rule the removed converter broke.)
 - **`sensitive_outputs`.** Still supported, unchanged, not deprecated.
-- **Anything already in v3 form.** Re-running is a no-op.
+- **Comments, formatting, key order.** Nothing about v3 requires changing them.
+- **Anything already in v3 form.**
 
 ---
 
@@ -249,9 +273,9 @@ Created with its mode (default `0600`), so it is never briefly world-readable.
 
 ## Rollback
 
-`git checkout` the config — which is why `--migrate` is a dry run by default and
-writes only with `--write`. Note that rolling the *config* back means rolling
-*veld* back too, since this version reads only `schemaVersion: "3"`.
+`git checkout` the config. Do the migration on a branch and nothing here is
+irreversible. Note that rolling the *config* back means rolling *veld* back too,
+since this version reads only `schemaVersion: "3"`.
 
 One thing worth knowing before you upgrade veld itself, independent of migrating a
 config: an unrecognised top-level key — most often the pre-JSONC `"//": "…"`

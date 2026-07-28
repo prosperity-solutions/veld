@@ -13,7 +13,7 @@
     "schemaVersion": {
       "type": "string",
       "const": "3",
-      "description": "Required in the root config file only. In v3 the `command` key is gone: every place that runs something uses `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). Run `veld config --migrate` to convert a v1/v2 config."
+      "description": "Required in the root config file only. Must be \"3\" — v1 and v2 are not supported and fail to load. In v3 the `command` key is gone: every place that runs something uses `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). See docs/migrating-to-v3.md to convert an older config."
     },
     "name": {
       "type": "string",

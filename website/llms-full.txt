@@ -315,7 +315,7 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `$schema` | string | No | JSON Schema URL for editor autocompletion |
-| `schemaVersion` | string | Yes (root file only) | Must be `"3"`. `"1"` and `"2"` are not supported and fail to load with a message pointing at `veld config --migrate`, which converts a config (dry run by default) |
+| `schemaVersion` | string | Yes (root file only) | Must be `"3"`. `"1"` and `"2"` are not supported and fail to load with a message stating every change needed. veld ships no converter — `docs/migrating-to-v3.md` is the rule set, `veld lint` is the check |
 | `include` | string[] | No | v3: globs of further config files, relative to the root file. Splits a large config across per-directory files. A node is defined in exactly one file |
 | `vars` | object | No | v3: one definition point per value, referenced as `${vars.name}`. A scalar or a single value source — never a config fragment |
 | `name` | string | Yes | Project name (used in URLs) |

@@ -56,8 +56,8 @@ unreadable.
 optional in every file, so an included file is just `{ "nodes": { … } }`.
 
 `schemaVersion` must be `"3"` — `"1"` and `"2"` are not supported and fail to load.
-Convert with `veld config --migrate` (dry run) then `--write`. The `command` key is
-replaced by `argv`/`shell`.
+There is no converter — apply the rules in `docs/migrating-to-v3.md` yourself and
+run `veld lint`. The `command` key is replaced by `argv`/`shell`.
 
 ## Running something: `argv` or `shell`
 

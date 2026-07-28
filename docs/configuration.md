@@ -113,10 +113,11 @@ every file.
 "schemaVersion": "3"
 ```
 
-**`"1"` and `"2"` are not supported.** A config declaring either fails to load with
-a message pointing at `veld config --migrate`, which converts it — a dry run by
-default, showing the diff before it writes anything. See
-[docs/migrating-to-v3.md](migrating-to-v3.md).
+**`"1"` and `"2"` are not supported.** A config declaring either fails to load, with
+an error that states every change needed. There are three mechanical rewrites and
+one semantic change — [docs/migrating-to-v3.md](migrating-to-v3.md) is the complete
+rule set, written so you can hand it to a coding agent and check the result with
+`veld lint`.
 
 Supporting two readings was tried and abandoned: every rule then needed a severity
 that depended on the document's version, and every new field was silently live in an
@@ -567,12 +568,12 @@ object:
 "skip_if": { "shell": "test -f .migrated" }
 ```
 
-#### `command` (`schemaVersion` 1 and 2 only)
+#### `command` (removed)
 
-`command` was the single shell-string form. It still works in a v1 or v2
-document, and a `schemaVersion: "3"` document containing it fails to load with a
-message naming every position and pointing at `veld config --migrate`. See
-[docs/migrating-to-v3.md](migrating-to-v3.md).
+`command` was the single shell-string form in `schemaVersion` 1 and 2. Neither
+version loads any more, and a `schemaVersion: "3"` document containing `command`
+fails to load with a message naming every position. Replace each one with `argv`
+or `shell` — see [docs/migrating-to-v3.md](migrating-to-v3.md).
 
 ### `script`
 

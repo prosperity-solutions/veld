@@ -263,15 +263,6 @@ enum Command {
         #[arg(long)]
         files: bool,
 
-        /// Convert a v1/v2 config to schemaVersion 3. Dry-run: prints a diff
-        /// and what needs a human, and writes nothing without --write.
-        #[arg(long)]
-        migrate: bool,
-
-        /// With --migrate, apply the changes instead of only showing them.
-        #[arg(long, requires = "migrate")]
-        write: bool,
-
         /// Explain one effective value and where it was defined, e.g.
         /// `nodes.api.variants.dev.env.DATABASE_URL`. A value declared `secret`
         /// is described, never printed.
@@ -663,11 +654,9 @@ async fn main() {
         Command::Config {
             path,
             files,
-            migrate,
-            write,
             why,
             json,
-        } => commands::config::run(path, files, migrate, write, why, json).await,
+        } => commands::config::run(path, files, why, json).await,
 
         Command::Lint { json } => commands::lint::run(json).await,
 

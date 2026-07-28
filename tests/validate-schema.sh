@@ -143,7 +143,7 @@ while IFS= read -r config; do
   version=$(python3 -c "import json; print(json.load(open('$plain')).get('schemaVersion', 'missing'))" 2>/dev/null || echo "unreadable")
   if [[ "$version" != "3" ]]; then
     echo -n "  $rel ... "
-    echo "FAIL (schemaVersion is \"$version\"; only \"3\" is supported — run \`veld config --migrate\`)"
+    echo "FAIL (schemaVersion is \"$version\"; only \"3\" is supported — see docs/migrating-to-v3.md)"
     FAIL=$((FAIL + 1))
     continue
   fi

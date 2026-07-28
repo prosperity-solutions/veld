@@ -26,13 +26,12 @@ pub enum ConfigError {
 
     #[error(
         "schemaVersion \"{0}\" is no longer supported — this veld reads only \"3\".\n  \
-         Run `veld config --migrate` to convert this config (a dry run; add `--write` to \
-         apply), then `veld lint` to check the result.\n  \
          What changes: `command` becomes `argv` (an array, spawned directly) or `shell` (a \
          string, run via sh -c); a bare-string `on_stop`/`skip_if` becomes \
          `{{ \"argv\": … }}`; and a node output referenced as `${{veld.KEY}}` becomes \
          `${{output.KEY}}`.\n  \
-         See docs/migrating-to-v3.md."
+         docs/migrating-to-v3.md states every rule — hand it to your coding agent, or \
+         apply them yourself. Then run `veld lint` to check the result."
     )]
     UnsupportedSchemaVersion(String),
 
@@ -48,8 +47,9 @@ pub enum ConfigError {
     #[error(
         "{path} declares schemaVersion \"3\", where `command` has been replaced by \
          `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). \
-         Found the old form at: {}. Run `veld config --migrate` to convert this file \
-         (dry-run by default; `--write` to apply).",
+         Found the old form at: {}. Use `argv` when the string is a plain program plus \
+         arguments, `shell` when it needs a shell (pipes, `&&`, globs, variable \
+         expansion). See docs/migrating-to-v3.md.",
         locations.join(", ")
     )]
     LegacyCommandInV3 {
@@ -874,9 +874,10 @@ impl<'de> Deserialize<'de> for CommandSpec {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error as _;
         match serde_json::Value::deserialize(d)? {
-            // The v1/v2 form: a bare shell string. Still accepted here so a v1/v2
-            // document keeps loading; `parse_config` rejects it for v3 documents
-            // and points at `veld config --migrate`.
+            // The v1/v2 form: a bare shell string. Deserializing it still succeeds
+            // so that `reject_v3_legacy_commands` is the thing that rejects it —
+            // that gate names every position and the replacement form, where a
+            // serde error here would only say "invalid type: string".
             serde_json::Value::String(s) => Ok(CommandSpec::Shell(s)),
             serde_json::Value::Object(map) => {
                 let keys: CommandKeys = serde_json::from_value(serde_json::Value::Object(map))
@@ -917,10 +918,10 @@ pub struct CommandKeys {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shell: Option<String>,
 
-    /// The v1/v2 shell string. **Removed in `schemaVersion: "3"`** — a v3
-    /// document containing it is a load error naming `veld config --migrate`
-    /// (see [`reject_v3_legacy_commands`]). Kept on the type so v1 and v2
-    /// documents keep loading with today's semantics.
+    /// The v1/v2 shell string. **Removed in `schemaVersion: "3"`**, which is the
+    /// only version veld reads — so this field exists purely so that
+    /// [`reject_v3_legacy_commands`] owns the rejection and can name every
+    /// position and its replacement, instead of serde reporting an unknown key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
 }
@@ -2382,11 +2383,19 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
 
 /// Schema versions this build can load.
 ///
-/// **Only `"3"`.** v1 and v2 are not supported: a config must be migrated, which is
-/// what `veld config --migrate` is for. Keeping two readings alive was tried and
-/// abandoned — every rule then needed a severity that depended on the document's
-/// version, every new field was silently live in an old document, and the result
-/// was two config languages sharing one parser. One reading is the feature.
+/// **Only `"3"`.** v1 and v2 are not supported: such a config must be rewritten,
+/// and [`UnsupportedSchemaVersion`](ConfigError::UnsupportedSchemaVersion) states
+/// every rule for doing so. Keeping two readings alive was tried and abandoned —
+/// every rule then needed a severity that depended on the document's version,
+/// every new field was silently live in an old document, and the result was two
+/// config languages sharing one parser. One reading is the feature.
+///
+/// There is deliberately no automated converter. veld shipped one and removed it:
+/// preserving comments meant rewriting bytes, and a byte-level rewriter cannot see
+/// that `hooks` and `ui` are opaque, so it edited the blobs veld promises not to
+/// interpret. Detection is structural and exact and stays here; the rewrite is a
+/// judgment (`argv` or `shell`?) best left to whoever — or whatever — is reading
+/// the config, with `veld lint` as the check afterwards.
 pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &["3"];
 
 /// Every recognised top-level config key, for the unknown-key diagnostic.
@@ -2421,7 +2430,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
 /// in the loader. That does mean such a document fails `veld stop` too; the
 /// mitigation is that it has never run, because it cannot start either. (A config
 /// that ran under an older veld declared `schemaVersion` 1 or 2, and now fails
-/// earlier, at the version check, with a message pointing at `--migrate`.)
+/// earlier, at the version check, which explains the upgrade in full.)
 ///
 /// Walking the raw value rather than the typed model catches every position at
 /// once (variants, probes, actions, setup/teardown steps, value sources) without
@@ -2444,8 +2453,9 @@ pub(crate) fn reject_v3_legacy_commands(
                     // not interpret their contents, so it must not police their key
                     // names either. A UI extension declaring a `command` key is its
                     // own business — treating it as veld's legacy key made the whole
-                    // config unloadable, and had `--migrate` rewriting a blob it is
-                    // explicitly not supposed to understand.
+                    // config unloadable. This exemption is also why the automated
+                    // converter was removed: it worked on bytes, so it could not see
+                    // the exemption and rewrote the opaque blobs anyway.
                     if at.is_empty() && (key == "hooks" || key == "ui") {
                         continue;
                     }
@@ -3971,7 +3981,7 @@ mod tests {
         assert_eq!(cfg.hooks.as_ref().unwrap().as_object().unwrap().len(), 2);
         assert!(cfg.ui.as_ref().unwrap().get("my-ext").is_some());
 
-        // Round-trips, so a `--migrate` rewrite cannot silently drop them.
+        // Round-trips, so `veld config` cannot silently drop them.
         let round: VeldConfig =
             serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(round.hooks, cfg.hooks);
@@ -4362,10 +4372,11 @@ mod tests {
 
     // -- F5: the v3 command gate ----------------------------------------------
 
-    /// A v3 document containing `command` fails to load, and the message names
-    /// `veld config --migrate`.
+    /// A v3 document containing `command` fails to load, and the message says what
+    /// to write instead. There is no converter to defer to, so the error is the
+    /// whole instruction.
     #[test]
-    fn v3_rejects_legacy_command_and_names_migrate() {
+    fn v3_rejects_legacy_command_and_says_what_to_write() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("veld.json");
         std::fs::write(
@@ -4399,12 +4410,15 @@ mod tests {
             ]
         );
         let msg = err.to_string();
-        assert!(msg.contains("veld config --migrate"), "{msg}");
         assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
+        assert!(msg.contains("docs/migrating-to-v3.md"), "{msg}");
+        // No converter exists; a message that names one sends the reader nowhere.
+        assert!(!msg.contains("--migrate"), "{msg}");
     }
 
-    /// v3 is the only supported version, and the message has to be the upgrade
-    /// instructions — this is the error every existing user meets exactly once.
+    /// v3 is the only supported version, and the message has to *be* the upgrade
+    /// instructions — this is the error every existing user meets exactly once, and
+    /// there is no `--migrate` to hand them off to.
     #[test]
     fn v1_and_v2_are_rejected_with_migration_instructions() {
         let dir = tempfile::tempdir().unwrap();
@@ -4429,12 +4443,52 @@ mod tests {
                 "v{version}: {err:?}"
             );
             let msg = err.to_string();
-            // The message is the whole upgrade path, so it must carry the command
-            // and say what changes.
-            assert!(msg.contains("veld config --migrate"), "{msg}");
-            assert!(msg.contains("--write"), "{msg}");
+            // The message is the whole upgrade path: what changes, where the full
+            // rules are, and how to check the result.
             assert!(msg.contains("argv") && msg.contains("shell"), "{msg}");
+            assert!(msg.contains("${output.KEY}"), "{msg}");
             assert!(msg.contains("docs/migrating-to-v3.md"), "{msg}");
+            assert!(msg.contains("veld lint"), "{msg}");
+            // Pointing at a converter veld no longer ships is a dead end.
+            assert!(!msg.contains("--migrate"), "{msg}");
+        }
+    }
+
+    /// The version error outranks **every** other complaint about the document.
+    ///
+    /// A v1/v2 config is the one most likely to hold a shape the v3 model rejects,
+    /// so if typed deserialization ran first, an existing user would meet `missing
+    /// field ...` or `unknown variant ...` instead of the upgrade instructions. This
+    /// used to be the behaviour. With no converter to stumble into, that error is
+    /// the only guidance there is, so the ordering is pinned here rather than left
+    /// to the order statements happen to appear in.
+    #[test]
+    fn version_error_outranks_every_other_parse_complaint() {
+        let dir = tempfile::tempdir().unwrap();
+        // Each of these fails for a *second*, unrelated reason as well: a node with
+        // no `variants`, an unknown node `type`, and a wrongly-typed field.
+        for (label, body) in [
+            (
+                "no variants",
+                r#""nodes": { "web": { "command": "x", "port": 3000 } }"#,
+            ),
+            (
+                "unknown type",
+                r#""nodes": { "web": { "variants": { "dev": { "type": "nope" } } } }"#,
+            ),
+            ("bad field type", r#""nodes": { "web": 42 }"#),
+        ] {
+            let path = dir.path().join("veld.json");
+            std::fs::write(
+                &path,
+                format!(r#"{{ "schemaVersion": "2", "name": "t", {body} }}"#),
+            )
+            .unwrap();
+            let err = parse_config(&path).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::UnsupportedSchemaVersion(ref v) if v == "2"),
+                "{label}: expected the version error to win, got {err:?}"
+            );
         }
     }
 

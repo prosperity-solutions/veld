@@ -6,14 +6,7 @@ use crate::output;
 ///
 /// Print the resolved veld.json contents. With `--path`, print only the file
 /// path. With `--why`, print one effective value and where it came from.
-pub async fn run(
-    path_only: bool,
-    files: bool,
-    migrate: bool,
-    write: bool,
-    why: Option<String>,
-    json: bool,
-) -> i32 {
+pub async fn run(path_only: bool, files: bool, why: Option<String>, json: bool) -> i32 {
     let cwd = match std::env::current_dir() {
         Ok(d) => d,
         Err(e) => {
@@ -33,10 +26,6 @@ pub async fn run(
     if path_only {
         println!("{}", config_path.display());
         return 0;
-    }
-
-    if migrate {
-        return run_migrate(&config_path, write, json);
     }
 
     if files {
@@ -284,108 +273,5 @@ fn list_files(loaded: &veld_core::include::LoadedConfig, json: bool) -> i32 {
         output::dim("config hash:"),
         output::dim(&loaded.config_hash[..12])
     );
-    0
-}
-
-/// `veld config --migrate [--write]`
-///
-/// Converts a v1/v2 config to `schemaVersion: "3"`. **Dry-run by default**: it
-/// prints a diff and what it could not do automatically, and only writes with
-/// `--write`.
-///
-/// That default is not politeness. Turning a shell string into an argv is a
-/// heuristic — `sh -c "a | b"` and `["a", "|", "b"]` are different programs — so
-/// anything with shell syntax in it is deliberately left as `shell` and listed for
-/// a human. Leaving a command alone is always a correct answer, which is exactly
-/// why `shell` stays first-class.
-fn run_migrate(config_path: &std::path::Path, write: bool, json: bool) -> i32 {
-    let plan = match veld_core::migrate::plan(config_path) {
-        Ok(p) => p,
-        Err(e) => {
-            output::print_error(&format!("{e}"), json);
-            return 1;
-        }
-    };
-
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "config": config_path.display().to_string(),
-                "changed": !plan.is_noop(),
-                "written": write && !plan.is_noop(),
-                "changes": plan.changes,
-                "needs_review": plan.manual,
-            }))
-            .unwrap()
-        );
-    }
-
-    if plan.is_noop() {
-        if !json {
-            output::print_success(&format!(
-                "{} is already schemaVersion 3 — nothing to migrate",
-                config_path.display()
-            ));
-        }
-        return 0;
-    }
-
-    let original = std::fs::read_to_string(config_path).unwrap_or_default();
-
-    if !json {
-        println!(
-            "{}",
-            veld_core::migrate::unified_diff(&original, &plan.migrated)
-        );
-        println!("{}", output::bold("Changes:"));
-        for change in &plan.changes {
-            println!("  {change}");
-        }
-        if !plan.manual.is_empty() {
-            println!();
-            println!(
-                "{}",
-                output::yellow("Left as `shell` — review these yourself:")
-            );
-            for item in &plan.manual {
-                println!("  {item}");
-            }
-            println!(
-                "{}",
-                output::dim(
-                    "  `shell` is permanently supported, so leaving them is fine. Convert one \
-                     to `argv` only if you want the no-word-splitting guarantee."
-                )
-            );
-        }
-    }
-
-    if !write {
-        if !json {
-            println!();
-            println!(
-                "{}",
-                output::dim("Dry run — nothing was written. Re-run with --write to apply.")
-            );
-        }
-        return 0;
-    }
-
-    if let Err(e) = std::fs::write(config_path, &plan.migrated) {
-        output::print_error(
-            &format!("Failed to write {}: {e}", config_path.display()),
-            json,
-        );
-        return 1;
-    }
-    if !json {
-        println!();
-        output::print_success(&format!("Wrote {}", config_path.display()));
-        println!(
-            "{}",
-            output::dim("Run `veld lint` to check the result before starting anything.")
-        );
-    }
     0
 }

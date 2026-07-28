@@ -286,7 +286,8 @@ fn relative_to(root: &Path, path: &Path) -> PathBuf {
     path.strip_prefix(root).unwrap_or(path).to_path_buf()
 }
 
-/// Parse one file: JSONC front end, then the shared document shape.
+/// Parse one file: JSONC front end, version gate, legacy-command gate, then the
+/// shared document shape.
 ///
 /// The legacy-command gate runs on every file unconditionally: only one schema
 /// version is supported, so `command` is never valid, and an included file
@@ -303,25 +304,31 @@ fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
             path: path.to_path_buf(),
             source: e,
         })?;
-    // The legacy-command gate, but **after** the version question is settled.
+    // The version question is settled first, on the **raw value** — before any
+    // typed deserialization and before the legacy-command gate.
     //
-    // A document that declares an unsupported `schemaVersion` must get the
-    // "run `veld config --migrate`" error, not "`command` has been replaced" —
-    // those are the same fix, and the version error is the one that explains it.
-    // So skip the gate for a document whose own version is unsupported and let the
-    // caller's version check produce the better message.
+    // Ordering here is the whole user experience of the upgrade. A v1/v2 document is
+    // precisely the document most likely to hold a shape the v3 model rejects, so
+    // deserializing first hands an existing user `missing field \`variants\` at line
+    // 7` when what they need is "schemaVersion 2 is no longer supported, here is
+    // every change". There is no converter to stumble into any more: this error is
+    // the only guidance, so nothing may outrank it.
+    //
+    // For the same reason it outranks the legacy-command gate — "`command` has been
+    // replaced" is the same fix stated less usefully.
     //
     // A file with no `schemaVersion` is an included file: its project's root was
-    // already version-checked, so the gate applies. Checking per file is what makes
-    // the error name the file to edit, and is why this is not a per-file *version*
-    // check — an included file legitimately omits the key, which would have left
-    // every included file free to keep the old form.
+    // already version-checked, so both gates apply to it. Checking the version
+    // per file would be wrong — an included file legitimately omits the key — but
+    // checking *commands* per file is what makes that error name the file to edit,
+    // which is why the two are separate.
     let own_version = value.get("schemaVersion").and_then(|v| v.as_str());
-    let version_is_supported =
-        own_version.is_none_or(|v| crate::config::SUPPORTED_SCHEMA_VERSIONS.contains(&v));
-    if version_is_supported {
-        crate::config::reject_v3_legacy_commands(&value, path)?;
+    if let Some(version) = own_version
+        && !crate::config::SUPPORTED_SCHEMA_VERSIONS.contains(&version)
+    {
+        return Err(ConfigError::UnsupportedSchemaVersion(version.to_owned()));
     }
+    crate::config::reject_v3_legacy_commands(&value, path)?;
     // Deserialize from the **text**, not the already-parsed `Value`:
     // `serde_json::from_value` discards positions, so every typed error (`unknown
     // variant`, `invalid type`, a bad field) would report line 0 — losing exactly
