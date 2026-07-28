@@ -21,7 +21,11 @@ pub async fn run(json: bool) -> i32 {
         .iter()
         .filter(|f| f.severity == Severity::Error)
         .count();
-    let warnings = findings.len() - errors;
+    let warnings = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Warning)
+        .count();
+    let notices = findings.len() - errors - warnings;
 
     if json {
         println!(
@@ -30,12 +34,13 @@ pub async fn run(json: bool) -> i32 {
                 "config": config_path,
                 "errors": errors,
                 "warnings": warnings,
+                "notices": notices,
                 "findings": findings,
             }))
             .unwrap()
         );
     } else {
-        print_human(&config_path, &findings, errors, warnings);
+        print_human(&config_path, &findings, errors, warnings, notices);
     }
 
     if errors > 0 { 1 } else { 0 }
@@ -46,16 +51,26 @@ fn print_human(
     findings: &[Finding],
     errors: usize,
     warnings: usize,
+    notices: usize,
 ) {
     if findings.is_empty() {
         output::print_success(&format!("{} is valid", config_path.display()));
         return;
+    }
+    // A config whose only findings are notices is valid; say so, then say what
+    // there is to know.
+    if errors == 0 && warnings == 0 {
+        output::print_success(&format!("{} is valid", config_path.display()));
+        println!();
     }
 
     for f in findings {
         let tag = match f.severity {
             Severity::Error => output::red("error"),
             Severity::Warning => output::yellow("warning"),
+            // Nothing is wrong; this is information, so it is not coloured like a
+            // problem.
+            Severity::Notice => output::cyan("notice"),
         };
         println!(
             "{tag} {} {}",
@@ -72,6 +87,9 @@ fn print_human(
     }
     if warnings > 0 {
         parts.push(format!("{warnings} warning(s)"));
+    }
+    if notices > 0 {
+        parts.push(format!("{notices} notice(s)"));
     }
     println!("{}", parts.join(", "));
 }

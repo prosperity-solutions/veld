@@ -83,14 +83,24 @@ pub enum ConfigError {
 
 /// How serious a [`Finding`] is.
 ///
-/// `Error` blocks `veld start`; `Warning` is reported by `veld lint` and never
-/// blocks anything. Nothing here is reachable from [`parse_config`] — see the
-/// module note on the parse/validate split.
+/// `Error` blocks `veld start`; `Warning` and `Notice` are reported by `veld lint`
+/// and never block anything. Nothing here is reachable from [`parse_config`] — see
+/// the module note on the parse/validate split.
+///
+/// The declaration order is load-bearing in exactly one place: [`validate`] sorts
+/// findings by it, so errors come first. It deliberately does **not** mean
+/// "at least this severe" — `severity >= Severity::Error` would be true for a
+/// notice, which is the opposite of what it reads like. Compare with `==`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Error,
     Warning,
+    /// Nothing is wrong. Used where veld has something to *tell* the author about
+    /// a legitimate declaration — currently that `hooks` and `ui` are reserved and
+    /// parsed but not executed by this version, which they could not otherwise
+    /// discover without reading the changelog.
+    Notice,
 }
 
 impl std::fmt::Display for Severity {
@@ -98,6 +108,7 @@ impl std::fmt::Display for Severity {
         match self {
             Severity::Error => f.write_str("error"),
             Severity::Warning => f.write_str("warning"),
+            Severity::Notice => f.write_str("notice"),
         }
     }
 }
@@ -135,6 +146,15 @@ impl Finding {
     fn warning(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
+            location: location.into(),
+            message: message.into(),
+            rule: rule.to_owned(),
+        }
+    }
+
+    fn notice(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            severity: Severity::Notice,
             location: location.into(),
             message: message.into(),
             rule: rule.to_owned(),
@@ -2306,6 +2326,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_resolved_variants(config, &mut findings);
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
+    check_reserved_namespaces(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld lint --json` output
@@ -2319,6 +2340,39 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
         ))
     });
     findings
+}
+
+/// F8: `hooks` and `ui` are reserved — parsed, stored, and **not executed** by
+/// this version.
+///
+/// Saying so is the whole point of reserving them. An author who writes a
+/// `worktree.created` hook and sees nothing happen has no way to tell a
+/// not-yet-implemented feature from a config mistake, and would reasonably spend
+/// an afternoon on the difference.
+fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
+    if let Some(hooks) = &config.hooks {
+        let count = hooks.as_object().map(|o| o.len()).unwrap_or(0);
+        out.push(Finding::notice(
+            "reserved-not-executed",
+            "hooks",
+            format!(
+                "`hooks` is declared ({count} event(s)); this version of veld parses and \
+                 stores them but does not run them. The key is reserved so the shape does \
+                 not change when it is implemented"
+            ),
+        ));
+    }
+    if let Some(ui) = &config.ui {
+        let count = ui.as_object().map(|o| o.len()).unwrap_or(0);
+        out.push(Finding::notice(
+            "reserved-not-executed",
+            "ui",
+            format!(
+                "`ui` is declared ({count} extension(s)); this version of veld parses and \
+                 stores them but does not render them"
+            ),
+        ));
+    }
 }
 
 /// The four `vars` rules (F4). They are the whole design, so all of them are
@@ -3537,6 +3591,72 @@ mod tests {
             !findings.iter().any(|f| f.rule == "unknown-builtin-var"),
             "{findings:?}"
         );
+    }
+
+    // -- F8: reserved namespaces ----------------------------------------------
+
+    /// `hooks` and `ui` parse, round-trip, and produce the not-executed notice.
+    ///
+    /// The notice is the point of reserving them: an author who writes a
+    /// `worktree.created` hook and sees nothing happen otherwise cannot tell a
+    /// not-yet-implemented feature from a config mistake.
+    #[test]
+    fn reserved_namespaces_are_held_and_reported_as_not_executed() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "hooks": {
+                    "worktree.created": [ { "argv": ["./scripts/setup-worktree.sh"] } ],
+                    "run.stopped":      [ { "shell": "./scripts/collect.sh" } ]
+                },
+                "ui": { "my-ext": { "title": "Mine", "panel": "p", "commands": [] } },
+                "nodes": {}
+            }"#,
+        )
+        .unwrap();
+
+        // Held opaquely — veld does not interpret the shape.
+        assert_eq!(cfg.hooks.as_ref().unwrap().as_object().unwrap().len(), 2);
+        assert!(cfg.ui.as_ref().unwrap().get("my-ext").is_some());
+
+        // Round-trips, so a `--migrate` rewrite cannot silently drop them.
+        let round: VeldConfig =
+            serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(round.hooks, cfg.hooks);
+        assert_eq!(round.ui, cfg.ui);
+
+        let findings = validate(&cfg);
+        let notices: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "reserved-not-executed")
+            .collect();
+        assert_eq!(notices.len(), 2, "one each for hooks and ui: {findings:?}");
+        assert!(
+            notices.iter().all(|f| f.severity == Severity::Notice),
+            "a legitimate declaration is not a warning: {notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|f| f.location == "hooks" && f.message.contains("does not run them")),
+            "{notices:?}"
+        );
+        // …and never blocks a run.
+        assert!(error_summary(&findings).is_none());
+    }
+
+    /// Reserving two keys must not open the door to every other typo.
+    #[test]
+    fn unknown_top_level_key_is_still_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            r#"{ "schemaVersion": "3", "name": "t", "hoks": {}, "nodes": {} }"#,
+        )
+        .unwrap();
+        let err = parse_config(&path).unwrap_err();
+        assert!(err.to_string().contains("hoks"), "{err}");
     }
 
     // -- F4: vars (a failing case per rule) ------------------------------------
