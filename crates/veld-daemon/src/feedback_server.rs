@@ -164,6 +164,28 @@ struct SeenBody {
 // Resolve project + run from query params or headers
 // ---------------------------------------------------------------------------
 
+/// Read `X-Veld-Project` as UTF-8.
+///
+/// NOT `HeaderValue::to_str()`, which rejects every byte >= 0x80 (it only
+/// accepts visible ASCII). This header carries a filesystem path — Caddy sets it
+/// from `project_root.to_string_lossy()` — so a project living under
+/// `/Users/José/app` or `~/项目/app` produces a perfectly valid header that
+/// `to_str()` refuses to read. Parsing the raw bytes covers every path the
+/// database can store, since both `root_key` and `Path::display()` are lossy
+/// UTF-8 round-trips of the same value.
+fn project_header(headers: &axum::http::HeaderMap) -> Option<String> {
+    let raw = headers.get("x-veld-project")?;
+    let value = std::str::from_utf8(raw.as_bytes()).ok()?;
+    // Trim only to decide emptiness; the value is used verbatim. Not because a
+    // surrounding space could survive the wire (HTTP field parsing strips
+    // leading/trailing OWS, and HTTP/2 forbids it) but so this reader never
+    // rewrites a filesystem path it is about to match for equality.
+    if value.trim().is_empty() {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
 fn resolve_store(
     run: Option<&str>,
     project: Option<&str>,
@@ -183,28 +205,85 @@ fn resolve_store(
     // CLI upgrades that migrate the schema.
     let db = Db::open().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Try explicit project path first, then header, then search registry.
-    if let Some(project_path) =
-        project.or_else(|| headers.get("x-veld-project").and_then(|v| v.to_str().ok()))
-    {
+    // (Also see #172 for the wider audit of alias/name-as-global-key sites.)
+    // A caller-supplied `?project=` is validated against the registry; the
+    // Caddy-injected header is not, and the asymmetry is the point.
+    //
+    // Caddy `set`s `X-Veld-Project` server-side, overriding anything the client
+    // sends, so it is as trustworthy as the route itself — and validating it
+    // would 404 reads of threads whose run has been garbage collected, since
+    // threads outlive their run. The query param is the opposite: it is pure
+    // client input, it *beats* the header below, and naming another project's
+    // real root would return that project's real threads (not, as previously
+    // claimed here, a harmless empty scope).
+    //
+    // The reach is LOCAL ONLY — an earlier version of this comment claimed a
+    // `veld share --web` page could read across projects, which is false: a
+    // web-shared page is dialled straight at the node's app port
+    // (`veld-share`'s host), bypassing Caddy, so it gets neither the
+    // `/__veld__/*` subroute nor the injected overlay, and this server binds
+    // 127.0.0.1. So this is hardening against local callers, not a remote hole.
+    //
+    // Validating it inherits the same limitation as validating the header would:
+    // `resolve_run_project` needs the (project, run) pair in the registry, and a
+    // garbage-collected environment isn't, so threads outliving GC become
+    // unreachable through this param. That's acceptable only because nothing
+    // shipped sends it — the overlay relies on the header, and the CLI uses
+    // `FeedbackStore` directly — so there is no caller to regress. It does NOT
+    // require the run to be *live*: the registry keeps each environment's latest
+    // run whatever its status, so reads on a stopped run still work.
+    if let Some(project_path) = project {
+        let registry = db
+            .registry()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let root = management::resolve_run_project(&registry, project_path, run_name)?;
+        return Ok(FeedbackStore::new(db, &root, run_name));
+    }
+    if let Some(project_path) = project_header(headers) {
         return Ok(FeedbackStore::new(
             db,
-            std::path::Path::new(project_path),
+            std::path::Path::new(&project_path),
             run_name,
         ));
     }
 
-    // Fallback: search the global registry for a project with this run.
+    // Fallback: search the global registry for a project with this run. Run
+    // names are unique per project, not globally (two repos both on `main`
+    // each have an environment called `main`), so two matches are a 409 — the
+    // first-match answer would silently read and write another project's
+    // feedback threads.
     let registry = db
         .registry()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    for entry in registry.projects.values() {
-        if entry.runs.contains_key(run_name) {
-            return Ok(FeedbackStore::new(db, &entry.project_root, run_name));
+    let mut holders = registry
+        .projects
+        .values()
+        .filter(|entry| entry.runs.contains_key(run_name));
+    match (holders.next(), holders.next()) {
+        (Some(only), None) => Ok(FeedbackStore::new(db, &only.project_root, run_name)),
+        (None, _) => Err(StatusCode::NOT_FOUND),
+        (Some(a), Some(b)) => {
+            // These handlers answer with status codes only, so a bare 409 is
+            // undiagnosable — log the candidates. Sorted and complete: a
+            // message whose contents shuffle between runs, or that truncates to
+            // the first two of N, is the same class of defect as the resolution
+            // bug this scoping exists to fix.
+            let mut roots: Vec<String> = [a, b]
+                .into_iter()
+                .chain(holders)
+                .map(|e| e.project_root.display().to_string())
+                .collect();
+            roots.sort_unstable();
+            warn!(
+                "feedback scope for run '{run_name}' is ambiguous across {} \
+                 projects ({}) — reach the overlay through Caddy so it injects \
+                 X-Veld-Project, which resolves this exactly",
+                roots.len(),
+                roots.join(", "),
+            );
+            Err(StatusCode::CONFLICT)
         }
     }
-
-    Err(StatusCode::NOT_FOUND)
 }
 
 // ---------------------------------------------------------------------------
@@ -311,8 +390,31 @@ async fn ingest_client_logs(
         None => return StatusCode::BAD_REQUEST,
     };
 
-    // Look up the project root from the registry instead of trusting the header.
-    // This prevents spoofed scope keys via crafted X-Veld-Project values.
+    // The project half of the address. In THIS handler `X-Veld-Project` is a
+    // *lookup key*, not a path — `resolve_store` above deliberately uses the
+    // same header verbatim as a path, for the reasons given there.
+    // `resolve_run_project` accepts it only if the registry
+    // records that exact project running that exact name, so a crafted value
+    // can't invent a scope key or point at a directory the daemon doesn't know.
+    // Never resolve the run name alone here — names repeat across projects, so
+    // a first-match scan writes one repo's console logs under another's
+    // (project, run_id). See `RunScope` in management.rs.
+    let project_header = match project_header(&headers) {
+        Some(p) => p,
+        None => {
+            // The client discards this response (the XHR has no handler and
+            // `sendBeacon` reports nothing), so without this line a broken
+            // Caddy invariant would kill client logging with no diagnostic
+            // anywhere.
+            warn!(
+                "client log batch for run '{run_name}' has no readable \
+                 X-Veld-Project header — is it reaching the daemon through \
+                 Caddy's /__veld__/ route?"
+            );
+            return StatusCode::BAD_REQUEST;
+        }
+    };
+
     let db = match Db::open() {
         Ok(db) => db,
         Err(e) => {
@@ -328,14 +430,9 @@ async fn ingest_client_logs(
         }
     };
 
-    let project_path = match registry
-        .projects
-        .values()
-        .find(|entry| entry.runs.contains_key(run_name))
-        .map(|entry| entry.project_root.clone())
-    {
-        Some(p) => p,
-        None => return StatusCode::NOT_FOUND,
+    let project_path = match management::resolve_run_project(&registry, &project_header, run_name) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
 
     let run_state = match db.get_run(&project_path, run_name) {

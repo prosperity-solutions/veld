@@ -246,7 +246,24 @@ let lastEnvData=null;
 const runState={},nodeColors={};
 let colorIdx=0;
 function nc(n){if(!(n in nodeColors))nodeColors[n]='node-c'+(colorIdx++%8);return nodeColors[n];}
-function rk(proj,run){return proj+'::'+run;}
+function rk(projectRoot,run){return projectRoot+'::'+run;}
+// The project half of a run address (`RunScope` in management.rs): a run
+// name alone resolves ambiguously when two projects run the same name.
+function scopeOf(card){return 'project_root='+encodeURIComponent(card.dataset.path);}
+// Fire a lifecycle action and SURFACE its failure. These are fire-and-forget
+// (the poll reflects the result), but the scope parameter added two silent
+// rejection modes — 400 without it, 404 when the project doesn't run the name —
+// and a discarded promise left the button stuck on "Stopping..." with nothing
+// anywhere. Restores the button and labels the failure on the button itself.
+function envAction(btn,action,card,failLabel){
+  const orig=action==='stop'?'Stop':'Restart';
+  fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/'+action+'?'+scopeOf(card),
+        {method:'POST',headers:{'X-Veld-Request':'1'}})
+    .then(r=>{if(!r.ok){btn.textContent=failLabel+' ('+r.status+')';
+                        setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},3000);}})
+    .catch(()=>{btn.textContent=failLabel;
+                setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},3000);});
+}
 function fp(data){
   return data.projects.map(p=>{
     const rs=p.runs.map(r=>{
@@ -266,10 +283,13 @@ async function refresh(){
   try{
     const resp=await fetch('/api/environments');if(!resp.ok)throw 0;
     const data=await resp.json();
-    // Hosted shares fold into their run card; fetch + index by run name.
+    // Hosted shares fold into their run card; fetch + index below.
     let shares=[];
     try{const sr=await fetch('/api/shares');if(sr.ok){const sd=await sr.json();shares=sd.shares||[];joinCount=(sd.joins||[]).length;}}catch(e){}
-    sharesByRun={};for(const s of shares){if(s.run)(sharesByRun[s.run]||(sharesByRun[s.run]=[])).push(s);}
+    // Indexed by run ID, not run name: run names repeat across projects
+    // (two repos both on `main`), so a name key attaches a share to an
+    // unrelated project's card.
+    sharesByRun={};for(const s of shares){if(s.run_id)(sharesByRun[s.run_id]||(sharesByRun[s.run_id]=[])).push(s);}
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
@@ -324,13 +344,13 @@ function render(data){
         return a.name.localeCompare(b.name);
       });
     for(const run of runs){
-      shownKeys.add(rk(proj.name,run.name));
-      const key=rk(proj.name,run.name);
+      shownKeys.add(rk(proj.project_root,run.name));
+      const key=rk(proj.project_root,run.name);
       const st=runState[key]||{tab:'services'};
 
       // A run may host a peer share and/or one or more web shares at once
       // (separate capabilities). Split them: web shares carry public_urls.
-      const runShares=(run.status==='running')?(sharesByRun[run.name]||[]):[];
+      const runShares=(run.status==='running')?(sharesByRun[run.run_id]||[]):[];
       const peerShare=runShares.find(x=>!(x.public_urls&&x.public_urls.length))||null;
       const webShares=runShares.filter(x=>x.public_urls&&x.public_urls.length);
       const live=!!run.live;
@@ -477,7 +497,7 @@ function render(data){
   // Run history per card, for the logs run picker (kept out of the DOM
   // string — the picker lives in the persistent log panel element).
   historyByKey={};
-  for(const proj of data.projects)for(const run of proj.runs)historyByKey[rk(proj.name,run.name)]=run.history||[];
+  for(const proj of data.projects)for(const run of proj.runs)historyByKey[rk(proj.project_root,run.name)]=run.history||[];
   for(const k of Object.keys(runState)){
     const s=runState[k];
     const host=$('[data-loghost="'+CSS.escape(k)+'"]');
@@ -574,24 +594,29 @@ function fmtWhen(iso){
 
 function startLogPolling(key){
   const s=runState[key];if(!s||s.logInterval)return;
-  const runName=$('[data-key="'+CSS.escape(key)+'"]')?.dataset.run;if(!runName)return;
+  const card=$('[data-key="'+CSS.escape(key)+'"]');
+  const runName=card?.dataset.run;if(!runName)return;
+  // A run name alone is ambiguous across projects — the card's path is the
+  // project half of the address (see RunScope in management.rs).
+  const projectRoot=card.dataset.path;
   const panel=ensureLogPanel(key);
   updateRunPicker(key,panel);
   const host=$('[data-loghost="'+CSS.escape(key)+'"]');
   if(host&&s.panelEl&&!s.panelEl.parentNode)host.appendChild(s.panelEl);
-  fetchLogs(key,runName);
-  s.logInterval=setInterval(()=>fetchLogs(key,runName),2000);
+  fetchLogs(key,runName,projectRoot);
+  s.logInterval=setInterval(()=>fetchLogs(key,runName,projectRoot),2000);
 }
 
 function stopLogPolling(key){const s=runState[key];if(!s)return;if(s.logInterval){clearInterval(s.logInterval);s.logInterval=null;}}
 
-async function fetchLogs(key,runName){
+async function fetchLogs(key,runName,projectRoot){
   const s=runState[key];if(!s||s.fetching)return;s.fetching=true;
   try{
     const src=s.sourceFilter||'all';
     // '' = latest run (server default); a short id or 'all' scopes the read.
     const rq=s.runFilter?('&run_id='+encodeURIComponent(s.runFilter)):'';
-    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)+'?lines=500&source='+src+rq);
+    const resp=await fetch('/api/logs/'+encodeURIComponent(runName)
+      +'?project_root='+encodeURIComponent(projectRoot)+'&lines=500&source='+src+rq);
     if(!resp.ok)return;
     const data=await resp.json();
     for(const nd of data.nodes)s.knownNodes.set(nd.node,nd.variant);
@@ -737,7 +762,7 @@ document.addEventListener('click',e=>{
       const btns=srcBtn.parentElement.querySelectorAll('button');
       btns.forEach(b=>b.classList.toggle('active',b.dataset.source===s.sourceFilter));
       // Immediately re-fetch with new source filter.
-      const runName=card.dataset.run;if(runName)fetchLogs(key,runName);
+      const runName=card.dataset.run;if(runName)fetchLogs(key,runName,card.dataset.path);
     }
     return;
   }
@@ -756,7 +781,7 @@ document.addEventListener('click',e=>{
   const runAction=e.target.closest('[data-action="run-action"]');
   if(runAction&&card){
     const btn=runAction,orig=btn.textContent;btn.disabled=true;btn.textContent='Running…';
-    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/action',{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({action:btn.dataset.act,node:btn.dataset.node})})
+    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/action?'+scopeOf(card),{method:'POST',headers:{'Content-Type':'application/json','X-Veld-Request':'1'},body:JSON.stringify({action:btn.dataset.act,node:btn.dataset.node})})
       .then(r=>{if(!r.ok)btn.textContent='Failed';})
       .catch(()=>{btn.textContent='Failed';})
       .finally(()=>{setTimeout(()=>{btn.textContent=orig;btn.disabled=false;},1500);});
@@ -767,12 +792,12 @@ document.addEventListener('click',e=>{
   if(e.target.closest('[data-action="stop-env"]')&&card){
     if(!confirm('Stop environment "'+card.dataset.run+'"?'))return;
     const btn=e.target.closest('[data-action="stop-env"]');btn.textContent='Stopping...';btn.disabled=true;
-    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/stop',{method:'POST',headers:{'X-Veld-Request':'1'}});
+    envAction(btn,'stop',card,'Stop failed');
     return;
   }
   if(e.target.closest('[data-action="restart-env"]')&&card){
     const btn=e.target.closest('[data-action="restart-env"]');btn.textContent='Restarting...';btn.disabled=true;
-    fetch('/api/environments/'+encodeURIComponent(card.dataset.run)+'/restart',{method:'POST',headers:{'X-Veld-Request':'1'}});
+    envAction(btn,'restart',card,'Restart failed');
     return;
   }
 });
@@ -785,7 +810,7 @@ document.addEventListener('change',e=>{
   if(runSel){const card=runSel.closest('.card');if(!card)return;const key=card.dataset.key,s=runState[key];
     if(s){s.runFilter=runSel.value;s.prevHtml=null;s.lastData=null;s.autoScroll=true;
       if(s.panelEl)updateAutoScrollBtn(s.panelEl,true);
-      const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}return;}
+      const runName=card.dataset.run;if(runName)fetchLogs(key,runName,card.dataset.path);}return;}
   const histSel=e.target.closest('[data-action="hist-select"]');
   if(histSel){
     const card=histSel.closest('.card');if(!card)return;
@@ -797,7 +822,7 @@ document.addEventListener('change',e=>{
     s.runFilter=histSel.value||'';
     s.prevHtml=null;s.lastData=null;
     if(lastEnvData)render(lastEnvData);
-    if(s.tab==='logs'){const runName=card.dataset.run;if(runName)fetchLogs(key,runName);}
+    if(s.tab==='logs'){const runName=card.dataset.run;if(runName)fetchLogs(key,runName,card.dataset.path);}
     return;
   }
 });
@@ -998,19 +1023,31 @@ document.addEventListener('click',async e=>{
   if(act==='copy-join'){navigator.clipboard.writeText(b.dataset.joinurl);flashBtn(b,'Copied');return;}
   if(act==='copy-join-cmd'){navigator.clipboard.writeText('veld join '+b.dataset.ticket);flashBtn(b,'Copied');return;}
   if(act==='start-share'){
+    const card=b.closest('.card');
+    // No silent downgrade: JSON.stringify drops an undefined value, so a
+    // missing card would post a scope-less share request — name-only
+    // resolution, on the one path where a wrong answer publishes URLs.
+    if(!card){alert('Sharing failed: could not determine the project');return;}
     b.disabled=true;const run=b.dataset.run;let copied=false;
     try{
-      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,approve:'manual'})});
+      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,project_root:card.dataset.path,approve:'manual'})});
       if(r.ok){const d=await r.json();if(d.join_url){try{await navigator.clipboard.writeText(d.join_url);copied=true;}catch(e){}}}
-    }catch(e){}
+      // Surface it, like start-web-share does. refresh() is fingerprint-gated
+      // and a failed share changes nothing, so without this the button stays
+      // disabled with no message at all.
+      else{const detail=(await r.text()).trim();alert('Sharing failed: '+(detail||r.status));}
+    }catch(e){alert('Sharing failed: could not reach the daemon');}
+    finally{b.disabled=false;}
     await refresh();refreshShares();
-    if(copied){document.querySelectorAll('.card').forEach(c=>{if(c.dataset.run===run){const cb=c.querySelector('[data-action="copy-join"]');if(cb)flashBtn(cb,'Link copied!');}});}
+    if(copied){const path=card.dataset.path;document.querySelectorAll('.card').forEach(c=>{if(c.dataset.run===run&&c.dataset.path===path){const cb=c.querySelector('[data-action="copy-join"]');if(cb)flashBtn(cb,'Link copied!');}});}
     return;
   }
   if(act==='start-web-share'){
+    const card=b.closest('.card');
+    if(!card){alert('Web sharing failed: could not determine the project');return;}
     b.disabled=true;const run=b.dataset.run;
     try{
-      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,web:true})});
+      const r=await fetch('/api/shares',{method:'POST',headers:{...H,'Content-Type':'application/json'},body:JSON.stringify({run,project_root:card.dataset.path,web:true})});
       if(!r.ok){
         // The daemon's error names the fix (no gateway configured, no
         // web-opted nodes, …) — show it rather than failing silently.

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   api,
+  runRef,
   type EmojiHolder,
   type EnvironmentList,
   type Repo,
@@ -458,13 +459,16 @@ function AppInner(props: {
     }
     void act(w, "start", () => api.startRun(w.id, startBody(sel)));
   };
+  // `w.path` is the run's project root — every worktree with a veld.json is
+  // its own project (see `runsForWorktree`), and the run name alone would be
+  // ambiguous across repos.
   const stopWorktree = (w: Worktree) => {
     const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "stop", () => api.stopRun(r.name));
+    if (r) void act(w, "stop", () => api.stopRun(runRef(w.path, r)));
   };
   const restartWorktree = (w: Worktree) => {
     const r = activeRun(runsForWorktree(envs, w));
-    if (r) void act(w, "restart", () => api.restartRun(r.name));
+    if (r) void act(w, "restart", () => api.restartRun(runRef(w.path, r)));
   };
 
   // ---- dialogs ------------------------------------------------------------

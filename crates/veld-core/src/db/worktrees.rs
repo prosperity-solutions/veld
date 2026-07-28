@@ -242,18 +242,15 @@ impl Db {
         Ok(stmt.query_row(params![id], wt_from_row).optional()?)
     }
 
-    /// Rename a worktree's alias. Returns whether the row existed.
+    /// Rename a worktree's alias. Returns whether the row existed;
+    /// [`DbError::AliasTaken`] when a sibling of the same repo already holds
+    /// the alias.
     pub fn rename_worktree(&self, id: i64, alias: &str) -> Result<bool, DbError> {
-        let conn = self.lock();
-        let n = conn.execute(
-            "UPDATE worktrees SET alias = ?1 WHERE id = ?2",
-            params![alias, id],
-        )?;
-        Ok(n > 0)
+        self.patch_worktree(id, Some(alias), None)
     }
 
-    /// Update alias and/or emoji in ONE statement. Returns whether the row
-    /// existed.
+    /// Update alias and/or emoji in one write, inside one transaction.
+    /// Returns whether the row existed.
     ///
     /// A single `UPDATE … COALESCE` rather than two writes: applied
     /// separately, a row deleted between them (concurrent `sync_worktrees`
@@ -262,6 +259,19 @@ impl Db {
     /// `None` leaves a column untouched; both `None` is a no-op write that
     /// still reports whether the row exists (the HTTP layer rejects an empty
     /// patch before reaching here).
+    ///
+    /// A new alias must be free among the row's repo siblings, the same
+    /// invariant [`unique_alias`] establishes at insert.
+    ///
+    /// Why per-repo rather than global: the alias becomes the default run name,
+    /// and the run name feeds the hostname
+    /// `{service}.{run}.{project}.localhost`, where `{project}` is the config's
+    /// `name` (both slugified — see `veld_core::url`). Two checkouts of ONE repo
+    /// share a `veld.json`, hence one `{project}` — equal aliases there mint
+    /// byte-identical hostnames and collide in Caddy. Two *different* repos normally differ in `{project}`,
+    /// so duplicate aliases across repos are harmless, and rejecting them would
+    /// break importing two repos that are both on `main`. Emoji stay
+    /// deliberately non-unique (see [`WorktreeRecord::emoji`]).
     pub fn patch_worktree(
         &self,
         id: i64,
@@ -273,13 +283,70 @@ impl Db {
                 return Err(DbError::InvalidEmoji(e.to_owned()));
             }
         }
-        let conn = self.lock();
-        let n = conn.execute(
+        let mut conn = self.lock();
+        // The collision check and the write share one IMMEDIATE transaction,
+        // which is what makes them atomic against ANY concurrent writer.
+        //
+        // Not merely across processes: `Db::open` builds a fresh connection and a
+        // fresh mutex per call and the daemon opens one per HTTP request, so two
+        // concurrent PATCHes inside one daemon hold different mutexes over
+        // different connections and race exactly like two processes would. The
+        // connection mutex serializes nothing between them. Read-then-write as
+        // two statements would let both observe the alias free; the loser of an
+        // IMMEDIATE race waits out `busy_timeout` instead. There is no `UNIQUE(repo_root,
+        // alias)` index to lean on, because adding one needs a de-duplicating
+        // migration first: a database that already broke the invariant through
+        // the rename hole this check closes would fail the index creation and
+        // brick on upgrade.
+        //
+        // One residual path is left open deliberately: `sync_worktrees` can
+        // move a row to a different `repo_root` (the `UPDATE … SET repo_root`
+        // on a row matched by `path` alone) carrying its alias unchanged. It is
+        // unreachable through the API — `import_repo` resolves every import to
+        // the repo's MAIN checkout, so two imports of one repo land on the same
+        // root, and `git worktree move` changes the path, which prunes and
+        // re-inserts through `unique_alias`.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        if let Some(alias) = alias {
+            // Scoped to the row's own repo, and excluding the row itself so
+            // renaming a worktree to the alias it already has stays a no-op
+            // rather than a self-collision.
+            // COLLATE NOCASE because `Main` and `main` are two legal aliases
+            // (`is_safe_identifier` allows A-Z) that produce the SAME hostname:
+            // `slugify` lowercases (see `veld_core::url`), so the two don't
+            // merely differ in case, they come out byte-identical. A
+            // case-sensitive check would report both as free and the collision
+            // would still happen. (SQLite's NOCASE folds ASCII only, which is
+            // exactly the legal alias space — `is_safe_identifier` is ASCII.)
+            //
+            // Residual gap, deliberately not closed here and tracked in #172:
+            // `slugify` also maps every non-alphanumeric to `-`, so `main-2`,
+            // `main_2` and `main.2` are three distinct aliases with one
+            // hostname, and this check reports all three as free. Closing it
+            // means comparing slugs, not aliases (or storing a slug column) —
+            // the same question as #170, so likely one change.
+            let taken: bool = tx.query_row(
+                "SELECT EXISTS (
+                     SELECT 1 FROM worktrees sibling
+                      WHERE sibling.alias = ?1 COLLATE NOCASE
+                        AND sibling.id != ?2
+                        AND sibling.repo_root =
+                            (SELECT repo_root FROM worktrees WHERE id = ?2)
+                 )",
+                params![alias, id],
+                |r| r.get(0),
+            )?;
+            if taken {
+                return Err(DbError::AliasTaken(alias.to_owned()));
+            }
+        }
+        let n = tx.execute(
             "UPDATE worktrees
                 SET alias = COALESCE(?1, alias), emoji = COALESCE(?2, emoji)
               WHERE id = ?3",
             params![alias, emoji, id],
         )?;
+        tx.commit()?;
         Ok(n > 0)
     }
 
@@ -368,8 +435,13 @@ fn unique_alias(
     base: &str,
 ) -> rusqlite::Result<String> {
     let taken = |alias: &str| -> rusqlite::Result<bool> {
+        // COLLATE NOCASE to match `Db::patch_worktree`'s check — the two must
+        // agree on what "taken" means, or insert and rename disagree. They agree
+        // on case; neither compares slugs, so the separator gap documented on
+        // `patch_worktree` applies to both.
         let n: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM worktrees WHERE repo_root = ?1 AND alias = ?2",
+            "SELECT COUNT(*) FROM worktrees
+              WHERE repo_root = ?1 AND alias = ?2 COLLATE NOCASE",
             params![repo_root, alias],
             |r| r.get(0),
         )?;
@@ -477,6 +549,108 @@ mod tests {
         let mut aliases: Vec<_> = wts.iter().map(|w| w.alias.as_str()).collect();
         aliases.sort();
         assert_eq!(aliases, vec!["login", "login-2"]);
+    }
+
+    #[test]
+    fn rename_cannot_break_alias_uniqueness_within_a_repo() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAliasDup");
+        db.upsert_repo(root, "dup").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasDup", "main", true),
+                    wt("/tmp/wts/dup-chk", "feat/checkout", false),
+                ],
+            )
+            .unwrap();
+        let main = wts.iter().find(|w| w.is_main).unwrap();
+        let other = wts.iter().find(|w| !w.is_main).unwrap();
+
+        // `unique_alias` establishes the invariant at insert; the rename path
+        // must not be a hole in it — before this check the UPDATE went through
+        // and left two checkouts of one repo answering to "main", which is two
+        // environments defaulting to the same run name.
+        let e = db.rename_worktree(other.id, &main.alias).unwrap_err();
+        assert!(
+            matches!(e, DbError::AliasTaken(ref a) if *a == main.alias),
+            "expected AliasTaken, got {e:?}"
+        );
+        // Rejected before the write: neither column moved.
+        assert_eq!(
+            db.get_worktree(other.id).unwrap().unwrap().alias,
+            other.alias
+        );
+
+        // Renaming to the alias it already holds is a no-op, not a collision
+        // with itself.
+        assert!(db.rename_worktree(other.id, &other.alias).unwrap());
+
+        // A colliding alias also blocks the emoji half of the same patch —
+        // "a good emoji and a bad alias must change neither".
+        let glyph = WORKTREE_EMOJI
+            .iter()
+            .find(|g| **g != other.emoji)
+            .expect("curated set has more than one glyph");
+        assert!(
+            db.patch_worktree(other.id, Some(&main.alias), Some(glyph))
+                .is_err()
+        );
+        assert_eq!(
+            db.get_worktree(other.id).unwrap().unwrap().emoji,
+            other.emoji
+        );
+
+        // A missing row still reports "not found" rather than a collision.
+        assert!(!db.rename_worktree(9_999, "whatever").unwrap());
+    }
+
+    #[test]
+    fn alias_uniqueness_ignores_case_because_hostnames_do() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoAliasCase");
+        db.upsert_repo(root, "case").unwrap();
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoAliasCase", "main", true),
+                    wt("/tmp/wts/case-other", "feat/other", false),
+                ],
+            )
+            .unwrap();
+        let other = wts.iter().find(|w| !w.is_main).unwrap();
+
+        // `is_safe_identifier` allows A-Z, so "Main" is a legal alias — but it
+        // would mint a hostname differing from "main"'s only in case, and DNS
+        // and Caddy host matching are case-insensitive. A case-sensitive check
+        // would pass here and the collision would still happen.
+        let e = db.rename_worktree(other.id, "MAIN").unwrap_err();
+        assert!(matches!(e, DbError::AliasTaken(_)), "got {e:?}");
+        assert!(db.rename_worktree(other.id, "main-2").unwrap());
+    }
+
+    #[test]
+    fn alias_uniqueness_is_scoped_to_one_repo() {
+        let (_dir, db) = test_db();
+        let a = Path::new("/tmp/repoAliasScopeA");
+        let b = Path::new("/tmp/repoAliasScopeB");
+        db.upsert_repo(a, "a").unwrap();
+        db.upsert_repo(b, "b").unwrap();
+        let wa = db
+            .sync_worktrees(a, &[wt(a.to_str().unwrap(), "main", true)])
+            .unwrap();
+        let wb = db
+            .sync_worktrees(b, &[wt(b.to_str().unwrap(), "release", true)])
+            .unwrap();
+        assert_eq!(wa[0].alias, "main");
+
+        // Cross-repo duplicates stay legal — that is exactly the state the
+        // run-addressing fix handles, and forbidding it would make importing
+        // two repos both on `main` fail.
+        assert!(db.rename_worktree(wb[0].id, "main").unwrap());
+        assert_eq!(db.get_worktree(wb[0].id).unwrap().unwrap().alias, "main");
     }
 
     #[test]
