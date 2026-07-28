@@ -313,6 +313,9 @@ async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperC
     let mut cleaned = 0;
     for ns in run.nodes.values() {
         // Remove Caddy route (ID follows the convention from orchestrator).
+        // Route id is keyed by run NAME, which is not unique across projects —
+        // two repos both on `main` collide here and in GC. Tracked as #170;
+        // changing the format needs a migration for already-stored routes.
         let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
         if helper.remove_route(&route_id).await.is_ok() {
             debug!("removed Caddy route: {route_id}");

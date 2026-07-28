@@ -169,6 +169,8 @@ async function trayMenu() {
     });
     for (const { project, run } of running.slice(0, 10)) {
       items.push({
+        // Project NAME, so two clones of one repo render identical rows —
+        // the alias/path is the disambiguator. Tracked as #172.
         label: `${project} / ${run.name} — ${run.status}`,
         click: () => focusWindow(),
       });

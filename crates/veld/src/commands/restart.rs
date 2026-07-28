@@ -1,5 +1,6 @@
 use veld_core::graph;
 use veld_core::orchestrator::Orchestrator;
+use veld_core::share::DaemonClient;
 
 use crate::output;
 
@@ -34,6 +35,21 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     };
     let run_name = run_name.as_str();
 
+    // Capture the outgoing run's id before stopping: a restart mints a NEW
+    // run id, so anything keyed to the old instance must be released here or
+    // it is orphaned. Shares are exactly that — the daemon's share manager
+    // holds them in memory keyed by run id, and nothing else here would release
+    // this one: the GC pass unshares runs it finds dead, but the stop below
+    // finalizes this run cleanly so GC never sees it as an orphan, leaving only
+    // the TTL hours later. Meanwhile the share points at torn-down ports — and a
+    // web share stays registered with the public gateway — while both dashboards
+    // attach shares to the *current* run id and can no longer show it.
+    // `veld stop` already does this; a restart is a stop followed by a start.
+    let prior_run_id = project_state
+        .runs
+        .get(run_name)
+        .map(|r| r.run_id.to_string());
+
     // Take the selections from the latest run — live or ended history (the
     // "dev crashed overnight → veld restart" case reads the crashed run).
     let selections: Vec<graph::NodeSelection> = match project_state.get_run(run_name) {
@@ -57,6 +73,54 @@ pub async fn run(name: Option<String>, debug: bool) -> i32 {
     if let Err(e) = orchestrator.stop(run_name).await {
         output::print_error(&format!("Failed to stop '{run_name}': {e}"), false);
         return 1;
+    }
+
+    // Best-effort, same contract as `veld stop`: silent on failure (the daemon
+    // may be down, or there may be no shares). Unlike `veld stop`, this sits
+    // BETWEEN the teardown and the restart, so it gets a timeout — a daemon that
+    // accepts the connection but never answers would otherwise wedge the command
+    // with the environment down and never brought back up, which is strictly
+    // worse than the same hang once everything is already stopped.
+    if let Some(run_id) = &prior_run_id {
+        // Three outcomes, all distinct — collapsing them to 0 would make both
+        // failures silent, and a share that survives a restart is not inert: the
+        // new run re-binds the same ports, so a surviving WEB share keeps its
+        // public URL live and quietly re-points it at the new processes. It is
+        // also unreachable from either dashboard (both attach shares by run id,
+        // and this one holds the dead run's) and GC never releases it, because
+        // the stop above already finalized the run. Only the TTL would, hours
+        // later. So a failure here has to be said out loud, with the manual
+        // remedy. All output is stderr per the AGENTS.md diagnostics rule (the
+        // `print_info` calls around it predate that convention).
+        let notice = |msg: String| eprintln!("  {} {msg}", output::dim("»"));
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            DaemonClient::new().unshare_run(run_id),
+        )
+        .await
+        {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => notice(format!(
+                "Released {n} share(s) of the previous run — re-share if you \
+                 still need the URL."
+            )),
+            // A daemon that isn't running holds no shares — they live only in
+            // its memory, never on disk — so there is nothing to warn about, and
+            // the remedy below would fail identically (`veld shares` uses the
+            // same client).
+            Ok(Err(veld_core::share::DaemonError::NotRunning)) => {}
+            Ok(Err(e)) => notice(format!(
+                "Could not release the previous run's shares ({e}) — any share \
+                 of it now points at the restarted run. Check `veld shares` \
+                 and stop it with `veld unshare <id>`."
+            )),
+            Err(_) => notice(
+                "Timed out releasing the previous run's shares — any share of \
+                 it now points at the restarted run. Check `veld shares` and \
+                 stop it with `veld unshare <id>`."
+                    .to_string(),
+            ),
+        }
     }
 
     // Start again with a fresh orchestrator.

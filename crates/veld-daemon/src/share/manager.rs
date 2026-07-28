@@ -355,6 +355,12 @@ impl ShareManager {
     }
 
     /// Periodically remove shares past their TTL, closing them fail-closed.
+    ///
+    /// TTL is the only trigger here. `veld stop`/`veld restart` release a run's
+    /// shares explicitly and the GC pass unshares runs it finds dead, but a run
+    /// that leaves the live slot by any other route keeps its share until it
+    /// expires — and neither dashboard surfaces a share whose run is gone.
+    /// Tracked as #171.
     fn spawn_reaper(self: Arc<Self>) {
         tokio::spawn(async move {
             loop {
@@ -868,6 +874,7 @@ impl ShareManager {
             .map(|s| ShareInfo {
                 id: s.id.clone(),
                 run: s.manifest.run.clone(),
+                run_id: Some(s.manifest.run_id),
                 approve: Some(s.approve_mode),
                 nodes: s.manifest.nodes.iter().map(|n| n.node.clone()).collect(),
                 urls: s.manifest.nodes.iter().map(|n| n.url.clone()).collect(),
@@ -897,6 +904,8 @@ impl ShareManager {
             .map(|j| ShareInfo {
                 id: j.id.clone(),
                 run: String::new(),
+                // A join is not attached to a local run at all.
+                run_id: None,
                 approve: None,
                 nodes: j.nodes.clone(),
                 urls: j.urls.clone(),

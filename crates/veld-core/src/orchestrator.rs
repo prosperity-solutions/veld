@@ -1969,6 +1969,9 @@ async fn execute_start_server_isolated(
         tracing::warn!(error = %e, "failed to add DNS host via helper");
     }
     let mut route = serde_json::json!({
+        // Route id is keyed by run NAME, which is not unique across projects —
+        // two repos both on `main` collide here and in GC. Tracked as #170;
+        // changing the format needs a migration for already-stored routes.
         "route_id": format!("veld-{}-{}-{}", ctx.run_name, sel.node, sel.variant),
         "hostname": &node_url,
         "upstream": format!("localhost:{port}"),

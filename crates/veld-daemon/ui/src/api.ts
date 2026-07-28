@@ -136,7 +136,10 @@ export interface ShareConnectionInfo {
 
 export interface ShareInfo {
   id: string;
+  /** Display only — attach a share to its run via {@link ShareInfo.run_id}. */
   run: string;
+  /** Run instance the share was minted from; absent on joins. */
+  run_id?: string | null;
   approve?: "first" | "manual" | "auto" | null;
   nodes: string[];
   urls: string[];
@@ -192,6 +195,38 @@ export interface PtyTicket {
    *  survived whatever disconnected us, and attaching resumes it. */
   resumed: boolean;
 }
+
+/**
+ * A run address. **The name alone is not one.**
+ *
+ * Environments are unique per project, not globally: two repos both checked
+ * out on `main` each get an environment called `main` (the desktop start
+ * endpoint derives the run name from the worktree alias, and aliases are only
+ * de-duplicated within one repo). The daemon used to resolve a bare name
+ * against every project and take the first hit, so stopping one repo's `main`
+ * could tear down another's — it now requires the project and 404s on a
+ * mismatch. Every run-addressed call takes this pair.
+ *
+ * `projectRoot` is the `project_root` of the `/api/environments` project the
+ * run was read from — for a desktop worktree, its checkout path (see
+ * `runsForWorktree`).
+ */
+export interface RunRef {
+  name: string;
+  projectRoot: string;
+}
+
+/** `{ name, projectRoot }` for a run listed under a project. */
+export function runRef(projectRoot: string, run: { name: string }): RunRef {
+  return { name: run.name, projectRoot };
+}
+
+/** Path segment for a run's name. */
+export const runPath = (run: RunRef) => encodeURIComponent(run.name);
+
+/** The `project_root=…` query string every run-addressed call must carry. */
+export const runScope = (run: RunRef) =>
+  new URLSearchParams({ project_root: run.projectRoot }).toString();
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
@@ -295,16 +330,16 @@ export const api = {
       method: "POST",
       body: JSON.stringify(start),
     }),
-  stopRun: (runName: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/stop`, {
+  stopRun: (run: RunRef) =>
+    request<void>(`/api/environments/${runPath(run)}/stop?${runScope(run)}`, {
       method: "POST",
     }),
-  restartRun: (runName: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/restart`, {
+  restartRun: (run: RunRef) =>
+    request<void>(`/api/environments/${runPath(run)}/restart?${runScope(run)}`, {
       method: "POST",
     }),
-  runAction: (runName: string, action: string, node?: string) =>
-    request<void>(`/api/environments/${encodeURIComponent(runName)}/action`, {
+  runAction: (run: RunRef, action: string, node?: string) =>
+    request<void>(`/api/environments/${runPath(run)}/action?${runScope(run)}`, {
       method: "POST",
       body: JSON.stringify(node ? { action, node } : { action }),
     }),
@@ -345,21 +380,22 @@ export const api = {
       method: "DELETE",
     }),
   stats: () => request<StatsResponse>("/api/stats"),
-  logs: (run: string, opts: { source?: string; runId?: string } = {}) => {
+  logs: (run: RunRef, opts: { source?: string; runId?: string } = {}) => {
     const q = new URLSearchParams({ lines: "500" });
+    q.set("project_root", run.projectRoot);
     if (opts.source && opts.source !== "all") q.set("source", opts.source);
     if (opts.runId) q.set("run_id", opts.runId);
-    return request<LogResponse>(
-      `/api/logs/${encodeURIComponent(run)}?${q.toString()}`,
-    );
+    return request<LogResponse>(`/api/logs/${runPath(run)}?${q.toString()}`);
   },
   shares: () => request<SharesList>("/api/shares"),
-  startShare: (run: string, opts: { web?: boolean } = {}) =>
+  startShare: (run: RunRef, opts: { web?: boolean } = {}) =>
     request<{ join_url?: string }>("/api/shares", {
       method: "POST",
-      body: JSON.stringify(
-        opts.web ? { run, web: true } : { run, approve: "manual" },
-      ),
+      body: JSON.stringify({
+        run: run.name,
+        project_root: run.projectRoot,
+        ...(opts.web ? { web: true } : { approve: "manual" }),
+      }),
     }),
   stopShare: (id: string) =>
     request<void>(`/api/shares/${encodeURIComponent(id)}`, {

@@ -46,6 +46,9 @@ pub fn routes() -> Router {
         .route("/api/health", get(health))
         .route("/api/environments", get(list_environments))
         .route("/api/stats", get(get_stats))
+        // Every route below that takes a `{run}` segment MUST also take the
+        // project scope — a run name alone is ambiguous across projects. See
+        // [`RunScope`]; `handler_guards` pins that each one 400s without it.
         .route("/api/logs/{run}", get(get_logs))
         .route("/api/open-terminal", post(open_terminal))
         .route("/api/environments/{run}/stop", post(stop_environment))
@@ -425,6 +428,12 @@ fn default_lines() -> usize {
 
 #[derive(Deserialize)]
 struct LogQuery {
+    /// See [`RunScope`] — same parameter, folded into this struct so the
+    /// handler takes a single `Query` extractor. Two `Query`s over one query
+    /// string only work while neither struct denies unknown fields, and this
+    /// daemon deliberately uses `deny_unknown_fields` elsewhere; don't
+    /// reintroduce the coupling.
+    project_root: String,
     #[serde(default = "default_lines")]
     lines: usize,
     node: Option<String>,
@@ -454,13 +463,49 @@ struct NodeLogs {
     lines: Vec<String>,
 }
 
-/// Look up a run name in the global registry, returning the project root.
-fn find_project_for_run(registry: &GlobalRegistry, run_name: &str) -> Option<std::path::PathBuf> {
+/// The project half of a run address, taken as a query parameter by every
+/// name-addressed endpoint.
+///
+/// **A run name alone does not identify a run.** Environments are unique per
+/// project (`UNIQUE(project_root, name)`), not globally: two repos both checked
+/// out on `main` each default to an environment named `main`, and the desktop
+/// start endpoint derives the run name from the worktree alias, which
+/// `unique_alias` de-duplicates only within one repo. Resolving a bare name
+/// against the whole registry therefore picked whichever project a `HashMap`
+/// iteration happened to yield first — stopping one repo's `main` could tear
+/// down another's. Callers send the `project_root` they read from
+/// `/api/environments`; it is the same value `/api/stats` keys by.
+#[derive(Deserialize)]
+pub(super) struct RunScope {
+    project_root: String,
+}
+
+/// Resolve a `(project_root, run_name)` pair to the project root as the
+/// registry records it, or 404 when that project does not run that name.
+///
+/// The returned path is the registry's own `PathBuf`, never the caller's
+/// string — it becomes the working directory of a spawned `veld` process, so
+/// only a project the daemon already tracks may be named (the rule
+/// `open_terminal` enforces for its own path argument).
+pub(super) fn resolve_run_project(
+    registry: &GlobalRegistry,
+    project_root: &str,
+    run_name: &str,
+) -> Result<std::path::PathBuf, StatusCode> {
+    let requested = std::path::Path::new(project_root);
     registry
         .projects
         .values()
-        .find(|entry| entry.runs.contains_key(run_name))
+        .find(|entry| entry.project_root == requested && entry.runs.contains_key(run_name))
         .map(|entry| entry.project_root.clone())
+        .ok_or_else(|| {
+            // The handlers answer with bare status codes, so a 404 alone can't
+            // distinguish "project not tracked" from "project doesn't run that
+            // name" — and a stale client sending the wrong root would otherwise
+            // fail completely silently.
+            warn!("no run '{run_name}' in project '{project_root}'");
+            StatusCode::NOT_FOUND
+        })
 }
 
 async fn get_logs(
@@ -475,7 +520,7 @@ async fn get_logs(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let project_root = find_project_for_run(&registry, &run_name).ok_or(StatusCode::NOT_FOUND)?;
+    let project_root = resolve_run_project(&registry, &q.project_root, &run_name)?;
 
     // Resolve the run instance: an explicit id prefix, "all" for the old
     // interleaved scope, or (default) the environment's latest run.
@@ -686,6 +731,7 @@ async fn open_terminal(
 async fn stop_environment(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
+    Query(scope): Query<RunScope>,
 ) -> StatusCode {
     if let Err(s) = check_csrf(&headers) {
         return s;
@@ -693,12 +739,13 @@ async fn stop_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&run_name, "stop")
+    run_veld_command(&scope, &run_name, "stop")
 }
 
 async fn restart_environment(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
+    Query(scope): Query<RunScope>,
 ) -> StatusCode {
     if let Err(s) = check_csrf(&headers) {
         return s;
@@ -706,7 +753,7 @@ async fn restart_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&run_name, "restart")
+    run_veld_command(&scope, &run_name, "restart")
 }
 
 #[derive(Deserialize)]
@@ -724,6 +771,7 @@ struct ActionBody {
 async fn run_action(
     headers: axum::http::HeaderMap,
     Path(run_name): Path<String>,
+    Query(scope): Query<RunScope>,
     Json(body): Json<ActionBody>,
 ) -> StatusCode {
     if let Err(s) = check_csrf(&headers) {
@@ -750,9 +798,9 @@ async fn run_action(
         Ok(r) => r,
         Err(code) => return code,
     };
-    let project_root = match find_project_for_run(&registry, &run_name) {
-        Some(p) => p,
-        None => return StatusCode::NOT_FOUND,
+    let project_root = match resolve_run_project(&registry, &scope.project_root, &run_name) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
 
     // Only spawn actions that actually exist in the project's config.
@@ -785,8 +833,11 @@ async fn run_action(
     spawn_veld(&project_root, &args)
 }
 
-/// Stop / restart helper: spawn `veld <action> --name <run>`.
-fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
+/// Stop / restart helper: spawn `veld <action> --name <run>` in the project
+/// the caller scoped the run to. The `--name` argument stays name-based (that
+/// is the CLI's own contract); it is the *working directory* that disambiguates
+/// which project's `main` gets stopped.
+fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCode {
     let registry = match open_db().and_then(|db| {
         db.registry().map_err(|e| {
             warn!("failed to load registry for {action}: {e}");
@@ -796,9 +847,9 @@ fn run_veld_command(run_name: &str, action: &str) -> StatusCode {
         Ok(r) => r,
         Err(code) => return code,
     };
-    let project_root = match find_project_for_run(&registry, run_name) {
-        Some(p) => p,
-        None => return StatusCode::NOT_FOUND,
+    let project_root = match resolve_run_project(&registry, &scope.project_root, run_name) {
+        Ok(p) => p,
+        Err(code) => return code,
     };
     spawn_veld(
         &project_root,
@@ -868,4 +919,159 @@ pub(super) fn is_safe_identifier(s: &str) -> bool {
 /// Simple single-quote shell escaping.
 fn shell_escape(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use veld_core::state::{RegistryEntry, RegistryRunInfo, RunStatus};
+
+    /// Two projects that each run an environment called `main` — the state the
+    /// desktop UI produces from two repos both checked out on `main`.
+    fn colliding_registry() -> GlobalRegistry {
+        let entry = |root: &str, name: &str, run: &str| {
+            let mut runs = HashMap::new();
+            runs.insert(
+                run.to_owned(),
+                RegistryRunInfo {
+                    run_id: uuid::Uuid::new_v4(),
+                    name: run.to_owned(),
+                    status: RunStatus::Running,
+                    urls: HashMap::new(),
+                },
+            );
+            (
+                root.to_owned(),
+                RegistryEntry {
+                    project_root: std::path::PathBuf::from(root),
+                    project_name: name.to_owned(),
+                    runs,
+                },
+            )
+        };
+        GlobalRegistry {
+            projects: HashMap::from([
+                entry("/repos/alpha", "alpha", "main"),
+                entry("/repos/beta", "beta", "main"),
+            ]),
+        }
+    }
+
+    #[test]
+    fn run_is_resolved_within_the_named_project_only() {
+        let reg = colliding_registry();
+        // The whole point: `main` resolves to whichever project the caller
+        // named, deterministically. A registry-order-dependent first match
+        // would let a stop on beta tear down alpha.
+        assert_eq!(
+            resolve_run_project(&reg, "/repos/alpha", "main").unwrap(),
+            std::path::PathBuf::from("/repos/alpha")
+        );
+        assert_eq!(
+            resolve_run_project(&reg, "/repos/beta", "main").unwrap(),
+            std::path::PathBuf::from("/repos/beta")
+        );
+    }
+
+    /// Router-level guards. These paths reject during extraction or on the
+    /// CSRF check, i.e. before any database access, so they run against the
+    /// real router with no test DB.
+    mod handler_guards {
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+        use tower::ServiceExt;
+
+        fn get(uri: &str) -> Request<Body> {
+            Request::builder().uri(uri).body(Body::empty()).unwrap()
+        }
+
+        fn post(uri: &str, csrf: bool) -> Request<Body> {
+            let mut b = Request::builder().method("POST").uri(uri);
+            if csrf {
+                b = b.header("x-veld-request", "1");
+            }
+            b.body(Body::empty()).unwrap()
+        }
+
+        async fn status(req: Request<Body>) -> StatusCode {
+            super::super::routes().oneshot(req).await.unwrap().status()
+        }
+
+        #[tokio::test]
+        async fn run_addressed_routes_require_a_project_scope() {
+            // A name-only request must not fall back to "whichever project
+            // holds this name" — that is the bug. It is rejected during
+            // extraction, so nothing is spawned and no DB is touched.
+            // Keep in sync with the name-addressed routes in routes().
+            assert_eq!(
+                status(post("/api/environments/main/stop", true)).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                status(post("/api/environments/main/restart", true)).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                status(post("/api/environments/main/action", true)).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                status(get("/api/logs/main?lines=500")).await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+
+        #[tokio::test]
+        async fn the_csrf_gate_still_applies_with_a_scope_present() {
+            // The scope is extracted before the handler body runs, so a
+            // request that satisfies extraction must still fail the CSRF
+            // check rather than reaching the spawn.
+            for uri in [
+                "/api/environments/main/stop?project_root=/repos/alpha",
+                "/api/environments/main/restart?project_root=/repos/alpha",
+            ] {
+                assert_eq!(
+                    status(post(uri, false)).await,
+                    StatusCode::FORBIDDEN,
+                    "{uri}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn logs_still_validates_its_other_query_fields() {
+            // `project_root` lives in `LogQuery` alongside the pre-existing
+            // fields rather than in a second `Query` extractor; folding it in
+            // must not have made the rest of the struct optional.
+            assert_eq!(
+                status(get(
+                    "/api/logs/main?project_root=/repos/alpha&lines=notanumber"
+                ))
+                .await,
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_project_or_run_is_not_found() {
+        let reg = colliding_registry();
+        // A project the daemon doesn't track can't become a spawn cwd, even
+        // when the run name exists elsewhere.
+        assert_eq!(
+            resolve_run_project(&reg, "/etc", "main"),
+            Err(StatusCode::NOT_FOUND)
+        );
+        // Known project, but it doesn't run that name.
+        assert_eq!(
+            resolve_run_project(&reg, "/repos/alpha", "release"),
+            Err(StatusCode::NOT_FOUND)
+        );
+        // Empty scope is not a wildcard.
+        assert_eq!(
+            resolve_run_project(&reg, "", "main"),
+            Err(StatusCode::NOT_FOUND)
+        );
+    }
 }

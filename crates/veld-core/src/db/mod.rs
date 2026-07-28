@@ -61,6 +61,9 @@ pub enum DbError {
     #[error("{0:?} is not one of the curated worktree glyphs")]
     InvalidEmoji(String),
 
+    #[error("another checkout of this repo is already called {0:?} — pick a different alias")]
+    AliasTaken(String),
+
     #[error("database error: {0}")]
     Sqlite(#[from] rusqlite::Error),
 

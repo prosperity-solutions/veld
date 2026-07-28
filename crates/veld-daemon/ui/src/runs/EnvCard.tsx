@@ -12,6 +12,7 @@ import {
 } from "@mantine/core";
 import {
   api,
+  runRef,
   type HistoryEntry,
   type NodeStats,
   type ProjectInfo,
@@ -121,6 +122,9 @@ export function EnvCard(props: {
   onChanged: () => void;
 }) {
   const { project, run } = props;
+  // Every run-addressed call goes through this — the card's own project scope,
+  // so a same-named run in another repo can never be the one acted on.
+  const ref = runRef(project.project_root, run);
   const [tab, setTab] = useState<string>("services");
   const [logsEverOpened, setLogsEverOpened] = useState(false);
   const [histSel, setHistSel] = useState<string>("");
@@ -137,7 +141,10 @@ export function EnvCard(props: {
   const shownOutcome = selected ? (selected.outcome ?? selected.status) : run.outcome;
   const shownEndedAt = selected?.ended_at ?? run.ended_at;
 
-  const runShares = props.shares.filter((s) => s.run === run.name);
+  // By run id, not name: two repos both on `main` have two environments
+  // called `main`, and a name-keyed filter hangs the other project's share
+  // strip on this card.
+  const runShares = props.shares.filter((s) => s.run_id === run.run_id);
   const peerShare = runShares.find((s) => s.public_urls.length === 0) ?? null;
   const webShares = runShares.filter((s) => s.public_urls.length > 0);
 
@@ -234,7 +241,7 @@ export function EnvCard(props: {
           size="compact-xs"
           variant="default"
           loading={busy === "restart"}
-          onClick={() => void act("restart", () => api.restartRun(run.name))}
+          onClick={() => void act("restart", () => api.restartRun(ref))}
         >
           Restart
         </Button>
@@ -245,7 +252,7 @@ export function EnvCard(props: {
             loading={busy === "stop"}
             onClick={() => {
               if (window.confirm(`Stop environment "${run.name}"?`)) {
-                void act("stop", () => api.stopRun(run.name));
+                void act("stop", () => api.stopRun(ref));
               }
             }}
           >
@@ -273,7 +280,7 @@ export function EnvCard(props: {
             loading={busy === "share"}
             onClick={() =>
               void act("share", async () => {
-                const r = await api.startShare(run.name);
+                const r = await api.startShare(ref);
                 if (r?.join_url) copy(r.join_url, "join");
               })
             }
@@ -297,7 +304,7 @@ export function EnvCard(props: {
             size="compact-xs"
             variant="light"
             loading={busy === "web-share"}
-            onClick={() => void act("web-share", () => api.startShare(run.name, { web: true }))}
+            onClick={() => void act("web-share", () => api.startShare(ref, { web: true }))}
           >
             Share to web
           </Button>
@@ -486,7 +493,7 @@ export function EnvCard(props: {
                           loading={busy === `act-${a.name}-${n.name}`}
                           onClick={() =>
                             void act(`act-${a.name}-${n.name}`, () =>
-                              api.runAction(run.name, a.name, n.name),
+                              api.runAction(ref, a.name, n.name),
                             )
                           }
                         >
@@ -516,7 +523,7 @@ export function EnvCard(props: {
 
       {logsEverOpened && (
         <LogsPanel
-          run={run.name}
+          run={ref}
           history={history}
           histSel={histSel || null}
           visible={tab === "logs"}

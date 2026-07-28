@@ -248,6 +248,17 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
                 "emoji must be one of the curated worktree glyphs",
             )
         }
+        // On the PATCH path there is no handler pre-check: the DB layer
+        // resolves the collision inside a transaction so two concurrent renames
+        // can't both win. (`create_worktree` does pre-check, to avoid creating
+        // a checkout it would then reject — this arm is what catches losing
+        // that race.) Echoing the alias is safe, unlike the emoji case:
+        // `validate_alias` has already bounded it to 1-64 identifier
+        // characters, and the UI needs to say *which* alias is taken.
+        veld_core::db::DbError::AliasTaken(ref alias) => err(
+            StatusCode::CONFLICT,
+            format!("another checkout of this repo is already called \"{alias}\""),
+        ),
         other => db_err(other),
     }
 }
@@ -664,6 +675,33 @@ async fn create_worktree(
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "repo not imported"))?;
     let repo_root = PathBuf::from(&repo.root);
 
+    // An explicit alias that a sibling already holds is rejected before `git
+    // worktree add` runs: the definitive check lives in `Db::patch_worktree`,
+    // but it only fires on the rename *after* the checkout exists, so failing
+    // there leaves a real checkout on disk carrying a branch-derived alias
+    // instead of the requested one. This read is racy by nature (a concurrent
+    // create, or a sibling on disk not yet synced), so it narrows the window
+    // rather than closing it — the rename below is still the authority. A
+    // derived alias needs no check at all: `sync_worktrees` suffixes it via
+    // `unique_alias`.
+    if let Some(ref alias) = body.alias {
+        let siblings = db.list_worktrees(&repo_root).map_err(db_err)?;
+        // Case-insensitive, matching `Db::patch_worktree` — hostnames are.
+        if siblings.iter().any(|w| w.alias.eq_ignore_ascii_case(alias)) {
+            // Distinct wording from the authoritative post-create 409 in
+            // `write_err`: this one guarantees nothing was created, and a
+            // client that must decide whether to resync needs to tell them
+            // apart.
+            return Err(err(
+                StatusCode::CONFLICT,
+                format!(
+                    "another checkout of this repo is already called \"{alias}\" \
+                     — nothing was created"
+                ),
+            ));
+        }
+    }
+
     let alias_hint = body
         .alias
         .clone()
@@ -727,7 +765,13 @@ async fn create_worktree(
     // The sync derives the alias from the branch; apply an explicit custom one.
     let created = match &body.alias {
         Some(alias) if *alias != created.alias => {
-            db.rename_worktree(created.id, alias).map_err(db_err)?;
+            // `write_err`, not `db_err`: the pre-check above is racy against a
+            // concurrent create/rename, and losing that race is a 409, not a
+            // "database error" 500. `sync_repo_worktrees` has already
+            // registered the row, so what survives is a registered worktree
+            // under its branch-derived alias, not an orphan — the next refresh
+            // shows it, and the user can rename it to something free.
+            db.rename_worktree(created.id, alias).map_err(write_err)?;
             db.get_worktree(created.id)
                 .map_err(db_err)?
                 .ok_or_else(|| db_err("worktree vanished after rename"))?
@@ -782,7 +826,8 @@ async fn patch_worktree(
     }
 
     let db = open_desktop_db()?;
-    // One statement for both columns — see `Db::patch_worktree`.
+    // One write for both columns, and the alias-collision check shares its
+    // transaction — see `Db::patch_worktree`.
     let existed = db
         .patch_worktree(id, body.alias.as_deref(), body.emoji.as_deref())
         .map_err(write_err)?;
@@ -956,6 +1001,30 @@ mod tests {
         assert!(validate_alias("..").is_err());
         assert!(validate_alias("a/b").is_err());
         assert!(validate_alias("").is_err());
+    }
+
+    #[test]
+    fn db_write_errors_map_to_client_errors_not_500s() {
+        use veld_core::db::DbError;
+        // Both variants are rejected *values*, not database failures. Mapping
+        // either through `db_err` would report a 500 for what the user can fix,
+        // and would make the handler-side pre-checks look redundant.
+        let msg = |e: DbError| {
+            let (code, Json(body)) = write_err(e);
+            (code, body["error"].as_str().unwrap_or_default().to_owned())
+        };
+
+        let (code, body) = msg(DbError::AliasTaken("chk".into()));
+        assert_eq!(code, StatusCode::CONFLICT);
+        assert!(body.contains("chk"), "must name the taken alias: {body}");
+
+        let (code, body) = msg(DbError::InvalidEmoji("🍕".into()));
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        // The rejected emoji is deliberately NOT echoed (unbounded input).
+        assert!(!body.contains('🍕'), "{body}");
+
+        // A genuine database failure stays a 500.
+        assert_eq!(msg(DbError::NoDataDir).0, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     #[test]

@@ -55,8 +55,27 @@ pub async fn share(
         None => None,
     };
 
+    // Project scope: a run name is unique per project, not globally, so tell the
+    // daemon which project this invocation means.
+    //
+    // Keyed on the config's EXISTENCE, not on parsing it — `veld share` never
+    // reads the config, and `load_config_from_cwd().ok()` would silently drop
+    // the scope for a veld.json that fails to parse or carries an unsupported
+    // schema_version. Dropping it re-enables machine-wide name resolution on the
+    // one path where a wrong answer publishes URLs. Still `None` outside any
+    // project, which is a real case: `veld share` works from anywhere.
+    let project_root = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| veld_core::config::discover_config(&cwd).ok())
+        .map(|config_path| {
+            veld_core::config::project_root(&config_path)
+                .display()
+                .to_string()
+        });
+
     let req = StartShareRequest {
         run,
+        project_root,
         nodes: if nodes.is_empty() { None } else { Some(nodes) },
         ttl_secs: ttl,
         approve: Some(approve_mode),

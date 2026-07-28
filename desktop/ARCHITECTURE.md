@@ -57,6 +57,7 @@ client, not surgery.
 │  PATCH/DELETE /api/worktrees/{id}               │
 │  POST /api/worktrees/{id}/start → `veld start`  │
 │  POST /api/environments/{run}/stop|restart      │
+│       ?project_root=… (run names repeat!)       │
 │  POST /api/pty/tickets   → attach ticket        │
 │  GET  /api/pty/attach    → terminal WebSocket   │
 │  DEL  /api/pty/sessions/{id} → end a shell      │
@@ -246,8 +247,8 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `GET /api/repos` | Pure DB read: repos with their worktrees, each worktree annotated with `has_veld_config`, `presets`, and `nodes` (startable nodes with variants + default variant — the custom-selection source) (run state is NOT joined here — the UI joins `/api/environments` client-side by path). `available` is only the cheap directory-exists check; git reconciliation lives in `POST /api/repos/refresh` below. |
 | `POST /api/repos/import` `{path}` | Accepts any directory inside the repo; resolves the main checkout via `git worktree list --porcelain`, derives the name, registers it, and syncs the worktree rows. Idempotent. |
 | `DELETE /api/repos` `{root}` | Unregisters (never touches the filesystem). |
-| `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. |
-| `PATCH /api/worktrees/{id}` `{alias?, emoji?}` | Partial update, DB only. Both fields optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
+| `POST /api/worktrees` `{repo_root, branch, alias?, path?, create_branch?}` | `git worktree add`. Default path: `<repo_parent>/_worktrees/<alias>`. An explicit `alias` a sibling already holds is a `409`. The check runs *before* `git worktree add`, so the common case creates nothing; it is a plain read though, so a create that races another one (or a sibling on disk not yet synced) still 409s on the authoritative check after the checkout exists — what survives then is a registered worktree under its branch-derived alias, not an orphan. |
+| `PATCH /api/worktrees/{id}` `{alias?, emoji?}` | Partial update, DB only. Both fields optional (alias-only callers stay wire-compatible); an empty patch is a `400` and an unknown field a `422` (`deny_unknown_fields` — with everything optional, a client typo would otherwise be a silent `200`). Both columns are written in one `UPDATE … COALESCE`, so the pair can't half-apply. An alias a sibling checkout of the same repo already holds is a `409`: `unique_alias` establishes that invariant at insert and the rename path must not be a hole in it, since the alias becomes the default run name. The check and the write share one transaction, so two concurrent renames can't both win. Cross-repo duplicate aliases stay legal — forbidding them would break importing two repos that are both on `main`. `emoji` is checked against the curated set — an allowlist rather than a "one grapheme?" test, which keeps the rail uniform and leaves no room for a multi-codepoint or zero-width payload; the rule lives in `veld_core::db::is_worktree_emoji`, beside the constant, so no caller can bypass it. |
 | `GET /api/worktree-emoji` | The curated glyph list, for the picker. Served rather than duplicated in TypeScript, because the same constant is the server-side allowlist; the picker fetches it once on open instead of riding the 5s poll. |
 | `DELETE /api/worktrees/{id}?force=` | `git worktree remove` (`--force` discards a dirty tree); prunes git bookkeeping if the checkout was already removed by hand. Never deletes the main checkout. |
 | `POST /api/worktrees/{id}/start` `{preset?, selections?, run_name?}` | Spawns `veld start` with the worktree as cwd (the CLI resolves veld.json from there). Two mutually-exclusive start modes: `preset` (`--preset <p>`) or explicit `selections` (`node:variant` positionals, validated per half) — a non-TTY bare start fails "No selections provided", so the UI always sends one. Default run name: the alias. `202 Accepted`; progress observed via `/api/environments`. |
@@ -273,9 +274,58 @@ cost to every terminal to compute what this one computes anyway.
 Git subprocesses follow the AGENTS.md daemon rule: resolved user login-shell
 `PATH` via `veld_core::user_path::resolve_user_path()`.
 
-Stop/restart reuse the existing `/api/environments/{run}` endpoints (runs are
-keyed per project root, and each worktree is its own project root — no
-collisions).
+Stop/restart reuse the existing `/api/environments/{run}` endpoints, which
+take the target project as a **required** `?project_root=` query parameter.
+
+Runs are keyed per project root in the database (`UNIQUE(project_root, name)`),
+but the *name* is not globally unique, and the endpoints originally took the
+name alone: the daemon resolved it by scanning the registry and taking the
+first project that held it. Two repos both checked out on `main` each default
+to an environment called `main` (the start endpoint derives the run name from
+the alias, and `unique_alias` de-duplicates only within one repo), so a stop on
+one could tear down the other — see issue #168. The UI sends the worktree path,
+which is already its join key into `/api/environments`; a project that does not
+run the named environment is a `404`. `/api/logs/{run}` and
+`/api/environments/{run}/action` take the same parameter.
+
+`POST /api/shares` takes `project_root` too, but **optional** rather than
+required, because its callers are separately-invoked binaries (the CLI) and a
+browser overlay rather than JS compiled into this daemon: the CLI sends its own
+project root, the overlay rides Caddy's `X-Veld-Project` header, and a request
+with neither still resolves by name — rejecting an ambiguous one with a `409`
+instead of publishing an unrelated project's URLs. When a project *is* named it
+is authoritative: a run that project doesn't hold is a `404` naming where it does
+run, never a silent fallback to another project (that fallback was tried and
+reverted — with `--web` it published a project the caller never named). Sharing
+additionally requires a live run, since `Db::registry()` carries each
+environment's latest run whatever its status.
+
+The corollary for anything else that needs global identity: use `worktrees.id`,
+the checkout path, or a `run_id` — never an alias or a run name.
+
+The name-addressed endpoints above are the deliberate exception, not a
+counter-example: `veld stop --name` / `veld restart --name` is the CLI's own
+contract, so the daemon spawns the CLI *in the project directory* and lets the
+cwd disambiguate rather than inventing a second addressing scheme. That also
+makes the address instance-agnostic — a stop re-resolves the name inside the
+project, so it acts on whatever run is current, not necessarily the instance the
+user was looking at. Harmless while an environment has at most one live run
+(`idx_runs_one_live` enforces that), but it is the reason, and it is why the
+share *responses* report each share's `run_id`, so a UI attaches a share to the
+exact instance it was minted from rather than to whatever run currently answers
+to the name. (The share *request* is name+project addressed like the others —
+`POST /api/shares` resolves the project's latest run.)
+
+One layer below this is still name-keyed and tracked separately: Caddy route ids
+are `veld-{run_name}-{node}-{variant}`, so two projects running the same name
+collide in the proxy store and in GC (issue #170). Related follow-ups: shares can
+outlive their run with no UI affordance to stop them (#171), and the Electron
+tray's project-name labels (#172 — that issue's feedback-store half is fixed
+here: a caller-supplied `?project=` is registry-validated, while Caddy's
+server-set header stays verbatim). The emoji
+picker compares worktree ids for exactly this reason, and `/api/shares` now
+reports each share's `run_id` so the dashboards attach a share to its own run
+card instead of to a same-named run in another repo.
 
 ## Local dev setup
 
