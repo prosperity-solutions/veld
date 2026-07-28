@@ -218,13 +218,13 @@ if [[ -x "$VELD_BIN" ]]; then
   else
     FAIL=$((FAIL + 1))
   fi
-elif [[ -n "${CI:-}" ]]; then
-  # Never silently skip in CI: a gate that quietly does nothing reads as a pass.
-  # The job that runs this must build a binary first (see ci.yml).
-  echo "  FAIL (no veld binary — this gate must not be skipped in CI)"
-  FAIL=$((FAIL + 1))
 else
-  echo "  SKIP (no veld binary at target/{debug,release}/veld — run cargo build)"
+  # Skipping is correct here, not a silent hole: the `integration` job in ci.yml runs
+  # `validate-doc-examples.py` as its own first-class step, because that job is the
+  # one with a built binary. The schema job never builds Rust, so hard-failing on a
+  # missing binary just broke it unconditionally — which is what the first version of
+  # this did.
+  echo "  SKIP (no veld binary here — ci.yml runs this gate in the integration job)"
 fi
 
 echo
