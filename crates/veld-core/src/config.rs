@@ -26,6 +26,9 @@ pub enum ConfigError {
 
     #[error("unsupported schema version \"{0}\" — run `veld update` to get the latest version")]
     UnsupportedSchemaVersion(String),
+
+    #[error("failed to parse veld.json at {path}: {detail}")]
+    Jsonc { path: PathBuf, detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,12 +1291,7 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
         path: path.to_path_buf(),
         source: e,
     })?;
-
-    let config: VeldConfig =
-        serde_json::from_str(&contents).map_err(|e| ConfigError::ParseError {
-            path: path.to_path_buf(),
-            source: e,
-        })?;
+    let config = parse_config_str(&contents, path)?;
 
     if config.schema_version != "1" && config.schema_version != "2" {
         return Err(ConfigError::UnsupportedSchemaVersion(
@@ -1302,6 +1300,34 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
     }
 
     Ok(config)
+}
+
+/// Parse one config document from its text. Accepts JSONC (comments, trailing
+/// commas) and rejects duplicate keys within the document.
+///
+/// `path` is only used to label errors. Split out from [`parse_config`] so a
+/// document that is not (yet) its own file can go through exactly the same
+/// front end.
+pub fn parse_config_str(contents: &str, path: &Path) -> Result<VeldConfig, ConfigError> {
+    // Comments and trailing commas are blanked in place, so every line and
+    // column serde reports below still points at the real file.
+    let json = crate::jsonc::strip(contents).map_err(|e| ConfigError::Jsonc {
+        path: path.to_path_buf(),
+        detail: e.to_string(),
+    })?;
+
+    // Before deserializing: serde_json is silently last-wins on duplicate keys,
+    // which would drop one of two `variants` blocks (or, once one file may
+    // define several nodes, one of two same-named nodes) without a word.
+    crate::jsonc::reject_duplicate_keys(&json).map_err(|e| ConfigError::ParseError {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+
+    serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
+        path: path.to_path_buf(),
+        source: e,
+    })
 }
 
 /// **Validate** an already-parsed config: every semantic rule, reported as
@@ -1731,6 +1757,96 @@ mod tests {
         )
         .unwrap();
         assert!(validate(&config).is_empty());
+    }
+
+    // -- F1: JSONC -------------------------------------------------------------
+
+    /// A commented, trailing-comma'd config loads, and a syntax error *after* the
+    /// comments still reports the position the editor shows — the reason comments
+    /// are blanked rather than deleted.
+    #[test]
+    fn commented_config_loads_and_error_positions_survive() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("veld.json");
+        std::fs::write(
+            &good,
+            r#"{
+  // The project this config describes.
+  "schemaVersion": "2",
+  "name": "commented", /* trailing block comment */
+  "nodes": {
+    "api": {
+      "default_variant": "dev",
+      "variants": {
+        // A comment-like string must survive: https://example.com//x
+        "dev": { "type": "command", "command": "echo //not-a-comment", },
+      },
+    },
+  },
+}"#,
+        )
+        .unwrap();
+        let config = parse_config(&good).expect("JSONC must load");
+        assert_eq!(config.name, "commented");
+        assert_eq!(
+            config.nodes["api"].variants["dev"].command.as_deref(),
+            Some("echo //not-a-comment")
+        );
+
+        // A real syntax error, four comment lines in.
+        let bad = dir.path().join("bad.json");
+        std::fs::write(
+            &bad,
+            "{\n  // one\n  /* two\n     three */\n  \"schemaVersion\": nope\n}",
+        )
+        .unwrap();
+        let err = parse_config(&bad).unwrap_err();
+        let ConfigError::ParseError { source, .. } = err else {
+            panic!("expected a parse error, got {err:?}");
+        };
+        assert_eq!(
+            (source.line(), source.column()),
+            (5, 21),
+            "position must survive comment stripping: {source}"
+        );
+    }
+
+    #[test]
+    fn duplicate_key_within_file_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        // Two `variants` blocks: serde_json would silently keep the last, so
+        // the `dev` variant would vanish with no diagnostic.
+        std::fs::write(
+            &path,
+            r#"{
+                "schemaVersion": "2",
+                "name": "dup",
+                "nodes": { "api": {
+                    "variants": { "dev": { "type": "command", "command": "a" } },
+                    "variants": { "ci":  { "type": "command", "command": "b" } }
+                }}
+            }"#,
+        )
+        .unwrap();
+        let err = parse_config(&path).unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate key \"variants\""),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn unterminated_block_comment_is_named_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(&path, "{\n  /* oops\n  \"name\": \"x\"\n}").unwrap();
+        let err = parse_config(&path).unwrap_err();
+        assert!(matches!(err, ConfigError::Jsonc { .. }), "{err:?}");
+        assert!(
+            err.to_string().contains("unterminated block comment"),
+            "{err}"
+        );
     }
 
     /// Parse failures are strictly structural: unreadable file, malformed JSON,
