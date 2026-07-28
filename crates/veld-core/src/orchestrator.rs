@@ -52,6 +52,11 @@ pub enum OrchestratorError {
     #[error(transparent)]
     Variable(#[from] crate::variables::VariableError),
 
+    /// A configured value source could not be dereferenced at run start — an
+    /// unset `env` var, an unreadable file, a failing or hanging helper.
+    #[error(transparent)]
+    Value(#[from] crate::values::ValueError),
+
     #[error(transparent)]
     Helper(#[from] crate::helper::HelperError),
 
@@ -1046,7 +1051,12 @@ impl Orchestrator {
                 .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
         };
         let resolved_cmd = raw_cmd.interpolate(&var_ctx)?;
-        let env = build_env(resolved.env.as_ref(), &var_ctx)?;
+        let (env, env_secret_keys) = build_env(
+            resolved.env.as_ref(),
+            &var_ctx,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        )
+        .await?;
 
         let key = RunState::node_key(&sel.node, &sel.variant);
 
@@ -1137,6 +1147,7 @@ impl Orchestrator {
         if let Some(sensitive) = resolved.sensitive_outputs.clone() {
             node_state.sensitive_keys = sensitive;
         }
+        node_state.sensitive_keys.extend(env_secret_keys);
         run.nodes.insert(key.clone(), node_state);
         // Append last so reverse-order teardown runs its on_stop hook first.
         if !run.execution_order.contains(&key) {
@@ -1662,8 +1673,17 @@ impl Orchestrator {
             node_cfg_opt.and_then(|n| n.env.as_ref()),
             variant_cfg.env.as_ref(),
         );
-        let env = match build_env(merged_env.as_ref(), &ctx) {
-            Ok(env) => env,
+        let env = match build_env(
+            merged_env.as_ref(),
+            &ctx,
+            &format!(
+                "nodes.{}.variants.{}",
+                node_state.node_name, node_state.variant
+            ),
+        )
+        .await
+        {
+            Ok((env, _)) => env,
             Err(e) => {
                 tracing::warn!(
                     node = node_state.node_name,
@@ -2231,7 +2251,15 @@ async fn execute_start_server_isolated(
     .await;
 
     // Build env (variant > node > project).
-    let mut env = build_env(resolved.env.as_ref(), var_ctx)?;
+    let (mut env, env_secret_keys) = build_env(
+        resolved.env.as_ref(),
+        var_ctx,
+        &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+    )
+    .await?;
+    // Env keys declared `secret: true` are masked and encrypted at rest just like
+    // sensitive outputs — same machinery, extended rather than duplicated.
+    node_state.sensitive_keys.extend(env_secret_keys);
     env.insert("VELD_PORT".to_owned(), port.to_string());
     for (name, value) in &precomputed.named_ports {
         env.insert(
@@ -2598,7 +2626,13 @@ async fn execute_command_isolated(
     let resolved_cmd = raw_cmd.interpolate(var_ctx)?;
 
     // Build env (variant > node > project).
-    let env = build_env(resolved.env.as_ref(), var_ctx)?;
+    let (env, env_secret_keys) = build_env(
+        resolved.env.as_ref(),
+        var_ctx,
+        &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+    )
+    .await?;
+    node_state.sensitive_keys.extend(env_secret_keys);
 
     // Idempotency check (skip_if).
     if let Some(ref skip_if_cmd) = resolved.skip_if {
@@ -2819,19 +2853,42 @@ async fn wait_for_process_exit(pid: u32) {
     }
 }
 
-/// Build the environment map, resolving variable references in values.
-fn build_env(
-    env_config: Option<&HashMap<String, String>>,
+/// Build the environment map: interpolate inline values, and dereference every
+/// configured source (F7).
+///
+/// Only an **inline literal** is interpolated. A value fetched from a file, the
+/// environment, or a command is used verbatim — substituting `${…}` inside
+/// fetched content would turn any secret store into an interpolation vector, and
+/// a password that happens to contain `${` would either break or, worse, expand.
+///
+/// Returns the resolved values plus the keys declared `secret`, so the caller can
+/// mark them sensitive without the values themselves needing a wrapper type.
+async fn build_env(
+    env_config: Option<&HashMap<String, config::ConfigValue>>,
     ctx: &VariableContext,
-) -> Result<HashMap<String, String>, crate::variables::VariableError> {
+    at_prefix: &str,
+) -> Result<(HashMap<String, String>, Vec<String>), OrchestratorError> {
     let mut env = HashMap::new();
-    if let Some(map) = env_config {
-        for (key, tmpl) in map {
-            let val = crate::variables::interpolate(tmpl, ctx)?;
-            env.insert(key.clone(), val);
+    let mut secret_keys = Vec::new();
+    let Some(map) = env_config else {
+        return Ok((env, secret_keys));
+    };
+    // Sorted so a failure is deterministic: with two broken sources the same one
+    // is always reported.
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = &map[key];
+        let resolved = match value.as_literal() {
+            Some(tmpl) => crate::variables::interpolate(tmpl, ctx)?,
+            None => crate::values::resolve_value(value, &format!("{at_prefix}.env.{key}")).await?,
+        };
+        env.insert(key.clone(), resolved);
+        if value.secret {
+            secret_keys.push(key.clone());
         }
     }
-    Ok(env)
+    Ok((env, secret_keys))
 }
 
 fn whoami_username() -> String {

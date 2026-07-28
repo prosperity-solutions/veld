@@ -316,7 +316,9 @@ fn validate_variable_references(
 
     // Scan project-level env for unqualified refs.
     if let Some(env_map) = &config.env {
-        for v in env_map.values().flatten() {
+        // Only inline literals are interpolated, so only they can hold a
+        // `${nodes.…}` reference.
+        for v in env_map.values().flatten().filter_map(|v| v.as_literal()) {
             check_string_for_ambiguous_refs(v, &active_variants)?;
         }
     }
@@ -339,7 +341,12 @@ fn validate_variable_references(
         // The resolved env, so a value hoisted to node level is scanned once and
         // an erased key is not scanned at all.
         if let Some(env_map) = &resolved.env {
-            owned_strings.extend(env_map.values().cloned());
+            owned_strings.extend(
+                env_map
+                    .values()
+                    .filter_map(|v| v.as_literal())
+                    .map(str::to_owned),
+            );
         }
         let strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
 

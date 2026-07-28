@@ -172,7 +172,7 @@ pub struct VeldConfig {
     /// Overridable at node and variant level; a more specific layer erases an
     /// inherited key with `"KEY": null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<NullableMap<String>>,
+    pub env: Option<NullableMap<ConfigValue>>,
 
     /// Environment sharing policy: which relays to use, and where the public
     /// web gateway lives. Per-service opt-in lives on each variant (`share`).
@@ -207,6 +207,147 @@ pub struct VeldConfig {
     /// last-wins interpretation, which is what it did before this existed.
     #[serde(skip)]
     pub deferred_findings: Vec<Finding>,
+}
+
+// ---------------------------------------------------------------------------
+// Value sources and sensitivity (F7)
+// ---------------------------------------------------------------------------
+
+/// A configured value: **where it comes from**, and **whether it is sensitive**.
+///
+/// A plain string is a literal, non-secret value — that is the common case and it
+/// stays terse. The object form names exactly one source plus an optional
+/// `secret` flag:
+///
+/// ```jsonc
+/// "env": {
+///   "REGION":       "eu-central-1",
+///   "PG_PASSWORD":  { "value": "devpassword", "secret": true },
+///   "GITHUB_TOKEN": { "env": "GITHUB_TOKEN", "secret": true },
+///   "SIGNING_KEY":  { "file": ".secrets/signing.key", "secret": true },
+///   "DATABASE_URL": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+/// }
+/// ```
+///
+/// **veld never takes custody of a secret.** It carries a *pointer* to one and a
+/// *sensitivity flag*; resolution happens at run start and the resolved value
+/// goes to the child process's environment (or a file — F9.1) and nowhere else.
+/// There is no provider table and no vendor name anywhere in the schema:
+/// `argv` runs a command and reads its stdout, and which command that is remains
+/// the author's business.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigValue {
+    /// Where the value is read from.
+    pub source: SecretSource,
+    /// Declared sensitivity. Not a Rust newtype: `sensitive_outputs` and the
+    /// share-manifest wire types must stay serde-lenient, so this is a flag that
+    /// travels with the value rather than a type that forbids `Serialize`.
+    pub secret: bool,
+}
+
+impl ConfigValue {
+    /// A plain, non-secret literal — the string form.
+    pub fn literal(value: impl Into<String>) -> Self {
+        Self {
+            source: SecretSource::Literal(value.into()),
+            secret: false,
+        }
+    }
+
+    /// The literal text, if this value is inline. `None` for every form that has
+    /// to be *fetched* — those are only known after resolution at run start.
+    pub fn as_literal(&self) -> Option<&str> {
+        match &self.source {
+            SecretSource::Literal(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// A short description of the source for diagnostics. Never includes a
+    /// literal value, so it is safe to log.
+    pub fn source_label(&self) -> String {
+        match &self.source {
+            SecretSource::Literal(_) => "an inline value".to_owned(),
+            SecretSource::Env(name) => format!("environment variable {name}"),
+            SecretSource::File(path) => format!("file {path}"),
+            SecretSource::Command(c) | SecretSource::Shell(c) => format!("command `{c}`"),
+            SecretSource::Argv(a) => format!("command {a:?}"),
+        }
+    }
+}
+
+impl Serialize for ConfigValue {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        // The terse form round-trips when there is nothing else to say.
+        if !self.secret {
+            if let SecretSource::Literal(v) = &self.source {
+                return s.serialize_str(v);
+            }
+        }
+        let mut m = s.serialize_map(Some(2))?;
+        match &self.source {
+            SecretSource::Literal(v) => m.serialize_entry("value", v)?,
+            SecretSource::Env(v) => m.serialize_entry("env", v)?,
+            SecretSource::File(v) => m.serialize_entry("file", v)?,
+            SecretSource::Command(v) => m.serialize_entry("command", v)?,
+            SecretSource::Argv(v) => m.serialize_entry("argv", v)?,
+            SecretSource::Shell(v) => m.serialize_entry("shell", v)?,
+        }
+        if self.secret {
+            m.serialize_entry("secret", &true)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfigValue {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::String(s) => Ok(ConfigValue::literal(s)),
+            serde_json::Value::Object(mut map) => {
+                let secret = match map.remove("secret") {
+                    None => false,
+                    Some(serde_json::Value::Bool(b)) => b,
+                    Some(other) => {
+                        return Err(D::Error::custom(format!(
+                            "\"secret\" must be true or false, got {other}"
+                        )));
+                    }
+                };
+                if map.len() != 1 {
+                    let mut keys: Vec<&str> = map.keys().map(String::as_str).collect();
+                    keys.sort();
+                    return Err(D::Error::custom(format!(
+                        "a value needs exactly one source key — \"value\", \"env\", \"file\", \
+                         \"argv\", or \"shell\" — found {}",
+                        if keys.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            keys.join(", ")
+                        }
+                    )));
+                }
+                let (key, val) = map.into_iter().next().expect("len checked == 1");
+                let source = match key.as_str() {
+                    // `value` is the object spelling of a literal: it exists so an
+                    // inline literal can still carry `secret: true`.
+                    "value" => SecretSource::Literal(
+                        val.as_str()
+                            .ok_or_else(|| D::Error::custom("\"value\" must be a string"))?
+                            .to_owned(),
+                    ),
+                    _ => secret_source_from_value(serde_json::json!({ key: val }))
+                        .map_err(D::Error::custom)?,
+                };
+                Ok(ConfigValue { source, secret })
+            }
+            other => Err(D::Error::custom(format!(
+                "a value must be a string or a single-source object, got {other}"
+            ))),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1091,7 +1232,7 @@ pub struct NodeConfig {
     /// Overrides project-level env. Overridable at variant level; `"KEY": null`
     /// erases an inherited key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<NullableMap<String>>,
+    pub env: Option<NullableMap<ConfigValue>>,
 
     /// Working directory for all variants of this node. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overridable at variant level. Supports variable substitution.
@@ -1250,7 +1391,7 @@ pub struct VariantConfig {
     /// Extra environment variables injected into the process. `"KEY": null`
     /// erases a key inherited from the node or project level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<NullableMap<String>>,
+    pub env: Option<NullableMap<ConfigValue>>,
 
     /// Named ports veld allocates for this variant, additive over the
     /// node-level map. `"name": null` erases an inherited one. Absent means the
@@ -1458,10 +1599,10 @@ pub fn resolve_features(
 /// variant > node > project. For each key, the most specific layer wins, and a
 /// layer erases an inherited key by setting it to `null`.
 pub fn resolve_env(
-    project: Option<&NullableMap<String>>,
-    node: Option<&NullableMap<String>>,
-    variant: Option<&NullableMap<String>>,
-) -> Option<HashMap<String, String>> {
+    project: Option<&NullableMap<ConfigValue>>,
+    node: Option<&NullableMap<ConfigValue>>,
+    variant: Option<&NullableMap<ConfigValue>>,
+) -> Option<HashMap<String, ConfigValue>> {
     merge_nullable_maps([project, node, variant])
 }
 
@@ -1755,7 +1896,7 @@ pub struct ResolvedVariant {
     pub readiness: Option<HealthCheck>,
     pub liveness: Option<LivenessProbe>,
     pub depends_on: Option<HashMap<String, String>>,
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<HashMap<String, ConfigValue>>,
     pub ports: Option<ResolvedPorts>,
     pub outputs: Option<Outputs>,
     pub sensitive_outputs: Option<Vec<String>>,
@@ -2059,6 +2200,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_exactly_one_command(config, &mut findings);
     check_builtin_names(config, &mut findings);
     check_resolved_variants(config, &mut findings);
+    check_secret_usage(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld lint --json` output
@@ -2072,6 +2214,228 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
         ))
     });
     findings
+}
+
+/// Does this literal *look* like a credential that was pasted into the config?
+///
+/// Shape-based, not entropy-based, and deliberately conservative: a false
+/// positive on a value the author knows is fine is a warning they can ignore,
+/// whereas a false negative is a leaked token in version control. Recognises the
+/// prefixed forms real providers use, a JWT, and a URL with inline credentials.
+fn looks_like_a_credential(value: &str) -> bool {
+    let v = value.trim();
+    // Provider-prefixed tokens. These are *shapes*, not a vendor table — veld
+    // knows nothing about the services, only that a string starting like this and
+    // long enough to be real is almost never a deliberate literal.
+    const PREFIXES: &[&str] = &[
+        "sk-",
+        "ghp_",
+        "gho_",
+        "ghu_",
+        "ghs_",
+        "ghr_",
+        "github_pat_",
+        "xoxb-",
+        "xoxp-",
+        "xoxa-",
+        "AKIA",
+        "ASIA",
+        "AIza",
+        "glpat-",
+        "dop_v1_",
+        "shpat_",
+        "npm_",
+        "pypi-",
+        "rk_live_",
+        "sk_live_",
+        "pk_live_",
+    ];
+    if PREFIXES
+        .iter()
+        .any(|p| v.starts_with(p) && v.len() >= p.len() + 12)
+    {
+        return true;
+    }
+    // A JWT: three base64url segments separated by dots, starting with a header.
+    if v.starts_with("eyJ") && v.matches('.').count() == 2 {
+        return true;
+    }
+    // `scheme://user:pass@host` — the classic accidental commit.
+    if let Some((scheme, rest)) = v.split_once("://") {
+        if !scheme.is_empty() && !scheme.contains(char::is_whitespace) {
+            if let Some((authority, _)) = rest.split_once('/').or(Some((rest, ""))) {
+                if let Some((userinfo, _)) = authority.split_once('@') {
+                    if let Some((_, password)) = userinfo.split_once(':') {
+                        // An empty or placeholder-length password is not worth a
+                        // warning; `postgres://user:postgres@localhost` in a local
+                        // dev config is the legitimate fixed-credential case.
+                        return password.len() >= 12;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// F7's sensitivity rules.
+///
+/// The point of `secret: true` is that veld can then *refuse* the unsafe uses. A
+/// secret's only sanctioned destinations are a child process's environment and a
+/// file — never an `argv` element, never a `shell` string, never a log, never
+/// `--json` output, never the share payload.
+fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
+    /// Names of the env keys, per node+variant, whose values are secret.
+    fn secret_env_keys(config: &VeldConfig, node: &NodeConfig, v: &VariantConfig) -> Vec<String> {
+        resolve_env(config.env.as_ref(), node.env.as_ref(), v.env.as_ref())
+            .map(|env| {
+                env.into_iter()
+                    .filter(|(_, value)| value.secret)
+                    .map(|(k, _)| k)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    for (node_name, node) in &config.nodes {
+        // A credential-shaped literal is worth flagging wherever it sits, marked
+        // secret or not: marking it keeps it out of `argv`, but it is still in
+        // version control.
+        for (level, env) in [
+            ("env".to_owned(), config.env.as_ref()),
+            (format!("nodes.{node_name}.env"), node.env.as_ref()),
+        ] {
+            for (key, value) in env.into_iter().flatten() {
+                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                    if looks_like_a_credential(literal) {
+                        out.push(Finding::warning(
+                            "credential-shaped-literal",
+                            format!("{level}.{key}"),
+                            "this value looks like a real credential written into the \
+                             config, where it lands in version control. Use \
+                             `{ \"env\": … }`, `{ \"file\": … }`, or `{ \"argv\": … }` to \
+                             keep it out. (A deliberate fixed local credential is fine — \
+                             mark it `{ \"value\": …, \"secret\": true }` and this stays \
+                             quiet.)",
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (variant_name, variant) in &node.variants {
+            let base = format!("nodes.{node_name}.variants.{variant_name}");
+            for (key, value) in variant.env.iter().flatten() {
+                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                    if looks_like_a_credential(literal) {
+                        out.push(Finding::warning(
+                            "credential-shaped-literal",
+                            format!("{base}.env.{key}"),
+                            "this value looks like a real credential written into the \
+                             config, where it lands in version control. Use \
+                             `{ \"env\": … }`, `{ \"file\": … }`, or `{ \"argv\": … }` to \
+                             keep it out.",
+                        ));
+                    }
+                }
+            }
+
+            // A secret interpolated into a command is an error, not a warning: an
+            // `argv` element and a `shell` string both end up in the process
+            // table, where every other user on the machine can read them, and in
+            // any shell history or CI log that echoes the command.
+            let secrets = secret_env_keys(config, node, variant);
+            if secrets.is_empty() {
+                continue;
+            }
+            let r = resolve_variant(config, node, variant);
+            let commands: [(&str, Option<&CommandSpec>); 3] = [
+                ("", r.command.as_ref()),
+                (".on_stop", r.on_stop.as_ref()),
+                (".skip_if", r.skip_if.as_ref()),
+            ];
+            for (suffix, spec) in commands {
+                let Some(spec) = spec else { continue };
+                let parts: Vec<String> = match spec {
+                    CommandSpec::Argv(a) => a.clone(),
+                    CommandSpec::Shell(sh) => vec![sh.clone()],
+                };
+                for part in &parts {
+                    for name in builtin_refs_in(part, "output.")
+                        .into_iter()
+                        .chain(env_refs(part))
+                    {
+                        if secrets.contains(&name) {
+                            out.push(Finding::error(
+                                "secret-in-command",
+                                format!("{base}{suffix}"),
+                                format!(
+                                    "{name} is declared `secret: true`, so it must not be \
+                                     interpolated into a command — an argv element and a \
+                                     shell string both appear in the process table, where \
+                                     any user on the machine can read them. veld already \
+                                     passes it to the process as the environment variable \
+                                     {name}; reference it there instead (`${{{name}}}` \
+                                     inside a `shell` command, or have the program read it \
+                                     from the environment)"
+                                ),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// `${<prefix><name>}` references in `s`.
+fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
+    let needle = format!("${{{prefix}");
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find(&needle) {
+        let after = &rest[start + needle.len()..];
+        match after.find('}') {
+            None => break,
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out
+}
+
+/// Bare `$NAME` / `${NAME}` shell references, which is how a `shell` command
+/// would reach an env value directly.
+fn env_refs(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let mut j = i + 1;
+        let braced = bytes.get(j) == Some(&b'{');
+        if braced {
+            j += 1;
+        }
+        let start = j;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        if j > start {
+            out.push(s[start..j].to_owned());
+        }
+        i = if braced && bytes.get(j) == Some(&b'}') {
+            j + 1
+        } else {
+            j.max(i + 1)
+        };
+    }
+    out
 }
 
 /// Rules that only make sense on the **resolved** variant — after node-level
@@ -2217,15 +2581,16 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 
     for (key, value) in config.env.iter().flatten() {
-        // A `null` value erases an inherited key and interpolates nothing.
-        if let Some(value) = value {
-            check(&format!("env.{key}"), value, out);
+        // A `null` value erases an inherited key, and only an inline literal is
+        // interpolated — a fetched value is used verbatim.
+        if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+            check(&format!("env.{key}"), literal, out);
         }
     }
     for (node_name, node) in &config.nodes {
         for (key, value) in node.env.iter().flatten() {
-            if let Some(value) = value {
-                check(&format!("nodes.{node_name}.env.{key}"), value, out);
+            if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                check(&format!("nodes.{node_name}.env.{key}"), literal, out);
             }
         }
         for (variant_name, variant) in &node.variants {
@@ -2234,8 +2599,8 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             check_cmd(&format!("{base}.on_stop"), variant.on_stop.clone(), out);
             check_cmd(&format!("{base}.skip_if"), variant.skip_if.clone(), out);
             for (key, value) in variant.env.iter().flatten() {
-                if let Some(value) = value {
-                    check(&format!("{base}.env.{key}"), value, out);
+                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
+                    check(&format!("{base}.env.{key}"), literal, out);
                 }
             }
         }
@@ -2907,6 +3272,226 @@ mod tests {
         );
     }
 
+    // -- F7: sensitivity lint rules (a passing and a failing fixture each) -----
+
+    fn findings_for(json: &str) -> Vec<Finding> {
+        let cfg: VeldConfig = serde_json::from_str(json).expect("fixture parses");
+        validate(&cfg)
+    }
+
+    /// **error** — a value marked `secret` interpolated into `argv` or `shell`.
+    ///
+    /// Both forms put the value in the process table, readable by every other
+    /// user on the machine, and in any CI log that echoes the command.
+    #[test]
+    fn secret_in_command_is_validation_error() {
+        // Failing fixture: the secret reaches an `argv` element and a `shell`
+        // string, plus `on_stop`.
+        let bad = findings_for(
+            r#"{
+                "schemaVersion": "2", "name": "t",
+                "nodes": { "db": { "variants": { "dev": {
+                    "type": "command",
+                    "env": { "PGPASSWORD": { "value": "devpw", "secret": true } },
+                    "argv": ["psql", "--password", "${PGPASSWORD}"],
+                    "on_stop": { "shell": "echo $PGPASSWORD | wc -c" }
+                }}}}
+            }"#,
+        );
+        let hits: Vec<&Finding> = bad
+            .iter()
+            .filter(|f| f.rule == "secret-in-command")
+            .collect();
+        assert_eq!(hits.len(), 2, "the command and the on_stop hook: {bad:?}");
+        assert!(hits.iter().all(|f| f.severity == Severity::Error));
+        assert!(hits.iter().any(|f| f.location.ends_with(".on_stop")));
+        assert!(hits[0].message.contains("process table"), "{:?}", hits[0]);
+
+        // Passing fixture: the same secret, delivered as an environment variable
+        // and read by the program — the sanctioned route.
+        let good = findings_for(
+            r#"{
+                "schemaVersion": "2", "name": "t",
+                "nodes": { "db": { "variants": { "dev": {
+                    "type": "command",
+                    "env": { "PGPASSWORD": { "value": "devpw", "secret": true } },
+                    "argv": ["psql", "--no-password"]
+                }}}}
+            }"#,
+        );
+        assert!(
+            !good.iter().any(|f| f.rule == "secret-in-command"),
+            "{good:?}"
+        );
+
+        // A NON-secret value in a command is fine — the rule keys off the flag,
+        // not off the name.
+        let plain = findings_for(
+            r#"{
+                "schemaVersion": "2", "name": "t",
+                "nodes": { "db": { "variants": { "dev": {
+                    "type": "command",
+                    "env": { "REGION": "eu-central-1" },
+                    "argv": ["deploy", "--region", "${REGION}"]
+                }}}}
+            }"#,
+        );
+        assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
+    }
+
+    /// **warn** — a credential-shaped literal, marked or not.
+    /// **silent** — a `secret: true` literal that is not credential-shaped, which
+    /// is the legitimate fixed-local-credential case.
+    #[test]
+    fn credential_shaped_literals_warn_and_plain_ones_stay_silent() {
+        for shaped in [
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+            "sk-abcdefghijklmnopqrstuvwxyz",
+            "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc",
+            "postgres://admin:sup3rs3cretpw@db.example.com/app",
+            "AKIAIOSFODNN7EXAMPLE",
+        ] {
+            let f = findings_for(&format!(
+                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"command","shell":"true","env":{{"TOKEN":{}}}
+                }}}}}}}}}}"#,
+                serde_json::to_string(shaped).unwrap()
+            ));
+            let hit = f
+                .iter()
+                .find(|f| f.rule == "credential-shaped-literal")
+                .unwrap_or_else(|| panic!("{shaped} should warn, got {f:?}"));
+            assert_eq!(hit.severity, Severity::Warning, "never blocks a run");
+        }
+
+        // The legitimate case: a fixed local credential, deliberately inline and
+        // marked. Silent — this is how local dev works and nagging about it
+        // trains people to ignore the warning.
+        let quiet = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"command","shell":"true",
+                "env":{"PG_PASSWORD":{"value":"devpassword","secret":true}}
+            }}}}}"#,
+        );
+        assert!(
+            !quiet.iter().any(|f| f.rule == "credential-shaped-literal"),
+            "{quiet:?}"
+        );
+
+        // …and so are ordinary values that merely contain a URL or a colon.
+        for benign in [
+            "eu-central-1",
+            "https://api.example.com",
+            "postgres://user:postgres@localhost:5432/app",
+            "debug",
+        ] {
+            let f = findings_for(&format!(
+                r#"{{"schemaVersion":"2","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"command","shell":"true","env":{{"V":{}}}
+                }}}}}}}}}}"#,
+                serde_json::to_string(benign).unwrap()
+            ));
+            assert!(
+                !f.iter().any(|f| f.rule == "credential-shaped-literal"),
+                "{benign} should stay quiet, got {f:?}"
+            );
+        }
+    }
+
+    /// **error** — a `start_server` with no readiness probe (v3; a warning in
+    /// v1/v2, see the rule's own comment).
+    #[test]
+    fn start_server_without_readiness_is_error_in_v3_and_warning_before() {
+        let v3 = findings_for(
+            r#"{"schemaVersion":"3","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"serve"
+            }}}}}"#,
+        );
+        let hit = v3
+            .iter()
+            .find(|f| f.rule == "start-server-needs-readiness")
+            .unwrap();
+        assert_eq!(hit.severity, Severity::Error);
+
+        let v2 = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"serve"
+            }}}}}"#,
+        );
+        assert_eq!(
+            v2.iter()
+                .find(|f| f.rule == "start-server-needs-readiness")
+                .unwrap()
+                .severity,
+            Severity::Warning,
+            "a v1/v2 config must keep starting"
+        );
+
+        // Passing fixture: either probe form satisfies it.
+        for probe in [
+            r#""probes":{"readiness":{"type":"http","path":"/z"}}"#,
+            r#""probes":{"readiness":{"type":"port"}}"#,
+            r#""health_check":{"type":"port"}"#,
+        ] {
+            let f = findings_for(&format!(
+                r#"{{"schemaVersion":"3","name":"t","nodes":{{"a":{{"variants":{{"dev":{{
+                    "type":"start_server","shell":"serve",{probe}
+                }}}}}}}}}}"#
+            ));
+            assert!(
+                !f.iter().any(|f| f.rule == "start-server-needs-readiness"),
+                "{probe} should satisfy the rule, got {f:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ambiguous_primary_port_is_error() {
+        let f = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x",
+                "probes":{"readiness":{"type":"port"}},
+                "ports":{"grpc":"auto","metrics":"auto"}
+            }}}}}"#,
+        );
+        let hit = f
+            .iter()
+            .find(|f| f.rule == "ambiguous-primary-port")
+            .unwrap_or_else(|| panic!("expected the rule to fire: {f:?}"));
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(hit.message.contains("grpc, metrics"), "{hit:?}");
+        assert!(hit.message.contains("http"), "must say how to fix it");
+
+        // Naming one `http` resolves it.
+        let ok = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x",
+                "probes":{"readiness":{"type":"port"}},
+                "ports":{"http":"auto","metrics":"auto"}
+            }}}}}"#,
+        );
+        assert!(!ok.iter().any(|f| f.rule == "ambiguous-primary-port"));
+    }
+
+    #[test]
+    fn missing_step_type_is_error() {
+        let f = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "shell":"x"
+            }}}}}"#,
+        );
+        assert!(f.iter().any(|f| f.rule == "missing-step-type"));
+
+        // Declared once on the node covers every variant.
+        let ok = findings_for(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "type":"command",
+                "variants":{"dev":{"shell":"x"},"ci":{"shell":"y"}}
+            }}}"#,
+        );
+        assert!(!ok.iter().any(|f| f.rule == "missing-step-type"));
+    }
+
     // -- F5: the v3 command gate ----------------------------------------------
 
     /// A v3 document containing `command` fails to load, and the message names
@@ -3350,47 +3935,47 @@ mod tests {
 
     #[test]
     fn test_resolve_env_project_only() {
-        let project = HashMap::from([("A".into(), Some("1".into()))]);
+        let project = HashMap::from([("A".into(), Some(ConfigValue::literal("1")))]);
         let result = resolve_env(Some(&project), None, None).unwrap();
-        assert_eq!(result.get("A").unwrap(), "1");
+        assert_eq!(result.get("A").unwrap().as_literal(), Some("1"));
     }
 
     #[test]
     fn test_resolve_env_node_overrides_project() {
         let project = HashMap::from([
-            ("A".into(), Some("1".into())),
-            ("B".into(), Some("2".into())),
+            ("A".into(), Some(ConfigValue::literal("1"))),
+            ("B".into(), Some(ConfigValue::literal("2"))),
         ]);
-        let node = HashMap::from([("A".into(), Some("override".into()))]);
+        let node = HashMap::from([("A".into(), Some(ConfigValue::literal("override")))]);
         let result = resolve_env(Some(&project), Some(&node), None).unwrap();
-        assert_eq!(result.get("A").unwrap(), "override");
-        assert_eq!(result.get("B").unwrap(), "2");
+        assert_eq!(result.get("A").unwrap().as_literal(), Some("override"));
+        assert_eq!(result.get("B").unwrap().as_literal(), Some("2"));
     }
 
     #[test]
     fn test_resolve_env_variant_overrides_all() {
-        let project = HashMap::from([("A".into(), Some("1".into()))]);
+        let project = HashMap::from([("A".into(), Some(ConfigValue::literal("1")))]);
         let node = HashMap::from([
-            ("A".into(), Some("2".into())),
-            ("B".into(), Some("3".into())),
+            ("A".into(), Some(ConfigValue::literal("2"))),
+            ("B".into(), Some(ConfigValue::literal("3"))),
         ]);
         let variant = HashMap::from([
-            ("A".into(), Some("final".into())),
-            ("C".into(), Some("4".into())),
+            ("A".into(), Some(ConfigValue::literal("final"))),
+            ("C".into(), Some(ConfigValue::literal("4"))),
         ]);
         let result = resolve_env(Some(&project), Some(&node), Some(&variant)).unwrap();
-        assert_eq!(result.get("A").unwrap(), "final");
-        assert_eq!(result.get("B").unwrap(), "3");
-        assert_eq!(result.get("C").unwrap(), "4");
+        assert_eq!(result.get("A").unwrap().as_literal(), Some("final"));
+        assert_eq!(result.get("B").unwrap().as_literal(), Some("3"));
+        assert_eq!(result.get("C").unwrap().as_literal(), Some("4"));
     }
 
     #[test]
     fn test_resolve_env_empty_map_with_values() {
         let empty = HashMap::new();
-        let variant = HashMap::from([("X".into(), Some("1".into()))]);
+        let variant = HashMap::from([("X".into(), Some(ConfigValue::literal("1")))]);
         let result = resolve_env(Some(&empty), None, Some(&variant)).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("X").unwrap(), "1");
+        assert_eq!(result.get("X").unwrap().as_literal(), Some("1"));
     }
 
     #[test]
@@ -3402,10 +3987,10 @@ mod tests {
 
     #[test]
     fn test_resolve_env_variant_only() {
-        let variant = HashMap::from([("X".into(), Some("val".into()))]);
+        let variant = HashMap::from([("X".into(), Some(ConfigValue::literal("val")))]);
         let result = resolve_env(None, None, Some(&variant)).unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result.get("X").unwrap(), "val");
+        assert_eq!(result.get("X").unwrap().as_literal(), Some("val"));
     }
 
     #[test]
@@ -3791,10 +4376,13 @@ mod tests {
         );
 
         let env = r.env.as_ref().unwrap();
-        assert_eq!(env.get("FROM_PROJECT").map(String::as_str), Some("p"));
-        assert_eq!(env.get("FROM_NODE").map(String::as_str), Some("n"));
         assert_eq!(
-            env.get("SHARED").map(String::as_str),
+            env.get("FROM_PROJECT").and_then(|v| v.as_literal()),
+            Some("p")
+        );
+        assert_eq!(env.get("FROM_NODE").and_then(|v| v.as_literal()), Some("n"));
+        assert_eq!(
+            env.get("SHARED").and_then(|v| v.as_literal()),
             Some("v"),
             "the variant wins on collision"
         );
