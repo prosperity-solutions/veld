@@ -98,7 +98,6 @@ impl Finding {
         }
     }
 
-    #[allow(dead_code)]
     fn warning(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Warning,
@@ -170,9 +169,10 @@ pub struct VeldConfig {
     pub proxy: Option<ProxyConfig>,
 
     /// Global environment variables inherited by all node variants.
-    /// Overridable at node and variant level.
+    /// Overridable at node and variant level; a more specific layer erases an
+    /// inherited key with `"KEY": null`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<NullableMap<String>>,
 
     /// Environment sharing policy: which relays to use, and where the public
     /// web gateway lives. Per-service opt-in lives on each variant (`share`).
@@ -207,6 +207,151 @@ pub struct VeldConfig {
     /// last-wins interpretation, which is what it did before this existed.
     #[serde(skip)]
     pub deferred_findings: Vec<Finding>,
+}
+
+// ---------------------------------------------------------------------------
+// Node-level defaults: maps, and how a variant removes an inherited key
+// ---------------------------------------------------------------------------
+
+/// A map whose values may be `null` to mean **remove the inherited key**.
+///
+/// Node-level defaults are additive per key (project → node → variant), so
+/// without this a variant could override an inherited entry but never get rid of
+/// one. `"KEY": null` is that eraser. The `None` entries are dropped by the
+/// `resolve_*` function after merging, so nothing downstream ever sees one.
+pub type NullableMap<T> = HashMap<String, Option<T>>;
+
+/// Merge `project → node → variant` layers of a [`NullableMap`], most specific
+/// last, then drop the keys a layer erased with `null`.
+///
+/// This is the **per-key override** strategy — one of the three distinct merge
+/// strategies in the resolved config (see the merge table in
+/// `docs/configuration.md`). It is used by `env`, `ports`, and `depends_on`.
+/// Do not try to unify it with the others: `features` is per *field*, and
+/// `probes`/`share`/`outputs` replace wholesale, deliberately.
+fn merge_nullable_maps<T: Clone>(
+    layers: [Option<&NullableMap<T>>; 3],
+) -> Option<HashMap<String, T>> {
+    if layers.iter().all(|l| l.is_none()) {
+        return None;
+    }
+    let mut merged: NullableMap<T> = HashMap::new();
+    for layer in layers.into_iter().flatten() {
+        for (k, v) in layer {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    Some(
+        merged
+            .into_iter()
+            .filter_map(|(k, v)| v.map(|v| (k, v)))
+            .collect(),
+    )
+}
+
+/// Distinguish "key absent" from "key present and `null`".
+///
+/// `Option<Option<T>>` after this: `None` = absent (inherit), `Some(None)` =
+/// explicitly `null` (erase the inherited value), `Some(Some(v))` = override.
+/// serde cannot express that with `Option<T>` alone — both cases deserialize to
+/// `None` — so every field a variant may erase needs this.
+fn explicit_null<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// How a named port is obtained.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PortSpec {
+    /// veld allocates a free port and reports it as `${veld.ports.<name>}`.
+    Auto,
+    /// A fixed port. Discouraged — a literal port silently breaks parallel
+    /// worktrees, which is the whole reason named auto-ports exist.
+    Fixed(u16),
+}
+
+impl Serialize for PortSpec {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            PortSpec::Auto => s.serialize_str("auto"),
+            PortSpec::Fixed(p) => s.serialize_u16(*p),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PortSpec {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        match serde_json::Value::deserialize(d)? {
+            serde_json::Value::String(s) if s == "auto" => Ok(PortSpec::Auto),
+            serde_json::Value::Number(n) => n
+                .as_u64()
+                .and_then(|n| u16::try_from(n).ok())
+                .filter(|p| *p > 0)
+                .map(PortSpec::Fixed)
+                .ok_or_else(|| D::Error::custom("a fixed port must be between 1 and 65535")),
+            other => Err(D::Error::custom(format!(
+                "a port must be \"auto\" or a number, got {other}"
+            ))),
+        }
+    }
+}
+
+/// The name of the port `${veld.port}` refers to when a node declares several.
+pub const PRIMARY_PORT_NAME: &str = "http";
+
+/// Resolved named ports for one node, and which of them is primary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPorts {
+    /// Port name → spec, in declaration-independent (sorted) order.
+    pub ports: BTreeMap<String, PortSpec>,
+    /// The name `${veld.port}` aliases.
+    pub primary: String,
+}
+
+impl ResolvedPorts {
+    /// Pick the primary port: the one named `http`, or the sole entry when only
+    /// one is declared. Ambiguity is a validation error rather than a guess —
+    /// silently picking alphabetically would make `${veld.port}` mean whichever
+    /// name happened to sort first.
+    fn choose_primary(ports: &BTreeMap<String, PortSpec>) -> Option<String> {
+        if ports.contains_key(PRIMARY_PORT_NAME) {
+            return Some(PRIMARY_PORT_NAME.to_owned());
+        }
+        if ports.len() == 1 {
+            return ports.keys().next().cloned();
+        }
+        None
+    }
+}
+
+/// Resolve a node's named ports (`project` has none; node → variant, per key).
+///
+/// Returns `None` when nothing is declared — a `start_server` with no `ports`
+/// then behaves exactly as it always has: one allocated port, reachable as
+/// `${veld.port}`.
+pub fn resolve_ports(
+    node: Option<&NullableMap<PortSpec>>,
+    variant: Option<&NullableMap<PortSpec>>,
+) -> Option<ResolvedPorts> {
+    let merged = merge_nullable_maps([None, node, variant])?;
+    if merged.is_empty() {
+        return None;
+    }
+    let ports: BTreeMap<String, PortSpec> = merged.into_iter().collect();
+    let primary = ResolvedPorts::choose_primary(&ports).unwrap_or_default();
+    Some(ResolvedPorts { ports, primary })
+}
+
+/// Resolve `depends_on` (node → variant, per key; `null` erases).
+pub fn resolve_depends_on(
+    node: Option<&NullableMap<String>>,
+    variant: Option<&NullableMap<String>>,
+) -> Option<HashMap<String, String>> {
+    merge_nullable_maps([None, node, variant])
 }
 
 // ---------------------------------------------------------------------------
@@ -943,9 +1088,10 @@ pub struct NodeConfig {
     pub proxy: Option<ProxyConfig>,
 
     /// Extra environment variables inherited by all variants of this node.
-    /// Overrides project-level env. Overridable at variant level.
+    /// Overrides project-level env. Overridable at variant level; `"KEY": null`
+    /// erases an inherited key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<NullableMap<String>>,
 
     /// Working directory for all variants of this node. Relative paths are resolved from the project root (the directory containing veld.json).
     /// Overridable at variant level. Supports variable substitution.
@@ -958,6 +1104,50 @@ pub struct NodeConfig {
     /// environment variables.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<Vec<ActionConfig>>,
+
+    // -- Node-level defaults (F3) ------------------------------------------
+    //
+    // A node may declare any of these once, here, and *any variant may override
+    // it*. This deduplicates **values**, never structure: which keys a node has
+    // is still written in that node, and `rg <ENV_VAR_NAME>` still finds the line
+    // that sets it. There is no inheritance, no mixins, no templates — a variant
+    // body is never assembled from somewhere else.
+    //
+    // The merge strategy differs per field on purpose; see the merge table in
+    // `docs/configuration.md` and the `resolve_*` family below.
+    /// Default step type for variants that do not state one.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub step_type: Option<StepType>,
+
+    /// Default command for all variants of this node (`argv` / `shell`).
+    #[serde(flatten)]
+    pub cmd: CommandKeys,
+
+    /// Default probes. **Replaced per probe**, not merged field-by-field: a probe
+    /// is a tagged union, so field-wise merging would let a variant switch
+    /// `type: "http"` to `type: "command"` and silently inherit a stale `path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probes: Option<ProbesConfig>,
+
+    /// Default sharing opt-in. Replaced wholesale by a variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub share: Option<SharePolicy>,
+
+    /// Default named ports. Additive per key; `"name": null` erases one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<NullableMap<PortSpec>>,
+
+    /// Default dependencies. Additive per key; `"node": null` erases one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub depends_on: Option<NullableMap<String>>,
+
+    /// Default outputs declaration. Replaced wholesale by a variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outputs: Option<Outputs>,
+
+    /// Default teardown hook. Replaced by a variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_stop: Option<CommandSpec>,
 
     pub variants: HashMap<String, VariantConfig>,
 }
@@ -1028,9 +1218,10 @@ impl ActionConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VariantConfig {
-    /// Step type: `command` or `start_server`.
-    #[serde(rename = "type")]
-    pub step_type: StepType,
+    /// Step type: `command` or `start_server`. Optional when the node declares
+    /// one; a variant that states it wins.
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub step_type: Option<StepType>,
 
     /// What this variant runs: `argv` or `shell` (or the v1/v2 `command`).
     /// A variant *is* the thing that runs, so the keys sit on it directly.
@@ -1051,20 +1242,33 @@ pub struct VariantConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probes: Option<ProbesConfig>,
 
-    /// Dependencies: node name -> variant name.
+    /// Dependencies: node name -> variant name. Additive over the node-level
+    /// map; `"node": null` erases an inherited dependency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub depends_on: Option<HashMap<String, String>>,
+    pub depends_on: Option<NullableMap<String>>,
 
-    /// Extra environment variables injected into the process.
+    /// Extra environment variables injected into the process. `"KEY": null`
+    /// erases a key inherited from the node or project level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub env: Option<HashMap<String, String>>,
+    pub env: Option<NullableMap<String>>,
 
-    /// Outputs declaration.
+    /// Named ports veld allocates for this variant, additive over the
+    /// node-level map. `"name": null` erases an inherited one. Absent means the
+    /// pre-`ports` behaviour: a `start_server` gets exactly one allocated port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<NullableMap<PortSpec>>,
+
+    /// Outputs declaration. **Replaces** the node-level one wholesale; `null`
+    /// erases it.
     ///
     /// - For `command`: a list of declared output names (`Vec<String>`).
-    /// - For `start_server`: a map of synthetic outputs (`HashMap<String, String>`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub outputs: Option<Outputs>,
+    /// - For `start_server`: a map of synthetic outputs.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub outputs: Option<Option<Outputs>>,
 
     /// Output keys whose values are sensitive (masked, encrypted at rest).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1110,8 +1314,16 @@ pub struct VariantConfig {
     /// Sharing opt-in for this variant. Absent (or an empty `expose` list) means
     /// this service can never be shared — `veld share` refuses it. This is the
     /// explicit, per-service consent that makes sharing auditable.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub share: Option<SharePolicy>,
+    ///
+    /// **Replaces** the node-level policy wholesale rather than merging: sharing
+    /// is a consent decision, and a half-inherited `expose` list is exactly the
+    /// kind of surprise it must not have. `null` erases the node-level opt-in.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub share: Option<Option<SharePolicy>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1243,26 +1455,14 @@ pub fn resolve_features(
 }
 
 /// Merge environment variable maps using the most specific override:
-/// variant > node > project. For each key, the most specific layer wins.
+/// variant > node > project. For each key, the most specific layer wins, and a
+/// layer erases an inherited key by setting it to `null`.
 pub fn resolve_env(
-    project: Option<&HashMap<String, String>>,
-    node: Option<&HashMap<String, String>>,
-    variant: Option<&HashMap<String, String>>,
+    project: Option<&NullableMap<String>>,
+    node: Option<&NullableMap<String>>,
+    variant: Option<&NullableMap<String>>,
 ) -> Option<HashMap<String, String>> {
-    let layers: &[Option<&HashMap<String, String>>] = &[project, node, variant];
-    let has_any = layers.iter().any(|l| l.is_some());
-    if !has_any {
-        return None;
-    }
-
-    let mut merged = HashMap::new();
-    // Apply from least specific to most specific so later layers override.
-    for map in layers.iter().flatten() {
-        for (k, v) in *map {
-            merged.insert(k.clone(), v.clone());
-        }
-    }
-    Some(merged)
+    merge_nullable_maps([project, node, variant])
 }
 
 // ---------------------------------------------------------------------------
@@ -1430,6 +1630,16 @@ pub struct HealthCheck {
     #[serde(flatten)]
     pub cmd: CommandKeys,
 
+    /// Which named port from the node's `ports` map this probe checks. Absent
+    /// means the primary port, which is what a single-port node has always used.
+    ///
+    /// Needed because a multi-port node's readiness is rarely "any port is open":
+    /// a debug-adapter variant's debugger port opens immediately while the
+    /// application port is still binding, so probing the wrong one reports ready
+    /// too early.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<String>,
+
     /// Maximum seconds to wait for health (default 60).
     #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
@@ -1449,13 +1659,25 @@ pub struct HealthCheck {
 pub struct ProbesConfig {
     /// Readiness probe — gates the dependency graph during startup.
     /// Same semantics as the legacy `health_check` field.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub readiness: Option<HealthCheck>,
+    ///
+    /// A variant **replaces** the whole probe object rather than merging into it;
+    /// `"readiness": null` erases the node-level one.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub readiness: Option<Option<HealthCheck>>,
 
     /// Liveness probe — runs continuously after the node is healthy.
     /// Triggers recovery when `failure_threshold` consecutive checks fail.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub liveness: Option<LivenessProbe>,
+    /// Replaced wholesale; `"liveness": null` erases the node-level one.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub liveness: Option<Option<LivenessProbe>>,
 }
 
 /// Liveness probe configuration. Shares check-type fields with `HealthCheck`
@@ -1504,19 +1726,150 @@ fn default_max_recoveries() -> u32 {
     3
 }
 
-impl VariantConfig {
-    /// Resolve the effective readiness probe: `probes.readiness` takes
-    /// precedence over the legacy `health_check` field.
-    pub fn readiness_probe(&self) -> Option<&HealthCheck> {
-        self.probes
-            .as_ref()
-            .and_then(|p| p.readiness.as_ref())
-            .or(self.health_check.as_ref())
+// ---------------------------------------------------------------------------
+// Resolved variant — the single owner of the node → variant cascade
+// ---------------------------------------------------------------------------
+
+/// Everything a node+variant effectively is, after the node-level defaults are
+/// applied.
+///
+/// **Every consumer must go through this.** F3, F6, and F7 all change how a
+/// variant's effective config is computed, and a second resolution path in the
+/// orchestrator would be invisible until it produced a wrong value at runtime
+/// (RC5). So the orchestrator, the graph, the daemon monitor and the share flow
+/// read `ResolvedVariant`, not `VariantConfig`.
+///
+/// The three merge strategies below are deliberately distinct and are not
+/// unified — see the merge table in `docs/configuration.md`:
+/// - **per key** (`env`, `ports`, `depends_on`) — additive, variant wins, `null`
+///   erases.
+/// - **per field** (`features`) — variant wins field by field.
+/// - **wholesale replace** (`probes` per probe, `share`, `outputs`) — a variant
+///   that states one replaces the node's entirely.
+/// - `proxy` keeps its pre-existing union-with-cross-key-rule, untouched.
+#[derive(Debug, Clone)]
+pub struct ResolvedVariant {
+    pub step_type: StepType,
+    pub command: Option<CommandSpec>,
+    pub script: Option<String>,
+    pub readiness: Option<HealthCheck>,
+    pub liveness: Option<LivenessProbe>,
+    pub depends_on: Option<HashMap<String, String>>,
+    pub env: Option<HashMap<String, String>>,
+    pub ports: Option<ResolvedPorts>,
+    pub outputs: Option<Outputs>,
+    pub sensitive_outputs: Option<Vec<String>>,
+    pub strict_outputs: bool,
+    pub skip_if: Option<CommandSpec>,
+    pub on_stop: Option<CommandSpec>,
+    pub share: Option<SharePolicy>,
+    pub features: ResolvedFeatures,
+    pub proxy: ResolvedProxy,
+    pub client_log_levels: Vec<String>,
+}
+
+/// Resolve one node+variant against its node and the project.
+///
+/// `step_type` has no sensible default, so a variant that states none and whose
+/// node states none falls back to `command` — the safer of the two, since a
+/// mislabelled `start_server` would hang the graph waiting for readiness. The
+/// `missing-step-type` validation rule reports it either way, so the fallback
+/// only decides what happens while the author still has an invalid config.
+pub fn resolve_variant(
+    project: &VeldConfig,
+    node: &NodeConfig,
+    variant: &VariantConfig,
+) -> ResolvedVariant {
+    // Wholesale replace: a variant that states the field at all replaces the
+    // node's value, and an explicit `null` erases it. `Some(None)` is the erase.
+    fn replace<T: Clone>(node: Option<&T>, variant: Option<&Option<T>>) -> Option<T> {
+        match variant {
+            Some(Some(v)) => Some(v.clone()),
+            Some(None) => None,
+            None => node.cloned(),
+        }
     }
 
-    /// Return the liveness probe if configured.
-    pub fn liveness_probe(&self) -> Option<&LivenessProbe> {
-        self.probes.as_ref().and_then(|p| p.liveness.as_ref())
+    /// What one level (node or variant) says about its readiness probe.
+    ///
+    /// `None` = the level is silent, so the next level up applies.
+    /// `Some(None)` = the level explicitly erased it.
+    /// `Some(Some(p))` = the level sets it.
+    ///
+    /// `probes.readiness` supersedes the legacy `health_check` *within* a level,
+    /// so a variant's `probes.readiness` still beats a variant's `health_check`,
+    /// and either of them beats anything the node said.
+    fn level_readiness(
+        probes: Option<&ProbesConfig>,
+        legacy: Option<&HealthCheck>,
+    ) -> Option<Option<HealthCheck>> {
+        if let Some(stated) = probes.and_then(|p| p.readiness.as_ref()) {
+            return Some(stated.clone());
+        }
+        legacy.cloned().map(Some)
+    }
+
+    // A node has no legacy `health_check` field — the legacy form was only ever
+    // on a variant — so the node level passes `None` for it.
+    let readiness = match level_readiness(variant.probes.as_ref(), variant.health_check.as_ref()) {
+        Some(from_variant) => from_variant,
+        None => level_readiness(node.probes.as_ref(), None).flatten(),
+    };
+
+    let liveness = replace(
+        node.probes
+            .as_ref()
+            .and_then(|p| p.liveness.as_ref())
+            .and_then(|l| l.as_ref()),
+        variant.probes.as_ref().and_then(|p| p.liveness.as_ref()),
+    );
+
+    ResolvedVariant {
+        step_type: variant
+            .step_type
+            .or(node.step_type)
+            .unwrap_or(StepType::Command),
+        command: variant.cmd.spec().or_else(|| node.cmd.spec()),
+        script: variant.script.clone(),
+        readiness,
+        liveness,
+        depends_on: resolve_depends_on(node.depends_on.as_ref(), variant.depends_on.as_ref()),
+        env: resolve_env(
+            project.env.as_ref(),
+            node.env.as_ref(),
+            variant.env.as_ref(),
+        ),
+        ports: resolve_ports(node.ports.as_ref(), variant.ports.as_ref()),
+        outputs: replace(node.outputs.as_ref(), variant.outputs.as_ref()),
+        sensitive_outputs: variant.sensitive_outputs.clone(),
+        strict_outputs: variant.strict_outputs,
+        skip_if: variant.skip_if.clone(),
+        on_stop: variant.on_stop.clone().or_else(|| node.on_stop.clone()),
+        share: replace(node.share.as_ref(), variant.share.as_ref()),
+        features: resolve_features(
+            project.features.as_ref(),
+            node.features.as_ref(),
+            variant.features.as_ref(),
+        ),
+        proxy: resolve_proxy(
+            project.proxy.as_ref(),
+            node.proxy.as_ref(),
+            variant.proxy.as_ref(),
+        ),
+        client_log_levels: resolve_client_log_levels(
+            project.client_log_levels.as_deref(),
+            node.client_log_levels.as_deref(),
+            variant.client_log_levels.as_deref(),
+        ),
+    }
+}
+
+impl VeldConfig {
+    /// Resolve a node+variant by name, if both exist.
+    pub fn resolved(&self, node: &str, variant: &str) -> Option<ResolvedVariant> {
+        let node_cfg = self.nodes.get(node)?;
+        let variant_cfg = node_cfg.variants.get(variant)?;
+        Some(resolve_variant(self, node_cfg, variant_cfg))
     }
 }
 
@@ -1705,6 +2058,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_depends_on_literal(config, &mut findings);
     check_exactly_one_command(config, &mut findings);
     check_builtin_names(config, &mut findings);
+    check_resolved_variants(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
     // is a `HashMap`, so a partial sort would leave `veld lint --json` output
@@ -1718,6 +2072,73 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
         ))
     });
     findings
+}
+
+/// Rules that only make sense on the **resolved** variant — after node-level
+/// defaults are applied — so a field hoisted to node level is judged where it
+/// actually takes effect rather than where it happens to be written.
+fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            let loc = format!("nodes.{node_name}.variants.{variant_name}");
+            let r = resolve_variant(config, node, variant);
+
+            // `type` has no default worth guessing at. `resolve_variant` falls
+            // back to `command` so a broken config still behaves predictably, but
+            // the author has to be told.
+            if variant.step_type.is_none() && node.step_type.is_none() {
+                out.push(Finding::error(
+                    "missing-step-type",
+                    &loc,
+                    "no \"type\" — set it on the variant, or once on the node for all \
+                     its variants. Expected \"start_server\" or \"command\"",
+                ));
+            }
+
+            // Which port `${veld.port}` means must never be a guess.
+            if let Some(ports) = &r.ports {
+                if ports.primary.is_empty() {
+                    let mut names: Vec<&str> = ports.ports.keys().map(String::as_str).collect();
+                    names.sort();
+                    out.push(Finding::error(
+                        "ambiguous-primary-port",
+                        format!("{loc}.ports"),
+                        format!(
+                            "several ports are declared ({}) and none is named \"{}\", so \
+                             `${{veld.port}}` has no unambiguous meaning. Name the main one \
+                             \"{}\"",
+                            names.join(", "),
+                            PRIMARY_PORT_NAME,
+                            PRIMARY_PORT_NAME
+                        ),
+                    ));
+                }
+            }
+
+            // A `start_server` with no readiness probe reports healthy the moment
+            // its port opens, so the graph proceeds before the service can serve.
+            //
+            // Severity is version-gated on purpose. The issue specifies this as an
+            // error, but applying it to a v1 or v2 document would break the
+            // acceptance criterion that such a config "loads and runs
+            // byte-identically, with no new warnings" — probeless `start_server`
+            // nodes are common in configs written before probes existed, and
+            // failing them at `veld start` would be a flag day. So: an error in a
+            // v3 document (which is opting into the new rules), a warning in v1/v2
+            // (surfaced by `veld lint`, never blocking a run).
+            if r.step_type == StepType::StartServer && r.readiness.is_none() {
+                let message = "a `start_server` with no readiness probe is reported healthy as \
+                     soon as its port opens, so dependents start before it can serve. Add \
+                     `probes.readiness` — `{ \"type\": \"http\", \"path\": \"/…\" }`, or \
+                     `{ \"type\": \"port\" }` to accept the port-open check as readiness";
+                out.push(if config.schema_version == "3" {
+                    Finding::error("start-server-needs-readiness", &loc, message)
+                } else {
+                    Finding::warning("start-server-needs-readiness", &loc, message)
+                });
+            }
+        }
+    }
 }
 
 /// The complete `veld.*` namespace — a **closed** set.
@@ -1796,11 +2217,16 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 
     for (key, value) in config.env.iter().flatten() {
-        check(&format!("env.{key}"), value, out);
+        // A `null` value erases an inherited key and interpolates nothing.
+        if let Some(value) = value {
+            check(&format!("env.{key}"), value, out);
+        }
     }
     for (node_name, node) in &config.nodes {
         for (key, value) in node.env.iter().flatten() {
-            check(&format!("nodes.{node_name}.env.{key}"), value, out);
+            if let Some(value) = value {
+                check(&format!("nodes.{node_name}.env.{key}"), value, out);
+            }
         }
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
@@ -1808,7 +2234,9 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             check_cmd(&format!("{base}.on_stop"), variant.on_stop.clone(), out);
             check_cmd(&format!("{base}.skip_if"), variant.skip_if.clone(), out);
             for (key, value) in variant.env.iter().flatten() {
-                check(&format!("{base}.env.{key}"), value, out);
+                if let Some(value) = value {
+                    check(&format!("{base}.env.{key}"), value, out);
+                }
             }
         }
     }
@@ -1888,7 +2316,7 @@ fn check_exactly_one_command(config: &VeldConfig, out: &mut Vec<Finding>) {
             // required when there is no script.
             check(base.clone(), &variant.cmd, variant.script.is_none(), out);
             if let Some(probes) = &variant.probes {
-                if let Some(readiness) = &probes.readiness {
+                if let Some(Some(readiness)) = &probes.readiness {
                     // Only a `command`-type probe runs anything; an http/port
                     // probe legitimately declares none.
                     let needs = matches!(readiness.check_type.as_str(), "command" | "bash");
@@ -1899,7 +2327,7 @@ fn check_exactly_one_command(config: &VeldConfig, out: &mut Vec<Finding>) {
                         out,
                     );
                 }
-                if let Some(liveness) = &probes.liveness {
+                if let Some(Some(liveness)) = &probes.liveness {
                     let needs = matches!(liveness.check_type.as_str(), "command" | "bash");
                     check(format!("{base}.probes.liveness"), &liveness.cmd, needs, out);
                 }
@@ -1927,7 +2355,12 @@ fn check_depends_on_literal(config: &VeldConfig, out: &mut Vec<Finding>) {
                 continue;
             };
             for (dep_node, dep_variant) in deps {
-                let loc = format!("nodes.{node_name}.variants.{variant_name}.depends_on");
+                // `null` erases an inherited dependency; there is no name to check.
+                let Some(dep_variant) = dep_variant else {
+                    continue;
+                };
+                let loc =
+                    format!("nodes.{node_name}.variants.{variant_name}.depends_on.{dep_node}");
                 if dep_node.contains("${") {
                     out.push(Finding::error(
                         RULE,
@@ -2398,7 +2831,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(validate(&config).is_empty());
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "depends-on-literal")
+        );
     }
 
     /// The guard for F0.2's namespace closure.
@@ -2529,6 +2966,7 @@ mod tests {
                 "nodes": { "api": { "variants": { "dev": {
                     "type": "start_server",
                     "argv": ["pnpm", "dev"],
+                    "probes": { "readiness": { "type": "http", "path": "/healthz" } },
                     "on_stop": { "shell": "docker rm -f x" }
                 }}}}
             }"#,
@@ -2576,10 +3014,18 @@ mod tests {
                 Some(CommandSpec::Shell("docker rm -f x".into())),
                 "v{version}"
             );
+            // No *errors* — a v1/v2 config must still start. The probeless
+            // `start_server` warning is deliberate and never blocks a run.
+            let findings = validate(&cfg);
             assert!(
-                validate(&cfg).is_empty(),
-                "v{version} must produce no findings: {:?}",
-                validate(&cfg)
+                !findings.iter().any(|f| f.severity == Severity::Error),
+                "v{version} must produce no errors: {findings:?}"
+            );
+            assert!(
+                findings
+                    .iter()
+                    .all(|f| f.rule == "start-server-needs-readiness"),
+                "v{version} must gain no unrelated findings: {findings:?}"
             );
         }
     }
@@ -2904,15 +3350,18 @@ mod tests {
 
     #[test]
     fn test_resolve_env_project_only() {
-        let project = HashMap::from([("A".into(), "1".into())]);
+        let project = HashMap::from([("A".into(), Some("1".into()))]);
         let result = resolve_env(Some(&project), None, None).unwrap();
         assert_eq!(result.get("A").unwrap(), "1");
     }
 
     #[test]
     fn test_resolve_env_node_overrides_project() {
-        let project = HashMap::from([("A".into(), "1".into()), ("B".into(), "2".into())]);
-        let node = HashMap::from([("A".into(), "override".into())]);
+        let project = HashMap::from([
+            ("A".into(), Some("1".into())),
+            ("B".into(), Some("2".into())),
+        ]);
+        let node = HashMap::from([("A".into(), Some("override".into()))]);
         let result = resolve_env(Some(&project), Some(&node), None).unwrap();
         assert_eq!(result.get("A").unwrap(), "override");
         assert_eq!(result.get("B").unwrap(), "2");
@@ -2920,9 +3369,15 @@ mod tests {
 
     #[test]
     fn test_resolve_env_variant_overrides_all() {
-        let project = HashMap::from([("A".into(), "1".into())]);
-        let node = HashMap::from([("A".into(), "2".into()), ("B".into(), "3".into())]);
-        let variant = HashMap::from([("A".into(), "final".into()), ("C".into(), "4".into())]);
+        let project = HashMap::from([("A".into(), Some("1".into()))]);
+        let node = HashMap::from([
+            ("A".into(), Some("2".into())),
+            ("B".into(), Some("3".into())),
+        ]);
+        let variant = HashMap::from([
+            ("A".into(), Some("final".into())),
+            ("C".into(), Some("4".into())),
+        ]);
         let result = resolve_env(Some(&project), Some(&node), Some(&variant)).unwrap();
         assert_eq!(result.get("A").unwrap(), "final");
         assert_eq!(result.get("B").unwrap(), "3");
@@ -2932,7 +3387,7 @@ mod tests {
     #[test]
     fn test_resolve_env_empty_map_with_values() {
         let empty = HashMap::new();
-        let variant = HashMap::from([("X".into(), "1".into())]);
+        let variant = HashMap::from([("X".into(), Some("1".into()))]);
         let result = resolve_env(Some(&empty), None, Some(&variant)).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("X").unwrap(), "1");
@@ -2947,7 +3402,7 @@ mod tests {
 
     #[test]
     fn test_resolve_env_variant_only() {
-        let variant = HashMap::from([("X".into(), "val".into())]);
+        let variant = HashMap::from([("X".into(), Some("val".into()))]);
         let result = resolve_env(None, None, Some(&variant)).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result.get("X").unwrap(), "val");
@@ -3064,12 +3519,12 @@ mod tests {
             }
         }"#;
         let probes: ProbesConfig = serde_json::from_str(json).unwrap();
-        let readiness = probes.readiness.unwrap();
+        let readiness = probes.readiness.unwrap().unwrap();
         assert_eq!(readiness.check_type, "http");
         assert_eq!(readiness.path.as_deref(), Some("/health"));
         assert_eq!(readiness.timeout_seconds, 30);
 
-        let liveness = probes.liveness.unwrap();
+        let liveness = probes.liveness.unwrap().unwrap();
         assert_eq!(liveness.check_type, "command");
         assert_eq!(liveness.cmd.command.as_deref(), Some("pg_isready"));
         assert_eq!(liveness.interval_ms, 5000);
@@ -3144,7 +3599,14 @@ mod tests {
         assert_eq!(config.schema_version, "2");
         let variant = &config.nodes["db"].variants["local"];
         assert!(variant.probes.is_some());
-        let liveness = variant.liveness_probe().unwrap();
+        let liveness = variant
+            .probes
+            .as_ref()
+            .unwrap()
+            .liveness
+            .clone()
+            .unwrap()
+            .unwrap();
         assert_eq!(liveness.check_type, "command");
     }
 
@@ -3208,55 +3670,322 @@ mod tests {
 
     // -- Readiness probe helper tests ------------------------------------------
 
+    // -- F3: the node -> variant cascade (one test per merge-table row) --------
+
+    /// Build a config from JSON and resolve one node:variant.
+    fn resolve(json: &str, node: &str, variant: &str) -> ResolvedVariant {
+        let cfg: VeldConfig = serde_json::from_str(json).expect("fixture parses");
+        cfg.resolved(node, variant)
+            .unwrap_or_else(|| panic!("{node}:{variant} missing"))
+    }
+
+    /// `probes.readiness` supersedes the legacy `health_check` *within* a level,
+    /// and either beats anything the node said.
     #[test]
-    fn test_readiness_probe_from_probes() {
-        let json = r#"{
-            "type": "start_server",
-            "command": "npm start",
-            "probes": {
-                "readiness": {
-                    "type": "http",
-                    "path": "/health"
+    fn readiness_precedence_within_and_across_levels() {
+        // Variant `probes.readiness` wins over variant `health_check`.
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x",
+                "health_check":{"type":"port"},
+                "probes":{"readiness":{"type":"http","path":"/ready"}}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(r.readiness.as_ref().unwrap().check_type, "http");
+
+        // Variant `health_check` alone still works (v1/v2 configs).
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x","health_check":{"type":"port"}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(r.readiness.as_ref().unwrap().check_type, "port");
+
+        // Hoisted to the node, inherited by a silent variant.
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "probes":{"readiness":{"type":"http","path":"/hoisted"}},
+                "variants":{"dev":{"type":"start_server","shell":"x"}}
+            }}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(
+            r.readiness.as_ref().unwrap().path.as_deref(),
+            Some("/hoisted")
+        );
+    }
+
+    /// **Merge table: `probes` replaces the whole probe object.**
+    ///
+    /// A deliberate exception to the per-field pattern `features` uses. A probe is
+    /// a tagged union, so field-wise merging would let a variant switch
+    /// `type: "http"` to `type: "command"` and silently inherit a stale `path` —
+    /// a probe that then checks the wrong thing forever.
+    #[test]
+    fn probes_are_replaced_wholesale_not_merged() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "probes":{"readiness":{"type":"http","path":"/from-node","expect_status":204}},
+                "variants":{"dev":{
+                    "type":"start_server","shell":"x",
+                    "probes":{"readiness":{"type":"command","shell":"pg_isready"}}
+                }}
+            }}}"#,
+            "a",
+            "dev",
+        );
+        let readiness = r.readiness.as_ref().unwrap();
+        assert_eq!(readiness.check_type, "command");
+        assert_eq!(
+            readiness.path, None,
+            "the node's `path` must NOT survive into a command probe"
+        );
+        assert_eq!(readiness.expect_status, None);
+    }
+
+    /// **Merge table: a variant erases an inherited probe with `null`.**
+    #[test]
+    fn variant_can_erase_an_inherited_probe() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "probes":{"liveness":{"type":"command","shell":"pg_isready"}},
+                "variants":{"dev":{
+                    "type":"start_server","shell":"x",
+                    "probes":{"liveness":null}
+                }}
+            }}}"#,
+            "a",
+            "dev",
+        );
+        assert!(r.liveness.is_none(), "\"liveness\": null must erase it");
+    }
+
+    /// **Merge table: `env` / `ports` / `depends_on` are additive per key**, the
+    /// variant wins on collision, and `"KEY": null` erases.
+    #[test]
+    fn maps_are_additive_per_key_and_null_erases() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t",
+                "env":{"FROM_PROJECT":"p","SHARED":"p"},
+                "nodes":{
+                  "db":{"variants":{"local":{"type":"command","shell":"x"}}},
+                  "cache":{"variants":{"local":{"type":"command","shell":"x"}}},
+                  "a":{
+                    "env":{"FROM_NODE":"n","SHARED":"n","DROPPED":"n"},
+                    "ports":{"http":"auto","debug":"auto","gone":"auto"},
+                    "depends_on":{"db":"local","cache":"local"},
+                    "variants":{"dev":{
+                      "type":"start_server","shell":"x",
+                      "env":{"SHARED":"v","DROPPED":null},
+                      "ports":{"metrics":"auto","gone":null},
+                      "depends_on":{"cache":null}
+                    }}
+                  }}}"#,
+            "a",
+            "dev",
+        );
+
+        let env = r.env.as_ref().unwrap();
+        assert_eq!(env.get("FROM_PROJECT").map(String::as_str), Some("p"));
+        assert_eq!(env.get("FROM_NODE").map(String::as_str), Some("n"));
+        assert_eq!(
+            env.get("SHARED").map(String::as_str),
+            Some("v"),
+            "the variant wins on collision"
+        );
+        assert!(!env.contains_key("DROPPED"), "null erases an inherited key");
+
+        let ports = r.ports.as_ref().unwrap();
+        let names: Vec<&str> = ports.ports.keys().map(String::as_str).collect();
+        assert_eq!(names, vec!["debug", "http", "metrics"]);
+        assert_eq!(ports.primary, "http");
+
+        let deps = r.depends_on.as_ref().unwrap();
+        assert_eq!(deps.get("db").map(String::as_str), Some("local"));
+        assert!(
+            !deps.contains_key("cache"),
+            "a variant can drop an inherited dependency"
+        );
+    }
+
+    /// **Merge table: `features` is per field**, not wholesale — the other
+    /// strategy, kept distinct on purpose.
+    #[test]
+    fn features_merge_per_field() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t",
+                "features":{"feedback_overlay":false,"client_logs":false},
+                "nodes":{"a":{
+                  "features":{"client_logs":true},
+                  "variants":{"dev":{"type":"start_server","shell":"x",
+                    "features":{"inject":false}}}
+                }}}"#,
+            "a",
+            "dev",
+        );
+        // Each field resolves independently at its own most-specific level.
+        assert!(!r.features.feedback_overlay, "from project");
+        assert!(r.features.client_logs, "from node");
+        assert!(!r.features.inject, "from variant");
+    }
+
+    /// **Merge table: `share` and `outputs` replace wholesale**, and `null`
+    /// erases. `share` in particular must never half-inherit — it is a consent
+    /// decision.
+    #[test]
+    fn share_and_outputs_replace_wholesale() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "share":{"expose":["peer","web"]},
+                "outputs":{"URL":"${veld.url}","EXTRA":"x"},
+                "variants":{"dev":{"type":"start_server","shell":"x",
+                  "share":{"expose":["peer"]},
+                  "outputs":{"URL":"${veld.url}"}}}
+            }}}"#,
+            "a",
+            "dev",
+        );
+        let share = r.share.as_ref().unwrap();
+        assert!(share.allows(ExposeMode::Peer));
+        assert!(
+            !share.allows(ExposeMode::Web),
+            "the node's `web` must NOT survive — sharing is replaced, not merged"
+        );
+        assert_eq!(
+            r.outputs.as_ref().unwrap().declared_keys().len(),
+            1,
+            "the node's EXTRA output must not survive"
+        );
+
+        // `null` erases the node-level opt-in entirely.
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "share":{"expose":["peer"]},
+                "variants":{"dev":{"type":"start_server","shell":"x","share":null}}
+            }}}"#,
+            "a",
+            "dev",
+        );
+        assert!(r.share.is_none(), "\"share\": null must erase it");
+    }
+
+    /// **Merge table: `type`, `on_stop`, and the command replace.** A variant that
+    /// states one wins; otherwise the node's applies.
+    #[test]
+    fn scalars_and_commands_replace() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "type":"start_server",
+                "shell":"node-level",
+                "on_stop":{"shell":"node-stop"},
+                "variants":{
+                  "inherits":{},
+                  "overrides":{"type":"command","argv":["own"],"on_stop":{"shell":"own-stop"}}
                 }
-            }
-        }"#;
-        let v: VariantConfig = serde_json::from_str(json).unwrap();
-        let probe = v.readiness_probe().unwrap();
-        assert_eq!(probe.check_type, "http");
+            }}}"#,
+            "a",
+            "inherits",
+        );
+        assert_eq!(r.step_type, StepType::StartServer);
+        assert_eq!(r.command, Some(CommandSpec::Shell("node-level".into())));
+        assert_eq!(r.on_stop, Some(CommandSpec::Shell("node-stop".into())));
+
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{
+                "type":"start_server",
+                "shell":"node-level",
+                "on_stop":{"shell":"node-stop"},
+                "variants":{
+                  "inherits":{},
+                  "overrides":{"type":"command","argv":["own"],"on_stop":{"shell":"own-stop"}}
+                }
+            }}}"#,
+            "a",
+            "overrides",
+        );
+        assert_eq!(r.step_type, StepType::Command);
+        assert_eq!(r.command, Some(CommandSpec::Argv(vec!["own".into()])));
+        assert_eq!(r.on_stop, Some(CommandSpec::Shell("own-stop".into())));
+    }
+
+    /// **Merge table: `proxy` is pre-existing and must not change.** Its union
+    /// semantics are asserted directly against `resolve_proxy` elsewhere; this
+    /// pins that routing through the resolver produces the same thing.
+    #[test]
+    fn proxy_row_of_merge_table_is_unchanged() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t",
+                "proxy":{"request":{"remove":["Origin"],"set":{"X-A":"p","X-B":"p"}}},
+                "nodes":{"a":{
+                  "proxy":{"request":{"remove":["Referer"],"set":{"X-B":"n"}}},
+                  "variants":{"dev":{"type":"start_server","shell":"x",
+                    "proxy":{"request":{"remove":["origin"],"set":{"X-C":"v"}}}}}
+                }}}"#,
+            "a",
+            "dev",
+        );
+        // remove: union, first spelling wins, case-insensitive dedup.
+        assert_eq!(r.proxy.request.remove, vec!["Origin", "Referer"]);
+        // set: per key, most specific wins.
+        assert_eq!(r.proxy.request.set.get("X-A").unwrap(), "p");
+        assert_eq!(r.proxy.request.set.get("X-B").unwrap(), "n");
+        assert_eq!(r.proxy.request.set.get("X-C").unwrap(), "v");
+    }
+
+    /// F6: several named ports, and `${veld.port}` still means the primary.
+    #[test]
+    fn two_named_ports_both_declared_and_primary_resolves() {
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x",
+                "ports":{"http":"auto","debug":"auto"}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        let ports = r.ports.as_ref().unwrap();
+        assert_eq!(ports.ports.len(), 2);
+        assert_eq!(ports.primary, "http", "`http` is the primary by convention");
+
+        // A single named port is the primary whatever it is called.
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x","ports":{"grpc":"auto"}
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert_eq!(r.ports.as_ref().unwrap().primary, "grpc");
+
+        // No `ports` at all keeps the pre-F6 behaviour: one allocated port.
+        let r = resolve(
+            r#"{"schemaVersion":"2","name":"t","nodes":{"a":{"variants":{"dev":{
+                "type":"start_server","shell":"x"
+            }}}}}"#,
+            "a",
+            "dev",
+        );
+        assert!(r.ports.is_none());
     }
 
     #[test]
-    fn test_readiness_probe_fallback_to_health_check() {
-        let json = r#"{
-            "type": "start_server",
-            "command": "npm start",
-            "health_check": {
-                "type": "port"
-            }
-        }"#;
-        let v: VariantConfig = serde_json::from_str(json).unwrap();
-        let probe = v.readiness_probe().unwrap();
-        assert_eq!(probe.check_type, "port");
-    }
-
-    #[test]
-    fn test_readiness_probe_probes_overrides_health_check() {
-        let json = r#"{
-            "type": "start_server",
-            "command": "npm start",
-            "health_check": {
-                "type": "port"
-            },
-            "probes": {
-                "readiness": {
-                    "type": "http",
-                    "path": "/ready"
-                }
-            }
-        }"#;
-        let v: VariantConfig = serde_json::from_str(json).unwrap();
-        let probe = v.readiness_probe().unwrap();
-        assert_eq!(probe.check_type, "http");
+    fn port_spec_accepts_auto_and_fixed_and_rejects_nonsense() {
+        assert_eq!(
+            serde_json::from_str::<PortSpec>(r#""auto""#).unwrap(),
+            PortSpec::Auto
+        );
+        assert_eq!(
+            serde_json::from_str::<PortSpec>("5432").unwrap(),
+            PortSpec::Fixed(5432)
+        );
+        assert!(serde_json::from_str::<PortSpec>("0").is_err());
+        assert!(serde_json::from_str::<PortSpec>("70000").is_err());
+        assert!(serde_json::from_str::<PortSpec>(r#""whatever""#).is_err());
     }
 
     // -- Sharing config tests -------------------------------------------------
@@ -3486,7 +4215,7 @@ mod tests {
             }
         }"#;
         let cfg: VeldConfig = serde_json::from_str(json).unwrap();
-        let sharing = cfg.sharing.unwrap();
+        let sharing = cfg.sharing.clone().unwrap();
         assert_eq!(
             sharing.relays,
             Some(RelayPolicy::Custom(vec![RelayEntry::url(
@@ -3496,7 +4225,7 @@ mod tests {
         let gateway = sharing.gateway.expect("gateway parsed");
         assert_eq!(gateway.url, "https://share.acme.internal");
         assert_eq!(gateway.token, None);
-        let share = cfg.nodes["web"].variants["local"].share.as_ref().unwrap();
+        let share = cfg.resolved("web", "local").unwrap().share.unwrap();
         assert!(share.allows(ExposeMode::Peer));
         assert!(!share.allows(ExposeMode::Web));
     }

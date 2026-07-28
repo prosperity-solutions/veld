@@ -573,7 +573,7 @@ fn build_manifest(
             }
         }
         let share = variant_share(&config, &ns.node_name, &ns.variant);
-        if !share.is_some_and(|s| s.allows(mode)) {
+        if !share.as_ref().is_some_and(|s| s.allows(mode)) {
             let label = format!("{}:{}", ns.node_name, ns.variant);
             // An other-audience-only opt-in is a deliberate choice, not a
             // missing one — call it out distinctly.
@@ -688,12 +688,13 @@ fn build_manifest(
 }
 
 /// The share policy of a node's specific variant, if any.
-fn variant_share<'a>(config: &'a VeldConfig, node: &str, variant: &str) -> Option<&'a SharePolicy> {
-    config
-        .nodes
-        .get(node)
-        .and_then(|n| n.variants.get(variant))
-        .and_then(|v| v.share.as_ref())
+///
+/// Resolved, not raw: `share` is hoistable to node level (F3). A raw read would
+/// refuse to share a node whose opt-in is declared once for all its variants —
+/// and, worse, the reverse mistake would be a silent consent bypass, so this must
+/// go through the one resolver.
+fn variant_share(config: &VeldConfig, node: &str, variant: &str) -> Option<SharePolicy> {
+    config.resolved(node, variant).and_then(|r| r.share)
 }
 
 /// Resolved reverse-proxy header rules for a node's specific variant

@@ -19,6 +19,13 @@ pub const PORT_RANGE_END: u16 = 29999;
 pub enum PortError {
     #[error("no available ports in range {}-{}", PORT_RANGE_START, PORT_RANGE_END)]
     Exhausted,
+
+    #[error(
+        "port {0} is already in use. It was requested explicitly, so veld will not \
+         substitute another — a debugger or client pointed at {0} must reach the process \
+         that asked for it. Use \"auto\" to let veld allocate a free port instead."
+    )]
+    AlreadyInUse(u16),
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +102,29 @@ impl PortAllocator {
             }
         }
         Err(PortError::Exhausted)
+    }
+
+    /// Reserve a specific port the author named explicitly (`"debug": 9229`).
+    ///
+    /// Unlike [`allocate`](Self::allocate) this cannot pick a different port, so a
+    /// port already taken is a hard error naming it — silently substituting
+    /// another would attach the debugger to the wrong place. A fixed port is
+    /// discouraged for exactly this reason: it is what breaks parallel worktrees.
+    pub fn reserve_fixed(&self, port: u16) -> Result<PortReservation, PortError> {
+        let mut allocated = self.allocated.lock().expect("port allocator lock poisoned");
+        if allocated.contains(&port) {
+            return Err(PortError::AlreadyInUse(port));
+        }
+        match try_reserve_port(port) {
+            Some(guards) => {
+                allocated.insert(port);
+                Ok(PortReservation {
+                    port,
+                    _guards: guards,
+                })
+            }
+            None => Err(PortError::AlreadyInUse(port)),
+        }
     }
 
     /// Release a previously allocated port.

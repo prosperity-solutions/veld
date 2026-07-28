@@ -167,19 +167,20 @@ fn build_graph_snapshot(
         let Some(variant_cfg) = node_cfg.variants.get(&sel.variant) else {
             continue;
         };
-        let command = match &variant_cfg.script {
+        // Resolved, so the snapshot records what the run actually used — a value
+        // hoisted to node level would otherwise read as absent.
+        let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
+        let command = match &resolved.script {
             Some(script) => Some(crate::state::CommandSnapshot::Script(script.clone())),
-            None => variant_cfg.cmd.spec().map(Into::into),
+            None => resolved.command.clone().map(Into::into),
         };
-        let mut env_keys: Vec<String> = config::resolve_env(
-            config.env.as_ref(),
-            node_cfg.env.as_ref(),
-            variant_cfg.env.as_ref(),
-        )
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
+        let mut env_keys: Vec<String> = resolved
+            .env
+            .as_ref()
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
         env_keys.sort();
-        let url_template = (variant_cfg.step_type == config::StepType::StartServer).then(|| {
+        let url_template = (resolved.step_type == config::StepType::StartServer).then(|| {
             url::resolve_url_template(
                 &config.url_template,
                 node_cfg.url_template.as_deref(),
@@ -190,7 +191,7 @@ fn build_graph_snapshot(
         nodes.insert(
             RunState::node_key(&sel.node, &sel.variant),
             crate::state::NodeSnapshot {
-                step_type: match variant_cfg.step_type {
+                step_type: match resolved.step_type {
                     config::StepType::Command => "command".to_owned(),
                     config::StepType::StartServer => "start_server".to_owned(),
                 },
@@ -272,14 +273,22 @@ fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
 /// any node begins execution so that all nodes can reference any other
 /// node's URL/port without requiring a dependency edge.
 struct PrecomputedServer {
+    /// The primary port — what `${veld.port}` and `VELD_PORT` resolve to, and
+    /// what Caddy proxies to. A node that declares no `ports` map has exactly
+    /// this one, as it always did.
     port: u16,
+    /// Every named port from the `ports` map, including the primary, as
+    /// `${veld.ports.<name>}`. Empty when the node declares no map.
+    named_ports: std::collections::BTreeMap<String, u16>,
     /// Raw hostname (without scheme), used for DNS/Caddy configuration.
     hostname: String,
     /// Full `https://` URL including port suffix when not 443.
     https_url: String,
-    /// Held TCP listeners that reserve the port from other processes.
+    /// Held TCP listeners that reserve the ports from other processes.
     /// Taken (released) right before the child process is spawned.
     reservation: Option<crate::port::PortReservation>,
+    /// Reservations for the non-primary named ports, released alongside it.
+    extra_reservations: Vec<crate::port::PortReservation>,
 }
 
 /// Read-only context shared by all node execution tasks within a stage.
@@ -594,12 +603,53 @@ impl Orchestrator {
         self.precomputed_servers.clear();
         for stage in &plan {
             for sel in stage {
-                let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-                if variant_cfg.step_type != config::StepType::StartServer {
+                let node_cfg = &self.config.nodes[&sel.node];
+                let variant_cfg = &node_cfg.variants[&sel.variant];
+                let resolved = config::resolve_variant(&self.config, node_cfg, variant_cfg);
+                if resolved.step_type != config::StepType::StartServer {
                     continue;
                 }
 
-                let reservation = self.port_allocator.allocate()?;
+                // One allocation per declared name. A node with no `ports` map
+                // gets exactly one, exactly as before F6 — the whole point is
+                // that debug-adapter and multi-port container variants stop
+                // needing hand-picked literal ports, which silently break
+                // parallel worktrees.
+                let mut named_ports = std::collections::BTreeMap::new();
+                let mut extra_reservations = Vec::new();
+                let mut primary_reservation = None;
+                match resolved.ports.as_ref() {
+                    None => {
+                        primary_reservation = Some(self.port_allocator.allocate()?);
+                    }
+                    Some(declared) => {
+                        for (name, spec) in &declared.ports {
+                            let reservation = match spec {
+                                config::PortSpec::Auto => self.port_allocator.allocate()?,
+                                config::PortSpec::Fixed(p) => {
+                                    self.port_allocator.reserve_fixed(*p)?
+                                }
+                            };
+                            named_ports.insert(name.clone(), reservation.port);
+                            if *name == declared.primary {
+                                primary_reservation = Some(reservation);
+                            } else {
+                                extra_reservations.push(reservation);
+                            }
+                        }
+                    }
+                }
+                let reservation = primary_reservation.ok_or_else(|| {
+                    // `validate` rejects an ambiguous primary before we get here;
+                    // this is the belt-and-braces path.
+                    OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason: "cannot tell which of the declared ports is the primary — \
+                                 name one of them \"http\""
+                            .to_owned(),
+                    }
+                })?;
                 let port = reservation.port;
 
                 let node_cfg = &self.config.nodes[&sel.node];
@@ -636,6 +686,11 @@ impl Orchestrator {
                 // ${nodes.X.url}, ${nodes.X.port}, and URL piece references.
                 let mut node_out = HashMap::new();
                 node_out.insert("port".to_owned(), port.to_string());
+                // Named ports are referenceable across nodes too:
+                // `${nodes.api.ports.debug}`.
+                for (name, value) in &named_ports {
+                    node_out.insert(format!("ports.{name}"), value.to_string());
+                }
                 node_out.insert("url".to_owned(), https_url.clone());
                 // Expose individual URL location pieces (mirrors the Web URL API).
                 node_out.insert("url.hostname".to_owned(), node_url.clone());
@@ -660,9 +715,11 @@ impl Orchestrator {
                     key,
                     PrecomputedServer {
                         port,
+                        named_ports,
                         hostname: node_url,
                         https_url,
                         reservation: Some(reservation),
+                        extra_reservations,
                     },
                 );
             }
@@ -917,7 +974,8 @@ impl Orchestrator {
 
         // A terminal node must run to completion — a start_server never exits,
         // so it can never be the thing whose exit ends the run.
-        if variant_cfg.step_type != config::StepType::Command {
+        let resolved = config::resolve_variant(&self.config, &node_cfg, &variant_cfg);
+        if resolved.step_type != config::StepType::Command {
             return Err(OrchestratorError::NodeFailed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
@@ -980,25 +1038,20 @@ impl Orchestrator {
             &self.project_root,
             &var_ctx,
         )?;
-        let raw_cmd = match &variant_cfg.script {
+        let raw_cmd = match &resolved.script {
             Some(script) => config::CommandSpec::script(&self.project_root.join(script)),
-            None => variant_cfg
-                .cmd
-                .spec()
+            None => resolved
+                .command
+                .clone()
                 .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
         };
         let resolved_cmd = raw_cmd.interpolate(&var_ctx)?;
-        let merged_env = config::resolve_env(
-            self.config.env.as_ref(),
-            node_cfg.env.as_ref(),
-            variant_cfg.env.as_ref(),
-        );
-        let env = build_env(merged_env.as_ref(), &var_ctx)?;
+        let env = build_env(resolved.env.as_ref(), &var_ctx)?;
 
         let key = RunState::node_key(&sel.node, &sel.variant);
 
         // Idempotency: if skip_if passes, skip the run entirely (exit 0).
-        if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
+        if let Some(ref skip_if_cmd) = resolved.skip_if {
             let skip_if_resolved = skip_if_cmd.interpolate(&var_ctx)?;
             if let Ok(out) = process::run_command(&skip_if_resolved, &working_dir, &env, None).await
             {
@@ -1058,7 +1111,7 @@ impl Orchestrator {
         // ignored (not fatal): the node has already produced its result and its
         // exit code is what matters — failing the run over strict_outputs here
         // would only mask it.
-        let declared_keys = variant_cfg
+        let declared_keys = resolved
             .outputs
             .as_ref()
             .map(|o| o.declared_keys())
@@ -1081,7 +1134,7 @@ impl Orchestrator {
         } else {
             NodeStatus::Failed
         };
-        if let Some(sensitive) = variant_cfg.sensitive_outputs.clone() {
+        if let Some(sensitive) = resolved.sensitive_outputs.clone() {
             node_state.sensitive_keys = sensitive;
         }
         run.nodes.insert(key.clone(), node_state);
@@ -1950,8 +2003,12 @@ async fn execute_node_isolated(
         },
     );
 
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
-    let sensitive_outputs = variant_cfg.sensitive_outputs.clone();
+    let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
+    // Resolved once per node execution and threaded down, so the start path
+    // cannot disagree with the graph or the snapshot about what this variant is.
+    let resolved = config::resolve_variant(&ctx.config, node_cfg, variant_cfg);
+    let sensitive_outputs = resolved.sensitive_outputs.clone();
     let mut node_state = NodeState::new(&sel.node, &sel.variant);
     node_state.status = NodeStatus::Starting;
 
@@ -1976,13 +2033,20 @@ async fn execute_node_isolated(
         }
     }
 
-    let server_handle = match variant_cfg.step_type {
+    let server_handle = match resolved.step_type {
         StepType::StartServer => Some(
-            execute_start_server_isolated(&ctx, &sel, &mut var_ctx, &mut node_state, precomputed)
-                .await?,
+            execute_start_server_isolated(
+                &ctx,
+                &sel,
+                &resolved,
+                &mut var_ctx,
+                &mut node_state,
+                precomputed,
+            )
+            .await?,
         ),
         StepType::Command => {
-            execute_command_isolated(&ctx, &sel, &mut var_ctx, &mut node_state).await?;
+            execute_command_isolated(&ctx, &sel, &resolved, &mut var_ctx, &mut node_state).await?;
             None
         }
     };
@@ -2031,12 +2095,13 @@ async fn execute_node_isolated(
 async fn execute_start_server_isolated(
     ctx: &NodeExecutionContext,
     sel: &NodeSelection,
+    resolved: &config::ResolvedVariant,
     var_ctx: &mut VariableContext,
     node_state: &mut NodeState,
     precomputed: Option<PrecomputedServer>,
 ) -> Result<process::ServerHandle, OrchestratorError> {
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
     let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
 
     let mut precomputed =
         precomputed.expect("precomputed server info missing for start_server node");
@@ -2047,9 +2112,17 @@ async fn execute_start_server_isolated(
         .reservation
         .take()
         .expect("port reservation already consumed — node executed twice?");
+    let extra_reservations = std::mem::take(&mut precomputed.extra_reservations);
 
     node_state.port = Some(port);
     var_ctx.set_builtin("port", port.to_string());
+    // `${veld.port}` stays the primary; each declared name is also addressable.
+    for (name, value) in &precomputed.named_ports {
+        var_ctx.set_builtin(&format!("ports.{name}"), value.to_string());
+        node_state
+            .outputs
+            .insert(format!("ports.{name}"), value.to_string());
+    }
     node_state.url = Some(https_url.clone());
     var_ctx.set_builtin("url", https_url.clone());
     // Expose individual URL location pieces (mirrors the Web URL API).
@@ -2101,11 +2174,7 @@ async fn execute_start_server_isolated(
         "upstream": format!("localhost:{port}"),
     });
     // Resolve per-node feature flags (variant > node > project > default).
-    let features = config::resolve_features(
-        ctx.config.features.as_ref(),
-        node_cfg.features.as_ref(),
-        variant_cfg.features.as_ref(),
-    );
+    let features = resolved.features;
 
     // Include feedback config so Caddy routes /__veld__/* to the daemon.
     // The proxy routes are created whenever a feature is enabled, even if
@@ -2121,21 +2190,13 @@ async fn execute_start_server_isolated(
     route["inject_client_logs"] = serde_json::json!(features.client_logs);
 
     // Resolve client log levels (variant > node > project > default).
-    let client_log_levels = config::resolve_client_log_levels(
-        ctx.config.client_log_levels.as_deref(),
-        node_cfg.client_log_levels.as_deref(),
-        variant_cfg.client_log_levels.as_deref(),
-    );
+    let client_log_levels = resolved.client_log_levels.clone();
     route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
 
     // Resolve reverse-proxy header rules (variant > node > project). Only sent
     // when non-empty — an absent `proxy` key means "no manipulation" to the
     // helper, so old behavior (Origin passes through) holds by default.
-    let proxy = config::resolve_proxy(
-        ctx.config.proxy.as_ref(),
-        node_cfg.proxy.as_ref(),
-        variant_cfg.proxy.as_ref(),
-    );
+    let proxy = resolved.proxy.clone();
     if !proxy.is_empty() {
         route["proxy"] = serde_json::json!(proxy);
     }
@@ -2152,9 +2213,9 @@ async fn execute_start_server_isolated(
     )?;
 
     // Resolve command.
-    let command = variant_cfg
-        .cmd
-        .spec()
+    let command = resolved
+        .command
+        .clone()
         .unwrap_or_else(|| config::CommandSpec::Shell(String::new()));
     let resolved_cmd = command.interpolate(var_ctx)?;
     debug_log_free(
@@ -2170,17 +2231,18 @@ async fn execute_start_server_isolated(
     .await;
 
     // Build env (variant > node > project).
-    let merged_env = config::resolve_env(
-        ctx.config.env.as_ref(),
-        node_cfg.env.as_ref(),
-        variant_cfg.env.as_ref(),
-    );
-    let mut env = build_env(merged_env.as_ref(), var_ctx)?;
+    let mut env = build_env(resolved.env.as_ref(), var_ctx)?;
     env.insert("VELD_PORT".to_owned(), port.to_string());
+    for (name, value) in &precomputed.named_ports {
+        env.insert(
+            format!("VELD_PORT_{}", name.to_uppercase().replace('-', "_")),
+            value.to_string(),
+        );
+    }
     env.insert("VELD_URL".to_owned(), https_url.clone());
 
     // Resolve synthetic outputs.
-    if let Some(Outputs::Synthetic(ref map)) = variant_cfg.outputs {
+    if let Some(Outputs::Synthetic(ref map)) = resolved.outputs {
         for (okey, tmpl) in map {
             let val = crate::variables::interpolate(tmpl, var_ctx)?;
             node_state.outputs.insert(okey.clone(), val);
@@ -2197,8 +2259,12 @@ async fn execute_start_server_isolated(
         variant: sel.variant.clone(),
     };
 
-    // Release the port reservation immediately before spawning.
+    // Release every reservation immediately before spawning, so the child can
+    // bind them.
     port_reservation.release();
+    for reservation in extra_reservations {
+        reservation.release();
+    }
 
     let handle = process::start_server(
         &resolved_cmd,
@@ -2245,8 +2311,7 @@ async fn execute_start_server_isolated(
     )
     .await;
     // Use probes.readiness if available, falling back to legacy health_check.
-    if let Some(hc) = variant_cfg.readiness_probe() {
-        let hc = hc.clone();
+    if let Some(hc) = resolved.readiness.clone() {
         node_state.status = NodeStatus::HealthChecking;
         node_state.readiness_phases.push(ReadinessPhase {
             phase: 1,
@@ -2313,6 +2378,26 @@ async fn execute_start_server_isolated(
         let phase1_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
         let phase2_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 2);
 
+        // Which port this probe watches: a named one from the `ports` map, or
+        // the primary. Probing the wrong port on a multi-port node reports ready
+        // too early — a debugger port opens long before the app is listening.
+        let probe_port = match hc.port.as_deref() {
+            None => port,
+            Some(name) => match precomputed.named_ports.get(name) {
+                Some(p) => *p,
+                None => {
+                    return Err(OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason: format!(
+                            "readiness probe references port \"{name}\", which this node \
+                             does not declare in `ports`"
+                        ),
+                    });
+                }
+            },
+        };
+
         // Phase 1: TCP port check.
         emit_progress(
             &ctx.progress_tx,
@@ -2320,12 +2405,12 @@ async fn execute_start_server_isolated(
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 1,
-                description: format!("waiting for port {port}"),
+                description: format!("waiting for port {probe_port}"),
             },
         );
 
         let phase1_result = tokio::select! {
-            result = health::wait_for_port(port, &hc, Some(&phase1_notifier)) => result,
+            result = health::wait_for_port(probe_port, &hc, Some(&phase1_notifier)) => result,
             _ = wait_for_process_exit(pid) => {
                 Err(health::HealthError::PortCheckFailed(
                     "server process exited before binding to port".into(),
@@ -2334,7 +2419,7 @@ async fn execute_start_server_isolated(
         };
 
         if let Err(e) = phase1_result {
-            let msg = format!("process did not bind to port {port}: {e}");
+            let msg = format!("process did not bind to port {probe_port}: {e}");
             node_state.status = NodeStatus::Failed;
             node_state.readiness_phases[0].last_error = Some(msg.clone());
             debug_log_free(
@@ -2379,7 +2464,7 @@ async fn execute_start_server_isolated(
 
         // Phase 2: depends on check type.
         let phase2_desc = match hc.check_type.as_str() {
-            "http" => format!("HTTP check on port {port}"),
+            "http" => format!("HTTP check on port {probe_port}"),
             "command" | "bash" => "command readiness check".to_owned(),
             "port" => "port-only (no phase 2)".to_owned(),
             other => format!("unknown check type: {other}"),
@@ -2397,7 +2482,7 @@ async fn execute_start_server_isolated(
         let phase2_future = async {
             match hc.check_type.as_str() {
                 "http" => {
-                    let direct_url = format!("http://127.0.0.1:{port}");
+                    let direct_url = format!("http://127.0.0.1:{probe_port}");
                     health::wait_for_http(&direct_url, &hc, Some(&phase2_notifier)).await
                 }
                 "command" | "bash" => {
@@ -2487,11 +2572,12 @@ async fn execute_start_server_isolated(
 async fn execute_command_isolated(
     ctx: &NodeExecutionContext,
     sel: &NodeSelection,
+    resolved: &config::ResolvedVariant,
     var_ctx: &mut VariableContext,
     node_state: &mut NodeState,
 ) -> Result<(), OrchestratorError> {
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
     let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
 
     // Resolve working directory (variant > node > project root).
     let working_dir = resolve_working_dir(
@@ -2502,25 +2588,20 @@ async fn execute_command_isolated(
     )?;
 
     // Resolve command or script.
-    let raw_cmd = match &variant_cfg.script {
+    let raw_cmd = match &resolved.script {
         Some(script) => config::CommandSpec::script(&ctx.project_root.join(script)),
-        None => variant_cfg
-            .cmd
-            .spec()
+        None => resolved
+            .command
+            .clone()
             .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
     };
     let resolved_cmd = raw_cmd.interpolate(var_ctx)?;
 
     // Build env (variant > node > project).
-    let merged_env = config::resolve_env(
-        ctx.config.env.as_ref(),
-        node_cfg.env.as_ref(),
-        variant_cfg.env.as_ref(),
-    );
-    let env = build_env(merged_env.as_ref(), var_ctx)?;
+    let env = build_env(resolved.env.as_ref(), var_ctx)?;
 
     // Idempotency check (skip_if).
-    if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
+    if let Some(ref skip_if_cmd) = resolved.skip_if {
         let skip_if_resolved = skip_if_cmd.interpolate(var_ctx)?;
         let skip_if_result =
             process::run_command(&skip_if_resolved, &working_dir, &env, None).await;
@@ -2558,7 +2639,7 @@ async fn execute_command_isolated(
         .insert("exit_code".to_owned(), result.exit_code.to_string());
 
     // Filter outputs against declared keys.
-    let declared_keys = variant_cfg
+    let declared_keys = resolved
         .outputs
         .as_ref()
         .map(|o| o.declared_keys())
@@ -2567,7 +2648,7 @@ async fn execute_command_isolated(
     for (k, v) in &result.outputs {
         if declared_keys.contains(k.as_str()) {
             node_state.outputs.insert(k.clone(), v.clone());
-        } else if variant_cfg.strict_outputs {
+        } else if resolved.strict_outputs {
             let reason = format!(
                 "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
             );
@@ -2596,8 +2677,7 @@ async fn execute_command_isolated(
 
     if result.exit_code == 0 {
         // Run readiness probe if configured (probes.readiness on command nodes).
-        if let Some(hc) = variant_cfg.readiness_probe() {
-            let hc = hc.clone();
+        if let Some(hc) = resolved.readiness.clone() {
             node_state.status = NodeStatus::HealthChecking;
             emit_progress(
                 &ctx.progress_tx,

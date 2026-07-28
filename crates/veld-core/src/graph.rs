@@ -157,9 +157,13 @@ pub fn build_execution_plan(
     // 2. Build adjacency list (node -> set of nodes it depends on).
     let mut deps: HashMap<NodeSelection, HashSet<NodeSelection>> = HashMap::new();
     for sel in &all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
+        // Resolved, not raw: `depends_on` is hoistable to node level (F3), so a
+        // raw read here would silently drop an inherited edge.
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("selection was validated");
         let mut dep_set = HashSet::new();
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 dep_set.insert(NodeSelection {
                     node: dep_node.clone(),
@@ -199,16 +203,17 @@ fn collect_all_nodes(
             .nodes
             .get(&sel.node)
             .ok_or_else(|| GraphError::UnknownNode(sel.node.clone()))?;
-        let variant_cfg =
-            node_cfg
-                .variants
-                .get(&sel.variant)
-                .ok_or_else(|| GraphError::UnknownVariant {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                })?;
+        if !node_cfg.variants.contains_key(&sel.variant) {
+            return Err(GraphError::UnknownVariant {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+            });
+        }
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("variant existence checked above");
 
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 // Validate the dependency target exists.
                 let dep_node_cfg = config
@@ -311,36 +316,32 @@ fn validate_variable_references(
 
     // Scan project-level env for unqualified refs.
     if let Some(env_map) = &config.env {
-        for v in env_map.values() {
+        for v in env_map.values().flatten() {
             check_string_for_ambiguous_refs(v, &active_variants)?;
         }
     }
 
     // For each node, scan its env, variant env, and command strings for unqualified refs.
     for sel in all_nodes {
-        let node_cfg = &config.nodes[&sel.node];
-        let variant_cfg = &node_cfg.variants[&sel.variant];
+        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
+            continue;
+        };
 
         // The command's own strings: for `argv`, every element (each is
         // interpolated independently); for `shell`, the whole string.
         let mut owned_strings: Vec<String> = Vec::new();
-        if let Some(spec) = variant_cfg.cmd.spec() {
+        if let Some(spec) = resolved.command.clone() {
             match spec {
                 crate::config::CommandSpec::Argv(argv) => owned_strings.extend(argv),
                 crate::config::CommandSpec::Shell(sh) => owned_strings.push(sh),
             }
         }
-        let mut strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
-        if let Some(env_map) = &node_cfg.env {
-            for v in env_map.values() {
-                strings_to_check.push(v);
-            }
+        // The resolved env, so a value hoisted to node level is scanned once and
+        // an erased key is not scanned at all.
+        if let Some(env_map) = &resolved.env {
+            owned_strings.extend(env_map.values().cloned());
         }
-        if let Some(env_map) = &variant_cfg.env {
-            for v in env_map.values() {
-                strings_to_check.push(v);
-            }
-        }
+        let strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
 
         for s in strings_to_check {
             check_string_for_ambiguous_refs(s, &active_variants)?;
@@ -356,9 +357,11 @@ fn validate_sensitive_outputs(
     config: &VeldConfig,
 ) -> Result<(), GraphError> {
     for sel in all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
-        if let Some(ref sensitive) = variant_cfg.sensitive_outputs {
-            let declared = variant_cfg
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("selection was validated");
+        if let Some(ref sensitive) = resolved.sensitive_outputs {
+            let declared = resolved
                 .outputs
                 .as_ref()
                 .map(|o| o.declared_keys())
@@ -391,8 +394,10 @@ pub fn get_dependents(
     // Build reverse adjacency: for each node, which nodes depend on it.
     let mut reverse_deps: HashMap<String, Vec<NodeSelection>> = HashMap::new();
     for sel in all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
+            continue;
+        };
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 let dep_key = format!("{dep_node}:{dep_variant}");
                 reverse_deps.entry(dep_key).or_default().push(sel.clone());
@@ -478,7 +483,7 @@ mod tests {
     fn make_config() -> VeldConfig {
         // db -> api -> frontend (dependency chain)
         let db_variant = VariantConfig {
-            step_type: StepType::Command,
+            step_type: Some(StepType::Command),
             cmd: crate::config::CommandKeys {
                 shell: Some("echo db".into()),
                 ..Default::default()
@@ -488,6 +493,7 @@ mod tests {
             probes: None,
             depends_on: None,
             env: None,
+            ports: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -501,7 +507,7 @@ mod tests {
             share: None,
         };
         let api_variant = VariantConfig {
-            step_type: StepType::StartServer,
+            step_type: Some(StepType::StartServer),
             cmd: crate::config::CommandKeys {
                 shell: Some("echo api".into()),
                 ..Default::default()
@@ -509,8 +515,9 @@ mod tests {
             script: None,
             health_check: None,
             probes: None,
-            depends_on: Some(HashMap::from([("db".into(), "local".into())])),
+            depends_on: Some(HashMap::from([("db".into(), Some("local".into()))])),
             env: None,
+            ports: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -524,7 +531,7 @@ mod tests {
             share: None,
         };
         let frontend_variant = VariantConfig {
-            step_type: StepType::StartServer,
+            step_type: Some(StepType::StartServer),
             cmd: crate::config::CommandKeys {
                 shell: Some("echo fe".into()),
                 ..Default::default()
@@ -532,8 +539,9 @@ mod tests {
             script: None,
             health_check: None,
             probes: None,
-            depends_on: Some(HashMap::from([("api".into(), "local".into())])),
+            depends_on: Some(HashMap::from([("api".into(), Some("local".into()))])),
             env: None,
+            ports: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -574,6 +582,14 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
                         variants: HashMap::from([("local".into(), db_variant)]),
                     },
                 ),
@@ -589,6 +605,14 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
                         variants: HashMap::from([("local".into(), api_variant)]),
                     },
                 ),
@@ -604,6 +628,14 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
                         variants: HashMap::from([("local".into(), frontend_variant)]),
                     },
                 ),

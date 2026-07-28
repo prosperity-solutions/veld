@@ -240,7 +240,13 @@ async fn run_liveness_checks(
             None => continue,
         };
 
-        let liveness = match variant_cfg.liveness_probe() {
+        // Resolved: `probes` is hoistable to node level (F3), so a raw read
+        // would silently stop probing a node that declares its liveness probe
+        // once for all variants.
+        let Some(resolved) = config.resolved(node_name, variant_name) else {
+            continue;
+        };
+        let liveness = match &resolved.liveness {
             Some(lp) => lp,
             None => continue,
         };
