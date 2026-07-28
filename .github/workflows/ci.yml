@@ -266,9 +266,11 @@ jobs:
       - name: Doc examples load and lint clean
         run: |
           set -e
-          # Runs here rather than in the schema job because it needs a built binary,
-          # and a gate that skips itself reads as a pass. The schema job's copy fails
-          # loudly in CI if it ever finds no binary.
+          # This job is the enforcement point: the gate needs a built veld, and this
+          # is the job that has one. `validate-schema.sh` also invokes it when a
+          # binary happens to be present locally, but skips otherwise — putting the
+          # requirement there instead just failed the schema job, which never builds
+          # Rust. A gate that skips itself reads as a pass, so it lives where it runs.
           python3 tests/validate-doc-examples.py target/debug/veld
 
       - name: Reject a v1/v2 config with the upgrade instructions
