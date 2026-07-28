@@ -184,6 +184,15 @@ export interface StatsResponse {
   projects: Record<string, Record<string, Record<string, NodeStats>>>;
 }
 
+/** One-shot credential for opening a terminal WebSocket. */
+export interface PtyTicket {
+  ticket: string;
+  expires_in_ms: number;
+  /** True when a live session with this id was waiting — i.e. the shell
+   *  survived whatever disconnected us, and attaching resumes it. */
+  resumed: boolean;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
   const res = await fetch(path, {
@@ -299,10 +308,41 @@ export const api = {
       method: "POST",
       body: JSON.stringify(node ? { action, node } : { action }),
     }),
+  /** Launch the *operating system's* terminal app at a path. Unrelated to the
+   *  in-app terminal panes below, which never leave the browser. */
   openTerminal: (path: string) =>
     request<void>("/api/open-terminal", {
       method: "POST",
       body: JSON.stringify({ path }),
+    }),
+  /**
+   * Mint a single-use ticket for an in-app terminal in a worktree.
+   *
+   * The WebSocket that follows cannot carry the `X-Veld-Request` CSRF header
+   * (handshakes can't set custom headers), so this CSRF-gated POST is what
+   * proves the request came from this page — see `crates/veld-daemon/src/pty.rs`.
+   * The ticket is good for one connection and expires in `expires_in_ms`;
+   * mint a new one per connect, including every reconnect.
+   *
+   * `sessionId` names the shell. Passing the id of a session that is still
+   * running reattaches to it — that is how a reload gets its terminal back —
+   * and any other id starts a new one.
+   */
+  ptyTicket: (worktreeId: number, sessionId: string) =>
+    request<PtyTicket>("/api/pty/tickets", {
+      method: "POST",
+      body: JSON.stringify({ worktree_id: worktreeId, session_id: sessionId }),
+    }),
+  /**
+   * End a terminal session now.
+   *
+   * Required, because dropping the socket deliberately does *not* kill the
+   * shell (that is what makes a reload survivable). Closing a tab without this
+   * leaves the shell running until the daemon's detach grace expires.
+   */
+  closePtySession: (sessionId: string) =>
+    request<void>(`/api/pty/sessions/${encodeURIComponent(sessionId)}`, {
+      method: "DELETE",
     }),
   stats: () => request<StatsResponse>("/api/stats"),
   logs: (run: string, opts: { source?: string; runId?: string } = {}) => {

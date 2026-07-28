@@ -23,6 +23,11 @@ stripped from the foundation, but has since shipped — see below.)
 | Electron's role | Supplementary shell | Frameless window, tray icon, later: embedded webviews with isolated sessions, CLI install. The web UI must stay fully usable without it. |
 | Run orchestration | Daemon shells out to the `veld` CLI | The daemon never runs the orchestrator in-process — stop/restart already work by spawning `cd <root> && veld …` in a login shell. Start follows the same pattern. |
 | Theme | Handoff palette (Inter + JetBrains Mono, oklch greens) | Deviates from the classic product tokens in `docs/branding.md`; sanctioned there as the **desktop theme**. Structural branding rules (wordmark, self-contained assets, noindex) still apply. |
+| Terminal transport | **PTY spawned daemon-side (`portable-pty`) over a WebSocket** | Not `node-pty` in the Electron main process: the browser build needs a daemon route regardless, so Electron would mean two implementations of one feature and would break the "usable without Electron" invariant above. Also avoids node-pty's native-rebuild churn across Electron versions. |
+| Terminal auth | Single-use ticket from a CSRF-gated `POST`, plus an `Origin` allowlist | The daemon's CSRF gate is custom-header-only, and a WebSocket handshake can carry neither a custom header nor a CORS preflight — so the usual gate is structurally unreachable on an endpoint that hands out a shell. Loopback is not the mitigation either: the helper publishes the daemon at `veld.localhost`. Both gates are kept deliberately; see the module docs in `crates/veld-daemon/src/pty.rs`. |
+| Terminal session lifetime | Sessions outlive their socket; explicit `DELETE` ends one | A terminal is not re-creatable state — dropping it kills the shell and everything in it — and a reload drops the socket. So a socket closing means "come back later" (scrollback is buffered and replayed on reattach) while closing a tab means "done". An abandoned session is reaped after a grace period so a closed tab can't leak a shell. |
+| Terminal renderer | **xterm.js**, with `ghostty-web` a fast-follow candidate | `ghostty-web` is the better emulator but pre-1.0, with an unverified addon story (fit-addon is required for resize) and a ~400 KB WASM blob that `vite-plugin-singlefile` would base64-inline into the daemon binary. It is API-compatible with xterm.js, so swapping stays cheap and this does not gate the terminal work. |
+| Pane layout | Two docks of tabs with a draggable split | The terminal, the embedded browser and run diagnostics all want the same region; each one added as another fixed column makes the window unusable. A tab kind per content type means the next increment is a renderer, not a layout rewrite. Layouts persist per worktree in `sessionStorage` — per browser tab, since a layout names live shells and two tabs must not claim the same one. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -52,6 +57,9 @@ client, not surgery.
 │  PATCH/DELETE /api/worktrees/{id}               │
 │  POST /api/worktrees/{id}/start → `veld start`  │
 │  POST /api/environments/{run}/stop|restart      │
+│  POST /api/pty/tickets   → attach ticket        │
+│  GET  /api/pty/attach    → terminal WebSocket   │
+│  DEL  /api/pty/sessions/{id} → end a shell      │
 └──────────────────────┬──────────────────────────┘
                        │ rusqlite (WAL)
 ┌──────────────────────▼──────────────────────────┐
@@ -109,6 +117,41 @@ requests at runtime — branding rule.
   better: plain greedy alone ranks "Switch to Runs" above "New worktree…" for
   `wt`, while anchoring alone can strand the rest of the query and drop the
   item from the list entirely.
+
+#### Panes and terminals (`ui/src/panes/`)
+
+- **Layout is a pure module** (`panes/model.ts`): two docks, each a tab list
+  with an active tab, plus a split ratio. Every mutation is a function on that
+  value, so the layout rules are unit-testable without a DOM and the React side
+  holds only the state cell.
+- **Terminals live outside React** (`panes/terminalHost.ts`). Unmounting a
+  terminal would close its socket and kill the shell, and React unmounts freely
+  — on a tab switch, and on every worktree switch, since each worktree has its
+  own layout. So the xterm instance and its container element sit in a
+  module-level registry keyed by tab id, and the component only *reparents* that
+  element into itself. This is also why a tab id must be unique for longer than
+  the page: it doubles as the daemon session id.
+- **Never write into a live shell.** A `[veld] …` notice injected into a running
+  terminal lands in the middle of whatever full-screen program is redrawing
+  (Claude Code, vim, top) and corrupts it. Notices are for shells that have
+  *ended*; anything about a live one goes on the pane's status chip.
+- **Replayed scrollback is bracketed, and input is gated inside the bracket.**
+  Recorded output can contain queries the shell once made (device attributes,
+  cursor position, colour). Parsing them again makes the emulator answer them
+  again, and that answer reaches a shell that asked nothing — arriving as
+  keystrokes. The symptom was a `1;2c` fragment at the prompt after every
+  reload. The gate lifts on xterm's `write` completion callback rather than on
+  `replay_end`, because the answers are emitted while parsing, not on receipt.
+- **`fit-addon` sizes the grid from the computed height of the terminal's
+  parent element**, which with border-box sizing includes that parent's own
+  padding. Padding there therefore buys a row that doesn't fit and the bottom
+  line renders off-pane; the padding belongs on the wrapper *outside* the
+  measured element (`.term-slot`, not `.term-host`).
+- **Focus** is shown with `:focus-within` on the dock rather than the layout's
+  `focused` field — that field only says where a new tab would open, while the
+  CSS tracks real DOM focus and picks up xterm's hidden textarea for free. Only
+  the focused dock's terminal claims the keyboard on mount; both docks mount on
+  load, so focusing unconditionally handed it to whichever mounted last.
 
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
@@ -211,6 +254,22 @@ on mutations, JSON errors, `202 Accepted` for fire-and-forget CLI spawns.
 | `POST /api/repos/refresh` | The UI's poll target: reconciles every repo's worktree rows with `git worktree list`, then returns the same payload as `GET /api/repos`. POST (CSRF-gated) because it spawns git and writes; debounced daemon-side. The plain GET stays a pure read. |
 | `POST /api/pick-directory` | Opens the native OS folder picker (the daemon runs in the user's GUI session — macOS `osascript`, Linux `zenity`/`kdialog`) and returns `{path}`; `204` on cancel, `409` while a picker is already open (single-flight), `408` after the 10-minute timeout, `500` on backend failure (no GUI session / permission denial), `501` without a picker backend. Works for the plain-browser build too — the web platform never exposes absolute paths. |
 
+Terminals live in their own module (`crates/veld-daemon/src/pty.rs`) rather than
+the `desktop` one, because they cannot use that router's CSRF layer — a
+WebSocket upgrade is a GET, which a method-keyed layer waves through, and a
+handshake can carry neither a custom header nor a CORS preflight.
+
+| Endpoint | Behavior |
+|---|---|
+| `POST /api/pty/tickets` `{worktree_id, session_id}` | CSRF-gated, and the only place a worktree id is resolved to a directory — so the socket below never accepts a path from the client. Returns a single-use ticket (122 bits from the OS CSPRNG, 30s TTL) plus `resumed`, true when a live session already answers to `session_id`. The client names the session (`crypto.randomUUID()`), which is what lets a reload ask for the same shell; the name is an identifier, not a credential. `409` if that session belongs to a different worktree. |
+| `GET /api/pty/attach?ticket=&cols=&rows=` | The WebSocket. Requires an allowlisted `Origin`, failing closed when absent, **and** an unredeemed ticket; a rejected origin does not burn the ticket. Binary frames are terminal bytes in both directions, text frames are JSON control (`resize` up; `replay_begin`/`replay_end`/`ready`/`exit`/`taken_over`/`lagged` down). A second attach takes the session over and tells the displaced socket why. |
+| `DELETE /api/pty/sessions/{id}` | CSRF-gated. Ends the shell now — the distinction the detach model rests on, since a socket closing means "come back later". `204` even when the session is already gone. |
+
+The shell is the user's `$SHELL -l`, which is this module's stated exception to
+the AGENTS.md `resolve_user_path()` rule: that helper *is* a login shell
+spawned to scrape `PATH`, so calling it here would add a second shell's startup
+cost to every terminal to compute what this one computes anyway.
+
 Git subprocesses follow the AGENTS.md daemon rule: resolved user login-shell
 `PATH` via `veld_core::user_path::resolve_user_path()`.
 
@@ -285,9 +344,9 @@ already lives in the URL, so modes are just routes.
 1. **Runs mode** (v1-dashboard parity in React/Mantine) + view switcher +
    `/` / `/ide` routing as above.
 2. Embedded webviews + isolated sessions (Electron `WebContentsView`,
-   `session.fromPartition`).
-3. Terminal panes (PTY over WebSocket from the daemon, or node-pty in the
-   Electron main process — decision deferred).
+   `session.fromPartition`). These are meant to arrive as a new `PaneKind` in
+   the dock (`crates/veld-daemon/ui/src/panes/`), not as another column.
+3. ~~Terminal panes~~ — shipped; see the decision log above.
 4. Start-run UX beyond preset picking; `veld share` from the UI.
 5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
 6. Packaging, auto-update, CLI installation from the app.

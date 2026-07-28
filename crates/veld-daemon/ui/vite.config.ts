@@ -23,7 +23,12 @@ export default defineConfig({
     port: 5199,
     strictPort: true,
     proxy: {
-      "/api": `http://127.0.0.1:${daemonPort}`,
+      // `ws: true` so the terminal's `/api/pty/attach` upgrade is proxied
+      // too; without it vite answers the handshake itself and the socket
+      // never reaches the daemon. The daemon only trusts this dev origin
+      // when it is a dev instance (see `allowed_origins` in pty.rs), so
+      // `just dev-ui` must point at `just dev-daemon`, not the installed one.
+      "/api": { target: `http://127.0.0.1:${daemonPort}`, ws: true },
     },
   },
   test: {
