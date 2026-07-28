@@ -449,6 +449,108 @@ impl<'de> Deserialize<'de> for ConfigValue {
     }
 }
 
+/// A value delivered to **disk** before the process starts (F9.1).
+///
+/// The docs have long said a secret may reach a process via the environment *or a
+/// file*, but there was no syntax for the second half — so the workaround was a
+/// shell command that writes the secret itself, which puts it in the process table
+/// on the way (exactly what `secret: true` exists to prevent).
+///
+/// ```jsonc
+/// "files": {
+///   ".secrets/pg.pem": { "env": "PG_CLIENT_CERT", "secret": true, "mode": "0400" }
+/// }
+/// ```
+///
+/// The path is resolved from the project root, like every other relative path.
+/// `mode` defaults to `0600`: the motivating case is a credential, and a
+/// world-readable default would undo the point.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDelivery {
+    /// Where the content comes from — the same value sources as everything else.
+    pub value: ConfigValue,
+    /// Octal file mode as written (e.g. `"0600"`).
+    pub mode: Option<String>,
+}
+
+/// Default mode for a delivered file: owner read/write only.
+pub const DEFAULT_FILE_MODE: u32 = 0o600;
+
+impl FileDelivery {
+    /// The mode to create the file with, or an error naming the bad value.
+    ///
+    /// Parsed as octal whether or not it carries a leading `0`, because `"600"`
+    /// and `"0600"` obviously mean the same thing to the person writing it — and
+    /// reading `"600"` as *decimal* 600 would silently produce mode 1130.
+    pub fn parsed_mode(&self) -> Result<u32, String> {
+        let Some(raw) = &self.mode else {
+            return Ok(DEFAULT_FILE_MODE);
+        };
+        let digits = raw.strip_prefix("0o").unwrap_or(raw);
+        u32::from_str_radix(digits, 8)
+            .ok()
+            .filter(|m| *m <= 0o7777)
+            .ok_or_else(|| {
+                format!("\"{raw}\" is not a file mode; write it in octal, e.g. \"0600\"")
+            })
+    }
+}
+
+impl Serialize for FileDelivery {
+    fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut m = s.serialize_map(None)?;
+        match &self.value.source {
+            SecretSource::Literal(v) => m.serialize_entry("value", v)?,
+            SecretSource::Env(v) => m.serialize_entry("env", v)?,
+            SecretSource::File(v) => m.serialize_entry("file", v)?,
+            SecretSource::Command(v) => m.serialize_entry("command", v)?,
+            SecretSource::Argv(v) => m.serialize_entry("argv", v)?,
+            SecretSource::Shell(v) => m.serialize_entry("shell", v)?,
+        }
+        if self.value.secret {
+            m.serialize_entry("secret", &true)?;
+        }
+        if let Some(mode) = &self.mode {
+            m.serialize_entry("mode", mode)?;
+        }
+        m.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for FileDelivery {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let mut map = match serde_json::Value::deserialize(d)? {
+            serde_json::Value::Object(map) => map,
+            other => {
+                return Err(D::Error::custom(format!(
+                    "a delivered file must be an object with one source key and an \
+                     optional \"mode\", got {other}"
+                )));
+            }
+        };
+        let mode = match map.remove("mode") {
+            None => None,
+            Some(serde_json::Value::String(s)) => Some(s),
+            // A bare number would already have lost its leading zero, so the
+            // octal/decimal ambiguity is settled by requiring a string.
+            Some(other) => {
+                return Err(D::Error::custom(format!(
+                    "\"mode\" must be a string like \"0600\", not {other}"
+                )));
+            }
+        };
+        let value: ConfigValue =
+            serde_json::from_value(serde_json::Value::Object(map)).map_err(D::Error::custom)?;
+        let delivery = FileDelivery { value, mode };
+        // Fail on a bad mode here rather than at spawn time, when the run is
+        // already half up.
+        delivery.parsed_mode().map_err(D::Error::custom)?;
+        Ok(delivery)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Node-level defaults: maps, and how a variant removes an inherited key
 // ---------------------------------------------------------------------------
@@ -1389,6 +1491,11 @@ pub struct NodeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_stop: Option<CommandSpec>,
 
+    /// Default values delivered to disk (F9.1). Additive per path; `"path": null`
+    /// erases an inherited one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<NullableMap<FileDelivery>>,
+
     pub variants: HashMap<String, VariantConfig>,
 }
 
@@ -1491,6 +1598,11 @@ pub struct VariantConfig {
     /// erases a key inherited from the node or project level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub env: Option<NullableMap<ConfigValue>>,
+
+    /// Values delivered to disk before this variant starts (F9.1). Additive over
+    /// the node-level map; `"path": null` erases an inherited one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<NullableMap<FileDelivery>>,
 
     /// Named ports veld allocates for this variant, additive over the
     /// node-level map. `"name": null` erases an inherited one. Absent means the
@@ -1997,6 +2109,8 @@ pub struct ResolvedVariant {
     pub depends_on: Option<HashMap<String, String>>,
     pub env: Option<HashMap<String, ConfigValue>>,
     pub ports: Option<ResolvedPorts>,
+    /// Paths (project-root-relative) to write before the process starts.
+    pub files: Option<HashMap<String, FileDelivery>>,
     pub outputs: Option<Outputs>,
     pub sensitive_outputs: Option<Vec<String>>,
     pub strict_outputs: bool,
@@ -2080,6 +2194,7 @@ pub fn resolve_variant(
             variant.env.as_ref(),
         ),
         ports: resolve_ports(node.ports.as_ref(), variant.ports.as_ref()),
+        files: merge_nullable_maps([None, node.files.as_ref(), variant.files.as_ref()]),
         outputs: replace(node.outputs.as_ref(), variant.outputs.as_ref()),
         sensitive_outputs: variant.sensitive_outputs.clone(),
         strict_outputs: variant.strict_outputs,

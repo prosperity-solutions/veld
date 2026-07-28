@@ -70,6 +70,13 @@ pub enum ValueError {
 
     #[error("{at}: source command produced output that is not valid UTF-8")]
     CommandNotUtf8 { at: String },
+
+    #[error("{at}: could not write {path}: {source}")]
+    FileUnwritable {
+        at: String,
+        path: String,
+        source: std::io::Error,
+    },
 }
 
 /// Resolve one value. `at` labels the location for error messages (e.g.
@@ -186,6 +193,64 @@ pub async fn resolve_env_values(
         }
     }
     Ok(out)
+}
+
+/// Write every declared file for one node, before its process starts (F9.1).
+///
+/// Paths are resolved from the project root, like every other relative path in a
+/// veld config. Parent directories are created. The file is created with its
+/// declared mode (default `0600`) **before** the content is written, so a secret is
+/// never briefly world-readable — creating then chmod-ing would leave exactly that
+/// window.
+pub async fn deliver_files(
+    files: &HashMap<String, crate::config::FileDelivery>,
+    project_root: &std::path::Path,
+    at_prefix: &str,
+) -> Result<Vec<std::path::PathBuf>, ValueError> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let mut written = Vec::new();
+    // Sorted for a deterministic failure.
+    let mut paths: Vec<&String> = files.keys().collect();
+    paths.sort();
+    for rel in paths {
+        let delivery = &files[rel];
+        let at = format!("{at_prefix}.files.{rel}");
+        let content = resolve_value(&delivery.value, &at).await?;
+        let mode = delivery
+            .parsed_mode()
+            .expect("the mode was validated at parse time");
+
+        let path = if std::path::Path::new(rel).is_absolute() {
+            std::path::PathBuf::from(rel)
+        } else {
+            project_root.join(rel)
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ValueError::FileUnwritable {
+                at: at.clone(),
+                path: path.display().to_string(),
+                source,
+            })?;
+        }
+        let write = |content: &str| -> std::io::Result<()> {
+            use std::io::Write as _;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(mode)
+                .open(&path)?;
+            f.write_all(content.as_bytes())
+        };
+        write(&content).map_err(|source| ValueError::FileUnwritable {
+            at: at.clone(),
+            path: path.display().to_string(),
+            source,
+        })?;
+        written.push(path);
+    }
+    Ok(written)
 }
 
 /// Resolve every project `var` once per run.
@@ -389,6 +454,83 @@ mod tests {
         assert!(serde_json::from_str::<ConfigValue>(r#"{ "secret": true }"#).is_err());
         // An unknown source key is a typo, not a new provider.
         assert!(serde_json::from_str::<ConfigValue>(r#"{ "vault": "x" }"#).is_err());
+    }
+
+    /// F9.1: a value can be delivered to disk, for a process that can only read a
+    /// file. Without this the workaround is a shell command that writes the secret
+    /// itself, which puts it in the process table on the way.
+    #[tokio::test]
+    async fn files_are_delivered_with_a_restrictive_default_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let files: HashMap<String, crate::config::FileDelivery> = HashMap::from([
+            (
+                // A nested path whose directory does not exist yet.
+                ".secrets/token".to_owned(),
+                serde_json::from_str(r#"{ "value": "s3cret", "secret": true }"#).unwrap(),
+            ),
+            (
+                "config/app.conf".to_owned(),
+                serde_json::from_str(r#"{ "value": "verbose=1", "mode": "0644" }"#).unwrap(),
+            ),
+        ]);
+
+        let written = deliver_files(&files, dir.path(), "nodes.a.variants.dev")
+            .await
+            .expect("files are delivered");
+        assert_eq!(written.len(), 2);
+
+        let token = dir.path().join(".secrets/token");
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "s3cret");
+        assert_eq!(
+            std::fs::metadata(&token).unwrap().permissions().mode() & 0o777,
+            0o600,
+            "a delivered file defaults to owner-only — the motivating case is a credential"
+        );
+
+        let conf = dir.path().join("config/app.conf");
+        assert_eq!(std::fs::read_to_string(&conf).unwrap(), "verbose=1");
+        assert_eq!(
+            std::fs::metadata(&conf).unwrap().permissions().mode() & 0o777,
+            0o644,
+            "an explicit mode is honoured"
+        );
+    }
+
+    /// The mode is octal whether or not it carries a leading zero: reading `"600"`
+    /// as decimal would silently produce mode 1130.
+    #[test]
+    fn file_mode_is_parsed_as_octal_and_bad_modes_are_rejected() {
+        let parse = |json: &str| serde_json::from_str::<crate::config::FileDelivery>(json);
+
+        assert_eq!(
+            parse(r#"{ "value": "x", "mode": "0600" }"#)
+                .unwrap()
+                .parsed_mode()
+                .unwrap(),
+            0o600
+        );
+        assert_eq!(
+            parse(r#"{ "value": "x", "mode": "600" }"#)
+                .unwrap()
+                .parsed_mode()
+                .unwrap(),
+            0o600,
+            "a missing leading zero still means octal"
+        );
+        assert_eq!(
+            parse(r#"{ "value": "x" }"#).unwrap().parsed_mode().unwrap(),
+            0o600,
+            "the default is owner-only"
+        );
+
+        // Rejected at parse time, not at spawn time when the run is half up.
+        assert!(parse(r#"{ "value": "x", "mode": "0999" }"#).is_err());
+        assert!(parse(r#"{ "value": "x", "mode": "rw-------" }"#).is_err());
+        // A bare number has already lost its leading zero, so it is refused
+        // rather than guessed at.
+        assert!(parse(r#"{ "value": "x", "mode": 600 }"#).is_err());
     }
 
     #[test]

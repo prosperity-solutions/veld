@@ -84,6 +84,12 @@ pub enum GraphError {
     UnknownPreset(String),
 
     #[error(
+        "preset reference cycle: {0}. A preset may reference another with `@name`, but not \
+         itself, directly or transitively"
+    )]
+    PresetCycle(String),
+
+    #[error(
         "node \"{node}:{variant}\" has sensitive_outputs {undeclared:?} not declared in outputs"
     )]
     UndeclaredSensitiveOutputs {
@@ -104,8 +110,6 @@ fn unknown_node(name: &str, config: &VeldConfig) -> GraphError {
     GraphError::UnknownNode {
         name: name.to_owned(),
         known,
-        // `include` is only recorded on the loaded document, so infer from whether
-        // the caller kept the file list; absent that, assume single-file.
         split: config.loaded_from_multiple_files,
     }
 }
@@ -166,11 +170,39 @@ pub fn resolve_selections(
         .collect()
 }
 
-/// Expand a preset name into its selections.
+/// Expand a preset name into its selections, following `@other-preset`
+/// references (F9.5).
+///
+/// A preset entry starting with `@` names another preset instead of a node, so
+/// `"ci": ["@full", "extra:default"]` is "everything in `full`, plus one more".
+/// Without this, a project with overlapping preset sets has to repeat every
+/// selection, and the repetitions drift.
+///
+/// Cycles are an error rather than a hang: `a → b → a` is a config mistake, and
+/// the error names the path so it is obvious which link to cut.
 pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
+    let mut visiting = Vec::new();
+    expand_preset_inner(preset_name, config, &mut visiting)
+}
+
+fn expand_preset_inner(
+    preset_name: &str,
+    config: &VeldConfig,
+    visiting: &mut Vec<String>,
+) -> Result<Vec<NodeSelection>, GraphError> {
+    if visiting.iter().any(|p| p == preset_name) {
+        let mut path = visiting.clone();
+        path.push(preset_name.to_owned());
+        return Err(GraphError::PresetCycle(
+            path.iter()
+                .map(|p| format!("@{p}"))
+                .collect::<Vec<_>>()
+                .join(" → "),
+        ));
+    }
     let presets = config
         .presets
         .as_ref()
@@ -178,7 +210,30 @@ pub fn expand_preset(
     let items = presets
         .get(preset_name)
         .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;
-    items.iter().map(|s| parse_selection(s)).collect()
+
+    visiting.push(preset_name.to_owned());
+    let mut out: Vec<NodeSelection> = Vec::new();
+    for item in items {
+        match item.strip_prefix('@') {
+            Some(referenced) => {
+                for sel in expand_preset_inner(referenced, config, visiting)? {
+                    // De-duplicate: two presets that both include a node should
+                    // not start it twice.
+                    if !out.contains(&sel) {
+                        out.push(sel);
+                    }
+                }
+            }
+            None => {
+                let sel = parse_selection(item)?;
+                if !out.contains(&sel) {
+                    out.push(sel);
+                }
+            }
+        }
+    }
+    visiting.pop();
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -541,6 +596,7 @@ mod tests {
             depends_on: None,
             env: None,
             ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -565,6 +621,7 @@ mod tests {
             depends_on: Some(HashMap::from([("db".into(), Some("local".into()))])),
             env: None,
             ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -589,6 +646,7 @@ mod tests {
             depends_on: Some(HashMap::from([("api".into(), Some("local".into()))])),
             env: None,
             ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -641,6 +699,7 @@ mod tests {
                         depends_on: None,
                         outputs: None,
                         on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), db_variant)]),
                     },
                 ),
@@ -664,6 +723,7 @@ mod tests {
                         depends_on: None,
                         outputs: None,
                         on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), api_variant)]),
                     },
                 ),
@@ -687,11 +747,118 @@ mod tests {
                         depends_on: None,
                         outputs: None,
                         on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), frontend_variant)]),
                     },
                 ),
             ]),
         }
+    }
+
+    /// F9.5: a preset may reference another with `@name`, so overlapping sets do
+    /// not have to repeat every selection and then drift.
+    #[test]
+    fn presets_compose_and_deduplicate() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([
+            (
+                "core".to_owned(),
+                vec!["db:local".to_owned(), "api:local".to_owned()],
+            ),
+            (
+                "full".to_owned(),
+                vec!["@core".to_owned(), "frontend:local".to_owned()],
+            ),
+            // Two references to the same preset must not start anything twice.
+            (
+                "ci".to_owned(),
+                vec!["@full".to_owned(), "@core".to_owned()],
+            ),
+        ]));
+
+        let full = expand_preset("full", &config).unwrap();
+        let names: Vec<String> = full.iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, vec!["db:local", "api:local", "frontend:local"]);
+
+        let ci = expand_preset("ci", &config).unwrap();
+        assert_eq!(
+            ci.len(),
+            3,
+            "an already-included selection is not repeated: {ci:?}"
+        );
+    }
+
+    /// A cycle is a config mistake, so it is an error naming the path rather than
+    /// a hang.
+    #[test]
+    fn preset_cycle_is_an_error_naming_the_path() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([
+            ("a".to_owned(), vec!["@b".to_owned()]),
+            ("b".to_owned(), vec!["@a".to_owned()]),
+        ]));
+        let err = expand_preset("a", &config).unwrap_err();
+        assert!(matches!(err, GraphError::PresetCycle(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("@a") && msg.contains("@b"), "{msg}");
+
+        // A preset referencing itself directly is the same class of mistake.
+        config.presets = Some(HashMap::from([(
+            "self".to_owned(),
+            vec!["@self".to_owned()],
+        )]));
+        assert!(matches!(
+            expand_preset("self", &config),
+            Err(GraphError::PresetCycle(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_preset_reference_is_named() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([("ci".to_owned(), vec!["@nope".to_owned()])]));
+        assert!(matches!(
+            expand_preset("ci", &config),
+            Err(GraphError::UnknownPreset(name)) if name == "nope"
+        ));
+    }
+
+    /// Under `include` globs, "unknown node" has four causes, so the error carries
+    /// the material to tell them apart.
+    #[test]
+    fn unknown_node_error_lists_defined_nodes() {
+        let mut config = make_config();
+        config.loaded_from_multiple_files = true;
+        let err = resolve_selections(
+            &[NodeSelection {
+                node: "typo".into(),
+                variant: "local".into(),
+            }],
+            &config,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("typo"), "{msg}");
+        assert!(msg.contains("api"), "must list what does exist: {msg}");
+        assert!(
+            msg.contains("veld config --files"),
+            "a split config must point at the glob→file→node chain: {msg}"
+        );
+
+        // A single-file config gets the node list but not the include advice,
+        // which would only mislead.
+        config.loaded_from_multiple_files = false;
+        let msg = resolve_selections(
+            &[NodeSelection {
+                node: "typo".into(),
+                variant: "local".into(),
+            }],
+            &config,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("api"));
+        assert!(!msg.contains("veld config --files"), "{msg}");
     }
 
     #[test]

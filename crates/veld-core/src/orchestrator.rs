@@ -2336,6 +2336,18 @@ async fn execute_start_server_isolated(
         variant: sel.variant.clone(),
     };
 
+    // Deliver declared files before the process starts, so it can read them on
+    // its first line. Failing here aborts the node rather than letting it start
+    // and fail obscurely on a missing certificate.
+    if let Some(files) = &resolved.files {
+        crate::values::deliver_files(
+            files,
+            &ctx.project_root,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        )
+        .await?;
+    }
+
     // Release every reservation immediately before spawning, so the child can
     // bind them.
     port_reservation.release();
@@ -2683,6 +2695,15 @@ async fn execute_command_isolated(
     .await?;
     node_state.sensitive_keys.extend(env_secret_keys);
 
+    if let Some(files) = &resolved.files {
+        crate::values::deliver_files(
+            files,
+            &ctx.project_root,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        )
+        .await?;
+    }
+
     // Idempotency check (skip_if).
     if let Some(ref skip_if_cmd) = resolved.skip_if {
         let skip_if_resolved = skip_if_cmd.interpolate(var_ctx)?;
@@ -2755,6 +2776,20 @@ async fn execute_command_isolated(
                 key = k,
                 "ignoring undeclared output"
             );
+        }
+    }
+
+    // F9.3: the map form on a `command` node publishes computed values, so a build
+    // step can say where its artifact landed. Interpolated *after* the command
+    // ran, with its captured outputs in scope as `${output.*}`, which is the whole
+    // point — the value usually depends on what the command produced.
+    if let Some(Outputs::Synthetic(ref map)) = resolved.outputs {
+        for (key, value) in &node_state.outputs {
+            var_ctx.set_output(key, value.clone());
+        }
+        for (key, template) in map {
+            let value = crate::variables::interpolate(template, var_ctx)?;
+            node_state.outputs.insert(key.clone(), value);
         }
     }
 
