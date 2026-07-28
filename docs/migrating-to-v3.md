@@ -185,6 +185,13 @@ same name in two files is an error naming both, so there is no precedence rule t
 learn. Relative paths (`cwd`, `script`, output paths) stay relative to the
 **project root**, not to the file that declares them.
 
+Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge across files:
+each entry has an owning file, so there is nothing to arbitrate. The project-level
+singletons — `url_template`, `features`, `proxy`, `sharing`, `client_log_levels` —
+are read from the root file only, because a single value would need a precedence
+rule. Declaring one in an included file is a `root-only-key` error rather than a
+silent no-op.
+
 `veld config --files` prints the glob → file → node chain, which is the fastest
 way to find out why a node seems missing.
 
@@ -262,6 +269,10 @@ For a program that can only read a credential from disk:
 ```
 
 Created with its mode (default `0600`), so it is never briefly world-readable.
+veld does **not** delete the file when the run ends — a program may re-read it
+across restarts, and removing a path you declared is a worse default than leaving
+it. Git-ignore the path; veld warns at start if a `secret` file lands somewhere git
+would commit.
 
 ### Preset composition
 

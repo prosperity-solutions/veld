@@ -226,6 +226,28 @@ impl Finding {
         }
     }
 
+    /// A project-level singleton declared in an included file, where it is ignored.
+    ///
+    /// An error rather than a warning: the author wrote a value that has no effect,
+    /// and every alternative is worse. Merging them would need a precedence rule
+    /// ("which file's `url_template` wins?") that this config system deliberately
+    /// refuses to have, and staying silent is how a team spends an afternoon
+    /// wondering why their `proxy` block does nothing.
+    pub(crate) fn root_only_key(key: &str, file: &str) -> Self {
+        Self {
+            severity: Severity::Error,
+            location: format!("{file}:{key}"),
+            message: format!(
+                "\"{key}\" is a project-level setting, so it is only read from the root \
+                 config file — the copy in {file} is ignored. Move it to the root file. \
+                 Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge \
+                 across files, because those are the ones with a per-key owner; a \
+                 single value would need a precedence rule instead"
+            ),
+            rule: "root-only-key".to_owned(),
+        }
+    }
+
     fn notice(rule: &str, location: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             severity: Severity::Notice,
@@ -1717,8 +1739,18 @@ pub struct VariantConfig {
 
     /// Teardown command to run when the environment is stopped.
     /// Executed in reverse dependency order during `veld stop`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub on_stop: Option<CommandSpec>,
+    ///
+    /// **Replaces** the node-level hook; `null` erases it. `null` has to be
+    /// distinguishable from absent here: with a plain `Option` an author writing
+    /// `"on_stop": null` to *disable* the node's hook got the node's hook anyway,
+    /// and it ran. Of all the fields to silently ignore an opt-out on, the one that
+    /// executes a command during teardown is the worst.
+    #[serde(
+        default,
+        deserialize_with = "explicit_null",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub on_stop: Option<Option<CommandSpec>>,
 
     /// Client-side log levels override for this specific variant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2274,7 +2306,9 @@ pub fn resolve_variant(
         sensitive_outputs: variant.sensitive_outputs.clone(),
         strict_outputs: variant.strict_outputs,
         skip_if: variant.skip_if.clone(),
-        on_stop: variant.on_stop.clone().or_else(|| node.on_stop.clone()),
+        // Absent inherits the node's hook; an explicit `null` erases it. `replace`
+        // is the same three-way rule already used for `outputs` and `share`.
+        on_stop: replace(node.on_stop.as_ref(), variant.on_stop.as_ref()),
         share: replace(node.share.as_ref(), variant.share.as_ref()),
         features: resolve_features(
             project.features.as_ref(),
@@ -2464,8 +2498,12 @@ pub(crate) fn reject_v3_legacy_commands(
                     }
                     // `on_stop` / `skip_if` took a bare shell string in v1/v2;
                     // in v3 they carry an { argv | shell } object like everything
-                    // else.
-                    if (key == "on_stop" || key == "skip_if") && child.is_string() {
+                    // else. `verify` is `skip_if`'s serde alias, so it has to be
+                    // listed here too — the gate matches on the spelling in the
+                    // file, and a key that deserializes into a gated field but is
+                    // not itself gated is a hole with no signal.
+                    if matches!(key.as_str(), "on_stop" | "skip_if" | "verify") && child.is_string()
+                    {
                         found.push(here.clone());
                     }
                     walk(child, &here, found);
@@ -2668,6 +2706,21 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// positive on a value the author knows is fine is a warning they can ignore,
 /// whereas a false negative is a leaked token in version control. Recognises the
 /// prefixed forms real providers use, a JWT, and a URL with inline credentials.
+/// [`looks_like_a_credential`], applied to the value **and to each whitespace-
+/// separated token in it**.
+///
+/// For a header value the token form is the normal one: `Authorization` is
+/// `Bearer <token>` or `Basic <base64>`, so a whole-string check — which is what
+/// the plain detector does, by design, since an `env` value is the credential
+/// itself — sees `Bearer ghp_…`, matches nothing, and reports clean. That made the
+/// first version of the proxy lint silently useless on the single case it exists
+/// for. Kept separate rather than widening the plain detector, because broadening
+/// the `env` rule to any token in a sentence would invent false positives in a rule
+/// that already ships.
+fn looks_like_a_credential_anywhere(value: &str) -> bool {
+    looks_like_a_credential(value) || value.split_whitespace().any(looks_like_a_credential)
+}
+
 fn looks_like_a_credential(value: &str) -> bool {
     let v = value.trim();
     // Provider-prefixed tokens. These are *shapes*, not a vendor table — veld
@@ -2774,6 +2827,53 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
 
         refs
+    }
+
+    // A credential-shaped `proxy` header value.
+    //
+    // `proxy.*.set` values are plain strings by design — they are also the wire
+    // payload sent to Caddy and to the public gateway, so they cannot carry a
+    // `secret` flag or a value source. That makes shape the only signal available,
+    // and it is worth acting on: an `Authorization` header is one of the most
+    // natural things to set here, and a resolved header value travels verbatim to
+    // every joiner of a share and to the gateway. Scrubbing it from the manifest is
+    // not an option — the remote proxy needs the value to apply the rule — so the
+    // honest mitigation is to refuse the shape at authoring time.
+    {
+        let mut check_rules = |location: String, rules: Option<&HeaderRules>| {
+            for (header, value) in rules.map(|r| &r.set).into_iter().flatten() {
+                if looks_like_a_credential_anywhere(value) {
+                    out.push(Finding::warning(
+                        "credential-shaped-proxy-header",
+                        format!("{location}.set.{header}"),
+                        format!(
+                            "the value set for `{header}` looks like a real credential. \
+                             A proxy header value cannot be marked `secret` or read from \
+                             a source — it is part of the route sent to Caddy and, when \
+                             the node is shared, to the public gateway and every joiner, \
+                             verbatim. Treat it as published: use a credential scoped to \
+                             local development, and never a production one"
+                        ),
+                    ));
+                }
+            }
+        };
+        let mut check_proxy = |location: String, proxy: Option<&ProxyConfig>| {
+            if let Some(p) = proxy {
+                check_rules(format!("{location}.request"), p.request.as_ref());
+                check_rules(format!("{location}.response"), p.response.as_ref());
+            }
+        };
+        check_proxy("proxy".to_owned(), config.proxy.as_ref());
+        for (node_name, node) in &config.nodes {
+            check_proxy(format!("nodes.{node_name}.proxy"), node.proxy.as_ref());
+            for (variant_name, variant) in &node.variants {
+                check_proxy(
+                    format!("nodes.{node_name}.variants.{variant_name}.proxy"),
+                    variant.proxy.as_ref(),
+                );
+            }
+        }
     }
 
     for (node_name, node) in &config.nodes {
@@ -2969,7 +3069,7 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
 }
 
 /// `${<prefix><name>}` references in `s`.
-fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
+pub(crate) fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
     let needle = format!("${{{prefix}");
     let mut out = Vec::new();
     let mut rest = s;
@@ -2988,7 +3088,7 @@ fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
 
 /// Bare `$NAME` / `${NAME}` shell references, which is how a `shell` command
 /// would reach an env value directly.
-fn env_refs(s: &str) -> Vec<String> {
+pub(crate) fn env_refs(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -3228,7 +3328,8 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             check_cmd(&base, variant.cmd.spec(), &ports, out);
             check_cmd(
                 &format!("{base}.on_stop"),
-                variant.on_stop.clone(),
+                // `Some(None)` is an explicit erase — nothing to check.
+                variant.on_stop.clone().flatten(),
                 &ports,
                 out,
             );
@@ -3778,7 +3879,7 @@ mod tests {
         let config = parse_config(&path).expect("structurally valid config must parse");
         assert_eq!(
             config.nodes["a"].variants["local"].on_stop,
-            Some(CommandSpec::Shell("echo bye".to_owned())),
+            Some(Some(CommandSpec::Shell("echo bye".to_owned()))),
             "the on_stop hook stop needs must still be readable"
         );
 
@@ -4275,6 +4376,58 @@ mod tests {
         assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
     }
 
+    /// A credential-shaped `proxy` header value warns at every level.
+    ///
+    /// The `Bearer <token>` case is the one that matters and the one the first
+    /// version of this rule missed: the plain detector is whole-string, so it saw
+    /// `Bearer ghp_…` and reported clean — a lint that existed and did nothing on
+    /// the only header anyone actually sets a credential in.
+    #[test]
+    fn credential_shaped_proxy_headers_warn_at_every_level() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "proxy": { "request": { "set": {
+                    "Authorization": "Bearer ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+                    "X-Env": "production"
+                }}},
+                "nodes": { "a": {
+                    "proxy": { "request": { "set": { "X-Node": "sk-abcdefghijklmnopqrstuvwxyz" } } },
+                    "variants": { "dev": {
+                        "type": "command", "argv": ["run"],
+                        "proxy": { "response": { "set": {
+                            "X-V": "Basic eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.abc"
+                        }}}
+                    }}
+                }}
+            }"#,
+        );
+        let hits: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "credential-shaped-proxy-header")
+            .map(|x| x.location.as_str())
+            .collect();
+        for expected in [
+            "proxy.request.set.Authorization",
+            "nodes.a.proxy.request.set.X-Node",
+            "nodes.a.variants.dev.proxy.response.set.X-V",
+        ] {
+            assert!(hits.contains(&expected), "missing {expected}: {hits:?}");
+        }
+        // A plain value must stay quiet, or the rule is noise nobody can act on.
+        assert!(
+            !hits.iter().any(|h| h.ends_with("X-Env")),
+            "false positive on a non-credential value: {hits:?}"
+        );
+        // Warning, not error: the value may be a deliberate local-only credential,
+        // and this must not block `veld start`.
+        assert!(
+            f.iter()
+                .filter(|x| x.rule == "credential-shaped-proxy-header")
+                .all(|x| x.severity == Severity::Warning)
+        );
+    }
+
     /// `${nodes.<other>.KEY}` is judged by **that** node's declaration.
     ///
     /// The rule used to take the trailing field of a cross-node reference and match
@@ -4625,7 +4778,7 @@ mod tests {
         );
         assert_eq!(
             cfg.nodes["api"].variants["dev"].on_stop,
-            Some(CommandSpec::Shell("docker rm -f x".into()))
+            Some(Some(CommandSpec::Shell("docker rm -f x".into())))
         );
         assert!(!validate(&cfg).iter().any(|f| f.severity == Severity::Error));
     }
@@ -5514,6 +5667,41 @@ mod tests {
         assert_eq!(r.step_type, StepType::Command);
         assert_eq!(r.command, Some(CommandSpec::Argv(vec!["own".into()])));
         assert_eq!(r.on_stop, Some(CommandSpec::Shell("own-stop".into())));
+    }
+
+    /// `"on_stop": null` on a variant **erases** the node's hook.
+    ///
+    /// It used to inherit it — and then *run* it, because a plain `Option` cannot
+    /// tell an explicit `null` from an absent key. An author disabling a teardown
+    /// command got the command. This asserts the three-way distinction, including
+    /// that absent still inherits, since the erase must not be achieved by breaking
+    /// inheritance for everyone.
+    #[test]
+    fn explicit_null_on_stop_erases_the_node_hook() {
+        let config = r#"{"schemaVersion":"3","name":"t","nodes":{"a":{
+            "type":"command",
+            "argv":["run"],
+            "on_stop":{"shell":"node-stop"},
+            "variants":{
+              "absent":{},
+              "erased":{"on_stop":null},
+              "own":{"on_stop":{"shell":"own-stop"}}
+            }
+        }}}"#;
+        assert_eq!(
+            resolve(config, "a", "absent").on_stop,
+            Some(CommandSpec::Shell("node-stop".into())),
+            "an absent on_stop must still inherit the node's hook"
+        );
+        assert_eq!(
+            resolve(config, "a", "erased").on_stop,
+            None,
+            "an explicit null must erase the node's hook, not inherit it"
+        );
+        assert_eq!(
+            resolve(config, "a", "own").on_stop,
+            Some(CommandSpec::Shell("own-stop".into()))
+        );
     }
 
     /// **Merge table: `proxy` is pre-existing and must not change.** Its union

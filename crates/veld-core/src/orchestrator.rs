@@ -1997,6 +1997,44 @@ async fn debug_log_free(writer: &Option<LogWriter>, message: &str) {
     }
 }
 
+/// Does this synthetic-output template read anything sensitive?
+///
+/// Reuses `config`'s reference parsers rather than re-scanning for `${...}` here:
+/// two implementations of "what does this string reference" drift, and the one that
+/// drifts silently is the one deciding whether a credential gets masked.
+///
+/// Deliberately conservative — an unrecognised reference form is treated as *not*
+/// tainted, so this narrows an existing leak rather than pretending to close every
+/// path. `sensitive` is matched against both the bare key (how a `shell` template
+/// reads an env value, `$KEY`) and the `${output.KEY}` / `${nodes.N.KEY}` forms.
+fn template_is_tainted(tmpl: &str, sensitive: &[String], secret_vars: &[String]) -> bool {
+    let is_sensitive = |name: &str| sensitive.iter().any(|s| s == name);
+
+    if crate::config::env_refs(tmpl)
+        .iter()
+        .any(|n| is_sensitive(n))
+    {
+        return true;
+    }
+    if crate::config::builtin_refs_in(tmpl, "output.")
+        .iter()
+        .any(|n| is_sensitive(n))
+    {
+        return true;
+    }
+    // `${nodes.<node>.KEY}` — the trailing field is the output key.
+    if crate::config::builtin_refs_in(tmpl, "nodes.")
+        .iter()
+        .filter_map(|r| r.rsplit('.').next().map(str::to_owned))
+        .any(|n| is_sensitive(&n))
+    {
+        return true;
+    }
+    crate::config::builtin_refs_in(tmpl, "vars.")
+        .iter()
+        .any(|n| secret_vars.iter().any(|v| v == n))
+}
+
 /// Build a readiness probe attempt notifier that sends progress events.
 fn make_attempt_notifier(
     tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
@@ -2339,11 +2377,34 @@ async fn execute_start_server_isolated(
     env.insert("VELD_URL".to_owned(), https_url.clone());
 
     // Resolve synthetic outputs.
+    //
+    // Sensitivity has to travel with the value. A synthetic output is a *template*,
+    // so `{"DSN": "postgres://u:${SECRET_PW}@h/db"}` resolves a value that is every
+    // bit as sensitive as `SECRET_PW` — but the key `DSN` was never declared
+    // sensitive, so it was persisted and displayed in the clear. Marking a secret
+    // and then handing it to a template that launders it is worse than not offering
+    // the flag: the author believes it is covered.
+    //
+    // The taint check runs *after* `sensitive_keys` already holds the declared
+    // `sensitive_outputs` and the secret env keys, so both are in scope here.
     if let Some(Outputs::Synthetic(ref map)) = resolved.outputs {
+        let secret_vars: Vec<String> = ctx
+            .config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut tainted: Vec<String> = Vec::new();
         for (okey, tmpl) in map {
             let val = crate::variables::interpolate(tmpl, var_ctx)?;
+            if template_is_tainted(tmpl, &node_state.sensitive_keys, &secret_vars) {
+                tainted.push(okey.clone());
+            }
             node_state.outputs.insert(okey.clone(), val);
         }
+        node_state.sensitive_keys.extend(tainted);
     }
 
     // Start the process.
@@ -3305,5 +3366,48 @@ mod tests {
             reloaded.execution_order.contains(&key),
             "terminal node must be appended to execution_order for teardown"
         );
+    }
+
+    /// A synthetic output built from a sensitive value is itself sensitive.
+    ///
+    /// This predicate fails *silently* if it breaks — a wrong `false` means a
+    /// credential is persisted and displayed in the clear, with nothing in the
+    /// output to suggest anything went wrong. So each reference form is pinned,
+    /// along with the negative case, since marking everything sensitive would be
+    /// an equally silent way to make masking meaningless.
+    #[test]
+    fn synthetic_output_inherits_sensitivity_from_what_it_reads() {
+        let sensitive = vec!["DB_PASSWORD".to_owned(), "TOKEN".to_owned()];
+        let secret_vars = vec!["signing_key".to_owned()];
+
+        for tainted in [
+            // A `shell`-style env read — the common case for a DSN template.
+            "postgres://user:${DB_PASSWORD}@localhost/app",
+            "postgres://user:$DB_PASSWORD@localhost/app",
+            // This node's own declared-sensitive output.
+            "Bearer ${output.TOKEN}",
+            // Another node's.
+            "Bearer ${nodes.vault.TOKEN}",
+            // A secret var.
+            "${vars.signing_key}",
+        ] {
+            assert!(
+                template_is_tainted(tainted, &sensitive, &secret_vars),
+                "must be tainted: {tainted}"
+            );
+        }
+
+        for clean in [
+            "http://localhost:${veld.port}/health",
+            "${output.PUBLIC_URL}",
+            "${nodes.api.url}",
+            "${vars.region}",
+            "no references at all",
+        ] {
+            assert!(
+                !template_is_tainted(clean, &sensitive, &secret_vars),
+                "must not be tainted: {clean}"
+            );
+        }
     }
 }

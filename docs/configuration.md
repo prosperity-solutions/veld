@@ -825,6 +825,19 @@ This is especially useful for `command` nodes that provision external resources 
 }
 ```
 
+Declared at node level, `on_stop` applies to every variant. A variant replaces it by
+declaring its own, and **disables it with `"on_stop": null`**:
+
+```jsonc
+"db": {
+  "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
+  "variants": {
+    "docker":   { /* inherits the hook */ },
+    "external": { "on_stop": null }   // nothing to tear down — and nothing runs
+  }
+}
+```
+
 The `on_stop` command receives the same variable context that was available during start:
 - All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, `${veld.node}`, etc. — see [Built-in Variables](#built-in-variables-veld))
 - This node's outputs as `${output.KEY}`, and any node's as `${nodes.<node>.KEY}` (including the automatic `exit_code` of a `command` node)
@@ -1116,7 +1129,9 @@ deliberately not unified.
 | `share` | Replace wholesale | `"share": null` |
 | `outputs` | Replace wholesale | `"outputs": null` |
 | `proxy` | `remove` lists **union** case-insensitively, `set` maps override per key; a header in both is resolved in favour of `set` | — |
-| `type`, `cwd`, `argv`, `shell`, `on_stop`, `skip_if`, `url_template` | Replace | — |
+| `type`, `cwd`, `argv`, `shell`, `url_template` | Replace | — |
+| `on_stop` | Replace | `"on_stop": null` |
+| `skip_if` | *not a node-level field* — declare it per variant | — |
 
 Two of these are worth the words:
 

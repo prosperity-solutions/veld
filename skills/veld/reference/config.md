@@ -111,7 +111,9 @@ Declare any variant field once on the node; any variant overrides it.
 | `features` | per field, variant wins | — |
 | `probes.readiness`, `probes.liveness` | **replace the whole probe object** | `"liveness": null` |
 | `share`, `outputs` | replace wholesale | `"share": null` |
-| `type`, `cwd`, `argv`, `shell`, `on_stop`, `skip_if`, `url_template` | replace | — |
+| `type`, `cwd`, `argv`, `shell`, `url_template` | replace | — |
+| `on_stop` | replace | `"on_stop": null` |
+| `skip_if` | *not a node-level field* — per variant only | — |
 | `proxy` | `remove` unions, `set` overrides per key | — |
 
 `probes` replaces per probe on purpose: field-wise merging would let a variant
@@ -158,7 +160,9 @@ or `files`.
 
 `${veld.port}` stays the primary — the one named `http`, or the sole entry. No
 `ports` map means one allocated port, exactly as before. A delivered file is
-created with its mode (default `0600`), never chmod-ed afterwards.
+created with its mode (default `0600`), never chmod-ed afterwards. It is **not**
+removed when the run ends — git-ignore the path. veld warns at start if a `secret`
+file is not ignored.
 
 ## Setup & Teardown
 

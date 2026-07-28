@@ -258,9 +258,48 @@ pub async fn deliver_files(
             path: path.display().to_string(),
             source,
         })?;
+        if delivery.value.secret {
+            warn_if_not_git_ignored(project_root, &path, &at);
+        }
         written.push(path);
     }
     Ok(written)
+}
+
+/// Warn when a delivered secret lands on a path git would commit.
+///
+/// The file is deliberately **not** removed after the run. Deleting a path the
+/// author declared is a worse default than leaving it: some programs re-read the
+/// credential across restarts, the path may be one the author also manages, and a
+/// teardown that removes user files fails badly when it guesses wrong. The real
+/// hazard is not the file existing — it is the file being committed. So veld says
+/// so, once, at the moment it creates it, and leaves the file alone.
+///
+/// Failure here is never fatal and never noisy: no git, no repo, or any other
+/// error means no opinion.
+fn warn_if_not_git_ignored(project_root: &std::path::Path, path: &std::path::Path, at: &str) {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_root)
+        .arg("check-ignore")
+        .arg("--quiet")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    // Exit 0 = ignored (good), 1 = not ignored, anything else = not a git repo or
+    // git is unavailable, which is not something to have an opinion about.
+    if let Ok(status) = output
+        && status.code() == Some(1)
+    {
+        tracing::warn!(
+            "{at}: delivered a `secret` value to {}, which git does not ignore — \
+             add it to .gitignore so the credential is not committed. veld does not \
+             remove the file after the run",
+            path.display()
+        );
+    }
 }
 
 /// Resolve every project `var` once per run.

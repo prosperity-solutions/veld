@@ -386,6 +386,27 @@ fn merge(
     for (file_index, doc) in docs {
         let here = |idx: &usize| files[*idx].relative.display().to_string();
 
+        // Everything below merges per key, so each entry has an owning file. The
+        // project-level singletons do not: they are read from `root` above, which
+        // silently discarded any copy in an included file. Say so instead.
+        if *file_index != 0 {
+            for (key, present) in [
+                ("url_template", doc.url_template.is_some()),
+                ("features", doc.features.is_some()),
+                ("proxy", doc.proxy.is_some()),
+                ("sharing", doc.sharing.is_some()),
+                ("client_log_levels", doc.client_log_levels.is_some()),
+                ("name", doc.name.is_some()),
+            ] {
+                if present {
+                    findings.push(crate::config::Finding::root_only_key(
+                        key,
+                        &here(file_index),
+                    ));
+                }
+            }
+        }
+
         for (node_name, node) in doc.nodes.iter().flatten() {
             if let Some(previous) = node_origin.get(node_name) {
                 // Both files named, because "which one wins" is not a question
