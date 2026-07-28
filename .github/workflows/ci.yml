@@ -246,6 +246,39 @@ jobs:
           ../target/debug/veld nodes
           ../target/debug/veld nodes --json
           ../target/debug/veld graph frontend:local
+          ../target/debug/veld config --files
+          # The issue's whole point for `veld lint` is CI. A fixture config that
+          # does not pass its own linter is not a fixture.
+          ../target/debug/veld lint
+          ../target/debug/veld lint --json
+
+      - name: Lint every config in the repo
+        run: |
+          set -e
+          # `veld lint` exits 1 on any error-severity finding, so this gates the
+          # repo's own configs against every rule in `config::validate`.
+          for cfg in $(git ls-files '*veld.json' | grep -v node_modules); do
+            dir=$(dirname "$cfg")
+            echo "--- $cfg"
+            (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" lint)
+          done
+
+      - name: Verify a v3 config round-trips through migrate
+        run: |
+          set -e
+          work=$(mktemp -d)
+          cp testproject/veld.json "$work/veld.json"
+          cd "$work"
+          # Dry run must not touch the file …
+          before=$(sha256sum veld.json | cut -d' ' -f1)
+          "$GITHUB_WORKSPACE/target/debug/veld" config --migrate > /dev/null
+          after=$(sha256sum veld.json | cut -d' ' -f1)
+          [ "$before" = "$after" ] || { echo "--migrate wrote without --write"; exit 1; }
+          # … and the written result must load and lint clean.
+          "$GITHUB_WORKSPACE/target/debug/veld" config --migrate --write > /dev/null
+          "$GITHUB_WORKSPACE/target/debug/veld" lint
+          grep -q '"schemaVersion": "3"' veld.json
+          echo "migrate round-trip verified."
 
       - name: Verify setup subcommands exist
         run: |

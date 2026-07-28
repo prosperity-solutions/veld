@@ -315,7 +315,9 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `$schema` | string | No | JSON Schema URL for editor autocompletion |
-| `schemaVersion` | string | Yes | `"1"` or `"2"` (use `"2"` for new projects) |
+| `schemaVersion` | string | Yes (root file only) | `"1"`, `"2"`, or `"3"`. Use `"3"` for new projects. v1/v2 keep working unchanged — there is no flag day |
+| `include` | string[] | No | v3: globs of further config files, relative to the root file. Splits a large config across per-directory files. A node is defined in exactly one file |
+| `vars` | object | No | v3: one definition point per value, referenced as `${vars.name}`. A scalar or a single value source — never a config fragment |
 | `name` | string | Yes | Project name (used in URLs) |
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |

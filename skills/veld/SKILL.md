@@ -247,15 +247,33 @@ are the operator's domain setup.
 
 ## Editing veld.json
 
-For the full config schema, variables, and node types, see [reference/config.md](reference/config.md).
+For the full config schema, variables, and node types, see [reference/config.md](reference/config.md) — **read its "Authoring principles" section first.**
 
-Quick reference for the two node types:
+The short version, because the wrong instinct here is expensive:
+
+- **Deduplicate values, never structure.** Which keys a node has stays written in
+  that node. `rg <ENV_VAR_NAME>` must still find the line that sets it.
+- **No inheritance, no mixins, no `extends`, no templates, no loops, no
+  conditionals.** Do not reach for patterns from other config systems. If you want
+  one, you want a node-level default or a `var`.
+- **Prefer `argv` over `shell`.** `argv` is spawned directly, so an interpolated
+  value can never change the argument count.
+- **A secret is a pointer plus a flag, never custody** — a value source plus
+  `secret: true`, delivered via the environment or `files`, never a command line.
+- **Run `veld lint` after editing.** It reports every problem at once; `veld start`
+  refuses on the same errors.
+
+Comments and trailing commas are legal in every config file. Editors need
+`"files.associations": {"veld.json": "jsonc"}` to stop flagging them.
+
+Quick reference for the two node types (`schemaVersion: "3"` form; in v1/v2 the
+command key is `command`, a shell string):
 
 **`start_server`** — long-running process. Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or legacy `health_check`).
-```json
+```jsonc
 {
   "type": "start_server",
-  "command": "npm run dev -- --port ${veld.port}",
+  "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
   "probes": {
     "readiness": { "type": "http", "path": "/health" },
     "liveness": { "type": "http", "path": "/health", "interval_ms": 5000 }
@@ -266,14 +284,29 @@ Quick reference for the two node types:
 ```
 
 **`command`** — run-to-completion. Emits outputs via `$VELD_OUTPUT_FILE`. Supports liveness probes for long-lived resources (e.g., SSH tunnels).
-```json
+```jsonc
 {
   "type": "command",
   "script": "./scripts/setup.sh",
   "outputs": ["DATABASE_URL"],
-  "skip_if": "./scripts/check.sh",
+  "skip_if": { "shell": "./scripts/check.sh" },
   "probes": {
-    "liveness": { "type": "command", "command": "pg_isready", "interval_ms": 5000 }
+    "liveness": { "type": "command", "argv": ["pg_isready"], "interval_ms": 5000 }
+  }
+}
+```
+
+**Node-level defaults** — declare a field once for every variant of a node
+(`schemaVersion: "3"`). Any variant overrides it; `"KEY": null` erases an inherited
+map entry. See the merge table in [reference/config.md](reference/config.md#node-level-defaults) — the strategies differ per field.
+```jsonc
+{
+  "type": "start_server",
+  "probes": { "readiness": { "type": "http", "path": "/healthz" } },
+  "env": { "LOG_LEVEL": "info" },
+  "variants": {
+    "dev":   { "argv": ["node", "server.js"] },
+    "debug": { "argv": ["node", "--inspect", "server.js"], "env": { "LOG_LEVEL": "debug" } }
   }
 }
 ```
@@ -374,10 +407,18 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **Outputs are volatile** — after a recovery restart, outputs like `DATABASE_URL` may change. Never cache outputs long-term; re-read with `veld status --outputs` when needed
 - **`depends_on` needs the variant** — write `"backend": "local"`, not just `"backend"`
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
-- **`outputs` shape differs by type** — object (`{"KEY": "template"}`) for `start_server`, array (`["KEY"]`) for `command`
+- **`outputs` shape** — a map (`{"KEY": "template"}`) publishes computed values, an array (`["KEY"]`) declares names captured from the node's own output. Both work on both node types now; on a `command` node the map is interpolated *after* the command runs, with its captured outputs in scope
+- **`veld lint` is the fast feedback loop** — it reports every semantic problem at once and exits 1 on any error. `veld start` refuses on the same errors, but only one at a time
+- **`command` is gone in `schemaVersion: "3"`** — use `argv` (array, spawned directly) or `shell` (string, via `sh -c`), exactly one. A v3 config containing `command` fails to load. `veld config --migrate` converts (dry run; `--write` applies). v1/v2 keep working unchanged
+- **`veld.*` is a closed set** — node outputs are `${output.KEY}` / `${nodes.<node>.KEY}`, never `${veld.KEY}`. This changed: `${veld.<OUTPUT>}` used to work inside `on_stop` and now fails, which would silently skip the teardown hook — `veld lint` catches it
+- **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
+- **Relative paths resolve from the project root**, never from the file that declares them, even in an included file
+- **`depends_on` names must be literal** — no `${...}` in either the node or the variant name; the graph is read before variables exist
+- **A `secret` value must not appear in `argv`/`shell`** — a command line lands in the process table. Deliver it via `env` or `files`
 - **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port
 - **`--oneshot` needs a `command` node** — the terminal node must run to completion; a `start_server` is rejected. Its exit code becomes veld's exit code; only its logs stream to stdout unless `--all-logs`
-- **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Only project-level variables (`${veld.name}`, `${veld.root}`, `${veld.run}`) are available, not `${veld.port}` or `${nodes.*}`
+- **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Project-level variables only (`${veld.name}`, `${veld.root}`, `${veld.run}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}`, `${vars.*}`) — not `${veld.port}`, `${veld.node}`, or `${nodes.*}`
+- **`hooks` and `ui` are reserved** — they parse and are stored but are **not executed** by this version; `veld lint` emits a notice saying so. Every *other* unknown top-level key is still a hard error
 - **No default header stripping** — Veld no longer strips `Origin` by default (it used to, for dev-server WS HMR). `Origin` now passes through the local proxy and is rewritten coherently by the gateway. If a Next.js dev server rejects WS HMR, set `allowedDevOrigins` in `next.config.js`; the escape hatch is `"proxy": { "request": { "remove": ["Origin"] } }`. Proxy header rules never apply to direct peer shares (`veld share` without `--web`)
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config
 - **Commands run from veld.json directory**, not your CWD — use `cwd` field if a node needs a different working directory

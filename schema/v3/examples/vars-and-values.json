@@ -1,0 +1,33 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "values",
+  "vars": {
+    "remote_api": "https://api.example.com",
+    "health_path": "/healthz",
+    "db_password": { "value": "devpassword", "secret": true },
+    "db_url": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+  },
+  "env": {
+    "REGION": "eu-central-1",
+    "PG_PASSWORD": { "value": "devpassword", "secret": true },
+    "GITHUB_TOKEN": { "env": "GITHUB_TOKEN", "secret": true },
+    "SIGNING_KEY": { "file": ".secrets/signing.key", "secret": true },
+    "DATABASE_URL": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+  },
+  "nodes": {
+    "api": {
+      "default_variant": "dev",
+      "type": "start_server",
+      "probes": { "readiness": { "type": "http", "path": "${vars.health_path}" } },
+      "env": { "API_URL": "${vars.remote_api}" },
+      "files": {
+        ".secrets/client.pem": { "env": "CLIENT_CERT", "secret": true, "mode": "0400" }
+      },
+      "variants": {
+        "dev": { "argv": ["node", "server.js"] },
+        "ci": { "shell": "node server.js 2>&1 | tee ci.log", "env": { "API_URL": null } }
+      }
+    }
+  }
+}

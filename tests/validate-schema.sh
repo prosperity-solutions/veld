@@ -12,7 +12,81 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 SCHEMA_V1="$REPO_ROOT/schema/v1/veld.schema.json"
 SCHEMA_V2="$REPO_ROOT/schema/v2/veld.schema.json"
+SCHEMA_V3="$REPO_ROOT/schema/v3/veld.schema.json"
 CHECK="python3 -m check_jsonschema"
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+# veld accepts JSONC — comments and trailing commas — in every config file, but
+# `check-jsonschema` and `json.load` are strict JSON parsers. Strip comments the
+# same way veld does (blanking bytes in place, so positions are preserved) before
+# handing a config to either of them; otherwise the first comment anyone writes
+# fails this job for a reason that has nothing to do with the schema.
+strip_jsonc() {
+  python3 - "$1" <<'PYEOF'
+import sys
+
+src = open(sys.argv[1], "rb").read()
+out = bytearray(src)
+i, in_string, escaped = 0, False, False
+while i < len(out):
+    b = out[i]
+    if in_string:
+        if escaped:
+            escaped = False
+        elif b == 0x5C:
+            escaped = True
+        elif b == 0x22:
+            in_string = False
+        i += 1
+        continue
+    if b == 0x22:
+        in_string = True
+        i += 1
+    elif b == 0x2F and i + 1 < len(out) and out[i + 1] == 0x2F:
+        while i < len(out) and out[i] != 0x0A:
+            out[i] = 0x20
+            i += 1
+    elif b == 0x2F and i + 1 < len(out) and out[i + 1] == 0x2A:
+        out[i] = out[i + 1] = 0x20
+        i += 2
+        while i < len(out):
+            if out[i] == 0x2A and i + 1 < len(out) and out[i + 1] == 0x2F:
+                out[i] = out[i + 1] = 0x20
+                i += 2
+                break
+            if out[i] != 0x0A:
+                out[i] = 0x20
+            i += 1
+    else:
+        i += 1
+
+# Trailing commas: a comma followed only by whitespace before } or ].
+i, in_string, escaped = 0, False, False
+while i < len(out):
+    b = out[i]
+    if in_string:
+        if escaped:
+            escaped = False
+        elif b == 0x5C:
+            escaped = True
+        elif b == 0x22:
+            in_string = False
+        i += 1
+        continue
+    if b == 0x22:
+        in_string = True
+    elif b == 0x2C:
+        j = i + 1
+        while j < len(out) and out[j] in b" \t\r\n":
+            j += 1
+        if j < len(out) and out[j] in b"}]":
+            out[i] = 0x20
+    i += 1
+
+sys.stdout.write(out.decode("utf-8"))
+PYEOF
+}
 
 if [[ "${1:-}" == "--install" ]]; then
   pip3 install --quiet check-jsonschema
@@ -48,6 +122,8 @@ run_check "schema/v1/veld.schema.json is valid" \
   $CHECK --check-metaschema "$SCHEMA_V1"
 run_check "schema/v2/veld.schema.json is valid" \
   $CHECK --check-metaschema "$SCHEMA_V2"
+run_check "schema/v3/veld.schema.json is valid" \
+  $CHECK --check-metaschema "$SCHEMA_V3"
 
 echo
 echo "2) Instance validation: checking project configs against their schema version"
@@ -56,20 +132,37 @@ echo "2) Instance validation: checking project configs against their schema vers
 while IFS= read -r config; do
   rel="${config#"$REPO_ROOT/"}"
 
+  # Comments are legal in a veld config; the validators below are not.
+  plain="$WORK/$(echo "$rel" | tr '/' '_')"
+  strip_jsonc "$config" > "$plain"
+
   # Pick the schema based on the file's schemaVersion field.
-  version=$(python3 -c "import json; print(json.load(open('$config')).get('schemaVersion', '1'))" 2>/dev/null || echo "1")
-  if [[ "$version" == "2" ]]; then
-    schema="$SCHEMA_V2"
-  else
-    schema="$SCHEMA_V1"
-  fi
+  version=$(python3 -c "import json; print(json.load(open('$plain')).get('schemaVersion', '1'))" 2>/dev/null || echo "1")
+  case "$version" in
+    3) schema="$SCHEMA_V3" ;;
+    2) schema="$SCHEMA_V2" ;;
+    *) schema="$SCHEMA_V1" ;;
+  esac
 
   run_check "$rel (v$version)" \
-    $CHECK --schemafile "$schema" "$config"
+    $CHECK --schemafile "$schema" "$plain"
 done < <(find "$REPO_ROOT" -name "veld.json" \
   -not -path "*/node_modules/*" \
   -not -path "*/target/*" \
   -not -path "*/.git/*" | sort)
+
+echo
+echo "3) Schema drift gate: every documented v3 example validates against the schema"
+echo
+# The JSON Schema is hand-maintained with no compiler check tying it to the Rust
+# types, so it drifts silently. These examples are the gate: this job validates
+# them against the schema, and `schema_v3_examples_round_trip` in veld-core
+# deserializes the same files with serde. A change to either side that the other
+# does not know about fails one of the two.
+for example in "$REPO_ROOT"/schema/v3/examples/*.json; do
+  run_check "$(basename "$example")" \
+    $CHECK --schemafile "$SCHEMA_V3" "$example"
+done
 
 echo
 echo "=== Results: $PASS passed, $FAIL failed ==="

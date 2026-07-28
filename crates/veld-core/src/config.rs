@@ -3708,6 +3708,82 @@ mod tests {
         );
     }
 
+    // -- Schema drift gate -----------------------------------------------------
+
+    /// The other half of the schema drift gate.
+    ///
+    /// `schema/v3/veld.schema.json` is hand-maintained with no compiler check tying
+    /// it to these Rust types, so it drifts silently — and a schema that has drifted
+    /// is worse than none, because the editor confidently reports the wrong thing.
+    ///
+    /// `schema/v3/examples/*.json` are the pin. This test deserializes every one of
+    /// them with serde; `tests/validate-schema.sh` validates the same files against
+    /// the schema in CI. A change to the types that the schema does not know about
+    /// fails there; a change to the schema that the types do not accept fails here.
+    /// Either way, adding a field means touching both.
+    #[test]
+    fn schema_v3_examples_round_trip() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root")
+            .join("schema/v3/examples");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{} must exist: {e}", dir.display()))
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "the drift gate is only a gate if there are examples in {}",
+            dir.display()
+        );
+
+        for entry in entries {
+            let path = entry.path();
+            let label = path.file_name().unwrap().to_string_lossy().into_owned();
+
+            // The serde side: it must load…
+            let cfg =
+                parse_config(&path).unwrap_or_else(|e| panic!("{label} must deserialize: {e}"));
+            assert_eq!(cfg.schema_version, "3", "{label}");
+
+            // …every node must resolve…
+            for (node, node_cfg) in &cfg.nodes {
+                for variant in node_cfg.variants.keys() {
+                    cfg.resolved(node, variant)
+                        .unwrap_or_else(|| panic!("{label}: {node}:{variant} must resolve"));
+                }
+            }
+
+            // …it must be semantically valid, since a documented example that
+            // `veld start` would refuse is not an example…
+            let findings = validate(&cfg);
+            let errors: Vec<&Finding> = findings
+                .iter()
+                .filter(|f| f.severity == Severity::Error)
+                .collect();
+            assert!(errors.is_empty(), "{label} must be valid, got {errors:#?}");
+
+            // …and it must survive a serialize/deserialize round-trip, so nothing in
+            // the document is silently dropped on the way through.
+            let reserialized = serde_json::to_string(&cfg).expect("serializes");
+            let round: VeldConfig = serde_json::from_str(&reserialized)
+                .unwrap_or_else(|e| panic!("{label} must round-trip: {e}"));
+            assert_eq!(round.nodes.len(), cfg.nodes.len(), "{label}");
+            assert_eq!(
+                round.hooks, cfg.hooks,
+                "{label}: reserved keys must survive"
+            );
+            assert_eq!(round.ui, cfg.ui, "{label}: reserved keys must survive");
+            assert_eq!(
+                round.vars.as_ref().map(|v| v.len()),
+                cfg.vars.as_ref().map(|v| v.len()),
+                "{label}"
+            );
+        }
+    }
+
     // -- F8: reserved namespaces ----------------------------------------------
 
     /// `hooks` and `ui` parse, round-trip, and produce the not-executed notice.

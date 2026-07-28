@@ -1,0 +1,14 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "example-monorepo",
+  "include": [
+    "veld.d/*.jsonc",
+    "apps/*/veld.node.json",
+    "services/*/veld.node.json"
+  ],
+  "presets": {
+    "core": ["api:dev", "web:dev"],
+    "ci": ["@core", "e2e:dev"]
+  }
+}
