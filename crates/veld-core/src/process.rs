@@ -176,6 +176,34 @@ async fn start_server_foreground(
     Ok(ServerHandle::Foreground(child))
 }
 
+/// Single-quote a string for safe inclusion in a `sh -c` script.
+fn sq(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+/// The argv of the log-sink stage of the detached pipeline: veld's own binary
+/// re-invoked as `veld _log`, which timestamps each line into the database.
+fn log_sink_argv(log_target: &LogTarget) -> Vec<String> {
+    let veld_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
+        .to_string_lossy()
+        .into_owned();
+    vec![
+        veld_bin,
+        "_log".to_owned(),
+        "--project-root".to_owned(),
+        log_target.project_root.to_string_lossy().into_owned(),
+        "--run".to_owned(),
+        log_target.run_name.clone(),
+        "--run-id".to_owned(),
+        log_target.run_id.clone(),
+        "--node".to_owned(),
+        log_target.node.clone(),
+        "--variant".to_owned(),
+        log_target.variant.clone(),
+    ]
+}
+
 /// Detached mode: spawn via std::process::Command in its own process group.
 ///
 /// Using `std::process::Command` (not tokio) avoids registering the child
@@ -194,21 +222,31 @@ fn start_server_detached(
     env: &HashMap<String, String>,
     log_target: &LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
+    spawn_detached(command, working_dir, env, &log_sink_argv(log_target))
+}
+
+/// Spawn the detached pipeline with an explicit log-sink argv.
+///
+/// Split out from [`start_server_detached`] so the RC1 characterization tests
+/// can substitute a stub sink: the real sink is `veld _log`, and a test process
+/// has no veld binary at `current_exe()`. Production always supplies
+/// [`log_sink_argv`]; the pipeline shape, tracked PID, and process-group
+/// leadership are identical either way, which is exactly what those tests pin.
+#[doc(hidden)]
+pub fn spawn_detached(
+    command: &str,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    sink_argv: &[String],
+) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    let sq = |s: &str| s.replace('\'', "'\\''");
-    let veld_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
-        .to_string_lossy()
-        .replace('\'', "'\\''");
-    let wrapper = format!(
-        "{{ {command} ; }} 2>&1 | '{veld_bin}' _log --project-root '{root}' --run '{run}' --run-id '{run_id}' --node '{node}' --variant '{variant}'",
-        root = sq(&log_target.project_root.to_string_lossy()),
-        run = sq(&log_target.run_name),
-        run_id = sq(&log_target.run_id),
-        node = sq(&log_target.node),
-        variant = sq(&log_target.variant),
-    );
+    let sink = sink_argv
+        .iter()
+        .map(|a| format!("'{}'", sq(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let wrapper = format!("{{ {command} ; }} 2>&1 | {sink}");
 
     let child = std::process::Command::new("sh")
         .arg("-c")
@@ -702,6 +740,201 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// RC1 characterization tests
+// ---------------------------------------------------------------------------
+
+/// Characterization tests for the **detached** spawn path — the process
+/// topology every later change must preserve.
+///
+/// These deliberately assert *today's* behaviour rather than a desired one.
+/// The detached wrapper is a shell pipeline by construction
+/// (`sh -c '{ cmd ; } 2>&1 | veld _log …'`), and a great deal of veld depends on
+/// its exact shape: the tracked PID is the pipeline shell and the process-group
+/// leader, so `kill(-pid)` reaps the node *and* the log writer; `is_alive` on
+/// that PID is what `cleanup_dead_runs` and the daemon monitor treat as "the
+/// node is up"; and the daemon's stats sampler walks the parent tree from it.
+///
+/// If a refactor of the spawn path changes any assertion here, the refactor is
+/// wrong — not the test.
+#[cfg(test)]
+mod characterization_tests {
+    use super::*;
+
+    /// Live PIDs in the process group `pgid`, via `ps` (portable across macOS
+    /// and Linux; `sysinfo` does not expose process groups).
+    ///
+    /// Zombies are excluded. In production the CLI exits and the pipeline is
+    /// reparented to init/launchd, which reaps it; under a test the test binary
+    /// *is* the parent, so an exited stage lingers as a zombie that `kill(pid,
+    /// 0)` still reports as alive. That is an artefact of the test harness, not
+    /// of the behaviour under test.
+    fn pids_in_group(pgid: u32) -> Vec<u32> {
+        let out = std::process::Command::new("ps")
+            .args(["-eo", "pid=,pgid=,state="])
+            .output()
+            .expect("ps must be available");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split_whitespace();
+                let pid: u32 = f.next()?.parse().ok()?;
+                let gid: u32 = f.next()?.parse().ok()?;
+                let state = f.next().unwrap_or("");
+                (gid == pgid && !state.starts_with('Z')).then_some(pid)
+            })
+            .collect()
+    }
+
+    fn group_of(pid: u32) -> u32 {
+        use nix::unistd::{Pid, getpgid};
+        getpgid(Some(Pid::from_raw(pid as i32)))
+            .expect("process must still exist")
+            .as_raw() as u32
+    }
+
+    /// Reap the pipeline shell if it has exited, so `is_alive` stops reporting a
+    /// zombie as running. See [`pids_in_group`] for why this is only needed in
+    /// tests: `spawn_detached` deliberately drops the `Child` handle because in
+    /// production the CLI exits and init takes over reaping.
+    fn reap(pid: u32) {
+        use nix::sys::wait::{WaitPidFlag, waitpid};
+        let _ = waitpid(
+            nix::unistd::Pid::from_raw(pid as i32),
+            Some(WaitPidFlag::WNOHANG),
+        );
+    }
+
+    /// Whether the pipeline shell has exited (reaping it first).
+    fn exited(pid: u32) -> bool {
+        reap(pid);
+        !is_alive(pid)
+    }
+
+    /// Poll `cond` until it holds or `secs` elapse. Returns whether it held.
+    async fn eventually(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..(secs * 20) {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        cond()
+    }
+
+    /// A stub log sink: a single binary that drains stdin into a file, standing
+    /// in for `veld _log` (whose binary is not at a test process's
+    /// `current_exe()`). One exec, like the real sink, so the process topology
+    /// matches production.
+    fn sink_argv(path: &Path) -> Vec<String> {
+        vec!["tee".to_owned(), path.to_string_lossy().into_owned()]
+    }
+
+    /// The tracked PID is the pipeline's process-group leader, and killing the
+    /// group reaps both the node process and the log writer. `kill_process`
+    /// signals `-pid`, so this property is what makes `veld stop` complete
+    /// rather than leaving an orphaned log writer holding the pipe.
+    #[tokio::test]
+    async fn tracked_pid_is_group_leader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        let handle = spawn_detached("sleep 30", tmp.path(), &HashMap::new(), &sink_argv(&log))
+            .expect("detached spawn");
+        let pid = handle.pid();
+
+        // The tracked PID leads its own group (process_group(0) on the spawn).
+        assert_eq!(group_of(pid), pid, "tracked pid must be the group leader");
+
+        // Both pipeline stages live in that group, so a group signal covers
+        // the log writer too — not just the node.
+        assert!(
+            eventually(5, || pids_in_group(pid).len() >= 2).await,
+            "pipeline should have at least the shell and one stage in the group, saw {:?}",
+            pids_in_group(pid)
+        );
+
+        kill_process(pid).await.expect("kill the group");
+        assert!(
+            eventually(5, || pids_in_group(pid).is_empty()).await,
+            "killing the group must reap every stage, still alive: {:?}",
+            pids_in_group(pid)
+        );
+        assert!(exited(pid));
+    }
+
+    /// A server that double-forks and lets its direct child exit is NOT
+    /// observable as dead: the daemonized grandchild keeps the stdout pipe
+    /// open, so the log writer never sees EOF and the pipeline shell (the
+    /// tracked PID) keeps waiting on it.
+    ///
+    /// This is why `cleanup_dead_runs` does not reap such a run — see
+    /// `is_reapable_orphan`, which is only ever reached with `any_alive =
+    /// false`. Rebuilding the pipeline with real file descriptors would make
+    /// the tracked PID exit here and silently start reaping live environments.
+    #[tokio::test]
+    async fn double_forking_server_not_reaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        // `( … & )` backgrounds in a subshell that exits immediately: the
+        // direct child is gone but `sleep` inherited the pipe.
+        let handle = spawn_detached(
+            "( sleep 30 & ) ; exit 0",
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&log),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert!(
+            !exited(pid),
+            "tracked pid must stay alive while a daemonized descendant holds \
+             the log pipe — otherwise cleanup_dead_runs reaps a live run"
+        );
+        // Consequently `cleanup_dead_runs` sees `any_alive = true` and
+        // `is_reapable_orphan` (unit-tested in `orchestrator`) returns false
+        // for every status — the run is left alone.
+
+        kill_process(pid).await.expect("kill the group");
+        assert!(eventually(5, || pids_in_group(pid).is_empty()).await);
+    }
+
+    /// End-to-end log capture: `2>&1` in the wrapper merges the node's stderr
+    /// into its stdout, both reach the log sink, and the sink sees EOF (exits)
+    /// once the node does.
+    #[tokio::test]
+    async fn detached_logs_reach_run_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        let handle = spawn_detached(
+            "echo to-stdout; echo to-stderr 1>&2",
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&log),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+
+        // The whole pipeline exits on its own: the node finishes, the sink
+        // reaches EOF, the pipeline shell reaps it.
+        assert!(
+            eventually(10, || exited(pid)).await,
+            "pipeline must reach EOF and exit once the node exits"
+        );
+
+        let captured = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            captured.contains("to-stdout"),
+            "stdout must reach the log sink, got {captured:?}"
+        );
+        assert!(
+            captured.contains("to-stderr"),
+            "stderr must reach the log sink via 2>&1, got {captured:?}"
+        );
+    }
 }
 
 #[cfg(test)]

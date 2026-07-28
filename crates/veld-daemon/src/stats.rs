@@ -245,4 +245,87 @@ mod tests {
         assert_eq!(s.process_count, 2);
         assert_eq!(s.memory_bytes, 10);
     }
+
+    /// RC1 characterization: the sampled *set* for a detached node.
+    ///
+    /// The parent-tree walk from the tracked PID must reach both stages of the
+    /// detached pipeline — the node's own process and the `veld _log` writer —
+    /// because the tracked PID is the pipeline shell that parents both. Any
+    /// change to the spawn path that reparents a stage (e.g. rebuilding the
+    /// pipeline with explicit file descriptors) would silently change which
+    /// processes this sums, showing up as an unexplained step change in the
+    /// CPU/memory graph rather than as a test failure. So pin the set here.
+    #[tokio::test]
+    async fn process_tree_shape_stable() {
+        let tmp = tempfile::tempdir().unwrap();
+        // `tee` stands in for `veld _log`: one exec'd binary draining the pipe,
+        // matching production's topology. `sleep` stands in for the node.
+        let sink = vec![
+            "tee".to_owned(),
+            tmp.path().join("sink.log").to_string_lossy().into_owned(),
+        ];
+        let handle =
+            veld_core::process::spawn_detached("sleep 30", tmp.path(), &HashMap::new(), &sink)
+                .expect("detached spawn");
+        let pid = handle.pid();
+
+        // Give both stages time to fork and exec.
+        let mut collector = StatsCollector::new();
+        let mut names: Vec<String> = Vec::new();
+        let mut count = 0u32;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            collector.refresh();
+            names = walk_names(&collector, pid);
+            count = collector
+                .sample_tree(pid, Utc::now())
+                .map(|s| s.process_count)
+                .unwrap_or(0);
+            if names.iter().any(|n| n.contains("sleep")) && names.iter().any(|n| n.contains("tee"))
+            {
+                break;
+            }
+        }
+
+        assert!(
+            names.iter().any(|n| n.contains("sleep")),
+            "the node's own process must be in the sampled tree, saw {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.contains("tee")),
+            "the log writer must be in the sampled tree, saw {names:?}"
+        );
+        assert_eq!(
+            count as usize,
+            names.len(),
+            "process_count must equal the walked set"
+        );
+        assert!(
+            count >= 2,
+            "the pipeline contributes at least the node and the log writer, got {count}"
+        );
+
+        let _ = veld_core::process::kill_process(pid).await;
+    }
+
+    /// Names of every process the tree walk from `root` reaches, using the same
+    /// parent map [`StatsCollector::sample_tree`] sums over.
+    fn walk_names(collector: &StatsCollector, root: u32) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut stack = vec![Pid::from_u32(root)];
+        let mut visited = HashSet::new();
+        while let Some(pid) = stack.pop() {
+            if !visited.insert(pid) {
+                continue;
+            }
+            let Some(proc_) = collector.sys.process(pid) else {
+                continue;
+            };
+            out.push(proc_.name().to_string_lossy().into_owned());
+            if let Some(kids) = collector.children.get(&pid) {
+                stack.extend(kids.iter().copied());
+            }
+        }
+        out
+    }
 }
