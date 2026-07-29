@@ -1580,6 +1580,11 @@ the run rather than failing mid-start with `unknown built-in variable`.
 | `start_server` node: `argv`, `shell`, `on_stop` | ✅ | ✅ | ✅ | ✅ |
 | `actions[].cmd` | run, name, project, root only | — | ✅ | ✅ (plus `${param.*}`, `${output.*}`) |
 
+An action's context is deliberately the smallest: it also has no `${vars.*}` and
+no `${nodes.<other>.…}`, because an action runs against one live node long after
+the plan that built it. `${veld.url}` and its pieces, and `${veld.ports.*}`, do
+resolve there — they come from the node's recorded state.
+
 Notes:
 
 - **`run_id`** is absent in a project step because a `teardown` also runs from

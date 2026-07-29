@@ -492,8 +492,8 @@ impl BuiltinScope<'_> {
 
 /// The `${veld.url}` family, derived from the node's own HTTPS URL.
 ///
-/// One owner for the derivation, because there were two callers and only one of
-/// them was complete: the `on_stop` context set `port` and stopped there, so a
+/// One owner for the derivation, because there were three callers and only one
+/// of them was complete: the `on_stop` context set `port` and stopped there, so a
 /// teardown hook naming its container after `${veld.url.hostname}` — the obvious
 /// way to stop the name in `argv` and the name in `on_stop` from drifting —
 /// failed to interpolate, and an `on_stop` that fails to interpolate is a leaked
@@ -503,7 +503,7 @@ impl BuiltinScope<'_> {
 /// the stop path has: `NodeState` persists the URL, not the pieces. It is exact
 /// either way — the URL carries its port whenever the port is not 443, which is
 /// the same condition the pieces were built under.
-fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
+pub fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
     let rest = https_url.strip_prefix("https://").unwrap_or(https_url);
     let host = rest.split('/').next().unwrap_or(rest);
     let (hostname, port) = match host.rsplit_once(':') {

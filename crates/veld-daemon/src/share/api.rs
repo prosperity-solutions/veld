@@ -616,10 +616,22 @@ fn build_manifest(
     }
     let run_state = &run_state;
 
-    let config = parse_config(&project_root.join("veld.json")).map_err(|e| {
+    let config_path = veld_core::config::root_config_in(&project_root).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            format!("could not load veld.json for run '{run_name}': {e}"),
+            format!(
+                "no veld.json or veld.jsonc in {} for run '{run_name}'",
+                project_root.display()
+            ),
+        )
+    })?;
+    let config = parse_config(&config_path).map_err(|e| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!(
+                "could not load {} for run '{run_name}': {e}",
+                config_path.display()
+            ),
         )
     })?;
 

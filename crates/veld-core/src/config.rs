@@ -2365,6 +2365,22 @@ fn default_interval() -> u64 {
 /// glob, so `nodes/*.jsonc` worked before this.
 pub const ROOT_CONFIG_NAMES: &[&str] = &["veld.json", "veld.jsonc"];
 
+/// The root config in exactly this directory, if there is one.
+///
+/// For every caller that already knows the project root and would otherwise
+/// write `project_root.join("veld.json")` — the daemon monitor, the share API,
+/// the desktop worktree views, the management API. Those bypass
+/// [`discover_config`] because they are not walking upward, and each one that
+/// hardcodes a filename is a project named `veld.jsonc` that the daemon cannot
+/// see: no liveness probes, no actions, `veld share` refusing with "could not
+/// load veld.json".
+pub fn root_config_in(dir: &Path) -> Option<PathBuf> {
+    ROOT_CONFIG_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|c| c.is_file())
+}
+
 /// Walk upward from `start` to find the project's root config.
 ///
 /// A directory holding both spellings resolves by **fixed precedence**
@@ -4009,24 +4025,21 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
         check(loc, literal, sites, out);
     }
 
+    // The **resolved** command surfaces, for the same reason `env` above uses the
+    // merged map: v3 hoists `argv`/`shell`, `on_stop` and `skip_if` to node level,
+    // and a raw `variant.*` read simply does not see them. That left the feature's
+    // own teaching example unchecked — a node-level
+    // `"on_stop": { "argv": [… "${veld.url.hostname}"] }` inherited by a `command`
+    // variant is exactly the case `builtin-not-in-scope` exists for, and it linted
+    // clean while the identical string written one level down errored.
     for (node_name, node) in &config.nodes {
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
             let sites = [site_for(config, node_name, node, variant_name, variant)];
-            check_cmd(&base, variant.cmd.spec(), &sites, out);
-            check_cmd(
-                &format!("{base}.on_stop"),
-                // `Some(None)` is an explicit erase — nothing to check.
-                variant.on_stop.clone().flatten(),
-                &sites,
-                out,
-            );
-            check_cmd(
-                &format!("{base}.skip_if"),
-                variant.skip_if.clone(),
-                &sites,
-                out,
-            );
+            let r = resolve_variant(config, node, variant);
+            check_cmd(&base, r.command.clone(), &sites, out);
+            check_cmd(&format!("{base}.on_stop"), r.on_stop.clone(), &sites, out);
+            check_cmd(&format!("{base}.skip_if"), r.skip_if.clone(), &sites, out);
         }
     }
 }
@@ -5147,6 +5160,42 @@ mod tests {
         );
     }
 
+    /// v3 hoists `argv`/`shell`, `on_stop` and `skip_if` to node level, so the
+    /// rules have to read the **resolved** variant. A raw `variant.*` read left
+    /// the feature's own teaching example unchecked: a node-level `on_stop`
+    /// naming `${veld.url.hostname}`, inherited by a `command` variant, is
+    /// exactly what `builtin-not-in-scope` exists for.
+    #[test]
+    fn node_level_command_defaults_are_linted_like_variant_level_ones() {
+        const CMDS: &str = r#""argv": ["echo", "${veld.bogus}"],
+                              "on_stop": { "argv": ["rm", "${veld.url.hostname}"] }"#;
+        let findings_at = |level: &str| -> Vec<String> {
+            let (node_level, variant_level) = match level {
+                "node" => (format!("{CMDS},"), String::new()),
+                _ => (String::new(), CMDS.to_owned()),
+            };
+            let mut rules: Vec<String> = findings_for(&format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "nodes": {{ "n": {{
+                        "type": "command", {node_level}
+                        "variants": {{ "one": {{ {variant_level} }} }}
+                      }}}} }}"#
+            ))
+            .into_iter()
+            .map(|f| f.rule)
+            .collect();
+            rules.sort();
+            rules
+        };
+
+        assert_eq!(
+            findings_at("node"),
+            ["builtin-not-in-scope", "unknown-builtin-var"],
+            "a hoisted command is interpolated like any other — it must be linted like one"
+        );
+        assert_eq!(findings_at("node"), findings_at("variant"));
+    }
+
     /// A value a variant overrides — or erases with `"KEY": null` — is not an
     /// interpolation site for that variant, so no rule may fire on it.
     ///
@@ -5556,6 +5605,35 @@ mod tests {
         // A directory holding both is handled by precedence plus a lint finding,
         // never by refusing to load — see
         // `both_root_spellings_is_a_finding_not_a_load_failure`.
+    }
+
+    /// Every caller that knows the project root already — the daemon monitor,
+    /// the share API, the desktop worktree views, the management API — resolves
+    /// the name through `root_config_in` rather than hardcoding one.
+    ///
+    /// Each site that hardcodes `veld.json` is a `veld.jsonc` project the daemon
+    /// cannot see: no liveness probes, no actions in the dashboard, `veld share`
+    /// refusing outright. Nothing in the type system catches that, so it is
+    /// pinned here and by a grep in the sibling assertion.
+    #[test]
+    fn root_config_in_finds_either_spelling_in_one_directory() {
+        let minimal = r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#;
+        for name in ROOT_CONFIG_NAMES {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), minimal).unwrap();
+            assert_eq!(root_config_in(dir.path()), Some(dir.path().join(name)));
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(root_config_in(empty.path()), None);
+
+        // It does NOT walk upward — that is `discover_config`'s job, and a
+        // worktree view asking about one directory must not answer about its
+        // parent.
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join("veld.json"), minimal).unwrap();
+        let inner = outer.path().join("sub");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(root_config_in(&inner), None);
     }
 
     /// Every way a preset can be broken is reported by `veld lint`.

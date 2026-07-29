@@ -353,7 +353,21 @@ fn build_context(
         ctx.set_builtin("port", port.to_string());
     }
     if let Some(url) = &node_state.url {
-        ctx.set_builtin("url", url.clone());
+        // `url` **and** its pieces, from the same derivation the node's own
+        // command and its `on_stop` use. Setting only `url` here meant
+        // `${veld.url.hostname}` — the spelling the schema and the configuration
+        // reference both teach — failed an action with "unknown built-in
+        // variable" while working everywhere else.
+        for (key, value) in veld_core::orchestrator::url_builtins(url) {
+            ctx.set_builtin(key, value);
+        }
+    }
+    // A named port is an output at start time; make it addressable here by the
+    // same `${veld.ports.<name>}` spelling the node's own command used.
+    for (k, v) in &node_state.outputs {
+        if k.starts_with("ports.") {
+            ctx.set_builtin(k, v.clone());
+        }
     }
 
     for (k, v) in &node_state.outputs {
