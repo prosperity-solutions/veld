@@ -134,7 +134,8 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached) |
+| `veld start [NODE:VARIANT...] --name <n> [-d]` | Start an environment (`-d` for detached). Given nothing to start: prompts with the preset list (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
+| `veld start --preset <NAME-OR-KEY>` | Start a preset by name, or by the stable key `veld presets` shows. A bare preset name as a positional does **not** work — positionals are `node:variant` selections |
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. The e2e-test / CI pattern (like `docker compose run --rm --abort-on-container-exit`). Only the terminal node's output goes to stdout unless `--all-logs`. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
@@ -145,7 +146,7 @@ veld stop --name dev
 | `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--source <s>] [-s <term>] [-C <n>] [--run <id>] [-p] [--all-runs]` | View logs — defaults to the latest run; `--run <id-prefix>` reads a past run, `-p` the previous one, `--all-runs` interleaves everything; `-f` follow (exits when the run ends) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes` | List all nodes and variants |
-| `veld presets` | List presets |
+| `veld presets [--json] [--pin]` | List presets with their keys, labels, and `when_to_use`. `--pin` prints the current numbering as a paste-ready block that freezes auto-assigned keys |
 | `veld runs [--name <n>] [--json]` | Run history: one row per execution instance (short id, started/ended, duration, outcome) |
 | `veld runs show <id> [--json]` | One run in full: outcome, node exit codes, and the graph snapshot it was started with |
 | `veld runs diff <old> <new> [--json]` | Config diff between two runs (nodes added/removed, command/cwd/env/url changes); one id diffs against its predecessor |
@@ -342,6 +343,7 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | `name` | string | Yes | Project name (used in URLs) |
 | `url_template` | string | No | URL template for services |
 | `presets` | object | No | Named shortcuts for node:variant selections |
+| `default_preset` | string | No | Preset used when `veld start` is given nothing. Must name a defined preset |
 | `client_log_levels` | array | No | Browser log levels to capture (default: `["log", "warn", "error"]`) |
 | `features` | object | No | Feature toggles: `feedback_overlay`, `client_logs`, `inject` (all default `true`, cascade: variant > node > project) |
 | `proxy` | object | No | Reverse-proxy header rules (`request`/`response`, each with `remove`/`set`); applies to the local proxy + web gateway (cascade: variant > node > project; `remove` unions, `set` merges) |
@@ -532,16 +534,55 @@ Default: `{service}.{run}.{project}.localhost`
 
 ### Presets
 
-Named shortcuts for node:variant selections:
+Named shortcuts for node:variant selections. A preset is either a bare list of
+selections, or an object adding a stable picker key and the metadata needed to
+choose it. Both forms are fully supported.
 
-```json
+```jsonc
 "presets": {
+  // List form.
   "fullstack": ["database:docker", "backend:local", "frontend:local"],
-  "frontend-only": ["frontend:local"]
-}
+  "frontend-only": ["frontend:local"],
+
+  // Object form.
+  "designer-preview": {
+    "key": 1,
+    "label": "Site preview (staging content)",
+    "when_to_use": "Reviewing visual changes against real CMS content. Slow to start; not for API work.",
+    "group": "For non-developers",
+    "selections": ["frontend:prod", "backend:staging"]
+  }
+},
+"default_preset": "fullstack"
 ```
 
-Usage: `veld start --preset fullstack --name my-feature`
+Usage: `veld start --preset fullstack --name my-feature`, or `veld start --preset 1`.
+In a script, pass the name or a pinned key — an unpinned key can move.
+
+Upgrading from an earlier veld: the picker's numbers used to be positions in an
+alphabetically sorted list and are now assigned in declaration order, so they change
+once. Re-check any runbook naming a number, then `veld presets --pin` to freeze them.
+
+**`key` is an identity, not a list position.** A pinned key does not move when
+presets are added, removed, renamed, or regrouped, so the number someone
+memorised stays correct. Presets without a key take the lowest unclaimed number in
+declaration order: appending a preset changes no existing key, and neither does
+pinning one at the number it already shows. An unpinned key does move when a
+preset is added or removed ahead of it in declaration order — including from
+another `include` file that sorts earlier. `veld presets` marks the auto-assigned
+keys; `veld presets --pin` prints a block to paste that freezes them (veld never
+rewrites a config itself).
+
+`label`, `when_to_use`, and `group` are what make a long preset list pickable by
+someone who did not write it — and by a coding agent, which reads `when_to_use`
+from `veld presets` / `veld presets --json` to decide what to start. Groups are
+ordered by their lowest member key, so a group can move on screen without changing
+a number; the list is ascending within a group rather than globally. Ungrouped
+presets are collected under `Other`.
+
+`default_preset` is what `veld start` uses when given nothing: enter at the
+picker, and without a TTY it is used directly instead of failing with "No
+selections provided".
 
 ### Additional Variant Fields
 

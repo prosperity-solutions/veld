@@ -74,7 +74,8 @@ The same applies to anything else that reads the file as strict JSON — `veld c
 | `schemaVersion`  | string | Yes      | `"1"` or `"2"`. Use `"2"` for new projects.       |
 | `name`           | string | Yes      | Human-readable project name                       |
 | `url_template`      | string | No       | URL template for services (see [URL Templates])   |
-| `presets`           | object | No       | Named shortcuts for node:variant selections       |
+| `presets`           | object | No       | Named shortcuts for node:variant selections (see [Presets](#presets)) |
+| `default_preset`    | string | No       | Preset used when `veld start` is given nothing (see [`default_preset`](#default_preset)) |
 | `client_log_levels` | array  | No       | Browser log levels to capture (see [Client-Side Log Levels]) |
 | `features`          | object | No       | Feature toggles (see [Features](#features))       |
 | `proxy`             | object | No       | Reverse-proxy header rules (see [Proxy](#proxy))   |
@@ -1069,8 +1070,10 @@ segments. Dotfiles are not matched by a bare `*`. Matches load in sorted order, 
 errors are deterministic.
 
 `vars`, `presets`, `env`, `setup`, `teardown`, `hooks`, and `ui` may appear in any
-file. Other project-level settings (`url_template`, `features`, `proxy`,
-`sharing`, `client_log_levels`) are read from the root file.
+file. Other project-level settings (`url_template`, `default_preset`, `features`,
+`proxy`, `sharing`, `client_log_levels`) are read from the root file. So a preset
+may be declared in any file, but which one is the default is decided in one
+place.
 
 ### Finding out why a node seems missing
 
@@ -1379,13 +1382,143 @@ Presets are named shortcuts for node:variant selections. They provide convenienc
 }
 ```
 
-Each preset maps to an array of `"node:variant"` strings. Use presets with:
+A preset is either an array of `"node:variant"` strings, as above, or an object
+that adds a picker key and a description -- see [Describing a
+preset](#describing-a-preset). Use presets with:
 
 ```sh
 veld start --preset fullstack --name my-feature
 ```
 
 In interactive mode (TTY with presets defined), `veld start` with no arguments presents a preset selector. Presets are purely additive -- they select end nodes that Veld then resolves through the dependency graph, starting all required upstream nodes automatically.
+
+### Preset keys: the number people actually type
+
+Most people run `veld start` and type a number. That number is a preset's **key**,
+and a key is an identity, not a position in the list:
+
+```jsonc
+"presets": {
+  "dev-local":   { "key": 1, "selections": ["web:dev", "api:local"] },
+  "dev-staging": { "key": 2, "selections": ["web:dev", "api:staging"] },
+  "docker":      { "key": 5, "selections": ["web:docker"] }
+}
+```
+
+A pinned `key` never moves -- not when presets are added, removed, renamed, or
+regrouped. That is what makes it safe to memorise, to put in a runbook, and to
+say to a colleague.
+
+> **Upgrading?** These numbers used to be positions in an alphabetically sorted
+> list, and they are now assigned in declaration order -- so for a config whose
+> presets are not written alphabetically, they change once. See
+> [the migration note](./migrating-to-v3.md#presets-gained-keys-and-metadata), and
+> run `veld presets --pin` to freeze them.
+
+Presets without a `key` take the **lowest number not already claimed**, in the
+order they are declared. A preset *named* like a number (`"7"`) claims that number,
+so its name and its key agree. Two consequences worth knowing:
+
+- **Appending a preset leaves every existing key alone** -- the normal workflow.
+  So does pinning a preset at the number it is already showing, which is what
+  makes `--pin` below safe to apply piecemeal.
+- An **unpinned** key still moves when a preset is added or removed *ahead of it*
+  in declaration order. In a split config that includes the file another team
+  owns: include globs load in sorted order, so someone adding
+  `veld.d/api.jsonc` renumbers the unpinned presets declared in
+  `veld.d/web.jsonc`. Pin the keys people actually type and this stops being your
+  problem.
+
+`veld presets` marks which keys are auto-assigned, and `veld presets --pin` prints
+the current numbering as a block to paste:
+
+```sh
+veld presets --pin
+```
+
+Veld never rewrites your config, so applying the block is your call -- run
+`veld lint` afterwards to check it. Two things to know when you do:
+
+- **A preset is defined in exactly one file.** The block is one merged
+  `presets` object, so in a split config add each entry's `key` to the file that
+  already declares that preset -- pasting the whole block into the root file is a
+  `duplicate-definition` error. `veld config --files` shows which file is which.
+  Pinning a few at a time is safe, precisely because pinning a preset at the
+  number it already shows moves nothing else.
+- `--pin` refuses to run if the config did not load completely (say an included
+  file has a syntax error), because the keys it would freeze are not the ones
+  you will get once it does.
+
+`--preset` accepts a key as well as a name, so `veld start --preset 2` and
+`veld start --preset dev-staging` are the same thing.
+
+In a **script**, prefer the name, or a key you have pinned. An unpinned key is a
+convenience for whoever is looking at the list right now; passing one from a script
+means passing a number that can move.
+
+The two differ only for a config that has a preset *named* like a number. A
+preset named `7` takes key 7, so normally there is nothing to disambiguate; if
+some other preset pins key 7 as well, then `--preset 7` means the preset **named**
+`7` -- names are what scripts and runbooks were written against -- while typing
+`7` at the picker selects whatever the list showed beside `[7]`. `veld lint` warns
+about that config either way.
+
+### Describing a preset
+
+A preset may be an object instead of a bare array. Both forms are fully
+supported: the array form is right when the name says everything, and the object
+form is for a list that has grown past what anyone can identify at a glance.
+
+```jsonc
+"presets": {
+  // Array form — nothing more to say about it.
+  "dev-local": ["web:dev", "api:local"],
+
+  // Object form.
+  "designer-preview": {
+    "key": 1,
+    "label": "Site preview (staging content)",
+    "when_to_use": "Reviewing visual changes against real CMS content. Slow to start (~90s); not for API work.",
+    "group": "For non-developers",
+    "selections": ["web:prod", "api:staging"]
+  }
+}
+```
+
+| Field | Purpose |
+|---|---|
+| `selections` | Required. `node:variant` entries and `@preset` references -- the array form is exactly this field |
+| `key` | The picker number, pinned permanently (see above) |
+| `label` | Human-readable name, shown instead of the config key in the picker and the desktop UI |
+| `when_to_use` | When to pick this one. Read by anyone who did not write the config -- and by coding agents, which get it from `veld presets --json` and from `veld presets` output. Say what it gives you and what it costs (start time, network, credentials) |
+| `group` | Optional heading to chunk the list under. Purely visual |
+
+Groups are ordered by their lowest member key, and presets within a group by key
+-- so a group can move on screen without changing a single number. Note that the
+list is ascending *within* each group, not read straight down: with keys 1 and 10
+in one group and 2 in another, the first group prints in full first, so the
+sequence is 1, 10, 2. A config that never mentions `group` prints one flat list,
+and presets with no `group` in a config that uses them are collected under
+`Other`.
+
+### `default_preset`
+
+```jsonc
+"presets": { "dev-local": ["web:dev", "api:local"] },
+"default_preset": "dev-local"
+```
+
+The preset `veld start` uses when given nothing to start. At the interactive
+picker, pressing enter takes it. Without a TTY -- a script, CI, or a coding agent
+running `veld start` in a non-interactive shell -- it is used directly, where a
+bare `veld start` would otherwise fail with "No selections provided".
+
+It must name a preset that exists; `veld lint` reports it if not.
+
+Without a TTY and with no `default_preset` declared, a bare `veld start` still
+exits 1 with a JSON payload on stdout: `error`, `nodes`, `presets` (the same
+records `veld presets --json` emits), and a `hint` naming the three ways to give it
+something to start.
 
 ### Composing presets
 
@@ -1410,6 +1543,12 @@ rather than at `veld start`:
 | `preset-unresolvable` | an `@ref` names a preset that does not exist, or the references form a cycle |
 | `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
 | `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
+| `preset-duplicate-key` | two presets pin the same `key`. A key is the number a person types, so it cannot mean two things |
+| `preset-invalid-key` | `"key": 0` -- the picker numbers from 1 |
+| `preset-empty` | a warning: the preset expands to no selections, so starting it brings up nothing and still reports success |
+| `preset-name-shadowed-by-key` | a warning: a preset is *named* like a number that another preset **pins** as its key, so the number and the name select different presets |
+| `default-preset-unknown` | `default_preset` names a preset that does not exist |
+| `presets-undocumented` | a notice, once, when a config has eight or more presets and none carry a `label` or `when_to_use` -- the size at which the list stops being pickable by anyone who did not write it |
 
 ---
 

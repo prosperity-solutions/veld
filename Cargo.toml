@@ -43,3 +43,4 @@ sha2 = "0.10"
 base64 = "0.22"
 petname = "2"
 indicatif = "0.17"
+indexmap = { version = "2", features = ["serde"] }

@@ -187,9 +187,9 @@ learn. Relative paths (`cwd`, `script`, output paths) stay relative to the
 
 Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge across files:
 each entry has an owning file, so there is nothing to arbitrate. The project-level
-singletons — `url_template`, `features`, `proxy`, `sharing`, `client_log_levels` —
-are read from the root file only, because a single value would need a precedence
-rule. Declaring one in an included file is a `root-only-key` error rather than a
+singletons — `url_template`, `default_preset`, `features`, `proxy`, `sharing`,
+`client_log_levels` — are read from the root file only, because a single value
+would need a precedence rule. Declaring one in an included file is a `root-only-key` error rather than a
 silent no-op.
 
 `veld config --files` prints the glob → file → node chain, which is the fastest
@@ -279,6 +279,71 @@ would commit.
 ```jsonc
 "presets": { "core": ["api:dev", "web:dev"], "ci": ["@core", "e2e:dev"] }
 ```
+
+### Presets gained keys and metadata
+
+**Read this even if you change nothing: the numbers in the `veld start` picker
+move once, on upgrade.**
+
+They used to be positions in an *alphabetically sorted* list. They are now keys,
+assigned in the order presets are declared in the file. So for a config whose
+presets are not written in alphabetical order, the number people type now means a
+different preset:
+
+```jsonc
+"presets": { "zulu": [...], "alpha": [...], "docker": [...] }
+```
+
+| | `1` | `2` | `3` |
+|---|---|---|---|
+| before | `alpha` | `docker` | `zulu` |
+| after | `zulu` | `alpha` | `docker` |
+
+That is a one-time change, and it is the point: a position renumbers every time
+someone adds a preset, which is the bug being fixed. But it does mean a runbook
+or a habit that says "run `veld start`, press 2" needs re-checking once. After
+upgrading:
+
+```sh
+veld presets              # the numbers as they now stand
+veld presets --pin        # a block to paste that freezes them for good
+```
+
+Pin the numbers people actually type and they will not move again.
+
+The rest of this section is optional. A preset may now be an object as well as an
+array; **the array form stays valid and is not deprecated**, so no existing
+`presets` block needs to change:
+
+```jsonc
+"presets": {
+  "core": ["api:dev", "web:dev"],            // unchanged, still correct
+  "designer-preview": {
+    "key": 1,                                 // stable picker number
+    "label": "Site preview (staging content)",
+    "when_to_use": "Reviewing visuals against real CMS content. Slow to start.",
+    "group": "For non-developers",
+    "selections": ["web:prod", "api:staging"]
+  }
+},
+"default_preset": "core"
+```
+
+Worth adopting if the numbering at `veld start` has ever shifted under someone,
+or if a preset list has grown past what a newcomer can identify:
+
+- `key` pins the number typed at the picker so it stops moving. Unpinned presets
+  take the lowest unclaimed number in declaration order, so appending a preset —
+  or pinning one at the number it already shows — changes nothing for anyone else.
+  `veld presets --pin` prints the current numbering as a block to paste.
+- `label` / `when_to_use` / `group` make the list pickable by people who did not
+  write the config, and by coding agents reading `veld presets`.
+- `default_preset` gives a bare `veld start` a defined answer, including in a
+  non-interactive shell where it previously failed with "No selections provided".
+
+`veld lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
+and — once, at eight or more presets with no metadata at all — a notice suggesting
+the object form.
 
 ---
 

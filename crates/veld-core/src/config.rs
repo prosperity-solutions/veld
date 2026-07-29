@@ -1,3 +1,5 @@
+use crate::presets::PresetDef;
+use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -298,8 +300,21 @@ pub struct VeldConfig {
     pub url_template: String,
 
     /// Named shortcuts for node:variant selections.
+    ///
+    /// An `IndexMap`, not a `HashMap`: declaration order is what unpinned preset
+    /// keys are assigned from (see [`crate::presets`]), so throwing it away at
+    /// parse time would make the number a user types depend on hash iteration
+    /// order. It is also why the picker used to sort alphabetically — the only
+    /// deterministic order a `HashMap` could offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presets: Option<HashMap<String, Vec<String>>>,
+    pub presets: Option<IndexMap<String, PresetDef>>,
+
+    /// The preset `veld start` runs when given nothing to start.
+    ///
+    /// Answers "just start it" — the most common thing a human types and by far
+    /// the most common thing a coding agent is asked to do — without a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_preset: Option<String>,
 
     /// Client-side log levels to capture (project-level default).
     /// Supported values: "log", "warn", "error", "info", "debug".
@@ -2444,6 +2459,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "include",
     "url_template",
     "presets",
+    "default_preset",
     "client_log_levels",
     "features",
     "proxy",
@@ -2551,6 +2567,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
     check_presets(config, &mut findings);
+    check_preset_keys(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
@@ -2640,6 +2657,21 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
                 ),
             )),
             Ok(selections) => {
+                // A preset that expands to nothing starts nothing — and reports
+                // success doing it, which is how `veld start` with such a preset as
+                // the `default_preset` hands a script (or a coding agent) an exit 0
+                // and a zero-node run. A warning, not an error: `veld init` writes
+                // an empty preset as a placeholder to fill in, and refusing to load
+                // a freshly scaffolded config would be worse than saying this.
+                if selections.is_empty() {
+                    out.push(Finding::warning(
+                        "preset-empty",
+                        format!("presets.{name}"),
+                        "selects nothing, so starting it brings up no nodes and still \
+                         reports success. Add `node:variant` selections, or an `@ref` to \
+                         a preset that has them",
+                    ));
+                }
                 // `expand_preset` resolves references; it does not know whether the
                 // node it named exists, which used to surface only once the graph
                 // was built.
@@ -2680,6 +2712,143 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
             }
         }
     }
+}
+
+/// The preset *number* rules — everything that can make the digit a person types
+/// mean the wrong thing.
+///
+/// A pinned `key` is a promise: it is what somebody memorised, wrote in a
+/// runbook, or said out loud to a colleague. So every way that promise can be
+/// broken or ambiguous is an error here rather than a surprise at the picker,
+/// where the only symptom is the wrong environment starting.
+fn check_preset_keys(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let Some(presets) = config.presets.as_ref() else {
+        // `default_preset` without any presets at all is still worth naming.
+        check_default_preset(config, out);
+        return;
+    };
+
+    // Duplicate pinned keys. Reported against every name involved, sorted, so
+    // the message is the same whichever file the reader opens first.
+    let mut by_key: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for (name, def) in presets {
+        if let Some(key) = def.key() {
+            by_key.entry(key).or_default().push(name.as_str());
+        }
+        if def.key() == Some(0) {
+            out.push(Finding::error(
+                "preset-invalid-key",
+                format!("presets.{name}"),
+                "\"key\": 0 is not selectable — the picker numbers from 1. Pin a key of 1 \
+                 or more",
+            ));
+        }
+    }
+    for (key, mut names) in by_key {
+        if names.len() > 1 {
+            names.sort_unstable();
+            for name in &names {
+                out.push(Finding::error(
+                    "preset-duplicate-key",
+                    format!("presets.{name}"),
+                    format!(
+                        "pins \"key\": {key}, and so does {}. A key is the number a person \
+                         types at the picker, so two presets cannot share one — give each \
+                         its own",
+                        names
+                            .iter()
+                            .filter(|n| *n != name)
+                            .map(|n| format!("`{n}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+
+    // A preset *named* like a number that some other preset holds as a key.
+    // `presets::find` resolves the key first, so the name becomes unreachable;
+    // rather than document that as a rule, report it.
+    let assigned: Vec<(String, u32)> = crate::presets::resolve(config)
+        .into_iter()
+        .map(|p| (p.name, p.key))
+        .collect();
+    for (name, own_key) in &assigned {
+        if let Ok(as_number) = name.parse::<u32>()
+            && let Some((owner, _)) = assigned
+                .iter()
+                .find(|(other, key)| *key == as_number && other != name)
+        {
+            out.push(Finding::warning(
+                "preset-name-shadowed-by-key",
+                format!("presets.{name}"),
+                format!(
+                    "is named `{name}`, which is also the key of preset `{owner}`. Typing \
+                     `{name}` at the picker selects `{owner}`; select this one by its own \
+                     key `{own_key}` instead. Renaming it also works, but breaks \
+                     `--preset {name}` wherever that is already used"
+                ),
+            ));
+        }
+    }
+
+    check_default_preset(config, out);
+
+    // One notice, not one per preset: the array form is fully supported and a
+    // small config saying `"dev": ["web:dev"]` needs no prose. It is at the scale
+    // where the list stops fitting in a glance that unlabelled presets start
+    // costing someone — a designer picking blind, or an agent guessing — which is
+    // the only case worth interrupting anyone about.
+    const CROWDED: usize = 8;
+    let documented = presets
+        .values()
+        .any(|d| d.label().is_some() || d.when_to_use().is_some());
+    if presets.len() >= CROWDED && !documented {
+        out.push(Finding::notice(
+            "presets-undocumented",
+            "presets",
+            format!(
+                "{} presets, none with a \"label\" or \"when_to_use\". At this size the \
+                 list is hard to pick from — for a person who did not write it, and for a \
+                 coding agent reading `veld presets --json` to decide what to start. The \
+                 object form adds both: `\"{}\": {{ \"label\": …, \"when_to_use\": …, \
+                 \"selections\": [...] }}`",
+                presets.len(),
+                presets.keys().next().map_or("dev", String::as_str),
+            ),
+        ));
+    }
+}
+
+/// `default_preset` must name a preset that exists — it is read when the user
+/// gave veld nothing to start, which is the moment they are least equipped to
+/// debug it.
+fn check_default_preset(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let Some(name) = config.default_preset.as_deref() else {
+        return;
+    };
+    let known: Vec<&str> = config
+        .presets
+        .iter()
+        .flatten()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if known.contains(&name) {
+        return;
+    }
+    let mut sorted = known;
+    sorted.sort_unstable();
+    let known_list = if sorted.is_empty() {
+        "no presets are defined".to_owned()
+    } else {
+        format!("known presets: {}", sorted.join(", "))
+    };
+    out.push(Finding::error(
+        "default-preset-unknown",
+        "default_preset",
+        format!("names `{name}`, but {known_list}"),
+    ));
 }
 
 fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
@@ -4158,8 +4327,12 @@ mod tests {
             // has to hold.
             // `include` is consumed by merging, so it is not on the merged
             // `VeldConfig` — read it off the raw document instead.
+            // Comments stripped first: an example is a veld config, so it is
+            // JSONC. Reading it here as strict JSON made this half of the drift
+            // gate reject a file the loader above had just accepted.
+            let source = std::fs::read_to_string(&path).expect("readable");
             let raw: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).expect("readable"))
+                serde_json::from_str(&crate::jsonc::strip(&source).expect("valid JSONC"))
                     .expect("valid JSON");
             let root_with_includes = raw
                 .get("include")
@@ -4491,6 +4664,8 @@ mod tests {
                     "other":    ["@cyclic"],
                     "ghost":    ["nosuch:dev"],
                     "badvar":   ["api:missing"],
+                    "empty":    [],
+                    "empty-ref": ["@empty"],
                     "fine":     ["api:dev", "@fine-inner"],
                     "fine-inner": ["api:dev"]
                 },
@@ -4509,6 +4684,10 @@ mod tests {
         assert_eq!(by_location("presets.cyclic"), ["preset-unresolvable"]);
         assert_eq!(by_location("presets.ghost"), ["preset-unknown-node"]);
         assert_eq!(by_location("presets.badvar"), ["preset-unknown-variant"]);
+        // A preset that selects nothing starts nothing and still reports success —
+        // including through a chain of `@refs` that all bottom out empty.
+        assert_eq!(by_location("presets.empty"), ["preset-empty"]);
+        assert_eq!(by_location("presets.empty-ref"), ["preset-empty"]);
 
         // A valid preset — including one composing another with `@` — stays silent,
         // or the rule is noise that trains people to ignore lint output.
@@ -4523,6 +4702,120 @@ mod tests {
             .expect("expected the finding")
             .message;
         assert!(msg.contains("it has: dev"), "{msg}");
+    }
+
+    /// Every way a preset *key* can be broken or ambiguous is a lint finding.
+    ///
+    /// A pinned key is a promise — it is what somebody memorised, wrote in a
+    /// runbook, or said out loud — so the ways that promise can silently mean
+    /// something else all have to fail here rather than at the picker, where the
+    /// only symptom is the wrong environment starting.
+    #[test]
+    fn broken_preset_keys_are_lint_findings() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "presets": {
+                    "dupe-a": { "key": 2, "selections": ["api:dev"] },
+                    "dupe-b": { "key": 2, "selections": ["api:dev"] },
+                    "zero":   { "key": 0, "selections": ["api:dev"] },
+                    "owner":  { "key": 7, "selections": ["api:dev"] },
+                    "7":      { "key": 9, "selections": ["api:dev"] },
+                    "fine":   { "key": 3, "selections": ["api:dev"] }
+                },
+                "default_preset": "ghost",
+                "nodes": { "api": { "variants": { "dev": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let rules = |loc: &str| -> Vec<&str> {
+            f.iter()
+                .filter(|x| x.location == loc)
+                .map(|x| x.rule.as_str())
+                .collect()
+        };
+
+        // Both sides of a duplicate are named, so the reader does not have to
+        // find the other one themselves.
+        assert_eq!(rules("presets.dupe-a"), ["preset-duplicate-key"]);
+        assert_eq!(rules("presets.dupe-b"), ["preset-duplicate-key"]);
+        assert!(
+            f.iter()
+                .find(|x| x.location == "presets.dupe-a")
+                .unwrap()
+                .message
+                .contains("dupe-b"),
+            "{f:?}"
+        );
+
+        assert_eq!(rules("presets.zero"), ["preset-invalid-key"]);
+        assert_eq!(rules("presets.7"), ["preset-name-shadowed-by-key"]);
+        assert_eq!(rules("default_preset"), ["default-preset-unknown"]);
+        assert!(rules("presets.fine").is_empty(), "{f:?}");
+        assert!(rules("presets.owner").is_empty(), "{f:?}");
+
+        // The shadowing warning must not send someone off to rename a preset —
+        // that breaks `--preset <name>` in every script they have. It stays
+        // reachable by its own key.
+        let shadow = f
+            .iter()
+            .find(|x| x.rule == "preset-name-shadowed-by-key")
+            .expect("expected the finding");
+        assert!(shadow.message.contains('9'), "{}", shadow.message);
+
+        // `default_preset` naming nothing must list what does exist.
+        let dp = f
+            .iter()
+            .find(|x| x.rule == "default-preset-unknown")
+            .expect("expected the finding");
+        assert!(dp.message.contains("fine"), "{}", dp.message);
+    }
+
+    /// The undocumented-presets notice fires once, and only once a list is big
+    /// enough that picking from it is the problem.
+    ///
+    /// A notice per preset, or one on a three-preset config, is exactly the noise
+    /// that teaches people to ignore lint output — and the array form is fully
+    /// supported, so a small config saying `"dev": ["web:dev"]` is not doing
+    /// anything wrong.
+    #[test]
+    fn undocumented_presets_notice_fires_once_and_only_when_crowded() {
+        let bare = |count: usize, documented: bool| -> String {
+            let mut entries: Vec<String> = (0..count)
+                .map(|i| format!("\"p{i}\": [\"api:dev\"]"))
+                .collect();
+            if documented {
+                entries[0] =
+                    "\"p0\": { \"label\": \"First\", \"selections\": [\"api:dev\"] }".to_owned();
+            }
+            format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "presets": {{ {} }},
+                      "nodes": {{ "api": {{ "variants": {{ "dev": {{
+                          "type": "command", "argv": ["true"]
+                      }}}}}}}} }}"#,
+                entries.join(", ")
+            )
+        };
+        let notices = |src: &str| -> usize {
+            findings_for(src)
+                .iter()
+                .filter(|x| x.rule == "presets-undocumented")
+                .count()
+        };
+
+        assert_eq!(notices(&bare(7, false)), 0, "7 presets is still scannable");
+        assert_eq!(
+            notices(&bare(8, false)),
+            1,
+            "one notice for the whole config, never one per preset"
+        );
+        assert_eq!(
+            notices(&bare(20, true)),
+            0,
+            "a single documented preset shows the author knows about the object form"
+        );
     }
 
     /// A credential-shaped `proxy` header value warns at every level.

@@ -1,13 +1,25 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Worktree } from "../api";
+import type { Preset, Worktree } from "../api";
 import {
   defaultStartSelection,
   parseStartSelection,
+  presetHeading,
   pruneStartSelection,
   resolveStartSelection,
   startBody,
+  startSelectionLabel,
   startStorageKey,
 } from "./StartConfig";
+
+/** A preset as the daemon sends it, with the keys already assigned. */
+const preset = (name: string, over: Partial<Preset> = {}): Preset => ({
+  name,
+  key: 1,
+  pinned: false,
+  selections: [`${name}:dev`],
+  is_default: false,
+  ...over,
+});
 
 const wt = (over: Partial<Worktree> = {}): Worktree => ({
   id: 1,
@@ -49,7 +61,7 @@ describe("parseStartSelection", () => {
 
 describe("pruneStartSelection", () => {
   const w = wt({
-    presets: ["full"],
+    presets: [preset("full")],
     nodes: [{ name: "api", variants: ["dev", "prod"], default_variant: "dev" }],
   });
 
@@ -89,10 +101,22 @@ describe("pruneStartSelection", () => {
 
 describe("defaultStartSelection", () => {
   it("prefers the first preset", () => {
-    expect(defaultStartSelection(wt({ presets: ["a", "b"] }))).toEqual({
-      kind: "preset",
-      name: "a",
-    });
+    expect(
+      defaultStartSelection(wt({ presets: [preset("a"), preset("b")] })),
+    ).toEqual({ kind: "preset", name: "a" });
+  });
+
+  it("prefers the config's default_preset over list position", () => {
+    // The author said which preset is the default; "first in the file" is a
+    // guess, and picking it would start the wrong thing for every project whose
+    // default isn't declared first.
+    expect(
+      defaultStartSelection(
+        wt({
+          presets: [preset("a"), preset("b", { is_default: true })],
+        }),
+      ),
+    ).toEqual({ kind: "preset", name: "b" });
   });
 
   it("falls back to every node at its default variant", () => {
@@ -139,7 +163,7 @@ describe("resolveStartSelection", () => {
   });
 
   const w = wt({
-    presets: ["full"],
+    presets: [preset("full")],
     nodes: [{ name: "api", variants: ["dev"], default_variant: "dev" }],
   });
 
@@ -177,10 +201,61 @@ describe("resolveStartSelection", () => {
   });
 });
 
+describe("presetHeading", () => {
+  it("labels the ungrouped bucket 'Other' so it can't read as part of a group", () => {
+    // The daemon's resolver orders groups by their lowest key, so the ungrouped
+    // bucket can land *between* two groups. Without its own heading those radios
+    // render under the preceding group's title.
+    const presets = [
+      preset("dev", { key: 1, group: "Everyday" }),
+      preset("loose", { key: 2 }),
+      preset("docker", { key: 5, group: "Docker" }),
+    ];
+    expect(presetHeading(presets, 0)).toBe("Everyday");
+    expect(presetHeading(presets, 1)).toBe("Other");
+    expect(presetHeading(presets, 2)).toBe("Docker");
+  });
+
+  it("repeats no heading within a run of the same group", () => {
+    const presets = [
+      preset("a", { key: 1, group: "Everyday" }),
+      preset("b", { key: 2, group: "Everyday" }),
+    ];
+    expect(presetHeading(presets, 0)).toBe("Everyday");
+    expect(presetHeading(presets, 1)).toBeNull();
+  });
+
+  it("renders no headings at all when no preset declares a group", () => {
+    const presets = [preset("a", { key: 1 }), preset("b", { key: 2 })];
+    expect(presetHeading(presets, 0)).toBeNull();
+    expect(presetHeading(presets, 1)).toBeNull();
+  });
+});
+
+describe("startSelectionLabel", () => {
+  it("shows a preset's label, falling back to its config key", () => {
+    const w = wt({
+      presets: [preset("web-prod-stg", { label: "Site preview" })],
+    });
+    expect(startSelectionLabel({ kind: "preset", name: "web-prod-stg" }, w))
+      .toBe("Site preview");
+    // No worktree in hand, or no label declared: the config key is all there is.
+    expect(startSelectionLabel({ kind: "preset", name: "web-prod-stg" }))
+      .toBe("web-prod-stg");
+    expect(
+      startSelectionLabel(
+        { kind: "preset", name: "plain" },
+        wt({ presets: [preset("plain")] }),
+      ),
+    ).toBe("plain");
+  });
+});
+
 describe("startBody", () => {
   it("sends exactly one of preset / selections", () => {
-    // `veld start` treats the two as mutually exclusive; sending both, or
-    // neither, fails with "No selections provided".
+    // `veld start` treats the two as mutually exclusive. Sending neither is not a
+    // safe no-op either: it falls back to the project's `default_preset` when one
+    // is declared, and only fails "No selections provided" when there isn't one.
     expect(startBody({ kind: "preset", name: "full" })).toEqual({
       preset: "full",
     });

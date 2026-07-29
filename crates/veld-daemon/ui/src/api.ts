@@ -89,9 +89,30 @@ export interface Worktree {
   is_main: boolean;
   created_at: string;
   has_veld_config: boolean;
-  presets: string[];
+  /** Presets in display order, as resolved by the daemon. */
+  presets: Preset[];
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
+}
+
+/**
+ * A preset with its key assigned. Mirrors `veld_core::presets::ResolvedPreset`.
+ *
+ * `key` is the stable number the CLI picker shows for the same preset — it is
+ * assigned by the daemon, not by this list's position, so the two surfaces
+ * cannot disagree about which number means which preset.
+ */
+export interface Preset {
+  name: string;
+  key: number;
+  /** Whether `key` was pinned in veld.json (an unpinned key can move). */
+  pinned: boolean;
+  label?: string | null;
+  when_to_use?: string | null;
+  group?: string | null;
+  selections: string[];
+  /** Whether this is the project's `default_preset`. */
+  is_default: boolean;
 }
 
 /** A worktree holding a given emoji — id, because aliases repeat across repos. */
