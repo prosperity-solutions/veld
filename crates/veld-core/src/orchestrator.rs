@@ -3845,7 +3845,8 @@ mod tests {
         let db = Db::open_at(&project_root.join("veld.db")).unwrap();
         Orchestrator {
             config,
-            config_path: project_root.join("veld.json"),
+            // A synthetic path for a test Orchestrator; no file is read through it.
+            config_path: project_root.join("veld.json"), // root-config-gate-ok
             config_hash: String::new(),
             project_root: project_root.to_path_buf(),
             db,

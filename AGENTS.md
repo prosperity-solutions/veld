@@ -169,6 +169,15 @@ and several were paid for in this codebase already.
   `veld.json` as strict JSON — a CI script, a `jq` pipeline, a test helper — must
   strip comments first (`tests/validate-schema.sh` shows the pattern, mirroring
   `veld_core::jsonc::strip`).
+- **The root config has two legal names, so never hardcode one.** `veld.json` and
+  `veld.jsonc` are both read (`config::ROOT_CONFIG_NAMES`; `veld init` writes the
+  first). Code that walks upward uses `config::discover_config`; code that already
+  knows the project root uses `config::root_config_in(dir)` — never
+  `project_root.join("veld.json")`. The daemon shipped five of those, and each was
+  a `veld.jsonc` project it could not see at all: no liveness probes, no actions
+  in the dashboard, `veld share` refusing outright, while the CLI worked fine.
+  `tests/validate-schema.sh` greps for the pattern, because nothing in the type
+  system does.
 - **veld does not rewrite a user's config.** `veld init` writes one when none
   exists; nothing else edits one. A serde round-trip deletes every comment, and
   the byte-level alternative cannot see structure — which is exactly how the

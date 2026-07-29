@@ -3999,8 +3999,16 @@ fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
             if sites.is_empty() {
                 continue;
             }
-            let missing: Vec<&BuiltinSite> =
+            let mut missing: Vec<&BuiltinSite> =
                 sites.iter().filter(|site| !site.provides(&name)).collect();
+            // Sorted by label before anything reads `first()`. `sites` is built by
+            // walking `config.nodes` / `node.variants`, both `HashMap`s, so the
+            // order is randomly seeded per process — and the remedy sentence is
+            // taken from one element. Without this, a value inherited by variants
+            // that fail for *different* reasons (a `command` node, a server node
+            // with no `ports` map) produced a different message on each run, which
+            // makes `veld lint --json` flap and any golden-file diff useless.
+            missing.sort_by(|a, b| a.label.cmp(&b.label));
             let Some(first) = missing.first() else {
                 continue;
             };
@@ -5751,6 +5759,14 @@ mod tests {
             setup.into_iter().collect::<Vec<_>>(),
             ["setup_only".to_owned()]
         );
+
+        // The teardown path excludes `setup`, which does not run at stop — so a
+        // credential helper behind a var only a setup step names is not woken up
+        // by `veld stop`. `teardown` itself stays in, because it does run.
+        let stop = vars_for_teardown(&cfg, &sel);
+        assert!(!stop.contains("setup_only"), "{stop:?}");
+        assert!(stop.contains("teardown_only"), "{stop:?}");
+        assert!(stop.contains("in_stop"), "an on_stop hook's var: {stop:?}");
     }
 
     /// The caller must pass the **plan**, not the endpoints — a node pulled in

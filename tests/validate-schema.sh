@@ -206,6 +206,34 @@ for pattern in "${LEGACY_PATTERNS[@]}"; do
 done
 
 echo
+echo "4b) Root-config gate: no production code hardcodes a root config filename"
+echo
+# `veld` reads `veld.json` OR `veld.jsonc`. A caller that already knows the
+# project root must go through `config::root_config_in`, never
+# `join("veld.json")` — five daemon sites did, and each one was a `veld.jsonc`
+# project the daemon could not see: no liveness probes, no actions in the
+# dashboard, `veld share` refusing outright. Nothing in the type system catches a
+# sixth, so it is caught here.
+echo -n "  no join(\"veld.json\") outside config.rs and tests ... "
+# A trailing `// root-config-gate-ok` exempts a deliberate case (a synthetic path
+# in a test fixture). Nothing else is exempt — `dir.path()`-rooted lines are test
+# tempdirs by construction.
+hardcodes=$(cd "$REPO_ROOT" && git ls-files 'crates/**/*.rs' \
+  | grep -v '^crates/veld-core/src/config.rs$' \
+  | xargs grep -nE 'join\("veld\.jsonc?"\)' 2>/dev/null \
+  | grep -v 'root-config-gate-ok' \
+  | grep -vE '(tempdir|dir\.path\(\))' || true)
+if [[ -z "$hardcodes" ]]; then
+  echo "OK"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL"
+  echo "$hardcodes" | sed 's/^/      /'
+  echo "      Use veld_core::config::root_config_in(dir) instead." | sed 's/^/  /'
+  FAIL=$((FAIL + 1))
+fi
+
+echo
 echo "5) Doc example gate: every complete documented config loads and lints clean"
 echo
 # The grep above catches a fragment using a dead form. This catches a whole example
