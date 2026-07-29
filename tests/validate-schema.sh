@@ -166,8 +166,15 @@ echo
 # deserializes the same files with serde. A change to either side that the other
 # does not know about fails one of the two.
 for example in "$REPO_ROOT"/schema/v3/examples/*.json; do
+  # Strip comments first, as check 2 does. These files are veld configs, so
+  # they are JSONC — and the Rust half of this gate
+  # (`schema_v3_examples_round_trip`) reads them through veld's own loader,
+  # which accepts comments. Validating them here as strict JSON made the two
+  # halves disagree about what an example was allowed to contain.
+  plain="$WORK/example_$(basename "$example")"
+  strip_jsonc "$example" > "$plain"
   run_check "$(basename "$example")" \
-    $CHECK --schemafile "$SCHEMA_V3" "$example"
+    $CHECK --schemafile "$SCHEMA_V3" "$plain"
 done
 
 echo

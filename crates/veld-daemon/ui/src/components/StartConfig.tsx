@@ -12,19 +12,26 @@ import {
   Text,
 } from "@mantine/core";
 import { IconChevronDown } from "@tabler/icons-react";
-import type { Worktree } from "../api";
+import type { Preset, Worktree } from "../api";
 
 /**
  * What ▶ starts: a preset, or an explicit set of `node:variant` selections.
- * A non-TTY `veld start` with neither fails ("No selections provided"), so
- * the UI always resolves to one of the two before starting.
+ * The UI always resolves to one of the two before starting — sending neither is
+ * not a no-op, since a bare `veld start` falls back to the project's
+ * `default_preset` when one is declared and only fails ("No selections provided")
+ * when there isn't one.
  */
 export type StartSelection =
   | { kind: "preset"; name: string }
   | { kind: "nodes"; selections: string[] };
 
 export function defaultStartSelection(w: Worktree): StartSelection | null {
-  if (w.presets.length > 0) return { kind: "preset", name: w.presets[0] };
+  if (w.presets.length > 0) {
+    // `default_preset` first — the config author said which one this is, and
+    // "the first preset in the file" is a guess by comparison.
+    const preferred = w.presets.find((p) => p.is_default) ?? w.presets[0];
+    return { kind: "preset", name: preferred.name };
+  }
   if (w.nodes.length > 0) {
     return {
       kind: "nodes",
@@ -65,7 +72,7 @@ export function pruneStartSelection(
 ): StartSelection | null {
   if (!sel) return null;
   if (sel.kind === "preset") {
-    return w.presets.includes(sel.name) ? sel : null;
+    return w.presets.some((p) => p.name === sel.name) ? sel : null;
   }
   const valid = new Set(
     w.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
@@ -98,6 +105,26 @@ export function resolveStartSelection(w: Worktree): StartSelection | null {
   );
 }
 
+/**
+ * The group heading to render above `presets[i]`, or `null` for none.
+ *
+ * Presets arrive already in display order, so a heading belongs exactly where the
+ * group changes. Ungrouped presets get an explicit **"Other"** heading rather than
+ * none: the daemon's resolver can place the ungrouped bucket *between* two groups,
+ * and a heading-less run of radios there renders under the previous group's title
+ * and reads as members of it. The CLI labels the same bucket "Other"
+ * (`crates/veld/src/commands/presets.rs`), and the two surfaces must not describe
+ * one payload differently.
+ *
+ * A config that never mentions `group` gets no headings at all.
+ */
+export function presetHeading(presets: Preset[], i: number): string | null {
+  if (!presets.some((p) => p.group != null)) return null;
+  const heading = presets[i].group ?? "Other";
+  const previous = i === 0 ? undefined : (presets[i - 1].group ?? "Other");
+  return heading === previous ? null : heading;
+}
+
 /** Request body for `POST /api/worktrees/{id}/start`. */
 export function startBody(sel: StartSelection): {
   preset?: string;
@@ -108,9 +135,20 @@ export function startBody(sel: StartSelection): {
     : { selections: sel.selections };
 }
 
-export function startSelectionLabel(sel: StartSelection | null): string {
+/**
+ * Button text for a selection. Given the worktree, a preset renders its
+ * human-readable `label`; without one it falls back to the config key, which is
+ * what a config with no labels has to show anyway.
+ */
+export function startSelectionLabel(
+  sel: StartSelection | null,
+  w?: Worktree,
+): string {
   if (!sel) return "nothing to start";
-  if (sel.kind === "preset") return sel.name;
+  if (sel.kind === "preset") {
+    const hit = w?.presets.find((p) => p.name === sel.name);
+    return hit?.label ?? sel.name;
+  }
   const n = sel.selections.length;
   return n === 1 ? sel.selections[0] : `${n} nodes`;
 }
@@ -221,7 +259,7 @@ export function StartConfig(props: {
           label: { fontFamily: "var(--mantine-font-family-monospace)" },
         }}
       >
-        {startSelectionLabel(sel)}
+        {startSelectionLabel(sel, w)}
       </Button>
       <Modal
         opened={opened}
@@ -252,20 +290,50 @@ export function StartConfig(props: {
                     }}
                   >
                     <Stack gap={7} pr={8}>
-                      {w.presets.map((p) => (
-                        <Radio
-                          key={p}
-                          value={p}
-                          label={p}
-                          size="xs"
-                          styles={{
-                            label: {
-                              fontFamily:
-                                "var(--mantine-font-family-monospace)",
-                            },
-                          }}
-                        />
-                      ))}
+                      {w.presets.map((p, i) => {
+                        const heading = presetHeading(w.presets, i);
+                        return (
+                          <div key={p.name}>
+                            {heading != null && (
+                              <Text
+                                size="xs"
+                                fw={600}
+                                c="dimmed"
+                                pt={i === 0 ? 0 : 8}
+                                pb={4}
+                              >
+                                {heading}
+                              </Text>
+                            )}
+                            <Radio
+                              value={p.name}
+                              size="xs"
+                              label={
+                                <Stack gap={0}>
+                                  <Group gap={6} wrap="nowrap">
+                                    <Text size="xs" c="dimmed" ff="monospace">
+                                      {p.key}
+                                    </Text>
+                                    <Text size="xs">
+                                      {p.label ?? p.name}
+                                    </Text>
+                                    {p.is_default && (
+                                      <Text size="xs" c="dimmed">
+                                        default
+                                      </Text>
+                                    )}
+                                  </Group>
+                                  {p.when_to_use && (
+                                    <Text size="xs" c="dimmed">
+                                      {p.when_to_use}
+                                    </Text>
+                                  )}
+                                </Stack>
+                              }
+                            />
+                          </div>
+                        );
+                      })}
                     </Stack>
                   </Radio.Group>
                 </ScrollArea.Autosize>

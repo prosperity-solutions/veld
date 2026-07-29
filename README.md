@@ -27,7 +27,7 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Named environments** — multiple environments coexist (`--name dev`); re-running by name is idempotent
 - **Run history** — a stopped, failed, or crashed run persists as history (last 10 per environment, 7 days) with its logs; `veld runs` lists it, `veld logs --run/--previous` targets it, and a crash is distinguishable from a clean stop
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
-- **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`); a preset can compose others with `@name`
+- **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`); a preset can compose others with `@name`. Every preset shows a **key**, the number you type at `veld start` — pin it and it never moves again, whatever is added or renamed around it, so it stays valid in muscle memory and in a runbook (`veld presets --pin` freezes the current numbering). Add an optional `label`, `group`, and `when_to_use` and a list of thirty becomes pickable by someone who didn't write it — and by a coding agent, which reads the same text from `veld presets --json`. `default_preset` gives a bare `veld start` a defined answer, including in a non-interactive shell
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc. Which built-ins exist in which context is checked by `veld lint`, so `${veld.url}` on a `command` node is refused before the run instead of failing mid-start
 - **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json` (or name the root file `veld.jsonc` and your editor works it out); split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value, interpolated and resolved only when the plan reaches them. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — an older config fails to load with an error stating every change needed. See [docs/migrating-to-v3.md](docs/migrating-to-v3.md), written to hand to a coding agent, with `veld lint` as the check
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
@@ -147,7 +147,8 @@ veld stop --name dev
 
 | Command | Description |
 |---------|-------------|
-| `veld start [NODE:VARIANT...] --name <n>` | Start an environment |
+| `veld start [NODE:VARIANT...] --name <n>` | Start an environment. With nothing to start: prompts (enter takes `default_preset`), or without a TTY uses `default_preset` directly |
+| `veld start --preset <NAME-OR-KEY>` | Start a preset by name or by the number `veld presets` shows |
 | `veld start <NODE:VARIANT> --oneshot [--all-logs]` | Run a command node as a one-off: start its dependencies, run it to completion (streaming its output), tear everything down in reverse order, and exit with its exit code. Ideal for end-to-end test runs. |
 | `veld stop [--name <n>] [--all]` | Stop a running environment |
 | `veld restart [--name <n>]` | Restart an environment |
@@ -158,7 +159,7 @@ veld stop --name dev
 | `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--run <id-prefix>] [-p] [--all-runs] [--source <s>] [-s <term>] [-C <n>] [--json]` | View logs, scoped to the latest run by default (`-f` follow — exits 0 when the followed run ends, `--run` targets a past run by id prefix, `-p`/`--previous` the run before the latest, `--all-runs` restores the old interleaved-across-runs behavior, `-s` search, `-C` context lines) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes [--json]` | List all nodes and variants, with the file and line each is defined in |
-| `veld presets` | List presets |
+| `veld presets [--json] [--pin]` | List presets with their keys, labels, and `when_to_use`. `--pin` prints the current numbering as a block to paste, freezing auto-assigned keys |
 | `veld lint [--json]` | Check the config for semantic problems — unknown or out-of-scope `${veld.*}`, a `${nodes.X}` no preset's plan contains, secrets heading for a command line, broken presets. Exits 1 on any error, 0 when only warnings and notices remain — the CI-facing half of the config checks. `veld start` refuses on the same errors |
 | `veld runs [--name <n>] [--json]` | List run history — one row per execution instance (short id, started/ended, duration, outcome), newest first. Without `--name`, all environments' runs grouped |
 | `veld runs show <id> [--json]` | One run in full: outcome, node results with exit codes, and the graph snapshot it was started with (raw commands, env key names, URL templates — never resolved values) |

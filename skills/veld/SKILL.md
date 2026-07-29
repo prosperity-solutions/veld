@@ -21,11 +21,11 @@ triggers:
   - preview the UI
   - feedback loop
   - "*.localhost"
-compatibility: Requires veld v11.0.0+
+compatibility: Requires veld v12.0.0+
 allowed-tools: Read, Edit, Bash(veld *)
 metadata:
   author: prosperity-solutions
-  version: "11.0.0"
+  version: "12.0.0"
 ---
 
 # Veld
@@ -427,6 +427,9 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
 - **Relative paths resolve from the project root**, never from the file that declares them, even in an included file
 - **A preset entry starting with `@` references another preset** — `"ci": ["@core", "e2e:dev"]` is "everything in `core`, plus one more". Selections de-duplicate, and a cycle is an error naming the path. `veld lint` catches a dangling `@ref`, a cycle, and a selection naming a node or variant that does not exist
+- **Pick a preset by reading `when_to_use`, not by guessing from its name** — the `veld presets` output above carries each preset's label, intent, and selections. When the user's request doesn't clearly match one, ask rather than starting a 90-second Docker build they didn't want
+- **A preset's `key` is stable; its list position is not** — `veld start --preset <key-or-name>` both work, and a pinned `key` keeps meaning the same preset as the config grows. Never tell a user "pick option 3" from a list you sorted yourself; quote the key veld printed
+- **`default_preset` is the answer to "just start it"** — a bare `veld start` uses it directly without a TTY, so in an agent shell it starts the project's default instead of failing with "No selections provided". If a project has many presets and no `default_preset`, suggest adding one
 - **`depends_on` names must be literal** — no `${...}` in either the node or the variant name; the graph is read before variables exist
 - **A `secret` value must not be *substituted* into `argv`/`shell`** — a command line lands in the process table. `secret-in-command` (**error**) fires on the forms veld resolves and only those: `${vars.x}`, `${output.x}`, `${nodes.a.x}`. Deliver the value via `env` or `files` instead. A bare `$SECRET_NAME` is a `secret-shell-expansion` **warning**, not an error: the *shell* expands it, so it leaks only when the expansion becomes another program's argument — `PGPASSWORD=$DB_PASS psql …` and `echo $DB_PASS` are safe, `psql "postgres://u:$DB_PASS@h/db"` is not, because the shell then `execve`s `psql` with the password in *its* argv. Prefer handing the program the variable name. `["docker","run","-e","NAME","img"]` is silent — no `$`, nothing expands
 - **`${veld.port}` and `${veld.url}` are only for `start_server`** — a `command` variant gets no allocated port and no route. Reach a server's address as `${nodes.<node>.url}`, which also works from that server's own `env` (the `NEXTAUTH_URL` / `BASE_URL` case)

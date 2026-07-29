@@ -441,8 +441,10 @@ struct WorktreeView {
     /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
-    /// Preset names from the checkout's root config (empty without a config).
-    presets: Vec<String>,
+    /// Presets from the checkout's root config, in display order, with their
+    /// keys and labels (empty without a config). The UI shows the label a human
+    /// can read; `name` is what it sends back to start the run.
+    presets: Vec<veld_core::presets::ResolvedPreset>,
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
@@ -461,12 +463,13 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     let cfg = config_path
         .as_deref()
         .and_then(|p| veld_core::config::parse_config(p).ok());
-    let mut presets: Vec<String> = cfg
+    // Display order comes from the resolver, not a sort here — the UI list and
+    // the CLI picker must agree, or the key printed next to a preset in one
+    // surface means something else in the other.
+    let presets = cfg
         .as_ref()
-        .and_then(|c| c.presets.as_ref())
-        .map(|p| p.keys().cloned().collect())
+        .map(veld_core::presets::resolve)
         .unwrap_or_default();
-    presets.sort();
     let mut nodes: Vec<NodeOptionView> = cfg
         .as_ref()
         .map(|c| {
@@ -896,8 +899,10 @@ struct StartBody {
     preset: Option<String>,
     /// Explicit `node:variant` selections — the alternative to a preset for
     /// configs without presets (or custom picks). Mutually exclusive with
-    /// `preset`; with neither, a non-TTY `veld start` fails "No selections
-    /// provided", so the UI always sends one of the two.
+    /// `preset`; the UI always sends one of the two. With neither, a non-TTY
+    /// `veld start` starts the project's `default_preset` if one is declared, and
+    /// otherwise fails "No selections provided" — so an empty body is a spawn,
+    /// not reliably a no-op.
     #[serde(default)]
     selections: Vec<String>,
     /// Run name; defaults to the worktree alias.
