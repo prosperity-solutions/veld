@@ -130,7 +130,9 @@ run_check "schema/v3/veld.schema.json is valid" \
 echo
 echo "2) Instance validation: checking project configs against their schema version"
 
-# Find all veld.json files in the repo (excluding node_modules, target, etc.)
+# Find every tracked root config in the repo (excluding node_modules, target, etc.).
+# Both spellings: veld reads `veld.json` and `veld.jsonc`, so a fixture using the
+# second one must not slip past this gate unchecked.
 while IFS= read -r config; do
   rel="${config#"$REPO_ROOT/"}"
 
@@ -150,7 +152,7 @@ while IFS= read -r config; do
 
   run_check "$rel (v$version)" \
     $CHECK --schemafile "$SCHEMA_V3" "$plain"
-done < <(find "$REPO_ROOT" -name "veld.json" \
+done < <(find "$REPO_ROOT" \( -name "veld.json" -o -name "veld.jsonc" \) \
   -not -path "*/node_modules/*" \
   -not -path "*/target/*" \
   -not -path "*/.git/*" | sort)

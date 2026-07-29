@@ -28,8 +28,8 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Run history** — a stopped, failed, or crashed run persists as history (last 10 per environment, 7 days) with its logs; `veld runs` lists it, `veld logs --run/--previous` targets it, and a crash is distinguishable from a clean stop
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
 - **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`); a preset can compose others with `@name`
-- **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
-- **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json`; split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — an older config fails to load with an error stating every change needed. See [docs/migrating-to-v3.md](docs/migrating-to-v3.md), written to hand to a coding agent, with `veld lint` as the check
+- **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc. Which built-ins exist in which context is checked by `veld lint`, so `${veld.url}` on a `command` node is refused before the run instead of failing mid-start
+- **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json` (or name the root file `veld.jsonc` and your editor works it out); split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value, interpolated and resolved only when the plan reaches them. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — an older config fails to load with an error stating every change needed. See [docs/migrating-to-v3.md](docs/migrating-to-v3.md), written to hand to a coding agent, with `veld lint` as the check
 - **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
 - **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
 - **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
@@ -87,7 +87,7 @@ cargo build --release
 
 ## Quick start
 
-1. Create a `veld.json` in your project root:
+1. Create a `veld.json` (or `veld.jsonc` — both are read) in your project root:
 
 ```json
 {
@@ -159,7 +159,7 @@ veld stop --name dev
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
 | `veld nodes [--json]` | List all nodes and variants, with the file and line each is defined in |
 | `veld presets` | List presets |
-| `veld lint [--json]` | Check veld.json for semantic problems. Exits 1 on any error, 0 when only warnings and notices remain — the CI-facing half of the config checks. `veld start` refuses on the same errors |
+| `veld lint [--json]` | Check the config for semantic problems — unknown or out-of-scope `${veld.*}`, a `${nodes.X}` no preset's plan contains, secrets heading for a command line, broken presets. Exits 1 on any error, 0 when only warnings and notices remain — the CI-facing half of the config checks. `veld start` refuses on the same errors |
 | `veld runs [--name <n>] [--json]` | List run history — one row per execution instance (short id, started/ended, duration, outcome), newest first. Without `--name`, all environments' runs grouped |
 | `veld runs show <id> [--json]` | One run in full: outcome, node results with exit codes, and the graph snapshot it was started with (raw commands, env key names, URL templates — never resolved values) |
 | `veld runs diff <old> <new> [--json]` | What changed in the config between two runs (node added/removed, command/cwd/env/url changes, veld.json hash). With one id, diffs that run against its predecessor |
@@ -179,7 +179,7 @@ veld stop --name dev
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
 | `veld config [--path] [--files] [--why <pointer>] [--json]` | Print the config. `--files`: each `include` glob, the files it matched, and the nodes each defines. `--why`: one effective value and where it was defined (a `secret` is described, never printed) |
-| `veld init` | Create a new veld.json |
+| `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 ## Configuration
 
@@ -204,7 +204,7 @@ Project-level lifecycle steps that run outside the dependency graph. Setup steps
 }
 ```
 
-Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if provided. Teardown is best-effort — failures are logged but don't block stop. Commands support shell env vars and project-level Veld variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`.
+Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if provided. Teardown is best-effort — failures are logged but don't block stop. Commands support shell env vars, project-level Veld variables (`${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}`) and `${vars.*}`. Node-scoped built-ins (`${veld.port}`, `${veld.url}`, `${veld.node}`) and `${veld.run_id}` are not available — a project step belongs to no node, and a teardown can outlive the run row.
 
 ### Health checks
 
@@ -308,9 +308,11 @@ For `start_server` nodes, individual URL location pieces are also available (mir
 | `${veld.url.scheme}` | `https` | Protocol scheme |
 | `${veld.url.port}` | `19443` | HTTPS port (note: `${veld.port}` is the backend bind port) |
 
-These are also available as cross-node references: `${nodes.backend.url.hostname}`, `${nodes.backend.url.host}`, etc.
+These are also available as cross-node references: `${nodes.backend.url.hostname}`, `${nodes.backend.url.host}`, etc., and in the node's own `on_stop` hook — so a container named after `${veld.url.hostname}` in `argv` is removed by the identical string at teardown.
 
 Ports and URLs for all `start_server` nodes are pre-computed before execution, so `${nodes.X.url}` works everywhere — even across nodes with no dependency relationship. Frontend can reference backend's URL and backend can reference frontend's URL without a cycle.
+
+Availability is not uniform — a `command` node has no port or URL of its own, a project `setup` step belongs to no node, and a `vars` value is one value for the whole run. `veld lint` reports a real built-in written where it is not populated (`builtin-not-in-scope`) rather than letting the run fail with `unknown built-in variable`. See [Availability](docs/configuration.md#availability).
 
 ## Architecture
 

@@ -19,7 +19,7 @@
         "liveness": { "type": "command", "argv": ["pg_isready"], "failure_threshold": 5 }
       },
       "outputs": { "URL": "${veld.url}" },
-      "on_stop": { "argv": ["docker", "rm", "-f", "api"] },
+      "on_stop": { "argv": ["docker", "rm", "-f", "${veld.url.hostname}"] },
       "share": { "expose": ["peer"] },
       "actions": [
         { "name": "psql", "shell": "psql ${output.URL}", "requires_outputs": ["URL"] }
