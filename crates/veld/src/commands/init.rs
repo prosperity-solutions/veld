@@ -16,10 +16,15 @@ const INIT_TEMPLATE: &str = r#"{
   "presets": {
     "default": []
   },
-  "default_preset": "default",
   "nodes": {}
 }
 "#;
+// No `default_preset` in this template, deliberately: its `default` preset selects
+// nothing, and a declared default is *used* by a bare `veld start` — including with
+// no TTY, where it would report a started environment with zero nodes and exit 0.
+// A scaffold must not hand a coding agent a success that did nothing. Add
+// `"default_preset"` once there are nodes to point it at; `generate_veld_json`
+// below does exactly that, because there it has detected services.
 
 // ---------------------------------------------------------------------------
 // Detected service
@@ -867,7 +872,6 @@ pub async fn run() -> i32 {
   "presets": {{
     "default": []
   }},
-  "default_preset": "default",
   "nodes": {{}}
 }}
 "#,

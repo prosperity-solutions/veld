@@ -336,11 +336,24 @@ fn parse_document(text: &str, path: &Path) -> Result<Document, ConfigError> {
         return Err(ConfigError::UnsupportedSchemaVersion(version.to_owned()));
     }
     crate::config::reject_v3_legacy_commands(&value, path)?;
-    // Deserialize from the **text**, not the already-parsed `Value`:
-    // `serde_json::from_value` discards positions, so every typed error (`unknown
-    // variant`, `invalid type`, a bad field) would report line 0 — losing exactly
-    // the accuracy that stripping comments in place rather than deleting them
-    // exists to preserve. The `Value` above is kept only for the v3 key gate.
+    // Deserialize from the **text**, not the already-parsed `Value`, for two
+    // independent reasons:
+    //
+    // 1. `serde_json::from_value` discards positions, so every typed error
+    //    (`unknown variant`, `invalid type`, a bad field) would report line 0 —
+    //    losing exactly the accuracy that stripping comments in place rather than
+    //    deleting them exists to preserve.
+    // 2. **Object key order.** `presets` is an `IndexMap` because declaration order
+    //    is what unpinned preset keys are assigned from (see [`crate::presets`]).
+    //    Streaming from the text hands the map its entries in document order;
+    //    `serde_json::Value`'s `Map` is a sorted `BTreeMap` unless the
+    //    `preserve_order` feature is on, and it is not. So routing this through the
+    //    `Value` would silently sort every preset alphabetically and bring back the
+    //    renumbering bug keys exist to prevent — and it would not fail a single
+    //    test that builds a config with `from_str`. `presets_keep_declaration_order`
+    //    in the tests below goes through this function for that reason.
+    //
+    // The `Value` above is kept only for the v3 key gate.
     serde_json::from_str(&json).map_err(|e| ConfigError::ParseError {
         path: path.to_path_buf(),
         source: e,
@@ -947,6 +960,51 @@ mod tests {
                 "{key} is advertised as known but landed in `unknown`"
             );
         }
+    }
+
+    /// Preset declaration order must survive the real file loader, across files.
+    ///
+    /// Every unpinned preset key is assigned from this order, so if it were lost the
+    /// numbers people type would be assigned alphabetically again — the exact bug
+    /// `key` exists to prevent. The order is only guaranteed because
+    /// [`parse_document`] deserializes from the file *text*: `serde_json::Value`'s
+    /// map is sorted, so a well-meaning switch to `from_value` would silently
+    /// reintroduce it. Tests that build a config straight from a string would all
+    /// still pass, which is why this one goes through `load`.
+    #[test]
+    fn presets_keep_declaration_order() {
+        let dir = project(&[
+            (
+                "veld.json",
+                r#"{
+                    "schemaVersion": "3",
+                    "name": "monorepo",
+                    "include": ["veld.d/*.jsonc"],
+                    "presets": { "zulu": ["a:dev"], "alpha": ["a:dev"] }
+                }"#,
+            ),
+            // Loaded after the root, and the two entries keep their in-file order
+            // rather than sorting with the root's.
+            (
+                "veld.d/more.jsonc",
+                r#"{ "presets": { "yankee": ["a:dev"], "bravo": ["a:dev"] } }"#,
+            ),
+            ("veld.d/node.jsonc", &node_file("a")),
+        ]);
+        let loaded = load(&dir.path().join("veld.json")).expect("loads");
+        let order: Vec<&str> = loaded
+            .config
+            .presets
+            .as_ref()
+            .expect("presets")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(
+            order,
+            ["zulu", "alpha", "yankee", "bravo"],
+            "declaration order, root file first — not alphabetical"
+        );
     }
 
     /// Every project-level singleton must be in the `root-only-key` list in

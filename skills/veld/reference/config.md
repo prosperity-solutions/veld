@@ -208,6 +208,14 @@ the auto-assigned keys and `veld presets --pin` prints a paste-ready block that
 freezes them (veld never rewrites a config itself).
 
 `--preset` takes either: `veld start --preset 2` == `veld start --preset dev-staging`.
+A preset *named* like a number takes that number as its key, so there is normally
+nothing to disambiguate. If another preset also pins that key, `--preset 7` resolves
+the **name** first (scripts predate keys) while the picker resolves the **key** first
+(the number is what the list showed) — `veld lint` warns on such a config.
+
+`--pin` refuses to run on a config that did not load completely, and its block must
+be applied per declaring file (a preset is defined in exactly one file, so pasting
+the merged block into the root is a `duplicate-definition` error).
 
 Display order is derived from keys — groups by their lowest member key, presets
 within a group by key — so a group can move on screen without changing a number.
@@ -233,7 +241,8 @@ rather than at `veld start`:
 | `preset-unknown-variant` | error | a real node, a variant it does not have |
 | `preset-duplicate-key` | error | two presets pin the same `key` |
 | `preset-invalid-key` | error | `"key": 0` — the picker numbers from 1 |
-| `preset-name-shadowed-by-key` | warning | a preset named like a number another preset holds as its key |
+| `preset-empty` | warning | expands to no selections: starts nothing, still reports success |
+| `preset-name-shadowed-by-key` | warning | a preset named like a number another preset **pins** as its key |
 | `default-preset-unknown` | error | `default_preset` names nothing |
 | `presets-undocumented` | notice | 8+ presets, none with a `label` or `when_to_use` |
 

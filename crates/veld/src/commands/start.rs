@@ -27,7 +27,9 @@ pub async fn run(
         // `--preset` takes a name or the key `veld presets` printed. Resolving
         // the token here (rather than passing it straight to `expand_preset`)
         // is what makes `--preset 3` and the picker's `3` the same thing.
-        let Some(chosen) = veld_core::presets::find(&config, token) else {
+        // Name-first: `--preset` is what scripts and the desktop UI pass, and they
+        // predate keys existing at all.
+        let Some(chosen) = veld_core::presets::find_by_name_then_key(&config, token) else {
             output::print_error(&unknown_preset_message(&config, token), false);
             return 1;
         };
@@ -1031,15 +1033,27 @@ fn interactive_preset_selector(
         Some(d) => format!(
             "Select a preset by number or name [{} = {}]: ",
             output::bold("enter"),
-            d.display_label()
+            // Sanitised like every other config-authored string here. This is the
+            // one line where the user commits to a choice, and it is printed
+            // without a trailing newline — so an unsanitised `label` carrying
+            // `ESC [2K` + `CR` could make the prompt name one preset while enter
+            // starts another.
+            output::one_line(d.display_label())
         ),
         None => "Select a preset by number or name: ".to_owned(),
     };
     print!("{prompt}");
     io::stdout().flush().ok()?;
 
+    // EOF (Ctrl-D) and a read error land here. Say "Cancelled." rather than
+    // exiting 1 with nothing printed, which is what a bare `?` used to do — and
+    // which reads as a crash.
     let stdin = io::stdin();
-    let line = stdin.lock().lines().next()?.ok()?;
+    let Some(Ok(line)) = stdin.lock().lines().next() else {
+        println!();
+        output::print_info("Cancelled.");
+        return None;
+    };
 
     match veld_core::presets::interpret_pick(&line, config) {
         veld_core::presets::Pick::Chosen(hit) => Some(hit.name),
@@ -1051,7 +1065,7 @@ fn interactive_preset_selector(
             output::print_error(
                 &format!(
                     "No preset `{}`. Type one of the numbers above, or a preset name.",
-                    line.trim()
+                    output::one_line(line.trim())
                 ),
                 false,
             );

@@ -18,8 +18,17 @@
 //!   order — including from another `include` file that sorts earlier, which in a
 //!   monorepo means a team can renumber presets it does not own. That is the whole
 //!   reason `key` exists, and why `veld presets` marks which keys are promises.
+//! * A preset *named* like a number claims that number as its key, so `7` cannot
+//!   come to mean two things merely because a config grew past seven presets.
 //! * Display order is derived from keys and never feeds back into them. Grouping
 //!   moves headers around on screen; it cannot move a number.
+//!
+//! Two lookups, because the two surfaces have different histories:
+//! [`find_by_key_then_name`] for the picker (the number is on screen) and
+//! [`find_by_name_then_key`] for `--preset` (scripts and runbooks were written
+//! against names, before keys existed). They differ only for a config that both
+//! names a preset like a number and pins that number elsewhere — which `veld lint`
+//! warns about.
 
 use crate::config::VeldConfig;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -240,24 +249,52 @@ pub fn resolve(config: &VeldConfig) -> Vec<ResolvedPreset> {
         return Vec::new();
     };
 
+    use std::collections::HashSet;
+
     // Every pinned key is reserved up front, so an auto key can never land on one
     // regardless of declaration order.
-    let mut used: std::collections::HashSet<u32> =
-        presets.values().filter_map(PresetDef::key).collect();
-    let mut lowest_free = |used: &mut std::collections::HashSet<u32>| -> u32 {
+    let pinned_keys: HashSet<u32> = presets.values().filter_map(PresetDef::key).collect();
+
+    // A preset *named* like a number claims that number. Otherwise `7` could mean
+    // two things through nobody's fault — one preset named `7`, another that merely
+    // happened to be seventh — and it would start happening the day a config passed
+    // seven presets. Here the preset named `7` simply *is* key 7, so both lookups
+    // agree and the list has no gap. That leaves
+    // `preset-name-shadowed-by-key` to report only what an author did deliberately:
+    // pinning a key that collides with someone else's name.
+    let claimed_by_name: HashSet<u32> = presets
+        .keys()
+        .filter_map(|n| n.parse::<u32>().ok())
+        .filter(|n| *n >= 1 && !pinned_keys.contains(n))
+        .collect();
+
+    let mut used: HashSet<u32> = pinned_keys.union(&claimed_by_name).copied().collect();
+
+    // A plain `fn`: it captures nothing, and taking `used` as a parameter keeps the
+    // "claim it as you hand it out" step visible at the call site.
+    fn lowest_free(used: &mut HashSet<u32>) -> u32 {
         let mut candidate = 1u32;
         while !used.insert(candidate) {
             candidate += 1;
         }
         candidate
-    };
+    }
 
     let resolved: Vec<ResolvedPreset> = presets
         .iter()
         .map(|(name, def)| {
             let (key, pinned) = match def.key() {
                 Some(k) => (k, true),
-                None => (lowest_free(&mut used), false),
+                // The number this preset's own name claimed above, if any — it was
+                // reserved for exactly this preset, so no further check is needed.
+                None => match name
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| claimed_by_name.contains(n))
+                {
+                    Some(own) => (own, false),
+                    None => (lowest_free(&mut used), false),
+                },
             };
             ResolvedPreset {
                 name: name.clone(),
@@ -320,22 +357,42 @@ pub fn has_groups(config: &VeldConfig) -> bool {
         .any(|(_, def)| def.group().is_some())
 }
 
-/// Resolve what someone typed at the picker, or passed to `--preset`: either a
-/// key (`3`) or a preset name (`dev-staging`).
+/// Resolve a token typed **at the picker**: a key (`3`) first, then a name.
 ///
-/// Numbers are tried first, so a preset perversely *named* `3` does not shadow
-/// the key `3` that the list just told the user to type. It stays reachable as
-/// `veld start --preset 3` only if no key `3` exists — a collision `veld lint`
-/// reports rather than silently resolving one way.
+/// Key-first because the list on screen just told the user that `3` means a
+/// particular row. If a preset is also *named* `3`, honouring the name here would
+/// start something other than what the user was looking at.
 #[must_use]
-pub fn find(config: &VeldConfig, token: &str) -> Option<ResolvedPreset> {
+pub fn find_by_key_then_name(config: &VeldConfig, token: &str) -> Option<ResolvedPreset> {
     let all = resolve(config);
-    if let Ok(key) = token.trim().parse::<u32>()
+    let token = token.trim();
+    if let Ok(key) = token.parse::<u32>()
         && let Some(hit) = all.iter().find(|p| p.key == key)
     {
         return Some(hit.clone());
     }
-    all.into_iter().find(|p| p.name == token.trim())
+    all.into_iter().find(|p| p.name == token)
+}
+
+/// Resolve a token passed to **`--preset`**: a name first, then a key.
+///
+/// The opposite precedence to the picker, deliberately. `--preset` is what scripts,
+/// CI, runbooks and the desktop UI pass, and every one of those was written against
+/// *names* — keys did not exist. So `--preset 7` has to keep meaning the preset
+/// named `7` for anyone who already had one, and only fall through to key 7 when no
+/// such name exists. The picker has no such history: its number is on screen.
+///
+/// For the overwhelming majority of configs — no preset named like a number —
+/// both functions return the same thing.
+#[must_use]
+pub fn find_by_name_then_key(config: &VeldConfig, token: &str) -> Option<ResolvedPreset> {
+    let all = resolve(config);
+    let token = token.trim();
+    if let Some(hit) = all.iter().find(|p| p.name == token) {
+        return Some(hit.clone());
+    }
+    let key = token.parse::<u32>().ok()?;
+    all.into_iter().find(|p| p.key == key)
 }
 
 /// The project's `default_preset`, if it is set and names a real preset.
@@ -362,22 +419,37 @@ pub fn pin_block(presets: &[ResolvedPreset]) -> String {
     let quote = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""));
     let mut out = String::from("\"presets\": {\n");
     for (i, preset) in presets.iter().enumerate() {
-        let mut fields = vec![format!("\"key\": {}", preset.key)];
-        if let Some(label) = &preset.label {
+        // Destructured, not field-accessed: a new field on `ResolvedPreset` must be
+        // a compile error here. Silently omitting one would make the paste workflow
+        // *delete* it from the user's config, and the round-trip test cannot catch
+        // that — its fixture would have the new field unset on both sides.
+        let ResolvedPreset {
+            name,
+            key,
+            pinned: _, // The point of pasting is that everything becomes pinned.
+            label,
+            when_to_use,
+            group,
+            selections,
+            is_default: _, // Lives in `default_preset`, not in a preset entry.
+        } = preset;
+
+        let mut fields = vec![format!("\"key\": {key}")];
+        if let Some(label) = label {
             fields.push(format!("\"label\": {}", quote(label)));
         }
-        if let Some(when) = &preset.when_to_use {
+        if let Some(when) = when_to_use {
             fields.push(format!("\"when_to_use\": {}", quote(when)));
         }
-        if let Some(group) = &preset.group {
+        if let Some(group) = group {
             fields.push(format!("\"group\": {}", quote(group)));
         }
-        let selections: Vec<String> = preset.selections.iter().map(|s| quote(s)).collect();
+        let selections: Vec<String> = selections.iter().map(|s| quote(s)).collect();
         fields.push(format!("\"selections\": [{}]", selections.join(", ")));
         let comma = if i + 1 == presets.len() { "" } else { "," };
         out.push_str(&format!(
             "  {}: {{ {} }}{comma}\n",
-            quote(&preset.name),
+            quote(name),
             fields.join(", ")
         ));
     }
@@ -401,7 +473,8 @@ pub enum Pick {
 ///
 /// Split out from the prompt's IO so the rule is testable without a pty: an
 /// empty line takes the default when one is declared and cancels otherwise, and
-/// anything else goes through [`find`], which accepts a key or a name.
+/// anything else goes through [`find_by_key_then_name`] — the picker's precedence,
+/// since the number is the thing on screen.
 #[must_use]
 pub fn interpret_pick(typed: &str, config: &VeldConfig) -> Pick {
     let typed = typed.trim();
@@ -411,7 +484,7 @@ pub fn interpret_pick(typed: &str, config: &VeldConfig) -> Pick {
             None => Pick::Cancelled,
         };
     }
-    match find(config, typed) {
+    match find_by_key_then_name(config, typed) {
         Some(hit) => Pick::Chosen(hit),
         None => Pick::NotFound,
     }
@@ -696,29 +769,73 @@ mod tests {
         assert_eq!(grouped(&config)[0].0, None);
     }
 
-    /// `find` is what the picker and `--preset` share, so both accept a key and
-    /// a name and cannot drift apart.
+    /// Both lookups accept a key and a name, so no config needs the user to know
+    /// which one a given surface wants.
     #[test]
-    fn find_accepts_a_key_or_a_name() {
+    fn both_lookups_accept_a_key_or_a_name() {
         let config = config_with(r#"{ "dev": { "key": 3, "selections": ["a:x"] } }"#, None);
-        assert_eq!(find(&config, "3").unwrap().name, "dev");
-        assert_eq!(find(&config, "dev").unwrap().name, "dev");
-        assert_eq!(find(&config, " dev ").unwrap().name, "dev");
-        assert!(find(&config, "nope").is_none());
-        assert!(find(&config, "4").is_none());
+        for find in [find_by_key_then_name, find_by_name_then_key] {
+            assert_eq!(find(&config, "3").unwrap().name, "dev");
+            assert_eq!(find(&config, "dev").unwrap().name, "dev");
+            assert_eq!(find(&config, " dev ").unwrap().name, "dev");
+            assert!(find(&config, "nope").is_none());
+            assert!(find(&config, "4").is_none());
+        }
     }
 
-    /// A key wins over a preset *named* the same digits. The picker just told the
-    /// user to type that number, so it has to mean what the list said.
+    /// The one config where the two lookups must disagree, and why.
+    ///
+    /// `--preset 7` has to keep meaning the preset *named* `7`: names are all that
+    /// existed before keys, so a script or runbook passing `7` predates the number.
+    /// The picker must do the opposite — it printed `[7]` next to a row, and that row
+    /// is what the user is looking at.
     #[test]
-    fn a_key_beats_a_preset_named_like_a_number() {
+    fn the_picker_prefers_the_key_and_the_flag_prefers_the_name() {
         let config = config_with(
-            r#"{ "dev": { "key": 3, "selections": ["a:x"] },
-                 "3": { "key": 8, "selections": ["b:x"] } }"#,
+            r#"{ "7":       ["a:x"],
+                 "pinned-7": { "key": 7, "selections": ["b:x"] } }"#,
             None,
         );
-        assert_eq!(find(&config, "3").unwrap().name, "dev");
-        assert_eq!(find(&config, "8").unwrap().name, "3");
+        assert_eq!(
+            find_by_key_then_name(&config, "7").unwrap().name,
+            "pinned-7",
+            "the picker showed [7] beside pinned-7"
+        );
+        assert_eq!(
+            find_by_name_then_key(&config, "7").unwrap().name,
+            "7",
+            "`--preset 7` must not change meaning for a config that predates keys"
+        );
+    }
+
+    /// A preset named like a number *is* that key, so `2` is never ambiguous by
+    /// accident and the numbering has no hole. The deliberate collision — someone
+    /// pinning a key that is another preset's name — is what the lint reports.
+    #[test]
+    fn a_preset_named_like_a_number_claims_that_key() {
+        // Without this, `c` would take key 2 while `2` is a real name, and typing
+        // `2` would mean two different things depending on the surface.
+        let config = config_with(r#"{ "a": ["a:x"], "2": ["b:x"], "c": ["c:x"] }"#, None);
+        let by_name: std::collections::HashMap<String, u32> = keys(&config).into_iter().collect();
+        assert_eq!(by_name["a"], 1);
+        assert_eq!(by_name["2"], 2, "the preset named `2` is key 2");
+        assert_eq!(by_name["c"], 3);
+        // So both lookups agree, with nothing to disambiguate.
+        assert_eq!(find_by_name_then_key(&config, "2").unwrap().name, "2");
+        assert_eq!(find_by_key_then_name(&config, "2").unwrap().name, "2");
+    }
+
+    /// A pin outranks a name's claim on the same number — the author asked for it
+    /// explicitly — and the displaced preset still gets a key rather than nothing.
+    #[test]
+    fn a_pin_outranks_a_numeric_name() {
+        let config = config_with(
+            r#"{ "2": ["a:x"], "pinned-2": { "key": 2, "selections": ["b:x"] } }"#,
+            None,
+        );
+        let by_name: std::collections::HashMap<String, u32> = keys(&config).into_iter().collect();
+        assert_eq!(by_name["pinned-2"], 2);
+        assert_eq!(by_name["2"], 1, "displaced, but still reachable by a key");
     }
 
     #[test]

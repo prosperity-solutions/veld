@@ -1382,7 +1382,9 @@ Presets are named shortcuts for node:variant selections. They provide convenienc
 }
 ```
 
-Each preset maps to an array of `"node:variant"` strings. Use presets with:
+A preset is either an array of `"node:variant"` strings, as above, or an object
+that adds a picker key and a description -- see [Describing a
+preset](#describing-a-preset). Use presets with:
 
 ```sh
 veld start --preset fullstack --name my-feature
@@ -1428,10 +1430,27 @@ veld presets --pin
 ```
 
 Veld never rewrites your config, so applying the block is your call -- run
-`veld lint` afterwards to check it.
+`veld lint` afterwards to check it. Two things to know when you do:
+
+- **A preset is defined in exactly one file.** The block is one merged
+  `presets` object, so in a split config add each entry's `key` to the file that
+  already declares that preset -- pasting the whole block into the root file is a
+  `duplicate-definition` error. `veld config --files` shows which file is which.
+  Pinning a few at a time is safe, precisely because pinning a preset at the
+  number it already shows moves nothing else.
+- `--pin` refuses to run if the config did not load completely (say an included
+  file has a syntax error), because the keys it would freeze are not the ones
+  you will get once it does.
 
 `--preset` accepts a key as well as a name, so `veld start --preset 2` and
 `veld start --preset dev-staging` are the same thing.
+
+The two differ only for a config that has a preset *named* like a number. A
+preset named `7` takes key 7, so normally there is nothing to disambiguate; if
+some other preset pins key 7 as well, then `--preset 7` means the preset **named**
+`7` -- names are what scripts and runbooks were written against -- while typing
+`7` at the picker selects whatever the list showed beside `[7]`. `veld lint` warns
+about that config either way.
 
 ### Describing a preset
 
@@ -1510,7 +1529,8 @@ rather than at `veld start`:
 | `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
 | `preset-duplicate-key` | two presets pin the same `key`. A key is the number a person types, so it cannot mean two things |
 | `preset-invalid-key` | `"key": 0` -- the picker numbers from 1 |
-| `preset-name-shadowed-by-key` | a warning: a preset is *named* like a number that another preset holds as its key, so typing it selects the other one |
+| `preset-empty` | a warning: the preset expands to no selections, so starting it brings up nothing and still reports success |
+| `preset-name-shadowed-by-key` | a warning: a preset is *named* like a number that another preset **pins** as its key, so the number and the name select different presets |
 | `default-preset-unknown` | `default_preset` names a preset that does not exist |
 | `presets-undocumented` | a notice, once, when a config has eight or more presets and none carry a `label` or `when_to_use` -- the size at which the list stops being pickable by anyone who did not write it |
 

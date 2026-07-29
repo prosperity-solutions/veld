@@ -250,6 +250,7 @@
             "key": {
               "type": "integer",
               "minimum": 1,
+              "maximum": 4294967295,
               "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key take the lowest unclaimed number, in declaration order — so appending a preset, or pinning one at the number it already shows, changes no other key; an unpinned key still moves when a preset is added or removed ahead of it, including from an include file that sorts earlier. `veld presets --pin` prints the current numbering as a block to paste."
             },
             "label": {

@@ -2657,6 +2657,21 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
                 ),
             )),
             Ok(selections) => {
+                // A preset that expands to nothing starts nothing — and reports
+                // success doing it, which is how `veld start` with such a preset as
+                // the `default_preset` hands a script (or a coding agent) an exit 0
+                // and a zero-node run. A warning, not an error: `veld init` writes
+                // an empty preset as a placeholder to fill in, and refusing to load
+                // a freshly scaffolded config would be worse than saying this.
+                if selections.is_empty() {
+                    out.push(Finding::warning(
+                        "preset-empty",
+                        format!("presets.{name}"),
+                        "selects nothing, so starting it brings up no nodes and still \
+                         reports success. Add `node:variant` selections, or an `@ref` to \
+                         a preset that has them",
+                    ));
+                }
                 // `expand_preset` resolves references; it does not know whether the
                 // node it named exists, which used to surface only once the graph
                 // was built.

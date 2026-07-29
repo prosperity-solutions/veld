@@ -22,6 +22,22 @@ pub async fn run(json: bool, pin: bool) -> i32 {
     }
 
     if pin {
+        // A partial load is the one state in which pinning is actively harmful.
+        // An unparseable include file takes its presets out of the map, so the
+        // remaining ones have shifted down — and `--pin` would then freeze them at
+        // the wrong numbers, permanently, from a syntax error in a file the user
+        // may not even have open. Refuse rather than help.
+        if let Some(errors) = veld_core::config::error_summary(&config.deferred_findings) {
+            output::print_error(
+                &format!(
+                    "Refusing to pin: this config did not load completely, so the keys \
+                     below are not the ones you would get once it does.\n{errors}\n  \
+                     Fix the above, then re-run `veld presets --pin`."
+                ),
+                false,
+            );
+            return 1;
+        }
         print_pin_block(&resolved);
         return 0;
     }
@@ -109,7 +125,17 @@ fn print_listing(config: &veld_core::config::VeldConfig, resolved: &[ResolvedPre
 /// The block itself is built by [`presets::pin_block`], which is where its
 /// round-trip property is tested.
 fn print_pin_block(resolved: &[ResolvedPreset]) {
-    println!("// Paste into veld.json to freeze the current preset numbering.");
-    println!("// Pinned keys never move, whatever is added, removed, or regrouped around them.");
+    println!("// Freeze the current preset numbering: a pinned key never moves again,");
+    println!("// whatever is added, removed, renamed, or regrouped around it.");
+    println!("//");
+    // The block is one merged `presets` object, but a preset is defined in exactly
+    // one file — so pasting the whole thing into the root file of a split config
+    // produces `duplicate-definition` errors for every preset that lives in an
+    // included file. Say where each entry goes. Pinning a subset is safe precisely
+    // because pinning a preset at the key it already shows moves nothing else.
+    println!("// Add each entry's \"key\" to the file that already declares that preset");
+    println!("// (with `include` globs that is not always veld.json — `veld nodes` and");
+    println!("// `veld config --files` show which file is which). Pinning a few at a time");
+    println!("// is safe: a key pinned at the number it already shows changes nothing else.");
     println!("{}", presets::pin_block(resolved));
 }
