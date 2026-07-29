@@ -279,12 +279,15 @@ it at run start (only if the plan reaches it), and passes it to the process's
 environment or a file.
 `secret: true` is what lets veld *refuse* the unsafe uses — a secret veld
 *substitutes* into an `argv` element or a `shell` string (`${vars.x}`,
-`${output.x}`, `${nodes.a.x}`) is an error, because both appear in the process
-table. A bare `$SECRET_NAME` is fine anywhere and is the recommended form: veld's
-interpolation consumes `${…}` only, so `$NAME` reaches argv untouched and a shell
-expands it later in the child, where the value never appears in any process's
-arguments. So is handing a container the name only
-(`["docker", "run", "-e", "SECRET_NAME", "img"]`).
+`${output.x}`, `${nodes.a.x}`) is an error, because the value lands in the process
+table for certain.
+
+A bare `$SECRET_NAME` is a **warning** (`secret-shell-expansion`), not an error:
+the *shell* expands it, so it leaks only when the expansion becomes another
+program's argument. `PGPASSWORD=$DB_PASS psql …` is safe;
+`psql "postgres://u:$DB_PASS@host/db"` is not, because the shell then `execve`s
+`psql` with the password in its argv. Handing a container the name only,
+`["docker", "run", "-e", "SECRET_NAME", "img"]`, is always safe.
 
 A missing `env` source is an error at start naming the node and the variable,
 rather than an empty value your app trips over later.

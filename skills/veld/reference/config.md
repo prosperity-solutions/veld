@@ -136,7 +136,10 @@ A var is a **scalar or a single value source** — never an object, never a conf
 fragment. It may not reference another var (one hop). Duplicate names and unknown
 references are errors. `veld config --why <pointer>` shows where a value came from.
 
-A var literal is interpolated against the **run-scoped** built-ins — `${veld.run}`,
+A var literal is **interpolated**, so every `${…}` in it is veld's to resolve: a
+reference in no veld namespace (`"${HOME}/.cache"`) is a
+`var-unresolvable-reference` error — write `$HOME` unbraced for the shell, or use
+`{ "env": "HOME" }`. It is interpolated against the **run-scoped** built-ins — `${veld.run}`,
 `run_id`, `name`, `project`, `root`, `worktree`, `branch`, `username`. The per-node
 ones (`port`, `url`, `url.*`, `ports.*`, `node`, `variant`) are a
 `builtin-not-in-scope` error in a var: a var is one value for the whole run, so
@@ -369,7 +372,7 @@ Substitution available inside `command` and `parameters` values:
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
 
-**Secrets — prefer `$KEY` over `${output.KEY}`.** A secret referenced as `${output.DB_PASS}` is interpolated into the command string, so it ends up in the process list (`ps`) and any argv-based logging. `$DB_PASS` is passed as an environment variable and expanded by the shell at runtime, so it never appears in argv — as in the `psql` example above. GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) are the exception: the URL is expanded into the launcher's argv regardless, so to avoid exposure there, omit the password and let the client prompt.
+**Secrets — `$KEY` beats `${output.KEY}`, but is not automatically safe.** `${output.DB_PASS}` is interpolated by veld into the command string, so it is in `ps` for certain — a `secret-in-command` **error**. `$DB_PASS` is expanded by the *shell*, and where the expansion lands decides the outcome: `echo $DB_PASS` (builtin) and `PGPASSWORD=$DB_PASS psql -U u db` (environment assignment) leak nothing, while `psql "postgres://u:$DB_PASS@host/db"` makes the shell `execve` `psql` with the expanded value in *that* program's argv. The shell's own `ps` entry shows the literal `$DB_PASS`; the program it runs shows the value. veld cannot distinguish them, so this is a `secret-shell-expansion` **warning**. Prefer giving the program the variable *name* (`PGPASSWORD=`, `--password-file`, `-e NAME`). GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) always expand into the launcher's argv — omit the password and let the client prompt.
 
 Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain shell/env references inside a command — otherwise Veld tries to resolve it and errors. When an action is defined on multiple nodes, disambiguate with `veld action <name> --node <node>`.
 

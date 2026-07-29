@@ -124,11 +124,12 @@ veld stop --name dev
   and passes it via the process environment or a delivered file (and only if the resolved plan
   reaches it, so a credential helper is not run for a service you did not start). A `secret` value
   veld *substitutes* into an `argv` element or `shell` string — `${vars.x}`, `${output.x}`,
-  `${nodes.a.x}` — is a lint **error**, because both appear in the process table. A bare `$NAME` is
-  fine anywhere and is the recommended form: veld's interpolation consumes `${…}` only, so `$NAME`
-  reaches argv untouched and a shell expands it later in the child, where the value never appears
-  in any process's arguments. `veld config` prints a redacted placeholder and there is no flag that
-  prints a resolved secret.
+  `${nodes.a.x}` — is a lint **error**, because the value lands in the process table for certain. A
+  bare `$NAME` is a **warning** instead: the shell expands it, so it leaks only when the expansion
+  becomes another program's argument (`PGPASSWORD=$DB_PASS psql …` is safe;
+  `psql "postgres://u:$DB_PASS@host/db"` is not — the shell execs psql with the password in its
+  argv). `veld config` prints a redacted placeholder and there is no flag that prints a resolved
+  secret.
 - **`veld lint` reports every semantic problem at once** and exits non-zero, for CI. Covers unknown
   built-in variables, built-ins written where they are not populated (`${veld.url}` on a `command`
   node, `${veld.port}` in a `vars` value), a `${nodes.X}` naming a node that does not exist or one

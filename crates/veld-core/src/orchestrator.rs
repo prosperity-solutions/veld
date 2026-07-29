@@ -1744,7 +1744,7 @@ impl Orchestrator {
                     self.config.vars.as_ref(),
                     Some(&self.project_root),
                     &ctx,
-                    &config::vars_for_plan(&self.config, &selections),
+                    &config::vars_for_teardown(&self.config, &selections),
                     &HashMap::new(),
                 )
                 .await

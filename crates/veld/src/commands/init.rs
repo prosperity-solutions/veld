@@ -646,8 +646,8 @@ fn add_veld_to_gitignore(root: &Path) {
 /// `veld init` -- create a starter veld.json in the current directory.
 ///
 /// One default, though veld reads either spelling: writing `veld.json` next to an
-/// existing `veld.jsonc` would leave the directory holding both, which
-/// `discover_config` refuses outright.
+/// existing `veld.jsonc` would leave the directory holding both, which `validate`
+/// reports as `ambiguous-root-config` and `veld start` then refuses.
 pub async fn run() -> i32 {
     let target = Path::new("veld.json");
 

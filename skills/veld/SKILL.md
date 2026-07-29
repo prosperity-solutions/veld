@@ -121,15 +121,26 @@ attached to. Inside `command` you can reference:
 - `${param.KEY}` — the action's static `parameters`
 - `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
 
-> **Secrets — prefer `$KEY` over `${output.KEY}`.** `${output.DB_PASS}` is
-> interpolated into the command string, so the value is visible in the process
-> list (`ps`). `$DB_PASS` is passed as an environment variable and expanded by
-> the shell at runtime, so it never appears in argv — the `psql` example above
-> leaks nothing. GUI clients are the exception: launching e.g.
-> `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"`
-> expands the URL into `open`'s argv regardless. For local dev against ephemeral
-> clones that's usually fine; to avoid it, drop the password and let the client
-> prompt: `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
+> **Secrets — `$KEY` is better than `${output.KEY}`, but it is not automatically
+> safe.** `${output.DB_PASS}` is interpolated by Veld into the command string, so
+> the value is in `ps` for certain — that is a `secret-in-command` **error**.
+> `$DB_PASS` is expanded by the *shell* instead, and where the expansion ends up
+> decides whether anything leaks:
+>
+> | Form | Leaks? |
+> |---|---|
+> | `echo $DB_PASS` (shell builtin, no `execve`) | no |
+> | `PGPASSWORD=$DB_PASS psql -U u db` (environment assignment) | no |
+> | `psql "postgres://u:$DB_PASS@host/db"` | **yes** — the shell `execve`s `psql` with the expanded value in *its* argv |
+> | `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST/$DB_NAME"` | **yes**, same reason |
+>
+> The shell's own `ps` entry shows the literal `$DB_PASS`; the program it then
+> runs shows the value. Veld cannot tell the cases apart, so `$KEY` naming a
+> secret is a `secret-shell-expansion` **warning**, not an error. Prefer handing
+> the program the variable *name* and letting it read the environment
+> (`PGPASSWORD=`, `--password-file`, `-e NAME` for a container). For a GUI client,
+> drop the password and let it prompt:
+> `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
 
 Run actions from the CLI:
 
@@ -411,7 +422,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`schemaVersion` must be `"3"`; `command` is gone** — use `argv` (array, spawned directly) or `shell` (string, via `sh -c`), exactly one. A `"1"`/`"2"` config, or a config containing `command`, fails to load — the error names every offending position. veld ships no converter: apply the rules in `docs/migrating-to-v3.md` and verify with `veld lint`
 - **`veld.*` is a closed set** — node outputs are `${output.KEY}` / `${nodes.<node>.KEY}`, never `${veld.KEY}`. This changed: `${veld.<OUTPUT>}` used to work inside `on_stop` and now fails, which would silently skip the teardown hook — `veld lint` catches it
 - **A built-in that exists is not a built-in that is *populated*** — `veld lint` reports `builtin-not-in-scope` for a real name written where the context does not have it. Availability: run/name/project/root/worktree/branch/username everywhere; `run_id` everywhere except `setup`/`teardown`; `node`/`variant` on nodes only; `port`/`url`/`url.*`/`ports.*` on `start_server` nodes only. A node's `on_stop` has exactly what the node had, URL family included — so `docker rm ${veld.project}-${veld.node}-${veld.run}` in `argv` and in `on_stop` cannot drift
-- **A `vars` value is run-scoped** — `${veld.run}`, `${veld.branch}` and friends are interpolated inside a var literal; `${veld.port}`, `${veld.url}`, `${veld.node}` in one are a lint error, because a var is one value for the whole run. Compose per-node values at the use site. A var backed by a source (`file`/`env`/`argv`/`shell`) is resolved only when the plan reaches it, so a credential-helper var costs nothing on a run that does not use it
+- **A `vars` value is run-scoped, and interpolated** — every `${…}` in a var literal is veld's to resolve, so `${HOME}` is a `var-unresolvable-reference` error (write `$HOME` unbraced, or use `{ "env": "HOME" }`). `${veld.run}`, `${veld.branch}` and friends resolve; `${veld.port}`, `${veld.url}`, `${veld.node}` in one are a lint error, because a var is one value for the whole run. Compose per-node values at the use site. A var backed by a source (`file`/`env`/`argv`/`shell`) is resolved only when the plan reaches it, so a credential-helper var costs nothing on a run that does not use it
 - **`${nodes.X.…}` is checked against each preset's plan** — `veld lint` reports `unknown-node-ref` (no such node) and `preset-missing-node-ref` (real node, not in that preset's plan), naming the preset. This is the "works with preset A, dies with preset B" class; a node pulled in transitively by `depends_on` counts as present
 - **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
 - **Relative paths resolve from the project root**, never from the file that declares them, even in an included file

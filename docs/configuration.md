@@ -1248,6 +1248,11 @@ A var whose value is a *fetched* source (`file`, `env`, `argv`, `shell`) is used
 verbatim, exactly as a node's `env` treats one: substituting inside content that
 came out of a secret store would make the store an interpolation vector.
 
+**A var literal is interpolated, so every `${…}` in it is Veld's to resolve.** A
+reference in no Veld namespace — `"cache": "${HOME}/.cache"` — is a
+`var-unresolvable-reference` error. Write `$HOME` without braces to leave it for
+the shell, or make the var a value source: `{ "env": "HOME" }`.
+
 ```sh
 veld config --why nodes.api.variants.dev.env.DATABASE_URL
 ```
@@ -1329,34 +1334,47 @@ interpolated by Veld into an `argv` element or a `shell` string (both appear in
 the process table, readable by every other user on the machine), not into logs,
 not into `--json` output, not into the share payload.
 
-**`$KEY` is fine; `${vars.db_pass}` is not.** The rule fires on the forms *Veld
-resolves*, and only those — they are the only ones that can put a value in the
-process table. A bare `$KEY` is not one: Veld's interpolation consumes `${…}` and
-nothing else, so `$KEY` reaches `argv` untouched and is expanded later by a shell
-*in the child*, where the value never appears in any process's arguments.
+**Two different rules, because there are two different risks.**
+
+`${vars.db_pass}`, `${output.DB_PASS}`, `${nodes.db.PASSWORD}` — Veld substitutes
+these into the command string itself, so the value is in the process table for
+certain. That is `secret-in-command`, an **error**.
+
+`$DB_PASS` is expanded by the *shell*, not by Veld, and whether it leaks depends
+entirely on what the shell does with the expansion:
 
 ```jsonc
 "env": { "DB_PASS": { "shell": "pass show db", "secret": true } },
-// fine — the shell expands $DB_PASS after the process is already running
+
+// safe — a builtin, no exec, the value stays inside the shell
+"shell": "echo $DB_PASS | some-consumer",
+// safe — an environment assignment; psql reads it from its environment
+"shell": "PGPASSWORD=$DB_PASS psql -h localhost -U u db",
+// LEAKS — the shell execs psql with the expanded value as an argument,
+// so `ps` shows the password on the psql process, not on the shell
 "shell": "psql \"postgres://u:$DB_PASS@localhost/db\"",
-"argv": ["bash", "-lc", "psql \"postgres://u:$DB_PASS@localhost/db\""],
-// also fine — the container is handed the name, not the value
+// safe — the container is handed the name, not the value
 "argv": ["docker", "run", "-e", "DB_PASS", "img"]
 ```
 
-Refused: `${vars.db_pass}`, `${output.DB_PASS}`, and `${nodes.db.PASSWORD}`
-anywhere in a command — Veld substitutes those into the command string itself.
+The shell's own `ps` entry shows the literal `$DB_PASS` in every case; the program
+it *runs* is where the value shows up. Veld cannot tell which case it is looking
+at, so a `$NAME` matching a secret is `secret-shell-expansion`, a **warning** —
+loud enough to check, not so loud it blocks a run that is fine. Prefer handing the
+program the variable *name*: `PGPASSWORD=`, `--password-file`, `-e NAME`.
 
-Not refused, and not a leak either way: `${DB_PASS}` (no such Veld namespace, so
+Not flagged, and not a leak: `${DB_PASS}` (no such Veld namespace, so
 interpolation fails rather than substituting) and a bare `$DB_PASS` in an `argv`
-element nothing expands (inert text — a mistake, but not an exposure).
+element no shell ever sees (inert text — a mistake, but not an exposure).
 
 ### Lint rules
 
 | Rule id | What it catches | Severity |
 |---|---|---|
-| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}`. A bare `$NAME` is not flagged: Veld never expands it, so it cannot reach the process table | **error** |
-| `ambiguous-root-config` | A directory holding both `veld.json` and `veld.jsonc`. Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld stop` still works) |
+| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}` | **error** |
+| `secret-shell-expansion` | A bare `$NAME` matching a secret. The shell expands it, so it leaks only if the expansion becomes another program's argument — Veld cannot tell, so it says so instead of guessing | warn |
+| `var-unresolvable-reference` | A `${…}` in a `vars` literal that names no Veld namespace (`${HOME}`). Var literals are interpolated, so it fails the run | **error** |
+| `ambiguous-root-config` | A directory holding `veld.json` and `veld.jsonc` as two *different* files (a symlink between them is fine). Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld stop` still works) |
 | `credential-shaped-literal` | A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
 | `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
 | `start-server-needs-readiness` | A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |

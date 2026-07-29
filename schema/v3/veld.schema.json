@@ -211,7 +211,7 @@
     },
     "secretFlag": {
       "type": "boolean",
-      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED where veld would substitute it into an argv element or shell string — ${vars.x}, ${output.x}, ${nodes.a.x} (both positions appear in the process table). A bare $NAME is fine anywhere and is the recommended form: veld's interpolation consumes ${…} only, so $NAME reaches argv untouched and a shell expands it later in the child, where the value never appears in any process's arguments. So is handing a container the name only, [\"docker\", \"run\", \"-e\", \"NAME\", \"img\"]. A secret's sanctioned destinations are the process environment and a file."
+      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED where veld would substitute it into an argv element or shell string — ${vars.x}, ${output.x}, ${nodes.a.x} (both positions appear in the process table). A bare $NAME is a WARNING (secret-shell-expansion), not an error: the shell expands it, so it leaks only when the expansion becomes another program's argument — PGPASSWORD=$DB_PASS psql … is safe, psql \"postgres://u:$DB_PASS@host/db\" is not, because the shell then execs psql with the password in its argv. Handing a container the name only, [\"docker\", \"run\", \"-e\", \"NAME\", \"img\"], is always safe. A secret's sanctioned destinations are the process environment and a file."
     },
     "envMap": {
       "type": "object",

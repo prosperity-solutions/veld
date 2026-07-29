@@ -2439,19 +2439,36 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
     // invite — copy `veld.json` to `veld.jsonc`, edit, forget to delete the
     // original. `veld start` and `veld lint` still refuse; `veld stop` still works.
     if let Some(dir) = path.parent() {
-        let present: Vec<&str> = ROOT_CONFIG_NAMES
-            .iter()
-            .copied()
-            .filter(|name| dir.join(name).is_file())
-            .collect();
+        // Deduplicated by target, because `ln -s veld.jsonc veld.json` is the
+        // obvious way to get JSONC editor mode without breaking a script or a CI
+        // job that names `veld.json` — and `is_file()` follows symlinks, so
+        // counting names would call that one file two configs and refuse it.
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut present: Vec<&str> = Vec::new();
+        for name in ROOT_CONFIG_NAMES {
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let target = candidate.canonicalize().unwrap_or(candidate);
+            if seen.contains(&target) {
+                continue;
+            }
+            seen.push(target);
+            present.push(name);
+        }
         if present.len() > 1 {
             loaded.config.deferred_findings.push(Finding::error(
                 "ambiguous-root-config",
-                dir.display().to_string(),
+                // A file name, not `dir.display()`: every other `location` is a
+                // pointer into the document, and an absolute path would put the
+                // developer's home directory into `veld lint --json` and make a
+                // golden-file CI diff machine-dependent.
+                ROOT_CONFIG_NAMES[0].to_owned(),
                 format!(
-                    "this directory contains {}. veld reads {} and ignores the other, so \
-                     the file you edit may not be the file veld runs — delete or rename \
-                     one of them",
+                    "this directory contains {}, which are two different files. veld reads \
+                     {} and ignores the other, so the file you edit may not be the file veld \
+                     runs — delete or rename one of them",
                     present.join(" and "),
                     ROOT_CONFIG_NAMES[0]
                 ),
@@ -2999,6 +3016,38 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
         }
     }
 
+    // A var literal is *interpolated* now, so every `${…}` in it is veld's to
+    // resolve — and `resolve_reference` errors on any namespace it does not know.
+    // `"cache": "${HOME}/.cache"` was verbatim before this release, passed through
+    // to the child, and expanded by its shell; it now aborts the start. That has
+    // to be a lint error rather than a runtime one: the second resolution pass
+    // runs *after* the run is persisted, so the abort leaves a `starting` row with
+    // nothing behind it.
+    for (name, value) in &declared {
+        let Some(literal) = value.as_literal() else {
+            continue;
+        };
+        for reference in interpolation_refs(literal) {
+            // `${veld.*}` scope is `check_builtin_names`; `${vars.*}` nesting is
+            // rule 2 above. Everything else has no namespace at all.
+            if reference.starts_with("veld.") || reference.starts_with("vars.") {
+                continue;
+            }
+            out.push(Finding::error(
+                "var-unresolvable-reference",
+                format!("vars.{name}"),
+                format!(
+                    "`${{{reference}}}` is not a veld reference, and a var literal is \
+                     interpolated — so this fails the run with \"unresolved variable \
+                     reference\". Only `${{veld.<run-scoped>}}` resolves in a var. For a \
+                     shell variable write `${reference}` without the braces, so veld leaves \
+                     it for the shell; for a node output use the value at the use site, or \
+                     make the var a value source (`{{ \"env\": \"{reference}\" }}`)"
+                ),
+            ));
+        }
+    }
+
     // Rule 4: an unknown `${vars.x}` is a hard error listing the declared names,
     // because the overwhelmingly likely cause is a typo and the fix is to see the
     // real list.
@@ -3368,24 +3417,37 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                             }
                         }
                     }
-                    // A bare `$NAME` / `${NAME}` is deliberately NOT collected.
-                    //
-                    // This rule exists for one thing: a secret *value* landing in
-                    // the process table. Only the forms veld itself resolves can
-                    // put one there — the three above. `veld.*` interpolation
-                    // consumes `${…}` and nothing else (see
-                    // `variables::resolve_reference`), so `$NAME` passes through
-                    // untouched into argv, where either a shell expands it later in
-                    // the child (the form the actions docs recommend, precisely
-                    // because the value never enters argv) or nothing does and it
-                    // is inert text. `${NAME}` matches no namespace and fails
-                    // interpolation, so it never reaches a command either.
-                    //
-                    // Collecting them cost more than it bought: `veld lint` refused
-                    // `["bash", "-lc", "echo $TOKEN"]` — an Error, so the run
-                    // refused too — while asserting a process-table exposure that
-                    // cannot happen. A false exposure claim on a security rule is
-                    // how authors learn to route around the linter.
+                    // A bare `$NAME` is a **warning**, on its own rule — see
+                    // `shell_expansion` below. It is not an error, because veld
+                    // does not substitute it and often nothing leaks; it is not
+                    // silence either, because often something does.
+                    let shell_expanded: Vec<String> = env_refs_detailed(part)
+                        .into_iter()
+                        // `${NAME}` is veld's to resolve, and it matches no
+                        // namespace, so interpolation fails and the value never
+                        // reaches a command at all. Nothing to warn about.
+                        .filter(|(_, braced)| !braced)
+                        .map(|(name, _)| name)
+                        .filter(|name| secrets.contains(name))
+                        .collect();
+                    for name in shell_expanded {
+                        out.push(Finding::warning(
+                            "secret-shell-expansion",
+                            format!("{base}{suffix}"),
+                            format!(
+                                "`${name}` is expanded by a **shell**, not by veld, so veld \
+                                 cannot tell where the value ends up. It is safe where the \
+                                 expansion never becomes an argument — a shell builtin, or an \
+                                 environment assignment like `PGPASSWORD=${name} psql …`. It \
+                                 is a leak where it does: `psql \"…${name}…\"` runs `execve` \
+                                 with the expanded value in *that* program's argv, which every \
+                                 other user on the machine can read from the process table. \
+                                 Prefer handing the program the variable name and letting it \
+                                 read the environment itself"
+                            ),
+                        ));
+                    }
+
                     for name in names {
                         // A `nodes.<other>.KEY` name is only ever pushed above once
                         // that node's own declaration has been checked, so it is
@@ -3447,6 +3509,25 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
             }
         }
     }
+}
+
+/// Every `${…}` reference in `s`, whatever its namespace — the set
+/// [`crate::variables::interpolate`] will try to resolve.
+fn interpolation_refs(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            // An unclosed `${` is interpolation's problem to report.
+            None => break,
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out
 }
 
 /// `${<prefix><name>}` references in `s`.
@@ -3527,6 +3608,27 @@ pub fn vars_for_plan(
     config: &VeldConfig,
     selections: &[crate::graph::NodeSelection],
 ) -> BTreeSet<String> {
+    vars_for(config, selections, true)
+}
+
+/// [`vars_for_plan`] minus `setup`, for the teardown path.
+///
+/// A `setup` step does not run at stop, so a var only it names must not be
+/// resolved there — otherwise `veld stop` runs the credential helper behind a var
+/// that this teardown will never look at, which is the cost this laziness exists
+/// to remove.
+pub fn vars_for_teardown(
+    config: &VeldConfig,
+    selections: &[crate::graph::NodeSelection],
+) -> BTreeSet<String> {
+    vars_for(config, selections, false)
+}
+
+fn vars_for(
+    config: &VeldConfig,
+    selections: &[crate::graph::NodeSelection],
+    include_setup: bool,
+) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     let mut complete = true;
 
@@ -3535,6 +3637,9 @@ pub fn vars_for_plan(
     // A var may not reference another var (`vars-cannot-nest`), so scanning the
     // block would only ever pull in a name that is already an error.
     project.vars = None;
+    if !include_setup {
+        project.setup = None;
+    }
     complete &= scan_var_refs(&project, &mut out);
 
     for sel in selections {
@@ -3555,14 +3660,13 @@ pub fn vars_for_plan(
 }
 
 /// Bare `$NAME` / `${NAME}` shell references, which is how a `shell` command
-/// reaches an env value directly.
+/// reaches an env value directly. `true` = the braced form.
 ///
-/// Note what this is *not* used for: [`check_secret_usage`] deliberately does
-/// not collect these. Neither form can put a secret's value in argv — veld's
-/// interpolator consumes `${…}` and nothing else, so `$NAME` passes through for
-/// a shell to expand later in the child, and `${NAME}` matches no namespace and
-/// fails interpolation.
-pub(crate) fn env_refs(s: &str) -> Vec<String> {
+/// The distinction decides who expands it. veld's interpolator claims every
+/// `${…}`, so `${NAME}` is veld's to resolve — and since `NAME` matches no
+/// namespace, it *fails* rather than substituting. An unbraced `$NAME` passes
+/// through veld untouched, so whatever runs the string later expands it.
+pub(crate) fn env_refs_detailed(s: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -3581,7 +3685,7 @@ pub(crate) fn env_refs(s: &str) -> Vec<String> {
             j += 1;
         }
         if j > start {
-            out.push(s[start..j].to_owned());
+            out.push((s[start..j].to_owned(), braced));
         }
         i = if braced && bytes.get(j) == Some(&b'}') {
             j + 1
@@ -3590,6 +3694,10 @@ pub(crate) fn env_refs(s: &str) -> Vec<String> {
         };
     }
     out
+}
+
+pub(crate) fn env_refs(s: &str) -> Vec<String> {
+    env_refs_detailed(s).into_iter().map(|(n, _)| n).collect()
 }
 
 /// Rules that only make sense on the **resolved** variant — after node-level
@@ -5097,18 +5205,24 @@ mod tests {
         assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
     }
 
-    /// `secret-in-command` fires on the forms **veld resolves**, and only those.
+    /// `secret-in-command` (error) fires on the forms **veld substitutes**;
+    /// `secret-shell-expansion` (warning) on a bare `$NAME`.
     ///
-    /// A bare `$NAME` cannot put a secret in the process table from any position:
-    /// `variables::interpolate` consumes `${…}` and nothing else, so `$NAME`
-    /// reaches argv untouched and is either expanded later by a shell *in the
-    /// child* (the form the actions docs recommend, precisely because the value
-    /// never enters argv) or is inert text. `${NAME}` matches no namespace and
-    /// fails interpolation, so it never reaches a command either.
+    /// The split is the whole point, and the reasoning behind it is easy to get
+    /// backwards — this project got it backwards twice. veld substituting
+    /// `${vars.x}` puts the value in argv unconditionally: error. A bare `$NAME`
+    /// is expanded by the *shell*, whose own `ps` entry still shows the literal
+    /// `$NAME` — but the program the shell then `execve`s shows the **value**:
     ///
-    /// The rule used to flag both, which forbade in a variant exactly what the
-    /// docs prescribe two pages over — and did it as an Error, so the run refused
-    /// — while asserting an exposure that cannot happen.
+    /// ```text
+    /// $ sh -c 'exec psql "postgres://u:$DB_PASS@h/db"'
+    /// $ ps -Ao args
+    ///   psql postgres://u:hunter2@h/db      <-- the secret, in the child's argv
+    /// ```
+    ///
+    /// So `PGPASSWORD=$DB_PASS psql …` and `echo $DB_PASS` leak nothing, while
+    /// `psql "…$DB_PASS…"` leaks. veld cannot tell those apart, so it warns
+    /// rather than either refusing the run or staying silent.
     #[test]
     fn secret_in_command_fires_only_on_forms_veld_resolves() {
         let leaks = |extra: &str, variant: &str| -> Vec<String> {
@@ -5127,25 +5241,14 @@ mod tests {
             .collect()
         };
 
-        // Not a leak, in any position — no shell heuristic decides this.
-        for form in [
-            r#""shell": "echo $K""#,
-            r#""argv": ["sh", "-c", "echo $K"]"#,
-            // The spellings a fixed `sh|bash|…` + exact-`-c` heuristic missed,
-            // and the reason there is no heuristic any more.
-            r#""argv": ["bash", "-lc", "echo $K"]"#,
-            r#""argv": ["sh", "-euc", "echo $K"]"#,
-            r#""argv": ["/usr/bin/env", "sh", "-c", "echo $K"]"#,
-            // Inert text: execve hands `$K` over verbatim and nothing expands it.
-            r#""argv": ["logger", "$K"]"#,
-            // `${K}` is not a veld namespace, so interpolation refuses it rather
-            // than substituting — the value never reaches the command.
-            r#""shell": "echo ${K}""#,
-            // Name-only forwarding: the safe way to hand a secret to a container.
-            r#""argv": ["docker", "run", "-e", "K", "img"]"#,
-        ] {
-            assert!(leaks("", form).is_empty(), "must not flag: {form}");
-        }
+        // `${K}` is not a veld namespace, so interpolation refuses it rather
+        // than substituting — the value never reaches the command at all.
+        assert!(leaks("", r#""shell": "echo ${K}""#).is_empty());
+        // Name-only forwarding: the safe way to hand a secret to a container.
+        assert!(
+            leaks("", r#""argv": ["docker", "run", "-e", "K", "img"]"#).is_empty(),
+            "no `$`, so nothing expands anything"
+        );
 
         // Refused: veld substitutes these into the command string itself, so the
         // value really does land in the process table.
@@ -5158,6 +5261,43 @@ mod tests {
             )
             .is_empty()
         );
+
+        // A bare `$K` is the *warning*, never the error — the original report's
+        // complaint was that this refused the run, and it must not.
+        let warned = |variant: &str| -> Vec<Finding> {
+            findings_for(&format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "nodes": {{ "n": {{ "variants": {{ "one": {{
+                        "type": "command",
+                        "env": {{ "K": {{ "shell": "echo hunter2", "secret": true }} }},
+                        {variant}
+                      }}}}}}}} }}"#
+            ))
+        };
+        for form in [
+            r#""shell": "echo $K""#,
+            r#""argv": ["bash", "-lc", "psql \"postgres://u:$K@h/db\""]"#,
+            r#""argv": ["/usr/bin/env", "sh", "-c", "echo $K"]"#,
+            // Inert here, but veld cannot know that either, and one warning that
+            // is occasionally unnecessary beats a heuristic that is occasionally
+            // wrong about a secret.
+            r#""argv": ["logger", "$K"]"#,
+        ] {
+            let f = warned(form);
+            assert!(
+                f.iter().all(|x| x.rule != "secret-in-command"),
+                "must not refuse the run: {form} → {f:?}"
+            );
+            let hit = f
+                .iter()
+                .find(|x| x.rule == "secret-shell-expansion")
+                .unwrap_or_else(|| panic!("must still warn: {form}"));
+            assert_eq!(hit.severity, Severity::Warning);
+            // The message has to name both outcomes, or it teaches the wrong
+            // lesson in whichever direction the reader already leans.
+            assert!(hit.message.contains("PGPASSWORD="), "{}", hit.message);
+            assert!(hit.message.contains("execve"), "{}", hit.message);
+        }
     }
 
     /// v3 hoists `argv`/`shell`, `on_stop` and `skip_if` to node level, so the
@@ -5261,6 +5401,35 @@ mod tests {
         assert_eq!(hit.severity, Severity::Error);
         assert!(hit.message.contains("veld.json"), "{}", hit.message);
         assert!(error_summary(&findings).is_some());
+        // A document pointer, not an absolute path: every other `location` is one,
+        // and a home directory in `veld lint --json` makes a golden-file CI diff
+        // machine-dependent.
+        assert_eq!(hit.location, "veld.json");
+    }
+
+    /// `ln -s veld.jsonc veld.json` is one file, not two.
+    ///
+    /// It is the obvious way to get JSONC editor mode without breaking a script
+    /// or CI job that names `veld.json` — and `is_file()` follows symlinks, so
+    /// counting names would call that single file an ambiguous root and refuse
+    /// the very migration the docs now suggest.
+    #[test]
+    fn a_symlink_between_the_two_root_names_is_not_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("veld.jsonc"),
+            r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("veld.jsonc", dir.path().join("veld.json")).unwrap();
+
+        let config = parse_config(&dir.path().join("veld.json")).expect("loads");
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "ambiguous-root-config"),
+            "one file reached by two names is not two configs"
+        );
     }
 
     /// F1: `${veld.*}` inside a `vars` value.
@@ -5308,6 +5477,48 @@ mod tests {
             .message;
         assert!(msg.contains("per-node"), "{msg}");
         assert!(msg.contains("use site"), "{msg}");
+    }
+
+    /// Interpolating var literals made every `${…}` in one veld's to resolve, so
+    /// a reference in no veld namespace — `"${HOME}/.cache"`, verbatim and
+    /// perfectly good before this release — now fails the run.
+    ///
+    /// It has to be caught at lint, not at start: the second resolution pass runs
+    /// *after* the run row is persisted, so the abort would leave a `starting`
+    /// run with nothing behind it.
+    #[test]
+    fn a_var_literal_referencing_no_veld_namespace_is_a_lint_error() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": {
+                    "cache":  "${HOME}/.cache",
+                    "shelly": "$HOME/.cache",
+                    "fine":   "${veld.run}-${veld.branch}"
+                },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let hits: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "var-unresolvable-reference")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(
+            hits,
+            ["vars.cache"],
+            "only the braced form is veld's to resolve — `$HOME` passes through \
+             untouched for the shell, and `${{veld.*}}` is a different rule: {f:?}"
+        );
+        // The fix has to be in the message, or the author just deletes the var.
+        let msg = &f
+            .iter()
+            .find(|x| x.rule == "var-unresolvable-reference")
+            .unwrap()
+            .message;
+        assert!(msg.contains("$HOME"), "{msg}");
     }
 
     /// F5: a real built-in written where it is not populated is its own error.
