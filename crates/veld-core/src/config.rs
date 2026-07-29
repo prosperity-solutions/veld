@@ -4664,6 +4664,8 @@ mod tests {
                     "other":    ["@cyclic"],
                     "ghost":    ["nosuch:dev"],
                     "badvar":   ["api:missing"],
+                    "empty":    [],
+                    "empty-ref": ["@empty"],
                     "fine":     ["api:dev", "@fine-inner"],
                     "fine-inner": ["api:dev"]
                 },
@@ -4682,6 +4684,10 @@ mod tests {
         assert_eq!(by_location("presets.cyclic"), ["preset-unresolvable"]);
         assert_eq!(by_location("presets.ghost"), ["preset-unknown-node"]);
         assert_eq!(by_location("presets.badvar"), ["preset-unknown-variant"]);
+        // A preset that selects nothing starts nothing and still reports success —
+        // including through a chain of `@refs` that all bottom out empty.
+        assert_eq!(by_location("presets.empty"), ["preset-empty"]);
+        assert_eq!(by_location("presets.empty-ref"), ["preset-empty"]);
 
         // A valid preset — including one composing another with `@` — stays silent,
         // or the rule is noise that trains people to ignore lint output.
