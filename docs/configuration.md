@@ -31,8 +31,9 @@ against a config you are in the middle of editing.)
 
 **Your editor does not know this.** A `veld.json` carrying a `$schema` is validated
 by the editor's strict JSON parser, which flags comments as syntax errors. Either
-name the root file `veld.jsonc` — editors pick JSONC mode from the extension, so
-nothing else is needed — or map the `.json` names to the `jsonc` language:
+**rename** the root file to `veld.jsonc` — editors pick JSONC mode from the
+extension, so nothing else is needed — or map the `.json` names to the `jsonc`
+language:
 
 ```jsonc
 // .vscode/settings.json
@@ -44,6 +45,10 @@ nothing else is needed — or map the `.json` names to the `jsonc` language:
   }
 }
 ```
+
+Rename — do not copy. Keeping the old `veld.json` around "just in case" leaves the
+directory with two different root configs, which is an `ambiguous-root-config`
+error and refuses `veld start` until one of them goes.
 
 Included files have always been matched by glob, so `include: ["nodes/*.jsonc"]`
 worked before the root name did.
