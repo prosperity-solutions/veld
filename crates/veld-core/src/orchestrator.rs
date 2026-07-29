@@ -649,6 +649,15 @@ pub struct Orchestrator {
     /// the `on_stop` path reuse the same values rather than re-running a source
     /// command — two resolutions of a rotating credential would disagree.
     resolved_vars: Option<Arc<HashMap<String, String>>>,
+    /// Which run `resolved_vars` was resolved *for*.
+    ///
+    /// One `Orchestrator` does not always mean one run: `veld stop --all` builds a
+    /// single instance and loops `stop()` over every run name. A var may read
+    /// `${veld.run}` or `${veld.run_id}`, so reusing the first run's map for the
+    /// second would have its `teardown` remove the first run's container — the
+    /// precise "cleans up the wrong thing" failure the teardown path exists to
+    /// avoid. The cache is therefore keyed, not just present.
+    resolved_vars_run: Option<String>,
     /// Dependency outputs captured at the end of `start` when a terminal node
     /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
     /// exact values the stages produced (no reconstruction drift).
@@ -685,6 +694,7 @@ impl Orchestrator {
             internal_log: None,
             terminal_node: None,
             resolved_vars: None,
+            resolved_vars_run: None,
             terminal_outputs: None,
         })
     }
@@ -917,6 +927,7 @@ impl Orchestrator {
         {
             Ok(vars) => {
                 self.resolved_vars = Some(Arc::new(vars));
+                self.resolved_vars_run = Some(run_name.to_owned());
                 self.run_setup_steps(run_name).await
             }
             Err(e) => Err(e.into()),
@@ -1125,6 +1136,7 @@ impl Orchestrator {
         );
         let shared_vars = Arc::new(all_vars);
         self.resolved_vars = Some(Arc::clone(&shared_vars));
+        self.resolved_vars_run = Some(run_name.to_owned());
 
         // Wrap immutable data in Arc once for all stages.
         let shared_config = Arc::new(self.config.clone());
@@ -2255,10 +2267,6 @@ impl Orchestrator {
         ctx
     }
 
-    /// Build the interpolation context for a project-level lifecycle step
-    /// (`setup` / `teardown`). Same closed `veld.*` set as a node context minus
-    /// `node`/`variant`, so `${veld.branch}` does not silently work in a node
-    /// command and fail in a setup step.
     /// Resolve the `${vars.*}` the stop path needs, **into `self.resolved_vars`**.
     ///
     /// Into the field, not a local, because that is the only thing
@@ -2280,8 +2288,13 @@ impl Orchestrator {
         run_id: Option<uuid::Uuid>,
         selections: &[graph::NodeSelection],
     ) -> Arc<HashMap<String, String>> {
+        // Only reuse a cache that belongs to *this* run — see `resolved_vars_run`.
         let mut merged: HashMap<String, String> =
-            self.resolved_vars.as_deref().cloned().unwrap_or_default();
+            if self.resolved_vars_run.as_deref() == Some(run_name) {
+                self.resolved_vars.as_deref().cloned().unwrap_or_default()
+            } else {
+                HashMap::new()
+            };
         let needed = config::vars_for_teardown(&self.config, selections);
         if !needed.iter().all(|n| merged.contains_key(n)) {
             let ctx = self.vars_context(
@@ -2304,14 +2317,26 @@ impl Orchestrator {
             .await
             {
                 Ok(v) => merged.extend(v),
-                Err(e) => tracing::warn!(error = %e, "could not resolve vars for teardown"),
+                // One failing source blanks the whole map, so the per-step warning
+                // that follows says `no var named …` about a var that *is*
+                // declared. Name the real cause here.
+                Err(e) => tracing::warn!(
+                    error = %e,
+                    "could not resolve project vars for teardown — any teardown step \
+                     or on_stop hook using ${{vars.*}} will be skipped"
+                ),
             }
         }
         let shared = Arc::new(merged);
         self.resolved_vars = Some(Arc::clone(&shared));
+        self.resolved_vars_run = Some(run_name.to_owned());
         shared
     }
 
+    /// Build the interpolation context for a project-level lifecycle step
+    /// (`setup` / `teardown`). Same closed `veld.*` set as a node context minus
+    /// `node`/`variant`, so `${veld.branch}` does not silently work in a node
+    /// command and fail in a setup step.
     fn project_step_context(&self, run_name: &str) -> VariableContext {
         let mut ctx = VariableContext::new();
         for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
@@ -3915,6 +3940,48 @@ mod tests {
         );
     }
 
+    /// `veld stop --all` loops one `Orchestrator` over every run, so the var
+    /// cache has to be keyed by run, not merely present.
+    ///
+    /// A var may read `${veld.run}`. Reusing the first run's map for the second
+    /// would have run B's `teardown` act on run A's resources — `docker rm` the
+    /// wrong container, which is exactly the failure teardown exists to prevent.
+    #[tokio::test]
+    async fn stopping_two_runs_on_one_orchestrator_does_not_reuse_the_first_runs_vars() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": { "container": "app-${veld.run}" },
+                "teardown": [ { "name": "rm", "shell": "echo ${vars.container}" } ],
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true" }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config);
+        let first = orch.ensure_stop_vars("alpha", None, &[]).await;
+        assert_eq!(
+            first.get("container").map(String::as_str),
+            Some("app-alpha")
+        );
+
+        // Same orchestrator, second run — as `veld stop --all` does.
+        let second = orch.ensure_stop_vars("bravo", None, &[]).await;
+        assert_eq!(
+            second.get("container").map(String::as_str),
+            Some("app-bravo"),
+            "run bravo must not inherit alpha's resolved vars"
+        );
+    }
+
     /// Build a minimal orchestrator backed by a throwaway database, with no
     /// helper interaction — enough to exercise `run_terminal` in isolation.
     fn test_orchestrator(project_root: &std::path::Path, config: VeldConfig) -> Orchestrator {
@@ -3938,6 +4005,7 @@ mod tests {
             internal_log: None,
             terminal_node: None,
             resolved_vars: None,
+            resolved_vars_run: None,
             terminal_outputs: Some(HashMap::new()),
         }
     }
