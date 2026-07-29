@@ -254,7 +254,10 @@ enum Command {
 
         /// Print the current numbering as a paste-ready `presets` block, so
         /// auto-assigned keys can be pinned and stop moving.
-        #[arg(long)]
+        ///
+        /// Rejected alongside `--json` rather than silently ignored: the output is
+        /// JSONC for a human to paste, not a document for a program to parse.
+        #[arg(long, conflicts_with = "json")]
         pin: bool,
     },
 

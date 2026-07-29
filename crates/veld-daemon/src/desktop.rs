@@ -901,8 +901,10 @@ struct StartBody {
     preset: Option<String>,
     /// Explicit `node:variant` selections — the alternative to a preset for
     /// configs without presets (or custom picks). Mutually exclusive with
-    /// `preset`; with neither, a non-TTY `veld start` fails "No selections
-    /// provided", so the UI always sends one of the two.
+    /// `preset`; the UI always sends one of the two. With neither, a non-TTY
+    /// `veld start` starts the project's `default_preset` if one is declared, and
+    /// otherwise fails "No selections provided" — so an empty body is a spawn,
+    /// not reliably a no-op.
     #[serde(default)]
     selections: Vec<String>,
     /// Run name; defaults to the worktree alias.

@@ -914,10 +914,13 @@ fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
     }
     let list = available
         .iter()
-        .map(|p| format!("{} ({})", p.name, p.key))
+        .map(|p| format!("{} ({})", output::one_line(&p.name), p.key))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("Unknown preset `{token}`. Available (name and key): {list}")
+    format!(
+        "Unknown preset `{}`. Available (name and key): {list}",
+        output::one_line(token)
+    )
 }
 
 /// Handle the case where no selections or preset were given.
@@ -938,9 +941,12 @@ fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
             let label = default
                 .label
                 .as_deref()
-                .map(|l| format!(" ({l})"))
+                .map(|l| format!(" ({})", output::one_line(l)))
                 .unwrap_or_default();
-            eprintln!("Starting default preset `{}`{label}.", default.name);
+            eprintln!(
+                "Starting default preset `{}`{label}.",
+                output::one_line(&default.name)
+            );
             return expand_and_resolve(&default.name, config);
         }
         let node_names: Vec<String> = config.nodes.keys().cloned().collect();
@@ -987,7 +993,9 @@ fn interactive_preset_selector(
             println!();
             println!(
                 "  {}",
-                output::bold(preset.group.as_deref().unwrap_or("Other")),
+                output::bold(&output::one_line(
+                    preset.group.as_deref().unwrap_or("Other")
+                )),
             );
             current_group = Some(preset.group.clone());
         } else if !show_groups && current_group.is_none() {
@@ -996,7 +1004,10 @@ fn interactive_preset_selector(
         }
 
         let name = if preset.label.is_some() {
-            format!(" {}", output::dim(&format!("({})", preset.name)))
+            format!(
+                " {}",
+                output::dim(&format!("({})", output::one_line(&preset.name)))
+            )
         } else {
             String::new()
         };
@@ -1008,10 +1019,10 @@ fn interactive_preset_selector(
         println!(
             "  {} {}{name}{marker}",
             output::cyan(&format!("[{}]", preset.key)),
-            preset.display_label(),
+            output::one_line(preset.display_label()),
         );
         if let Some(when) = &preset.when_to_use {
-            println!("      {}", output::dim(when));
+            println!("      {}", output::dim(&output::one_line(when)));
         }
     }
     println!();

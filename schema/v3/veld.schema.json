@@ -250,7 +250,7 @@
             "key": {
               "type": "integer",
               "minimum": 1,
-              "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key are numbered after the highest pinned one, in declaration order — stable when a preset is appended, not when one is inserted ahead of it. `veld presets --pin` prints the current numbering as a block to paste."
+              "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key take the lowest unclaimed number, in declaration order — so appending a preset, or pinning one at the number it already shows, changes no other key; an unpinned key still moves when a preset is added or removed ahead of it, including from an include file that sorts earlier. `veld presets --pin` prints the current numbering as a block to paste."
             },
             "label": {
               "type": "string",
@@ -262,7 +262,7 @@
             },
             "group": {
               "type": "string",
-              "description": "Optional heading to chunk the picker list under. Purely visual: groups are ordered by their lowest key, so a group can move on screen but can never change a number."
+              "description": "Optional heading to chunk the picker list under. Purely visual: groups are ordered by their lowest member key, so a group can move on screen but can never change a number. Presets with no group are collected under \"Other\"."
             }
           }
         }

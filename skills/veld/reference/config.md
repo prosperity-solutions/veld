@@ -198,16 +198,21 @@ file is not ignored.
 
 `key` is the number typed at the `veld start` picker, and it is an **identity, not
 a list position** — a pinned key does not move when presets are added, removed,
-renamed, or regrouped. Presets without one are numbered after the highest pinned
-key, in declaration order: stable when a preset is appended, not when one is
-inserted ahead of it. `veld presets` marks the auto-assigned keys and
-`veld presets --pin` prints a paste-ready block that freezes them (veld never
-rewrites a config itself).
+renamed, or regrouped. Presets without one take the **lowest unclaimed number**, in
+declaration order. So appending a preset changes no existing key, and neither does
+pinning one at the number it already shows (which is what makes `--pin` safe to
+apply to a subset). An unpinned key *does* move when a preset is added or removed
+ahead of it — including from another `include` file that sorts earlier, so in a
+monorepo another team can renumber presets it does not own. `veld presets` marks
+the auto-assigned keys and `veld presets --pin` prints a paste-ready block that
+freezes them (veld never rewrites a config itself).
 
 `--preset` takes either: `veld start --preset 2` == `veld start --preset dev-staging`.
 
-Display order is derived from keys — groups by their lowest key, presets within a
-group by key — so a group can move on screen without changing a number.
+Display order is derived from keys — groups by their lowest member key, presets
+within a group by key — so a group can move on screen without changing a number.
+Ascending *within* a group, not globally: keys 1 and 10 in one group and 2 in
+another print as 1, 10, 2. Ungrouped presets are collected under `Other`.
 
 ### `default_preset`
 

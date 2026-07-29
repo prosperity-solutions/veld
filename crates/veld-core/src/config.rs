@@ -2759,7 +2759,7 @@ fn check_preset_keys(config: &VeldConfig, out: &mut Vec<Finding>) {
         .into_iter()
         .map(|p| (p.name, p.key))
         .collect();
-    for (name, _) in &assigned {
+    for (name, own_key) in &assigned {
         if let Ok(as_number) = name.parse::<u32>()
             && let Some((owner, _)) = assigned
                 .iter()
@@ -2770,8 +2770,9 @@ fn check_preset_keys(config: &VeldConfig, out: &mut Vec<Finding>) {
                 format!("presets.{name}"),
                 format!(
                     "is named `{name}`, which is also the key of preset `{owner}`. Typing \
-                     `{name}` selects `{owner}`, so this preset is reachable only by \
-                     renaming it"
+                     `{name}` at the picker selects `{owner}`; select this one by its own \
+                     key `{own_key}` instead. Renaming it also works, but breaks \
+                     `--preset {name}` wherever that is already used"
                 ),
             ));
         }
@@ -4680,6 +4681,120 @@ mod tests {
             .expect("expected the finding")
             .message;
         assert!(msg.contains("it has: dev"), "{msg}");
+    }
+
+    /// Every way a preset *key* can be broken or ambiguous is a lint finding.
+    ///
+    /// A pinned key is a promise — it is what somebody memorised, wrote in a
+    /// runbook, or said out loud — so the ways that promise can silently mean
+    /// something else all have to fail here rather than at the picker, where the
+    /// only symptom is the wrong environment starting.
+    #[test]
+    fn broken_preset_keys_are_lint_findings() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "presets": {
+                    "dupe-a": { "key": 2, "selections": ["api:dev"] },
+                    "dupe-b": { "key": 2, "selections": ["api:dev"] },
+                    "zero":   { "key": 0, "selections": ["api:dev"] },
+                    "owner":  { "key": 7, "selections": ["api:dev"] },
+                    "7":      { "key": 9, "selections": ["api:dev"] },
+                    "fine":   { "key": 3, "selections": ["api:dev"] }
+                },
+                "default_preset": "ghost",
+                "nodes": { "api": { "variants": { "dev": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let rules = |loc: &str| -> Vec<&str> {
+            f.iter()
+                .filter(|x| x.location == loc)
+                .map(|x| x.rule.as_str())
+                .collect()
+        };
+
+        // Both sides of a duplicate are named, so the reader does not have to
+        // find the other one themselves.
+        assert_eq!(rules("presets.dupe-a"), ["preset-duplicate-key"]);
+        assert_eq!(rules("presets.dupe-b"), ["preset-duplicate-key"]);
+        assert!(
+            f.iter()
+                .find(|x| x.location == "presets.dupe-a")
+                .unwrap()
+                .message
+                .contains("dupe-b"),
+            "{f:?}"
+        );
+
+        assert_eq!(rules("presets.zero"), ["preset-invalid-key"]);
+        assert_eq!(rules("presets.7"), ["preset-name-shadowed-by-key"]);
+        assert_eq!(rules("default_preset"), ["default-preset-unknown"]);
+        assert!(rules("presets.fine").is_empty(), "{f:?}");
+        assert!(rules("presets.owner").is_empty(), "{f:?}");
+
+        // The shadowing warning must not send someone off to rename a preset —
+        // that breaks `--preset <name>` in every script they have. It stays
+        // reachable by its own key.
+        let shadow = f
+            .iter()
+            .find(|x| x.rule == "preset-name-shadowed-by-key")
+            .expect("expected the finding");
+        assert!(shadow.message.contains('9'), "{}", shadow.message);
+
+        // `default_preset` naming nothing must list what does exist.
+        let dp = f
+            .iter()
+            .find(|x| x.rule == "default-preset-unknown")
+            .expect("expected the finding");
+        assert!(dp.message.contains("fine"), "{}", dp.message);
+    }
+
+    /// The undocumented-presets notice fires once, and only once a list is big
+    /// enough that picking from it is the problem.
+    ///
+    /// A notice per preset, or one on a three-preset config, is exactly the noise
+    /// that teaches people to ignore lint output — and the array form is fully
+    /// supported, so a small config saying `"dev": ["web:dev"]` is not doing
+    /// anything wrong.
+    #[test]
+    fn undocumented_presets_notice_fires_once_and_only_when_crowded() {
+        let bare = |count: usize, documented: bool| -> String {
+            let mut entries: Vec<String> = (0..count)
+                .map(|i| format!("\"p{i}\": [\"api:dev\"]"))
+                .collect();
+            if documented {
+                entries[0] =
+                    "\"p0\": { \"label\": \"First\", \"selections\": [\"api:dev\"] }".to_owned();
+            }
+            format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "presets": {{ {} }},
+                      "nodes": {{ "api": {{ "variants": {{ "dev": {{
+                          "type": "command", "argv": ["true"]
+                      }}}}}}}} }}"#,
+                entries.join(", ")
+            )
+        };
+        let notices = |src: &str| -> usize {
+            findings_for(src)
+                .iter()
+                .filter(|x| x.rule == "presets-undocumented")
+                .count()
+        };
+
+        assert_eq!(notices(&bare(7, false)), 0, "7 presets is still scannable");
+        assert_eq!(
+            notices(&bare(8, false)),
+            1,
+            "one notice for the whole config, never one per preset"
+        );
+        assert_eq!(
+            notices(&bare(20, true)),
+            0,
+            "a single documented preset shows the author knows about the object form"
+        );
     }
 
     /// A credential-shaped `proxy` header value warns at every level.

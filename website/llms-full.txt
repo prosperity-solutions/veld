@@ -560,17 +560,20 @@ Usage: `veld start --preset fullstack --name my-feature`, or `veld start --prese
 
 **`key` is an identity, not a list position.** A pinned key does not move when
 presets are added, removed, renamed, or regrouped, so the number someone
-memorised stays correct. Presets without a key are numbered after the highest
-pinned one in declaration order — stable when a preset is appended, not when one
-is inserted ahead of it. `veld presets` marks the auto-assigned keys;
-`veld presets --pin` prints a block to paste that freezes them (veld never
+memorised stays correct. Presets without a key take the lowest unclaimed number in
+declaration order: appending a preset changes no existing key, and neither does
+pinning one at the number it already shows. An unpinned key does move when a
+preset is added or removed ahead of it in declaration order — including from
+another `include` file that sorts earlier. `veld presets` marks the auto-assigned
+keys; `veld presets --pin` prints a block to paste that freezes them (veld never
 rewrites a config itself).
 
 `label`, `when_to_use`, and `group` are what make a long preset list pickable by
 someone who did not write it — and by a coding agent, which reads `when_to_use`
 from `veld presets` / `veld presets --json` to decide what to start. Groups are
-ordered by their lowest key, so a group can move on screen without changing a
-number.
+ordered by their lowest member key, so a group can move on screen without changing
+a number; the list is ascending within a group rather than globally. Ungrouped
+presets are collected under `Other`.
 
 `default_preset` is what `veld start` uses when given nothing: enter at the
 picker, and without a TTY it is used directly instead of failing with "No

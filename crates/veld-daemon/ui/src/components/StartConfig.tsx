@@ -12,7 +12,7 @@ import {
   Text,
 } from "@mantine/core";
 import { IconChevronDown } from "@tabler/icons-react";
-import type { Worktree } from "../api";
+import type { Preset, Worktree } from "../api";
 
 /**
  * What ▶ starts: a preset, or an explicit set of `node:variant` selections.
@@ -101,6 +101,26 @@ export function resolveStartSelection(w: Worktree): StartSelection | null {
   return (
     pruneStartSelection(w, parseStartSelection(raw)) ?? defaultStartSelection(w)
   );
+}
+
+/**
+ * The group heading to render above `presets[i]`, or `null` for none.
+ *
+ * Presets arrive already in display order, so a heading belongs exactly where the
+ * group changes. Ungrouped presets get an explicit **"Other"** heading rather than
+ * none: the daemon's resolver can place the ungrouped bucket *between* two groups,
+ * and a heading-less run of radios there renders under the previous group's title
+ * and reads as members of it. The CLI labels the same bucket "Other"
+ * (`crates/veld/src/commands/presets.rs`), and the two surfaces must not describe
+ * one payload differently.
+ *
+ * A config that never mentions `group` gets no headings at all.
+ */
+export function presetHeading(presets: Preset[], i: number): string | null {
+  if (!presets.some((p) => p.group != null)) return null;
+  const heading = presets[i].group ?? "Other";
+  const previous = i === 0 ? undefined : (presets[i - 1].group ?? "Other");
+  return heading === previous ? null : heading;
 }
 
 /** Request body for `POST /api/worktrees/{id}/start`. */
@@ -269,13 +289,10 @@ export function StartConfig(props: {
                   >
                     <Stack gap={7} pr={8}>
                       {w.presets.map((p, i) => {
-                        // Presets arrive in display order already grouped, so a
-                        // heading is needed exactly where the group changes.
-                        const newGroup =
-                          p.group != null && p.group !== w.presets[i - 1]?.group;
+                        const heading = presetHeading(w.presets, i);
                         return (
                           <div key={p.name}>
-                            {newGroup && (
+                            {heading != null && (
                               <Text
                                 size="xs"
                                 fw={600}
@@ -283,7 +300,7 @@ export function StartConfig(props: {
                                 pt={i === 0 ? 0 : 8}
                                 pb={4}
                               >
-                                {p.group}
+                                {heading}
                               </Text>
                             )}
                             <Radio

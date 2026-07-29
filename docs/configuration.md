@@ -1407,11 +1407,21 @@ A pinned `key` never moves -- not when presets are added, removed, renamed, or
 regrouped. That is what makes it safe to memorise, to put in a runbook, and to
 say to a colleague.
 
-Presets without a `key` are numbered after the highest pinned one, in the order
-they are declared. So **appending** a preset leaves every existing key alone,
-which is the normal workflow; **inserting** one earlier in the file still shifts
-the unpinned ones after it. `veld presets` marks which keys are auto-assigned,
-and `veld presets --pin` prints the current numbering as a block to paste:
+Presets without a `key` take the **lowest number not already claimed**, in the
+order they are declared. Two consequences worth knowing:
+
+- **Appending a preset leaves every existing key alone** -- the normal workflow.
+  So does pinning a preset at the number it is already showing, which is what
+  makes `--pin` below safe to apply piecemeal.
+- An **unpinned** key still moves when a preset is added or removed *ahead of it*
+  in declaration order. In a split config that includes the file another team
+  owns: include globs load in sorted order, so someone adding
+  `veld.d/api.jsonc` renumbers the unpinned presets declared in
+  `veld.d/web.jsonc`. Pin the keys people actually type and this stops being your
+  problem.
+
+`veld presets` marks which keys are auto-assigned, and `veld presets --pin` prints
+the current numbering as a block to paste:
 
 ```sh
 veld presets --pin
@@ -1453,10 +1463,13 @@ form is for a list that has grown past what anyone can identify at a glance.
 | `when_to_use` | When to pick this one. Read by anyone who did not write the config -- and by coding agents, which get it from `veld presets --json` and from `veld presets` output. Say what it gives you and what it costs (start time, network, credentials) |
 | `group` | Optional heading to chunk the list under. Purely visual |
 
-Groups are ordered by their lowest key, and presets within a group by key -- so
-the list reads in ascending key order with headings interleaved, and a group can
-move on screen without changing a single number. A config that never mentions
-`group` prints one flat list.
+Groups are ordered by their lowest member key, and presets within a group by key
+-- so a group can move on screen without changing a single number. Note that the
+list is ascending *within* each group, not read straight down: with keys 1 and 10
+in one group and 2 in another, the first group prints in full first, so the
+sequence is 1, 10, 2. A config that never mentions `group` prints one flat list,
+and presets with no `group` in a config that uses them are collected under
+`Other`.
 
 ### `default_preset`
 

@@ -407,6 +407,7 @@ fn merge(
                 ("proxy", doc.proxy.is_some()),
                 ("sharing", doc.sharing.is_some()),
                 ("client_log_levels", doc.client_log_levels.is_some()),
+                ("default_preset", doc.default_preset.is_some()),
                 ("name", doc.name.is_some()),
             ] {
                 if present {
@@ -944,6 +945,59 @@ mod tests {
             assert!(
                 doc.unknown.is_empty(),
                 "{key} is advertised as known but landed in `unknown`"
+            );
+        }
+    }
+
+    /// Every project-level singleton must be in the `root-only-key` list in
+    /// [`merge`], or a copy in an included file is silently discarded.
+    ///
+    /// This test exists because that list had no coverage and `default_preset` was
+    /// duly added to `Document` without being added to the list — so `veld lint`
+    /// passed a config whose `default_preset` did nothing, while the docs promised
+    /// an error. Deriving the expectation from [`crate::config::KNOWN_TOP_LEVEL_KEYS`]
+    /// means a *future* top-level key cannot be added without classifying it here.
+    #[test]
+    fn every_root_only_key_is_reported_in_an_included_file() {
+        // Keys that legitimately merge per entry, so they may appear anywhere.
+        const MERGES: &[&str] = &[
+            "nodes", "presets", "vars", "env", "setup", "teardown", "hooks", "ui",
+        ];
+        // Structural keys, handled before this check: `include` is only read from
+        // the root, and the version/name/schema of the document itself are the
+        // loader's business. `name` is *also* in the root-only list, so it is not
+        // excluded here.
+        const STRUCTURAL: &[&str] = &["$schema", "schemaVersion", "include"];
+
+        for key in crate::config::KNOWN_TOP_LEVEL_KEYS {
+            if MERGES.contains(key) || STRUCTURAL.contains(key) {
+                continue;
+            }
+            let value = match *key {
+                "client_log_levels" => "[]",
+                "features" | "proxy" | "sharing" => "{}",
+                // url_template, default_preset, name
+                _ => "\"x\"",
+            };
+            let dir = project(&[
+                ("veld.json", ROOT_WITH_INCLUDE),
+                (
+                    "veld.d/stray.jsonc",
+                    &format!("{{ {} : {value} }}", format_args!("\"{key}\"")),
+                ),
+            ]);
+            let loaded = load(&dir.path().join("veld.json")).expect("loads");
+            assert!(
+                loaded
+                    .config
+                    .deferred_findings
+                    .iter()
+                    .any(|f| f.rule == "root-only-key" && f.message.contains(key)),
+                "`{key}` is read from the root file only, so declaring it in an \
+                 included file must be a root-only-key finding rather than a silent \
+                 discard. Add it to the list in `merge`, or to MERGES here if it \
+                 really does merge. Findings: {:?}",
+                loaded.config.deferred_findings
             );
         }
     }

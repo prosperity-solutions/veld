@@ -303,7 +303,8 @@ Worth adopting if the numbering at `veld start` has ever shifted under someone,
 or if a preset list has grown past what a newcomer can identify:
 
 - `key` pins the number typed at the picker so it stops moving. Unpinned presets
-  are numbered after the highest pinned key in declaration order —
+  take the lowest unclaimed number in declaration order, so appending a preset —
+  or pinning one at the number it already shows — changes nothing for anyone else.
   `veld presets --pin` prints the current numbering as a block to paste.
 - `label` / `when_to_use` / `group` make the list pickable by people who did not
   write the config, and by coding agents reading `veld presets`.

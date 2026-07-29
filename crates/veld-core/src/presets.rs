@@ -11,11 +11,13 @@
 //!
 //! * A preset may pin its own `key`. A pinned key never moves, no matter what is
 //!   added, removed, renamed, or regrouped around it.
-//! * Unpinned presets are assigned keys after the highest pinned one, in
-//!   declaration order — which makes appending a preset (the normal workflow)
-//!   leave every existing key alone. Inserting one in the middle of the file
-//!   still shifts the unpinned tail; that is the whole reason `key` exists, and
-//!   why `veld presets` marks which keys are promises and which are not.
+//! * Unpinned presets take the lowest still-unused number, in declaration order.
+//!   Appending a preset (the normal workflow) therefore leaves every existing key
+//!   alone, and so does pinning one at the number it already had. An unpinned key
+//!   still moves when a preset is added or removed *ahead of it* in declaration
+//!   order — including from another `include` file that sorts earlier, which in a
+//!   monorepo means a team can renumber presets it does not own. That is the whole
+//!   reason `key` exists, and why `veld presets` marks which keys are promises.
 //! * Display order is derived from keys and never feeds back into them. Grouping
 //!   moves headers around on screen; it cannot move a number.
 
@@ -202,18 +204,31 @@ impl ResolvedPreset {
 
 /// Assign every preset a key and return them in display order.
 ///
-/// Keys: a pinned `key` is taken as-is; unpinned presets are numbered from
-/// `max(pinned) + 1` upward in declaration order. Declaration order survives
-/// because `presets` is an `IndexMap` all the way through
+/// Keys: a pinned `key` is taken as-is; unpinned presets take the **lowest
+/// still-unused positive integer**, in declaration order. Declaration order
+/// survives because `presets` is an `IndexMap` all the way through
 /// [`crate::include::merge`], and include globs load in sorted order — so this is
 /// deterministic across machines, which is the point of a number two people can
 /// say to each other.
 ///
-/// Display order: groups sorted by their lowest key, presets within a group
-/// sorted by key. Deriving group order from keys rather than declaring it
-/// separately means there is exactly one number in the config controlling
-/// everything, and the rendered list still reads top-to-bottom in ascending key
-/// order.
+/// Filling the lowest free number rather than counting up from `max(pinned) + 1`
+/// is what makes pinning *safe*. Under `max + 1` every auto key depended on the
+/// whole set of pinned keys, so pinning one preset at the number it was already
+/// displaying renumbered all the others — the exact breakage this module exists to
+/// prevent, triggered by the action the docs recommend. Here, pinning a preset at
+/// its current key is a no-op for every other preset, which is what makes
+/// `veld presets --pin` output idempotent (see
+/// `pinning_the_current_numbering_is_a_no_op`). It also removes the `u32::MAX`
+/// hole: counting up from 1 cannot saturate into a collision.
+///
+/// Display order: groups sorted by their lowest member key, presets within a
+/// group sorted by key. So the list is ascending *within* each group and the
+/// groups themselves are ordered by where they start — but the sequence read
+/// straight down is not globally ascending when two groups' key ranges
+/// interleave (keys 1 and 10 in one group, 2 in another, prints 1, 10, 2). That
+/// is the price of deriving group order from keys instead of declaring it
+/// separately, and it buys exactly one number in the config controlling
+/// everything.
 ///
 /// This function is total. A config with duplicate pinned keys is a `veld lint`
 /// error (`preset-duplicate-key`) and `veld start` refuses to run on it, but this
@@ -225,19 +240,24 @@ pub fn resolve(config: &VeldConfig) -> Vec<ResolvedPreset> {
         return Vec::new();
     };
 
-    let highest_pinned = presets.values().filter_map(PresetDef::key).max();
-    let mut next_auto = highest_pinned.map_or(1, |k| k.saturating_add(1));
+    // Every pinned key is reserved up front, so an auto key can never land on one
+    // regardless of declaration order.
+    let mut used: std::collections::HashSet<u32> =
+        presets.values().filter_map(PresetDef::key).collect();
+    let mut lowest_free = |used: &mut std::collections::HashSet<u32>| -> u32 {
+        let mut candidate = 1u32;
+        while !used.insert(candidate) {
+            candidate += 1;
+        }
+        candidate
+    };
 
     let resolved: Vec<ResolvedPreset> = presets
         .iter()
         .map(|(name, def)| {
             let (key, pinned) = match def.key() {
                 Some(k) => (k, true),
-                None => {
-                    let k = next_auto;
-                    next_auto = next_auto.saturating_add(1);
-                    (k, false)
-                }
+                None => (lowest_free(&mut used), false),
             };
             ResolvedPreset {
                 name: name.clone(),
@@ -323,6 +343,46 @@ pub fn find(config: &VeldConfig, token: &str) -> Option<ResolvedPreset> {
 pub fn default_preset(config: &VeldConfig) -> Option<ResolvedPreset> {
     let name = config.default_preset.as_deref()?;
     resolve(config).into_iter().find(|p| p.name == name)
+}
+
+/// Render the current numbering as a paste-ready `presets` block.
+///
+/// Prints rather than writes: veld does not rewrite a user's config (a serde
+/// round-trip deletes every comment, and these files are JSONC precisely so those
+/// comments can exist). So the author — or their agent — applies it, and
+/// `veld lint` is the check afterwards.
+///
+/// Every preset is emitted in object form with its key pinned, including ones
+/// currently in the array form, because a key cannot be added to an array. The
+/// property that makes this worth offering is that pasting the result changes no
+/// key: see `pinning_the_current_numbering_is_a_no_op` and
+/// `the_pin_block_round_trips_to_the_same_keys`.
+#[must_use]
+pub fn pin_block(presets: &[ResolvedPreset]) -> String {
+    let quote = |s: &str| serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""));
+    let mut out = String::from("\"presets\": {\n");
+    for (i, preset) in presets.iter().enumerate() {
+        let mut fields = vec![format!("\"key\": {}", preset.key)];
+        if let Some(label) = &preset.label {
+            fields.push(format!("\"label\": {}", quote(label)));
+        }
+        if let Some(when) = &preset.when_to_use {
+            fields.push(format!("\"when_to_use\": {}", quote(when)));
+        }
+        if let Some(group) = &preset.group {
+            fields.push(format!("\"group\": {}", quote(group)));
+        }
+        let selections: Vec<String> = preset.selections.iter().map(|s| quote(s)).collect();
+        fields.push(format!("\"selections\": [{}]", selections.join(", ")));
+        let comma = if i + 1 == presets.len() { "" } else { "," };
+        out.push_str(&format!(
+            "  {}: {{ {} }}{comma}\n",
+            quote(&preset.name),
+            fields.join(", ")
+        ));
+    }
+    out.push('}');
+    out
 }
 
 /// What a line typed at the interactive preset prompt means.
@@ -490,25 +550,89 @@ mod tests {
         assert!(after_keys.contains(&("brand-new".to_owned(), 9)));
     }
 
-    /// Unpinned keys start above every pinned one, so auto-assignment can never
-    /// collide with a number someone deliberately reserved.
+    /// Auto keys fill the lowest free numbers and skip pinned ones, so a high
+    /// pinned key does not push everything else into the hundreds.
     #[test]
-    fn auto_keys_start_above_the_highest_pinned_key() {
+    fn auto_keys_fill_the_lowest_free_numbers_around_pinned_ones() {
         let config = config_with(
             r#"{ "floater": ["f:x"],
                  "pinned-high": { "key": 20, "selections": ["h:x"] },
-                 "other-floater": ["o:x"] }"#,
+                 "other-floater": ["o:x"],
+                 "pinned-low": { "key": 2, "selections": ["l:x"] },
+                 "third-floater": ["t:x"] }"#,
             None,
         );
         let by_name: std::collections::HashMap<String, u32> = keys(&config).into_iter().collect();
         assert_eq!(by_name["pinned-high"], 20);
-        assert_eq!(by_name["floater"], 21);
-        assert_eq!(by_name["other-floater"], 22);
+        assert_eq!(by_name["pinned-low"], 2);
+        // 2 and 20 are reserved, so the floaters take 1, 3, 4 in declaration order.
+        assert_eq!(by_name["floater"], 1);
+        assert_eq!(by_name["other-floater"], 3);
+        assert_eq!(by_name["third-floater"], 4);
     }
 
-    /// Display order is derived from keys, so the rendered list reads in
-    /// ascending key order with group headings interleaved — and grouping can
-    /// move a heading on screen without moving a single number.
+    /// The property that makes pinning safe to recommend, and that
+    /// `veld presets --pin` depends on: pinning presets at the keys they are
+    /// already displaying changes nothing for anyone.
+    ///
+    /// Under the previous `max(pinned) + 1` scheme this failed — pinning `beta` at
+    /// its own key 2 moved `alpha` from 1 to 3.
+    #[test]
+    fn pinning_the_current_numbering_is_a_no_op() {
+        let before = config_with(
+            r#"{ "alpha": ["a:x"], "beta": ["b:x"], "gamma": ["c:x"] }"#,
+            None,
+        );
+        assert_eq!(
+            keys(&before),
+            [
+                ("alpha".to_owned(), 1),
+                ("beta".to_owned(), 2),
+                ("gamma".to_owned(), 3)
+            ]
+        );
+
+        // Pin only the middle one, at the key it already had.
+        let after = config_with(
+            r#"{ "alpha": ["a:x"],
+                 "beta": { "key": 2, "selections": ["b:x"] },
+                 "gamma": ["c:x"] }"#,
+            None,
+        );
+        let by_name: std::collections::HashMap<String, u32> = keys(&after).into_iter().collect();
+        assert_eq!(by_name["alpha"], 1, "pinning a peer must not move alpha");
+        assert_eq!(by_name["beta"], 2);
+        assert_eq!(by_name["gamma"], 3, "pinning a peer must not move gamma");
+    }
+
+    /// A pinned key at the top of the range must not make auto keys collide.
+    /// `max(pinned) + 1` saturated at `u32::MAX`, silently handing three presets
+    /// the same number while `veld lint` reported the config valid.
+    #[test]
+    fn a_pinned_key_at_the_ceiling_does_not_collide() {
+        let config = config_with(
+            r#"{ "top": { "key": 4294967295, "selections": ["t:x"] },
+                 "one": ["a:x"],
+                 "two": ["b:x"] }"#,
+            None,
+        );
+        let assigned = keys(&config);
+        let mut nums: Vec<u32> = assigned.iter().map(|(_, k)| *k).collect();
+        nums.sort_unstable();
+        nums.dedup();
+        assert_eq!(
+            nums.len(),
+            3,
+            "every preset needs its own key: {assigned:?}"
+        );
+        let by_name: std::collections::HashMap<String, u32> = assigned.into_iter().collect();
+        assert_eq!(by_name["one"], 1);
+        assert_eq!(by_name["two"], 2);
+    }
+
+    /// Groups are ordered by their lowest member key and presets within a group
+    /// by key — so grouping can move a heading on screen without moving a single
+    /// number.
     #[test]
     fn groups_are_ordered_by_their_lowest_key() {
         let config = config_with(
@@ -528,8 +652,7 @@ mod tests {
                 ("docker".to_owned(), 5),
                 ("e2e".to_owned(), 7),
             ],
-            "Everyday sorts first because it holds key 1, and the list stays \
-             ascending across group boundaries"
+            "Everyday sorts first because it holds key 1"
         );
 
         let grouped = grouped(&config);
@@ -539,6 +662,28 @@ mod tests {
         assert_eq!(grouped[1].0.as_deref(), Some("Docker"));
         assert_eq!(grouped[2].0, None, "ungrouped presets are their own bucket");
         assert!(has_groups(&config));
+    }
+
+    /// The documented cost of deriving group order from keys: read straight down,
+    /// the list is *not* globally ascending when two groups' key ranges interleave.
+    /// Pinned here so nobody re-adds the "always ascending" claim the docs used to
+    /// make.
+    #[test]
+    fn interleaved_group_ranges_are_not_globally_ascending() {
+        let config = config_with(
+            r#"{
+                "dev":   { "key": 1,  "group": "Everyday", "selections": ["a:x"] },
+                "other": { "key": 2,  "group": "Docker",   "selections": ["b:x"] },
+                "later": { "key": 10, "group": "Everyday", "selections": ["c:x"] }
+            }"#,
+            None,
+        );
+        let order: Vec<u32> = resolve(&config).into_iter().map(|p| p.key).collect();
+        assert_eq!(
+            order,
+            [1, 10, 2],
+            "Everyday (lowest key 1) prints in full before Docker (lowest key 2)"
+        );
     }
 
     /// A config that never mentions `group` renders as one flat list — nothing
@@ -636,6 +781,52 @@ mod tests {
 
         let no_default = config_with(r#"{ "dev": ["a:x"] }"#, None);
         assert_eq!(interpret_pick("", &no_default), Pick::Cancelled);
+    }
+
+    /// `--pin` is only worth offering if pasting its output is inert: same keys,
+    /// same metadata, and now every key a promise. Includes a label containing a
+    /// quote and a backslash, since the block is assembled as text.
+    #[test]
+    fn the_pin_block_round_trips_to_the_same_keys() {
+        let original = config_with(
+            r#"{
+                "dev":    { "key": 4, "label": "The \"real\" dev\\prod mix",
+                            "when_to_use": "Everyday.", "group": "Everyday",
+                            "selections": ["web:dev", "@base"] },
+                "base":   ["api:local"],
+                "docker": { "group": "Docker", "selections": ["web:docker"] }
+            }"#,
+            Some("base"),
+        );
+        let before = resolve(&original);
+        assert!(
+            before.iter().any(|p| !p.pinned),
+            "the fixture must exercise auto keys, or this proves nothing"
+        );
+
+        let pasted = format!(
+            "{{ \"schemaVersion\": \"3\", \"name\": \"t\", \"nodes\": {{}}, \
+             \"default_preset\": \"base\", {} }}",
+            pin_block(&before)
+        );
+        let reparsed: VeldConfig = serde_json::from_str(
+            &crate::jsonc::strip(&pasted).expect("the emitted block must be valid JSONC"),
+        )
+        .expect("the emitted block must parse back");
+        let after = resolve(&reparsed);
+
+        // `pinned` is the one field that must change — that is what pinning is.
+        // Everything else, order included, has to be untouched.
+        let expected: Vec<ResolvedPreset> = before
+            .iter()
+            .cloned()
+            .map(|p| ResolvedPreset { pinned: true, ..p })
+            .collect();
+        assert_eq!(after, expected, "pasting the pin block changed something");
+        assert!(
+            after.iter().all(|p| p.pinned),
+            "every key must be pinned afterwards, or nothing was frozen: {after:?}"
+        );
     }
 
     /// The array form must not silently grow into an object by passing through

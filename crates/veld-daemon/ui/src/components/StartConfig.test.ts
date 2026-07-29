@@ -3,6 +3,7 @@ import type { Preset, Worktree } from "../api";
 import {
   defaultStartSelection,
   parseStartSelection,
+  presetHeading,
   pruneStartSelection,
   resolveStartSelection,
   startBody,
@@ -197,6 +198,37 @@ describe("resolveStartSelection", () => {
 
   it("is null when the worktree has nothing to start", () => {
     expect(resolveStartSelection(wt())).toBeNull();
+  });
+});
+
+describe("presetHeading", () => {
+  it("labels the ungrouped bucket 'Other' so it can't read as part of a group", () => {
+    // The daemon's resolver orders groups by their lowest key, so the ungrouped
+    // bucket can land *between* two groups. Without its own heading those radios
+    // render under the preceding group's title.
+    const presets = [
+      preset("dev", { key: 1, group: "Everyday" }),
+      preset("loose", { key: 2 }),
+      preset("docker", { key: 5, group: "Docker" }),
+    ];
+    expect(presetHeading(presets, 0)).toBe("Everyday");
+    expect(presetHeading(presets, 1)).toBe("Other");
+    expect(presetHeading(presets, 2)).toBe("Docker");
+  });
+
+  it("repeats no heading within a run of the same group", () => {
+    const presets = [
+      preset("a", { key: 1, group: "Everyday" }),
+      preset("b", { key: 2, group: "Everyday" }),
+    ];
+    expect(presetHeading(presets, 0)).toBe("Everyday");
+    expect(presetHeading(presets, 1)).toBeNull();
+  });
+
+  it("renders no headings at all when no preset declares a group", () => {
+    const presets = [preset("a", { key: 1 }), preset("b", { key: 2 })];
+    expect(presetHeading(presets, 0)).toBeNull();
+    expect(presetHeading(presets, 1)).toBeNull();
   });
 });
 
