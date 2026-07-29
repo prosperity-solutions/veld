@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Badge,
   Button,
@@ -14,6 +14,7 @@ import {
   type StatsResponse,
 } from "../api";
 import { EnvCard } from "./EnvCard";
+import { confirmedUnattached, unattachedShareIds } from "./util";
 import { topbarClass } from "../shell";
 import type { ReactNode } from "react";
 
@@ -28,6 +29,10 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
   const [shares, setShares] = useState<SharesList | null>(null);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [offline, setOffline] = useState(false);
+  /** Share ids that looked unattached on the previous poll (see `confirmedUnattached`). */
+  const prevUnattached = useRef<Set<string>>(new Set());
+  /** Shares confirmed unattached across two polls — the ones safe to render. */
+  const [orphanIds, setOrphanIds] = useState<Set<string>>(new Set());
   const [view, setView] = useState<string>(
     () => window.localStorage.getItem("veld-view") ?? "active",
   );
@@ -35,6 +40,15 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
   const refresh = useCallback(async () => {
     try {
       const [e, s] = await Promise.all([api.environments(), api.shares()]);
+      // Advance the orphan-share gate here, once per poll — see
+      // `confirmedUnattached`. Doing it in a render effect instead would let an
+      // unrelated re-render (the 5s stats tick) confirm one poll against itself.
+      const known = new Set(
+        e.projects.flatMap((p) => p.runs.map((r) => r.run_id)),
+      );
+      const nowUnattached = unattachedShareIds(s.shares, known);
+      setOrphanIds(confirmedUnattached(nowUnattached, prevUnattached.current));
+      prevUnattached.current = nowUnattached;
       setEnvs(e);
       setShares(s);
       setOffline(false);
@@ -74,6 +88,11 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
   const joinCount = shares?.joins.length ?? 0;
   const pending = shares?.pending ?? [];
   const joins = shares?.joins ?? [];
+
+  // Hosted shares whose run this dashboard doesn't list (#171) — the set is
+  // decided per poll in `refresh` (see `unattachedShareIds` for why the run set
+  // is every known run and not the filtered `shown` list).
+  const orphanShares = (shares?.shares ?? []).filter((s) => orphanIds.has(s.id));
 
   const shown = allRuns
     .filter(({ r }) => (view === "active" ? r.live : !r.live))
@@ -130,8 +149,41 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
       </div>
 
       <div className="runs-container" style={{ flex: "none" }}>
-      {(pending.length > 0 || joins.length > 0) && (
+      {(pending.length > 0 || joins.length > 0 || orphanShares.length > 0) && (
         <Stack gap={6} px={14} pb={8}>
+          {orphanShares.map((s) => (
+            <Group key={s.id} gap="xs" className="share-row pending" p={8} wrap="wrap">
+              <Badge size="xs" color="orange" variant="light">
+                {s.public_urls.length > 0 ? "public web share" : "share"} without a run
+              </Badge>
+              <Text size="xs">
+                run <b>{s.run || "(unknown)"}</b> is gone
+              </Text>
+              {s.public_urls.map((u) => (
+                <a
+                  key={u.node}
+                  href={u.public_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="node-url"
+                >
+                  {u.public_url}
+                </a>
+              ))}
+              <Text size="xs" c="dimmed" ff="monospace">
+                {s.id}
+              </Text>
+              <div style={{ flex: 1 }} />
+              <Button
+                size="compact-xs"
+                color="red"
+                variant="light"
+                onClick={() => void api.stopShare(s.id).then(refresh)}
+              >
+                Unshare
+              </Button>
+            </Group>
+          ))}
           {pending.map((p) => (
             <Group key={p.id} gap="xs" className="share-row pending" p={8} wrap="wrap">
               <Badge size="xs" color="yellow" variant="light">

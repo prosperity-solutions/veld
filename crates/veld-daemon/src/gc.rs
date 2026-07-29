@@ -312,22 +312,39 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
 async fn cleanup_routes_and_dns(run: &RunState, run_name: &str, helper: &HelperClient) -> usize {
     let mut cleaned = 0;
     for ns in run.nodes.values() {
-        // Remove Caddy route (ID follows the convention from orchestrator).
-        // Route id is keyed by run NAME, which is not unique across projects —
-        // two repos both on `main` collide here and in GC. Tracked as #170;
-        // changing the format needs a migration for already-stored routes.
-        let route_id = format!("veld-{}-{}-{}", run_name, ns.node_name, ns.variant);
+        // The pre-#170 id needs no URL, so it is removed unconditionally — a
+        // node whose `url` checkpoint never landed still had its route added
+        // (`add_route` runs before the post-spawn save), and this is the only
+        // key that can reach such an entry. Covers a route stored by an older
+        // helper still running after a `veld update` (see `legacy_run_route_id`).
+        let legacy = veld_core::url::legacy_run_route_id(run_name, &ns.node_name, &ns.variant);
+        // Counted like any other removal: in the `veld update` window this exists
+        // for, it IS the removal, and reporting "0 routes removed" while deleting
+        // them would misread as "nothing to do".
+        if helper.remove_route(&legacy).await.is_ok() {
+            debug!("removed legacy Caddy route: {legacy}");
+            cleaned += 1;
+        }
+
+        // The hostname-keyed id, on the other hand, is derivable only from a
+        // recorded URL. An entry added just before a kill, with no URL persisted,
+        // is therefore unreachable here — it is overwritten by the next start of
+        // the same environment, since the id is a pure function of the hostname.
+        let Some(ref url_str) = ns.url else { continue };
+        // `veld_core::url` owns both the hostname extraction and the id format,
+        // so this cannot drift from the orchestrator's construction side (#170).
+        // Note the port is stripped here too — the previous version removed the
+        // DNS host as `host:18443` whenever the helper wasn't on 443.
+        let hostname = veld_core::url::hostname_of_url(url_str);
+        let route_id = veld_core::url::run_route_id(hostname);
         if helper.remove_route(&route_id).await.is_ok() {
             debug!("removed Caddy route: {route_id}");
             cleaned += 1;
         }
 
         // Remove DNS host entry.
-        if let Some(ref url_str) = ns.url {
-            let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-            if helper.remove_host(hostname).await.is_ok() {
-                debug!("removed DNS entry: {hostname}");
-            }
+        if helper.remove_host(hostname).await.is_ok() {
+            debug!("removed DNS entry: {hostname}");
         }
     }
     cleaned

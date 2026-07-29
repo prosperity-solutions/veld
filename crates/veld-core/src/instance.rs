@@ -11,12 +11,15 @@
 //!
 //! The helper/Caddy/DNS layer is deliberately NOT instanced — it is a
 //! singleton owning ports 80/443/18443 and system DNS; every instance shares
-//! it. Only the *management* route is instance-scoped (`veld-mgmt-<host>`):
-//! RUN routes stay keyed by `veld-{run}-{node}-{variant}` and run-name-based
-//! hostnames, so two instances starting an environment with the SAME name
-//! collide in shared Caddy (last-write-wins, and stopping one removes the
-//! route the other still needs). Keep dev-instance run names distinct from
-//! the installed instance's.
+//! it. Only the *management* route is instance-scoped (`veld-mgmt-<host>`).
+//! RUN routes are keyed by hostname ([`crate::url::run_route_id`]), so two
+//! instances collide in shared Caddy exactly when they mint the same
+//! hostname — which two checkouts of one repo do whenever their run names
+//! match (last-write-wins, and stopping one removes the route the other still
+//! needs). `veld start` refuses that case *within* one instance by checking
+//! the registry, but instances have separate databases and cannot see each
+//! other's runs, so nothing detects it across them. Keep dev-instance run
+//! names distinct from the installed instance's.
 
 use std::path::PathBuf;
 

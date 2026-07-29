@@ -316,16 +316,21 @@ exact instance it was minted from rather than to whatever run currently answers
 to the name. (The share *request* is name+project addressed like the others —
 `POST /api/shares` resolves the project's latest run.)
 
-One layer below this is still name-keyed and tracked separately: Caddy route ids
-are `veld-{run_name}-{node}-{variant}`, so two projects running the same name
-collide in the proxy store and in GC (issue #170). Related follow-ups: shares can
-outlive their run with no UI affordance to stop them (#171), and the Electron
-tray's project-name labels (#172 — that issue's feedback-store half is fixed
-here: a caller-supplied `?project=` is registry-validated, while Caddy's
-server-set header stays verbatim). The emoji
-picker compares worktree ids for exactly this reason, and `/api/shares` now
-reports each share's `run_id` so the dashboards attach a share to its own run
-card instead of to a same-named run in another repo.
+The layer below — the proxy store — is keyed by **hostname**, not by run name:
+`veld_core::url::run_route_id(hostname)` is the one place the id is built, so a
+route id collides exactly when the URL does, and the helper re-keys any route a
+pre-#170 build persisted when it starts. Two checkouts that share a project name
+*and* a run name do still mint one hostname; `veld start` now refuses that up
+front rather than overwriting the other project's route. Shares are released when
+a live run is replaced, and both dashboards list a hosted share whose run they no
+longer know about, so it stays stoppable. The tray marks a run with its worktree
+emoji + alias (falling back to the checkout path) only when another shown run
+carries the same project name — which is exactly what two clones of one repo
+produce, the name coming from `veld.json`; unambiguous rows keep the plain label
+and cost no extra request. The emoji picker
+compares worktree ids for the same reason, and `/api/shares` reports each share's
+`run_id` so the dashboards attach a share to its own run card instead of to a
+same-named run in another repo.
 
 ## Local dev setup
 

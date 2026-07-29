@@ -178,6 +178,10 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Collect stderr captures left by a previous daemon that was killed between
+    // spawning a `veld` command and reaping it.
+    feedback_server::management::sweep_spawn_logs();
+
     // Spawn background tasks.
     let monitor_broadcaster = broadcaster.clone();
     let monitor_handle = tokio::spawn(async move {

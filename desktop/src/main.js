@@ -13,6 +13,7 @@ const {
   nativeImage,
   shell,
 } = require("electron");
+const fs = require("node:fs");
 
 // Dev override: point the shell at the vite dev server
 // (VELD_DESKTOP_URL=http://localhost:5199). Default: the daemon directly —
@@ -21,6 +22,7 @@ const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
 const APP_URL = `${BASE_URL}/ide?shell=electron`;
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
+const REPOS_URL = `${BASE_URL}/api/repos`;
 
 /** @type {BrowserWindow | null} */
 let win = null;
@@ -145,6 +147,69 @@ function trayIcon() {
   return img;
 }
 
+/** @type {{at: number, marks: Map<string, {alias: string, emoji: string}>}} */
+let marksCache = { at: 0, marks: new Map() };
+const MARKS_TTL_MS = 60_000;
+
+/**
+ * Map every known worktree's checkout path to its emoji + alias, for labelling
+ * runs by checkout rather than by project name. Empty map on any failure — the
+ * tray must still render when only /api/environments answers.
+ *
+ * Cached for a minute rather than fetched on the tray's 10s tick: `/api/repos`
+ * stats and parses a veld.json per worktree, and aliases change on the order of
+ * minutes. A newly imported checkout gets its emoji within one TTL.
+ *
+ * @returns {Promise<Map<string, {alias: string, emoji: string}>>}
+ */
+async function worktreeMarks() {
+  if (Date.now() - marksCache.at < MARKS_TTL_MS) return marksCache.marks;
+  const marks = new Map();
+  // Stamped even on failure, keeping the previous marks: against an older daemon
+  // with no /api/repos — or none running — retrying every tick would reinstate
+  // exactly the per-tick cost this cache exists to avoid.
+  try {
+    const res = await fetch(REPOS_URL, { signal: AbortSignal.timeout(2000) });
+    if (res.ok) {
+      const data = await res.json();
+      for (const repo of data.repos ?? []) {
+        for (const wt of repo.worktrees ?? []) {
+          if (wt.path) marks.set(wt.path, { alias: wt.alias, emoji: wt.emoji });
+        }
+      }
+      marksCache = { at: Date.now(), marks };
+      return marksCache.marks;
+    }
+  } catch {
+    // Older daemon, or none — keep whatever we had and fall back to the path.
+  }
+  marksCache = { at: Date.now(), marks: marksCache.marks };
+  return marksCache.marks;
+}
+
+/**
+ * Look up a checkout's mark. Worktree paths are canonicalized daemon-side (git
+ * reports realpaths) while a project root is whatever directory veld ran in, so
+ * a symlinked checkout only matches after resolving.
+ */
+function markFor(marks, root) {
+  if (!root) return undefined;
+  const direct = marks.get(root);
+  if (direct) return direct;
+  try {
+    return marks.get(fs.realpathSync(root));
+  } catch {
+    return undefined;
+  }
+}
+
+/** Last two path segments, enough to tell two clones apart in a menu row. */
+function shortenPath(p) {
+  if (!p) return "unknown path";
+  const parts = p.split("/").filter(Boolean);
+  return parts.slice(-2).join("/") || p;
+}
+
 async function trayMenu() {
   /** @type {Electron.MenuItemConstructorOptions[]} */
   const items = [];
@@ -157,7 +222,11 @@ async function trayMenu() {
     for (const project of data.projects ?? []) {
       for (const run of project.runs ?? []) {
         if (run.status === "running" || run.status === "starting") {
-          running.push({ project: project.name, run });
+          running.push({
+            project: project.name,
+            root: project.project_root,
+            run,
+          });
         }
       }
     }
@@ -167,11 +236,29 @@ async function trayMenu() {
         : "No running runs",
       enabled: false,
     });
-    for (const { project, run } of running.slice(0, 10)) {
+    const shownRuns = running.slice(0, 10);
+    // Two clones of one repo share `project.name` (it comes from veld.json), so
+    // their rows would be indistinguishable (#172). Mark those rows with the
+    // worktree emoji + alias — and only those, since for the single-checkout
+    // majority it is noise, and then `/api/repos` isn't fetched at all.
+    const nameCounts = new Map();
+    for (const { project } of shownRuns) {
+      nameCounts.set(project, (nameCounts.get(project) ?? 0) + 1);
+    }
+    const ambiguous = [...nameCounts.values()].some((n) => n > 1);
+    const marks = ambiguous ? await worktreeMarks() : new Map();
+    for (const { project, root, run } of shownRuns) {
+      let label = `${project} / ${run.name} — ${run.status}`;
+      if ((nameCounts.get(project) ?? 0) > 1) {
+        const mark = markFor(marks, root);
+        const where = mark
+          ? `${mark.emoji ? `${mark.emoji} ` : ""}${mark.alias}`
+          : shortenPath(root);
+        label = `${project} (${where}) / ${run.name} — ${run.status}`;
+      }
       items.push({
-        // Project NAME, so two clones of one repo render identical rows —
-        // the alias/path is the disambiguator. Tracked as #172.
-        label: `${project} / ${run.name} — ${run.status}`,
+        label,
+        toolTip: root ?? undefined,
         click: () => focusWindow(),
       });
     }

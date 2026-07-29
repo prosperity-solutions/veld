@@ -7,8 +7,59 @@ import {
   fmtWhen,
   runKey,
   shortUrl,
+  confirmedUnattached,
   statusBucket,
+  unattachedShareIds,
 } from "./util";
+
+describe("unattachedShareIds", () => {
+  const shares = [
+    { id: "shr_live", run_id: "run-1" },
+    { id: "shr_orphan", run_id: "run-gone" },
+    { id: "shr_noid", run_id: null },
+  ];
+
+  it("keeps only shares whose run the dashboard doesn't know", () => {
+    expect([...unattachedShareIds(shares, new Set(["run-1"]))]).toEqual([
+      "shr_orphan",
+      "shr_noid",
+    ]);
+  });
+
+  it("yields nothing until the environment list has loaded", () => {
+    // A slow first /api/environments must not flash every share as orphaned.
+    expect(unattachedShareIds(shares, null)).toEqual(new Set());
+  });
+
+  it("treats every known run as attachment, whatever the view shows", () => {
+    // The run set is all known runs, not the filtered view — otherwise
+    // switching to History would orphan every live run's share.
+    expect([
+      ...unattachedShareIds(shares, new Set(["run-1", "run-gone"])),
+    ]).toEqual(["shr_noid"]);
+  });
+});
+
+describe("confirmedUnattached", () => {
+  it("needs a share to look unattached on two consecutive polls", () => {
+    // The runs and the shares come from two requests: a share minted between
+    // them looks unattached for one poll, and an Unshare button next to a live
+    // share is destructive.
+    const poll1 = new Set(["shr_a", "shr_b"]);
+    expect(confirmedUnattached(poll1, new Set())).toEqual(new Set());
+
+    const poll2 = new Set(["shr_b", "shr_c"]);
+    expect(confirmedUnattached(poll2, poll1)).toEqual(new Set(["shr_b"]));
+  });
+
+  it("drops a share that re-attached", () => {
+    // Its run came back into the listing (a slow fetch resolved) — stop
+    // offering to unshare it.
+    expect(confirmedUnattached(new Set(), new Set(["shr_a"]))).toEqual(
+      new Set(),
+    );
+  });
+});
 
 describe("fmtBytes", () => {
   it("picks units at binary boundaries", () => {
