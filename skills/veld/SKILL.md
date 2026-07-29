@@ -412,6 +412,7 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`veld.*` is a closed set** — node outputs are `${output.KEY}` / `${nodes.<node>.KEY}`, never `${veld.KEY}`. This changed: `${veld.<OUTPUT>}` used to work inside `on_stop` and now fails, which would silently skip the teardown hook — `veld lint` catches it
 - **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
 - **Relative paths resolve from the project root**, never from the file that declares them, even in an included file
+- **A preset entry starting with `@` references another preset** — `"ci": ["@core", "e2e:dev"]` is "everything in `core`, plus one more". Selections de-duplicate, and a cycle is an error naming the path. `veld lint` catches a dangling `@ref`, a cycle, and a selection naming a node or variant that does not exist
 - **`depends_on` names must be literal** — no `${...}` in either the node or the variant name; the graph is read before variables exist
 - **A `secret` value must not appear in `argv`/`shell`** — a command line lands in the process table. Deliver it via `env` or `files`
 - **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port

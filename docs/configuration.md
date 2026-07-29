@@ -1402,6 +1402,15 @@ repeat every selection and then drift:
 Selections are de-duplicated, so two references to the same preset never start
 anything twice. A cycle is an error naming the path (`@a → @b → @a`).
 
+`veld lint` checks all of this **statically**, so a broken preset fails at lint time
+rather than at `veld start`:
+
+| Rule | Fires when |
+|---|---|
+| `preset-unresolvable` | an `@ref` names a preset that does not exist, or the references form a cycle |
+| `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
+| `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
+
 ---
 
 ## Variable Substitution

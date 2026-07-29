@@ -164,6 +164,27 @@ created with its mode (default `0600`), never chmod-ed afterwards. It is **not**
 removed when the run ends — git-ignore the path. veld warns at start if a `secret`
 file is not ignored.
 
+## Presets
+
+```jsonc
+"presets": {
+  "core": ["api:dev", "web:dev"],
+  "ci":   ["@core", "e2e:dev"]     // @name references another preset
+}
+```
+
+- An entry starting with `@` names **another preset** instead of a node, so
+  overlapping sets do not repeat every selection and then drift.
+- Selections are **de-duplicated**: a node reached through two presets starts once.
+- A **cycle is an error** naming the path (`@a → @b → @a`), not a hang.
+- Presets are additive — they select end nodes, and veld resolves the dependency
+  graph from there, so upstream nodes start automatically.
+
+`veld lint` checks presets statically: a dangling `@ref`, a cycle, a selection
+naming a node that does not exist (`preset-unknown-node`), and one naming a variant
+that does not exist (`preset-unknown-variant`) are all **errors** at lint time rather
+than surprises at `veld start`.
+
 ## Setup & Teardown
 
 Project-level lifecycle steps. Not nodes — no variants, no health checks, no dependency graph.
