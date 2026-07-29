@@ -24,11 +24,14 @@ pub async fn run(
 
     // Determine what to start.
     let parsed_selections = if let Some(ref token) = preset {
-        // `--preset` takes a name or the key `veld presets` printed. Resolving
-        // the token here (rather than passing it straight to `expand_preset`)
-        // is what makes `--preset 3` and the picker's `3` the same thing.
-        // Name-first: `--preset` is what scripts and the desktop UI pass, and they
-        // predate keys existing at all.
+        // `--preset` takes a name or the key `veld presets` printed, resolved here
+        // rather than passed straight to `expand_preset`.
+        //
+        // Name-first, unlike the picker: `--preset` is what scripts, CI and the
+        // desktop UI pass, and all of those predate keys existing. The two orders
+        // agree for every config that does not both name a preset like a number and
+        // pin that number on a different preset — a config `veld lint` warns about.
+        // See `presets::find_by_name_then_key`.
         let Some(chosen) = veld_core::presets::find_by_name_then_key(&config, token) else {
             output::print_error(&unknown_preset_message(&config, token), false);
             return 1;

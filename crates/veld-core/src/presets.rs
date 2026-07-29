@@ -300,9 +300,9 @@ pub fn resolve(config: &VeldConfig) -> Vec<ResolvedPreset> {
                 name: name.clone(),
                 key,
                 pinned,
-                label: def.label().map(ToOwned::to_owned),
-                when_to_use: def.when_to_use().map(ToOwned::to_owned),
-                group: def.group().map(ToOwned::to_owned),
+                label: non_blank(def.label()),
+                when_to_use: non_blank(def.when_to_use()),
+                group: non_blank(def.group()),
                 selections: def.selections().to_vec(),
                 is_default: config.default_preset.as_deref() == Some(name.as_str()),
             }
@@ -348,13 +348,15 @@ pub fn grouped(config: &VeldConfig) -> Vec<(Option<String>, Vec<ResolvedPreset>)
 }
 
 /// Whether any preset declares a `group`.
+///
+/// Answered from [`resolve`], not from the raw `PresetDef`: a blank `group` is
+/// normalised to absent there, and reading the raw value here would report "this
+/// config uses groups" for a config whose only `group` is `""` — then every heading
+/// would render as empty space. One owner for resolution, as elsewhere in this
+/// crate.
 #[must_use]
 pub fn has_groups(config: &VeldConfig) -> bool {
-    config
-        .presets
-        .iter()
-        .flatten()
-        .any(|(_, def)| def.group().is_some())
+    resolve(config).iter().any(|p| p.group.is_some())
 }
 
 /// Resolve a token typed **at the picker**: a key (`3`) first, then a name.
@@ -400,6 +402,19 @@ pub fn find_by_name_then_key(config: &VeldConfig, token: &str) -> Option<Resolve
 pub fn default_preset(config: &VeldConfig) -> Option<ResolvedPreset> {
     let name = config.default_preset.as_deref()?;
     resolve(config).into_iter().find(|p| p.name == name)
+}
+
+/// A blank string is the same as an absent one.
+///
+/// `"group": ""` is a mistake, and every consumer of these fields distinguishes
+/// "has a value" from "does not" — `display_label` falls back to the preset's name,
+/// the picker and the UI fall back to the `Other` heading. Honouring an empty string
+/// literally gets all of that wrong in the same way: a nameless row, or a heading
+/// rendered as blank space. Normalising here rather than at each render site means
+/// one rule for the CLI, the management UI and `--json` alike.
+fn non_blank(value: Option<&str>) -> Option<String> {
+    let trimmed = value?.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
 /// Render the current numbering as a paste-ready `presets` block.
@@ -757,6 +772,35 @@ mod tests {
             [1, 10, 2],
             "Everyday (lowest key 1) prints in full before Docker (lowest key 2)"
         );
+    }
+
+    /// A blank `label`/`group`/`when_to_use` is treated as absent, so the fallbacks
+    /// every surface already has (the preset's name, the `Other` heading) apply
+    /// instead of rendering a nameless row or an empty heading. Surrounding
+    /// whitespace is trimmed for the same reason.
+    #[test]
+    fn blank_metadata_is_the_same_as_absent() {
+        let config = config_with(
+            r#"{ "blank": { "label": "", "group": "   ", "when_to_use": "\t",
+                            "selections": ["a:x"] },
+                 "padded": { "label": "  Local dev  ", "selections": ["b:x"] } }"#,
+            None,
+        );
+        let resolved = resolve(&config);
+        let blank = resolved.iter().find(|p| p.name == "blank").unwrap();
+        assert_eq!(blank.label, None);
+        assert_eq!(blank.group, None);
+        assert_eq!(blank.when_to_use, None);
+        assert_eq!(
+            blank.display_label(),
+            "blank",
+            "an empty label must fall back to the preset's name, not render as nothing"
+        );
+        // With no non-blank group anywhere, nothing renders a heading at all.
+        assert!(!has_groups(&config));
+
+        let padded = resolved.iter().find(|p| p.name == "padded").unwrap();
+        assert_eq!(padded.label.as_deref(), Some("Local dev"));
     }
 
     /// A config that never mentions `group` renders as one flat list — nothing
