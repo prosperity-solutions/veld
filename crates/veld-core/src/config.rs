@@ -3903,15 +3903,6 @@ impl BuiltinScopeKind {
     }
 }
 
-/// Reject `${veld.<name>}` references to names that are not builtins.
-///
-/// This is the guard for the F0.2 namespace closure. Before it, writing
-/// `${veld.exit_code}` in an `on_stop` hook — which veld's own docs used to
-/// recommend — produced `VariableError::UnknownBuiltin` at *teardown* time, where
-/// `run_on_stop_hook` could only log a warning and skip the hook: the container
-/// never got removed and `veld stop` still reported success. Catching the name
-/// here turns a silent teardown skip into a refusal at `veld start`, before
-/// anything is running that would need tearing down.
 /// One context a string is interpolated in, and what that context has.
 ///
 /// A variant-level string has exactly one. A project- or node-level `env` value
@@ -3967,6 +3958,20 @@ impl BuiltinSite {
     }
 }
 
+/// Reject `${veld.<name>}` references to names that are not builtins, and real
+/// builtins written where the context does not populate them.
+///
+/// This is the guard for the F0.2 namespace closure. Before it, writing
+/// `${veld.exit_code}` in an `on_stop` hook — which veld's own docs used to
+/// recommend — produced `VariableError::UnknownBuiltin` at *teardown* time, where
+/// `run_on_stop_hook` could only log a warning and skip the hook: the container
+/// never got removed and `veld stop` still reported success. Catching the name
+/// here turns a silent teardown skip into a refusal at `veld start`, before
+/// anything is running that would need tearing down.
+///
+/// The scope half ([`BuiltinScopeKind`]) does the same for a name that is real
+/// but empty where it was written — `${veld.url}` on a `command` node — which
+/// otherwise fails the run with a message that reads like the name is wrong.
 fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     const RULE: &str = "unknown-builtin-var";
     const SCOPE_RULE: &str = "builtin-not-in-scope";

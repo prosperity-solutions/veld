@@ -500,9 +500,16 @@ impl BuiltinScope<'_> {
 /// container.
 ///
 /// The URL is the input rather than `(hostname, https_port)` because that is all
-/// the stop path has: `NodeState` persists the URL, not the pieces. It is exact
-/// either way — the URL carries its port whenever the port is not 443, which is
-/// the same condition the pieces were built under.
+/// the stop path has: `NodeState` persists the URL, not the pieces.
+///
+/// That is exact for every hostname veld generates, since `node_hostname`
+/// slugifies to `[a-z0-9-]` and cannot produce a colon. It is deliberately
+/// **not** identical for one input the old two-place construction handled badly:
+/// a `url_template` carrying a literal port (`"{service}.localhost:3000"`) at
+/// `https_port == 443` used to yield `url.hostname = "svc.localhost:3000"` and
+/// `url.port = "443"` — the port in the wrong field, twice. Splitting the URL
+/// gives `"svc.localhost"` and `"3000"`. A config that read the old values sees
+/// different ones; they were wrong.
 pub fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
     let rest = https_url.strip_prefix("https://").unwrap_or(https_url);
     let host = rest.split('/').next().unwrap_or(rest);
@@ -3885,6 +3892,20 @@ mod tests {
         assert_eq!(standard["url.hostname"], "web.dev.veld.localhost");
         assert_eq!(standard["url.host"], "web.dev.veld.localhost");
         assert_eq!(standard["url.port"], "443");
+
+        // A `url_template` may carry a literal port, which `node_hostname` passes
+        // through. The old two-place construction put it in the wrong field at
+        // `https_port == 443` — `url.hostname` kept the `:3000` and `url.port`
+        // said `443`. Pinned because it is the one input where this is a
+        // deliberate behaviour change rather than an extraction.
+        let templated = by_key("https://svc.localhost:3000");
+        assert_eq!(templated["url.hostname"], "svc.localhost");
+        assert_eq!(templated["url.port"], "3000");
+        assert_eq!(templated["url.host"], "svc.localhost:3000");
+
+        // A hostname veld generates can never contain a colon, so the split is
+        // unambiguous for everything except the templated case above.
+        assert!(!crate::url::slugify("weird:name").contains(':'));
     }
 
     /// F0.3: one builtin set, so `${veld.node}` (and every sibling) resolves the
