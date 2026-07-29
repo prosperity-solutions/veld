@@ -6,7 +6,7 @@ use crate::output;
 
 /// `veld restart [--name <n>] [--debug]`
 pub async fn run(name: Option<String>, debug: bool) -> i32 {
-    let Some((config_path, config)) = super::load_config(false) else {
+    let Some((config_path, config)) = super::parse_config(false) else {
         return 1;
     };
 

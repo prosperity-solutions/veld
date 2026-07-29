@@ -1,0 +1,988 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "title": "Veld Project Configuration (v3)",
+  "description": "Any Veld config file. All top-level keys are optional except in the root veld.json, which must declare schemaVersion and name \u2014 so one schema covers the root file and every file it includes, and $schema autocompletion works in all of them.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional JSON Schema reference for editor autocompletion. Note: veld accepts JSONC (comments and trailing commas) in every config file, but editors validate a .json file with a strict JSON parser \u2014 map veld.json to the 'jsonc' language in your editor to stop spurious syntax errors."
+    },
+    "schemaVersion": {
+      "type": "string",
+      "const": "3",
+      "description": "Required in the root config file only. Must be \"3\" \u2014 v1 and v2 are not supported and fail to load. In v3 the `command` key is gone: every place that runs something uses `argv` (an array, spawned directly) or `shell` (a string, run via sh -c). See docs/migrating-to-v3.md to convert an older config."
+    },
+    "name": {
+      "type": "string",
+      "description": "Required in the root config file only. Human-readable project name, used in URLs and run history."
+    },
+    "include": {
+      "type": "array",
+      "description": "Globs of further config files to load, relative to this file's directory. Root config only \u2014 nested includes are refused, because load order (and so error messages) would depend on a graph nobody can see. Matches are loaded in sorted order. `*` matches within one path segment, `?` one character, `**` across segments.",
+      "items": {
+        "type": "string"
+      },
+      "examples": [
+        [
+          "veld.d/*.jsonc",
+          "apps/*/veld.node.json"
+        ]
+      ]
+    },
+    "url_template": {
+      "type": "string",
+      "description": "Hostname template for start_server nodes. Uses {variable} \u2014 single braces \u2014 not ${variable}.",
+      "default": "{service}.{run}.{project}.localhost"
+    },
+    "vars": {
+      "type": "object",
+      "description": "One definition point per value, referenced as ${vars.<name>} at every use site. A var is a scalar or a single value source \u2014 never an object, never a config fragment: the key stays written in the node that uses it, so `rg <ENV_VAR>` still finds the line that sets it. A var may not reference another var (one hop, always).",
+      "additionalProperties": {
+        "$ref": "#/$defs/value"
+      }
+    },
+    "env": {
+      "$ref": "#/$defs/envMap",
+      "description": "Project-wide environment variables, inherited by every node variant."
+    },
+    "presets": {
+      "type": "object",
+      "description": "Named selections for `veld start --preset <name>`. An entry starting with @ references another preset, so overlapping sets need not repeat every selection. Cycles are an error.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "examples": [
+        {
+          "core": [
+            "api:dev",
+            "web:dev"
+          ],
+          "ci": [
+            "@core",
+            "e2e:dev"
+          ]
+        }
+      ]
+    },
+    "client_log_levels": {
+      "$ref": "#/$defs/clientLogLevels"
+    },
+    "features": {
+      "$ref": "#/$defs/features"
+    },
+    "proxy": {
+      "$ref": "#/$defs/proxy"
+    },
+    "sharing": {
+      "$ref": "#/$defs/sharing"
+    },
+    "setup": {
+      "type": "array",
+      "description": "Steps run sequentially before the dependency graph. A non-zero exit aborts startup.",
+      "items": {
+        "$ref": "#/$defs/lifecycleStep"
+      }
+    },
+    "teardown": {
+      "type": "array",
+      "description": "Steps run sequentially after all nodes stop. Best-effort: failures are logged, never blocking.",
+      "items": {
+        "$ref": "#/$defs/lifecycleStep"
+      }
+    },
+    "nodes": {
+      "type": "object",
+      "description": "The dependency graph. A node is defined in exactly one file \u2014 the same name in two files is an error naming both, which is what removes precedence rules for node bodies entirely.",
+      "additionalProperties": {
+        "$ref": "#/$defs/node"
+      }
+    },
+    "hooks": {
+      "type": "object",
+      "description": "RESERVED. Repo-declared lifecycle hooks keyed by event (worktree.created, project.created, run.stopped). Parsed and stored but NOT EXECUTED by this version of veld \u2014 `veld lint` says so. Hooks are not nodes: no graph, no port, no probes. Repo-declared only, never from a fetched extension.",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "$ref": "#/$defs/commandObject"
+        }
+      }
+    },
+    "ui": {
+      "type": "object",
+      "description": "RESERVED. JSON-defined UI extensions for the desktop app. Parsed and stored but NOT RENDERED by this version of veld.",
+      "additionalProperties": true
+    }
+  },
+  "$defs": {
+    "value": {
+      "description": "A value: a plain string (a non-secret literal), or an object naming exactly one source plus an optional `secret` flag. veld never takes custody of a secret \u2014 it carries a pointer and a flag, resolves it at run start, and passes it to the process's environment or a file. Nothing here names a vendor: `argv` runs a command and reads stdout, and which command that is is your business.",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "A non-secret literal."
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "value": {
+              "type": "string",
+              "description": "An inline literal. This object form exists so a literal can carry `secret: true`."
+            },
+            "secret": {
+              "$ref": "#/$defs/secretFlag"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "env"
+          ],
+          "properties": {
+            "env": {
+              "type": "string",
+              "description": "Read from the environment veld was launched with. Missing at start is an error naming the node and the variable."
+            },
+            "secret": {
+              "$ref": "#/$defs/secretFlag"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "file"
+          ],
+          "properties": {
+            "file": {
+              "type": "string",
+              "description": "Read the (trimmed) contents of a file. Relative to the project root."
+            },
+            "secret": {
+              "$ref": "#/$defs/secretFlag"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "argv"
+          ],
+          "properties": {
+            "argv": {
+              "$ref": "#/$defs/argv",
+              "description": "Run a command directly and take its trimmed stdout."
+            },
+            "secret": {
+              "$ref": "#/$defs/secretFlag"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "shell"
+          ],
+          "properties": {
+            "shell": {
+              "type": "string",
+              "description": "Run a shell command and take its trimmed stdout."
+            },
+            "secret": {
+              "$ref": "#/$defs/secretFlag"
+            }
+          }
+        }
+      ]
+    },
+    "secretFlag": {
+      "type": "boolean",
+      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED in an argv element or shell string (both appear in the process table). A secret's sanctioned destinations are the process environment and a file."
+    },
+    "envMap": {
+      "type": "object",
+      "description": "Environment variables. Additive across project \u2192 node \u2192 variant, with the most specific level winning per key; a level erases an inherited key by setting it to null.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/value"
+          },
+          {
+            "type": "null",
+            "description": "Erase this key inherited from a less specific level."
+          }
+        ]
+      }
+    },
+    "argv": {
+      "type": "array",
+      "description": "An argument vector, spawned directly: no shell, no word splitting, no globbing. Interpolation runs per element after the array is fixed, so a value containing spaces, globs, quotes, or newlines can never change the argument count.",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1
+    },
+    "commandObject": {
+      "description": "Something to run: exactly one of `argv` or `shell`.",
+      "type": "object",
+      "oneOf": [
+        {
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "$ref": "#/$defs/argv"
+            }
+          }
+        },
+        {
+          "required": [
+            "shell"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "type": "string",
+              "description": "Run via sh -c; you own the quoting. Permanently supported \u2014 any node that misbehaves under argv can be reverted to a string with no veld change and no config version change."
+            }
+          }
+        }
+      ]
+    },
+    "lifecycleStep": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Shown in progress output."
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "failureMessage": {
+          "type": "string",
+          "description": "Shown when the step exits non-zero. Useful for prerequisite checks."
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "argv"
+          ]
+        },
+        {
+          "required": [
+            "shell"
+          ]
+        }
+      ]
+    },
+    "portSpec": {
+      "description": "How a named port is obtained.",
+      "oneOf": [
+        {
+          "const": "auto",
+          "description": "veld allocates a free port."
+        },
+        {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "A fixed port. Discouraged: a literal port silently breaks parallel worktrees, which is the reason named auto-ports exist. veld will not substitute a different one if it is taken."
+        }
+      ]
+    },
+    "portsMap": {
+      "type": "object",
+      "description": "Named ports veld allocates, referenced as ${veld.ports.<name>} and exported as VELD_PORT_<NAME>. ${veld.port} remains the primary \u2014 the one named `http`, or the sole entry. Omit entirely for the historical behaviour: one allocated port.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/portSpec"
+          },
+          {
+            "type": "null",
+            "description": "Erase an inherited port."
+          }
+        ]
+      },
+      "examples": [
+        {
+          "http": "auto",
+          "debug": "auto",
+          "metrics": "auto"
+        }
+      ]
+    },
+    "filesMap": {
+      "type": "object",
+      "description": "Values delivered to disk before the process starts, for a program that can only read a file. Paths are relative to the project root; parent directories are created; the file is created WITH its mode (default 0600) rather than chmod-ed afterwards, so a credential is never briefly world-readable.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A value plus an optional octal mode.",
+            "properties": {
+              "value": {
+                "type": "string"
+              },
+              "env": {
+                "type": "string"
+              },
+              "file": {
+                "type": "string"
+              },
+              "argv": {
+                "$ref": "#/$defs/argv"
+              },
+              "shell": {
+                "type": "string"
+              },
+              "secret": {
+                "$ref": "#/$defs/secretFlag"
+              },
+              "mode": {
+                "type": "string",
+                "pattern": "^0?[0-7]{3,4}$",
+                "description": "Octal file mode as a string, e.g. \"0600\". A string, not a number, because a bare number has already lost its leading zero.",
+                "default": "0600"
+              }
+            },
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "value"
+                ]
+              },
+              {
+                "required": [
+                  "env"
+                ]
+              },
+              {
+                "required": [
+                  "file"
+                ]
+              },
+              {
+                "required": [
+                  "argv"
+                ]
+              },
+              {
+                "required": [
+                  "shell"
+                ]
+              }
+            ]
+          },
+          {
+            "type": "null",
+            "description": "Erase an inherited file."
+          }
+        ]
+      }
+    },
+    "dependsOn": {
+      "type": "object",
+      "description": "Dependencies: node name \u2192 variant name. Both must be written LITERALLY \u2014 no ${\u2026}. The graph is read before any variable exists, so an interpolated dependency would need a two-stage evaluator. Additive over the node level; \"node\": null erases an inherited dependency.",
+      "additionalProperties": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "stepType": {
+      "type": "string",
+      "enum": [
+        "command",
+        "start_server"
+      ],
+      "description": "`command` runs to completion; `start_server` stays running and gets an allocated port and a URL. These are the only two primitives."
+    },
+    "clientLogLevels": {
+      "type": "array",
+      "description": "Browser console levels to capture. 'exception' is always captured.",
+      "items": {
+        "type": "string",
+        "enum": [
+          "log",
+          "warn",
+          "error",
+          "info",
+          "debug"
+        ]
+      }
+    },
+    "features": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Per-field cascade: project \u2192 node \u2192 variant, most specific wins field by field.",
+      "properties": {
+        "feedback_overlay": {
+          "type": "boolean",
+          "description": "Inject the Veld toolbar into HTML responses."
+        },
+        "client_logs": {
+          "type": "boolean",
+          "description": "Inject the client-side log collector."
+        },
+        "inject": {
+          "type": "boolean",
+          "description": "Inject bootstrap scripts automatically. When false the /__veld__/* routes still exist for manual script tags."
+        }
+      }
+    },
+    "headerRules": {
+      "type": "object",
+      "properties": {
+        "remove": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "set": {
+          "type": "object",
+          "description": "Header name -> value. Plain strings only: these values travel to Caddy and to the public gateway as part of a route, so the value-source/`secret` forms are NOT yet supported here. Do not put a credential in a header value \u2014 see the follow-up noted in docs/configuration.md.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Static header manipulation by the local proxy and the public gateway. Resolvable at project, node, and variant level: `remove` lists union case-insensitively, `set` maps override per key, and a header in both is resolved in favour of `set`.",
+      "properties": {
+        "request": {
+          "$ref": "#/$defs/headerRules"
+        },
+        "response": {
+          "$ref": "#/$defs/headerRules"
+        }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "description": "A readiness or liveness check. A variant REPLACES an inherited probe wholesale rather than merging into it \u2014 a probe is a tagged union, so field-wise merging would let a variant switch type from http to command and silently inherit a stale path.",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "http",
+            "port",
+            "command"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "description": "For type http."
+        },
+        "expect_status": {
+          "type": "integer",
+          "description": "For type http. Default 200."
+        },
+        "port": {
+          "type": "string",
+          "description": "READINESS ONLY. Which named port from `ports` to check; default is the primary. A multi-port node's readiness is rarely 'any port is open' \u2014 a debugger port opens long before the app is listening. Not yet supported on a liveness probe, which always watches the primary port."
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "default": 60
+        },
+        "interval_ms": {
+          "type": "integer",
+          "default": 1000
+        },
+        "failure_threshold": {
+          "type": "integer",
+          "description": "Liveness only: consecutive failures before recovery. Default 3."
+        },
+        "max_recoveries": {
+          "type": "integer",
+          "description": "Liveness only: recovery attempts before permanent failure. Default 3."
+        }
+      },
+      "required": [
+        "type"
+      ]
+    },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "readiness": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/probe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Gates the dependency graph during startup. A start_server without one is reported healthy as soon as its port opens, so dependents start before it can serve. null erases an inherited probe."
+        },
+        "liveness": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/probe"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Runs continuously after the node is healthy; triggers recovery. null erases an inherited probe."
+        }
+      }
+    },
+    "outputs": {
+      "description": "Values this node publishes, referenced elsewhere as ${nodes.<node>.<KEY>}. A list declares names captured from the node's own output; a map publishes computed values (available on both node types \u2014 on a `command` node the map is interpolated after the command runs, with its captured outputs in scope, so a build step can say where its artifact landed). Replaced wholesale by a variant; null erases.",
+      "oneOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "share": {
+      "description": "Per-service sharing opt-in. Absent, or an empty `expose`, means this service can never be shared. Replaced wholesale by a variant rather than merged \u2014 sharing is a consent decision and a half-inherited expose list is exactly the surprise it must not have. null erases.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "expose": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": [
+                  "peer",
+                  "web"
+                ]
+              }
+            },
+            "web": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "access": {
+                  "type": "string",
+                  "enum": [
+                    "password",
+                    "link"
+                  ],
+                  "description": "Viewer access for the public URL. Default: password \u2014 never an open URL by accident."
+                }
+              }
+            }
+          }
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "action": {
+      "type": "object",
+      "description": "A user-invokable command on a node, exposed as `veld action <name>` and as a dashboard button.",
+      "required": [
+        "name"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "parameters": {
+          "type": "object",
+          "description": "Static values available as ${param.KEY} and as environment variables. Plain strings only \u2014 the value-source/`secret` forms are not yet supported here.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "requires_outputs": {
+          "type": "array",
+          "description": "Output keys that must all be present for this action to be available.",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "oneOf": [
+        {
+          "required": [
+            "argv"
+          ]
+        },
+        {
+          "required": [
+            "shell"
+          ]
+        }
+      ]
+    },
+    "node": {
+      "type": "object",
+      "required": [
+        "variants"
+      ],
+      "description": "A node and its variants. Any variant field may be declared once here, at node level, and any variant may override it \u2014 this deduplicates VALUES, never structure: which keys a node has is still written in that node. There is no inheritance, no mixins, no templates.",
+      "properties": {
+        "default_variant": {
+          "type": "string"
+        },
+        "hidden": {
+          "type": "boolean",
+          "description": "Hide from `veld nodes`. Still participates in the graph."
+        },
+        "url_template": {
+          "type": "string"
+        },
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/action"
+          }
+        },
+        "variants": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/variant"
+          }
+        },
+        "type": {
+          "$ref": "#/$defs/stepType"
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Relative to the PROJECT ROOT, not to the file that declares it."
+        },
+        "env": {
+          "$ref": "#/$defs/envMap"
+        },
+        "ports": {
+          "$ref": "#/$defs/portsMap"
+        },
+        "files": {
+          "$ref": "#/$defs/filesMap"
+        },
+        "depends_on": {
+          "$ref": "#/$defs/dependsOn"
+        },
+        "probes": {
+          "$ref": "#/$defs/probes"
+        },
+        "outputs": {
+          "$ref": "#/$defs/outputs"
+        },
+        "on_stop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/commandObject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Default teardown hook for every variant of this node, run in reverse dependency order during `veld stop`. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine."
+        },
+        "share": {
+          "$ref": "#/$defs/share"
+        },
+        "features": {
+          "$ref": "#/$defs/features"
+        },
+        "proxy": {
+          "$ref": "#/$defs/proxy"
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/clientLogLevels"
+        }
+      },
+      "additionalProperties": false
+    },
+    "variant": {
+      "type": "object",
+      "description": "One way to run a node. `type` and the command may come from the node level instead. Exactly one of argv or shell.",
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/stepType"
+        },
+        "argv": {
+          "$ref": "#/$defs/argv"
+        },
+        "shell": {
+          "type": "string"
+        },
+        "script": {
+          "type": "string",
+          "description": "Path to a script file, relative to the project root. An alternative to argv/shell."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Relative to the PROJECT ROOT, not to the file that declares it."
+        },
+        "env": {
+          "$ref": "#/$defs/envMap"
+        },
+        "ports": {
+          "$ref": "#/$defs/portsMap"
+        },
+        "files": {
+          "$ref": "#/$defs/filesMap"
+        },
+        "depends_on": {
+          "$ref": "#/$defs/dependsOn"
+        },
+        "probes": {
+          "$ref": "#/$defs/probes"
+        },
+        "health_check": {
+          "$ref": "#/$defs/probe",
+          "description": "Deprecated alias for probes.readiness. Still accepted."
+        },
+        "outputs": {
+          "$ref": "#/$defs/outputs"
+        },
+        "sensitive_outputs": {
+          "type": "array",
+          "description": "Output keys whose values are sensitive: masked in display, encrypted at rest. Must all be declared in `outputs`.",
+          "items": {
+            "type": "string"
+          }
+        },
+        "strict_outputs": {
+          "type": "boolean",
+          "default": true,
+          "description": "Fail if the command produces an output not declared in `outputs`. Cannot be null."
+        },
+        "skip_if": {
+          "$ref": "#/$defs/commandObject",
+          "description": "Idempotency check: skip this step if the command exits 0."
+        },
+        "on_stop": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/commandObject"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Teardown, run in reverse dependency order during `veld stop`. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it."
+        },
+        "share": {
+          "$ref": "#/$defs/share"
+        },
+        "features": {
+          "$ref": "#/$defs/features"
+        },
+        "proxy": {
+          "$ref": "#/$defs/proxy"
+        },
+        "url_template": {
+          "type": "string"
+        },
+        "client_log_levels": {
+          "$ref": "#/$defs/clientLogLevels"
+        },
+        "verify": {
+          "$ref": "#/$defs/commandObject",
+          "description": "Deprecated alias for `skip_if`, still accepted. Prefer `skip_if`."
+        }
+      },
+      "additionalProperties": false
+    },
+    "secretSource": {
+      "description": "Where a token is read from. A plain string is a literal (convenient locally, but it lands in version control).",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "object",
+          "required": [
+            "env"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "env": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "file"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "file": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "argv"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "argv": {
+              "$ref": "#/$defs/argv"
+            }
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "shell"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "shell": {
+              "type": "string"
+            }
+          }
+        }
+      ]
+    },
+    "sharing": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Environment-wide sharing policy. Relays must be opted into explicitly \u2014 including public \u2014 so nothing is routed over public relays by accident.",
+      "properties": {
+        "relays": {
+          "oneOf": [
+            {
+              "const": "public",
+              "description": "n0's public relay set."
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "description": "Self-hosted relays. Share traffic is confined to these.",
+              "items": {
+                "oneOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "object",
+                    "required": [
+                      "url"
+                    ],
+                    "additionalProperties": false,
+                    "properties": {
+                      "url": {
+                        "type": "string"
+                      },
+                      "token": {
+                        "$ref": "#/$defs/secretSource"
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        },
+        "gateway": {
+          "oneOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "object",
+              "required": [
+                "url"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "url": {
+                  "type": "string"
+                },
+                "token": {
+                  "$ref": "#/$defs/secretSource"
+                }
+              }
+            }
+          ]
+        },
+        "dangerouslyEmbedRelayTokensInTicket": {
+          "type": "boolean",
+          "description": "DANGER. Embeds the resolved relay token in every share link. Only for disposable, per-project tokens you rotate freely."
+        }
+      }
+    }
+  }
+}

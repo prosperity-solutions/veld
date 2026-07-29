@@ -240,7 +240,13 @@ async fn run_liveness_checks(
             None => continue,
         };
 
-        let liveness = match variant_cfg.liveness_probe() {
+        // Resolved: `probes` is hoistable to node level (F3), so a raw read
+        // would silently stop probing a node that declares its liveness probe
+        // once for all variants.
+        let Some(resolved) = config.resolved(node_name, variant_name) else {
+            continue;
+        };
+        let liveness = match &resolved.liveness {
             Some(lp) => lp,
             None => continue,
         };
@@ -451,15 +457,15 @@ async fn run_single_liveness_check(
 
     match liveness.check_type.as_str() {
         "command" | "bash" => {
-            if let Some(ref cmd) = liveness.command {
+            if let Some(cmd) = liveness.cmd.spec() {
                 // Timeout command checks to prevent hanging the monitor loop.
                 // Inject the resolved user PATH so probes find tools like
                 // pg_isready even when the daemon starts at boot.
+                let Ok(mut command) = veld_core::process::tokio_command(&cmd) else {
+                    return Err("liveness probe declares an empty argv".to_owned());
+                };
                 let result = tokio::time::timeout(Duration::from_secs(30), async {
-                    let mut command = tokio::process::Command::new("sh");
                     command
-                        .arg("-c")
-                        .arg(cmd)
                         .current_dir(working_dir)
                         .stdout(std::process::Stdio::null())
                         .stderr(std::process::Stdio::piped())
@@ -559,7 +565,7 @@ fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
     if !config_path.exists() {
         return None;
     }
-    config::load_config(&config_path).ok()
+    config::parse_config(&config_path).ok()
 }
 
 /// Find the veld CLI binary path.

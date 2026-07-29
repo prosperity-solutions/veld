@@ -1,0 +1,39 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "defaults",
+  "nodes": {
+    "db": {
+      "default_variant": "local",
+      "type": "command",
+      "variants": { "local": { "argv": ["true"] } }
+    },
+    "api": {
+      "default_variant": "dev",
+      "type": "start_server",
+      "cwd": "services/api",
+      "depends_on": { "db": "local" },
+      "ports": { "http": "auto", "debug": "auto" },
+      "probes": {
+        "readiness": { "type": "http", "path": "/healthz" },
+        "liveness": { "type": "command", "argv": ["pg_isready"], "failure_threshold": 5 }
+      },
+      "outputs": { "URL": "${veld.url}" },
+      "on_stop": { "argv": ["docker", "rm", "-f", "api"] },
+      "share": { "expose": ["peer"] },
+      "actions": [
+        { "name": "psql", "shell": "psql ${output.URL}", "requires_outputs": ["URL"] }
+      ],
+      "variants": {
+        "dev": { "argv": ["node", "server.js"] },
+        "debug": {
+          "argv": ["node", "--inspect=${veld.ports.debug}", "server.js"],
+          "probes": { "liveness": null, "readiness": { "type": "port", "port": "http" } },
+          "share": null,
+          "on_stop": null,
+          "verify": { "argv": ["true"] }
+        }
+      }
+    }
+  }
+}

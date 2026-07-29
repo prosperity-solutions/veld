@@ -2,7 +2,7 @@ use crate::output;
 
 /// `veld presets [--json]`
 pub async fn run(json: bool) -> i32 {
-    let Some((_config_path, config)) = super::load_config(json) else {
+    let Some((_config_path, config)) = super::parse_config(json) else {
         return 1;
     };
 

@@ -246,6 +246,53 @@ jobs:
           ../target/debug/veld nodes
           ../target/debug/veld nodes --json
           ../target/debug/veld graph frontend:local
+          ../target/debug/veld config --files
+          # The issue's whole point for `veld lint` is CI. A fixture config that
+          # does not pass its own linter is not a fixture.
+          ../target/debug/veld lint
+          ../target/debug/veld lint --json
+
+      - name: Lint every config in the repo
+        run: |
+          set -e
+          # `veld lint` exits 1 on any error-severity finding, so this gates the
+          # repo's own configs against every rule in `config::validate`.
+          for cfg in $(git ls-files '*veld.json' | grep -v node_modules); do
+            dir=$(dirname "$cfg")
+            echo "--- $cfg"
+            (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" lint)
+          done
+
+      - name: Doc examples load and lint clean
+        run: |
+          set -e
+          # This job is the enforcement point: the gate needs a built veld, and this
+          # is the job that has one. `validate-schema.sh` also invokes it when a
+          # binary happens to be present locally, but skips otherwise — putting the
+          # requirement there instead just failed the schema job, which never builds
+          # Rust. A gate that skips itself reads as a pass, so it lives where it runs.
+          python3 tests/validate-doc-examples.py target/debug/veld
+
+      - name: Reject a v1/v2 config with the upgrade instructions
+        run: |
+          set -e
+          work=$(mktemp -d)
+          # veld reads only schemaVersion 3, and the rejection message *is* the
+          # migration guide — there is no converter to fall back on, so a message
+          # that regresses leaves an upgrading user with nothing.
+          sed 's/"schemaVersion": "3"/"schemaVersion": "2"/' testproject/veld.json \
+            > "$work/veld.json"
+          cd "$work"
+          out=$("$GITHUB_WORKSPACE/target/debug/veld" lint 2>&1) && {
+            echo "a schemaVersion 2 config must not load"; exit 1
+          }
+          echo "$out"
+          for needle in 'no longer supported' 'argv' 'shell' 'docs/migrating-to-v3.md' 'veld lint'; do
+            echo "$out" | grep -q -- "$needle" || {
+              echo "rejection message lost: $needle"; exit 1
+            }
+          done
+          echo "v2 rejection message verified."
 
       - name: Verify setup subcommands exist
         run: |

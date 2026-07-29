@@ -18,7 +18,7 @@ pub async fn run(
     all_logs: bool,
     _debug: bool,
 ) -> i32 {
-    let Some((config_path, config)) = super::load_config(false) else {
+    let Some((config_path, config)) = super::parse_config(false) else {
         return 1;
     };
 
@@ -100,11 +100,11 @@ pub async fn run(
             return 1;
         }
         let sel = parsed_selections[0].clone();
+        // Resolved: `type` is hoistable to node level (F3), so a raw read would
+        // misclassify a node that declares it once for all its variants.
         let is_command = config
-            .nodes
-            .get(&sel.node)
-            .and_then(|n| n.variants.get(&sel.variant))
-            .map(|v| v.step_type == veld_core::config::StepType::Command)
+            .resolved(&sel.node, &sel.variant)
+            .map(|r| r.step_type == veld_core::config::StepType::Command)
             .unwrap_or(false);
         if !is_command {
             output::print_error(
@@ -1105,8 +1105,11 @@ fn find_non_localhost_domains(
             Some(v) => v,
             None => continue,
         };
+        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
+            continue;
+        };
 
-        if variant_cfg.step_type != StepType::StartServer {
+        if resolved.step_type != StepType::StartServer {
             continue;
         }
 

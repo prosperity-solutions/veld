@@ -1,0 +1,20 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "reserved",
+  "hooks": {
+    "worktree.created": [{ "argv": ["./scripts/setup-worktree.sh"] }],
+    "project.created": [{ "argv": ["pnpm", "install"] }],
+    "run.stopped": [{ "shell": "./scripts/collect-artifacts.sh | tee artifacts.log" }]
+  },
+  "ui": {
+    "my-extension": { "title": "Mine", "panel": "panel.html", "commands": [] }
+  },
+  "setup": [
+    { "name": "docker", "argv": ["docker", "info"], "failureMessage": "Docker must be running" }
+  ],
+  "teardown": [{ "name": "cleanup", "shell": "rm -rf .tmp" }],
+  "nodes": {
+    "task": { "default_variant": "dev", "variants": { "dev": { "type": "command", "argv": ["true"] } } }
+  }
+}

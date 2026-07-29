@@ -8,19 +8,56 @@ Veld discovers `veld.json` by walking up the directory tree from your current wo
 
 All relative paths in the configuration resolve relative to the directory containing `veld.json` -- never the current working directory.
 
+### Comments and trailing commas
+
+Every Veld config file accepts `//` line comments, `/* */` block comments, and
+trailing commas — at every `schemaVersion`, with no rename to `.jsonc`:
+
+```jsonc
+{
+  // The API service. Owned by @some-team.
+  "schemaVersion": "3",
+  "name": "example",
+  "nodes": { /* … */ },
+}
+```
+
+A duplicate key is an error rather than silently last-wins, so a copy-pasted node
+or a doubled `variants` block cannot quietly drop half of itself. (It is reported
+by `veld lint` and `veld start`, not by the loader, so `veld stop` still works
+against a config you are in the middle of editing.)
+
+**Your editor does not know this.** A `veld.json` carrying a `$schema` is validated
+by the editor's strict JSON parser, which flags comments as syntax errors. Map the
+file to the `jsonc` language:
+
+```jsonc
+// .vscode/settings.json
+{
+  "files.associations": {
+    "veld.json": "jsonc",
+    "veld.local.json": "jsonc",
+    "*.node.json": "jsonc"
+  }
+}
+```
+
+The same applies to anything else that reads the file as strict JSON — `veld config
+| jq` will break on a commented config.
+
 ### Minimal Example
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "my-app",
   "nodes": {
     "backend": {
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "health_check": { "type": "http", "path": "/health" }
         }
       }
@@ -69,11 +106,25 @@ The name is available as the `{project}` variable in URL templates and as `${vel
 
 ### `schemaVersion`
 
-Must be `"1"` or `"2"`. Use `"2"` for new projects — it enables `probes` and `skip_if`. Version `"1"` is still fully supported (uses legacy `health_check` and `verify` fields).
+Must be `"3"`. Required in the root config file; every other key is optional in
+every file.
 
 ```json
-"schemaVersion": "2"
+"schemaVersion": "3"
 ```
+
+**`"1"` and `"2"` are not supported.** A config declaring either fails to load, with
+an error that states every change needed. There are three mechanical rewrites and
+one semantic change — [docs/migrating-to-v3.md](migrating-to-v3.md) is the complete
+rule set, written so you can hand it to a coding agent and check the result with
+`veld lint`.
+
+Supporting two readings was tried and abandoned: every rule then needed a severity
+that depended on the document's version, and every new field was silently live in an
+old document that had never opted into it. One reading is the feature.
+
+A document containing `command` fails to load, with a message naming every offending
+position.
 
 ### `url_template`
 
@@ -257,12 +308,12 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 ```json
 {
   "setup": [
-    { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
-    { "name": "node-version", "command": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Need Node >= 20" },
-    { "name": "veld-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+    { "name": "docker", "argv": ["docker", "info"], "failureMessage": "Docker must be running" },
+    { "name": "node-version", "shell": "node -v | grep -q 'v2[0-9]'", "failureMessage": "Need Node >= 20" },
+    { "name": "veld-network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" }
   ],
   "teardown": [
-    { "name": "veld-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+    { "name": "veld-network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
   ]
 }
 ```
@@ -272,12 +323,14 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 | Field            | Type   | Required | Description |
 |------------------|--------|----------|-------------|
 | `name`           | string | Yes      | Human-readable name for progress reporting and error messages |
-| `command`        | string | Yes      | Shell command to execute |
+| `argv` / `shell` | array / string | Yes (exactly one) | What to run. See [`argv` and `shell`](#argv-and-shell) |
 | `failureMessage` | string | No       | Message shown when the command fails (non-zero exit) |
 
 #### Variable availability
 
-Setup and teardown steps have access to a limited set of variables — only project-level Veld variables and shell environment variables. Node-scoped variables like `${veld.port}`, `${veld.url}`, and `${nodes.*}` are not available because setup/teardown runs outside the node graph.
+Setup and teardown steps run outside the node graph, so node-scoped variables —
+`${veld.port}`, `${veld.url}`, `${veld.node}`, `${veld.variant}`, and
+`${nodes.*}` — are not available. Everything project-level is:
 
 | Variable | Description |
 |----------|-------------|
@@ -285,7 +338,11 @@ Setup and teardown steps have access to a limited set of variables — only proj
 | `${veld.project}` | Same as `${veld.name}` |
 | `${veld.root}` | Absolute path to the directory containing `veld.json` |
 | `${veld.run}` | Run name |
-| Shell env vars | `$HOME`, `$PATH`, `$CI`, etc. — expanded by the shell |
+| `${veld.worktree}` | Slugified worktree directory name |
+| `${veld.branch}` | Current git branch, slugified |
+| `${veld.username}` | OS username |
+| `${vars.*}` | Any project [`vars`](#vars) entry |
+| Shell env vars | `$HOME`, `$PATH`, `$CI`, etc. — expanded by the shell (in a `shell` step; an `argv` step has no shell to expand them) |
 
 #### Execution lifecycle
 
@@ -338,7 +395,7 @@ When set to `true`, the node is excluded from `veld nodes` output. Hidden nodes 
   "variants": {
     "default": {
       "type": "command",
-      "command": "./scripts/generate-certs.sh"
+      "argv": ["./scripts/generate-certs.sh"]
     }
   }
 }
@@ -403,7 +460,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 | Field               | Type             | Required | Applies To     | Description                                           |
 |---------------------|------------------|----------|----------------|-------------------------------------------------------|
 | `type`              | string           | Yes      | All            | `"command"` or `"start_server"`                          |
-| `command`           | string           | Varies   | All            | Inline shell command to execute                       |
+| `argv` / `shell`    | array / string   | Yes (exactly one) | All   | What to run — `argv` is spawned directly, `shell` runs via `sh -c` |
 | `script`            | string           | Varies   | `command` only    | Path to script file, relative to `veld.json`          |
 | `health_check`      | object           | No       | `start_server` | Legacy readiness probe. Deprecated: use `probes.readiness` |
 | `probes`            | object           | No       | All            | Readiness and liveness probe configuration            |
@@ -412,8 +469,8 @@ A variant defines how a node behaves in a given context. The same node might be 
 | `outputs`           | array or object  | No       | All            | Output declarations (format varies by type)           |
 | `sensitive_outputs`  | array of strings | No       | All            | Output keys to mask and encrypt                       |
 | `url_template`      | string           | No       | `start_server` | URL template override for this variant                |
-| `on_stop`           | string           | No       | All            | Teardown command run when the environment is stopped  |
-| `skip_if`           | string           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
+| `on_stop`           | object           | No       | All            | Teardown command (`{ "argv": … }` / `{ "shell": … }`) run when the environment is stopped |
+| `skip_if`           | object           | No       | `command` only    | Idempotency check — skip if exits 0 (alias: `verify`)|
 | `client_log_levels` | array of strings | No       | `start_server` | Browser log levels override for this variant          |
 | `features`          | object           | No       | `start_server` | Feature toggles override for this variant             |
 | `proxy`             | object           | No       | `start_server` | Reverse-proxy header rules override for this variant (see [Proxy](#proxy)) |
@@ -426,7 +483,7 @@ A variant defines how a node behaves in a given context. The same node might be 
 Runs a shell command or script to completion. Used for setup tasks such as database cloning, seeding, data migration, or exporting remote service URLs.
 
 - The working directory defaults to `${veld.root}` (the directory containing `veld.json`)
-- Must specify either `command` or `script` (mutually exclusive)
+- Must specify exactly one of `argv`, `shell`, or `script`
 - Can declare outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged — exposes values in terminal/logs)
 - Built-in output: `exit_code`
 - Supports the `skip_if` field for idempotency
@@ -434,7 +491,7 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 ```json
 {
   "type": "command",
-  "command": "echo 'DATABASE_URL=postgresql://localhost:5432/mydb' >> \"$VELD_OUTPUT_FILE\"",
+  "shell": "echo 'DATABASE_URL=postgresql://localhost:5432/mydb' >> \"$VELD_OUTPUT_FILE\"",
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -444,10 +501,10 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
 
 - The working directory defaults to `${veld.root}`
-- Must specify `command` (required)
+- Must specify exactly one of `argv` or `shell` (required)
 - The process **must** bind to `${veld.port}` -- if it does not, the health check fails with a clear error
 - Built-in outputs: `url` (the full HTTPS URL) and `port` (the allocated port number)
-- Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `command`, `env`, and `outputs` templates
+- Built-in variables: `${veld.port}` and `${veld.url}` are available in this node's `argv`/`shell`, `env`, and `outputs` templates
 - Ports and URLs are **pre-computed** before any node executes, so `${nodes.X.url}` and `${nodes.X.port}` for any `start_server` node are available everywhere -- no dependency edge required
 - Requires a readiness probe: use `probes.readiness` (preferred) or the legacy `health_check` field
 - Users never see or deal with port numbers -- only clean HTTPS URLs
@@ -455,24 +512,73 @@ Starts and manages a long-lived process. Veld allocates a port, injects it as `$
 ```json
 {
   "type": "start_server",
-  "command": "pnpm --filter backend dev --port ${veld.port}",
+  "argv": ["pnpm", "--filter", "backend", "dev", "--port", "${veld.port}"],
   "health_check": { "type": "http", "path": "/health" }
 }
 ```
 
-### `command`
+### `argv` and `shell`
 
-An inline shell command to execute. Supports full Veld variable substitution.
+**One vocabulary for every place Veld runs something.** Two keys, exactly one of
+them:
 
-```json
-"command": "docker run --rm --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16"
+| Key | Meaning |
+|---|---|
+| `"argv": ["pnpm", "dev"]` | An array, spawned directly. No shell, so no word splitting, no globbing, no `$VAR` expansion. |
+| `"shell": "pnpm dev \| tee out.log"` | A string, run via `sh -c`. You own the quoting. |
+
+```jsonc
+"argv": ["docker", "run", "--rm", "--name", "veld-db-${veld.run}",
+         "-p", "${veld.port}:5432", "postgres:16"]
+
+"shell": "pnpm build && pnpm start --port ${veld.port}"
 ```
 
-For `start_server` variants, `command` is required. For `command` variants, you must provide either `command` or `script`.
+#### The `argv` guarantee
+
+Interpolation runs **per element, after the array is fixed**, so a value
+containing spaces, globs, quotes, or newlines can never change the argument
+count:
+
+```jsonc
+"argv": ["psql", "${vars.db_url}"]   // always exactly two arguments
+"shell": "psql ${vars.db_url}"       // a URL containing a space becomes two words
+```
+
+This holds on the detached path too, where the command runs inside a shell
+pipeline: Veld passes the argv as positional parameters and expands `"$@"`, which
+produces exactly one word per element whatever it contains.
+
+#### `shell` is not deprecated
+
+It is permanently supported, and that is what makes `argv` a safe default: any
+node that misbehaves under `argv` can be reverted to a string by its author, with
+no Veld change and no config version change. Use `shell` when you actually want a
+shell — pipes, redirection, `&&`, globbing, `$VAR` expansion.
+
+#### Where they apply
+
+Everywhere Veld runs something: a variant, `on_stop`, `skip_if`, a
+`command`-type probe, `actions[]`, `setup` / `teardown` steps, and
+[value sources](#value-sources). In a nested position the pair is wrapped in an
+object:
+
+```jsonc
+"on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] }
+"skip_if": { "shell": "test -f .migrated" }
+```
+
+#### `command` (removed)
+
+`command` was the single shell-string form in `schemaVersion` 1 and 2. Neither
+version loads any more, and a `schemaVersion: "3"` document containing `command`
+fails to load with a message naming every position. Replace each one with `argv`
+or `shell` — see [docs/migrating-to-v3.md](migrating-to-v3.md).
 
 ### `script`
 
-A path to a script file, relative to the directory containing `veld.json`. Mutually exclusive with `command`. Only valid for `command` type variants.
+A path to a script file, relative to the project root. An alternative to
+`argv`/`shell`.
 
 ```json
 "script": "./scripts/clone-db.sh"
@@ -531,7 +637,7 @@ Runs a shell command and checks the exit code. Exit code `0` means healthy.
 ```json
 "health_check": {
   "type": "command",
-  "command": "./scripts/check-db-ready.sh",
+  "argv": ["./scripts/check-db-ready.sh"],
   "timeout_seconds": 45,
   "interval_ms": 2000
 }
@@ -550,7 +656,7 @@ Configures readiness and liveness probes for a variant. Available for both `comm
   },
   "liveness": {
     "type": "command",
-    "command": "pg_isready -h localhost -p 5432",
+    "argv": ["pg_isready", "-h", "localhost", "-p", "5432"],
     "interval_ms": 5000,
     "failure_threshold": 3,
     "max_recoveries": 3
@@ -648,7 +754,7 @@ Defines synthetic outputs whose values are string templates interpolated after t
 ```json
 {
   "type": "start_server",
-  "command": "docker run --rm -p ${veld.port}:5432 postgres:16",
+  "argv": ["docker", "run", "--rm", "-p", "${veld.port}:5432", "postgres:16"],
   "health_check": { "type": "port" },
   "outputs": {
     "DATABASE_URL": "postgresql://postgres:veld@localhost:${veld.port}/app",
@@ -699,7 +805,7 @@ The `skip_if` command receives the previous run's output variables as environmen
 {
   "type": "command",
   "script": "./scripts/clone-db.sh",
-  "skip_if": "./scripts/verify-db.sh",
+  "skip_if": { "argv": ["./scripts/verify-db.sh"] },
   "outputs": ["DATABASE_URL"]
 }
 ```
@@ -713,26 +819,51 @@ This is especially useful for `command` nodes that provision external resources 
 ```json
 {
   "type": "command",
-  "command": "docker run -d --name veld-db-${veld.run} -p ${veld.port}:5432 postgres:16",
-  "on_stop": "docker rm -f veld-db-${veld.run}",
+  "argv": ["docker", "run", "-d", "--name", "veld-db-${veld.run}", "-p", "${veld.port}:5432", "postgres:16"],
+  "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
   "outputs": ["DATABASE_URL"]
 }
 ```
 
+Declared at node level, `on_stop` applies to every variant. A variant replaces it by
+declaring its own, and **disables it with `"on_stop": null`**:
+
+```jsonc
+"db": {
+  "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
+  "variants": {
+    "docker":   { /* inherits the hook */ },
+    "external": { "on_stop": null }   // nothing to tear down — and nothing runs
+  }
+}
+```
+
 The `on_stop` command receives the same variable context that was available during start:
-- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, etc.)
-- All outputs produced by this node (e.g. `${veld.exit_code}`, custom outputs)
+- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, `${veld.node}`, etc. — see [Built-in Variables](#built-in-variables-veld))
+- This node's outputs as `${output.KEY}`, and any node's as `${nodes.<node>.KEY}` (including the automatic `exit_code` of a `command` node)
 - Environment variables from the variant's `env` block
 
+> **Changed:** node outputs used to *also* be reachable as `${veld.KEY}` here — and only
+> here. That let an output named like a built-in (`run`, `branch`, `port`) shadow it during
+> teardown but nowhere else, so the same string resolved to two different values. `veld.*`
+> is now a closed set. Rewrite `${veld.exit_code}` as `${output.exit_code}` and
+> `${veld.MY_OUTPUT}` as `${output.MY_OUTPUT}`. `veld lint` and `veld start` reject any
+> `${veld.*}` name that is not a built-in, so this is caught before a run starts rather
+> than at teardown.
+
 If the `on_stop` command fails (non-zero exit code or execution error), Veld logs a warning but continues tearing down the remaining nodes. A failing teardown hook never blocks the stop operation.
+
+If `on_stop` references a variable that cannot be resolved, the hook is **skipped** — Veld
+prints a prominent warning naming the command and what it was meant to clean up, because
+whatever it would have removed has been left behind.
 
 `on_stop` works with both `command` and `start_server` variants:
 
 ```json
 {
   "type": "start_server",
-  "command": "docker run --rm --name veld-redis-${veld.run} -p ${veld.port}:6379 redis:7",
-  "on_stop": "docker stop veld-redis-${veld.run}",
+  "argv": ["docker", "run", "--rm", "--name", "veld-redis-${veld.run}", "-p", "${veld.port}:6379", "redis:7"],
+  "on_stop": { "argv": ["docker", "stop", "veld-redis-${veld.run}"] },
   "health_check": { "type": "port" }
 }
 ```
@@ -756,7 +887,7 @@ Sharing has two config surfaces: an environment-wide `sharing` block (relays and
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev",
+          "argv": ["npm", "run", "dev"],
           "share": { "expose": ["peer"] }
         }
       }
@@ -788,7 +919,7 @@ Give a relay entry a `token` to send one:
       { "url": "https://lit.acme.internal",  "token": "the-shared-secret" },
       { "url": "https://env.acme.internal",  "token": { "env": "VELD_RELAY_TOKEN" } },
       { "url": "https://file.acme.internal", "token": { "file": "/run/secrets/relay-token" } },
-      { "url": "https://op.acme.internal",   "token": { "command": "op read op://vault/relay/token" } }
+      { "url": "https://op.acme.internal",   "token": { "argv": ["op", "read", "op://vault/relay/token"] } }
     ]
   }
 }
@@ -801,7 +932,7 @@ Give a relay entry a `token` to send one:
 | `"a-string"` | Literal token, inline in config | Quick local setup — but it lands the secret in `veld.json` (and version control) |
 | `{ "env": "VAR" }` | Read environment variable `VAR` **from the daemon's process environment, not your shell** (so `export VAR=… && veld share` won't work — a running daemon doesn't inherit it) | 12-factor / CI secret injection |
 | `{ "file": "/path" }` | Read the file's contents (trailing whitespace trimmed). Use an absolute path — a relative one resolves against the daemon's working directory, not your project | Docker / Kubernetes secret mounts (`/run/secrets/…`) |
-| `{ "command": "…" }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed). Runs with your login-shell `PATH`, so user-installed CLIs (`op`, `vault`, brew tools) are found even though the command executes on the daemon — but *only* `PATH` is inherited, not other shell-exported variables or aliases | 1Password, Vault, or any secret-manager CLI |
+| `{ "argv": ["…"] }` | Run the string through `sh -c` and use its stdout (trailing whitespace trimmed). Runs with your login-shell `PATH`, so user-installed CLIs (`op`, `vault`, brew tools) are found even though the command executes on the daemon — but *only* `PATH` is inherited, not other shell-exported variables or aliases | 1Password, Vault, or any secret-manager CLI |
 
 All forms trim trailing whitespace (secret stores commonly append a newline). Prefer the `env` / `file` / `command` forms over a literal so the secret stays out of the config file. The token is resolved on the daemon at share time; a token that fails to resolve (missing env var, unreadable file, command exits non-zero or times out, or an empty result) is a hard error — Veld never binds a relay unauthenticated when a token was declared. `command` runs an arbitrary shell command from your config, exactly like `start_server`/`command` steps already do, so the same trust applies: only run configs you trust.
 
@@ -825,7 +956,7 @@ There is no `veld.json` path for a joiner's relay token.
 ```json
 {
   "sharing": {
-    "relays": [{ "url": "https://relay.acme.internal", "token": { "command": "op read op://vault/relay/token" } }],
+    "relays": [{ "url": "https://relay.acme.internal", "token": { "argv": ["op", "read", "op://vault/relay/token"] } }],
     "dangerouslyEmbedRelayTokensInTicket": true
   }
 }
@@ -847,7 +978,7 @@ The public web gateway this environment registers `web` shares with (used by `ve
 }
 ```
 
-`token` is a secret source exactly like [relay auth tokens](#relay-auth-tokens) — a literal string, `{ "env": … }`, `{ "file": … }`, or `{ "command": … }` — resolved on the daemon when the share starts, Debug-redacted, and required (the gateway never accepts unauthenticated registrations). Without config, the `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` env vars (on the **daemon's** environment) work as an ad-hoc override; config wins when both are present.
+`token` is a secret source exactly like [relay auth tokens](#relay-auth-tokens) — a literal string, `{ "env": … }`, `{ "file": … }`, `{ "argv": [ … ] }`, or `{ "shell": … }` — resolved on the daemon when the share starts, Debug-redacted, and required (the gateway never accepts unauthenticated registrations). Without config, the `VELD_SHARE_GATEWAY` + `VELD_SHARE_GATEWAY_TOKEN` env vars (on the **daemon's** environment) work as an ad-hoc override; config wins when both are present.
 
 The gateway itself is one self-hosted container — see the [gateway operator guide](gateway.md) for deployment (DNS, TLS, env vars).
 
@@ -890,6 +1021,352 @@ Practical note for multi-service shares: the viewer's session cookie is scoped p
 
 ---
 
+## Splitting the config across files
+
+Set `schemaVersion: "3"` and add `include` globs to the root file. Every config
+file uses **the same schema**, with all top-level keys optional except
+`schemaVersion` and `name` in the root — so `$schema` autocompletion works in every
+file and there is one schema to learn.
+
+```jsonc
+// veld.json — the root file
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "example-monorepo",
+  "include": [
+    "veld.d/*.jsonc",
+    "apps/*/veld.node.json",
+    "services/*/veld.node.json"
+  ],
+  "presets": { "core": ["api:dev", "web:dev"] }
+}
+```
+
+```jsonc
+// services/api/veld.node.json — CODEOWNERS: /services/api/ @some-team
+{
+  "nodes": {
+    "api":       { /* … */ },
+    "worker":    { /* … */ },
+    "api-build": { /* … */ }
+  }
+}
+```
+
+**A node is defined in exactly one file. A file may define any number of nodes.**
+
+| Rule | Why |
+|---|---|
+| The same node name in two files is an error naming both | Removes precedence rules for node bodies entirely — there is never a question of which file won |
+| A file that fails to parse is a named, fatal error | Skipping it would turn a typo into "unknown node", answered three hours later |
+| Duplicate `vars` or `preset` names across files are errors | No shadowing, no file-local scope, no ordering dependency |
+| Relative paths resolve from the **project root**, not the declaring file | A file-relative reading would silently change every existing `cwd`, `script`, and output path |
+| Only the root file may `include` | Nested includes would make load order — and so error messages — depend on a graph nobody can see |
+
+Glob syntax: `*` matches within one path segment, `?` one character, `**` across
+segments. Dotfiles are not matched by a bare `*`. Matches load in sorted order, so
+errors are deterministic.
+
+`vars`, `presets`, `env`, `setup`, `teardown`, `hooks`, and `ui` may appear in any
+file. Other project-level settings (`url_template`, `features`, `proxy`,
+`sharing`, `client_log_levels`) are read from the root file.
+
+### Finding out why a node seems missing
+
+```sh
+veld config --files
+```
+
+prints each glob, the files it matched, and the nodes each defines. Under globs,
+"unknown node" has four different causes — never defined, defined but not matched
+by a glob, its file renamed out of a glob, or its file present but unparseable —
+and this is what tells them apart. `veld nodes` also shows `file:line` per node.
+
+---
+
+## Node-level defaults
+
+A node may declare any variant field **once**, at node level; **any variant may
+override it**.
+
+```jsonc
+"api": {
+  "type": "start_server",
+  "probes": { "readiness": { "type": "http", "path": "/healthz" } },
+  "env": { "API_URL": "${vars.remote_api}", "LOG_LEVEL": "info" },
+  "ports": { "http": "auto" },
+  "variants": {
+    "dev": { "argv": ["node", "server.js"] },
+    "debug": {
+      "argv": ["node", "--inspect", "server.js"],
+      "ports": { "debug": "auto" },
+      "env": { "LOG_LEVEL": "debug", "API_URL": null }
+    }
+  }
+}
+```
+
+This deduplicates **values, never structure**. Which keys a node has is still
+written in that node, and `rg API_URL` still finds the line that sets it. There is
+**no inheritance, no mixins, no templates** — a variant body is never assembled
+from somewhere else.
+
+Hoistable: `type`, `argv`/`shell`, `cwd`, `env`, `ports`, `files`, `depends_on`,
+`probes`, `outputs`, `on_stop`, `share`, `features`, `proxy`,
+`client_log_levels`, `url_template`.
+
+### The merge table
+
+There are **three** distinct strategies, plus `proxy`'s pre-existing one. They are
+deliberately not unified.
+
+| Field | Node → variant | How a variant removes it |
+|---|---|---|
+| `env`, `ports`, `depends_on`, `files` (maps) | **Additive per key**; the variant wins on collision | `"KEY": null` |
+| `features` | Per field; the variant wins field by field | — |
+| `probes.readiness`, `probes.liveness` | **Replace the whole probe object** | `"liveness": null` |
+| `share` | Replace wholesale | `"share": null` |
+| `outputs` | Replace wholesale | `"outputs": null` |
+| `proxy` | `remove` lists **union** case-insensitively, `set` maps override per key; a header in both is resolved in favour of `set` | — |
+| `type`, `cwd`, `argv`, `shell`, `url_template` | Replace | — |
+| `on_stop` | Replace | `"on_stop": null` |
+| `skip_if` | *not a node-level field* — declare it per variant | — |
+
+Two of these are worth the words:
+
+- **`probes` replaces per probe** — a deliberate exception to the per-field
+  pattern `features` uses. A probe is a tagged union, so field-by-field merging
+  would let a variant switch `type: "http"` to `type: "command"` and silently
+  inherit a stale `path`, producing a probe that checks the wrong thing forever.
+- **`share` replaces wholesale** — sharing is a consent decision, and a
+  half-inherited `expose` list is exactly the surprise it must not have.
+
+`null` is only valid on a key that is optional. `strict_outputs` and the
+project-level `url_template` are not, and setting either to `null` is an error
+naming the field.
+
+---
+
+## `vars`
+
+One definition point per value, referenced by name at every use site.
+
+```jsonc
+// veld.d/vars.jsonc
+{
+  "vars": {
+    "remote_api":  "https://api.example.com",
+    "health_path": "/healthz",
+    "db_password": { "value": "devpassword", "secret": true },
+    "db_url":      { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+  }
+}
+```
+
+```jsonc
+"env": {
+  "DATABASE_URL": "${vars.db_url}",
+  "API_URL":      "${vars.remote_api}"
+}
+```
+
+**The key never leaves the node that uses it.** `${vars.db_url}` is written where
+`DATABASE_URL` is set, so a reader of that node still sees which keys it has and
+`rg DATABASE_URL` still finds the line.
+
+The rules, all enforced:
+
+1. **A var is a scalar or a single [value source](#value-sources)** — never an
+   object, never a partial config body. If a probe block or an `env` map could
+   live in a var, this would be a template system.
+2. **A var may not reference another var.** One hop, always, so provenance is a
+   single lookup.
+3. **A duplicate var name is an error**, including across files. No shadowing, no
+   file-local scope, no ordering dependency.
+4. **An unknown `${vars.x}` is an error** listing the declared names, because the
+   cause is nearly always a typo.
+
+A var is resolved **once per run**, so a var backed by a command runs that command
+exactly once — two references to a rotating credential can never disagree.
+
+```sh
+veld config --why nodes.api.variants.dev.env.DATABASE_URL
+```
+
+prints the effective value, where it was defined, and what it overrides. A
+`secret` value is described, never printed, and there is no flag that will.
+
+---
+
+## Value sources
+
+A value is **a string**, or **an object with exactly one source key** plus an
+optional `secret` flag.
+
+```jsonc
+"env": {
+  "REGION":       "eu-central-1",
+  "PG_PASSWORD":  { "value": "devpassword", "secret": true },
+  "GITHUB_TOKEN": { "env": "GITHUB_TOKEN", "secret": true },
+  "SIGNING_KEY":  { "file": ".secrets/signing.key", "secret": true },
+  "DATABASE_URL": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
+}
+```
+
+| Source | Meaning |
+|---|---|
+| `value` | An inline literal. This object form exists so a literal can carry `secret: true` |
+| `env` | Read from the environment Veld was launched with. **Missing at start is an error naming the node and the variable** |
+| `file` | The (trimmed) contents of a file, relative to the project root |
+| `argv` / `shell` | Run a command, take its trimmed stdout |
+
+**Nothing in Veld knows any vendor tool.** `argv` runs a command and reads stdout;
+which command is your business. There is no provider table and no vendor name in
+the schema.
+
+Allowed in: `env.*`, `vars.*`, `sharing.relays[].token`,
+`sharing.gateway.token`, and [`files`](#files).
+
+**Not yet supported** in `proxy.*.set.*` or `actions[].parameters.*` — those take
+plain strings. Both are on the list because a proxy `Authorization` header is one
+of the likeliest real secrets in a config, but the resolved proxy travels to Caddy
+and to the public web gateway inside a route, so marking one secret means teaching
+those paths to carry and scrub it. Until then, **do not put a credential in a proxy
+header value**: it is sent to every joiner of a share and to the gateway verbatim.
+
+Refused in `argv`/`shell` elements, `cwd`, `depends_on`, `url_template`, `type`,
+and `include` — those must be statically known for graph building and linting.
+
+### Timing
+
+Sources are resolved **once per run, at start, after the graph is built and before
+the first spawn** — never during parse. That ordering is what keeps `veld stop`,
+`veld status`, and the daemon monitor working against a config whose secret source
+has since broken: they parse the config, they never resolve it.
+
+Only an **inline literal** is interpolated. A value fetched from a file, the
+environment, or a command is used verbatim — substituting `${…}` into fetched
+content would make any secret store an interpolation vector.
+
+A source command has a **30-second timeout**, and the message says why it matters:
+an interactive credential helper (a biometric prompt, an MFA push) has no terminal
+when the run is started by the daemon, so it hangs rather than failing. The fix is
+a non-interactive source, not a longer timeout. Source commands inherit your
+login-shell `PATH`, so `op`, `vault`, and version-manager shims are found.
+
+### `secret`
+
+`secret: true` is a declaration, not a type. It is what lets Veld *refuse* the
+unsafe uses.
+
+Where a secret may go: a child process's environment, or a [file](#files). **Not**
+into an `argv` element, **not** into a `shell` string (both appear in the process
+table, readable by every other user on the machine), not into logs, not into
+`--json` output, not into the share payload.
+
+### Lint rules
+
+| Rule | Severity |
+|---|---|
+| A value marked `secret` interpolated into `argv` or `shell` | **error** |
+| A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
+| A `secret: true` literal that is not credential-shaped (e.g. `"devpassword"`) | silent — the legitimate fixed-local-credential case |
+| A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |
+| A declared `env` source missing at start | **error**, naming node and variable |
+
+All of them run in `veld lint`; the errors also run inside `veld start`. None of
+them runs in the loader, so `veld stop` is never blocked by one.
+
+---
+
+## `ports`
+
+A node may declare multiple named ports; Veld allocates each.
+
+```jsonc
+"ports": { "http": "auto", "debug": "auto", "metrics": "auto" }
+```
+
+- Referenced as `${veld.ports.http}`, and exported to the process as
+  `VELD_PORT_HTTP`.
+- Referenced across nodes as `${nodes.api.ports.debug}`.
+- `${veld.port}` remains the **primary** — the one named `http`, or the sole entry
+  when only one is declared. Several ports with none named `http` is an error,
+  rather than a guess about what `${veld.port}` means.
+- A probe may name one: `"probes": { "readiness": { "type": "port", "port": "http" } }`.
+  A multi-port node's readiness is rarely "any port is open" — a debugger port
+  opens long before the app is listening.
+- **A `start_server` with no `ports` declaration behaves exactly as before:** one
+  allocated port.
+
+A fixed number (`"debug": 9229`) is accepted but discouraged: a literal port
+silently breaks parallel worktrees, which is the reason named auto-ports exist. If
+a fixed port is taken, Veld errors rather than substituting another — a debugger
+pointed at 9229 must reach the process that asked for it.
+
+---
+
+## `files`
+
+Deliver a value to disk, for a program that can only read a credential from a
+file.
+
+```jsonc
+"files": {
+  ".secrets/client.pem": { "env": "CLIENT_CERT", "secret": true, "mode": "0400" },
+  "config/app.conf":     { "value": "verbose=1" }
+}
+```
+
+Same [value sources](#value-sources) as everything else. Paths resolve from the
+project root and parent directories are created. The file is created **with** its
+mode rather than chmod-ed afterwards, so a credential is never briefly
+world-readable, and `mode` defaults to `0600`.
+
+`mode` is a string, in octal, with or without the leading zero — a bare number has
+already lost its leading zero, so it is refused rather than guessed at.
+
+---
+
+## Reserved: `hooks` and `ui`
+
+Both are **reserved**: they parse, are stored, and are **not executed by this
+version**. `veld lint` says so, so a hook that does nothing is distinguishable
+from a config mistake.
+
+```jsonc
+// veld.d/hooks.jsonc
+{
+  "hooks": {
+    "worktree.created": [ { "argv": ["./scripts/setup-worktree.sh"] } ],
+    "project.created":  [ { "argv": ["pnpm", "install"] } ],
+    "run.stopped":      [ { "argv": ["./scripts/collect-artifacts.sh"] } ]
+  }
+}
+```
+
+Rules, stated now so the work that implements them does not distort the node
+model:
+
+1. **Hooks are not nodes.** They do not join the dependency graph, get no
+   allocated port, and have no probes. If something needs readiness or a port, it
+   is a node.
+2. They use the same `argv`/`shell` vocabulary and the same value sources. There
+   is no second command syntax anywhere.
+3. **Repo-declared only.** A hook may never originate from a fetched or remote
+   extension — hooks run arbitrary code on a developer machine, and keeping them
+   in reviewed repo files is what preserves Veld's no-remote-execution guarantee.
+
+Every **other** unknown top-level key is an **error reported by `veld lint` and
+`veld start`** — not a load failure. A typo is still caught, but it cannot strand
+`veld stop`, whose job is to tear down an environment that is already running (see
+[the parse/validate split](#veld-lint)). If you are upgrading a config that used
+the pre-JSONC `"//": "…"` comment idiom, that key now reports a finding telling you
+to make it a real comment.
+
+---
+
 ## Presets
 
 Presets are named shortcuts for node:variant selections. They provide convenience for common configurations without introducing a new core concept.
@@ -909,6 +1386,30 @@ veld start --preset fullstack --name my-feature
 ```
 
 In interactive mode (TTY with presets defined), `veld start` with no arguments presents a preset selector. Presets are purely additive -- they select end nodes that Veld then resolves through the dependency graph, starting all required upstream nodes automatically.
+
+### Composing presets
+
+An entry starting with `@` references another preset, so overlapping sets need not
+repeat every selection and then drift:
+
+```json
+"presets": {
+  "core": ["api:dev", "web:dev"],
+  "ci":   ["@core", "e2e:dev"]
+}
+```
+
+Selections are de-duplicated, so two references to the same preset never start
+anything twice. A cycle is an error naming the path (`@a → @b → @a`).
+
+`veld lint` checks all of this **statically**, so a broken preset fails at lint time
+rather than at `veld start`:
+
+| Rule | Fires when |
+|---|---|
+| `preset-unresolvable` | an `@ref` names a preset that does not exist, or the references form a cycle |
+| `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
+| `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
 
 ---
 
@@ -940,6 +1441,28 @@ Available to all node variants without any declaration:
 | `${veld.worktree}`      | Slugified worktree directory name                    |
 | `${veld.branch}`        | Current git branch, slugified (empty string if not in git) |
 | `${veld.username}`      | OS username                                          |
+| `${veld.node}`          | This node's name                                     |
+| `${veld.variant}`       | This variant's name                                  |
+| `${veld.ports.<name>}`  | A named port from this node's `ports` map (see [`ports`](#ports)) |
+
+**`veld.*` is a closed set.** A node's *outputs* are **not** in it — they are
+`${output.KEY}` (this node) and `${nodes.<node>.KEY}` (any node). `veld lint` and
+`veld start` reject any `${veld.*}` name that is not listed above, so a typo or a
+leftover `${veld.MY_OUTPUT}` is caught before a run starts.
+
+> **Changed in this release.** Node outputs used to *also* be reachable as
+> `${veld.KEY}` inside `on_stop` — and only there. An output named like a builtin
+> (`run`, `branch`) therefore shadowed it during teardown but nowhere else, so the
+> same string resolved to two different values. See
+> [docs/migrating-to-v3.md](migrating-to-v3.md#the-one-breaking-change-that-affects-v1-and-v2-too).
+
+Availability is not uniform:
+
+| Variable | Where it is missing |
+|---|---|
+| `port`, `url`, `url.*`, `ports.*` | Only a `start_server` node has these. |
+| `node`, `variant` | Absent in project-level `setup` / `teardown` steps, which belong to no node. |
+| `run_id` | Absent in project-level `setup` / `teardown` steps. |
 
 ### Node Output References (`${nodes.*}`)
 
@@ -1000,7 +1523,7 @@ Veld validates all variable references for ambiguity at graph resolution time an
 ```json
 {
   "type": "start_server",
-  "command": "pnpm --filter frontend dev",
+  "argv": ["pnpm", "--filter", "frontend", "dev"],
   "depends_on": { "backend": "local", "database": "docker" },
   "env": {
     "PORT": "${veld.port}",
@@ -1133,8 +1656,8 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "my-project",
   "url_template": "{service}.{branch ?? run}.my-project.localhost",
 
@@ -1150,15 +1673,15 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         "local": {
           "type": "command",
           "script": "./scripts/clone-db.sh",
-          "skip_if": "./scripts/verify-db.sh",
-          "on_stop": "./scripts/drop-db.sh",
+          "skip_if": { "argv": ["./scripts/verify-db.sh"] },
+          "on_stop": { "argv": ["./scripts/drop-db.sh"] },
           "outputs": ["DATABASE_URL"],
           "sensitive_outputs": ["DATABASE_URL"]
         },
         "docker": {
           "type": "start_server",
-          "command": "docker run -d --name veld-db-${veld.run} -e POSTGRES_PASSWORD=veld -p ${veld.port}:5432 postgres:16",
-          "on_stop": "docker rm -f veld-db-${veld.run}",
+          "argv": ["docker", "run", "-d", "--name", "veld-db-${veld.run}", "-e", "POSTGRES_PASSWORD=veld", "-p", "${veld.port}:5432", "postgres:16"],
+          "on_stop": { "argv": ["docker", "rm", "-f", "veld-db-${veld.run}"] },
           "health_check": {
             "type": "port",
             "timeout_seconds": 30
@@ -1175,8 +1698,8 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "default": {
           "type": "command",
-          "command": "./scripts/generate-dev-certs.sh",
-          "skip_if": "test -f ./certs/dev.pem"
+          "argv": ["./scripts/generate-dev-certs.sh"],
+          "skip_if": { "argv": ["test", "-f", "./certs/dev.pem"] }
         }
       }
     },
@@ -1186,7 +1709,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter backend dev --port ${veld.port}",
+          "argv": ["pnpm", "--filter", "backend", "dev", "--port", "${veld.port}"],
           "health_check": {
             "type": "http",
             "path": "/health",
@@ -1204,7 +1727,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "command",
-          "command": "echo 'BACKEND_URL=https://api.staging.my-project.com' >> \"$VELD_OUTPUT_FILE\"",
+          "shell": "echo 'BACKEND_URL=https://api.staging.my-project.com' >> \"$VELD_OUTPUT_FILE\"",
           "outputs": ["BACKEND_URL"]
         }
       }
@@ -1215,7 +1738,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter frontend dev",
+          "argv": ["pnpm", "--filter", "frontend", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1230,7 +1753,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "start_server",
-          "command": "pnpm --filter frontend dev",
+          "argv": ["pnpm", "--filter", "frontend", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1251,7 +1774,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "pnpm --filter admin dev",
+          "argv": ["pnpm", "--filter", "admin", "dev"],
           "health_check": {
             "type": "http",
             "path": "/",
@@ -1267,7 +1790,7 @@ Below is a realistic `veld.json` for a monorepo with a database, backend API, fr
         },
         "staging": {
           "type": "start_server",
-          "command": "pnpm --filter admin dev",
+          "argv": ["pnpm", "--filter", "admin", "dev"],
           "health_check": {
             "type": "http",
             "path": "/"
@@ -1345,7 +1868,7 @@ veld start e2e --oneshot
       "variants": {
         "local": {
           "type": "command",
-          "command": "playwright test --reporter=line",
+          "argv": ["playwright", "test", "--reporter=line"],
           "env": { "BASE_URL": "${nodes.web.url}" },
           "depends_on": { "web": "local", "api": "local" }
         }
@@ -1406,7 +1929,7 @@ Veld provides a JSON Schema for editor autocompletion and validation. Add the `$
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   ...
 }
 ```

@@ -27,8 +27,12 @@ No port numbers. No manual wiring. Just clean, stable, human-readable URLs.
 - **Named environments** — multiple environments coexist (`--name dev`); re-running by name is idempotent
 - **Run history** — a stopped, failed, or crashed run persists as history (last 10 per environment, 7 days) with its logs; `veld runs` lists it, `veld logs --run/--previous` targets it, and a crash is distinguishable from a clean stop
 - **Setup / teardown** — project-level lifecycle steps that gate startup (check Docker, create networks) and clean up after stop
-- **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`)
+- **Presets** — named shortcuts for common selections (`fullstack`, `ui-only`); a preset can compose others with `@name`
 - **Variable interpolation** — `${veld.port}`, `${nodes.backend.url}`, git branch, etc.
+- **Config that scales to a monorepo** (`schemaVersion: "3"`) — comments and trailing commas in `veld.json`; split the config across per-directory files with `include` globs so teams own their own; declare a field once at node level and override it per variant; `vars` for one definition point per value. Deduplicates *values*, never structure — `rg <ENV_VAR>` still finds the line that sets it. `schemaVersion: "3"` is required — an older config fails to load with an error stating every change needed. See [docs/migrating-to-v3.md](docs/migrating-to-v3.md), written to hand to a coding agent, with `veld lint` as the check
+- **`argv` or `shell`** — one vocabulary everywhere veld runs something. `argv` is spawned directly, so an interpolated value containing spaces or globs can never change the argument count; `shell` is the permanently-supported escape hatch
+- **Value sources and secrets** — read a value from the environment, a file, or a command's stdout, and mark it `secret`. Veld carries a *pointer* and a flag, never custody: a secret reaches the process's environment or a file (`files:`) and is refused in a command line, where it would land in the process table
+- **Named ports** — `"ports": { "http": "auto", "debug": "auto" }` for debug adapters and multi-port containers, so nothing needs a hand-picked literal port that breaks parallel worktrees
 - **Structured output** — all commands support `--json` for scripting and CI
 - **Browser dashboard** — management UI at `https://veld.localhost` with service health, logs, search, stop/restart
 - **Client-side logs** — captures browser `console.log/warn/error`, exceptions, and promise rejections; view with `veld logs --source client`
@@ -87,8 +91,8 @@ cargo build --release
 
 ```json
 {
-  "$schema": "https://veld.oss.life.li/schema/v2/veld.schema.json",
-  "schemaVersion": "2",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
   "name": "myproject",
   "url_template": "{service}.{run}.{project}.localhost",
   "nodes": {
@@ -97,7 +101,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/health", "timeout_seconds": 30 } }
         }
       }
@@ -107,7 +111,7 @@ cargo build --release
       "variants": {
         "local": {
           "type": "start_server",
-          "command": "npm run dev -- --port ${veld.port}",
+          "argv": ["npm", "run", "dev", "--", "--port", "${veld.port}"],
           "probes": { "readiness": { "type": "http", "path": "/", "timeout_seconds": 30 } },
           "depends_on": { "backend": "local" },
           "env": { "NEXT_PUBLIC_API_URL": "${nodes.backend.url}" }
@@ -153,8 +157,9 @@ veld stop --name dev
 | `veld actions [--json]` | List the actions defined across the project's nodes |
 | `veld logs [--name <n>] [--node <n>] [--lines <n>] [-f] [--since <d>] [--run <id-prefix>] [-p] [--all-runs] [--source <s>] [-s <term>] [-C <n>] [--json]` | View logs, scoped to the latest run by default (`-f` follow — exits 0 when the followed run ends, `--run` targets a past run by id prefix, `-p`/`--previous` the run before the latest, `--all-runs` restores the old interleaved-across-runs behavior, `-s` search, `-C` context lines) |
 | `veld graph [NODE:VARIANT...]` | Print dependency graph |
-| `veld nodes` | List all nodes and variants |
+| `veld nodes [--json]` | List all nodes and variants, with the file and line each is defined in |
 | `veld presets` | List presets |
+| `veld lint [--json]` | Check veld.json for semantic problems. Exits 1 on any error, 0 when only warnings and notices remain — the CI-facing half of the config checks. `veld start` refuses on the same errors |
 | `veld runs [--name <n>] [--json]` | List run history — one row per execution instance (short id, started/ended, duration, outcome), newest first. Without `--name`, all environments' runs grouped |
 | `veld runs show <id> [--json]` | One run in full: outcome, node results with exit codes, and the graph snapshot it was started with (raw commands, env key names, URL templates — never resolved values) |
 | `veld runs diff <old> <new> [--json]` | What changed in the config between two runs (node added/removed, command/cwd/env/url changes, veld.json hash). With one id, diffs that run against its predecessor |
@@ -173,6 +178,7 @@ veld stop --name dev
 | `veld ui` | Open the management dashboard in the browser |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
+| `veld config [--path] [--files] [--why <pointer>] [--json]` | Print the config. `--files`: each `include` glob, the files it matched, and the nodes each defines. `--why`: one effective value and where it was defined (a `secret` is described, never printed) |
 | `veld init` | Create a new veld.json |
 
 ## Configuration
@@ -189,11 +195,11 @@ Project-level lifecycle steps that run outside the dependency graph. Setup steps
 ```json
 {
   "setup": [
-    { "name": "docker", "command": "docker info", "failureMessage": "Docker must be running" },
-    { "name": "veld-network", "command": "docker network create ${veld.name}-net 2>/dev/null || true" }
+    { "name": "docker", "argv": ["docker", "info"], "failureMessage": "Docker must be running" },
+    { "name": "veld-network", "shell": "docker network create ${veld.name}-net 2>/dev/null || true" }
   ],
   "teardown": [
-    { "name": "veld-network", "command": "docker network rm ${veld.name}-net 2>/dev/null || true" }
+    { "name": "veld-network", "shell": "docker network rm ${veld.name}-net 2>/dev/null || true" }
   ]
 }
 ```
@@ -205,7 +211,7 @@ Setup steps that fail (non-zero exit) abort startup with the `failureMessage` if
 ```json
 { "type": "http", "path": "/health", "expect_status": 200, "timeout_seconds": 30 }
 { "type": "port", "timeout_seconds": 10 }
-{ "type": "command", "command": "curl -sf http://localhost:${veld.port}/ready" }
+{ "type": "command", "argv": ["curl", "-sf", "http://localhost:${veld.port}/ready"] }
 ```
 
 ### URL template variables
@@ -366,7 +372,7 @@ Share a running environment with a colleague so they open the **same** URLs on t
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer"] } }
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer"] } }
       }
     }
   }
@@ -393,7 +399,7 @@ Traffic is end-to-end encrypted between the two velds; a relay only forwards sea
 
 > **n0's public relays are for development and testing, not production.** They're a free community service shared across all iroh users worldwide — rate-limited, best-effort, and carry no uptime or throughput guarantees (a share stuck on `relayed` is capped by that relay). Per [iroh's own guidance](https://docs.iroh.computer/concepts/relays), production or high-volume sharing should run on **self-hosted relays** (`"relays": ["https://relay.example.com"]`, one Docker container — see [Relay auth tokens](docs/configuration.md#relay-auth-tokens)) or n0's managed relays. This is n0's fair-use recommendation, not a licensing restriction — iroh is dual-licensed MIT/Apache-2.0 and free to use commercially.
 
-A self-hosted relay can require an **authorization token** so it isn't open to anyone. Write a relay as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token can be a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "command": "op read op://vault/relay/token" }` (1Password/Vault CLI). It's resolved on the daemon at share time; if it can't be resolved, the share fails rather than connecting unauthenticated. Config tokens apply to **hosting** only. The join side derives the relay from the ticket automatically; if that relay is token-gated, the joiner is **prompted** for the token (browser overlay or `veld join` terminal prompt) and it's **cached** per relay so future joins don't re-ask. A wrong token re-prompts. The token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when it matches the ticket's relay), or — to skip joiner setup entirely — the host can set `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket, which is **dangerous** (the relay secret then travels in every share link; disposable tokens only). See [Relay auth tokens](docs/configuration.md#relay-auth-tokens).
+A self-hosted relay can require an **authorization token** so it isn't open to anyone. Write a relay as `{ "url": ..., "token": ... }` and Veld sends the token as an `Authorization: Bearer` header. The token can be a literal string, or — to keep the secret out of `veld.json` — `{ "env": "VAR" }`, `{ "file": "/run/secrets/…" }` (Docker/K8s mounts), or `{ "argv": ["op", "read", "op://vault/relay/token"] }` (1Password/Vault CLI). It's resolved on the daemon at share time; if it can't be resolved, the share fails rather than connecting unauthenticated. Config tokens apply to **hosting** only. The join side derives the relay from the ticket automatically; if that relay is token-gated, the joiner is **prompted** for the token (browser overlay or `veld join` terminal prompt) and it's **cached** per relay so future joins don't re-ask. A wrong token re-prompts. The token can also come from `VELD_SHARE_RELAY` + `VELD_SHARE_RELAY_TOKEN` (sent only when it matches the ticket's relay), or — to skip joiner setup entirely — the host can set `sharing.dangerouslyEmbedRelayTokensInTicket: true` to embed the token in the ticket, which is **dangerous** (the relay secret then travels in every share link; disposable tokens only). See [Relay auth tokens](docs/configuration.md#relay-auth-tokens).
 
 `share.expose` is a list of audiences. `peer` (Veld-to-Veld, described above) reproduces the origin URL verbatim. `web` exposes a service to **anyone with a browser** — no Veld required — via a self-hosted gateway.
 
@@ -411,7 +417,7 @@ Point the environment at your org's gateway and opt services into the `web` audi
   "nodes": {
     "frontend": {
       "variants": {
-        "local": { "type": "start_server", "command": "npm run dev", "share": { "expose": ["peer", "web"] } }
+        "local": { "type": "start_server", "argv": ["npm", "run", "dev"], "share": { "expose": ["peer", "web"] } }
       }
     }
   }

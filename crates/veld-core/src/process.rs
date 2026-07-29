@@ -7,6 +7,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tracing;
 
+use crate::config::CommandSpec;
 use crate::db::{Db, LogStream};
 
 // ---------------------------------------------------------------------------
@@ -110,6 +111,58 @@ impl LogTarget {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Command builders — the single owner of "how a CommandSpec becomes a process"
+// ---------------------------------------------------------------------------
+
+/// Build a `tokio::process::Command` for a spec: `argv` is spawned directly,
+/// `shell` goes through `sh -c`.
+///
+/// Every async spawn site in the tree routes through this (and [`std_command`]
+/// for the sync ones), so `argv` cannot mean "no shell" in one place and
+/// "re-parsed by a shell" in another. An empty `argv` would panic on
+/// `argv[0]`, so it is rejected here rather than at the OS boundary.
+pub fn tokio_command(spec: &CommandSpec) -> Result<Command, ProcessError> {
+    match spec {
+        CommandSpec::Argv(argv) => {
+            let (program, rest) = argv.split_first().ok_or_else(empty_argv)?;
+            let mut cmd = Command::new(program);
+            cmd.args(rest);
+            Ok(cmd)
+        }
+        CommandSpec::Shell(s) => {
+            let mut cmd = Command::new("sh");
+            cmd.arg("-c").arg(s);
+            Ok(cmd)
+        }
+    }
+}
+
+/// The `std::process::Command` twin of [`tokio_command`], for the sync spawn
+/// sites (detached servers, `veld action`).
+pub fn std_command(spec: &CommandSpec) -> Result<std::process::Command, ProcessError> {
+    match spec {
+        CommandSpec::Argv(argv) => {
+            let (program, rest) = argv.split_first().ok_or_else(empty_argv)?;
+            let mut cmd = std::process::Command::new(program);
+            cmd.args(rest);
+            Ok(cmd)
+        }
+        CommandSpec::Shell(s) => {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c").arg(s);
+            Ok(cmd)
+        }
+    }
+}
+
+fn empty_argv() -> ProcessError {
+    ProcessError::SpawnFailed(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "argv is empty — there is no program to run",
+    ))
+}
+
 /// Spawn a long-running server process.
 ///
 /// When `foreground` is true, stdout/stderr are piped through background
@@ -121,7 +174,7 @@ impl LogTarget {
 /// independent of the CLI process and the tokio runtime. stdout/stderr are
 /// piped through a detached `veld _log` writer that outlives the CLI.
 pub async fn start_server(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_target: LogTarget,
@@ -136,14 +189,12 @@ pub async fn start_server(
 
 /// Foreground mode: pipe stdout/stderr through timestamping tasks.
 async fn start_server_foreground(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_target: LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
-    let mut child = Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let mut child = tokio_command(command)?
         .current_dir(working_dir)
         .envs(env)
         .stdin(Stdio::null())
@@ -155,7 +206,7 @@ async fn start_server_foreground(
 
     tracing::info!(
         pid = child.id().unwrap_or(0),
-        command = command,
+        command = command.display(),
         "started server process (foreground)"
     );
 
@@ -176,6 +227,34 @@ async fn start_server_foreground(
     Ok(ServerHandle::Foreground(child))
 }
 
+/// Single-quote a string for safe inclusion in a `sh -c` script.
+fn sq(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
+/// The argv of the log-sink stage of the detached pipeline: veld's own binary
+/// re-invoked as `veld _log`, which timestamps each line into the database.
+fn log_sink_argv(log_target: &LogTarget) -> Vec<String> {
+    let veld_bin = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
+        .to_string_lossy()
+        .into_owned();
+    vec![
+        veld_bin,
+        "_log".to_owned(),
+        "--project-root".to_owned(),
+        log_target.project_root.to_string_lossy().into_owned(),
+        "--run".to_owned(),
+        log_target.run_name.clone(),
+        "--run-id".to_owned(),
+        log_target.run_id.clone(),
+        "--node".to_owned(),
+        log_target.node.clone(),
+        "--variant".to_owned(),
+        log_target.variant.clone(),
+    ]
+}
+
 /// Detached mode: spawn via std::process::Command in its own process group.
 ///
 /// Using `std::process::Command` (not tokio) avoids registering the child
@@ -189,30 +268,69 @@ async fn start_server_foreground(
 /// into the central database. The entire pipeline (server + log writer) runs
 /// in the same process group and survives CLI exit.
 fn start_server_detached(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     log_target: &LogTarget,
 ) -> Result<ServerHandle, ProcessError> {
+    spawn_detached(command, working_dir, env, &log_sink_argv(log_target))
+}
+
+/// Spawn the detached pipeline with an explicit log-sink argv.
+///
+/// Split out from [`start_server_detached`] so the RC1 characterization tests
+/// can substitute a stub sink: the real sink is `veld _log`, and a test process
+/// has no veld binary at `current_exe()`. Production always supplies
+/// [`log_sink_argv`]; the pipeline shape, tracked PID, and process-group
+/// leadership are identical either way, which is exactly what those tests pin.
+#[doc(hidden)]
+pub fn spawn_detached(
+    command: &CommandSpec,
+    working_dir: &Path,
+    env: &HashMap<String, String>,
+    sink_argv: &[String],
+) -> Result<ServerHandle, ProcessError> {
     use std::os::unix::process::CommandExt;
 
-    let sq = |s: &str| s.replace('\'', "'\\''");
-    let veld_bin = std::env::current_exe()
-        .unwrap_or_else(|_| std::path::PathBuf::from("veld"))
-        .to_string_lossy()
-        .replace('\'', "'\\''");
-    let wrapper = format!(
-        "{{ {command} ; }} 2>&1 | '{veld_bin}' _log --project-root '{root}' --run '{run}' --run-id '{run_id}' --node '{node}' --variant '{variant}'",
-        root = sq(&log_target.project_root.to_string_lossy()),
-        run = sq(&log_target.run_name),
-        run_id = sq(&log_target.run_id),
-        node = sq(&log_target.node),
-        variant = sq(&log_target.variant),
-    );
+    // Only veld's own `_log` arguments are shell-quoted; they are ours, not the
+    // author's.
+    let sink = sink_argv
+        .iter()
+        .map(|a| format!("'{}'", sq(a)))
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    let child = std::process::Command::new("sh")
-        .arg("-c")
-        .arg(&wrapper)
+    // The pipeline stays a shell pipeline. For `argv`, the node command is passed
+    // as **positional parameters** and expanded with `"$@"`, which produces
+    // exactly one word per element regardless of spaces, globs, quotes, or
+    // newlines — so an interpolated value can never change the argument count,
+    // even here.
+    //
+    // Deliberately NOT re-joining argv into the script, and deliberately NOT
+    // rebuilding the pipeline with manual file descriptors: the process topology,
+    // tracked PID, process-group leadership, and the `stats.rs` parent-tree walk
+    // must stay byte-identical to the shell-string case. Real fds would change
+    // what `is_alive` tracks (breaking `cleanup_dead_runs`, `veld status`, the
+    // monitor, and GC for servers that double-fork) and would change the
+    // `node_stats` sampled *set*, producing an unexplained step change in the UI
+    // graph. See the RC1 characterization tests below.
+    let (wrapper, positional): (String, &[String]) = match command {
+        CommandSpec::Shell(s) => (format!("{{ {s} ; }} 2>&1 | {sink}"), &[]),
+        CommandSpec::Argv(argv) => {
+            if argv.is_empty() {
+                return Err(empty_argv());
+            }
+            (format!("{{ \"$@\" ; }} 2>&1 | {sink}"), argv.as_slice())
+        }
+    };
+
+    let mut builder = std::process::Command::new("sh");
+    builder.arg("-c").arg(&wrapper);
+    if !positional.is_empty() {
+        // `$0` for the shell itself, then one argument per argv element.
+        builder.arg("sh").args(positional);
+    }
+    let child = builder
         .current_dir(working_dir)
         .envs(env)
         .stdin(Stdio::null())
@@ -226,7 +344,7 @@ fn start_server_detached(
 
     tracing::info!(
         pid = pid,
-        command = command,
+        command = command.display(),
         "started server process (detached, pgid=own)"
     );
 
@@ -267,7 +385,7 @@ async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget)
 ///
 /// When both channels produce the same key, the file-based value wins.
 pub async fn run_command(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     output_file: Option<&Path>,
@@ -302,14 +420,20 @@ pub async fn run_command(
         );
     }
 
-    let spawn_result = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(working_dir)
-        .envs(&env)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn();
+    let spawn_result = match tokio_command(command) {
+        Ok(mut cmd) => cmd
+            .current_dir(working_dir)
+            .envs(&env)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn(),
+        Err(e) => {
+            if let Some(path) = output_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
+    };
 
     let mut child = match spawn_result {
         Ok(child) => child,
@@ -379,7 +503,11 @@ pub async fn run_command(
     let exit_code = status.code().unwrap_or(-1);
 
     if !status.success() {
-        tracing::warn!(exit_code, command, "command step exited with non-zero code");
+        tracing::warn!(
+            exit_code,
+            command = command.display(),
+            "command step exited with non-zero code"
+        );
     }
 
     Ok(CommandOutput { exit_code, outputs })
@@ -408,7 +536,7 @@ pub async fn run_command(
 /// keeps interruption deterministic regardless of how the child handles
 /// signals itself.
 pub async fn run_command_streaming(
-    command: &str,
+    command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     output_file: Option<&Path>,
@@ -444,16 +572,22 @@ pub async fn run_command_streaming(
         );
     }
 
-    let spawn_result = Command::new("sh")
-        .arg("-c")
-        .arg(command)
-        .current_dir(working_dir)
-        .envs(&env)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0) // own group — we forward Ctrl+C by killing the group
-        .spawn();
+    let spawn_result = match tokio_command(command) {
+        Ok(mut cmd) => cmd
+            .current_dir(working_dir)
+            .envs(&env)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0) // own group — we forward Ctrl+C by killing the group
+            .spawn(),
+        Err(e) => {
+            if let Some(path) = output_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
+    };
 
     let mut child = match spawn_result {
         Ok(child) => child,
@@ -704,6 +838,328 @@ pub async fn kill_process(pid: u32) -> Result<(), ProcessError> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// RC1 characterization tests
+// ---------------------------------------------------------------------------
+
+/// Characterization tests for the **detached** spawn path — the process
+/// topology every later change must preserve.
+///
+/// These deliberately assert *today's* behaviour rather than a desired one.
+/// The detached wrapper is a shell pipeline by construction
+/// (`sh -c '{ cmd ; } 2>&1 | veld _log …'`), and a great deal of veld depends on
+/// its exact shape: the tracked PID is the pipeline shell and the process-group
+/// leader, so `kill(-pid)` reaps the node *and* the log writer; `is_alive` on
+/// that PID is what `cleanup_dead_runs` and the daemon monitor treat as "the
+/// node is up"; and the daemon's stats sampler walks the parent tree from it.
+///
+/// If a refactor of the spawn path changes any assertion here, the refactor is
+/// wrong — not the test.
+#[cfg(test)]
+mod characterization_tests {
+    use super::*;
+
+    /// Live PIDs in the process group `pgid`, via `ps` (portable across macOS
+    /// and Linux; `sysinfo` does not expose process groups).
+    ///
+    /// Zombies are excluded. In production the CLI exits and the pipeline is
+    /// reparented to init/launchd, which reaps it; under a test the test binary
+    /// *is* the parent, so an exited stage lingers as a zombie that `kill(pid,
+    /// 0)` still reports as alive. That is an artefact of the test harness, not
+    /// of the behaviour under test.
+    fn pids_in_group(pgid: u32) -> Vec<u32> {
+        let out = std::process::Command::new("ps")
+            .args(["-eo", "pid=,pgid=,state="])
+            .output()
+            .expect("ps must be available");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter_map(|line| {
+                let mut f = line.split_whitespace();
+                let pid: u32 = f.next()?.parse().ok()?;
+                let gid: u32 = f.next()?.parse().ok()?;
+                let state = f.next().unwrap_or("");
+                (gid == pgid && !state.starts_with('Z')).then_some(pid)
+            })
+            .collect()
+    }
+
+    fn group_of(pid: u32) -> u32 {
+        use nix::unistd::{Pid, getpgid};
+        getpgid(Some(Pid::from_raw(pid as i32)))
+            .expect("process must still exist")
+            .as_raw() as u32
+    }
+
+    /// Reap the pipeline shell if it has exited, so `is_alive` stops reporting a
+    /// zombie as running. See [`pids_in_group`] for why this is only needed in
+    /// tests: `spawn_detached` deliberately drops the `Child` handle because in
+    /// production the CLI exits and init takes over reaping.
+    fn reap(pid: u32) {
+        use nix::sys::wait::{WaitPidFlag, waitpid};
+        let _ = waitpid(
+            nix::unistd::Pid::from_raw(pid as i32),
+            Some(WaitPidFlag::WNOHANG),
+        );
+    }
+
+    /// Whether the pipeline shell has exited (reaping it first).
+    fn exited(pid: u32) -> bool {
+        reap(pid);
+        !is_alive(pid)
+    }
+
+    /// Poll `cond` until it holds or `secs` elapse. Returns whether it held.
+    async fn eventually(secs: u64, mut cond: impl FnMut() -> bool) -> bool {
+        for _ in 0..(secs * 20) {
+            if cond() {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        cond()
+    }
+
+    /// A stub log sink: a single binary that drains stdin into a file, standing
+    /// in for `veld _log` (whose binary is not at a test process's
+    /// `current_exe()`). One exec, like the real sink, so the process topology
+    /// matches production.
+    fn sink_argv(path: &Path) -> Vec<String> {
+        vec!["tee".to_owned(), path.to_string_lossy().into_owned()]
+    }
+
+    /// The tracked PID is the pipeline's process-group leader, and killing the
+    /// group reaps both the node process and the log writer. `kill_process`
+    /// signals `-pid`, so this property is what makes `veld stop` complete
+    /// rather than leaving an orphaned log writer holding the pipe.
+    #[tokio::test]
+    async fn tracked_pid_is_group_leader() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        let handle = spawn_detached(
+            &CommandSpec::Shell("sleep 30".to_owned()),
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&log),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+
+        // The tracked PID leads its own group (process_group(0) on the spawn).
+        assert_eq!(group_of(pid), pid, "tracked pid must be the group leader");
+
+        // Both pipeline stages live in that group, so a group signal covers
+        // the log writer too — not just the node.
+        assert!(
+            eventually(5, || pids_in_group(pid).len() >= 2).await,
+            "pipeline should have at least the shell and one stage in the group, saw {:?}",
+            pids_in_group(pid)
+        );
+
+        kill_process(pid).await.expect("kill the group");
+        assert!(
+            eventually(5, || pids_in_group(pid).is_empty()).await,
+            "killing the group must reap every stage, still alive: {:?}",
+            pids_in_group(pid)
+        );
+        assert!(exited(pid));
+    }
+
+    /// A server that double-forks and lets its direct child exit is NOT
+    /// observable as dead: the daemonized grandchild keeps the stdout pipe
+    /// open, so the log writer never sees EOF and the pipeline shell (the
+    /// tracked PID) keeps waiting on it.
+    ///
+    /// This is why `cleanup_dead_runs` does not reap such a run — see
+    /// `is_reapable_orphan`, which is only ever reached with `any_alive =
+    /// false`. Rebuilding the pipeline with real file descriptors would make
+    /// the tracked PID exit here and silently start reaping live environments.
+    #[tokio::test]
+    async fn double_forking_server_not_reaped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        // `( … & )` backgrounds in a subshell that exits immediately: the
+        // direct child is gone but `sleep` inherited the pipe.
+        let handle = spawn_detached(
+            &CommandSpec::Shell("( sleep 30 & ) ; exit 0".to_owned()),
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&log),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+
+        tokio::time::sleep(std::time::Duration::from_millis(750)).await;
+        assert!(
+            !exited(pid),
+            "tracked pid must stay alive while a daemonized descendant holds \
+             the log pipe — otherwise cleanup_dead_runs reaps a live run"
+        );
+        // Consequently `cleanup_dead_runs` sees `any_alive = true` and
+        // `is_reapable_orphan` (unit-tested in `orchestrator`) returns false
+        // for every status — the run is left alone.
+
+        kill_process(pid).await.expect("kill the group");
+        assert!(eventually(5, || pids_in_group(pid).is_empty()).await);
+    }
+
+    /// **The argv guarantee, through the detached path.**
+    ///
+    /// Interpolated values containing spaces, `?`, `*`, `$`, quotes, and a newline
+    /// must each yield exactly one argv element. This has to exercise the detached
+    /// wrapper, not just `CommandSpec::interpolate`: the wrapper is a shell
+    /// pipeline, so a version that re-joined argv into the script would pass a
+    /// pure-function test and then let the shell re-split every one of these in
+    /// production. `"$@"` is what makes it hold.
+    #[tokio::test]
+    async fn interpolation_never_changes_argc() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("argv.txt");
+
+        // Each of these would become two or more words, or expand, under a shell.
+        let hostile = [
+            "two words",
+            "quest?ion",
+            "glob*star",
+            "$HOME",
+            "has'single",
+            "has\"double",
+            "semi;colon",
+            "pipe|bar",
+            "new\nline",
+            "", // an empty argument must survive as an empty argument
+        ];
+
+        // Substitute them through the real interpolation path, so the test covers
+        // "value came from a variable" rather than a hand-written literal.
+        let mut ctx = crate::variables::VariableContext::new();
+        let mut argv = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            // `$#` is the argument count as the *shell* sees it, after `"$@"`.
+            format!("printf '%s\\n' \"$#\" > '{}'", out.display()),
+            "sh".to_owned(), // $0 for the inner shell
+        ];
+        for (i, value) in hostile.iter().enumerate() {
+            ctx.set_builtin(&format!("v{i}"), (*value).to_owned());
+            argv.push(format!("${{veld.v{i}}}"));
+        }
+
+        let spec = CommandSpec::Argv(argv)
+            .interpolate(&ctx)
+            .expect("interpolation resolves");
+        // The element count is fixed before substitution, so it is already right.
+        assert_eq!(
+            spec_len(&spec),
+            4 + hostile.len(),
+            "interpolation must not change the element count"
+        );
+
+        let handle = spawn_detached(
+            &spec,
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&tmp.path().join("sink.log")),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+        assert!(
+            eventually(10, || exited(pid)).await,
+            "pipeline should finish"
+        );
+
+        let seen: usize = std::fs::read_to_string(&out)
+            .expect("inner shell wrote its argument count")
+            .trim()
+            .parse()
+            .expect("a number");
+        assert_eq!(
+            seen,
+            hostile.len(),
+            "every hostile value must arrive as exactly one argument, even through \
+             the detached shell pipeline"
+        );
+    }
+
+    fn spec_len(spec: &CommandSpec) -> usize {
+        match spec {
+            CommandSpec::Argv(a) => a.len(),
+            CommandSpec::Shell(_) => 1,
+        }
+    }
+
+    /// A `shell` node keeps the exact wrapper it had before argv existed, and an
+    /// `argv` node gets the positional-parameter form. Pins the emitted script,
+    /// which no other test covers — renaming a `veld _log` flag would otherwise
+    /// only fail at runtime.
+    #[test]
+    fn detached_wrapper_shape_is_pinned() {
+        let target = LogTarget {
+            db: Db::open_at(&std::env::temp_dir().join("veld-wrapper-test.db")).unwrap(),
+            project_root: PathBuf::from("/pro ject"),
+            run_name: "dev".into(),
+            run_id: "rid".into(),
+            node: "api".into(),
+            variant: "local".into(),
+        };
+        let sink = log_sink_argv(&target);
+        assert_eq!(
+            &sink[1..],
+            &[
+                "_log",
+                "--project-root",
+                "/pro ject",
+                "--run",
+                "dev",
+                "--run-id",
+                "rid",
+                "--node",
+                "api",
+                "--variant",
+                "local",
+            ],
+            "the _log flag names and order are what the detached pipeline depends on"
+        );
+        // A path containing a single quote must not break out of the script.
+        let quoted = sq("it's");
+        assert_eq!(quoted, "it'\\''s");
+    }
+
+    /// End-to-end log capture: `2>&1` in the wrapper merges the node's stderr
+    /// into its stdout, both reach the log sink, and the sink sees EOF (exits)
+    /// once the node does.
+    #[tokio::test]
+    async fn detached_logs_reach_run_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("sink.log");
+        let handle = spawn_detached(
+            &CommandSpec::Shell("echo to-stdout; echo to-stderr 1>&2".to_owned()),
+            tmp.path(),
+            &HashMap::new(),
+            &sink_argv(&log),
+        )
+        .expect("detached spawn");
+        let pid = handle.pid();
+
+        // The whole pipeline exits on its own: the node finishes, the sink
+        // reaches EOF, the pipeline shell reaps it.
+        assert!(
+            eventually(10, || exited(pid)).await,
+            "pipeline must reach EOF and exit once the node exits"
+        );
+
+        let captured = std::fs::read_to_string(&log).unwrap_or_default();
+        assert!(
+            captured.contains("to-stdout"),
+            "stdout must reach the log sink, got {captured:?}"
+        );
+        assert!(
+            captured.contains("to-stderr"),
+            "stderr must reach the log sink via 2>&1, got {captured:?}"
+        );
+    }
+}
+
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
@@ -716,7 +1172,9 @@ mod streaming_tests {
         let env = HashMap::new();
         let dir = std::env::temp_dir();
         let out = run_command_streaming(
-            "echo hello; echo 'VELD_OUTPUT foo=bar'; echo oops 1>&2; exit 3",
+            &CommandSpec::Shell(
+                "echo hello; echo 'VELD_OUTPUT foo=bar'; echo oops 1>&2; exit 3".to_owned(),
+            ),
             &dir,
             &env,
             None,
@@ -732,9 +1190,15 @@ mod streaming_tests {
     async fn zero_exit_no_outputs() {
         let env = HashMap::new();
         let dir = std::env::temp_dir();
-        let out = run_command_streaming("true", &dir, &env, None, None)
-            .await
-            .expect("streaming run should succeed");
+        let out = run_command_streaming(
+            &CommandSpec::Shell("true".to_owned()),
+            &dir,
+            &env,
+            None,
+            None,
+        )
+        .await
+        .expect("streaming run should succeed");
         assert_eq!(out.exit_code, 0);
         assert!(out.outputs.is_empty());
     }
@@ -746,7 +1210,7 @@ mod streaming_tests {
         let env = HashMap::new();
         let dir = std::env::temp_dir();
         let out = run_command_streaming(
-            "printf '\\377\\n'; echo 'VELD_OUTPUT foo=bar'",
+            &CommandSpec::Shell("printf '\\377\\n'; echo 'VELD_OUTPUT foo=bar'".to_owned()),
             &dir,
             &env,
             None,

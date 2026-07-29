@@ -81,12 +81,64 @@ When a change introduces new config fields, CLI flags, subcommands, or user-visi
 | `skills/veld/SKILL.md` | Agent-facing skill (quick reference, gotchas) |
 | `skills/veld/reference/config.md` | Agent-facing config reference |
 | `schema/v2/veld.schema.json` | JSON Schema for v2 configs (probes, recovery, skip_if) |
+| `schema/v3/veld.schema.json` | JSON Schema for v3 configs. **Hand-maintained — there is no compiler check tying it to the Rust types.** Any config field you add or change must be reflected here AND covered by `schema/v3/examples/`, which `tests/validate-schema.sh` validates against the schema and `schema_v3_examples_round_trip` deserializes with serde. That pair is the drift gate; skipping it ships a schema that confidently reports the wrong thing in the editor |
+| `docs/migrating-to-v3.md` | Migration guide. Update whenever v3 gains a field, or whenever something changes for v1/v2 configs too |
 | `website/index.html` | **Marketing site.** If the change adds or renames a user-visible capability, decide whether it belongs on the site and, if so, update the relevant part — the features grid, CLI reference, sharing section, or the architecture diagram (`for the nerds`). Keep the brand tokens per `website/AGENTS.md` / `docs/branding.md`. |
 | `website/llms-full.txt` | LLM-facing docs — sync with any `index.html` content change (see `website/AGENTS.md`) |
 
 **Always ask "does the website need to change?"** For every user-visible feature, weigh whether it's worth surfacing on the marketing site — the site should stay an accurate, current picture of what veld can do, not drift behind the CLI. If it fits, update `website/index.html` (and `llms-full.txt`); if it deliberately doesn't, say so.
 
 If the change is purely internal (refactor, bugfix with no new surface area), this checklist does not apply.
+
+## Config Authoring Principles
+
+These govern the `veld.json` surface. They are not style preferences — each one
+exists because the obvious alternative makes a large monorepo config unreadable,
+and several were paid for in this codebase already.
+
+- **Deduplicate values, never structure.** Which keys a node has stays written in
+  that node; only *values* get a single definition point (`vars`, node-level
+  defaults). A reader — or a coding agent — must be able to open a node file and
+  see what that node runs, and `rg <ENV_VAR_NAME>` must still find the line that
+  sets it.
+- **Keys stay at the use site.** A var holds a value, not a config fragment. The
+  moment a probe block or an `env` map can live in a var, this is a template
+  system.
+- **No inheritance, mixins, `extends`, or node templates.** No loops, `matrix`,
+  `for_each`, or ranges. No conditionals, operators, or arithmetic in
+  interpolation. No second config language that compiles to JSON. If five nodes
+  are similar, write five nodes and hoist the shared *values*.
+- **`argv` is preferred over `shell`, and `shell` is permanently supported.**
+  `argv` is spawned directly, so an interpolated value can never change the
+  argument count; `shell` is the escape hatch that makes `argv` a safe default,
+  because any node that misbehaves under it can be reverted with no veld change.
+- **Any new field that runs something is called `argv`/`shell`** — never
+  `command`, `cmd`, `exec`, or `run`. One vocabulary, everywhere.
+- **A secret is a pointer plus a sensitivity flag, never custody.** veld carries a
+  value source and `secret: true`, resolves it at run start, and delivers it to a
+  child's environment or a file. Never into a command line (the process table is
+  world-readable), a log, `--json` output, or a share payload. No vendor name ever
+  becomes a first-class concept in the schema.
+- **New diagnostics never go in the loader.** `config::parse_config` runs on every
+  subcommand — `stop`, `status`, `logs` — and inside the daemon monitor. `on_stop`
+  is read from the on-disk config *at stop time*, so a config that fails to load
+  means teardown never runs and containers leak with no way to clean them up. Put
+  semantic checks in `config::validate`, which returns `Finding`s and is called
+  only from `veld start`, `veld lint`, and the share flow. `validate` returns a type
+  `ConfigError` does not contain, so this is enforced by the compiler — keep it that
+  way.
+- **`veld.*` is a closed set.** Node outputs live in `${output.*}` and
+  `${nodes.<node>.*}`. Merging them into the builtins let an output shadow a
+  builtin on some paths and not others, so the same string resolved to two
+  different values.
+- **One owner for resolution.** A node+variant's effective config comes from
+  `config::resolve_variant`. Do not read `variant_cfg.<field>` directly in the
+  orchestrator, the graph, the monitor, or the share flow — a second resolution
+  path is invisible until it produces a wrong value at runtime, or (for `share`) a
+  silent consent bypass.
+- **Remote execution is never added.** No `host`, `ssh`, or `target` field, ever.
+  Repo-declared hooks only — a hook may not originate from a fetched extension,
+  because that is what preserves the guarantee.
 
 ## Key Conventions
 
@@ -112,6 +164,18 @@ If the change is purely internal (refactor, bugfix with no new surface area), th
   and the terminal node's own output under `veld start --oneshot` are the only
   things on stdout. A stray `println!`/`tracing::*!`-to-stdout in a command
   silently corrupts an agent's or CI's stdout capture — keep chrome on stderr.
+- **A veld config is JSONC.** Comments and trailing commas are legal in every
+  config file, at every `schemaVersion`. Anything in this repo that reads a
+  `veld.json` as strict JSON — a CI script, a `jq` pipeline, a test helper — must
+  strip comments first (`tests/validate-schema.sh` shows the pattern, mirroring
+  `veld_core::jsonc::strip`).
+- **veld does not rewrite a user's config.** `veld init` writes one when none
+  exists; nothing else edits one. A serde round-trip deletes every comment, and
+  the byte-level alternative cannot see structure — which is exactly how the
+  removed `veld config --migrate --write` ended up editing the `hooks`/`ui` blobs
+  veld promises not to interpret. If a change seems to need a config rewriter,
+  emit a precise diagnostic instead and let the author (or their agent) apply it;
+  `veld lint` is the verification step.
 - Domain: `veld.oss.life.li` (not `veld.dev`)
 - Install URL: `https://veld.oss.life.li/get`
 - URL templates use `{variable}` (single braces); commands/env use `${variable}`

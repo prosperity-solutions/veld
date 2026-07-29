@@ -52,6 +52,11 @@ pub enum OrchestratorError {
     #[error(transparent)]
     Variable(#[from] crate::variables::VariableError),
 
+    /// A configured value source could not be dereferenced at run start — an
+    /// unset `env` var, an unreadable file, a failing or hanging helper.
+    #[error(transparent)]
+    Value(#[from] crate::values::ValueError),
+
     #[error(transparent)]
     Helper(#[from] crate::helper::HelperError),
 
@@ -74,6 +79,12 @@ pub enum OrchestratorError {
 
     #[error("environment '{0}' was replaced by another `veld start` while starting")]
     Superseded(String),
+
+    /// Semantic config problems, from `config::validate`. Reachable only from
+    /// `start` — never from the loader, so `stop`/`status`/`logs` still work
+    /// against a config that has since been broken.
+    #[error("{0}")]
+    ConfigInvalid(String),
 
     #[error(
         "hostname {hostname} is already served by run '{run_name}' of {project_name} \
@@ -159,6 +170,37 @@ struct UrlContext {
     worktree: String,
     username: String,
     hostname: String,
+}
+
+/// Every hostname a plan will serve, normalised the way route ids are.
+///
+/// Split out from `check_hostnames_unclaimed` so the selection rule is testable
+/// without a registry: `claimed_hostname` (the decision) already had tests, but
+/// *which nodes get offered to it* did not — and that is where this went wrong.
+/// The step type must come from [`config::resolve_variant`], because `type` may be
+/// declared once at node level (F3); reading it off the raw variant yields `None`
+/// for every variant that inherits it, silently skipping the collision check for
+/// exactly the configs using that feature.
+fn planned_hostnames(
+    config: &config::VeldConfig,
+    plan: &[Vec<NodeSelection>],
+    run_name: &str,
+    ctx: &UrlContext,
+) -> Result<Vec<String>, OrchestratorError> {
+    let mut planned = Vec::new();
+    for sel in plan.iter().flatten() {
+        let node_cfg = &config.nodes[&sel.node];
+        let variant_cfg = &node_cfg.variants[&sel.variant];
+        let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
+        if resolved.step_type != config::StepType::StartServer {
+            continue;
+        }
+        // Normalised the same way the route id is, so a template carrying a literal
+        // port compares against the registry's stripped hostnames.
+        let rendered = node_hostname(config, sel, run_name, ctx)?;
+        planned.push(url::hostname_of_url(&rendered).to_owned());
+    }
+    Ok(planned)
 }
 
 /// The hostname a `start_server` node will be served at.
@@ -362,20 +404,20 @@ fn build_graph_snapshot(
         let Some(variant_cfg) = node_cfg.variants.get(&sel.variant) else {
             continue;
         };
-        let command = variant_cfg
-            .script
+        // Resolved, so the snapshot records what the run actually used — a value
+        // hoisted to node level would otherwise read as absent.
+        let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
+        let command = match &resolved.script {
+            Some(script) => Some(crate::state::CommandSnapshot::Script(script.clone())),
+            None => resolved.command.clone().map(Into::into),
+        };
+        let mut env_keys: Vec<String> = resolved
+            .env
             .as_ref()
-            .map(|s| format!("script:{s}"))
-            .or_else(|| variant_cfg.command.clone());
-        let mut env_keys: Vec<String> = config::resolve_env(
-            config.env.as_ref(),
-            node_cfg.env.as_ref(),
-            variant_cfg.env.as_ref(),
-        )
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
         env_keys.sort();
-        let url_template = (variant_cfg.step_type == config::StepType::StartServer).then(|| {
+        let url_template = (resolved.step_type == config::StepType::StartServer).then(|| {
             url::resolve_url_template(
                 &config.url_template,
                 node_cfg.url_template.as_deref(),
@@ -386,7 +428,7 @@ fn build_graph_snapshot(
         nodes.insert(
             RunState::node_key(&sel.node, &sel.variant),
             crate::state::NodeSnapshot {
-                step_type: match variant_cfg.step_type {
+                step_type: match resolved.step_type {
                     config::StepType::Command => "command".to_owned(),
                     config::StepType::StartServer => "start_server".to_owned(),
                 },
@@ -398,6 +440,54 @@ fn build_graph_snapshot(
         );
     }
     crate::state::GraphSnapshot { config_hash, nodes }
+}
+
+/// The inputs every `veld.*` builtin is derived from.
+///
+/// One constructor for all three interpolation paths (startup stage, `--oneshot`
+/// terminal node, `on_stop` teardown) so the same `${veld.…}` string cannot
+/// resolve differently — or fail — depending on which path expanded it. Before
+/// this, `${veld.node}` existed only in the action context and each path
+/// hand-rolled a slightly different set.
+///
+/// `veld.*` is a **closed** set: node outputs are NOT injected here. They live
+/// in `${output.*}` (own node) and `${nodes.<node>.<field>}` (any node). Merging
+/// them into builtins let an output named `port`, `url`, `run`, `node`, or
+/// `branch` shadow the builtin of the same name — silently, and only on the
+/// paths that did the merging.
+struct BuiltinScope<'a> {
+    run_name: &'a str,
+    /// Stringified run-instance UUID. `None` only where no run exists yet.
+    run_id: Option<String>,
+    project_root: &'a Path,
+    project_name: &'a str,
+    /// Raw worktree directory name; slugified on the way in.
+    worktree: &'a str,
+    /// Raw git branch; slugified on the way in.
+    branch: &'a str,
+    username: &'a str,
+    /// Node and variant this context belongs to, when it is node-scoped.
+    /// `None` for project-level setup/teardown steps, which belong to no node.
+    node: Option<(&'a str, &'a str)>,
+}
+
+impl BuiltinScope<'_> {
+    fn apply(&self, ctx: &mut VariableContext) {
+        ctx.set_builtin("run", self.run_name.to_owned());
+        if let Some(id) = &self.run_id {
+            ctx.set_builtin("run_id", id.clone());
+        }
+        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
+        ctx.set_builtin("project", self.project_name.to_owned());
+        ctx.set_builtin("name", self.project_name.to_owned());
+        ctx.set_builtin("worktree", url::slugify(self.worktree));
+        ctx.set_builtin("branch", url::slugify(self.branch));
+        ctx.set_builtin("username", self.username.to_owned());
+        if let Some((node, variant)) = self.node {
+            ctx.set_builtin("node", node.to_owned());
+            ctx.set_builtin("variant", variant.to_owned());
+        }
+    }
 }
 
 /// Machine-readable outcome detail for a failed start.
@@ -420,14 +510,22 @@ fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
 /// any node begins execution so that all nodes can reference any other
 /// node's URL/port without requiring a dependency edge.
 struct PrecomputedServer {
+    /// The primary port — what `${veld.port}` and `VELD_PORT` resolve to, and
+    /// what Caddy proxies to. A node that declares no `ports` map has exactly
+    /// this one, as it always did.
     port: u16,
+    /// Every named port from the `ports` map, including the primary, as
+    /// `${veld.ports.<name>}`. Empty when the node declares no map.
+    named_ports: std::collections::BTreeMap<String, u16>,
     /// Raw hostname (without scheme), used for DNS/Caddy configuration.
     hostname: String,
     /// Full `https://` URL including port suffix when not 443.
     https_url: String,
-    /// Held TCP listeners that reserve the port from other processes.
+    /// Held TCP listeners that reserve the ports from other processes.
     /// Taken (released) right before the child process is spawned.
     reservation: Option<crate::port::PortReservation>,
+    /// Reservations for the non-primary named ports, released alongside it.
+    extra_reservations: Vec<crate::port::PortReservation>,
 }
 
 /// Read-only context shared by all node execution tasks within a stage.
@@ -449,6 +547,9 @@ struct NodeExecutionContext {
     username: String,
     /// Snapshot of all outputs from prior stages for variable resolution.
     all_outputs: Arc<HashMap<String, HashMap<String, String>>>,
+    /// Project `vars`, resolved once for the whole run so two use sites of the
+    /// same value can never disagree.
+    vars: Arc<HashMap<String, String>>,
     /// Shared run state for PID checkpointing. Uses `std::sync::Mutex`
     /// (not tokio) so the lock is acquired without an `.await` point —
     /// this makes the spawn→checkpoint sequence cancellation-safe.
@@ -508,6 +609,10 @@ pub struct Orchestrator {
     /// instead run afterwards via [`Orchestrator::run_terminal`]. Its exit ends
     /// the run (see `veld start --oneshot`).
     terminal_node: Option<NodeSelection>,
+    /// Project `vars`, resolved once during `start`. Stashed so `run_terminal` and
+    /// the `on_stop` path reuse the same values rather than re-running a source
+    /// command — two resolutions of a rotating credential would disagree.
+    resolved_vars: Option<Arc<HashMap<String, String>>>,
     /// Dependency outputs captured at the end of `start` when a terminal node
     /// is set, so `run_terminal` can interpolate `${nodes.X.url}` etc. with the
     /// exact values the stages produced (no reconstruction drift).
@@ -543,6 +648,7 @@ impl Orchestrator {
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
+            resolved_vars: None,
             terminal_outputs: None,
         })
     }
@@ -597,7 +703,7 @@ impl Orchestrator {
 
     /// Convenience: discover config from CWD and build the orchestrator.
     pub fn from_cwd() -> Result<Self, OrchestratorError> {
-        let (path, cfg) = config::load_config_from_cwd()?;
+        let (path, cfg) = config::parse_config_from_cwd()?;
         Self::new(path, cfg)
     }
 
@@ -612,10 +718,13 @@ impl Orchestrator {
         selections: &[NodeSelection],
         run_name: &str,
     ) -> Result<RunState, OrchestratorError> {
-        // Fail loudly on an invalid proxy header before it reaches Caddy (a bad
-        // value baked into a persisted route can poison the whole config reload).
-        // Done here, not in load_config, so a typo doesn't strand `veld stop`.
-        config::validate_proxy_headers(&self.config)?;
+        // Semantic validation runs HERE, not in `parse_config`: a typo must not
+        // strand `veld stop` against a running environment (its `on_stop` hooks
+        // are read from the on-disk config at stop time). `veld lint` runs the
+        // same rules and additionally reports warnings.
+        if let Some(msg) = config::error_summary(&config::validate(&self.config)) {
+            return Err(OrchestratorError::ConfigInvalid(msg));
+        }
 
         // Resolve the graph and the URL context up front, because the hostnames
         // this run wants must be checked against other projects BEFORE anything
@@ -762,12 +871,53 @@ impl Orchestrator {
         self.precomputed_servers.clear();
         for stage in &plan {
             for sel in stage {
-                let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-                if variant_cfg.step_type != config::StepType::StartServer {
+                let node_cfg = &self.config.nodes[&sel.node];
+                let variant_cfg = &node_cfg.variants[&sel.variant];
+                let resolved = config::resolve_variant(&self.config, node_cfg, variant_cfg);
+                if resolved.step_type != config::StepType::StartServer {
                     continue;
                 }
 
-                let reservation = self.port_allocator.allocate()?;
+                // One allocation per declared name. A node with no `ports` map
+                // gets exactly one, exactly as before F6 — the whole point is
+                // that debug-adapter and multi-port container variants stop
+                // needing hand-picked literal ports, which silently break
+                // parallel worktrees.
+                let mut named_ports = std::collections::BTreeMap::new();
+                let mut extra_reservations = Vec::new();
+                let mut primary_reservation = None;
+                match resolved.ports.as_ref() {
+                    None => {
+                        primary_reservation = Some(self.port_allocator.allocate()?);
+                    }
+                    Some(declared) => {
+                        for (name, spec) in &declared.ports {
+                            let reservation = match spec {
+                                config::PortSpec::Auto => self.port_allocator.allocate()?,
+                                config::PortSpec::Fixed(p) => {
+                                    self.port_allocator.reserve_fixed(*p)?
+                                }
+                            };
+                            named_ports.insert(name.clone(), reservation.port);
+                            if *name == declared.primary {
+                                primary_reservation = Some(reservation);
+                            } else {
+                                extra_reservations.push(reservation);
+                            }
+                        }
+                    }
+                }
+                let reservation = primary_reservation.ok_or_else(|| {
+                    // `validate` rejects an ambiguous primary before we get here;
+                    // this is the belt-and-braces path.
+                    OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason: "cannot tell which of the declared ports is the primary — \
+                                 name one of them \"http\""
+                            .to_owned(),
+                    }
+                })?;
                 let port = reservation.port;
 
                 // Same function the pre-start hostname check used, so the URL a
@@ -791,6 +941,11 @@ impl Orchestrator {
                 // ${nodes.X.url}, ${nodes.X.port}, and URL piece references.
                 let mut node_out = HashMap::new();
                 node_out.insert("port".to_owned(), port.to_string());
+                // Named ports are referenceable across nodes too:
+                // `${nodes.api.ports.debug}`.
+                for (name, value) in &named_ports {
+                    node_out.insert(format!("ports.{name}"), value.to_string());
+                }
                 node_out.insert("url".to_owned(), https_url.clone());
                 // Expose individual URL location pieces (mirrors the Web URL API).
                 node_out.insert("url.hostname".to_owned(), node_url.clone());
@@ -815,9 +970,11 @@ impl Orchestrator {
                     key,
                     PrecomputedServer {
                         port,
+                        named_ports,
                         hostname: node_url,
                         https_url,
                         reservation: Some(reservation),
+                        extra_reservations,
                     },
                 );
             }
@@ -881,6 +1038,15 @@ impl Orchestrator {
         self.debug_log("Run persisted as 'starting' before first stage executes")
             .await;
 
+        // Resolve project `vars` before anything spawns: a var may be backed by a
+        // file or a command, and a broken source must fail the start rather than
+        // surface as an empty value inside a service.
+        let shared_vars = Arc::new(
+            crate::values::resolve_vars(self.config.vars.as_ref(), Some(&self.project_root))
+                .await?,
+        );
+        self.resolved_vars = Some(Arc::clone(&shared_vars));
+
         // Wrap immutable data in Arc once for all stages.
         let shared_config = Arc::new(self.config.clone());
         let shared_project_root = Arc::new(self.project_root.clone());
@@ -905,6 +1071,7 @@ impl Orchestrator {
                         &url_ctx.worktree,
                         &url_ctx.username,
                         &mut all_outputs,
+                        &shared_vars,
                         total_nodes,
                         &mut node_index,
                         &shared_config,
@@ -1072,7 +1239,8 @@ impl Orchestrator {
 
         // A terminal node must run to completion — a start_server never exits,
         // so it can never be the thing whose exit ends the run.
-        if variant_cfg.step_type != config::StepType::Command {
+        let resolved = config::resolve_variant(&self.config, &node_cfg, &variant_cfg);
+        if resolved.step_type != config::StepType::Command {
             return Err(OrchestratorError::NodeFailed {
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
@@ -1106,14 +1274,21 @@ impl Orchestrator {
         let username = whoami_username();
 
         let mut var_ctx = VariableContext::new();
-        var_ctx.set_builtin("run", run_name.to_owned());
-        var_ctx.set_builtin("run_id", run.run_id.to_string());
-        var_ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        var_ctx.set_builtin("project", self.config.name.clone());
-        var_ctx.set_builtin("name", self.config.name.clone());
-        var_ctx.set_builtin("worktree", url::slugify(&worktree));
-        var_ctx.set_builtin("branch", url::slugify(&branch));
-        var_ctx.set_builtin("username", username);
+        BuiltinScope {
+            run_name,
+            run_id: Some(run.run_id.to_string()),
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: &worktree,
+            branch: &branch,
+            username: &username,
+            node: Some((&sel.node, &sel.variant)),
+        }
+        .apply(&mut var_ctx);
+
+        for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
+            var_ctx.set_var(name, value.clone());
+        }
 
         // Clone (not take) the stashed dependency outputs so a defensive
         // re-invocation still resolves `${nodes.X.*}` rather than silently
@@ -1132,24 +1307,27 @@ impl Orchestrator {
             &self.project_root,
             &var_ctx,
         )?;
-        let raw_cmd = if let Some(ref script) = variant_cfg.script {
-            format!("sh {}", self.project_root.join(script).display())
-        } else {
-            variant_cfg.command.clone().unwrap_or_default()
+        let raw_cmd = match &resolved.script {
+            Some(script) => config::CommandSpec::script(&self.project_root.join(script)),
+            None => resolved
+                .command
+                .clone()
+                .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
         };
-        let resolved_cmd = crate::variables::interpolate(&raw_cmd, &var_ctx)?;
-        let merged_env = config::resolve_env(
-            self.config.env.as_ref(),
-            node_cfg.env.as_ref(),
-            variant_cfg.env.as_ref(),
-        );
-        let env = build_env(merged_env.as_ref(), &var_ctx)?;
+        let resolved_cmd = raw_cmd.interpolate(&var_ctx)?;
+        let (env, env_secret_keys) = build_env(
+            resolved.env.as_ref(),
+            &var_ctx,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+            &self.project_root,
+        )
+        .await?;
 
         let key = RunState::node_key(&sel.node, &sel.variant);
 
         // Idempotency: if skip_if passes, skip the run entirely (exit 0).
-        if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
-            let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, &var_ctx)?;
+        if let Some(ref skip_if_cmd) = resolved.skip_if {
+            let skip_if_resolved = skip_if_cmd.interpolate(&var_ctx)?;
             if let Ok(out) = process::run_command(&skip_if_resolved, &working_dir, &env, None).await
             {
                 if out.exit_code == 0 {
@@ -1208,7 +1386,7 @@ impl Orchestrator {
         // ignored (not fatal): the node has already produced its result and its
         // exit code is what matters — failing the run over strict_outputs here
         // would only mask it.
-        let declared_keys = variant_cfg
+        let declared_keys = resolved
             .outputs
             .as_ref()
             .map(|o| o.declared_keys())
@@ -1231,9 +1409,10 @@ impl Orchestrator {
         } else {
             NodeStatus::Failed
         };
-        if let Some(sensitive) = variant_cfg.sensitive_outputs.clone() {
+        if let Some(sensitive) = resolved.sensitive_outputs.clone() {
             node_state.sensitive_keys = sensitive;
         }
+        node_state.sensitive_keys.extend(env_secret_keys);
         run.nodes.insert(key.clone(), node_state);
         // Append last so reverse-order teardown runs its on_stop hook first.
         if !run.execution_order.contains(&key) {
@@ -1279,6 +1458,7 @@ impl Orchestrator {
         worktree: &str,
         username: &str,
         all_outputs: &mut HashMap<String, HashMap<String, String>>,
+        vars: &Arc<HashMap<String, String>>,
         total_nodes: usize,
         node_index: &mut usize,
         shared_config: &Arc<VeldConfig>,
@@ -1300,6 +1480,7 @@ impl Orchestrator {
             worktree: worktree.to_owned(),
             username: username.to_owned(),
             all_outputs: Arc::new(all_outputs.clone()),
+            vars: Arc::clone(vars),
             checkpoint: Arc::new(std::sync::Mutex::new(CheckpointState {
                 run: run.clone(),
                 project_root: self.project_root.clone(),
@@ -1454,6 +1635,31 @@ impl Orchestrator {
             .begin_ending(&run.run_id, EndReason::Stopped, None)?;
         run.status = RunStatus::Stopping;
 
+        // Captured before the loop borrows `run` mutably; `${veld.run_id}` must
+        // resolve in `on_stop` exactly as it did in the node's own command.
+        let run_id = run.run_id;
+
+        // `on_stop` may reference `${vars.*}`. Reuse `start`'s values when this is
+        // the same process; otherwise (`veld stop` as its own invocation) resolve
+        // once for the whole teardown. A failing source must not abort the stop —
+        // teardown running is more important than every hook interpolating — so
+        // this degrades to no vars and the affected hooks report being skipped.
+        let stop_vars: Arc<HashMap<String, String>> = match &self.resolved_vars {
+            Some(v) => Arc::clone(v),
+            None => match crate::values::resolve_vars(
+                self.config.vars.as_ref(),
+                Some(&self.project_root),
+            )
+            .await
+            {
+                Ok(v) => Arc::new(v),
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
+                    Arc::new(HashMap::new())
+                }
+            },
+        };
+
         // Stop in reverse execution order (dependencies last). Fall back to
         // HashMap keys for runs created before execution_order was tracked.
         let node_keys: Vec<String> = if run.execution_order.is_empty() {
@@ -1489,7 +1695,8 @@ impl Orchestrator {
 
                 // Run on_stop hook if defined (skip nodes that never ran).
                 if node_state.status != NodeStatus::Pending {
-                    self.run_on_stop_hook(run_name, node_state).await;
+                    self.run_on_stop_hook(run_name, Some(run_id), &stop_vars, node_state)
+                        .await;
                 }
 
                 node_state.status = NodeStatus::Stopped;
@@ -1527,17 +1734,7 @@ impl Orchestrator {
         run_name: &str,
         ctx: &UrlContext,
     ) -> Result<(), OrchestratorError> {
-        let mut planned = Vec::new();
-        for sel in plan.iter().flatten() {
-            let variant_cfg = &self.config.nodes[&sel.node].variants[&sel.variant];
-            if variant_cfg.step_type != config::StepType::StartServer {
-                continue;
-            }
-            // Normalised the same way the route id is, so a template carrying a
-            // literal port compares against the registry's stripped hostnames.
-            let rendered = node_hostname(&self.config, sel, run_name, ctx)?;
-            planned.push(url::hostname_of_url(&rendered).to_owned());
-        }
+        let planned = planned_hostnames(&self.config, plan, run_name, ctx)?;
 
         let registry = match self.db.registry() {
             Ok(r) => r,
@@ -1770,7 +1967,13 @@ impl Orchestrator {
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
-    async fn run_on_stop_hook(&self, run_name: &str, node_state: &NodeState) {
+    async fn run_on_stop_hook(
+        &self,
+        run_name: &str,
+        run_id: Option<uuid::Uuid>,
+        vars: &HashMap<String, String>,
+        node_state: &NodeState,
+    ) {
         let variant_cfg = match self
             .config
             .nodes
@@ -1781,7 +1984,17 @@ impl Orchestrator {
             None => return,
         };
 
-        let on_stop_cmd = match variant_cfg.on_stop.as_deref() {
+        // Resolved, not raw: `on_stop` is hoistable to node level (F3), and reading
+        // the variant directly meant a node-level teardown hook never ran — the
+        // exact container-leak failure this feature exists to prevent.
+        let resolved = match self
+            .config
+            .resolved(&node_state.node_name, &node_state.variant)
+        {
+            Some(r) => r,
+            None => return,
+        };
+        let on_stop_cmd = match resolved.on_stop.as_ref() {
             Some(cmd) => cmd,
             None => return,
         };
@@ -1794,40 +2007,62 @@ impl Orchestrator {
 
         // Build variable context matching what was available at start time.
         let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
-        ctx.set_builtin(
-            "worktree",
-            url::slugify(
-                self.project_root
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("default"),
-            ),
-        );
-        ctx.set_builtin(
-            "branch",
-            url::slugify(&url::detect_git_branch(&self.project_root)),
-        );
-        ctx.set_builtin("username", whoami_username());
+        BuiltinScope {
+            run_name,
+            run_id: run_id.map(|id| id.to_string()),
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: self
+                .project_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default"),
+            branch: &url::detect_git_branch(&self.project_root),
+            username: &whoami_username(),
+            node: Some((&node_state.node_name, &node_state.variant)),
+        }
+        .apply(&mut ctx);
 
+        for (name, value) in vars {
+            ctx.set_var(name, value.clone());
+        }
+
+        // Outputs are reachable as `${output.KEY}` (this node) and
+        // `${nodes.<node>.KEY}` (any node) — deliberately NOT as `${veld.KEY}`.
+        // Injecting them into the builtins let an output named `port`, `url`,
+        // `run`, `node`, or `branch` shadow the builtin here but nowhere else,
+        // so the same string resolved differently in `command` and `on_stop`.
         for (k, v) in &node_state.outputs {
-            ctx.set_builtin(k, v.clone());
+            ctx.set_output(k, v.clone());
             ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
         }
         if let Some(port) = node_state.port {
             ctx.set_builtin("port", port.to_string());
         }
 
-        let resolved_cmd = match crate::variables::interpolate(on_stop_cmd, &ctx) {
+        let resolved_cmd = match on_stop_cmd.interpolate(&ctx) {
             Ok(cmd) => cmd,
             Err(e) => {
+                // A teardown hook that cannot be resolved does not run, and the
+                // user is about to be told the environment stopped cleanly. That
+                // combination is how containers leak, so say it loudly on the
+                // stream the user actually reads rather than burying it in a
+                // tracing warning. `veld start`/`veld lint` catch the common cause
+                // (an unknown `${veld.*}` name — see `check_builtin_names`), but
+                // this path stays reachable for a config edited after start.
+                eprintln!(
+                    "  ! teardown hook for {}:{} was SKIPPED: {e}\n    \
+                     The command was: {}\n    \
+                     Anything it was meant to clean up (containers, volumes, \
+                     temp state) has been left behind.",
+                    node_state.node_name,
+                    node_state.variant,
+                    on_stop_cmd.display(),
+                );
                 tracing::warn!(
                     node = node_state.node_name,
                     error = %e,
-                    "failed to resolve on_stop command variables"
+                    "failed to resolve on_stop command variables — hook skipped"
                 );
                 return;
             }
@@ -1835,13 +2070,19 @@ impl Orchestrator {
 
         // Build env (variant > node > project).
         let node_cfg_opt = self.config.nodes.get(&node_state.node_name);
-        let merged_env = config::resolve_env(
-            self.config.env.as_ref(),
-            node_cfg_opt.and_then(|n| n.env.as_ref()),
-            variant_cfg.env.as_ref(),
-        );
-        let env = match build_env(merged_env.as_ref(), &ctx) {
-            Ok(env) => env,
+        let merged_env = resolved.env.clone();
+        let env = match build_env(
+            merged_env.as_ref(),
+            &ctx,
+            &format!(
+                "nodes.{}.variants.{}",
+                node_state.node_name, node_state.variant
+            ),
+            &self.project_root,
+        )
+        .await
+        {
+            Ok((env, _)) => env,
             Err(e) => {
                 tracing::warn!(
                     node = node_state.node_name,
@@ -1888,6 +2129,33 @@ impl Orchestrator {
         }
     }
 
+    /// Build the interpolation context for a project-level lifecycle step
+    /// (`setup` / `teardown`). Same closed `veld.*` set as a node context minus
+    /// `node`/`variant`, so `${veld.branch}` does not silently work in a node
+    /// command and fail in a setup step.
+    fn project_step_context(&self, run_name: &str) -> VariableContext {
+        let mut ctx = VariableContext::new();
+        for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
+            ctx.set_var(name, value.clone());
+        }
+        BuiltinScope {
+            run_name,
+            run_id: None,
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree: self
+                .project_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default"),
+            branch: &url::detect_git_branch(&self.project_root),
+            username: &whoami_username(),
+            node: None,
+        }
+        .apply(&mut ctx);
+        ctx
+    }
+
     // -----------------------------------------------------------------------
     // Setup / Teardown lifecycle steps
     // -----------------------------------------------------------------------
@@ -1901,11 +2169,7 @@ impl Orchestrator {
         };
 
         let total = steps.len();
-        let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
+        let ctx = self.project_step_context(run_name);
 
         for (i, step) in steps.iter().enumerate() {
             self.emit(ProgressEvent::SetupStepStarting {
@@ -1915,7 +2179,19 @@ impl Orchestrator {
             });
 
             let started = std::time::Instant::now();
-            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+            let Some(step_cmd) = step.cmd.spec() else {
+                let reason = "step declares no command — set \"argv\" or \"shell\"".to_owned();
+                self.emit(ProgressEvent::SetupStepFailed {
+                    name: step.name.clone(),
+                    error: reason.clone(),
+                });
+                return Err(OrchestratorError::SetupFailed {
+                    name: step.name.clone(),
+                    reason,
+                    failure_message: step.failure_message.clone(),
+                });
+            };
+            let resolved_cmd = match step_cmd.interpolate(&ctx) {
                 Ok(cmd) => cmd,
                 Err(e) => {
                     let reason = format!("variable resolution failed: {e}");
@@ -1979,11 +2255,7 @@ impl Orchestrator {
         };
 
         let total = steps.len();
-        let mut ctx = VariableContext::new();
-        ctx.set_builtin("run", run_name.to_owned());
-        ctx.set_builtin("root", self.project_root.to_string_lossy().into_owned());
-        ctx.set_builtin("project", self.config.name.clone());
-        ctx.set_builtin("name", self.config.name.clone());
+        let ctx = self.project_step_context(run_name);
 
         for (i, step) in steps.iter().enumerate() {
             self.emit(ProgressEvent::TeardownStepRunning {
@@ -1992,7 +2264,14 @@ impl Orchestrator {
                 total,
             });
 
-            let resolved_cmd = match crate::variables::interpolate(&step.command, &ctx) {
+            let Some(step_cmd) = step.cmd.spec() else {
+                tracing::warn!(
+                    step = step.name,
+                    "teardown step declares no command — set \"argv\" or \"shell\""
+                );
+                continue;
+            };
+            let resolved_cmd = match step_cmd.interpolate(&ctx) {
                 Ok(cmd) => cmd,
                 Err(e) => {
                     tracing::warn!(
@@ -2057,6 +2336,67 @@ async fn debug_log_free(writer: &Option<LogWriter>, message: &str) {
     if let Some(writer) = writer {
         let _ = writer.write_line(&format!("[VELD] {message}")).await;
     }
+}
+
+/// Record sensitive keys **without discarding the ones already there**.
+///
+/// The whole bug class this replaces was an `=` where an extend belonged: three
+/// separate places contribute keys (declared `sensitive_outputs`, secret `env`
+/// values, tainted synthetic outputs) and whichever ran last silently won. A
+/// command node using both a secret `env` value and `sensitive_outputs` stopped
+/// masking the env value. Additive-and-idempotent is the only safe shape here, so
+/// it gets a name and a test rather than being open-coded at each site.
+fn mark_sensitive(keys: &mut Vec<String>, add: impl IntoIterator<Item = String>) {
+    for key in add {
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+}
+
+/// Does this synthetic-output template read anything sensitive?
+///
+/// Reuses `config`'s reference parsers rather than re-scanning for `${...}` here:
+/// two implementations of "what does this string reference" drift, and the one that
+/// drifts silently is the one deciding whether a credential gets masked.
+///
+/// Deliberately conservative — an unrecognised reference form is treated as *not*
+/// tainted, so this narrows an existing leak rather than pretending to close every
+/// path. `sensitive` is matched against both the bare key (how a `shell` template
+/// reads an env value, `$KEY`) and the `${output.KEY}` / `${nodes.N.KEY}` forms.
+///
+/// Known limit: taint is not transitive within one `outputs` map. Each template is
+/// judged against the sensitivity known *before* the map is resolved, so a synthetic
+/// output deriving from another synthetic output that is itself only tainted-by-
+/// derivation is not marked. That is currently unreachable — the interpolation
+/// context holds the *captured* outputs, not siblings being computed in the same
+/// pass — but it is the thing to fix first if sibling references ever resolve.
+fn template_is_tainted(tmpl: &str, sensitive: &[String], secret_vars: &[String]) -> bool {
+    let is_sensitive = |name: &str| sensitive.iter().any(|s| s == name);
+
+    if crate::config::env_refs(tmpl)
+        .iter()
+        .any(|n| is_sensitive(n))
+    {
+        return true;
+    }
+    if crate::config::builtin_refs_in(tmpl, "output.")
+        .iter()
+        .any(|n| is_sensitive(n))
+    {
+        return true;
+    }
+    // `${nodes.<node>.KEY}` — the trailing field is the output key.
+    if crate::config::builtin_refs_in(tmpl, "nodes.")
+        .iter()
+        .filter_map(|r| r.rsplit('.').next().map(str::to_owned))
+        .any(|n| is_sensitive(&n))
+    {
+        return true;
+    }
+    crate::config::builtin_refs_in(tmpl, "vars.")
+        .iter()
+        .any(|n| secret_vars.iter().any(|v| v == n))
 }
 
 /// Build a readiness probe attempt notifier that sends progress events.
@@ -2146,21 +2486,32 @@ async fn execute_node_isolated(
         },
     );
 
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
-    let sensitive_outputs = variant_cfg.sensitive_outputs.clone();
+    let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
+    // Resolved once per node execution and threaded down, so the start path
+    // cannot disagree with the graph or the snapshot about what this variant is.
+    let resolved = config::resolve_variant(&ctx.config, node_cfg, variant_cfg);
+    let sensitive_outputs = resolved.sensitive_outputs.clone();
     let mut node_state = NodeState::new(&sel.node, &sel.variant);
     node_state.status = NodeStatus::Starting;
 
     // Build variable context.
     let mut var_ctx = VariableContext::new();
-    var_ctx.set_builtin("run", ctx.run_name.clone());
-    var_ctx.set_builtin("run_id", ctx.run_id.to_string());
-    var_ctx.set_builtin("root", ctx.project_root.to_string_lossy().into_owned());
-    var_ctx.set_builtin("project", ctx.config.name.clone());
-    var_ctx.set_builtin("name", ctx.config.name.clone());
-    var_ctx.set_builtin("worktree", url::slugify(&ctx.worktree));
-    var_ctx.set_builtin("branch", url::slugify(&ctx.branch));
-    var_ctx.set_builtin("username", ctx.username.clone());
+    BuiltinScope {
+        run_name: &ctx.run_name,
+        run_id: Some(ctx.run_id.to_string()),
+        project_root: &ctx.project_root,
+        project_name: &ctx.config.name,
+        worktree: &ctx.worktree,
+        branch: &ctx.branch,
+        username: &ctx.username,
+        node: Some((&sel.node, &sel.variant)),
+    }
+    .apply(&mut var_ctx);
+
+    for (name, value) in ctx.vars.as_ref() {
+        var_ctx.set_var(name, value.clone());
+    }
 
     // Populate node output references from already-executed nodes.
     for (node_key, outputs) in ctx.all_outputs.as_ref() {
@@ -2169,20 +2520,33 @@ async fn execute_node_isolated(
         }
     }
 
-    let server_handle = match variant_cfg.step_type {
+    let server_handle = match resolved.step_type {
         StepType::StartServer => Some(
-            execute_start_server_isolated(&ctx, &sel, &mut var_ctx, &mut node_state, precomputed)
-                .await?,
+            execute_start_server_isolated(
+                &ctx,
+                &sel,
+                &resolved,
+                &mut var_ctx,
+                &mut node_state,
+                precomputed,
+            )
+            .await?,
         ),
         StepType::Command => {
-            execute_command_isolated(&ctx, &sel, &mut var_ctx, &mut node_state).await?;
+            execute_command_isolated(&ctx, &sel, &resolved, &mut var_ctx, &mut node_state).await?;
             None
         }
     };
 
     // Mark sensitive output keys.
+    //
+    // Extend, never assign. Both branches above already put keys here — the
+    // `start_server` path adds secret `env` keys, and `execute_command_isolated`
+    // adds those plus any tainted synthetic output — so assigning discarded them.
+    // For a `command` node that used both a secret `env` value and
+    // `sensitive_outputs`, the env value silently stopped being masked.
     if let Some(sensitive) = sensitive_outputs {
-        node_state.sensitive_keys = sensitive;
+        mark_sensitive(&mut node_state.sensitive_keys, sensitive);
     }
 
     // Emit completion event.
@@ -2224,12 +2588,13 @@ async fn execute_node_isolated(
 async fn execute_start_server_isolated(
     ctx: &NodeExecutionContext,
     sel: &NodeSelection,
+    resolved: &config::ResolvedVariant,
     var_ctx: &mut VariableContext,
     node_state: &mut NodeState,
     precomputed: Option<PrecomputedServer>,
 ) -> Result<process::ServerHandle, OrchestratorError> {
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
     let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
 
     let mut precomputed =
         precomputed.expect("precomputed server info missing for start_server node");
@@ -2240,9 +2605,17 @@ async fn execute_start_server_isolated(
         .reservation
         .take()
         .expect("port reservation already consumed — node executed twice?");
+    let extra_reservations = std::mem::take(&mut precomputed.extra_reservations);
 
     node_state.port = Some(port);
     var_ctx.set_builtin("port", port.to_string());
+    // `${veld.port}` stays the primary; each declared name is also addressable.
+    for (name, value) in &precomputed.named_ports {
+        var_ctx.set_builtin(&format!("ports.{name}"), value.to_string());
+        node_state
+            .outputs
+            .insert(format!("ports.{name}"), value.to_string());
+    }
     node_state.url = Some(https_url.clone());
     var_ctx.set_builtin("url", https_url.clone());
     // Expose individual URL location pieces (mirrors the Web URL API).
@@ -2309,11 +2682,7 @@ async fn execute_start_server_isolated(
         "upstream": format!("localhost:{port}"),
     });
     // Resolve per-node feature flags (variant > node > project > default).
-    let features = config::resolve_features(
-        ctx.config.features.as_ref(),
-        node_cfg.features.as_ref(),
-        variant_cfg.features.as_ref(),
-    );
+    let features = resolved.features;
 
     // Include feedback config so Caddy routes /__veld__/* to the daemon.
     // The proxy routes are created whenever a feature is enabled, even if
@@ -2329,21 +2698,13 @@ async fn execute_start_server_isolated(
     route["inject_client_logs"] = serde_json::json!(features.client_logs);
 
     // Resolve client log levels (variant > node > project > default).
-    let client_log_levels = config::resolve_client_log_levels(
-        ctx.config.client_log_levels.as_deref(),
-        node_cfg.client_log_levels.as_deref(),
-        variant_cfg.client_log_levels.as_deref(),
-    );
+    let client_log_levels = resolved.client_log_levels.clone();
     route["client_log_levels"] = serde_json::json!(client_log_levels.join(","));
 
     // Resolve reverse-proxy header rules (variant > node > project). Only sent
     // when non-empty — an absent `proxy` key means "no manipulation" to the
     // helper, so old behavior (Origin passes through) holds by default.
-    let proxy = config::resolve_proxy(
-        ctx.config.proxy.as_ref(),
-        node_cfg.proxy.as_ref(),
-        variant_cfg.proxy.as_ref(),
-    );
+    let proxy = resolved.proxy.clone();
     if !proxy.is_empty() {
         route["proxy"] = serde_json::json!(proxy);
     }
@@ -2360,36 +2721,72 @@ async fn execute_start_server_isolated(
     )?;
 
     // Resolve command.
-    let command = variant_cfg.command.as_deref().unwrap_or_default();
-    let resolved_cmd = crate::variables::interpolate(command, var_ctx)?;
+    let command = resolved
+        .command
+        .clone()
+        .unwrap_or_else(|| config::CommandSpec::Shell(String::new()));
+    let resolved_cmd = command.interpolate(var_ctx)?;
     debug_log_free(
         &ctx.debug_writer,
         &format!(
             "{}:{} — resolved command: {} (cwd: {})",
             sel.node,
             sel.variant,
-            resolved_cmd,
+            resolved_cmd.display(),
             working_dir.display()
         ),
     )
     .await;
 
     // Build env (variant > node > project).
-    let merged_env = config::resolve_env(
-        ctx.config.env.as_ref(),
-        node_cfg.env.as_ref(),
-        variant_cfg.env.as_ref(),
-    );
-    let mut env = build_env(merged_env.as_ref(), var_ctx)?;
+    let (mut env, env_secret_keys) = build_env(
+        resolved.env.as_ref(),
+        var_ctx,
+        &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        &ctx.project_root,
+    )
+    .await?;
+    // Env keys declared `secret: true` are masked and encrypted at rest just like
+    // sensitive outputs — same machinery, extended rather than duplicated.
+    node_state.sensitive_keys.extend(env_secret_keys);
     env.insert("VELD_PORT".to_owned(), port.to_string());
+    for (name, value) in &precomputed.named_ports {
+        env.insert(
+            format!("VELD_PORT_{}", name.to_uppercase().replace('-', "_")),
+            value.to_string(),
+        );
+    }
     env.insert("VELD_URL".to_owned(), https_url.clone());
 
     // Resolve synthetic outputs.
-    if let Some(Outputs::Synthetic(ref map)) = variant_cfg.outputs {
+    //
+    // Sensitivity has to travel with the value. A synthetic output is a *template*,
+    // so `{"DSN": "postgres://u:${SECRET_PW}@h/db"}` resolves a value that is every
+    // bit as sensitive as `SECRET_PW` — but the key `DSN` was never declared
+    // sensitive, so it was persisted and displayed in the clear. Marking a secret
+    // and then handing it to a template that launders it is worse than not offering
+    // the flag: the author believes it is covered.
+    //
+    // The taint check runs *after* `sensitive_keys` already holds the declared
+    // `sensitive_outputs` and the secret env keys, so both are in scope here.
+    if let Some(Outputs::Synthetic(ref map)) = resolved.outputs {
+        let secret_vars: Vec<String> = ctx
+            .config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut tainted: Vec<String> = Vec::new();
         for (okey, tmpl) in map {
             let val = crate::variables::interpolate(tmpl, var_ctx)?;
+            if template_is_tainted(tmpl, &node_state.sensitive_keys, &secret_vars) {
+                tainted.push(okey.clone());
+            }
             node_state.outputs.insert(okey.clone(), val);
         }
+        mark_sensitive(&mut node_state.sensitive_keys, tainted);
     }
 
     // Start the process.
@@ -2402,8 +2799,24 @@ async fn execute_start_server_isolated(
         variant: sel.variant.clone(),
     };
 
-    // Release the port reservation immediately before spawning.
+    // Deliver declared files before the process starts, so it can read them on
+    // its first line. Failing here aborts the node rather than letting it start
+    // and fail obscurely on a missing certificate.
+    if let Some(files) = &resolved.files {
+        crate::values::deliver_files(
+            files,
+            &ctx.project_root,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        )
+        .await?;
+    }
+
+    // Release every reservation immediately before spawning, so the child can
+    // bind them.
     port_reservation.release();
+    for reservation in extra_reservations {
+        reservation.release();
+    }
 
     let handle = process::start_server(
         &resolved_cmd,
@@ -2450,8 +2863,7 @@ async fn execute_start_server_isolated(
     )
     .await;
     // Use probes.readiness if available, falling back to legacy health_check.
-    if let Some(hc) = variant_cfg.readiness_probe() {
-        let hc = hc.clone();
+    if let Some(hc) = resolved.readiness.clone() {
         node_state.status = NodeStatus::HealthChecking;
         node_state.readiness_phases.push(ReadinessPhase {
             phase: 1,
@@ -2518,6 +2930,26 @@ async fn execute_start_server_isolated(
         let phase1_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
         let phase2_notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 2);
 
+        // Which port this probe watches: a named one from the `ports` map, or
+        // the primary. Probing the wrong port on a multi-port node reports ready
+        // too early — a debugger port opens long before the app is listening.
+        let probe_port = match hc.port.as_deref() {
+            None => port,
+            Some(name) => match precomputed.named_ports.get(name) {
+                Some(p) => *p,
+                None => {
+                    return Err(OrchestratorError::NodeFailed {
+                        node: sel.node.clone(),
+                        variant: sel.variant.clone(),
+                        reason: format!(
+                            "readiness probe references port \"{name}\", which this node \
+                             does not declare in `ports`"
+                        ),
+                    });
+                }
+            },
+        };
+
         // Phase 1: TCP port check.
         emit_progress(
             &ctx.progress_tx,
@@ -2525,12 +2957,12 @@ async fn execute_start_server_isolated(
                 node: sel.node.clone(),
                 variant: sel.variant.clone(),
                 phase: 1,
-                description: format!("waiting for port {port}"),
+                description: format!("waiting for port {probe_port}"),
             },
         );
 
         let phase1_result = tokio::select! {
-            result = health::wait_for_port(port, &hc, Some(&phase1_notifier)) => result,
+            result = health::wait_for_port(probe_port, &hc, Some(&phase1_notifier)) => result,
             _ = wait_for_process_exit(pid) => {
                 Err(health::HealthError::PortCheckFailed(
                     "server process exited before binding to port".into(),
@@ -2539,7 +2971,7 @@ async fn execute_start_server_isolated(
         };
 
         if let Err(e) = phase1_result {
-            let msg = format!("process did not bind to port {port}: {e}");
+            let msg = format!("process did not bind to port {probe_port}: {e}");
             node_state.status = NodeStatus::Failed;
             node_state.readiness_phases[0].last_error = Some(msg.clone());
             debug_log_free(
@@ -2584,7 +3016,7 @@ async fn execute_start_server_isolated(
 
         // Phase 2: depends on check type.
         let phase2_desc = match hc.check_type.as_str() {
-            "http" => format!("HTTP check on port {port}"),
+            "http" => format!("HTTP check on port {probe_port}"),
             "command" | "bash" => "command readiness check".to_owned(),
             "port" => "port-only (no phase 2)".to_owned(),
             other => format!("unknown check type: {other}"),
@@ -2602,13 +3034,13 @@ async fn execute_start_server_isolated(
         let phase2_future = async {
             match hc.check_type.as_str() {
                 "http" => {
-                    let direct_url = format!("http://127.0.0.1:{port}");
+                    let direct_url = format!("http://127.0.0.1:{probe_port}");
                     health::wait_for_http(&direct_url, &hc, Some(&phase2_notifier)).await
                 }
                 "command" | "bash" => {
-                    if let Some(cmd) = &hc.command {
+                    if let Some(cmd) = hc.cmd.spec() {
                         health::wait_for_command_check(
-                            cmd,
+                            &cmd,
                             &working_dir,
                             &hc,
                             Some(&phase2_notifier),
@@ -2692,11 +3124,12 @@ async fn execute_start_server_isolated(
 async fn execute_command_isolated(
     ctx: &NodeExecutionContext,
     sel: &NodeSelection,
+    resolved: &config::ResolvedVariant,
     var_ctx: &mut VariableContext,
     node_state: &mut NodeState,
 ) -> Result<(), OrchestratorError> {
-    let variant_cfg = &ctx.config.nodes[&sel.node].variants[&sel.variant];
     let node_cfg = &ctx.config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
 
     // Resolve working directory (variant > node > project root).
     let working_dir = resolve_working_dir(
@@ -2707,24 +3140,37 @@ async fn execute_command_isolated(
     )?;
 
     // Resolve command or script.
-    let raw_cmd = if let Some(ref script) = variant_cfg.script {
-        format!("sh {}", ctx.project_root.join(script).display())
-    } else {
-        variant_cfg.command.clone().unwrap_or_default()
+    let raw_cmd = match &resolved.script {
+        Some(script) => config::CommandSpec::script(&ctx.project_root.join(script)),
+        None => resolved
+            .command
+            .clone()
+            .unwrap_or_else(|| config::CommandSpec::Shell(String::new())),
     };
-    let resolved_cmd = crate::variables::interpolate(&raw_cmd, var_ctx)?;
+    let resolved_cmd = raw_cmd.interpolate(var_ctx)?;
 
     // Build env (variant > node > project).
-    let merged_env = config::resolve_env(
-        ctx.config.env.as_ref(),
-        node_cfg.env.as_ref(),
-        variant_cfg.env.as_ref(),
-    );
-    let env = build_env(merged_env.as_ref(), var_ctx)?;
+    let (env, env_secret_keys) = build_env(
+        resolved.env.as_ref(),
+        var_ctx,
+        &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        &ctx.project_root,
+    )
+    .await?;
+    node_state.sensitive_keys.extend(env_secret_keys);
+
+    if let Some(files) = &resolved.files {
+        crate::values::deliver_files(
+            files,
+            &ctx.project_root,
+            &format!("nodes.{}.variants.{}", sel.node, sel.variant),
+        )
+        .await?;
+    }
 
     // Idempotency check (skip_if).
-    if let Some(ref skip_if_cmd) = variant_cfg.skip_if {
-        let skip_if_resolved = crate::variables::interpolate(skip_if_cmd, var_ctx)?;
+    if let Some(ref skip_if_cmd) = resolved.skip_if {
+        let skip_if_resolved = skip_if_cmd.interpolate(var_ctx)?;
         let skip_if_result =
             process::run_command(&skip_if_resolved, &working_dir, &env, None).await;
         if let Ok(ref out) = skip_if_result {
@@ -2761,7 +3207,7 @@ async fn execute_command_isolated(
         .insert("exit_code".to_owned(), result.exit_code.to_string());
 
     // Filter outputs against declared keys.
-    let declared_keys = variant_cfg
+    let declared_keys = resolved
         .outputs
         .as_ref()
         .map(|o| o.declared_keys())
@@ -2770,7 +3216,7 @@ async fn execute_command_isolated(
     for (k, v) in &result.outputs {
         if declared_keys.contains(k.as_str()) {
             node_state.outputs.insert(k.clone(), v.clone());
-        } else if variant_cfg.strict_outputs {
+        } else if resolved.strict_outputs {
             let reason = format!(
                 "undeclared output \"{k}\" — add it to \"outputs\" or set \"strict_outputs\": false"
             );
@@ -2797,10 +3243,45 @@ async fn execute_command_isolated(
         }
     }
 
+    // F9.3: the map form on a `command` node publishes computed values, so a build
+    // step can say where its artifact landed. Interpolated *after* the command
+    // ran, with its captured outputs in scope as `${output.*}`, which is the whole
+    // point — the value usually depends on what the command produced.
+    if let Some(Outputs::Synthetic(ref map)) = resolved.outputs {
+        for (key, value) in &node_state.outputs {
+            var_ctx.set_output(key, value.clone());
+        }
+        // Taint propagation, as on the `start_server` path — and this is the sharper
+        // case: these templates are interpolated *after* the command ran, with its
+        // captured outputs in scope, so `${output.TOKEN}` where `TOKEN` is declared
+        // sensitive is not hypothetical, it is the intended usage.
+        //
+        // `resolved.sensitive_outputs` is consulted directly because the caller
+        // applies it to `node_state` only after this function returns.
+        let mut sensitive: Vec<String> = node_state.sensitive_keys.clone();
+        sensitive.extend(resolved.sensitive_outputs.iter().flatten().cloned());
+        let secret_vars: Vec<String> = ctx
+            .config
+            .vars
+            .iter()
+            .flatten()
+            .filter(|(_, value)| value.secret)
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut tainted: Vec<String> = Vec::new();
+        for (key, template) in map {
+            let value = crate::variables::interpolate(template, var_ctx)?;
+            if template_is_tainted(template, &sensitive, &secret_vars) {
+                tainted.push(key.clone());
+            }
+            node_state.outputs.insert(key.clone(), value);
+        }
+        mark_sensitive(&mut node_state.sensitive_keys, tainted);
+    }
+
     if result.exit_code == 0 {
         // Run readiness probe if configured (probes.readiness on command nodes).
-        if let Some(hc) = variant_cfg.readiness_probe() {
-            let hc = hc.clone();
+        if let Some(hc) = resolved.readiness.clone() {
             node_state.status = NodeStatus::HealthChecking;
             emit_progress(
                 &ctx.progress_tx,
@@ -2815,8 +3296,8 @@ async fn execute_command_isolated(
             let notifier = make_attempt_notifier(&ctx.progress_tx, &sel.node, &sel.variant, 1);
             let probe_result = match hc.check_type.as_str() {
                 "command" | "bash" => {
-                    if let Some(cmd) = &hc.command {
-                        health::wait_for_command_check(cmd, &working_dir, &hc, Some(&notifier))
+                    if let Some(cmd) = hc.cmd.spec() {
+                        health::wait_for_command_check(&cmd, &working_dir, &hc, Some(&notifier))
                             .await
                     } else {
                         Ok(())
@@ -2942,19 +3423,50 @@ async fn wait_for_process_exit(pid: u32) {
     }
 }
 
-/// Build the environment map, resolving variable references in values.
-fn build_env(
-    env_config: Option<&HashMap<String, String>>,
+/// Build the environment map: interpolate inline values, and dereference every
+/// configured source (F7).
+///
+/// Only an **inline literal** is interpolated. A value fetched from a file, the
+/// environment, or a command is used verbatim — substituting `${…}` inside
+/// fetched content would turn any secret store into an interpolation vector, and
+/// a password that happens to contain `${` would either break or, worse, expand.
+///
+/// Returns the resolved values plus the keys declared `secret`, so the caller can
+/// mark them sensitive without the values themselves needing a wrapper type.
+async fn build_env(
+    env_config: Option<&HashMap<String, config::ConfigValue>>,
     ctx: &VariableContext,
-) -> Result<HashMap<String, String>, crate::variables::VariableError> {
+    at_prefix: &str,
+    project_root: &Path,
+) -> Result<(HashMap<String, String>, Vec<String>), OrchestratorError> {
     let mut env = HashMap::new();
-    if let Some(map) = env_config {
-        for (key, tmpl) in map {
-            let val = crate::variables::interpolate(tmpl, ctx)?;
-            env.insert(key.clone(), val);
+    let mut secret_keys = Vec::new();
+    let Some(map) = env_config else {
+        return Ok((env, secret_keys));
+    };
+    // Sorted so a failure is deterministic: with two broken sources the same one
+    // is always reported.
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    for key in keys {
+        let value = &map[key];
+        let resolved = match value.as_literal() {
+            Some(tmpl) => crate::variables::interpolate(tmpl, ctx)?,
+            None => {
+                crate::values::resolve_value(
+                    value,
+                    &format!("{at_prefix}.env.{key}"),
+                    Some(project_root),
+                )
+                .await?
+            }
+        };
+        env.insert(key.clone(), resolved);
+        if value.secret {
+            secret_keys.push(key.clone());
         }
     }
-    Ok(env)
+    Ok((env, secret_keys))
 }
 
 fn whoami_username() -> String {
@@ -3208,8 +3720,187 @@ mod tests {
             progress_tx: None,
             internal_log: None,
             terminal_node: None,
+            resolved_vars: None,
             terminal_outputs: Some(HashMap::new()),
         }
+    }
+
+    /// F0.3: one builtin set, so `${veld.node}` (and every sibling) resolves the
+    /// same way on the start, terminal, and stop paths. Before this, `node` and
+    /// `variant` existed only in the action context.
+    #[test]
+    fn builtin_scope_is_one_closed_set() {
+        let root = std::path::Path::new("/projects/app");
+        let mut ctx = VariableContext::new();
+        BuiltinScope {
+            run_name: "dev",
+            run_id: Some("abc".to_owned()),
+            project_root: root,
+            project_name: "app",
+            worktree: "My Worktree",
+            branch: "feature/Thing",
+            username: "sam",
+            node: Some(("api", "local")),
+        }
+        .apply(&mut ctx);
+
+        let got = |k: &str| ctx.builtins.get(k).cloned().unwrap_or_default();
+        assert_eq!(got("run"), "dev");
+        assert_eq!(got("run_id"), "abc");
+        assert_eq!(got("root"), "/projects/app");
+        assert_eq!(got("project"), "app");
+        assert_eq!(got("name"), "app");
+        assert_eq!(got("node"), "api");
+        assert_eq!(got("variant"), "local");
+        assert_eq!(got("username"), "sam");
+        // worktree/branch are slugified for URL safety.
+        assert_eq!(got("worktree"), url::slugify("My Worktree"));
+        assert_eq!(got("branch"), url::slugify("feature/Thing"));
+
+        // A project-level step has no node, and must not invent one.
+        let mut project_ctx = VariableContext::new();
+        BuiltinScope {
+            run_name: "dev",
+            run_id: None,
+            project_root: root,
+            project_name: "app",
+            worktree: "app",
+            branch: "main",
+            username: "sam",
+            node: None,
+        }
+        .apply(&mut project_ctx);
+        assert!(!project_ctx.builtins.contains_key("node"));
+        assert!(!project_ctx.builtins.contains_key("variant"));
+    }
+
+    /// F0.2 exit gate: an output named like a builtin must not shadow it.
+    ///
+    /// The `on_stop` path used to inject every node output into the *builtins*
+    /// map, so a node with an output called `run` made `${veld.run}` resolve to
+    /// the output during teardown and to the run name everywhere else — the same
+    /// string, two values.
+    ///
+    /// `run` is the probe here, not `port`: on the old code `set_builtin("port",
+    /// …)` ran *after* the outputs loop and overwrote it, so `port` was never
+    /// actually shadowable. The genuinely shadowable builtins were the ones set
+    /// before the loop — `run`, `branch`, `worktree`, `root`, `project`, `name`,
+    /// `username`. `port` is kept below as a control: it must still resolve to
+    /// the allocated port, and the output must still be reachable as
+    /// `${output.port}`.
+    ///
+    /// This also covers F0.3 on the stop path (`${veld.node}`/`${veld.variant}`).
+    #[tokio::test]
+    async fn output_does_not_shadow_builtin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("resolved");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "nodes": {{
+                    "svc": {{ "default_variant": "local", "variants": {{
+                        "local": {{
+                            "type": "start_server",
+                            "shell": "sleep 30",
+                            "on_stop": "printf '%s' \"${{veld.run}}|${{veld.port}}|${{veld.node}}|${{veld.variant}}|${{output.run}}|${{output.port}}\" > {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let key = RunState::node_key("svc", "local");
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new("svc", "local");
+        ns.status = NodeStatus::Healthy;
+        // The allocated port…
+        ns.port = Some(12345);
+        // …and node outputs that happen to be named like builtins. `run` was
+        // genuinely shadowable before F0.2; `port` never was (see above).
+        ns.outputs.insert("run".to_owned(), "SHADOW".to_owned());
+        ns.outputs.insert("port".to_owned(), "9999".to_owned());
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key);
+        orch.save_state(&run).unwrap();
+
+        orch.stop("testrun").await.expect("stop");
+
+        let resolved = std::fs::read_to_string(&marker).expect("on_stop must have run");
+        assert_eq!(
+            resolved, "testrun|12345|svc|local|SHADOW|9999",
+            "${{veld.run}} must stay the run name and ${{veld.port}} the allocated \
+             port; the same-named outputs are reachable only as ${{output.*}}"
+        );
+    }
+
+    /// F0.1 exit gate: `veld stop` must work against a running environment whose
+    /// config is semantically invalid — **and its `on_stop` hooks must still
+    /// execute**.
+    ///
+    /// This is the whole reason validation lives in `config::validate` (called
+    /// from `start`) rather than in the loader: `on_stop` is read from the
+    /// on-disk config at stop time, so a config error that failed the load would
+    /// mean teardown commands never run and containers leak with no way to clean
+    /// them up.
+    #[tokio::test]
+    async fn stop_succeeds_with_invalid_config() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("on-stop-ran");
+
+        // An invalid proxy header name: parses fine, `validate` rejects it.
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "proxy": {{ "request": {{ "remove": ["X Frame Options"] }} }},
+                "nodes": {{
+                    "svc": {{ "default_variant": "local", "variants": {{
+                        "local": {{
+                            "type": "start_server",
+                            "shell": "sleep 30",
+                            "on_stop": "touch {}"
+                        }}
+                    }}}}
+                }}
+            }}"#,
+            marker.display()
+        ))
+        .unwrap();
+        assert!(
+            !config::validate(&config).is_empty(),
+            "fixture must be semantically invalid"
+        );
+
+        let mut orch = test_orchestrator(project_root, config.clone());
+        let sel = NodeSelection {
+            node: "svc".to_owned(),
+            variant: "local".to_owned(),
+        };
+        let key = RunState::node_key(&sel.node, &sel.variant);
+
+        let mut run = RunState::new("testrun", &config.name);
+        run.status = RunStatus::Running;
+        let mut ns = NodeState::new(&sel.node, &sel.variant);
+        // Anything other than `Pending` — a node that never ran gets no hook.
+        ns.status = NodeStatus::Healthy;
+        run.nodes.insert(key.clone(), ns);
+        run.execution_order.push(key);
+        orch.save_state(&run).unwrap();
+
+        let result = orch.stop("testrun").await.expect("stop must not fail");
+        assert_eq!(result, StopResult::Stopped);
+        assert!(
+            marker.exists(),
+            "the on_stop hook must still run for an invalid config"
+        );
     }
 
     /// The core `--oneshot` contract: a non-zero terminal exit is returned (not
@@ -3222,12 +3913,12 @@ mod tests {
 
         let config: VeldConfig = serde_json::from_str(
             r#"{
-                "schemaVersion": "2",
+                "schemaVersion": "3",
                 "name": "testcfg",
                 "url_template": "{service}.{run}.{project}.localhost",
                 "nodes": {
                     "task": { "default_variant": "local", "variants": {
-                        "local": { "type": "command", "command": "echo running; exit 7" }
+                        "local": { "type": "command", "shell": "echo running; exit 7" }
                     }}
                 }
             }"#,
@@ -3258,5 +3949,147 @@ mod tests {
             reloaded.execution_order.contains(&key),
             "terminal node must be appended to execution_order for teardown"
         );
+    }
+
+    /// A node that inherits `type` from the node level is still hostname-checked.
+    ///
+    /// #170's collision check read `step_type` off the raw variant. That predates
+    /// node-level defaults (F3), where `type` is declared once on the node and the
+    /// variant omits it — so the raw read saw `None`, decided the node was not a
+    /// `start_server`, and skipped it. The result was a *safety* check that quietly
+    /// stopped covering the configs using the newer feature: two checkouts could
+    /// both claim one hostname and only one of them would route.
+    ///
+    /// The plain-variant case is asserted alongside it, because "resolve everything"
+    /// must not have broken the shape that already worked.
+    #[test]
+    fn node_level_type_is_still_hostname_checked() {
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "app",
+                "url_template": "{service}.{run}.{project}.localhost",
+                "nodes": {
+                    "inherits": {
+                        "type": "start_server",
+                        "variants": { "dev": { "shell": "serve" } }
+                    },
+                    "explicit": {
+                        "variants": { "dev": { "type": "start_server", "shell": "serve" } }
+                    },
+                    "task": {
+                        "variants": { "dev": { "type": "command", "shell": "true" } }
+                    }
+                }
+            }"#,
+        )
+        .expect("fixture must parse");
+
+        let plan = vec![vec![
+            NodeSelection {
+                node: "inherits".to_owned(),
+                variant: "dev".to_owned(),
+            },
+            NodeSelection {
+                node: "explicit".to_owned(),
+                variant: "dev".to_owned(),
+            },
+            NodeSelection {
+                node: "task".to_owned(),
+                variant: "dev".to_owned(),
+            },
+        ]];
+        let ctx = UrlContext {
+            branch: "main".to_owned(),
+            worktree: "app".to_owned(),
+            username: "dev".to_owned(),
+            hostname: "box".to_owned(),
+        };
+
+        let planned = planned_hostnames(&config, &plan, "main", &ctx).expect("must render");
+
+        assert!(
+            planned.contains(&"inherits.main.app.localhost".to_owned()),
+            "a node inheriting `type` from the node level must be checked: {planned:?}"
+        );
+        assert!(
+            planned.contains(&"explicit.main.app.localhost".to_owned()),
+            "{planned:?}"
+        );
+        // A `command` node serves no hostname, so offering one would invent a
+        // collision that cannot happen.
+        assert!(
+            !planned.iter().any(|h| h.starts_with("task.")),
+            "a command node must not claim a hostname: {planned:?}"
+        );
+    }
+
+    /// Recording sensitive keys is additive and idempotent.
+    ///
+    /// This existed as `node_state.sensitive_keys = sensitive`, so for a `command`
+    /// node the declared `sensitive_outputs` overwrote the secret `env` keys the
+    /// execution path had already recorded — the env value simply stopped being
+    /// masked, with nothing to indicate it. Three independent sources contribute
+    /// keys, so the only correct shape is union.
+    #[test]
+    fn marking_sensitive_keys_never_drops_existing_ones() {
+        let mut keys = vec!["ENV_SECRET".to_owned()];
+        mark_sensitive(&mut keys, ["DECLARED_OUTPUT".to_owned()]);
+        assert!(
+            keys.contains(&"ENV_SECRET".to_owned()),
+            "a later source must not discard an earlier one: {keys:?}"
+        );
+        assert!(keys.contains(&"DECLARED_OUTPUT".to_owned()));
+
+        // Idempotent: the same key arriving twice must not accumulate.
+        mark_sensitive(&mut keys, ["ENV_SECRET".to_owned()]);
+        assert_eq!(
+            keys.iter().filter(|k| *k == "ENV_SECRET").count(),
+            1,
+            "{keys:?}"
+        );
+    }
+
+    /// A synthetic output built from a sensitive value is itself sensitive.
+    ///
+    /// This predicate fails *silently* if it breaks — a wrong `false` means a
+    /// credential is persisted and displayed in the clear, with nothing in the
+    /// output to suggest anything went wrong. So each reference form is pinned,
+    /// along with the negative case, since marking everything sensitive would be
+    /// an equally silent way to make masking meaningless.
+    #[test]
+    fn synthetic_output_inherits_sensitivity_from_what_it_reads() {
+        let sensitive = vec!["DB_PASSWORD".to_owned(), "TOKEN".to_owned()];
+        let secret_vars = vec!["signing_key".to_owned()];
+
+        for tainted in [
+            // A `shell`-style env read — the common case for a DSN template.
+            "postgres://user:${DB_PASSWORD}@localhost/app",
+            "postgres://user:$DB_PASSWORD@localhost/app",
+            // This node's own declared-sensitive output.
+            "Bearer ${output.TOKEN}",
+            // Another node's.
+            "Bearer ${nodes.vault.TOKEN}",
+            // A secret var.
+            "${vars.signing_key}",
+        ] {
+            assert!(
+                template_is_tainted(tainted, &sensitive, &secret_vars),
+                "must be tainted: {tainted}"
+            );
+        }
+
+        for clean in [
+            "http://localhost:${veld.port}/health",
+            "${output.PUBLIC_URL}",
+            "${nodes.api.url}",
+            "${vars.region}",
+            "no references at all",
+        ] {
+            assert!(
+                !template_is_tainted(clean, &sensitive, &secret_vars),
+                "must not be tainted: {clean}"
+            );
+        }
     }
 }

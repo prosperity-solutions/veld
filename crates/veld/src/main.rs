@@ -258,6 +258,24 @@ enum Command {
         #[arg(long)]
         path: bool,
 
+        /// List each include glob, the files it matched, and the nodes each
+        /// defines. The fastest way to find out why a node seems missing.
+        #[arg(long)]
+        files: bool,
+
+        /// Explain one effective value and where it was defined, e.g.
+        /// `nodes.api.variants.dev.env.DATABASE_URL`. A value declared `secret`
+        /// is described, never printed.
+        #[arg(long, value_name = "POINTER")]
+        why: Option<String>,
+
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Check veld.json for semantic problems (CI-friendly).
+    Lint {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
@@ -633,7 +651,14 @@ async fn main() {
 
         Command::Presets { json } => commands::presets::run(json).await,
 
-        Command::Config { path, json } => commands::config::run(path, json).await,
+        Command::Config {
+            path,
+            files,
+            why,
+            json,
+        } => commands::config::run(path, files, why, json).await,
+
+        Command::Lint { json } => commands::lint::run(json).await,
 
         Command::Init => commands::init::run().await,
 

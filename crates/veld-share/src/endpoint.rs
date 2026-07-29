@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use iroh::endpoint::{BindOpts, presets};
 use iroh::{Endpoint, RelayConfig, RelayMap, RelayMode, RelayUrl, SecretKey};
 use tracing::warn;
-use veld_core::config::{RelayEntry, RelayPolicy, SecretSource};
+use veld_core::config::{CommandSpec, RelayEntry, RelayPolicy, SecretSource};
 
 /// ALPN protocol identifier for veld's share tunnels.
 pub const ALPN: &[u8] = b"veld/share/1";
@@ -584,14 +584,21 @@ pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
                 .trim_end()
                 .to_owned()
         }
-        SecretSource::Command(cmd) => {
+        // `argv` / `shell` (and the v1/v2 `command` spelling) all run a command
+        // and take its trimmed stdout. `SecretSource::command()` normalizes the
+        // three into one `CommandSpec` so the timeout, PATH injection, and
+        // trimming semantics below cannot diverge between them.
+        other => {
+            let spec = other
+                .command()
+                .expect("literal/env/file are handled above; the rest run a command");
             // The daemon/gateway runs with a bare service PATH (launchd,
             // systemd), so a command that works in the user's terminal (`op
             // read …`) would otherwise fail with "command not found". Same
             // precedent as the daemon's liveness probes. Resolved outside the
             // timeout below — PATH resolution carries its own bound.
             let user_path = veld_core::user_path::resolve_user_path().await;
-            run_token_command(cmd, &user_path).await?
+            run_token_command(&spec, &user_path).await?
         }
     };
     if value.is_empty() {
@@ -605,37 +612,41 @@ pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
 /// pin the PATH injection with an explicit value instead of mutating the
 /// process environment (which would be a data race under multithreaded
 /// `cargo test`).
-async fn run_token_command(cmd: &str, user_path: &str) -> Result<String> {
+async fn run_token_command(cmd: &CommandSpec, user_path: &str) -> Result<String> {
+    let shown = cmd.display();
+    let mut builder = veld_core::process::tokio_command(cmd)
+        .with_context(|| format!("building token command `{shown}`"))?;
     let output = tokio::time::timeout(
         TOKEN_RESOLVE_TIMEOUT,
         // kill_on_drop so a command that outlives the timeout (a hung
         // CLI, a vault stall) is reaped when the timed-out future drops,
         // rather than orphaned and left running on the daemon.
-        tokio::process::Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .env("PATH", user_path)
-            .kill_on_drop(true)
-            .output(),
+        builder.env("PATH", user_path).kill_on_drop(true).output(),
     )
     .await
     .with_context(|| {
+        // A credential helper that wants a biometric prompt or MFA has no tty
+        // under the daemon, so it hangs here rather than failing. Say so — the
+        // fix is a non-interactive source, not a longer timeout.
         format!(
-            "token command `{cmd}` timed out after {}s",
+            "token command `{shown}` timed out after {}s. A source command runs on the \
+             veld daemon, which has no terminal, so an interactive credential helper \
+             (biometric prompt, MFA) will hang. Use a non-interactive alternative — a \
+             service account, a cached session, or `{{ \"env\": … }}` / `{{ \"file\": … }}`.",
             TOKEN_RESOLVE_TIMEOUT.as_secs()
         )
     })?
-    .with_context(|| format!("running token command `{cmd}`"))?;
+    .with_context(|| format!("running token command `{shown}`"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "token command `{cmd}` failed ({}): {}",
+            "token command `{shown}` failed ({}): {}",
             output.status,
             stderr.trim()
         );
     }
     Ok(String::from_utf8(output.stdout)
-        .with_context(|| format!("token command `{cmd}` produced non-UTF-8 output"))?
+        .with_context(|| format!("token command `{shown}` produced non-UTF-8 output"))?
         .trim_end()
         .to_owned())
 }
@@ -1120,17 +1131,23 @@ mod tests {
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let injected = format!("{}:/usr/bin:/bin", dir.path().display());
-        let token = run_token_command("veld-fake-secret-cli", &injected)
-            .await
-            .unwrap();
+        let token = run_token_command(
+            &CommandSpec::Shell("veld-fake-secret-cli".to_owned()),
+            &injected,
+        )
+        .await
+        .unwrap();
         assert_eq!(token, "from-login-path");
 
         // Without the fake CLI's directory on PATH the same command must fail
         // with "command not found" — proving the injected PATH, not the
         // process PATH, is what resolved the CLI above.
-        let err = run_token_command("veld-fake-secret-cli", "/usr/bin:/bin")
-            .await
-            .unwrap_err();
+        let err = run_token_command(
+            &CommandSpec::Shell("veld-fake-secret-cli".to_owned()),
+            "/usr/bin:/bin",
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("failed"), "{err}");
     }
 

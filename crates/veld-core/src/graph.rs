@@ -33,8 +33,35 @@ pub type ExecutionPlan = Vec<Stage>;
 
 #[derive(Debug, Error)]
 pub enum GraphError {
-    #[error("unknown node \"{0}\"")]
-    UnknownNode(String),
+    /// Under `include` globs, "unknown node" has four distinct causes: never
+    /// defined, defined but not matched by a glob, its file renamed out of a glob,
+    /// or its file present but unparseable. A bare name cannot tell them apart, so
+    /// the error carries what the reader needs to: the nodes that *do* exist, and
+    /// a pointer at `veld config --files` for the glob→file→node chain.
+    #[error(
+        "unknown node \"{name}\"{}{}",
+        if known.is_empty() {
+            "\n  No nodes are defined at all.".to_owned()
+        } else {
+            format!("\n  Defined nodes: {}", known.join(", "))
+        },
+        if *split {
+            "\n  This project's config is split across files — run \
+             `veld config --files` to see which glob matched which file, and which \
+             nodes each defines. A node can go missing because its file was renamed \
+             out of an `include` glob."
+                .to_owned()
+        } else {
+            String::new()
+        }
+    )]
+    UnknownNode {
+        name: String,
+        /// Every defined node name, sorted.
+        known: Vec<String>,
+        /// Whether the config uses `include`, which changes what the likely cause is.
+        split: bool,
+    },
 
     #[error("node \"{node}\" has no variant \"{variant}\"")]
     UnknownVariant { node: String, variant: String },
@@ -57,6 +84,12 @@ pub enum GraphError {
     UnknownPreset(String),
 
     #[error(
+        "preset reference cycle: {0}. A preset may reference another with `@name`, but not \
+         itself, directly or transitively"
+    )]
+    PresetCycle(String),
+
+    #[error(
         "node \"{node}:{variant}\" has sensitive_outputs {undeclared:?} not declared in outputs"
     )]
     UndeclaredSensitiveOutputs {
@@ -69,6 +102,17 @@ pub enum GraphError {
 // ---------------------------------------------------------------------------
 // Parsing selection strings
 // ---------------------------------------------------------------------------
+
+/// Build an [`GraphError::UnknownNode`] carrying enough context to diagnose it.
+fn unknown_node(name: &str, config: &VeldConfig) -> GraphError {
+    let mut known: Vec<String> = config.nodes.keys().cloned().collect();
+    known.sort();
+    GraphError::UnknownNode {
+        name: name.to_owned(),
+        known,
+        split: config.loaded_from_multiple_files,
+    }
+}
 
 /// Parse a `"node:variant"` selection string.
 pub fn parse_selection(s: &str) -> Result<NodeSelection, GraphError> {
@@ -97,7 +141,7 @@ pub fn resolve_selections(
             let node_cfg = config
                 .nodes
                 .get(&sel.node)
-                .ok_or_else(|| GraphError::UnknownNode(sel.node.clone()))?;
+                .ok_or_else(|| unknown_node(&sel.node, config))?;
 
             let variant = if sel.variant.is_empty() {
                 node_cfg
@@ -126,11 +170,39 @@ pub fn resolve_selections(
         .collect()
 }
 
-/// Expand a preset name into its selections.
+/// Expand a preset name into its selections, following `@other-preset`
+/// references (F9.5).
+///
+/// A preset entry starting with `@` names another preset instead of a node, so
+/// `"ci": ["@full", "extra:default"]` is "everything in `full`, plus one more".
+/// Without this, a project with overlapping preset sets has to repeat every
+/// selection, and the repetitions drift.
+///
+/// Cycles are an error rather than a hang: `a → b → a` is a config mistake, and
+/// the error names the path so it is obvious which link to cut.
 pub fn expand_preset(
     preset_name: &str,
     config: &VeldConfig,
 ) -> Result<Vec<NodeSelection>, GraphError> {
+    let mut visiting = Vec::new();
+    expand_preset_inner(preset_name, config, &mut visiting)
+}
+
+fn expand_preset_inner(
+    preset_name: &str,
+    config: &VeldConfig,
+    visiting: &mut Vec<String>,
+) -> Result<Vec<NodeSelection>, GraphError> {
+    if visiting.iter().any(|p| p == preset_name) {
+        let mut path = visiting.clone();
+        path.push(preset_name.to_owned());
+        return Err(GraphError::PresetCycle(
+            path.iter()
+                .map(|p| format!("@{p}"))
+                .collect::<Vec<_>>()
+                .join(" → "),
+        ));
+    }
     let presets = config
         .presets
         .as_ref()
@@ -138,7 +210,30 @@ pub fn expand_preset(
     let items = presets
         .get(preset_name)
         .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;
-    items.iter().map(|s| parse_selection(s)).collect()
+
+    visiting.push(preset_name.to_owned());
+    let mut out: Vec<NodeSelection> = Vec::new();
+    for item in items {
+        match item.strip_prefix('@') {
+            Some(referenced) => {
+                for sel in expand_preset_inner(referenced, config, visiting)? {
+                    // De-duplicate: two presets that both include a node should
+                    // not start it twice.
+                    if !out.contains(&sel) {
+                        out.push(sel);
+                    }
+                }
+            }
+            None => {
+                let sel = parse_selection(item)?;
+                if !out.contains(&sel) {
+                    out.push(sel);
+                }
+            }
+        }
+    }
+    visiting.pop();
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -157,9 +252,13 @@ pub fn build_execution_plan(
     // 2. Build adjacency list (node -> set of nodes it depends on).
     let mut deps: HashMap<NodeSelection, HashSet<NodeSelection>> = HashMap::new();
     for sel in &all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
+        // Resolved, not raw: `depends_on` is hoistable to node level (F3), so a
+        // raw read here would silently drop an inherited edge.
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("selection was validated");
         let mut dep_set = HashSet::new();
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 dep_set.insert(NodeSelection {
                     node: dep_node.clone(),
@@ -198,23 +297,24 @@ fn collect_all_nodes(
         let node_cfg = config
             .nodes
             .get(&sel.node)
-            .ok_or_else(|| GraphError::UnknownNode(sel.node.clone()))?;
-        let variant_cfg =
-            node_cfg
-                .variants
-                .get(&sel.variant)
-                .ok_or_else(|| GraphError::UnknownVariant {
-                    node: sel.node.clone(),
-                    variant: sel.variant.clone(),
-                })?;
+            .ok_or_else(|| unknown_node(&sel.node, config))?;
+        if !node_cfg.variants.contains_key(&sel.variant) {
+            return Err(GraphError::UnknownVariant {
+                node: sel.node.clone(),
+                variant: sel.variant.clone(),
+            });
+        }
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("variant existence checked above");
 
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 // Validate the dependency target exists.
                 let dep_node_cfg = config
                     .nodes
                     .get(dep_node)
-                    .ok_or_else(|| GraphError::UnknownNode(dep_node.clone()))?;
+                    .ok_or_else(|| unknown_node(dep_node, config))?;
                 if !dep_node_cfg.variants.contains_key(dep_variant) {
                     return Err(GraphError::UnknownVariant {
                         node: dep_node.clone(),
@@ -311,30 +411,39 @@ fn validate_variable_references(
 
     // Scan project-level env for unqualified refs.
     if let Some(env_map) = &config.env {
-        for v in env_map.values() {
+        // Only inline literals are interpolated, so only they can hold a
+        // `${nodes.…}` reference.
+        for v in env_map.values().flatten().filter_map(|v| v.as_literal()) {
             check_string_for_ambiguous_refs(v, &active_variants)?;
         }
     }
 
     // For each node, scan its env, variant env, and command strings for unqualified refs.
     for sel in all_nodes {
-        let node_cfg = &config.nodes[&sel.node];
-        let variant_cfg = &node_cfg.variants[&sel.variant];
+        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
+            continue;
+        };
 
-        let mut strings_to_check: Vec<&str> = Vec::new();
-        if let Some(cmd) = &variant_cfg.command {
-            strings_to_check.push(cmd);
-        }
-        if let Some(env_map) = &node_cfg.env {
-            for v in env_map.values() {
-                strings_to_check.push(v);
+        // The command's own strings: for `argv`, every element (each is
+        // interpolated independently); for `shell`, the whole string.
+        let mut owned_strings: Vec<String> = Vec::new();
+        if let Some(spec) = resolved.command.clone() {
+            match spec {
+                crate::config::CommandSpec::Argv(argv) => owned_strings.extend(argv),
+                crate::config::CommandSpec::Shell(sh) => owned_strings.push(sh),
             }
         }
-        if let Some(env_map) = &variant_cfg.env {
-            for v in env_map.values() {
-                strings_to_check.push(v);
-            }
+        // The resolved env, so a value hoisted to node level is scanned once and
+        // an erased key is not scanned at all.
+        if let Some(env_map) = &resolved.env {
+            owned_strings.extend(
+                env_map
+                    .values()
+                    .filter_map(|v| v.as_literal())
+                    .map(str::to_owned),
+            );
         }
+        let strings_to_check: Vec<&str> = owned_strings.iter().map(String::as_str).collect();
 
         for s in strings_to_check {
             check_string_for_ambiguous_refs(s, &active_variants)?;
@@ -350,9 +459,11 @@ fn validate_sensitive_outputs(
     config: &VeldConfig,
 ) -> Result<(), GraphError> {
     for sel in all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
-        if let Some(ref sensitive) = variant_cfg.sensitive_outputs {
-            let declared = variant_cfg
+        let resolved = config
+            .resolved(&sel.node, &sel.variant)
+            .expect("selection was validated");
+        if let Some(ref sensitive) = resolved.sensitive_outputs {
+            let declared = resolved
                 .outputs
                 .as_ref()
                 .map(|o| o.declared_keys())
@@ -385,8 +496,10 @@ pub fn get_dependents(
     // Build reverse adjacency: for each node, which nodes depend on it.
     let mut reverse_deps: HashMap<String, Vec<NodeSelection>> = HashMap::new();
     for sel in all_nodes {
-        let variant_cfg = &config.nodes[&sel.node].variants[&sel.variant];
-        if let Some(dep_map) = &variant_cfg.depends_on {
+        let Some(resolved) = config.resolved(&sel.node, &sel.variant) else {
+            continue;
+        };
+        if let Some(dep_map) = &resolved.depends_on {
             for (dep_node, dep_variant) in dep_map {
                 let dep_key = format!("{dep_node}:{dep_variant}");
                 reverse_deps.entry(dep_key).or_default().push(sel.clone());
@@ -472,13 +585,18 @@ mod tests {
     fn make_config() -> VeldConfig {
         // db -> api -> frontend (dependency chain)
         let db_variant = VariantConfig {
-            step_type: StepType::Command,
-            command: Some("echo db".into()),
+            step_type: Some(StepType::Command),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo db".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,
             depends_on: None,
             env: None,
+            ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -492,13 +610,18 @@ mod tests {
             share: None,
         };
         let api_variant = VariantConfig {
-            step_type: StepType::StartServer,
-            command: Some("echo api".into()),
+            step_type: Some(StepType::StartServer),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo api".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,
-            depends_on: Some(HashMap::from([("db".into(), "local".into())])),
+            depends_on: Some(HashMap::from([("db".into(), Some("local".into()))])),
             env: None,
+            ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -512,13 +635,18 @@ mod tests {
             share: None,
         };
         let frontend_variant = VariantConfig {
-            step_type: StepType::StartServer,
-            command: Some("echo fe".into()),
+            step_type: Some(StepType::StartServer),
+            cmd: crate::config::CommandKeys {
+                shell: Some("echo fe".into()),
+                ..Default::default()
+            },
             script: None,
             health_check: None,
             probes: None,
-            depends_on: Some(HashMap::from([("api".into(), "local".into())])),
+            depends_on: Some(HashMap::from([("api".into(), Some("local".into()))])),
             env: None,
+            ports: None,
+            files: None,
             outputs: None,
             sensitive_outputs: None,
             strict_outputs: true,
@@ -534,7 +662,7 @@ mod tests {
 
         VeldConfig {
             schema: None,
-            schema_version: "2".into(),
+            schema_version: "3".into(),
             name: "test".into(),
             url_template: "{service}.{run}.{project}.localhost".into(),
             presets: None,
@@ -545,6 +673,11 @@ mod tests {
             sharing: None,
             setup: None,
             teardown: None,
+            vars: None,
+            hooks: None,
+            ui: None,
+            loaded_from_multiple_files: false,
+            deferred_findings: Vec::new(),
             nodes: HashMap::from([
                 (
                     "db".into(),
@@ -558,6 +691,15 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), db_variant)]),
                     },
                 ),
@@ -573,6 +715,15 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), api_variant)]),
                     },
                 ),
@@ -588,11 +739,126 @@ mod tests {
                         env: None,
                         cwd: None,
                         actions: None,
+                        step_type: None,
+                        cmd: Default::default(),
+                        probes: None,
+                        share: None,
+                        ports: None,
+                        depends_on: None,
+                        outputs: None,
+                        on_stop: None,
+                        files: None,
                         variants: HashMap::from([("local".into(), frontend_variant)]),
                     },
                 ),
             ]),
         }
+    }
+
+    /// F9.5: a preset may reference another with `@name`, so overlapping sets do
+    /// not have to repeat every selection and then drift.
+    #[test]
+    fn presets_compose_and_deduplicate() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([
+            (
+                "core".to_owned(),
+                vec!["db:local".to_owned(), "api:local".to_owned()],
+            ),
+            (
+                "full".to_owned(),
+                vec!["@core".to_owned(), "frontend:local".to_owned()],
+            ),
+            // Two references to the same preset must not start anything twice.
+            (
+                "ci".to_owned(),
+                vec!["@full".to_owned(), "@core".to_owned()],
+            ),
+        ]));
+
+        let full = expand_preset("full", &config).unwrap();
+        let names: Vec<String> = full.iter().map(|s| s.to_string()).collect();
+        assert_eq!(names, vec!["db:local", "api:local", "frontend:local"]);
+
+        let ci = expand_preset("ci", &config).unwrap();
+        assert_eq!(
+            ci.len(),
+            3,
+            "an already-included selection is not repeated: {ci:?}"
+        );
+    }
+
+    /// A cycle is a config mistake, so it is an error naming the path rather than
+    /// a hang.
+    #[test]
+    fn preset_cycle_is_an_error_naming_the_path() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([
+            ("a".to_owned(), vec!["@b".to_owned()]),
+            ("b".to_owned(), vec!["@a".to_owned()]),
+        ]));
+        let err = expand_preset("a", &config).unwrap_err();
+        assert!(matches!(err, GraphError::PresetCycle(_)), "{err:?}");
+        let msg = err.to_string();
+        assert!(msg.contains("@a") && msg.contains("@b"), "{msg}");
+
+        // A preset referencing itself directly is the same class of mistake.
+        config.presets = Some(HashMap::from([(
+            "self".to_owned(),
+            vec!["@self".to_owned()],
+        )]));
+        assert!(matches!(
+            expand_preset("self", &config),
+            Err(GraphError::PresetCycle(_))
+        ));
+    }
+
+    #[test]
+    fn unknown_preset_reference_is_named() {
+        let mut config = make_config();
+        config.presets = Some(HashMap::from([("ci".to_owned(), vec!["@nope".to_owned()])]));
+        assert!(matches!(
+            expand_preset("ci", &config),
+            Err(GraphError::UnknownPreset(name)) if name == "nope"
+        ));
+    }
+
+    /// Under `include` globs, "unknown node" has four causes, so the error carries
+    /// the material to tell them apart.
+    #[test]
+    fn unknown_node_error_lists_defined_nodes() {
+        let mut config = make_config();
+        config.loaded_from_multiple_files = true;
+        let err = resolve_selections(
+            &[NodeSelection {
+                node: "typo".into(),
+                variant: "local".into(),
+            }],
+            &config,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("typo"), "{msg}");
+        assert!(msg.contains("api"), "must list what does exist: {msg}");
+        assert!(
+            msg.contains("veld config --files"),
+            "a split config must point at the glob→file→node chain: {msg}"
+        );
+
+        // A single-file config gets the node list but not the include advice,
+        // which would only mislead.
+        config.loaded_from_multiple_files = false;
+        let msg = resolve_selections(
+            &[NodeSelection {
+                node: "typo".into(),
+                variant: "local".into(),
+            }],
+            &config,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(msg.contains("api"));
+        assert!(!msg.contains("veld config --files"), "{msg}");
     }
 
     #[test]

@@ -459,7 +459,7 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     let config_path = FsPath::new(&wt.path).join("veld.json");
     let has_veld_config = config_path.is_file();
     let cfg = if has_veld_config {
-        veld_core::config::load_config(&config_path).ok()
+        veld_core::config::parse_config(&config_path).ok()
     } else {
         None
     };
