@@ -253,8 +253,9 @@ describe("startSelectionLabel", () => {
 
 describe("startBody", () => {
   it("sends exactly one of preset / selections", () => {
-    // `veld start` treats the two as mutually exclusive; sending both, or
-    // neither, fails with "No selections provided".
+    // `veld start` treats the two as mutually exclusive. Sending neither is not a
+    // safe no-op either: it falls back to the project's `default_preset` when one
+    // is declared, and only fails "No selections provided" when there isn't one.
     expect(startBody({ kind: "preset", name: "full" })).toEqual({
       preset: "full",
     });

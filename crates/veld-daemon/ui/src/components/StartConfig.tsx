@@ -16,8 +16,10 @@ import type { Preset, Worktree } from "../api";
 
 /**
  * What ▶ starts: a preset, or an explicit set of `node:variant` selections.
- * A non-TTY `veld start` with neither fails ("No selections provided"), so
- * the UI always resolves to one of the two before starting.
+ * The UI always resolves to one of the two before starting — sending neither is
+ * not a no-op, since a bare `veld start` falls back to the project's
+ * `default_preset` when one is declared and only fails ("No selections provided")
+ * when there isn't one.
  */
 export type StartSelection =
   | { kind: "preset"; name: string }

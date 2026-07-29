@@ -537,7 +537,15 @@ fn generate_veld_json(
     json.push_str("  },\n");
     // So a bare `veld start` — and a coding agent told "start the app" — has a
     // defined answer from the first run, rather than a prompt or an error.
-    json.push_str("  \"default_preset\": \"default\",\n");
+    //
+    // Only when the preset actually selects something. This function is also
+    // reached with no detected services ("starting from scratch"), and pointing
+    // `default_preset` at an empty preset makes a bare `veld start` report a
+    // started environment with zero nodes and exit 0 — the same false success the
+    // static template at the top of this file refuses to write.
+    if !preset_entries.is_empty() {
+        json.push_str("  \"default_preset\": \"default\",\n");
+    }
     json.push_str("  \"nodes\": {\n");
 
     let mut node_entries: Vec<String> = Vec::new();

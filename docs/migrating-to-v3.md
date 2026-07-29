@@ -280,10 +280,40 @@ would commit.
 "presets": { "core": ["api:dev", "web:dev"], "ci": ["@core", "e2e:dev"] }
 ```
 
-### Presets gained keys and metadata — nothing to migrate
+### Presets gained keys and metadata
 
-A preset may now be an object as well as an array. **The array form stays valid
-and is not deprecated**, so no existing `presets` block needs to change:
+**Read this even if you change nothing: the numbers in the `veld start` picker
+move once, on upgrade.**
+
+They used to be positions in an *alphabetically sorted* list. They are now keys,
+assigned in the order presets are declared in the file. So for a config whose
+presets are not written in alphabetical order, the number people type now means a
+different preset:
+
+```jsonc
+"presets": { "zulu": [...], "alpha": [...], "docker": [...] }
+```
+
+| | `1` | `2` | `3` |
+|---|---|---|---|
+| before | `alpha` | `docker` | `zulu` |
+| after | `zulu` | `alpha` | `docker` |
+
+That is a one-time change, and it is the point: a position renumbers every time
+someone adds a preset, which is the bug being fixed. But it does mean a runbook
+or a habit that says "run `veld start`, press 2" needs re-checking once. After
+upgrading:
+
+```sh
+veld presets              # the numbers as they now stand
+veld presets --pin        # a block to paste that freezes them for good
+```
+
+Pin the numbers people actually type and they will not move again.
+
+The rest of this section is optional. A preset may now be an object as well as an
+array; **the array form stays valid and is not deprecated**, so no existing
+`presets` block needs to change:
 
 ```jsonc
 "presets": {

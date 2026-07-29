@@ -557,6 +557,11 @@ choose it. Both forms are fully supported.
 ```
 
 Usage: `veld start --preset fullstack --name my-feature`, or `veld start --preset 1`.
+In a script, pass the name or a pinned key — an unpinned key can move.
+
+Upgrading from an earlier veld: the picker's numbers used to be positions in an
+alphabetically sorted list and are now assigned in declaration order, so they change
+once. Re-check any runbook naming a number, then `veld presets --pin` to freeze them.
 
 **`key` is an identity, not a list position.** A pinned key does not move when
 presets are added, removed, renamed, or regrouped, so the number someone

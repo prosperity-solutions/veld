@@ -207,7 +207,12 @@ monorepo another team can renumber presets it does not own. `veld presets` marks
 the auto-assigned keys and `veld presets --pin` prints a paste-ready block that
 freezes them (veld never rewrites a config itself).
 
+**Upgrade note:** these numbers used to be positions in an alphabetically sorted
+list and are now assigned in declaration order, so they changed once. Tell the user
+to re-check any runbook that names a number, and to run `veld presets --pin`.
+
 `--preset` takes either: `veld start --preset 2` == `veld start --preset dev-staging`.
+In a script, pass the **name** or a **pinned** key — an unpinned key can move.
 A preset *named* like a number takes that number as its key, so there is normally
 nothing to disambiguate. If another preset also pins that key, `--preset 7` resolves
 the **name** first (scripts predate keys) while the picker resolves the **key** first

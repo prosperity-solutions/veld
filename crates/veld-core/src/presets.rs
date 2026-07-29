@@ -262,10 +262,18 @@ pub fn resolve(config: &VeldConfig) -> Vec<ResolvedPreset> {
     // agree and the list has no gap. That leaves
     // `preset-name-shadowed-by-key` to report only what an author did deliberately:
     // pinning a key that collides with someone else's name.
+    // Only a *canonical* decimal name claims a key. `"01"` and `"1"` both parse to
+    // 1, so accepting either would hand two presets the same key — printing `[1]`
+    // twice, leaving one unreachable by number, and saying nothing, since
+    // `preset-duplicate-key` only inspects pinned keys. `"+2"` is the same trap.
+    let canonical = |name: &String| -> Option<u32> {
+        let n = name.parse::<u32>().ok()?;
+        (n >= 1 && n.to_string() == *name).then_some(n)
+    };
     let claimed_by_name: HashSet<u32> = presets
         .keys()
-        .filter_map(|n| n.parse::<u32>().ok())
-        .filter(|n| *n >= 1 && !pinned_keys.contains(n))
+        .filter_map(canonical)
+        .filter(|n| !pinned_keys.contains(n))
         .collect();
 
     let mut used: HashSet<u32> = pinned_keys.union(&claimed_by_name).copied().collect();
@@ -287,12 +295,11 @@ pub fn resolve(config: &VeldConfig) -> Vec<ResolvedPreset> {
                 Some(k) => (k, true),
                 // The number this preset's own name claimed above, if any — it was
                 // reserved for exactly this preset, so no further check is needed.
-                None => match name
-                    .parse::<u32>()
-                    .ok()
-                    .filter(|n| claimed_by_name.contains(n))
-                {
-                    Some(own) => (own, false),
+                // Reported as `pinned`, because it is: the name holds the number as
+                // firmly as a `key` would, so listing it among the keys that "can
+                // still move" would be a lie to both the reader and `--json`.
+                None => match canonical(name).filter(|n| claimed_by_name.contains(n)) {
+                    Some(own) => (own, true),
                     None => (lowest_free(&mut used), false),
                 },
             };
@@ -867,6 +874,44 @@ mod tests {
         // So both lookups agree, with nothing to disambiguate.
         assert_eq!(find_by_name_then_key(&config, "2").unwrap().name, "2");
         assert_eq!(find_by_key_then_name(&config, "2").unwrap().name, "2");
+        // The name holds that number as firmly as a `key` would, so it must not be
+        // advertised as an auto key that might still move.
+        assert!(
+            resolve(&config)
+                .iter()
+                .find(|p| p.name == "2")
+                .unwrap()
+                .pinned
+        );
+    }
+
+    /// Only a canonical decimal name claims a key. `"01"` and `"1"` both parse to
+    /// 1, and honouring both would silently give two presets the same key —
+    /// unreportable, since `preset-duplicate-key` only inspects pinned keys.
+    #[test]
+    fn non_canonical_numeric_names_do_not_claim_keys() {
+        let config = config_with(
+            r#"{ "1": ["a:x"], "01": ["b:x"], "+2": ["c:x"], "0": ["d:x"] }"#,
+            None,
+        );
+        let assigned = keys(&config);
+        let mut nums: Vec<u32> = assigned.iter().map(|(_, k)| *k).collect();
+        nums.sort_unstable();
+        nums.dedup();
+        assert_eq!(
+            nums.len(),
+            4,
+            "every preset needs a distinct key: {assigned:?}"
+        );
+        let by_name: std::collections::HashMap<String, u32> = assigned.into_iter().collect();
+        assert_eq!(
+            by_name["1"], 1,
+            "the canonical name still claims its number"
+        );
+        // `01`, `+2` and `0` are not canonical, so they take ordinary free numbers.
+        for name in ["01", "+2", "0"] {
+            assert_ne!(by_name[name], 1);
+        }
     }
 
     /// A pin outranks a name's claim on the same number — the author asked for it

@@ -1409,8 +1409,15 @@ A pinned `key` never moves -- not when presets are added, removed, renamed, or
 regrouped. That is what makes it safe to memorise, to put in a runbook, and to
 say to a colleague.
 
+> **Upgrading?** These numbers used to be positions in an alphabetically sorted
+> list, and they are now assigned in declaration order -- so for a config whose
+> presets are not written alphabetically, they change once. See
+> [the migration note](./migrating-to-v3.md#presets-gained-keys-and-metadata), and
+> run `veld presets --pin` to freeze them.
+
 Presets without a `key` take the **lowest number not already claimed**, in the
-order they are declared. Two consequences worth knowing:
+order they are declared. A preset *named* like a number (`"7"`) claims that number,
+so its name and its key agree. Two consequences worth knowing:
 
 - **Appending a preset leaves every existing key alone** -- the normal workflow.
   So does pinning a preset at the number it is already showing, which is what
@@ -1444,6 +1451,10 @@ Veld never rewrites your config, so applying the block is your call -- run
 
 `--preset` accepts a key as well as a name, so `veld start --preset 2` and
 `veld start --preset dev-staging` are the same thing.
+
+In a **script**, prefer the name, or a key you have pinned. An unpinned key is a
+convenience for whoever is looking at the list right now; passing one from a script
+means passing a number that can move.
 
 The two differ only for a config that has a preset *named* like a number. A
 preset named `7` takes key 7, so normally there is nothing to disambiguate; if
@@ -1503,6 +1514,11 @@ running `veld start` in a non-interactive shell -- it is used directly, where a
 bare `veld start` would otherwise fail with "No selections provided".
 
 It must name a preset that exists; `veld lint` reports it if not.
+
+Without a TTY and with no `default_preset` declared, a bare `veld start` still
+exits 1 with a JSON payload on stdout: `error`, `nodes`, `presets` (the same
+records `veld presets --json` emits), and a `hint` naming the three ways to give it
+something to start.
 
 ### Composing presets
 
