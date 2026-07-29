@@ -26,7 +26,11 @@ unreadable.
   (`env`/`file`/`argv`) and `secret: true`. A secret may reach a process's
   environment or a file, never a command line.
 - **`veld.*` is a closed set.** Node outputs are `${output.*}` and
-  `${nodes.<node>.*}`.
+  `${nodes.<node>.*}`. The set is closed but not uniform: `port`/`url`/`url.*`/
+  `ports.*` exist only on a `start_server` node, `node`/`variant` only on a node,
+  `run_id` not in a project step, and a `vars` value gets the run-scoped names
+  only. `veld lint` reports a name written out of scope as
+  `builtin-not-in-scope`. A node's `on_stop` has exactly what the node had.
 - **Any new field that runs something is called `argv`/`shell`** — never
   `command`, `cmd`, `exec`, or `run`.
 
@@ -35,7 +39,9 @@ unreadable.
 ```jsonc
 {
   // Every config file accepts // and /* */ comments and trailing commas, at any
-  // schemaVersion. Editors need `"files.associations": {"veld.json": "jsonc"}`.
+  // schemaVersion. The root file may be veld.json OR veld.jsonc; with both in
+  // one directory veld.json wins and lint errors `ambiguous-root-config`. With
+  // .json, editors need `"files.associations": {"veld.json": "jsonc"}`.
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "3",
   "name": "myproject",
@@ -131,6 +137,21 @@ A var is a **scalar or a single value source** — never an object, never a conf
 fragment. It may not reference another var (one hop). Duplicate names and unknown
 references are errors. `veld config --why <pointer>` shows where a value came from.
 
+A var literal is **interpolated**, so every `${…}` in it is veld's to resolve: a
+reference in no veld namespace (`"${HOME}/.cache"`) is a
+`var-unresolvable-reference` error — write `$HOME` unbraced for the shell, or use
+`{ "env": "HOME" }`. It is interpolated against the **run-scoped** built-ins — `${veld.run}`,
+`run_id`, `name`, `project`, `root`, `worktree`, `branch`, `username`. The per-node
+ones (`port`, `url`, `url.*`, `ports.*`, `node`, `variant`) are a
+`builtin-not-in-scope` error in a var: a var is one value for the whole run, so
+compose those at the use site. A var whose value is a *fetched* source is used
+verbatim (no interpolation inside secret-store content).
+
+A var backed by a source is resolved **only when the resolved plan reaches it** —
+the same laziness a node-level `env` source has — so a credential-helper var does
+not run on a `veld start` whose nodes need no secret. `${vars.*}` works in `setup`
+steps too (it silently did not before).
+
 ## Value sources and `secret` (v3)
 
 ```jsonc
@@ -143,14 +164,25 @@ references are errors. `veld config --why <pointer>` shows where a value came fr
 ```
 
 Sources: `value` (inline literal, so it can carry the flag), `env`, `file`,
-`argv`, `shell`. Resolved once at run start, before the first spawn — never at
-parse. A missing `env` source is an error naming the node and the variable. A
-source command has a 30s timeout (an interactive credential helper has no terminal
-under the daemon, so it hangs — use a non-interactive source).
+`argv`, `shell`. Resolved at most once per run, at start — never at parse, and
+only if the resolved plan reaches the value. A missing `env` source is an error
+naming the node and the variable. A source command has a 30s timeout (an
+interactive credential helper has no terminal under the daemon, so it hangs — use
+a non-interactive source).
 
-**A `secret` value must not appear in `argv` or `shell`** — that is a lint error,
-because a command line lands in the process table. Deliver it via the environment
-or `files`.
+**A `secret` value must not be substituted by veld into `argv` or `shell`** —
+that is a lint error (`secret-in-command`), because a command line lands in the
+process table. Deliver it via the environment or `files`.
+
+Refused — the forms veld resolves, so the value really does land in argv:
+`${vars.x}`, `${output.x}`, `${nodes.a.x}` naming a secret, anywhere in a command.
+
+Allowed, and the recommended form: a bare `$NAME`, in **any** position. veld's
+interpolation consumes `${…}` and nothing else, so `$NAME` reaches argv untouched
+— a shell expands it later in the child, where the value never appears in any
+process's arguments, and where no shell is involved it is inert text. There is no
+shell-detection heuristic. Also allowed: handing a container the *name* only,
+`["docker", "run", "-e", "NAME", "img"]`.
 
 ## `ports` and `files` (v3)
 
@@ -250,6 +282,14 @@ rather than at `veld start`:
 | `preset-name-shadowed-by-key` | warning | a preset named like a number another preset **pins** as its key |
 | `default-preset-unknown` | error | `default_preset` names nothing |
 | `presets-undocumented` | notice | 8+ presets, none with a `label` or `when_to_use` |
+| `unknown-node-ref` | error | `${nodes.X.…}` where `X` is not a node anywhere |
+| `preset-missing-node-ref` | error | `${nodes.X.…}` where `X` is real but not in *this* preset's plan |
+
+The last two resolve `${nodes.X.…}` against each preset's plan — the
+"works with preset A, dies with preset B" class, which is the one thing a reader
+cannot check by opening a single node file. A node pulled in transitively by
+`depends_on` counts as present, and the message names both the preset and the
+reference.
 
 ## Setup & Teardown
 
@@ -271,7 +311,12 @@ Project-level lifecycle steps. Not nodes — no variants, no health checks, no d
 Step fields: `name` (required), `argv` or `shell` (required, exactly one),
 `failureMessage` (optional).
 
-Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars (`${veld.port}`, `${nodes.*}`).
+Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`,
+`${veld.worktree}`, `${veld.branch}`, `${veld.username}` and `${vars.*}`, plus
+shell env vars. No node-scoped vars (`${veld.port}`, `${veld.url}`,
+`${veld.node}`, `${nodes.*}`) and no `${veld.run_id}` — a teardown step also runs
+from `veld stop` after the run row is gone. `veld lint` reports these as
+`builtin-not-in-scope`.
 
 ## Node Types
 
@@ -393,7 +438,7 @@ Substitution available inside `command` and `parameters` values:
 - `${param.KEY}` — this action's parameters
 - `${veld.run}`, `${veld.node}`, `${veld.variant}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
 
-**Secrets — prefer `$KEY` over `${output.KEY}`.** A secret referenced as `${output.DB_PASS}` is interpolated into the command string, so it ends up in the process list (`ps`) and any argv-based logging. `$DB_PASS` is passed as an environment variable and expanded by the shell at runtime, so it never appears in argv — as in the `psql` example above. GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) are the exception: the URL is expanded into the launcher's argv regardless, so to avoid exposure there, omit the password and let the client prompt.
+**Secrets — `$KEY` beats `${output.KEY}`, but is not automatically safe.** `${output.DB_PASS}` is interpolated by veld into the command string, so it is in `ps` for certain — a `secret-in-command` **error**. `$DB_PASS` is expanded by the *shell*, and where the expansion lands decides the outcome: `echo $DB_PASS` (builtin) and `PGPASSWORD=$DB_PASS psql -U u db` (environment assignment) leak nothing, while `psql "postgres://u:$DB_PASS@host/db"` makes the shell `execve` `psql` with the expanded value in *that* program's argv. The shell's own `ps` entry shows the literal `$DB_PASS`; the program it runs shows the value. veld cannot distinguish them, so this is a `secret-shell-expansion` **warning**. Prefer giving the program the variable *name* (`PGPASSWORD=`, `--password-file`, `-e NAME`). GUI clients launched with a connection URL (`open -a Postico "postgresql://$DB_USER:$DB_PASS@…"`) always expand into the launcher's argv — omit the password and let the client prompt.
 
 Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain shell/env references inside a command — otherwise Veld tries to resolve it and errors. When an action is defined on multiple nodes, disambiguate with `veld action <name> --node <node>`.
 

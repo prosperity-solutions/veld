@@ -490,6 +490,43 @@ impl BuiltinScope<'_> {
     }
 }
 
+/// The `${veld.url}` family, derived from the node's own HTTPS URL.
+///
+/// One owner for the derivation, because there were three callers and only one
+/// of them was complete: the `on_stop` context set `port` and stopped there, so a
+/// teardown hook naming its container after `${veld.url.hostname}` — the obvious
+/// way to stop the name in `argv` and the name in `on_stop` from drifting —
+/// failed to interpolate, and an `on_stop` that fails to interpolate is a leaked
+/// container.
+///
+/// The URL is the input rather than `(hostname, https_port)` because that is all
+/// the stop path has: `NodeState` persists the URL, not the pieces.
+///
+/// That is exact for every hostname veld generates, since `node_hostname`
+/// slugifies to `[a-z0-9-]` and cannot produce a colon. It is deliberately
+/// **not** identical for one input the old two-place construction handled badly:
+/// a `url_template` carrying a literal port (`"{service}.localhost:3000"`) at
+/// `https_port == 443` used to yield `url.hostname = "svc.localhost:3000"` and
+/// `url.port = "443"` — the port in the wrong field, twice. Splitting the URL
+/// gives `"svc.localhost"` and `"3000"`. A config that read the old values sees
+/// different ones; they were wrong.
+pub fn url_builtins(https_url: &str) -> Vec<(&'static str, String)> {
+    let rest = https_url.strip_prefix("https://").unwrap_or(https_url);
+    let host = rest.split('/').next().unwrap_or(rest);
+    let (hostname, port) = match host.rsplit_once(':') {
+        Some((h, p)) if !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()) => (h, p.to_owned()),
+        _ => (host, "443".to_owned()),
+    };
+    vec![
+        ("url", https_url.to_owned()),
+        ("url.hostname", hostname.to_owned()),
+        ("url.host", host.to_owned()),
+        ("url.origin", https_url.to_owned()),
+        ("url.scheme", "https".to_owned()),
+        ("url.port", port),
+    ]
+}
+
 /// Machine-readable outcome detail for a failed start.
 fn end_detail_for_error(e: &OrchestratorError) -> EndDetail {
     let mut detail = EndDetail::default();
@@ -535,7 +572,6 @@ struct NodeExecutionContext {
     config: Arc<VeldConfig>,
     db: Db,
     project_root: Arc<PathBuf>,
-    https_port: u16,
     foreground: bool,
     helper_client: HelperClient,
     progress_tx: Option<mpsc::UnboundedSender<ProgressEvent>>,
@@ -849,10 +885,43 @@ impl Orchestrator {
         ))
         .await;
 
+        // Project `vars` are resolved in two passes with one cache: the ones a
+        // `setup` step reaches for, before setup runs, and the rest below, before
+        // the first node spawns. A var is still resolved at most once per run —
+        // two resolutions of a rotating credential would disagree — but now only
+        // if something actually reaches for it.
+        //
+        // Setup could not see `${vars.*}` at all before this: `project_step_context`
+        // read `resolved_vars`, which was still empty this early, so a var
+        // referenced in a setup step failed with "no var named …" while being
+        // declared three lines up in the same file.
+        let vars_ctx = self.vars_context(
+            run_name,
+            run.run_id,
+            &url_ctx.branch,
+            &url_ctx.worktree,
+            &url_ctx.username,
+        );
+
         // Run project-level setup steps before the graph executes. A setup
         // failure happens before the run is persisted, so record it as
         // `failed` history directly — this run never held the live slot.
-        if let Err(e) = self.run_setup_steps(run_name).await {
+        let setup_result = match crate::values::resolve_vars(
+            self.config.vars.as_ref(),
+            Some(&self.project_root),
+            &vars_ctx,
+            &config::vars_for_setup(&self.config),
+            &HashMap::new(),
+        )
+        .await
+        {
+            Ok(vars) => {
+                self.resolved_vars = Some(Arc::new(vars));
+                self.run_setup_steps(run_name).await
+            }
+            Err(e) => Err(e.into()),
+        };
+        if let Err(e) = setup_result {
             run.status = RunStatus::Failed;
             run.end_reason = Some(EndReason::Failed);
             run.end_detail = Some(end_detail_for_error(&e));
@@ -946,20 +1015,12 @@ impl Orchestrator {
                 for (name, value) in &named_ports {
                     node_out.insert(format!("ports.{name}"), value.to_string());
                 }
-                node_out.insert("url".to_owned(), https_url.clone());
-                // Expose individual URL location pieces (mirrors the Web URL API).
-                node_out.insert("url.hostname".to_owned(), node_url.clone());
-                node_out.insert(
-                    "url.host".to_owned(),
-                    if self.https_port == 443 {
-                        node_url.clone()
-                    } else {
-                        format!("{}:{}", node_url, self.https_port)
-                    },
-                );
-                node_out.insert("url.origin".to_owned(), https_url.clone());
-                node_out.insert("url.scheme".to_owned(), "https".to_owned());
-                node_out.insert("url.port".to_owned(), self.https_port.to_string());
+                // `url` plus the individual location pieces (mirrors the Web URL
+                // API), from the same derivation the node's own `${veld.url*}`
+                // and its `on_stop` use.
+                for (key, value) in url_builtins(&https_url) {
+                    node_out.insert(key.to_owned(), value);
+                }
                 all_outputs.insert(format!("{}:{}", sel.node, sel.variant), node_out.clone());
                 all_outputs
                     .entry(sel.node.clone())
@@ -1038,13 +1099,31 @@ impl Orchestrator {
         self.debug_log("Run persisted as 'starting' before first stage executes")
             .await;
 
-        // Resolve project `vars` before anything spawns: a var may be backed by a
-        // file or a command, and a broken source must fail the start rather than
-        // surface as an empty value inside a service.
-        let shared_vars = Arc::new(
-            crate::values::resolve_vars(self.config.vars.as_ref(), Some(&self.project_root))
-                .await?,
+        // Resolve the rest of the plan's `vars` before anything spawns: a var may
+        // be backed by a file or a command, and a broken source must fail the
+        // start rather than surface as an empty value inside a service. Only the
+        // plan's — a credential helper behind a var no selected node mentions is
+        // not woken up, matching what a node-level `env` source already did.
+        //
+        // `plan`, not `resolved`: `resolved` is the *endpoints*, and a node pulled
+        // in only by `depends_on` interpolates its own `env` like any other. Asking
+        // the endpoints would leave a var that only a dependency uses unresolved,
+        // and the node would fail at spawn with "no var named …" for a var that is
+        // declared right there in the config.
+        let planned: Vec<NodeSelection> = plan.iter().flatten().cloned().collect();
+        let mut all_vars: HashMap<String, String> =
+            self.resolved_vars.as_deref().cloned().unwrap_or_default();
+        all_vars.extend(
+            crate::values::resolve_vars(
+                self.config.vars.as_ref(),
+                Some(&self.project_root),
+                &vars_ctx,
+                &config::vars_for_plan(&self.config, &planned),
+                &all_vars,
+            )
+            .await?,
         );
+        let shared_vars = Arc::new(all_vars);
         self.resolved_vars = Some(Arc::clone(&shared_vars));
 
         // Wrap immutable data in Arc once for all stages.
@@ -1469,7 +1548,6 @@ impl Orchestrator {
             config: Arc::clone(shared_config),
             db: self.db.clone(),
             project_root: Arc::clone(shared_project_root),
-            https_port: self.https_port,
             foreground: self.foreground,
             helper_client: self.helper_client.clone(),
             progress_tx: self.progress_tx.clone(),
@@ -1646,18 +1724,45 @@ impl Orchestrator {
         // this degrades to no vars and the affected hooks report being skipped.
         let stop_vars: Arc<HashMap<String, String>> = match &self.resolved_vars {
             Some(v) => Arc::clone(v),
-            None => match crate::values::resolve_vars(
-                self.config.vars.as_ref(),
-                Some(&self.project_root),
-            )
-            .await
-            {
-                Ok(v) => Arc::new(v),
-                Err(e) => {
-                    tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
-                    Arc::new(HashMap::new())
+            None => {
+                // Only what the stopping nodes and the project-level surfaces can
+                // reach, for the same reason `start` is selective: a `veld stop`
+                // must not run a credential helper for a var no `on_stop` here
+                // mentions.
+                let selections: Vec<graph::NodeSelection> = run
+                    .nodes
+                    .values()
+                    .map(|n| graph::NodeSelection {
+                        node: n.node_name.clone(),
+                        variant: n.variant.clone(),
+                    })
+                    .collect();
+                let ctx = self.vars_context(
+                    run_name,
+                    run_id,
+                    &url::detect_git_branch(&self.project_root),
+                    self.project_root
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("default"),
+                    &whoami_username(),
+                );
+                match crate::values::resolve_vars(
+                    self.config.vars.as_ref(),
+                    Some(&self.project_root),
+                    &ctx,
+                    &config::vars_for_teardown(&self.config, &selections),
+                    &HashMap::new(),
+                )
+                .await
+                {
+                    Ok(v) => Arc::new(v),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
+                        Arc::new(HashMap::new())
+                    }
                 }
-            },
+            }
         };
 
         // Stop in reverse execution order (dependencies last). Fall back to
@@ -2035,9 +2140,23 @@ impl Orchestrator {
         for (k, v) in &node_state.outputs {
             ctx.set_output(k, v.clone());
             ctx.set_node_output(&format!("nodes.{}.{k}", node_state.node_name), v.clone());
+            // A named port is an output *and* a builtin at start time; it has to
+            // be both here too, or `${veld.ports.debug}` resolves in the command
+            // that created the container and not in the one that removes it.
+            if k.starts_with("ports.") {
+                ctx.set_builtin(k, v.clone());
+            }
         }
         if let Some(port) = node_state.port {
             ctx.set_builtin("port", port.to_string());
+        }
+        // `${veld.url}` and its pieces were missing here while `${veld.port}` was
+        // present — an asymmetry with no reason behind it, and the URL is the
+        // half a teardown hook is more likely to want.
+        if let Some(url) = &node_state.url {
+            for (key, value) in url_builtins(url) {
+                ctx.set_builtin(key, value);
+            }
         }
 
         let resolved_cmd = match on_stop_cmd.interpolate(&ctx) {
@@ -2127,6 +2246,37 @@ impl Orchestrator {
                 );
             }
         }
+    }
+
+    /// Build the interpolation context a `vars` **value** is resolved in.
+    ///
+    /// Run-scoped builtins and nothing else, deliberately: a var is one value for
+    /// the whole run, so `${veld.port}` or `${veld.node}` in one could only mean
+    /// some arbitrary node's. `config::BuiltinScopeKind::Vars` is the lint-side
+    /// statement of the same rule, and `check_builtin_names` refuses the
+    /// per-node names here rather than letting a literal `${veld.port}` reach a
+    /// process as text.
+    fn vars_context(
+        &self,
+        run_name: &str,
+        run_id: uuid::Uuid,
+        branch: &str,
+        worktree: &str,
+        username: &str,
+    ) -> VariableContext {
+        let mut ctx = VariableContext::new();
+        BuiltinScope {
+            run_name,
+            run_id: Some(run_id.to_string()),
+            project_root: &self.project_root,
+            project_name: &self.config.name,
+            worktree,
+            branch,
+            username,
+            node: None,
+        }
+        .apply(&mut ctx);
+        ctx
     }
 
     /// Build the interpolation context for a project-level lifecycle step
@@ -2617,20 +2767,10 @@ async fn execute_start_server_isolated(
             .insert(format!("ports.{name}"), value.to_string());
     }
     node_state.url = Some(https_url.clone());
-    var_ctx.set_builtin("url", https_url.clone());
-    // Expose individual URL location pieces (mirrors the Web URL API).
-    var_ctx.set_builtin("url.hostname", node_url.clone());
-    var_ctx.set_builtin(
-        "url.host",
-        if ctx.https_port == 443 {
-            node_url.clone()
-        } else {
-            format!("{}:{}", node_url, ctx.https_port)
-        },
-    );
-    var_ctx.set_builtin("url.origin", https_url.clone());
-    var_ctx.set_builtin("url.scheme", "https".to_owned());
-    var_ctx.set_builtin("url.port", ctx.https_port.to_string());
+    // `url` plus the individual location pieces (mirrors the Web URL API).
+    for (key, value) in url_builtins(&https_url) {
+        var_ctx.set_builtin(key, value);
+    }
 
     emit_progress(
         &ctx.progress_tx,
@@ -3705,7 +3845,8 @@ mod tests {
         let db = Db::open_at(&project_root.join("veld.db")).unwrap();
         Orchestrator {
             config,
-            config_path: project_root.join("veld.json"),
+            // A synthetic path for a test Orchestrator; no file is read through it.
+            config_path: project_root.join("veld.json"), // root-config-gate-ok
             config_hash: String::new(),
             project_root: project_root.to_path_buf(),
             db,
@@ -3723,6 +3864,49 @@ mod tests {
             resolved_vars: None,
             terminal_outputs: Some(HashMap::new()),
         }
+    }
+
+    /// The `${veld.url*}` family is derived from the URL alone, so the stop path
+    /// — which has only `NodeState.url` — produces exactly what the start path
+    /// built from `(hostname, https_port)`.
+    #[test]
+    fn url_builtins_round_trip_both_port_forms() {
+        let by_key = |url: &str| -> HashMap<String, String> {
+            url_builtins(url)
+                .into_iter()
+                .map(|(k, v)| (k.to_owned(), v))
+                .collect()
+        };
+
+        // The non-443 form the local helper actually serves.
+        let local = by_key("https://web.dev.veld.localhost:8443");
+        assert_eq!(local["url"], "https://web.dev.veld.localhost:8443");
+        assert_eq!(local["url.hostname"], "web.dev.veld.localhost");
+        assert_eq!(local["url.host"], "web.dev.veld.localhost:8443");
+        assert_eq!(local["url.origin"], "https://web.dev.veld.localhost:8443");
+        assert_eq!(local["url.scheme"], "https");
+        assert_eq!(local["url.port"], "8443");
+
+        // Port 443 is elided from the URL, exactly as the start path elides it,
+        // and `url.port` still reports the real one.
+        let standard = by_key("https://web.dev.veld.localhost");
+        assert_eq!(standard["url.hostname"], "web.dev.veld.localhost");
+        assert_eq!(standard["url.host"], "web.dev.veld.localhost");
+        assert_eq!(standard["url.port"], "443");
+
+        // A `url_template` may carry a literal port, which `node_hostname` passes
+        // through. The old two-place construction put it in the wrong field at
+        // `https_port == 443` — `url.hostname` kept the `:3000` and `url.port`
+        // said `443`. Pinned because it is the one input where this is a
+        // deliberate behaviour change rather than an extraction.
+        let templated = by_key("https://svc.localhost:3000");
+        assert_eq!(templated["url.hostname"], "svc.localhost");
+        assert_eq!(templated["url.port"], "3000");
+        assert_eq!(templated["url.host"], "svc.localhost:3000");
+
+        // A hostname veld generates can never contain a colon, so the split is
+        // unambiguous for everything except the templated case above.
+        assert!(!crate::url::slugify("weird:name").contains(':'));
     }
 
     /// F0.3: one builtin set, so `${veld.node}` (and every sibling) resolves the

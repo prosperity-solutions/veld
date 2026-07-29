@@ -4,7 +4,7 @@
 //! A "repo" is a git repository the user imported (keyed by its main checkout
 //! root); worktrees are its `git worktree` checkouts. Run state is not
 //! duplicated here — the UI joins a worktree to `/api/environments` by path
-//! (every worktree with a veld.json is its own veld project root).
+//! (every worktree with a root config is its own veld project root).
 //!
 //! Git subprocesses run with the user's login-shell `PATH` (AGENTS.md daemon
 //! rule) and argument-vector spawning — no shell interpolation. Mutating
@@ -438,12 +438,12 @@ struct RepoView {
 struct WorktreeView {
     #[serde(flatten)]
     worktree: WorktreeRecord,
-    /// Whether the checkout has a veld.json — drives whether the UI shows run
+    /// Whether the checkout has a root config — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
-    /// Presets from the checkout's veld.json, in display order, with their keys
-    /// and labels (empty without a config). The UI shows the label a human can
-    /// read; `name` is what it sends back to start the run.
+    /// Presets from the checkout's root config, in display order, with their
+    /// keys and labels (empty without a config). The UI shows the label a human
+    /// can read; `name` is what it sends back to start the run.
     presets: Vec<veld_core::presets::ResolvedPreset>,
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
@@ -458,13 +458,11 @@ struct NodeOptionView {
 }
 
 fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
-    let config_path = FsPath::new(&wt.path).join("veld.json");
-    let has_veld_config = config_path.is_file();
-    let cfg = if has_veld_config {
-        veld_core::config::parse_config(&config_path).ok()
-    } else {
-        None
-    };
+    let config_path = veld_core::config::root_config_in(FsPath::new(&wt.path));
+    let has_veld_config = config_path.is_some();
+    let cfg = config_path
+        .as_deref()
+        .and_then(|p| veld_core::config::parse_config(p).ok());
     // Display order comes from the resolver, not a sort here — the UI list and
     // the CLI picker must agree, or the key printed next to a preset in one
     // surface means something else in the other.
@@ -913,7 +911,7 @@ struct StartBody {
 }
 
 /// Start a veld run in a worktree by spawning `veld start` with the worktree
-/// as cwd (the CLI resolves veld.json from there) — the same fire-and-forget
+/// as cwd (the CLI resolves the root config from there) — the same fire-and-forget
 /// pattern as the management stop/restart endpoints. Returns 202; the UI
 /// observes progress via `/api/environments`.
 async fn start_worktree_run(
@@ -926,10 +924,10 @@ async fn start_worktree_run(
         .map_err(db_err)?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
     let wt_path = PathBuf::from(&wt.path);
-    if !wt_path.join("veld.json").is_file() {
+    if veld_core::config::root_config_in(&wt_path).is_none() {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "worktree has no veld.json — nothing to start",
+            "worktree has no veld.json or veld.jsonc — nothing to start",
         ));
     }
 

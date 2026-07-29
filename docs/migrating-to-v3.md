@@ -69,9 +69,16 @@ Outputs are reachable as:
 - `${nodes.<node>.KEY}` — any node's
 
 `veld lint` and `veld start` reject any `${veld.*}` name that is not a builtin,
-so this is caught **before a run starts** rather than at teardown — which
+**and any real builtin written where it is not populated** — `${veld.url}` on a
+`command` node, `${veld.node}` in a `setup` step, `${veld.port}` in a `vars`
+value. Both are caught **before a run starts** rather than at teardown — which
 matters, because a teardown hook that fails to interpolate does not run, and
-whatever it was going to clean up gets left behind.
+whatever it was going to clean up gets left behind. See
+[Availability](configuration.md#availability) for the full matrix.
+
+`on_stop` now receives everything its node had, `${veld.url}` and
+`${veld.url.*}` and `${veld.ports.*}` included; it previously got `${veld.port}`
+and stopped there.
 
 ---
 
@@ -157,12 +164,19 @@ None of this is required. Each item exists to remove a specific workaround.
 
 Legal in every config file, no rename needed. One caveat: your **editor** does
 not know that. A `veld.json` with a `$schema` is validated by the editor's strict
-JSON parser, so map it to the `jsonc` language to stop spurious errors:
+JSON parser, so either rename the root file to `veld.jsonc` — veld reads both, and
+editors pick JSONC mode from the extension — or map the `.json` names to the
+`jsonc` language:
 
 ```jsonc
 // .vscode/settings.json
 { "files.associations": { "veld.json": "jsonc", "*.node.json": "jsonc" } }
 ```
+
+Rename rather than copy: in a directory holding both, `veld.json` wins and
+`veld lint` errors with `ambiguous-root-config`, so `veld start` refuses until you
+delete one. (`veld stop` keeps working — that is a lint finding, not a load
+failure, so teardown hooks still run.) `veld init` still writes `veld.json`.
 
 ### Splitting the config across files
 
@@ -230,6 +244,14 @@ One definition point per value:
 A var holds a *value*, not a config fragment, and may not reference another var.
 `veld config --why <pointer>` shows where an effective value came from.
 
+A var literal may use the **run-scoped** built-ins — `${veld.run}`, `run_id`,
+`name`, `project`, `root`, `worktree`, `branch`, `username`. The per-node ones
+(`port`, `url`, `url.*`, `ports.*`, `node`, `variant`) are a lint error in a var,
+because a var is one value for the whole run; compose those at the use site. A var
+backed by a `file` / `env` / `argv` / `shell` source is resolved only when the
+plan reaches it, so a credential helper behind a var is not run by a
+`veld start docs`.
+
 ### Named ports
 
 ```jsonc
@@ -253,9 +275,19 @@ ports, which silently break parallel worktrees.
 ```
 
 veld never takes custody of a secret: it carries a pointer and a flag, resolves
-it at run start, and passes it to the process's environment or a file.
-`secret: true` is what lets veld *refuse* the unsafe uses — a secret in an `argv`
-element or a `shell` string is an error, because both appear in the process table.
+it at run start (only if the plan reaches it), and passes it to the process's
+environment or a file.
+`secret: true` is what lets veld *refuse* the unsafe uses — a secret veld
+*substitutes* into an `argv` element or a `shell` string (`${vars.x}`,
+`${output.x}`, `${nodes.a.x}`) is an error, because the value lands in the process
+table for certain.
+
+A bare `$SECRET_NAME` is a **warning** (`secret-shell-expansion`), not an error:
+the *shell* expands it, so it leaks only when the expansion becomes another
+program's argument. `PGPASSWORD=$DB_PASS psql …` is safe;
+`psql "postgres://u:$DB_PASS@host/db"` is not, because the shell then `execve`s
+`psql` with the password in its argv. Handing a container the name only,
+`["docker", "run", "-e", "SECRET_NAME", "img"]`, is always safe.
 
 A missing `env` source is an error at start naming the node and the variable,
 rather than an empty value your app trips over later.

@@ -54,7 +54,7 @@ cargo build --release
 
 ## Quick Start
 
-1. Create a `veld.json` in your project root:
+1. Create a `veld.json` (or `veld.jsonc` — both are read; with both present `veld.json` wins and lint reports it) in your project root:
 
 ```json
 {
@@ -121,14 +121,22 @@ veld stop --name dev
   supported for pipes, `&&`, and redirection.
 - **Secrets are a pointer plus a flag, never custody.** A value can be read from `env`, a `file`, or
   the stdout of an `argv`/`shell` command, and marked `secret: true`. veld resolves it at run start
-  and passes it via the process environment or a delivered file. A `secret` value interpolated into
-  an `argv` element or `shell` string is a lint **error**, because both appear in the process table.
-  `veld config` prints a redacted placeholder and there is no flag that prints a resolved secret.
+  and passes it via the process environment or a delivered file (and only if the resolved plan
+  reaches it, so a credential helper is not run for a service you did not start). A `secret` value
+  veld *substitutes* into an `argv` element or `shell` string — `${vars.x}`, `${output.x}`,
+  `${nodes.a.x}` — is a lint **error**, because the value lands in the process table for certain. A
+  bare `$NAME` is a **warning** instead: the shell expands it, so it leaks only when the expansion
+  becomes another program's argument (`PGPASSWORD=$DB_PASS psql …` is safe;
+  `psql "postgres://u:$DB_PASS@host/db"` is not — the shell execs psql with the password in its
+  argv). `veld config` prints a redacted placeholder and there is no flag that prints a resolved
+  secret.
 - **`veld lint` reports every semantic problem at once** and exits non-zero, for CI. Covers unknown
-  built-in variables, unresolvable presets (dangling `@ref`, cycles, unknown node or variant),
-  secrets heading for a command line, credential-shaped literals, and reserved-but-inert keys.
-  Semantic problems are deliberately *not* load errors, so a config that has drifted can still be
-  torn down with `veld stop`.
+  built-in variables, built-ins written where they are not populated (`${veld.url}` on a `command`
+  node, `${veld.port}` in a `vars` value), a `${nodes.X}` naming a node that does not exist or one
+  a given preset's plan does not contain, unresolvable presets (dangling `@ref`, cycles, unknown
+  node or variant), secrets heading for a command line, credential-shaped literals, and
+  reserved-but-inert keys. Semantic problems are deliberately *not* load errors, so a config that
+  has drifted can still be torn down with `veld stop`.
 
 ## CLI Reference
 
@@ -160,7 +168,7 @@ veld stop --name dev
 | `veld leave [JOIN_ID] [--json]` | Disconnect from a joined share (defaults to the sole active join) |
 | `veld gc` | Clean up stale state and logs |
 | `veld setup [unprivileged\|privileged]` | One-time system setup |
-| `veld init` | Create a new veld.json |
+| `veld init` | Create a new veld.json (veld also reads veld.jsonc) |
 
 All commands support `--json` for structured output, making veld scriptable and CI/agent-friendly.
 
@@ -370,7 +378,7 @@ Project-level lifecycle steps that run outside the dependency graph. Not nodes �
 
 Step fields: `name` (required), `argv` or `shell` (required, exactly one), `failureMessage` (optional — shown on failure).
 
-Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars.
+Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}` and `${vars.*}`, plus shell env vars. No node-scoped vars (`${veld.port}`, `${veld.url}`, `${veld.node}`, `${nodes.*}`) and no `${veld.run_id}` — a teardown step also runs from `veld stop` after the run row is gone.
 
 ### Step Types
 
@@ -485,11 +493,21 @@ For `command` variants — array (captured from `$VELD_OUTPUT_FILE` or legacy `V
 | `${veld.url.port}` | HTTPS port (`${veld.port}` is the backend bind port) |
 | `${veld.run}` | Run name |
 | `${veld.run_id}` | Stable run UUID |
-| `${veld.root}` | Path to directory containing veld.json |
+| `${veld.root}` | Path to the directory containing the root config |
 | `${veld.project}` | Project name |
+| `${veld.name}` | Project name (alias for `${veld.project}`) |
 | `${veld.worktree}` | Slugified worktree directory name |
 | `${veld.branch}` | Current git branch (slugified) |
 | `${veld.username}` | OS username |
+| `${veld.node}` | This node's name |
+| `${veld.variant}` | This variant's name |
+| `${veld.ports.<name>}` | A named port from this node's `ports` map (start_server only) |
+
+Availability is not uniform, and `veld lint` checks a reference against the context it sits in
+(`builtin-not-in-scope`): `port`/`url`/`url.*`/`ports.*` exist only on a `start_server` node,
+`node`/`variant` only on a node, `run_id` not in a project `setup`/`teardown` step, and a `vars`
+value gets the run-scoped names only (a var is one value for the whole run, so compose per-node
+ones at the use site). A node's `on_stop` receives exactly what the node had, URL family included.
 
 #### Node Output References (`${nodes.*}`)
 

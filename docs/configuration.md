@@ -2,16 +2,18 @@
 
 ## Overview
 
-Veld is configured through a single `veld.json` file placed in the root of your project. This file is committed to version control and defines your entire local development environment: the services to run, how they depend on each other, health checks, environment wiring, and URL routing.
+Veld is configured through a single root config file placed in the root of your project. This file is committed to version control and defines your entire local development environment: the services to run, how they depend on each other, health checks, environment wiring, and URL routing.
 
-Veld discovers `veld.json` by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld init`.
+The root file may be named **`veld.json` or `veld.jsonc`** — both are read identically, and `veld init` writes `veld.json`. If a directory holds both, `veld.json` wins and `veld lint` reports `ambiguous-root-config` as an error, so `veld start` refuses until you delete or rename one. It is a *finding* rather than a load failure on purpose: discovery runs on every subcommand including `stop`, and a root config that refuses to load is one whose `on_stop` hooks never run, leaking the containers they exist to remove.
 
-All relative paths in the configuration resolve relative to the directory containing `veld.json` -- never the current working directory.
+Veld discovers it by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld init`.
+
+All relative paths in the configuration resolve relative to the directory containing the root config -- never the current working directory.
 
 ### Comments and trailing commas
 
 Every Veld config file accepts `//` line comments, `/* */` block comments, and
-trailing commas — at every `schemaVersion`, with no rename to `.jsonc`:
+trailing commas — at every `schemaVersion`, whatever the file is called:
 
 ```jsonc
 {
@@ -28,8 +30,10 @@ by `veld lint` and `veld start`, not by the loader, so `veld stop` still works
 against a config you are in the middle of editing.)
 
 **Your editor does not know this.** A `veld.json` carrying a `$schema` is validated
-by the editor's strict JSON parser, which flags comments as syntax errors. Map the
-file to the `jsonc` language:
+by the editor's strict JSON parser, which flags comments as syntax errors. Either
+**rename** the root file to `veld.jsonc` — editors pick JSONC mode from the
+extension, so nothing else is needed — or map the `.json` names to the `jsonc`
+language:
 
 ```jsonc
 // .vscode/settings.json
@@ -41,6 +45,13 @@ file to the `jsonc` language:
   }
 }
 ```
+
+Rename — do not copy. Keeping the old `veld.json` around "just in case" leaves the
+directory with two different root configs, which is an `ambiguous-root-config`
+error and refuses `veld start` until one of them goes.
+
+Included files have always been matched by glob, so `include: ["nodes/*.jsonc"]`
+worked before the root name did.
 
 The same applies to anything else that reads the file as strict JSON — `veld config
 | jq` will break on a commented config.
@@ -344,6 +355,14 @@ Setup and teardown steps run outside the node graph, so node-scoped variables �
 | `${veld.username}` | OS username |
 | `${vars.*}` | Any project [`vars`](#vars) entry |
 | Shell env vars | `$HOME`, `$PATH`, `$CI`, etc. — expanded by the shell (in a `shell` step; an `argv` step has no shell to expand them) |
+
+`${veld.run_id}` is also unavailable: a `teardown` step runs from `veld stop` after
+the run row is gone, so there is no id to report. Use `${veld.run}`.
+
+> **Fixed in this release.** `${vars.*}` was documented here but silently empty —
+> a setup step referencing a var failed with *"no var named …"* while the var was
+> declared three lines up. Vars a setup step names are now resolved just before it
+> runs (and, being cached, are not resolved a second time for the graph).
 
 #### Execution lifecycle
 
@@ -840,9 +859,19 @@ declaring its own, and **disables it with `"on_stop": null`**:
 ```
 
 The `on_stop` command receives the same variable context that was available during start:
-- All `${veld.*}` built-in variables (`${veld.root}`, `${veld.project}`, `${veld.port}`, `${veld.node}`, etc. — see [Built-in Variables](#built-in-variables-veld))
-- This node's outputs as `${output.KEY}`, and any node's as `${nodes.<node>.KEY}` (including the automatic `exit_code` of a `command` node)
+- Every `${veld.*}` built-in the node itself had — for a `start_server` node that includes `${veld.port}`, `${veld.url}`, `${veld.url.hostname}` and the rest of the URL family, and `${veld.ports.<name>}`. See [Availability](#availability).
+- This node's outputs as `${output.KEY}`, and its own as `${nodes.<self>.KEY}` (including the automatic `exit_code` of a `command` node)
 - Environment variables from the variant's `env` block
+
+Naming a resource after the same built-ins in `argv` and in `on_stop` is the point:
+a container called `${veld.project}-${veld.node}-${veld.run}` in both places cannot
+drift, whereas the same name copied by hand into two places is exactly how a
+container survives a `veld stop`.
+
+> **Changed in this release.** `on_stop` used to receive `${veld.port}` but not
+> `${veld.url}`, `${veld.url.*}`, or `${veld.ports.*}` — an asymmetry with no
+> reason behind it, and the URL half is the one a teardown hook is more likely to
+> want. All of them are now populated.
 
 > **Changed:** node outputs used to *also* be reachable as `${veld.KEY}` here — and only
 > here. That let an output named like a built-in (`run`, `branch`, `port`) shadow it during
@@ -1190,8 +1219,47 @@ The rules, all enforced:
 4. **An unknown `${vars.x}` is an error** listing the declared names, because the
    cause is nearly always a typo.
 
-A var is resolved **once per run**, so a var backed by a command runs that command
-exactly once — two references to a rotating credential can never disagree.
+A var is resolved **at most once per run**, so a var backed by a command runs that
+command exactly once — two references to a rotating credential can never disagree.
+
+**Only if something reaches for it.** A var whose value is a
+[value source](#value-sources) is resolved only when the resolved plan can reach
+it — a node in the plan, or a project-level surface like `env`, `setup`, or
+`teardown`, which every node inherits. This is the same laziness a node-level
+`env` source always had. It matters when the source is a credential helper:
+putting the command in a var is the natural move, since it is one value used by
+several nodes, and it used to mean *every* `veld start` reached for the credential
+store — including runs whose nodes need no secret at all.
+
+### `${veld.*}` inside a var
+
+A var literal is interpolated against the **run-scoped** built-ins:
+
+```jsonc
+"vars": {
+  "run_url": "https://web.${veld.run}.example.test",
+  "cache":   "${veld.project}-${veld.branch}"
+}
+```
+
+| In a var value | |
+|---|---|
+| `run`, `run_id`, `name`, `project`, `root`, `worktree`, `branch`, `username` | resolved |
+| `port`, `url`, `url.*`, `ports.*`, `node`, `variant` | **error** (`builtin-not-in-scope`) |
+
+The second group is per-node, and a var is one value for the whole run, so
+`${veld.port}` in one could only mean some arbitrary node's port. Compose those at
+the use site instead — a node's `env` can mix `${veld.port}` and `${vars.…}` in
+the same string.
+
+A var whose value is a *fetched* source (`file`, `env`, `argv`, `shell`) is used
+verbatim, exactly as a node's `env` treats one: substituting inside content that
+came out of a secret store would make the store an interpolation vector.
+
+**A var literal is interpolated, so every `${…}` in it is Veld's to resolve.** A
+reference in no Veld namespace — `"cache": "${HOME}/.cache"` — is a
+`var-unresolvable-reference` error. Write `$HOME` without braces to leave it for
+the shell, or make the var a value source: `{ "env": "HOME" }`.
 
 ```sh
 veld config --why nodes.api.variants.dev.env.DATABASE_URL
@@ -1243,10 +1311,16 @@ and `include` — those must be statically known for graph building and linting.
 
 ### Timing
 
-Sources are resolved **once per run, at start, after the graph is built and before
-the first spawn** — never during parse. That ordering is what keeps `veld stop`,
-`veld status`, and the daemon monitor working against a config whose secret source
-has since broken: they parse the config, they never resolve it.
+Sources are resolved **at most once per run, at start, after the graph is built**
+— never during parse. That ordering is what keeps `veld stop`, `veld status`, and
+the daemon monitor working against a config whose secret source has since broken:
+they parse the config, they never resolve it.
+
+Only what the plan reaches is resolved at all — a node's `env` source when that
+node is in the plan, a [`vars`](#vars) source when something in the plan
+references it. `setup` steps run before the graph does, so the vars they name are
+resolved just before them and the rest just before the first node spawns; either
+way each is resolved once.
 
 Only an **inline literal** is interpolated. A value fetched from a file, the
 environment, or a command is used verbatim — substituting `${…}` into fetched
@@ -1264,22 +1338,69 @@ login-shell `PATH`, so `op`, `vault`, and version-manager shims are found.
 unsafe uses.
 
 Where a secret may go: a child process's environment, or a [file](#files). **Not**
-into an `argv` element, **not** into a `shell` string (both appear in the process
-table, readable by every other user on the machine), not into logs, not into
-`--json` output, not into the share payload.
+interpolated by Veld into an `argv` element or a `shell` string (both appear in
+the process table, readable by every other user on the machine), not into logs,
+not into `--json` output, not into the share payload.
+
+**Two different rules, because there are two different risks.**
+
+`${vars.db_pass}`, `${output.DB_PASS}`, `${nodes.db.PASSWORD}` — Veld substitutes
+these into the command string itself, so the value is in the process table for
+certain. That is `secret-in-command`, an **error**.
+
+`$DB_PASS` is expanded by the *shell*, not by Veld, and whether it leaks depends
+entirely on what the shell does with the expansion:
+
+```jsonc
+"env": { "DB_PASS": { "shell": "pass show db", "secret": true } },
+
+// safe — a builtin, no exec, the value stays inside the shell
+"shell": "echo $DB_PASS | some-consumer",
+// safe — an environment assignment; psql reads it from its environment
+"shell": "PGPASSWORD=$DB_PASS psql -h localhost -U u db",
+// LEAKS — the shell execs psql with the expanded value as an argument,
+// so `ps` shows the password on the psql process, not on the shell
+"shell": "psql \"postgres://u:$DB_PASS@localhost/db\"",
+// safe — the container is handed the name, not the value
+"argv": ["docker", "run", "-e", "DB_PASS", "img"]
+```
+
+The shell's own `ps` entry shows the literal `$DB_PASS` in every case; the program
+it *runs* is where the value shows up. Veld cannot tell which case it is looking
+at, so a `$NAME` matching a secret is `secret-shell-expansion`, a **warning** —
+loud enough to check, not so loud it blocks a run that is fine. Prefer handing the
+program the variable *name*: `PGPASSWORD=`, `--password-file`, `-e NAME`.
+
+Not flagged, and not a leak: `${DB_PASS}` (no such Veld namespace, so
+interpolation fails rather than substituting) and a bare `$DB_PASS` in an `argv`
+element no shell ever sees (inert text — a mistake, but not an exposure).
 
 ### Lint rules
 
-| Rule | Severity |
-|---|---|
-| A value marked `secret` interpolated into `argv` or `shell` | **error** |
-| A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
-| A `secret: true` literal that is not credential-shaped (e.g. `"devpassword"`) | silent — the legitimate fixed-local-credential case |
-| A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |
-| A declared `env` source missing at start | **error**, naming node and variable |
+| Rule id | What it catches | Severity |
+|---|---|---|
+| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}` | **error** |
+| `secret-shell-expansion` | A bare `$NAME` matching a secret. The shell expands it, so it leaks only if the expansion becomes another program's argument — Veld cannot tell, so it says so instead of guessing | warn |
+| `var-unresolvable-reference` | A `${…}` in a `vars` literal that names no Veld namespace (`${HOME}`). Var literals are interpolated, so it fails the run | **error** |
+| `ambiguous-root-config` | A directory holding `veld.json` and `veld.jsonc` as two *different* files (a symlink between them is fine). Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld stop` still works) |
+| `credential-shaped-literal` | A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
+| `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
+| `start-server-needs-readiness` | A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |
+| `unknown-var` | `${vars.x}` naming a var that is not declared, listing the declared names | **error** |
+| `vars-cannot-nest` | A var referencing another var | **error** |
+| `unknown-builtin-var` | `${veld.x}` naming something that is not a built-in at all | **error** |
+| `builtin-not-in-scope` | A real built-in written where it is not populated — `${veld.url}` in a `command` node, `${veld.port}` in a `vars` value, `${veld.node}` in a `setup` step. See [availability](#availability) | **error**, or warn when only *some* variants inheriting the value lack it |
+| `unknown-node-ref` | `${nodes.X.…}` naming a node that is not defined anywhere | **error** |
+| `preset-missing-node-ref` | `${nodes.X.…}` where `X` is real but not in a given preset's plan — the "works with preset A, dies with preset B" case, named by preset | **error** |
+| `preset-unresolvable` / `preset-unknown-node` / `preset-unknown-variant` | A preset with a dangling `@ref`, a cycle, or a node/variant that does not exist | **error** |
+| `secret: true` literal that is not credential-shaped (e.g. `"devpassword"`) | — | silent — the legitimate fixed-local-credential case |
+
+A declared `env` source missing at start is not a lint rule — it cannot be known
+statically — but it is an **error** at start, naming the node and the variable.
 
 All of them run in `veld lint`; the errors also run inside `veld start`. None of
-them runs in the loader, so `veld stop` is never blocked by one.
+them runs in the loader, so `veld stop` is never blocked by one. `veld lint --json`
+emits the rule id with each finding.
 
 ---
 
@@ -1543,12 +1664,20 @@ rather than at `veld start`:
 | `preset-unresolvable` | an `@ref` names a preset that does not exist, or the references form a cycle |
 | `preset-unknown-node` | a selection names a node that is not defined. With `include` globs this can also mean no glob matched its file — `veld config --files` prints the glob → file → node chain |
 | `preset-unknown-variant` | a selection names a real node but a variant it does not have; the message lists the variants it does have |
+| `preset-missing-node-ref` | a node in this preset's plan references `${nodes.X.…}` and `X` is not in that plan — the message names both the preset and the reference |
 | `preset-duplicate-key` | two presets pin the same `key`. A key is the number a person types, so it cannot mean two things |
 | `preset-invalid-key` | `"key": 0` -- the picker numbers from 1 |
 | `preset-empty` | a warning: the preset expands to no selections, so starting it brings up nothing and still reports success |
 | `preset-name-shadowed-by-key` | a warning: a preset is *named* like a number that another preset **pins** as its key, so the number and the name select different presets |
 | `default-preset-unknown` | `default_preset` names a preset that does not exist |
 | `presets-undocumented` | a notice, once, when a config has eight or more presets and none carry a `label` or `when_to_use` -- the size at which the list stops being pickable by anyone who did not write it |
+
+The last one is the "works with preset A, dies with preset B" case. A preset's plan
+is fully static — `expand_preset` plus the transitive `depends_on` closure — so
+given `"thin": ["web:dev"]` and a `web` whose `env` reads `${nodes.api.url}`, lint
+can already tell that `api` is not in `thin`'s plan. In a config with many
+overlapping presets that combination is the one thing you cannot check by reading a
+single node file. A node pulled in only by `depends_on` counts as present.
 
 ---
 
@@ -1595,13 +1724,46 @@ leftover `${veld.MY_OUTPUT}` is caught before a run starts.
 > same string resolved to two different values. See
 > [docs/migrating-to-v3.md](migrating-to-v3.md#the-one-breaking-change-that-affects-v1-and-v2-too).
 
-Availability is not uniform:
+<a id="availability"></a>
 
-| Variable | Where it is missing |
-|---|---|
-| `port`, `url`, `url.*`, `ports.*` | Only a `start_server` node has these. |
-| `node`, `variant` | Absent in project-level `setup` / `teardown` steps, which belong to no node. |
-| `run_id` | Absent in project-level `setup` / `teardown` steps. |
+#### Availability
+
+The set is closed but **not uniform** — each context populates what it can know.
+`veld lint` and `veld start` check a reference against the context it sits in
+(`builtin-not-in-scope`), so `${veld.url}` on a `command` node is refused before
+the run rather than failing mid-start with `unknown built-in variable`.
+
+| | run, name, project, root, worktree, branch, username | run_id | node, variant | port, url, url.\*, ports.\* |
+|---|:-:|:-:|:-:|:-:|
+| `vars` value | ✅ | ✅ | — | — |
+| project `setup` / `teardown` | ✅ | — | — | — |
+| project / node / variant `env` | ✅ | ✅ | ✅ | `start_server` only |
+| `command` node: `argv`, `shell`, `skip_if`, `on_stop` | ✅ | ✅ | ✅ | — |
+| `start_server` node: `argv`, `shell`, `on_stop` | ✅ | ✅ | ✅ | ✅ |
+| `actions[].cmd` | run, name, project, root only | — | ✅ | ✅ (plus `${param.*}`, `${output.*}`) |
+
+An action's context is deliberately the smallest: it also has no `${vars.*}` and
+no `${nodes.<other>.…}`, because an action runs against one live node long after
+the plan that built it. `${veld.url}` and its pieces, and `${veld.ports.*}`, do
+resolve there — they come from the node's recorded state.
+
+Notes:
+
+- **`run_id`** is absent in a project step because a `teardown` also runs from
+  `veld stop` after the run row is gone. Use `${veld.run}`, the name you started
+  with.
+- **`port` / `url` / `ports.*`** exist only where a port is allocated and a route
+  registered, which is a `start_server` step. From anywhere else, reach a server's
+  address as [`${nodes.<node>.url}`](#node-output-references-nodes) — including
+  from the node's own `env`, which is how a server tells itself its public URL
+  (`NEXTAUTH_URL`, `BASE_URL`).
+- **`on_stop` has the same set as the node it belongs to**, so a container named
+  `${veld.project}-${veld.node}-${veld.url.hostname}` in `argv` can be removed by
+  the identical string in `on_stop` — which is the point, since a name copied by
+  hand into two places is how containers leak.
+- A value inherited by several variants (a project- or node-level `env`) is judged
+  against every variant it reaches. Wrong for all of them is an error; wrong for
+  only some is a warning naming them.
 
 ### Node Output References (`${nodes.*}`)
 

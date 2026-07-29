@@ -1,7 +1,7 @@
 use crate::presets::PresetDef;
 use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 
@@ -11,7 +11,7 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
-    #[error("could not find veld.json in {0} or any parent directory")]
+    #[error("could not find veld.json or veld.jsonc in {0} or any parent directory")]
     NotFound(PathBuf),
 
     #[error("failed to read veld.json at {path}: {source}")]
@@ -2368,13 +2368,51 @@ fn default_interval() -> u64 {
 // Config discovery + loading
 // ---------------------------------------------------------------------------
 
-/// Walk upward from `start` to find `veld.json`. Returns the path to the file.
+/// The names a project root may use, in the order they are reported.
+///
+/// Both, because a veld config **is** JSONC at every schema version and editors
+/// decide that from the extension: `veld.json` full of `//` comments is a wall of
+/// red squiggles until someone finds the `files.associations` setting, which is
+/// a poor way to learn that comments were always allowed. `veld init` still
+/// writes `veld.json` — one default, two accepted spellings.
+///
+/// Only the **root** name is fixed. Included files have always been matched by
+/// glob, so `nodes/*.jsonc` worked before this.
+pub const ROOT_CONFIG_NAMES: &[&str] = &["veld.json", "veld.jsonc"];
+
+/// The root config in exactly this directory, if there is one.
+///
+/// For every caller that already knows the project root and would otherwise
+/// write `project_root.join("veld.json")` — the daemon monitor, the share API,
+/// the desktop worktree views, the management API. Those bypass
+/// [`discover_config`] because they are not walking upward, and each one that
+/// hardcodes a filename is a project named `veld.jsonc` that the daemon cannot
+/// see: no liveness probes, no actions, `veld share` refusing with "could not
+/// load veld.json".
+pub fn root_config_in(dir: &Path) -> Option<PathBuf> {
+    ROOT_CONFIG_NAMES
+        .iter()
+        .map(|name| dir.join(name))
+        .find(|c| c.is_file())
+}
+
+/// Walk upward from `start` to find the project's root config.
+///
+/// A directory holding both spellings resolves by **fixed precedence**
+/// (`ROOT_CONFIG_NAMES` order) and is reported as an `ambiguous-root-config`
+/// finding by [`parse_config_with_files`] — deliberately not an error here.
+/// Discovery runs on every subcommand including `stop`, and a config that cannot
+/// be found is a config whose `on_stop` hooks never run, which leaks the
+/// containers they exist to remove. Refusing is `validate`'s job; finding a file
+/// is this function's.
 pub fn discover_config(start: &Path) -> Result<PathBuf, ConfigError> {
     let mut dir = start.to_path_buf();
     loop {
-        let candidate = dir.join("veld.json");
-        if candidate.is_file() {
-            return Ok(candidate);
+        for name in ROOT_CONFIG_NAMES {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
         if !dir.pop() {
             return Err(ConfigError::NotFound(start.to_path_buf()));
@@ -2407,6 +2445,51 @@ pub fn parse_config(path: &Path) -> Result<VeldConfig, ConfigError> {
 /// unparseable) and a bare name cannot tell them apart.
 pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConfig, ConfigError> {
     let mut loaded = crate::include::load(path)?;
+
+    // Two root spellings in one directory. A **finding**, not a load error, for
+    // the reason every other semantic check is: `on_stop` is read from the
+    // on-disk config at stop time, so a config that fails to load means teardown
+    // never runs and containers leak with no way to clean them up. Refusing here
+    // would make `veld stop` impossible in exactly the situation the docs now
+    // invite — copy `veld.json` to `veld.jsonc`, edit, forget to delete the
+    // original. `veld start` and `veld lint` still refuse; `veld stop` still works.
+    if let Some(dir) = path.parent() {
+        // Deduplicated by target, because `ln -s veld.jsonc veld.json` is the
+        // obvious way to get JSONC editor mode without breaking a script or a CI
+        // job that names `veld.json` — and `is_file()` follows symlinks, so
+        // counting names would call that one file two configs and refuse it.
+        let mut seen: Vec<PathBuf> = Vec::new();
+        let mut present: Vec<&str> = Vec::new();
+        for name in ROOT_CONFIG_NAMES {
+            let candidate = dir.join(name);
+            if !candidate.is_file() {
+                continue;
+            }
+            let target = candidate.canonicalize().unwrap_or(candidate);
+            if seen.contains(&target) {
+                continue;
+            }
+            seen.push(target);
+            present.push(name);
+        }
+        if present.len() > 1 {
+            loaded.config.deferred_findings.push(Finding::error(
+                "ambiguous-root-config",
+                // A file name, not `dir.display()`: every other `location` is a
+                // pointer into the document, and an absolute path would put the
+                // developer's home directory into `veld lint --json` and make a
+                // golden-file CI diff machine-dependent.
+                ROOT_CONFIG_NAMES[0].to_owned(),
+                format!(
+                    "this directory contains {}, which are two different files. veld reads \
+                     {} and ignores the other, so the file you edit may not be the file veld \
+                     runs — delete or rename one of them",
+                    present.join(" and "),
+                    ROOT_CONFIG_NAMES[0]
+                ),
+            ));
+        }
+    }
 
     // Deferred (non-fatal) findings are collected per file — see
     // `VeldConfig::deferred_findings` for why a duplicate key must not fail the
@@ -2567,6 +2650,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
     check_presets(config, &mut findings);
+    check_node_refs(config, &mut findings);
     check_preset_keys(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
@@ -2711,6 +2795,230 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
                 }
             }
         }
+    }
+}
+
+/// `nodes.<node>[:<variant>].<field>` → the node and, when written, the variant.
+fn parse_node_ref(reference: &str) -> Option<(&str, Option<&str>)> {
+    let (head, _field) = reference.split_once('.')?;
+    Some(match head.split_once(':') {
+        Some((node, variant)) => (node, Some(variant)),
+        None => (head, None),
+    })
+}
+
+/// Every string a node interpolates with a **node** context — the surfaces where
+/// `${nodes.<other>.…}` genuinely resolves. Paired with its location.
+///
+/// Deliberately an explicit list rather than a walk over everything: a rule that
+/// refuses a config has to be precise about where it looks, and `files` values,
+/// `probes`, and `actions` are each interpolated (or not) by a different path
+/// with a different context.
+fn env_definition_site(
+    node_name: &str,
+    node: &NodeConfig,
+    variant_name: &str,
+    variant: &VariantConfig,
+    key: &str,
+) -> String {
+    let defines =
+        |m: Option<&NullableMap<ConfigValue>>| matches!(m.and_then(|m| m.get(key)), Some(Some(_)));
+    if defines(variant.env.as_ref()) {
+        format!("nodes.{node_name}.variants.{variant_name}.env.{key}")
+    } else if defines(node.env.as_ref()) {
+        format!("nodes.{node_name}.env.{key}")
+    } else {
+        format!("env.{key}")
+    }
+}
+
+fn node_context_strings(
+    config: &VeldConfig,
+    node_name: &str,
+    node: &NodeConfig,
+    variant_name: &str,
+    variant: &VariantConfig,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let base = format!("nodes.{node_name}.variants.{variant_name}");
+
+    let push_cmd =
+        |loc: String, spec: Option<CommandSpec>, out: &mut Vec<(String, String)>| match spec {
+            Some(CommandSpec::Argv(argv)) => {
+                for a in argv {
+                    out.push((loc.clone(), a));
+                }
+            }
+            Some(CommandSpec::Shell(s)) => out.push((loc, s)),
+            None => {}
+        };
+
+    let r = resolve_variant(config, node, variant);
+    push_cmd(base.clone(), r.command.clone(), &mut out);
+    push_cmd(format!("{base}.on_stop"), r.on_stop.clone(), &mut out);
+    push_cmd(format!("{base}.skip_if"), r.skip_if.clone(), &mut out);
+
+    // The effective env this variant runs with, project → node → variant.
+    if let Some(merged) = resolve_env(config.env.as_ref(), node.env.as_ref(), variant.env.as_ref())
+    {
+        let mut keys: Vec<&String> = merged.keys().collect();
+        keys.sort();
+        for key in keys {
+            if let Some(literal) = merged[key].as_literal() {
+                out.push((
+                    env_definition_site(node_name, node, variant_name, variant, key),
+                    literal.to_owned(),
+                ));
+            }
+        }
+    }
+
+    // `cwd` is variant-over-node, not merged.
+    if let Some(cwd) = variant.cwd.as_ref() {
+        out.push((format!("{base}.cwd"), cwd.clone()));
+    } else if let Some(cwd) = node.cwd.as_ref() {
+        out.push((format!("nodes.{node_name}.cwd"), cwd.clone()));
+    }
+    out
+}
+
+/// A `${nodes.X.…}` reference resolves against **this run's plan**, so whether it
+/// works is a property of the preset, not of the node that wrote it.
+///
+/// Two rules, both of which used to surface only at start:
+///
+/// - `X` is not a node at all. Always broken, whatever is started.
+/// - `X` is a real node that a given preset does not bring up. `veld start
+///   --preset a` works, `--preset b` dies with `unresolved variable reference:
+///   ${nodes.b.url}`. A preset's plan is fully static — `expand_preset` plus the
+///   `depends_on` closure — so this is exactly the combination a reader cannot
+///   check by opening a single node file, and exactly what lint is for.
+fn check_node_refs(config: &VeldConfig, out: &mut Vec<Finding>) {
+    const UNKNOWN: &str = "unknown-node-ref";
+    const NOT_IN_PLAN: &str = "preset-missing-node-ref";
+
+    // Every (location, string) the config interpolates with a node context,
+    // grouped by the node:variant that owns it. A project-level `env` value shows
+    // up under every variant that still inherits it — `node_context_strings`
+    // resolves the merge, so a value some variant overrides or erases is not
+    // attributed to that variant at all.
+    let mut per_variant: BTreeMap<(String, String), Vec<(String, String)>> = BTreeMap::new();
+    for (node_name, node) in &config.nodes {
+        for (variant_name, variant) in &node.variants {
+            per_variant.insert(
+                (node_name.clone(), variant_name.clone()),
+                node_context_strings(config, node_name, node, variant_name, variant),
+            );
+        }
+    }
+
+    // Rule 1 — the node does not exist. Reported once per site, independent of
+    // any preset.
+    let mut known: Vec<&str> = config.nodes.keys().map(String::as_str).collect();
+    known.sort_unstable();
+    let mut unknown_seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (loc, s) in per_variant.values().flatten() {
+        for reference in builtin_refs_in(s, "nodes.") {
+            let Some((target, _)) = parse_node_ref(&reference) else {
+                continue;
+            };
+            if config.nodes.contains_key(target) {
+                continue;
+            }
+            if !unknown_seen.insert((loc.clone(), target.to_owned())) {
+                continue;
+            }
+            out.push(Finding::error(
+                UNKNOWN,
+                loc.clone(),
+                format!(
+                    "`${{nodes.{reference}}}` refers to node \"{target}\", which is not \
+                     defined. With `include` globs a node can also be missing because no \
+                     glob matched its file — `veld config --files` prints the glob → file → \
+                     node chain. Defined nodes: {}",
+                    known.join(", ")
+                ),
+            ));
+        }
+    }
+
+    // Rule 2 — the node exists but this preset's plan does not contain it.
+    // Aggregated so one bad reference used by three presets is one finding
+    // naming three presets, not three findings.
+    let Some(presets) = config.presets.as_ref() else {
+        return;
+    };
+    let mut by_site: BTreeMap<(String, String), BTreeSet<String>> = BTreeMap::new();
+    let mut preset_names: Vec<&String> = presets.keys().collect();
+    preset_names.sort();
+    for preset in preset_names {
+        // A preset that does not expand, or whose graph does not build, is
+        // already reported by `check_presets` — nothing to add here.
+        let Ok(selections) = crate::graph::expand_preset(preset, config) else {
+            continue;
+        };
+        let Ok(resolved) = crate::graph::resolve_selections(&selections, config) else {
+            continue;
+        };
+        let Ok(plan) = crate::graph::build_execution_plan(&resolved, config) else {
+            continue;
+        };
+        // The plan is the transitive closure, so a node pulled in only by
+        // `depends_on` counts as present.
+        let planned: BTreeSet<(String, String)> = plan
+            .iter()
+            .flatten()
+            .map(|sel| (sel.node.clone(), sel.variant.clone()))
+            .collect();
+        if planned.is_empty() {
+            continue;
+        }
+
+        let sites = planned
+            .iter()
+            .filter_map(|key| per_variant.get(key))
+            .flatten();
+        for (loc, s) in sites {
+            for reference in builtin_refs_in(s, "nodes.") {
+                let Some((target, variant)) = parse_node_ref(&reference) else {
+                    continue;
+                };
+                if !config.nodes.contains_key(target) {
+                    continue; // already reported by rule 1
+                }
+                let satisfied = match variant {
+                    Some(v) => planned.contains(&(target.to_owned(), v.to_owned())),
+                    None => planned.iter().any(|(n, _)| n == target),
+                };
+                if !satisfied {
+                    by_site
+                        .entry((loc.clone(), reference.clone()))
+                        .or_default()
+                        .insert(preset.clone());
+                }
+            }
+        }
+    }
+
+    for ((loc, reference), presets) in by_site {
+        let names: Vec<&str> = presets.iter().map(String::as_str).collect();
+        out.push(Finding::error(
+            NOT_IN_PLAN,
+            loc,
+            format!(
+                "`${{nodes.{reference}}}` is not in the plan of preset{} {} — starting \
+                 {} would fail with \"unresolved variable reference\". Add the node to the \
+                 preset, or give this node a `depends_on` so every plan that includes it \
+                 pulls the reference in too",
+                if names.len() == 1 { "" } else { "s" },
+                names.join(", "),
+                if names.len() == 1 {
+                    format!("`veld start --preset {}`", names[0])
+                } else {
+                    "them".to_owned()
+                },
+            ),
+        ));
     }
 }
 
@@ -2874,6 +3182,38 @@ fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
                     ),
                 ));
             }
+        }
+    }
+
+    // A var literal is *interpolated* now, so every `${…}` in it is veld's to
+    // resolve — and `resolve_reference` errors on any namespace it does not know.
+    // `"cache": "${HOME}/.cache"` was verbatim before this release, passed through
+    // to the child, and expanded by its shell; it now aborts the start. That has
+    // to be a lint error rather than a runtime one: the second resolution pass
+    // runs *after* the run is persisted, so the abort leaves a `starting` row with
+    // nothing behind it.
+    for (name, value) in &declared {
+        let Some(literal) = value.as_literal() else {
+            continue;
+        };
+        for reference in interpolation_refs(literal) {
+            // `${veld.*}` scope is `check_builtin_names`; `${vars.*}` nesting is
+            // rule 2 above. Everything else has no namespace at all.
+            if reference.starts_with("veld.") || reference.starts_with("vars.") {
+                continue;
+            }
+            out.push(Finding::error(
+                "var-unresolvable-reference",
+                format!("vars.{name}"),
+                format!(
+                    "`${{{reference}}}` is not a veld reference, and a var literal is \
+                     interpolated — so this fails the run with \"unresolved variable \
+                     reference\". Only `${{veld.<run-scoped>}}` resolves in a var. For a \
+                     shell variable write `${reference}` without the braces, so veld leaves \
+                     it for the shell; for a node output use the value at the use site, or \
+                     make the var a value source (`{{ \"env\": \"{reference}\" }}`)"
+                ),
+            ));
         }
     }
 
@@ -3246,7 +3586,37 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
                             }
                         }
                     }
-                    names.extend(env_refs(part));
+                    // A bare `$NAME` is a **warning**, on its own rule — see
+                    // `shell_expansion` below. It is not an error, because veld
+                    // does not substitute it and often nothing leaks; it is not
+                    // silence either, because often something does.
+                    let shell_expanded: Vec<String> = env_refs_detailed(part)
+                        .into_iter()
+                        // `${NAME}` is veld's to resolve, and it matches no
+                        // namespace, so interpolation fails and the value never
+                        // reaches a command at all. Nothing to warn about.
+                        .filter(|(_, braced)| !braced)
+                        .map(|(name, _)| name)
+                        .filter(|name| secrets.contains(name))
+                        .collect();
+                    for name in shell_expanded {
+                        out.push(Finding::warning(
+                            "secret-shell-expansion",
+                            format!("{base}{suffix}"),
+                            format!(
+                                "`${name}` is expanded by a **shell**, not by veld, so veld \
+                                 cannot tell where the value ends up. It is safe where the \
+                                 expansion never becomes an argument — a shell builtin, or an \
+                                 environment assignment like `PGPASSWORD=${name} psql …`. It \
+                                 is a leak where it does: `psql \"…${name}…\"` runs `execve` \
+                                 with the expanded value in *that* program's argv, which every \
+                                 other user on the machine can read from the process table. \
+                                 Prefer handing the program the variable name and letting it \
+                                 read the environment itself"
+                            ),
+                        ));
+                    }
+
                     for name in names {
                         // A `nodes.<other>.KEY` name is only ever pushed above once
                         // that node's own declaration has been checked, so it is
@@ -3310,6 +3680,25 @@ fn check_secret_usage(config: &VeldConfig, out: &mut Vec<Finding>) {
     }
 }
 
+/// Every `${…}` reference in `s`, whatever its namespace — the set
+/// [`crate::variables::interpolate`] will try to resolve.
+fn interpolation_refs(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("${") {
+        let after = &rest[start + 2..];
+        match after.find('}') {
+            // An unclosed `${` is interpolation's problem to report.
+            None => break,
+            Some(end) => {
+                out.push(after[..end].to_owned());
+                rest = &after[end + 1..];
+            }
+        }
+    }
+    out
+}
+
 /// `${<prefix><name>}` references in `s`.
 pub(crate) fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
     let needle = format!("${{{prefix}");
@@ -3328,9 +3717,125 @@ pub(crate) fn builtin_refs_in(s: &str, prefix: &str) -> Vec<String> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Which `vars` a run actually needs
+// ---------------------------------------------------------------------------
+
+/// Collect every `${vars.NAME}` in `value`'s serialised form. Returns false if
+/// the value could not be serialised, which is the caller's cue to fall back to
+/// "all of them".
+///
+/// Deliberately a scan of the serialised JSON rather than a walk over a list of
+/// named fields. A missed field here is not a diagnostic that reads badly, it is
+/// a var that fails to resolve at the one use site nobody remembered to list —
+/// and the list would have to be re-audited every time the schema grows a
+/// string. Over-including costs nothing: the name was resolved unconditionally
+/// before this existed.
+fn scan_var_refs<T: Serialize>(value: &T, out: &mut BTreeSet<String>) -> bool {
+    match serde_json::to_string(value) {
+        Ok(text) => {
+            out.extend(builtin_refs_in(&text, "vars."));
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+fn all_var_names(config: &VeldConfig) -> BTreeSet<String> {
+    config
+        .vars
+        .iter()
+        .flatten()
+        .map(|(name, _)| name.clone())
+        .collect()
+}
+
+/// The vars a project `setup` step can reach.
+///
+/// Setup runs before the graph does, so its vars are resolved before it — and
+/// only its vars, so a credential helper backing a var no setup step mentions is
+/// not woken up before the first command runs.
+pub fn vars_for_setup(config: &VeldConfig) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    if !scan_var_refs(&config.setup, &mut out) {
+        return all_var_names(config);
+    }
+    out
+}
+
+/// The vars a given plan can reach: everything outside `nodes` (project `env`,
+/// `setup`, `teardown`, `proxy`, …, all of which apply to every node) plus each
+/// selected `node:variant`.
+///
+/// This is what makes a var's value source **lazy**, matching what a node-level
+/// `env` source already did. A var is the natural home for a credential used by
+/// several nodes; resolving it on every `veld start` meant `veld start docs`
+/// reached for the credential store, so the cost and the failure modes of a
+/// secret stopped being local to the nodes that need it. Duplicating the source
+/// into each variant to avoid that is exactly what `vars` exists to prevent.
+pub fn vars_for_plan(
+    config: &VeldConfig,
+    selections: &[crate::graph::NodeSelection],
+) -> BTreeSet<String> {
+    vars_for(config, selections, true)
+}
+
+/// [`vars_for_plan`] minus `setup`, for the teardown path.
+///
+/// A `setup` step does not run at stop, so a var only it names must not be
+/// resolved there — otherwise `veld stop` runs the credential helper behind a var
+/// that this teardown will never look at, which is the cost this laziness exists
+/// to remove.
+pub fn vars_for_teardown(
+    config: &VeldConfig,
+    selections: &[crate::graph::NodeSelection],
+) -> BTreeSet<String> {
+    vars_for(config, selections, false)
+}
+
+fn vars_for(
+    config: &VeldConfig,
+    selections: &[crate::graph::NodeSelection],
+    include_setup: bool,
+) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    let mut complete = true;
+
+    let mut project = config.clone();
+    project.nodes.clear();
+    // A var may not reference another var (`vars-cannot-nest`), so scanning the
+    // block would only ever pull in a name that is already an error.
+    project.vars = None;
+    if !include_setup {
+        project.setup = None;
+    }
+    complete &= scan_var_refs(&project, &mut out);
+
+    for sel in selections {
+        let Some(node) = config.nodes.get(&sel.node) else {
+            continue;
+        };
+        // Only the selected variant: a var used solely by `api:prod` must not be
+        // resolved because `api:dev` is in the plan.
+        let mut slice = node.clone();
+        slice.variants.retain(|name, _| name == &sel.variant);
+        complete &= scan_var_refs(&slice, &mut out);
+    }
+
+    if !complete {
+        return all_var_names(config);
+    }
+    out
+}
+
 /// Bare `$NAME` / `${NAME}` shell references, which is how a `shell` command
-/// would reach an env value directly.
-pub(crate) fn env_refs(s: &str) -> Vec<String> {
+/// reaches an env value directly. `true` = the braced form.
+///
+/// The distinction decides who expands it. veld's interpolator claims every
+/// `${…}`, so `${NAME}` is veld's to resolve — and since `NAME` matches no
+/// namespace, it *fails* rather than substituting. An unbraced `$NAME` passes
+/// through veld untouched, so whatever runs the string later expands it.
+pub(crate) fn env_refs_detailed(s: &str) -> Vec<(String, bool)> {
     let mut out = Vec::new();
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -3349,7 +3854,7 @@ pub(crate) fn env_refs(s: &str) -> Vec<String> {
             j += 1;
         }
         if j > start {
-            out.push(s[start..j].to_owned());
+            out.push((s[start..j].to_owned(), braced));
         }
         i = if braced && bytes.get(j) == Some(&b'}') {
             j + 1
@@ -3358,6 +3863,10 @@ pub(crate) fn env_refs(s: &str) -> Vec<String> {
         };
     }
     out
+}
+
+pub(crate) fn env_refs(s: &str) -> Vec<String> {
+    env_refs_detailed(s).into_iter().map(|(n, _)| n).collect()
 }
 
 /// Rules that only make sense on the **resolved** variant — after node-level
@@ -3433,10 +3942,9 @@ fn check_resolved_variants(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// named `port`, `run`, or `branch` shadow the builtin on some paths and not
 /// others, so the same string resolved to different values (F0.2).
 ///
-/// Availability is not uniform, and [`check_builtin_names`] deliberately does not
-/// model that — it only rejects names that are not builtins at all:
-/// - `port` / `url` / `url.*` exist only for a `start_server` node.
-/// - `node` / `variant` are absent in project-level `setup` / `teardown` steps.
+/// Availability is **not** uniform — see [`BuiltinScopeKind`], which models it, and
+/// [`check_builtin_names`], which reports a name that is real but not populated
+/// where it was written.
 ///
 /// One family is **not** listed here because it is per-node rather than fixed:
 /// `ports.<name>`, one per entry in the node's `ports` map (F6).
@@ -3463,7 +3971,164 @@ pub const BUILTIN_VARS: &[&str] = &[
     "url.port",
 ];
 
-/// Reject `${veld.<name>}` references to names that are not builtins.
+/// Which interpolation context a `${veld.*}` reference sits in.
+///
+/// `veld.*` is a closed set, but it is not a *uniform* one: each orchestrator
+/// path populates the subset it can actually know. A `command` node has no port
+/// and no URL; a project `setup` step belongs to no node; a `vars` value is
+/// resolved once for the whole run, before any node exists, so anything
+/// per-node is meaningless in it.
+///
+/// This used to be documented and otherwise unmodelled, so `${veld.url}` written
+/// in a `command` node's `env` passed `veld lint` and then failed the run with
+/// `unknown built-in variable: veld.url` — a message that reads like the name is
+/// wrong when the name is fine and the *place* is wrong. The variants exist to
+/// let [`check_builtin_names`] say the second thing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuiltinScopeKind {
+    /// A project-level `setup` / `teardown` step. Run-scoped names only, and not
+    /// even `run_id`: a teardown step also runs from `veld stop` against a run
+    /// whose row is already gone, where there is no id to report.
+    ProjectStep,
+    /// A `vars` value. Run-scoped names, including `run_id` — vars are resolved
+    /// after the run exists. Nothing per-node: one var is one value for the whole
+    /// run, so `${veld.port}` in it could only mean some arbitrary node's port.
+    Vars,
+    /// A `command` node. Run-scoped plus `node` / `variant`. No port is allocated
+    /// and no route is registered for a `command` step, so there is no `port`,
+    /// `url`, or `ports.*` to report.
+    CommandNode,
+    /// A `start_server` node — the full set, plus the node's own `ports.*`.
+    ServerNode,
+}
+
+impl BuiltinScopeKind {
+    /// Is `name` (a `veld.` reference with the prefix already stripped, and never
+    /// a `ports.*` one — those are per-node, see [`check_builtin_names`])
+    /// populated in this context?
+    pub fn provides(self, name: &str) -> bool {
+        match name {
+            "run" | "root" | "project" | "name" | "worktree" | "branch" | "username" => true,
+            "run_id" => self != BuiltinScopeKind::ProjectStep,
+            "node" | "variant" => {
+                matches!(
+                    self,
+                    BuiltinScopeKind::CommandNode | BuiltinScopeKind::ServerNode
+                )
+            }
+            _ => self == BuiltinScopeKind::ServerNode,
+        }
+    }
+
+    /// How to name this context in a diagnostic.
+    fn describe(self) -> &'static str {
+        match self {
+            BuiltinScopeKind::ProjectStep => "a project `setup` / `teardown` step",
+            BuiltinScopeKind::Vars => "a `vars` value",
+            BuiltinScopeKind::CommandNode => "a `command` node",
+            BuiltinScopeKind::ServerNode => "a `start_server` node",
+        }
+    }
+
+    /// The way out, which differs enough by context to be worth spelling out —
+    /// a `vars` author and a `command`-node author have different fixes for the
+    /// same name.
+    fn remedy_for(self, name: &str) -> String {
+        let per_node = name == "port"
+            || name == "url"
+            || name.starts_with("url.")
+            || name.starts_with("ports.");
+        match self {
+            BuiltinScopeKind::Vars if per_node => format!(
+                "`${{veld.{name}}}` is per-node, and a var is one value for the whole run. \
+                 Reference it at the use site instead — a node's `env` can compose \
+                 `${{veld.{name}}}` with `${{vars.…}}` in the same string"
+            ),
+            BuiltinScopeKind::Vars => format!(
+                "reference `${{veld.{name}}}` at the use site instead of storing it in a var"
+            ),
+            BuiltinScopeKind::CommandNode if name == "port" || name.starts_with("ports.") => {
+                "a `command` step gets no port allocation (only a `start_server` step does). \
+                 Reference another node's port as `${nodes.<node>.port}`, or change this \
+                 node's `type` to `start_server`"
+                    .to_owned()
+            }
+            BuiltinScopeKind::CommandNode if name == "url" || name.starts_with("url.") => {
+                "a `command` step has no URL of its own (only a `start_server` step is \
+                 routed). Reference the server's URL as `${nodes.<node>.url}`"
+                    .to_owned()
+            }
+            BuiltinScopeKind::ProjectStep if name == "run_id" => {
+                "a project step also runs from `veld stop` after the run row is gone, so \
+                 there is no run id. Use `${veld.run}`, which is the name you started with"
+                    .to_owned()
+            }
+            BuiltinScopeKind::ProjectStep => format!(
+                "a project step belongs to no node, so `${{veld.{name}}}` has nothing to \
+                 resolve against. Move the command into the node it is about"
+            ),
+            _ => format!("`${{veld.{name}}}` is not available here"),
+        }
+    }
+}
+
+/// One context a string is interpolated in, and what that context has.
+///
+/// A variant-level string has exactly one. A project- or node-level `env` value
+/// is inherited by many, and that is the whole reason this is a list:
+/// `${veld.port}` in a project `env` is perfectly good in a project whose nodes
+/// are all `start_server`, and broken only for the ones that are not.
+struct BuiltinSite {
+    /// `node:variant`, for naming the sites that lack a name the others have.
+    label: String,
+    kind: BuiltinScopeKind,
+    /// Named ports this variant resolves to. Only meaningful for a server node.
+    ports: Vec<String>,
+}
+
+impl BuiltinSite {
+    fn project(kind: BuiltinScopeKind) -> Self {
+        Self {
+            label: String::new(),
+            kind,
+            ports: Vec::new(),
+        }
+    }
+
+    fn provides(&self, name: &str) -> bool {
+        match name.strip_prefix("ports.") {
+            Some(port) => {
+                self.kind == BuiltinScopeKind::ServerNode && self.ports.iter().any(|p| p == port)
+            }
+            None => self.kind.provides(name),
+        }
+    }
+
+    /// The remedy sentence for a name this site does not have.
+    fn remedy_for(&self, name: &str) -> String {
+        match name.strip_prefix("ports.") {
+            Some(port) if self.kind == BuiltinScopeKind::ServerNode => {
+                if self.ports.is_empty() {
+                    format!(
+                        "`${{veld.ports.{port}}}` refers to a named port, but this node \
+                         declares no `ports` map. Add one — \
+                         `\"ports\": {{ \"{port}\": \"auto\" }}` — or use `${{veld.port}}` \
+                         for the single allocated port"
+                    )
+                } else {
+                    format!(
+                        "this node declares no port named \"{port}\". Declared ports: {}",
+                        self.ports.join(", ")
+                    )
+                }
+            }
+            _ => self.kind.remedy_for(name),
+        }
+    }
+}
+
+/// Reject `${veld.<name>}` references to names that are not builtins, and real
+/// builtins written where the context does not populate them.
 ///
 /// This is the guard for the F0.2 namespace closure. Before it, writing
 /// `${veld.exit_code}` in an `on_stop` hook — which veld's own docs used to
@@ -3472,120 +4137,199 @@ pub const BUILTIN_VARS: &[&str] = &[
 /// never got removed and `veld stop` still reported success. Catching the name
 /// here turns a silent teardown skip into a refusal at `veld start`, before
 /// anything is running that would need tearing down.
+///
+/// The scope half ([`BuiltinScopeKind`]) does the same for a name that is real
+/// but empty where it was written — `${veld.url}` on a `command` node — which
+/// otherwise fails the run with a message that reads like the name is wrong.
 fn check_builtin_names(config: &VeldConfig, out: &mut Vec<Finding>) {
     const RULE: &str = "unknown-builtin-var";
+    const SCOPE_RULE: &str = "builtin-not-in-scope";
 
-    /// `declared_ports` is the node's `ports` map, so `${veld.ports.debug}`
-    /// resolves iff the node declares a port called `debug`.
-    fn check(loc: &str, s: &str, declared_ports: &[String], out: &mut Vec<Finding>) {
+    fn check(loc: &str, s: &str, sites: &[BuiltinSite], out: &mut Vec<Finding>) {
         for name in builtin_refs(s) {
-            if BUILTIN_VARS.contains(&name.as_str()) {
-                continue;
-            }
-            // `ports.<name>` is per-node, so it is checked against the node.
-            if let Some(port_name) = name.strip_prefix("ports.") {
-                if declared_ports.iter().any(|p| p == port_name) {
-                    continue;
-                }
+            if !BUILTIN_VARS.contains(&name.as_str()) && !name.starts_with("ports.") {
+                // Point at the namespace that almost certainly holds it: an author
+                // writing `${veld.DB_HOST}` means this node's output.
                 out.push(Finding::error(
                     RULE,
                     loc,
-                    if declared_ports.is_empty() {
-                        format!(
-                            "`${{veld.ports.{port_name}}}` refers to a named port, but this \
-                             node declares no `ports` map. Add one — \
-                             `\"ports\": {{ \"{port_name}\": \"auto\" }}` — or use \
-                             `${{veld.port}}` for the single allocated port"
-                        )
-                    } else {
-                        format!(
-                            "this node declares no port named \"{port_name}\". \
-                             Declared ports: {}",
-                            declared_ports.join(", ")
-                        )
-                    },
+                    format!(
+                        "`${{veld.{name}}}` is not a built-in variable. `veld.*` is a closed \
+                         set ({}). If {name} is a node output, use `${{output.{name}}}` \
+                         (this node) or `${{nodes.<node>.{name}}}` (another node)",
+                        BUILTIN_VARS.join(", ")
+                    ),
                 ));
                 continue;
             }
-            // Point at the namespace that almost certainly holds it: an author
-            // writing `${veld.DB_HOST}` means this node's output.
-            out.push(Finding::error(
-                RULE,
-                loc,
-                format!(
-                    "`${{veld.{name}}}` is not a built-in variable. `veld.*` is a closed set \
-                     ({}). If {name} is a node output, use `${{output.{name}}}` (this node) \
-                     or `${{nodes.<node>.{name}}}` (another node)",
-                    BUILTIN_VARS.join(", ")
-                ),
-            ));
+
+            // A project `env` in a config with no nodes is never interpolated, so
+            // there is nothing to be in scope of.
+            if sites.is_empty() {
+                continue;
+            }
+            let mut missing: Vec<&BuiltinSite> =
+                sites.iter().filter(|site| !site.provides(&name)).collect();
+            // Sorted by label before anything reads `first()`. `sites` is built by
+            // walking `config.nodes` / `node.variants`, both `HashMap`s, so the
+            // order is randomly seeded per process — and the remedy sentence is
+            // taken from one element. Without this, a value inherited by variants
+            // that fail for *different* reasons (a `command` node, a server node
+            // with no `ports` map) produced a different message on each run, which
+            // makes `veld lint --json` flap and any golden-file diff useless.
+            missing.sort_by(|a, b| a.label.cmp(&b.label));
+            let Some(first) = missing.first() else {
+                continue;
+            };
+
+            if missing.len() == sites.len() {
+                out.push(Finding::error(
+                    SCOPE_RULE,
+                    loc,
+                    format!(
+                        "`${{veld.{name}}}` is a real built-in, but it is not populated in {}, \
+                         so the run would fail here with \"unknown built-in variable\" — {}",
+                        first.kind.describe(),
+                        first.remedy_for(&name)
+                    ),
+                ));
+            } else {
+                // Inherited by several variants and wrong for only some of them.
+                // A warning, not an error: refusing the whole config would break a
+                // project where the value is correct everywhere it is actually used.
+                let mut labels: Vec<&str> = missing.iter().map(|s| s.label.as_str()).collect();
+                labels.sort_unstable();
+                out.push(Finding::warning(
+                    SCOPE_RULE,
+                    loc,
+                    format!(
+                        "`${{veld.{name}}}` is not populated for every variant that inherits \
+                         this value: {} would fail with \"unknown built-in variable\" — {}",
+                        labels.join(", "),
+                        first.remedy_for(&name)
+                    ),
+                ));
+            }
         }
     }
 
     fn check_cmd(
         loc: &str,
         spec: Option<CommandSpec>,
-        declared_ports: &[String],
+        sites: &[BuiltinSite],
         out: &mut Vec<Finding>,
     ) {
         match spec {
             Some(CommandSpec::Argv(argv)) => {
                 for a in &argv {
-                    check(loc, a, declared_ports, out);
+                    check(loc, a, sites, out);
                 }
             }
-            Some(CommandSpec::Shell(s)) => check(loc, &s, declared_ports, out),
+            Some(CommandSpec::Shell(s)) => check(loc, &s, sites, out),
             None => {}
         }
     }
 
-    for (key, value) in config.env.iter().flatten() {
-        // A `null` value erases an inherited key, and only an inline literal is
-        // interpolated — a fetched value is used verbatim.
-        if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-            check(&format!("env.{key}"), literal, &[], out);
+    /// The context one `node:variant` provides.
+    fn site_for(
+        config: &VeldConfig,
+        node_name: &str,
+        node: &NodeConfig,
+        variant_name: &str,
+        variant: &VariantConfig,
+    ) -> BuiltinSite {
+        let kind = match resolve_variant(config, node, variant).step_type {
+            StepType::StartServer => BuiltinScopeKind::ServerNode,
+            StepType::Command => BuiltinScopeKind::CommandNode,
+        };
+        BuiltinSite {
+            label: format!("{node_name}:{variant_name}"),
+            kind,
+            ports: resolve_ports(node.ports.as_ref(), variant.ports.as_ref())
+                .map(|p| p.ports.keys().cloned().collect())
+                .unwrap_or_default(),
         }
     }
+
+    // A `vars` value is resolved once for the whole run, before any node runs.
+    // Checking it here is what turns a literal `${veld.run}` reaching a process —
+    // as a bad hostname or a container named `foo-${veld.run}` — into a refusal.
+    let vars_site = [BuiltinSite::project(BuiltinScopeKind::Vars)];
+    for (name, value) in config.vars.iter().flatten() {
+        if let Some(literal) = value.as_literal() {
+            check(&format!("vars.{name}"), literal, &vars_site, out);
+        }
+    }
+
+    let step_site = [BuiltinSite::project(BuiltinScopeKind::ProjectStep)];
+    for (label, steps) in [
+        ("setup", config.setup.as_ref()),
+        ("teardown", config.teardown.as_ref()),
+    ] {
+        for (i, step) in steps.into_iter().flatten().enumerate() {
+            check_cmd(
+                &format!("{label}[{i}] ({})", step.name),
+                step.cmd.spec(),
+                &step_site,
+                out,
+            );
+        }
+    }
+
+    // `env` is checked on the **merged** value, never on a raw `config.env` /
+    // `node.env` / `variant.env` read: a project- or node-level value that a
+    // variant overrides — or erases with `"KEY": null` — is not interpolated for
+    // that variant, and linting it anyway refuses a config over text that never
+    // runs. `resolve_env` is the one owner of that merge (AGENTS.md, *One owner
+    // for resolution*).
+    //
+    // Each effective (definition site, literal) is collected once with the list of
+    // variants that actually see it, so a project-level value inherited by twenty
+    // nodes is one finding — and one that knows whether *all* of them lack the
+    // built-in (error) or only some (warning).
+    let mut env_sites: BTreeMap<(String, String), Vec<BuiltinSite>> = BTreeMap::new();
     for (node_name, node) in &config.nodes {
-        // A node-level `env` value is inherited by every variant, so it may only
-        // reference a port the node itself declares.
-        let node_ports: Vec<String> = resolve_ports(node.ports.as_ref(), None)
-            .map(|p| p.ports.keys().cloned().collect())
-            .unwrap_or_default();
-        for (key, value) in node.env.iter().flatten() {
-            if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                check(
-                    &format!("nodes.{node_name}.env.{key}"),
-                    literal,
-                    &node_ports,
-                    out,
-                );
+        for (variant_name, variant) in &node.variants {
+            let Some(merged) =
+                resolve_env(config.env.as_ref(), node.env.as_ref(), variant.env.as_ref())
+            else {
+                continue;
+            };
+            for (key, value) in &merged {
+                // Only an inline literal is interpolated — a fetched value is
+                // used verbatim.
+                let Some(literal) = value.as_literal() else {
+                    continue;
+                };
+                env_sites
+                    .entry((
+                        env_definition_site(node_name, node, variant_name, variant, key),
+                        literal.to_owned(),
+                    ))
+                    .or_default()
+                    .push(site_for(config, node_name, node, variant_name, variant));
             }
         }
+    }
+    for ((loc, literal), sites) in &env_sites {
+        check(loc, literal, sites, out);
+    }
+
+    // The **resolved** command surfaces, for the same reason `env` above uses the
+    // merged map: v3 hoists `argv`/`shell`, `on_stop` and `skip_if` to node level,
+    // and a raw `variant.*` read simply does not see them. That left the feature's
+    // own teaching example unchecked — a node-level
+    // `"on_stop": { "argv": [… "${veld.url.hostname}"] }` inherited by a `command`
+    // variant is exactly the case `builtin-not-in-scope` exists for, and it linted
+    // clean while the identical string written one level down errored.
+    for (node_name, node) in &config.nodes {
         for (variant_name, variant) in &node.variants {
             let base = format!("nodes.{node_name}.variants.{variant_name}");
-            let ports: Vec<String> = resolve_ports(node.ports.as_ref(), variant.ports.as_ref())
-                .map(|p| p.ports.keys().cloned().collect())
-                .unwrap_or_default();
-            check_cmd(&base, variant.cmd.spec(), &ports, out);
-            check_cmd(
-                &format!("{base}.on_stop"),
-                // `Some(None)` is an explicit erase — nothing to check.
-                variant.on_stop.clone().flatten(),
-                &ports,
-                out,
-            );
-            check_cmd(
-                &format!("{base}.skip_if"),
-                variant.skip_if.clone(),
-                &ports,
-                out,
-            );
-            for (key, value) in variant.env.iter().flatten() {
-                if let Some(literal) = value.as_ref().and_then(|v| v.as_literal()) {
-                    check(&format!("{base}.env.{key}"), literal, &ports, out);
-                }
-            }
+            let sites = [site_for(config, node_name, node, variant_name, variant)];
+            let r = resolve_variant(config, node, variant);
+            check_cmd(&base, r.command.clone(), &sites, out);
+            check_cmd(&format!("{base}.on_stop"), r.on_stop.clone(), &sites, out);
+            check_cmd(&format!("{base}.skip_if"), r.skip_if.clone(), &sites, out);
         }
     }
 }
@@ -4592,16 +5336,17 @@ mod tests {
     /// user on the machine, and in any CI log that echoes the command.
     #[test]
     fn secret_in_command_is_validation_error() {
-        // Failing fixture: the secret reaches an `argv` element and a `shell`
-        // string, plus `on_stop`.
+        // Failing fixture: the secret reaches a command through the two reference
+        // forms veld itself resolves — a var and this node's own output.
         let bad = findings_for(
             r#"{
                 "schemaVersion": "3", "name": "t",
+                "vars": { "pgpw": { "value": "devpw", "secret": true } },
                 "nodes": { "db": { "variants": { "dev": {
                     "type": "command",
-                    "env": { "PGPASSWORD": { "value": "devpw", "secret": true } },
-                    "argv": ["psql", "--password", "${PGPASSWORD}"],
-                    "on_stop": { "shell": "echo $PGPASSWORD | wc -c" }
+                    "outputs": ["DSN"], "sensitive_outputs": ["DSN"],
+                    "argv": ["psql", "--password", "${vars.pgpw}"],
+                    "on_stop": { "shell": "echo ${output.DSN}" }
                 }}}}
             }"#,
         );
@@ -4644,6 +5389,693 @@ mod tests {
             }"#,
         );
         assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
+    }
+
+    /// `secret-in-command` (error) fires on the forms **veld substitutes**;
+    /// `secret-shell-expansion` (warning) on a bare `$NAME`.
+    ///
+    /// The split is the whole point, and the reasoning behind it is easy to get
+    /// backwards — this project got it backwards twice. veld substituting
+    /// `${vars.x}` puts the value in argv unconditionally: error. A bare `$NAME`
+    /// is expanded by the *shell*, whose own `ps` entry still shows the literal
+    /// `$NAME` — but the program the shell then `execve`s shows the **value**:
+    ///
+    /// ```text
+    /// $ sh -c 'exec psql "postgres://u:$DB_PASS@h/db"'
+    /// $ ps -Ao args
+    ///   psql postgres://u:hunter2@h/db      <-- the secret, in the child's argv
+    /// ```
+    ///
+    /// So `PGPASSWORD=$DB_PASS psql …` and `echo $DB_PASS` leak nothing, while
+    /// `psql "…$DB_PASS…"` leaks. veld cannot tell those apart, so it warns
+    /// rather than either refusing the run or staying silent.
+    #[test]
+    fn secret_in_command_fires_only_on_forms_veld_resolves() {
+        let leaks = |extra: &str, variant: &str| -> Vec<String> {
+            findings_for(&format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "vars": {{ "tok": {{ "value": "s", "secret": true }} }},
+                      "nodes": {{ "n": {{ "variants": {{ "one": {{
+                        "type": "command",
+                        "env": {{ "K": {{ "shell": "echo hunter2", "secret": true }} }},
+                        {extra}{variant}
+                      }}}}}}}} }}"#
+            ))
+            .into_iter()
+            .filter(|f| f.rule == "secret-in-command")
+            .map(|f| f.message)
+            .collect()
+        };
+
+        // `${K}` is not a veld namespace, so interpolation refuses it rather
+        // than substituting — the value never reaches the command at all.
+        assert!(leaks("", r#""shell": "echo ${K}""#).is_empty());
+        // Name-only forwarding: the safe way to hand a secret to a container.
+        assert!(
+            leaks("", r#""argv": ["docker", "run", "-e", "K", "img"]"#).is_empty(),
+            "no `$`, so nothing expands anything"
+        );
+
+        // Refused: veld substitutes these into the command string itself, so the
+        // value really does land in the process table.
+        assert!(!leaks("", r#""shell": "curl -H \"auth: ${vars.tok}\" x""#).is_empty());
+        assert!(!leaks("", r#""argv": ["curl", "-d", "${vars.tok}"]"#).is_empty());
+        assert!(
+            !leaks(
+                r#""outputs": ["PW"], "sensitive_outputs": ["PW"], "#,
+                r#""argv": ["true"], "on_stop": { "shell": "echo ${output.PW}" }"#
+            )
+            .is_empty()
+        );
+
+        // A bare `$K` is the *warning*, never the error — the original report's
+        // complaint was that this refused the run, and it must not.
+        let warned = |variant: &str| -> Vec<Finding> {
+            findings_for(&format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "nodes": {{ "n": {{ "variants": {{ "one": {{
+                        "type": "command",
+                        "env": {{ "K": {{ "shell": "echo hunter2", "secret": true }} }},
+                        {variant}
+                      }}}}}}}} }}"#
+            ))
+        };
+        for form in [
+            r#""shell": "echo $K""#,
+            r#""argv": ["bash", "-lc", "psql \"postgres://u:$K@h/db\""]"#,
+            r#""argv": ["/usr/bin/env", "sh", "-c", "echo $K"]"#,
+            // Inert here, but veld cannot know that either, and one warning that
+            // is occasionally unnecessary beats a heuristic that is occasionally
+            // wrong about a secret.
+            r#""argv": ["logger", "$K"]"#,
+        ] {
+            let f = warned(form);
+            assert!(
+                f.iter().all(|x| x.rule != "secret-in-command"),
+                "must not refuse the run: {form} → {f:?}"
+            );
+            let hit = f
+                .iter()
+                .find(|x| x.rule == "secret-shell-expansion")
+                .unwrap_or_else(|| panic!("must still warn: {form}"));
+            assert_eq!(hit.severity, Severity::Warning);
+            // The message has to name both outcomes, or it teaches the wrong
+            // lesson in whichever direction the reader already leans.
+            assert!(hit.message.contains("PGPASSWORD="), "{}", hit.message);
+            assert!(hit.message.contains("execve"), "{}", hit.message);
+        }
+    }
+
+    /// v3 hoists `argv`/`shell`, `on_stop` and `skip_if` to node level, so the
+    /// rules have to read the **resolved** variant. A raw `variant.*` read left
+    /// the feature's own teaching example unchecked: a node-level `on_stop`
+    /// naming `${veld.url.hostname}`, inherited by a `command` variant, is
+    /// exactly what `builtin-not-in-scope` exists for.
+    #[test]
+    fn node_level_command_defaults_are_linted_like_variant_level_ones() {
+        const CMDS: &str = r#""argv": ["echo", "${veld.bogus}"],
+                              "on_stop": { "argv": ["rm", "${veld.url.hostname}"] }"#;
+        let findings_at = |level: &str| -> Vec<String> {
+            let (node_level, variant_level) = match level {
+                "node" => (format!("{CMDS},"), String::new()),
+                _ => (String::new(), CMDS.to_owned()),
+            };
+            let mut rules: Vec<String> = findings_for(&format!(
+                r#"{{ "schemaVersion": "3", "name": "t",
+                      "nodes": {{ "n": {{
+                        "type": "command", {node_level}
+                        "variants": {{ "one": {{ {variant_level} }} }}
+                      }}}} }}"#
+            ))
+            .into_iter()
+            .map(|f| f.rule)
+            .collect();
+            rules.sort();
+            rules
+        };
+
+        assert_eq!(
+            findings_at("node"),
+            ["builtin-not-in-scope", "unknown-builtin-var"],
+            "a hoisted command is interpolated like any other — it must be linted like one"
+        );
+        assert_eq!(findings_at("node"), findings_at("variant"));
+    }
+
+    /// A value a variant overrides — or erases with `"KEY": null` — is not an
+    /// interpolation site for that variant, so no rule may fire on it.
+    ///
+    /// This is the raw-`node.env` read AGENTS.md's *One owner for resolution*
+    /// forbids, and it had teeth: all three new rules are Errors, and
+    /// `Orchestrator::start` turns any Error into a refusal of *every* start. A
+    /// config that ran fine was refused, with a message naming a failure that
+    /// could not occur.
+    #[test]
+    fn erased_and_overridden_env_is_not_an_interpolation_site() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "env": { "FROM_PROJECT": "${nodes.ghost.url}" },
+                "nodes": { "web": {
+                    "env": { "SELF": "${veld.url}", "PEER": "${nodes.ghost.url}" },
+                    "variants": { "one": {
+                        "type": "command",
+                        "env": {
+                            "SELF": null,
+                            "PEER": "harmless",
+                            "FROM_PROJECT": null
+                        },
+                        "argv": ["true"]
+                    }}
+                }}
+            }"#,
+        );
+        assert!(
+            f.is_empty(),
+            "nothing here is ever interpolated — every value is erased or \
+             overridden by the only variant: {f:?}"
+        );
+    }
+
+    /// Both root spellings in one directory is a **finding**, not a load error.
+    ///
+    /// Discovery runs on every subcommand, `stop` included, and `on_stop` is read
+    /// from the on-disk config at stop time — so refusing to load would make
+    /// teardown impossible and leak the containers those hooks exist to remove,
+    /// in exactly the situation the docs now invite (copy, edit, forget to delete
+    /// the original). `veld start` and `veld lint` still refuse; `veld stop`
+    /// still works.
+    #[test]
+    fn both_root_spellings_is_a_finding_not_a_load_failure() {
+        let minimal = r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("veld.json"), minimal).unwrap();
+        std::fs::write(dir.path().join("veld.jsonc"), minimal).unwrap();
+
+        // Precedence, not refusal: discovery always finds a file to tear down with.
+        assert_eq!(
+            discover_config(dir.path()).expect("discovery must not fail"),
+            dir.path().join("veld.json")
+        );
+
+        let config = parse_config(&dir.path().join("veld.json")).expect("the load must succeed");
+        let findings = validate(&config);
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "ambiguous-root-config")
+            .expect("but lint and start must refuse");
+        assert_eq!(hit.severity, Severity::Error);
+        assert!(hit.message.contains("veld.json"), "{}", hit.message);
+        assert!(error_summary(&findings).is_some());
+        // A document pointer, not an absolute path: every other `location` is one,
+        // and a home directory in `veld lint --json` makes a golden-file CI diff
+        // machine-dependent.
+        assert_eq!(hit.location, "veld.json");
+    }
+
+    /// `ln -s veld.jsonc veld.json` is one file, not two.
+    ///
+    /// It is the obvious way to get JSONC editor mode without breaking a script
+    /// or CI job that names `veld.json` — and `is_file()` follows symlinks, so
+    /// counting names would call that single file an ambiguous root and refuse
+    /// the very migration the docs now suggest.
+    #[test]
+    fn a_symlink_between_the_two_root_names_is_not_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("veld.jsonc"),
+            r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("veld.jsonc", dir.path().join("veld.json")).unwrap();
+
+        let config = parse_config(&dir.path().join("veld.json")).expect("loads");
+        assert!(
+            !validate(&config)
+                .iter()
+                .any(|f| f.rule == "ambiguous-root-config"),
+            "one file reached by two names is not two configs"
+        );
+    }
+
+    /// F1: `${veld.*}` inside a `vars` value.
+    ///
+    /// The run-scoped half resolves; the per-node half is refused, because a var
+    /// is one value for the whole run and `${veld.port}` in one could only mean
+    /// some arbitrary node's port. Before this the whole family passed lint and
+    /// then reached the process as literal text — a container named
+    /// `foo-${veld.run}`, or a URL with a `${` in it, diagnosed hours later as
+    /// somebody else's bug.
+    #[test]
+    fn builtins_in_vars_are_run_scoped_only() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": {
+                    "ok":       "https://web.${veld.run}.${veld.branch}.example.test",
+                    "also_ok":  "${veld.project}-${veld.username}-${veld.run_id}",
+                    "port":     "localhost:${veld.port}",
+                    "url":      "${veld.url}/callback",
+                    "node":     "c-${veld.node}",
+                    "named":    "${veld.ports.debug}"
+                },
+                "nodes": { "a": { "variants": { "dev": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let scope: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "builtin-not-in-scope")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(scope, ["vars.named", "vars.node", "vars.port", "vars.url"]);
+        assert!(
+            f.iter()
+                .filter(|x| x.rule == "builtin-not-in-scope")
+                .all(|x| x.severity == Severity::Error)
+        );
+        // The message has to say the *place* is wrong, not the name.
+        let msg = &f
+            .iter()
+            .find(|x| x.location == "vars.port")
+            .expect("port is refused")
+            .message;
+        assert!(msg.contains("per-node"), "{msg}");
+        assert!(msg.contains("use site"), "{msg}");
+    }
+
+    /// Interpolating var literals made every `${…}` in one veld's to resolve, so
+    /// a reference in no veld namespace — `"${HOME}/.cache"`, verbatim and
+    /// perfectly good before this release — now fails the run.
+    ///
+    /// It has to be caught at lint, not at start: the second resolution pass runs
+    /// *after* the run row is persisted, so the abort would leave a `starting`
+    /// run with nothing behind it.
+    #[test]
+    fn a_var_literal_referencing_no_veld_namespace_is_a_lint_error() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": {
+                    "cache":  "${HOME}/.cache",
+                    "shelly": "$HOME/.cache",
+                    "fine":   "${veld.run}-${veld.branch}"
+                },
+                "nodes": { "n": { "variants": { "one": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let hits: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "var-unresolvable-reference")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(
+            hits,
+            ["vars.cache"],
+            "only the braced form is veld's to resolve — `$HOME` passes through \
+             untouched for the shell, and `${{veld.*}}` is a different rule: {f:?}"
+        );
+        // The fix has to be in the message, or the author just deletes the var.
+        let msg = &f
+            .iter()
+            .find(|x| x.rule == "var-unresolvable-reference")
+            .unwrap()
+            .message;
+        assert!(msg.contains("$HOME"), "{msg}");
+    }
+
+    /// F5: a real built-in written where it is not populated is its own error.
+    ///
+    /// `${veld.url}` in a `command` node used to pass lint and fail the run with
+    /// `unknown built-in variable: veld.url`, which reads like the name is wrong
+    /// when the name is fine and the context is not.
+    #[test]
+    fn builtins_are_checked_against_the_context_they_sit_in() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "setup": [{ "name": "s", "shell": "echo ${veld.node} ${veld.run}" }],
+                "nodes": {
+                  "task": { "variants": { "dev": {
+                    "type": "command",
+                    "env": { "SELF": "${veld.url}", "WHO": "${veld.node}" },
+                    "argv": ["true"]
+                  }}},
+                  "web": { "variants": { "dev": {
+                    "type": "start_server",
+                    "env": { "SELF": "${veld.url}", "H": "${veld.url.hostname}" },
+                    "argv": ["serve"]
+                  }}}
+                }
+            }"#,
+        );
+        let scope: Vec<(&str, &str)> = f
+            .iter()
+            .filter(|x| x.rule == "builtin-not-in-scope")
+            .map(|x| (x.location.as_str(), x.message.as_str()))
+            .collect();
+        assert_eq!(scope.len(), 2, "{f:?}");
+        // A `command` step is never routed, so it has no URL of its own.
+        assert_eq!(scope[0].0, "nodes.task.variants.dev.env.SELF");
+        assert!(scope[0].1.contains("${nodes.<node>.url}"), "{:?}", scope[0]);
+        // A project step belongs to no node.
+        assert_eq!(scope[1].0, "setup[0] (s)");
+        assert!(scope[1].1.contains("veld.node"), "{:?}", scope[1]);
+
+        // `${veld.node}` on a node and the whole URL family on a server node are
+        // correct and must stay silent, or the rule is noise.
+        assert!(
+            !f.iter()
+                .any(|x| x.rule == "builtin-not-in-scope" && x.location.starts_with("nodes.web")),
+            "{f:?}"
+        );
+        assert!(
+            !f.iter()
+                .any(|x| x.location == "nodes.task.variants.dev.env.WHO"),
+            "`${{veld.node}}` on a node is correct: {f:?}"
+        );
+    }
+
+    /// An inherited value is judged where it takes effect, and a value that is
+    /// right for some variants and wrong for others is a warning — refusing the
+    /// whole config would break a project where every use of it is fine.
+    #[test]
+    fn inherited_env_with_a_per_node_builtin_warns_rather_than_refusing() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": { "n": {
+                    "env": { "ME": "${veld.url}" },
+                    "variants": {
+                      "serve": { "type": "start_server", "argv": ["serve"] },
+                      "once":  { "type": "command", "argv": ["true"] }
+                    }
+                }}
+            }"#,
+        );
+        let hit = f
+            .iter()
+            .find(|x| x.rule == "builtin-not-in-scope")
+            .expect("the command variant cannot resolve it");
+        assert_eq!(hit.severity, Severity::Warning, "{f:?}");
+        assert!(hit.message.contains("n:once"), "{}", hit.message);
+
+        // Every variant wrong ⇒ an error, because nothing can start.
+        let all_bad = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "nodes": { "n": {
+                    "env": { "ME": "${veld.url}" },
+                    "variants": { "once": { "type": "command", "argv": ["true"] } }
+                }}
+            }"#,
+        );
+        assert_eq!(
+            all_bad
+                .iter()
+                .find(|x| x.rule == "builtin-not-in-scope")
+                .expect("refused")
+                .severity,
+            Severity::Error
+        );
+    }
+
+    /// F4: `${nodes.X.…}` is resolved against **this run's plan**, so whether it
+    /// works is a property of the preset. In a config with overlapping presets
+    /// that combination is the one thing a reader cannot check by opening a
+    /// single node file.
+    #[test]
+    fn node_refs_are_checked_against_each_preset_plan() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "presets": {
+                    "full":  ["web:dev", "api:dev"],
+                    "thin":  ["web:dev"],
+                    "chain": ["web:dev", "helper:dev"]
+                },
+                "nodes": {
+                  "web": { "variants": { "dev": {
+                    "type": "start_server",
+                    "env": { "API": "${nodes.api.url}", "GONE": "${nodes.nope.url}" },
+                    "argv": ["serve"]
+                  }}},
+                  "api": { "variants": { "dev": {
+                    "type": "start_server", "argv": ["serve"]
+                  }}},
+                  "helper": { "variants": { "dev": {
+                    "type": "command", "depends_on": { "api": "dev" }, "argv": ["true"]
+                  }}}
+                }
+            }"#,
+        );
+
+        // A node that does not exist is broken under every preset, so it is
+        // reported once, on its own rule.
+        let unknown: Vec<&str> = f
+            .iter()
+            .filter(|x| x.rule == "unknown-node-ref")
+            .map(|x| x.location.as_str())
+            .collect();
+        assert_eq!(unknown, ["nodes.web.variants.dev.env.GONE"]);
+
+        // `thin` does not bring up `api`; `full` does, and `chain` pulls it in
+        // transitively through `helper`'s `depends_on`.
+        let missing: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "preset-missing-node-ref")
+            .collect();
+        assert_eq!(missing.len(), 1, "{f:?}");
+        assert_eq!(missing[0].location, "nodes.web.variants.dev.env.API");
+        assert!(missing[0].message.contains("thin"), "{:?}", missing[0]);
+        assert!(!missing[0].message.contains("full"), "{:?}", missing[0]);
+        assert!(
+            !missing[0].message.contains("chain"),
+            "a transitive depends_on puts the node in the plan: {:?}",
+            missing[0]
+        );
+    }
+
+    /// The rule reads a preset's *plan*, so it must not care which of the two
+    /// declaration forms produced it. Pinned because the object form (`key`,
+    /// `label`, `selections`) arrived separately, and a rule that silently only
+    /// covers the array form is worse than no rule.
+    #[test]
+    fn preset_node_refs_are_checked_in_the_object_form_too() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "presets": {
+                    "thin": { "key": 1, "label": "Thin", "selections": ["web:dev"] },
+                    "full": { "key": 2, "selections": ["web:dev", "api:dev"] }
+                },
+                "nodes": {
+                  "web": { "variants": { "dev": {
+                    "type": "start_server",
+                    "probes": { "readiness": { "type": "port" } },
+                    "env": { "API": "${nodes.api.url}" },
+                    "argv": ["serve"]
+                  }}},
+                  "api": { "variants": { "dev": {
+                    "type": "start_server",
+                    "probes": { "readiness": { "type": "port" } },
+                    "argv": ["serve"]
+                  }}}
+                }
+            }"#,
+        );
+        let missing: Vec<&Finding> = f
+            .iter()
+            .filter(|x| x.rule == "preset-missing-node-ref")
+            .collect();
+        assert_eq!(missing.len(), 1, "{f:?}");
+        assert!(missing[0].message.contains("thin"), "{:?}", missing[0]);
+        assert!(!missing[0].message.contains("full"), "{:?}", missing[0]);
+    }
+
+    /// F2: which vars a run needs. The scan is what makes a var's value source
+    /// lazy, so a name it misses is a var that silently fails to resolve —
+    /// hence a fixture that exercises every level, not just `env`.
+    #[test]
+    fn vars_for_plan_sees_every_use_site() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "env": { "P": "${vars.project_level}" },
+                "setup": [{ "name": "s", "shell": "echo ${vars.setup_only}" }],
+                "teardown": [{ "name": "t", "shell": "echo ${vars.teardown_only}" }],
+                "vars": {
+                    "project_level": "a", "setup_only": "b", "teardown_only": "c",
+                    "node_level": "d", "dev_only": "e", "prod_only": "f",
+                    "in_cwd": "g", "in_probe": "h", "in_stop": "i", "unused": "j"
+                },
+                "nodes": {
+                  "api": {
+                    "env": { "N": "${vars.node_level}" },
+                    "variants": {
+                      "dev": {
+                        "type": "start_server",
+                        "cwd": "${vars.in_cwd}",
+                        "env": { "D": "${vars.dev_only}" },
+                        "probes": {
+                          "readiness": { "type": "command", "shell": "check ${vars.in_probe}" }
+                        },
+                        "on_stop": { "shell": "rm ${vars.in_stop}" },
+                        "argv": ["serve"]
+                      },
+                      "prod": {
+                        "type": "start_server",
+                        "env": { "Q": "${vars.prod_only}" },
+                        "argv": ["serve"]
+                      }
+                    }
+                  }
+                }
+            }"#,
+        )
+        .expect("fixture parses");
+
+        let sel = [crate::graph::NodeSelection {
+            node: "api".to_owned(),
+            variant: "dev".to_owned(),
+        }];
+        let needed = vars_for_plan(&cfg, &sel);
+        for name in [
+            "project_level",
+            "setup_only",
+            "teardown_only",
+            "node_level",
+            "dev_only",
+            "in_cwd",
+            "in_probe",
+            "in_stop",
+        ] {
+            assert!(needed.contains(name), "{name} must be needed: {needed:?}");
+        }
+        // The point of the exercise: a var nothing in the plan reaches is not
+        // resolved, so a credential helper behind it is never woken up.
+        assert!(!needed.contains("unused"), "{needed:?}");
+        assert!(
+            !needed.contains("prod_only"),
+            "another variant of a planned node is not in the plan: {needed:?}"
+        );
+
+        // Setup runs before the graph does and gets only what it names.
+        let setup = vars_for_setup(&cfg);
+        assert_eq!(
+            setup.into_iter().collect::<Vec<_>>(),
+            ["setup_only".to_owned()]
+        );
+
+        // The teardown path excludes `setup`, which does not run at stop — so a
+        // credential helper behind a var only a setup step names is not woken up
+        // by `veld stop`. `teardown` itself stays in, because it does run.
+        let stop = vars_for_teardown(&cfg, &sel);
+        assert!(!stop.contains("setup_only"), "{stop:?}");
+        assert!(stop.contains("teardown_only"), "{stop:?}");
+        assert!(stop.contains("in_stop"), "an on_stop hook's var: {stop:?}");
+    }
+
+    /// The caller must pass the **plan**, not the endpoints — a node pulled in
+    /// only by `depends_on` interpolates its own `env` like any other, so asking
+    /// the endpoints would leave a var only a dependency uses unresolved and the
+    /// node would fail at spawn with "no var named …" for a var declared right
+    /// there in the config.
+    ///
+    /// Pinned here rather than left to the orchestrator, because the failure is
+    /// invisible until a run whose selected node happens not to be the one that
+    /// uses the var.
+    #[test]
+    fn vars_for_plan_covers_a_transitive_dependency() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "vars": { "dep_only": "x" },
+                "nodes": {
+                  "app": { "variants": { "one": {
+                    "type": "command", "depends_on": { "db": "one" }, "argv": ["true"]
+                  }}},
+                  "db": { "variants": { "one": {
+                    "type": "command",
+                    "env": { "DSN": "${vars.dep_only}" },
+                    "argv": ["true"]
+                  }}}
+                }
+            }"#,
+        )
+        .expect("fixture parses");
+
+        let endpoint = [crate::graph::NodeSelection {
+            node: "app".to_owned(),
+            variant: "one".to_owned(),
+        }];
+        assert!(
+            !vars_for_plan(&cfg, &endpoint).contains("dep_only"),
+            "the endpoint alone genuinely does not reach it — which is why the \
+             orchestrator must not pass endpoints"
+        );
+
+        let plan = crate::graph::build_execution_plan(&endpoint, &cfg).expect("plan builds");
+        let planned: Vec<crate::graph::NodeSelection> = plan.iter().flatten().cloned().collect();
+        assert!(
+            vars_for_plan(&cfg, &planned).contains("dep_only"),
+            "a var used only by a transitively-included dependency must be resolved"
+        );
+    }
+
+    /// F6: the root config may be `veld.json` or `veld.jsonc` — one default, two
+    /// accepted spellings — and a directory holding both is refused rather than
+    /// resolved by a precedence rule nobody would remember.
+    #[test]
+    fn root_config_may_be_json_or_jsonc() {
+        let minimal = r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#;
+
+        for name in ROOT_CONFIG_NAMES {
+            let dir = tempfile::tempdir().unwrap();
+            let nested = dir.path().join("packages/app");
+            std::fs::create_dir_all(&nested).unwrap();
+            std::fs::write(dir.path().join(name), minimal).unwrap();
+            assert_eq!(
+                discover_config(&nested).expect("discovered from a subdirectory"),
+                dir.path().join(name)
+            );
+        }
+
+        // A directory holding both is handled by precedence plus a lint finding,
+        // never by refusing to load — see
+        // `both_root_spellings_is_a_finding_not_a_load_failure`.
+    }
+
+    /// Every caller that knows the project root already — the daemon monitor,
+    /// the share API, the desktop worktree views, the management API — resolves
+    /// the name through `root_config_in` rather than hardcoding one.
+    ///
+    /// Each site that hardcodes `veld.json` is a `veld.jsonc` project the daemon
+    /// cannot see: no liveness probes, no actions in the dashboard, `veld share`
+    /// refusing outright. Nothing in the type system catches that, so it is
+    /// pinned here and by a grep in the sibling assertion.
+    #[test]
+    fn root_config_in_finds_either_spelling_in_one_directory() {
+        let minimal = r#"{ "schemaVersion": "3", "name": "t", "nodes": {} }"#;
+        for name in ROOT_CONFIG_NAMES {
+            let dir = tempfile::tempdir().unwrap();
+            std::fs::write(dir.path().join(name), minimal).unwrap();
+            assert_eq!(root_config_in(dir.path()), Some(dir.path().join(name)));
+        }
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(root_config_in(empty.path()), None);
+
+        // It does NOT walk upward — that is `discover_config`'s job, and a
+        // worktree view asking about one directory must not answer about its
+        // parent.
+        let outer = tempfile::tempdir().unwrap();
+        std::fs::write(outer.path().join("veld.json"), minimal).unwrap();
+        let inner = outer.path().join("sub");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert_eq!(root_config_in(&inner), None);
     }
 
     /// Every way a preset can be broken is reported by `veld lint`.

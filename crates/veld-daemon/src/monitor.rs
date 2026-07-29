@@ -559,12 +559,10 @@ async fn run_single_liveness_check(
     }
 }
 
-/// Load the VeldConfig for a project root, if a veld.json exists.
+/// Load the VeldConfig for a project root, if a root config exists.
 fn load_config_for_project(project_root: &Path) -> Option<VeldConfig> {
-    let config_path = project_root.join("veld.json");
-    if !config_path.exists() {
-        return None;
-    }
+    // `root_config_in` already proved the file exists.
+    let config_path = veld_core::config::root_config_in(project_root)?;
     config::parse_config(&config_path).ok()
 }
 

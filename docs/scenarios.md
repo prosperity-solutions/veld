@@ -1236,8 +1236,7 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
           },
           "env": {
             "DATABASE_URL": "${nodes.postgres.DATABASE_URL}",
-            "REDIS_URL": "${nodes.redis.REDIS_URL}",
-            "WORKER_DASHBOARD_URL": "${nodes.worker.url}"
+            "REDIS_URL": "${nodes.redis.REDIS_URL}"
           }
         }
       }
@@ -1286,9 +1285,11 @@ Note the use of qualified references (`${nodes.catalog-service:local.url}` vs `$
 
 1. Postgres and Redis start in parallel.
 2. Once both are healthy, `api`, `worker`, and `scheduler` can start. The `api` and `worker` nodes both depend on Postgres and Redis, so they start as soon as infrastructure is ready. The `scheduler` depends only on Redis.
-3. Note the cross-references: `api` references `${nodes.worker.url}` (for a worker dashboard link) and `worker` references `${nodes.api.url}` (for callback URLs). Neither has a `depends_on` on the other -- this works because `url` is pre-computed.
+3. Note the cross-reference: `worker` references `${nodes.api.url}` (for callback URLs) with no `depends_on` on it -- this works because `url` is pre-computed.
 
 With `--preset api-only`, only the API and its infrastructure dependencies start. No worker, no scheduler.
+
+**A cross-reference has to hold in every preset that includes the referencing node.** `api` cannot read `${nodes.worker.url}` here, however tempting a worker-dashboard link is: `--preset full` would resolve it and `--preset api-only` would die with `unresolved variable reference`. `veld lint` reports that combination as `preset-missing-node-ref`, naming the preset -- it is the one thing you cannot see by reading a single node file. If the API genuinely needs the worker, add `worker:local` to the preset or give `api` a `depends_on` so every plan that includes it pulls the worker in too.
 
 All three application nodes are `start_server` with health check endpoints, so Veld monitors them and reports if any crashes.
 

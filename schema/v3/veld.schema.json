@@ -2,13 +2,13 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "title": "Veld Project Configuration (v3)",
-  "description": "Any Veld config file. All top-level keys are optional except in the root veld.json, which must declare schemaVersion and name \u2014 so one schema covers the root file and every file it includes, and $schema autocompletion works in all of them.",
+  "description": "Any Veld config file. All top-level keys are optional except in the root config (veld.json or veld.jsonc \u2014 both are read; with both present veld.json wins and lint reports ambiguous-root-config), which must declare schemaVersion and name \u2014 so one schema covers the root file and every file it includes, and $schema autocompletion works in all of them.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
     "$schema": {
       "type": "string",
-      "description": "Optional JSON Schema reference for editor autocompletion. Note: veld accepts JSONC (comments and trailing commas) in every config file, but editors validate a .json file with a strict JSON parser \u2014 map veld.json to the 'jsonc' language in your editor to stop spurious syntax errors."
+      "description": "Optional JSON Schema reference for editor autocompletion. Note: veld accepts JSONC (comments and trailing commas) in every config file, but editors validate a .json file with a strict JSON parser \u2014 name the root file veld.jsonc, or map veld.json to the 'jsonc' language in your editor, to stop spurious syntax errors."
     },
     "schemaVersion": {
       "type": "string",
@@ -39,7 +39,7 @@
     },
     "vars": {
       "type": "object",
-      "description": "One definition point per value, referenced as ${vars.<name>} at every use site. A var is a scalar or a single value source \u2014 never an object, never a config fragment: the key stays written in the node that uses it, so `rg <ENV_VAR>` still finds the line that sets it. A var may not reference another var (one hop, always).",
+      "description": "One definition point per value, referenced as ${vars.<name>} at every use site. A var is a scalar or a single value source \u2014 never an object, never a config fragment: the key stays written in the node that uses it, so `rg <ENV_VAR>` still finds the line that sets it. A var may not reference another var (one hop, always). A literal may use the run-scoped built-ins (${veld.run}, run_id, name, project, root, worktree, branch, username); the per-node ones (port, url, url.*, ports.*, node, variant) are a lint error here, because a var is one value for the whole run \u2014 compose those at the use site. A var backed by a value source is resolved only when the resolved plan reaches it, so a credential helper behind a var costs nothing on a run that does not use it.",
       "additionalProperties": {
         "$ref": "#/$defs/value"
       }
@@ -271,7 +271,7 @@
     },
     "secretFlag": {
       "type": "boolean",
-      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED in an argv element or shell string (both appear in the process table). A secret's sanctioned destinations are the process environment and a file."
+      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED where veld would substitute it into an argv element or shell string — ${vars.x}, ${output.x}, ${nodes.a.x} (both positions appear in the process table). A bare $NAME is a WARNING (secret-shell-expansion), not an error: the shell expands it, so it leaks only when the expansion becomes another program's argument — PGPASSWORD=$DB_PASS psql … is safe, psql \"postgres://u:$DB_PASS@host/db\" is not, because the shell then execs psql with the password in its argv. Handing a container the name only, [\"docker\", \"run\", \"-e\", \"NAME\", \"img\"], is always safe. A secret's sanctioned destinations are the process environment and a file."
     },
     "envMap": {
       "type": "object",
@@ -811,7 +811,7 @@
               "type": "null"
             }
           ],
-          "description": "Default teardown hook for every variant of this node, run in reverse dependency order during `veld stop`. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine."
+          "description": "Default teardown hook for every variant of this node, run in reverse dependency order during `veld stop`. A variant replaces it, or erases it with `\"on_stop\": null`. `null` here is simply equivalent to omitting the key \u2014 accepted because serde accepts it, and a schema stricter than the parser flags configs that load fine. It receives every ${veld.*} the node itself had, the URL family and named ports included, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"
@@ -896,7 +896,7 @@
               "type": "null"
             }
           ],
-          "description": "Teardown, run in reverse dependency order during `veld stop`. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it."
+          "description": "Teardown, run in reverse dependency order during `veld stop`. `null` erases a hook inherited from the node level (and nothing runs); omitting the key inherits it. It receives every ${veld.*} this variant had at start — for a start_server that includes ${veld.url}, ${veld.url.*} and ${veld.ports.*} — plus ${output.KEY} and ${vars.*}, so a resource named after the same built-ins in argv and here cannot drift."
         },
         "share": {
           "$ref": "#/$defs/share"

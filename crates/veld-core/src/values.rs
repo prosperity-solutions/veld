@@ -1,17 +1,25 @@
 //! Resolving configured [`ConfigValue`]s into concrete strings.
 //!
-//! **Timing is the contract.** Resolution happens once per run, at start, *after*
-//! the graph is built and *before* the first spawn — never during parse. That
-//! ordering is what makes `veld stop`, `veld status`, and the daemon monitor
-//! immune to a secret source that has since broken: they parse the config, they
-//! never resolve it.
+//! **Timing is the contract.** Resolution happens at most once per run, at start,
+//! *after* the graph is built — never during parse. That ordering is what makes
+//! `veld stop`, `veld status`, and the daemon monitor immune to a secret source
+//! that has since broken: they parse the config, they never resolve it.
+//!
+//! **Scope is the other half of the contract.** A value is resolved only if
+//! something in the resolved plan reaches for it. A node's `env` source always
+//! worked that way; [`resolve_vars`] does now too, so a var backed by a
+//! credential helper does not make every `veld start` — including one whose
+//! nodes need no secret at all — reach for the credential store. `start`
+//! resolves in two passes over one cache (the vars a `setup` step names, before
+//! setup runs; the rest before the first node spawns), which is why this
+//! function takes both what is `needed` and what is `already` resolved.
 //!
 //! **veld never takes custody of a secret.** A [`ConfigValue`] is a pointer plus
 //! a sensitivity flag. This module dereferences the pointer at the last possible
 //! moment, hands the result to the child process, and keeps it out of logs,
 //! `--json` output, and the share payload.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -83,6 +91,15 @@ pub enum ValueError {
         at: String,
         path: String,
         source: std::io::Error,
+    },
+
+    /// A `vars` literal that references something a var cannot see. Only the
+    /// run-scoped builtins are in scope there — a var is one value for the whole
+    /// run, so anything per-node has nothing to resolve against.
+    #[error("{at}: {source}")]
+    Interpolation {
+        at: String,
+        source: crate::variables::VariableError,
     },
 }
 
@@ -302,27 +319,49 @@ fn warn_if_not_git_ignored(project_root: &std::path::Path, path: &std::path::Pat
     }
 }
 
-/// Resolve every project `var` once per run.
+/// Resolve project `vars` once per run.
 ///
 /// Once, not per use site: a var whose source is a command must run that command
 /// exactly one time, or two references to `${vars.db_url}` could disagree — and
 /// with a rotating credential they would.
+///
+/// **Only the names in `needed`**, and only names not already in `already`. A var
+/// backed by a credential helper is resolved when something in the plan asks for
+/// it, the same way a node-level `env` source already was — see
+/// [`crate::config::vars_for_plan`].
+///
+/// An inline literal is interpolated against `ctx`, which carries the run-scoped
+/// builtins (`${veld.run}`, `${veld.branch}`, …). A *fetched* value is used
+/// verbatim, exactly as a node's `env` treats one: substituting inside content
+/// that came out of a secret store would turn the store into an interpolation
+/// vector, and a password containing `${` would break or, worse, expand.
 pub async fn resolve_vars(
     vars: Option<&HashMap<String, ConfigValue>>,
     project_root: Option<&std::path::Path>,
+    ctx: &crate::variables::VariableContext,
+    needed: &BTreeSet<String>,
+    already: &HashMap<String, String>,
 ) -> Result<HashMap<String, String>, ValueError> {
     let mut out = HashMap::new();
     let Some(vars) = vars else {
         return Ok(out);
     };
-    let mut names: Vec<&String> = vars.keys().collect();
+    // Sorted so a failure is deterministic: with two broken sources the same one
+    // is always the one reported.
+    let mut names: Vec<&String> = vars
+        .keys()
+        .filter(|n| needed.contains(n.as_str()) && !already.contains_key(n.as_str()))
+        .collect();
     names.sort();
     for name in names {
         let value = &vars[name];
-        out.insert(
-            name.clone(),
-            resolve_value(value, &format!("vars.{name}"), project_root).await?,
-        );
+        let at = format!("vars.{name}");
+        let resolved = match value.as_literal() {
+            Some(literal) => crate::variables::interpolate(literal, ctx)
+                .map_err(|source| ValueError::Interpolation { at, source })?,
+            None => resolve_value(value, &at, project_root).await?,
+        };
+        out.insert(name.clone(), resolved);
     }
     Ok(out)
 }
@@ -536,6 +575,111 @@ mod tests {
         // A bare number has already lost its leading zero, so it is refused
         // rather than guessed at.
         assert!(parse(r#"{ "value": "x", "mode": 600 }"#).is_err());
+    }
+
+    /// F1: a var literal is interpolated against the run-scoped builtins.
+    ///
+    /// It was not, and nothing said so: `"run_url": "https://web.${veld.run}.x"`
+    /// passed `veld lint` and delivered the literal text `${veld.run}` to the
+    /// process, where it surfaced hours later as a bad hostname or a container
+    /// named `foo-${veld.run}` rather than as a config error.
+    #[tokio::test]
+    async fn var_literals_interpolate_run_scoped_builtins() {
+        let mut ctx = crate::variables::VariableContext::new();
+        ctx.set_builtin("run", "demo".to_owned());
+        ctx.set_builtin("branch", "main".to_owned());
+
+        let vars: HashMap<String, ConfigValue> = HashMap::from([
+            (
+                "run_url".to_owned(),
+                cv(r#""https://web.${veld.run}.example.test""#),
+            ),
+            ("branchy".to_owned(), cv(r#""${veld.branch}-cache""#)),
+            // A *fetched* value is used verbatim: substituting inside content
+            // that came out of a secret store would make the store an
+            // interpolation vector.
+            (
+                "fetched".to_owned(),
+                cv(r#"{ "shell": "printf '${veld.run}'" }"#),
+            ),
+        ]);
+        let needed = vars.keys().cloned().collect();
+        let out = resolve_vars(Some(&vars), None, &ctx, &needed, &HashMap::new())
+            .await
+            .expect("all three resolve");
+
+        assert_eq!(out["run_url"], "https://web.demo.example.test");
+        assert_eq!(out["branchy"], "main-cache");
+        assert_eq!(out["fetched"], "${veld.run}", "a fetched value is verbatim");
+    }
+
+    /// A var literal naming something a var cannot see fails the start with a
+    /// message that points at the var, not at whichever node happened to use it.
+    #[tokio::test]
+    async fn var_literal_with_an_out_of_scope_builtin_errors_by_name() {
+        let vars: HashMap<String, ConfigValue> =
+            HashMap::from([("api".to_owned(), cv(r#""localhost:${veld.port}""#))]);
+        let err = resolve_vars(
+            Some(&vars),
+            None,
+            &crate::variables::VariableContext::new(),
+            &vars.keys().cloned().collect(),
+            &HashMap::new(),
+        )
+        .await
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, ValueError::Interpolation { .. }));
+        assert!(msg.contains("vars.api"), "{msg}");
+        assert!(msg.contains("veld.port"), "{msg}");
+    }
+
+    /// F2: a var is resolved only when something reaches for it, and never twice.
+    ///
+    /// The motivating case is a credential helper: putting the command in a var —
+    /// the natural move, since it is one value used by several nodes — used to
+    /// make *every* `veld start` reach for the credential store, including runs
+    /// whose nodes need no secret at all.
+    #[tokio::test]
+    async fn unreferenced_and_already_resolved_vars_are_not_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let vars: HashMap<String, ConfigValue> = HashMap::from([
+            (
+                "eager".to_owned(),
+                cv(&format!(
+                    r#"{{ "shell": "touch {}; echo x" }}"#,
+                    marker.display()
+                )),
+            ),
+            ("wanted".to_owned(), cv(r#""literal""#)),
+            ("cached".to_owned(), cv(r#""fresh""#)),
+        ]);
+
+        let already = HashMap::from([("cached".to_owned(), "from-the-first-pass".to_owned())]);
+        let needed = ["wanted".to_owned(), "cached".to_owned()]
+            .into_iter()
+            .collect();
+        let out = resolve_vars(
+            Some(&vars),
+            None,
+            &crate::variables::VariableContext::new(),
+            &needed,
+            &already,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out["wanted"], "literal");
+        assert!(
+            !marker.exists(),
+            "a var nothing in the plan references must not run its source command"
+        );
+        assert!(
+            !out.contains_key("cached"),
+            "a var the earlier pass already resolved is not resolved again — two \
+             resolutions of a rotating credential would disagree"
+        );
     }
 
     #[test]

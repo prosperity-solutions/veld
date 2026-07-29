@@ -5,6 +5,7 @@
   "vars": {
     "remote_api": "https://api.example.com",
     "health_path": "/healthz",
+    "cache_bucket": "cache-${veld.project}-${veld.branch}",
     "db_password": { "value": "devpassword", "secret": true },
     "db_url": { "argv": ["secret-tool", "read", "path/to/secret"], "secret": true }
   },
@@ -20,7 +21,11 @@
       "default_variant": "dev",
       "type": "start_server",
       "probes": { "readiness": { "type": "http", "path": "${vars.health_path}" } },
-      "env": { "API_URL": "${vars.remote_api}" },
+      "env": {
+        "API_URL": "${vars.remote_api}",
+        "CACHE_BUCKET": "${vars.cache_bucket}",
+        "SELF_URL": "${nodes.api.url}"
+      },
       "files": {
         ".secrets/client.pem": { "env": "CLIENT_CERT", "secret": true, "mode": "0400" }
       },

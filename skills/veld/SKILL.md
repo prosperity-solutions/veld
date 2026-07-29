@@ -121,15 +121,26 @@ attached to. Inside `command` you can reference:
 - `${param.KEY}` — the action's static `parameters`
 - `${veld.run}`, `${veld.node}`, `${veld.project}`, `${veld.root}`, `${veld.port}`, `${veld.url}`
 
-> **Secrets — prefer `$KEY` over `${output.KEY}`.** `${output.DB_PASS}` is
-> interpolated into the command string, so the value is visible in the process
-> list (`ps`). `$DB_PASS` is passed as an environment variable and expanded by
-> the shell at runtime, so it never appears in argv — the `psql` example above
-> leaks nothing. GUI clients are the exception: launching e.g.
-> `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST:$DB_PORT/$DB_NAME"`
-> expands the URL into `open`'s argv regardless. For local dev against ephemeral
-> clones that's usually fine; to avoid it, drop the password and let the client
-> prompt: `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
+> **Secrets — `$KEY` is better than `${output.KEY}`, but it is not automatically
+> safe.** `${output.DB_PASS}` is interpolated by Veld into the command string, so
+> the value is in `ps` for certain — that is a `secret-in-command` **error**.
+> `$DB_PASS` is expanded by the *shell* instead, and where the expansion ends up
+> decides whether anything leaks:
+>
+> | Form | Leaks? |
+> |---|---|
+> | `echo $DB_PASS` (shell builtin, no `execve`) | no |
+> | `PGPASSWORD=$DB_PASS psql -U u db` (environment assignment) | no |
+> | `psql "postgres://u:$DB_PASS@host/db"` | **yes** — the shell `execve`s `psql` with the expanded value in *its* argv |
+> | `open -a Postico "postgresql://$DB_USER:$DB_PASS@$DB_HOST/$DB_NAME"` | **yes**, same reason |
+>
+> The shell's own `ps` entry shows the literal `$DB_PASS`; the program it then
+> runs shows the value. Veld cannot tell the cases apart, so `$KEY` naming a
+> secret is a `secret-shell-expansion` **warning**, not an error. Prefer handing
+> the program the variable *name* and letting it read the environment
+> (`PGPASSWORD=`, `--password-file`, `-e NAME` for a container). For a GUI client,
+> drop the password and let it prompt:
+> `open -a Postico "postgresql://$DB_USER@$DB_HOST:$DB_PORT/$DB_NAME"`.
 
 Run actions from the CLI:
 
@@ -410,6 +421,9 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **`veld lint` is the fast feedback loop** — it reports every semantic problem at once and exits 1 on any error. `veld start` refuses on the same errors, but only one at a time
 - **`schemaVersion` must be `"3"`; `command` is gone** — use `argv` (array, spawned directly) or `shell` (string, via `sh -c`), exactly one. A `"1"`/`"2"` config, or a config containing `command`, fails to load — the error names every offending position. veld ships no converter: apply the rules in `docs/migrating-to-v3.md` and verify with `veld lint`
 - **`veld.*` is a closed set** — node outputs are `${output.KEY}` / `${nodes.<node>.KEY}`, never `${veld.KEY}`. This changed: `${veld.<OUTPUT>}` used to work inside `on_stop` and now fails, which would silently skip the teardown hook — `veld lint` catches it
+- **A built-in that exists is not a built-in that is *populated*** — `veld lint` reports `builtin-not-in-scope` for a real name written where the context does not have it. Availability: run/name/project/root/worktree/branch/username everywhere; `run_id` everywhere except `setup`/`teardown`; `node`/`variant` on nodes only; `port`/`url`/`url.*`/`ports.*` on `start_server` nodes only. A node's `on_stop` has exactly what the node had, URL family included — so `docker rm ${veld.project}-${veld.node}-${veld.run}` in `argv` and in `on_stop` cannot drift
+- **A `vars` value is run-scoped, and interpolated** — every `${…}` in a var literal is veld's to resolve, so `${HOME}` is a `var-unresolvable-reference` error (write `$HOME` unbraced, or use `{ "env": "HOME" }`). `${veld.run}`, `${veld.branch}` and friends resolve; `${veld.port}`, `${veld.url}`, `${veld.node}` in one are a lint error, because a var is one value for the whole run. Compose per-node values at the use site. A var backed by a source (`file`/`env`/`argv`/`shell`) is resolved only when the plan reaches it, so a credential-helper var costs nothing on a run that does not use it
+- **`${nodes.X.…}` is checked against each preset's plan** — `veld lint` reports `unknown-node-ref` (no such node) and `preset-missing-node-ref` (real node, not in that preset's plan), naming the preset. This is the "works with preset A, dies with preset B" class; a node pulled in transitively by `depends_on` counts as present
 - **A node is defined in exactly one file** — with `include` globs, the same node name in two files is an error naming both. `veld config --files` prints the glob → file → node chain when a node seems missing
 - **Relative paths resolve from the project root**, never from the file that declares them, even in an included file
 - **A preset entry starting with `@` references another preset** — `"ci": ["@core", "e2e:dev"]` is "everything in `core`, plus one more". Selections de-duplicate, and a cycle is an error naming the path. `veld lint` catches a dangling `@ref`, a cycle, and a selection naming a node or variant that does not exist
@@ -417,10 +431,11 @@ veld logs --source internal -f --name my-feature  # follow mode
 - **A preset's `key` is stable; its list position is not** — `veld start --preset <key-or-name>` both work, and a pinned `key` keeps meaning the same preset as the config grows. Never tell a user "pick option 3" from a list you sorted yourself; quote the key veld printed
 - **`default_preset` is the answer to "just start it"** — a bare `veld start` uses it directly without a TTY, so in an agent shell it starts the project's default instead of failing with "No selections provided". If a project has many presets and no `default_preset`, suggest adding one
 - **`depends_on` names must be literal** — no `${...}` in either the node or the variant name; the graph is read before variables exist
-- **A `secret` value must not appear in `argv`/`shell`** — a command line lands in the process table. Deliver it via `env` or `files`
-- **`${veld.port}` is only for `start_server`** — `command` variants don't get an allocated port
+- **A `secret` value must not be *substituted* into `argv`/`shell`** — a command line lands in the process table. `secret-in-command` (**error**) fires on the forms veld resolves and only those: `${vars.x}`, `${output.x}`, `${nodes.a.x}`. Deliver the value via `env` or `files` instead. A bare `$SECRET_NAME` is a `secret-shell-expansion` **warning**, not an error: the *shell* expands it, so it leaks only when the expansion becomes another program's argument — `PGPASSWORD=$DB_PASS psql …` and `echo $DB_PASS` are safe, `psql "postgres://u:$DB_PASS@h/db"` is not, because the shell then `execve`s `psql` with the password in *its* argv. Prefer handing the program the variable name. `["docker","run","-e","NAME","img"]` is silent — no `$`, nothing expands
+- **`${veld.port}` and `${veld.url}` are only for `start_server`** — a `command` variant gets no allocated port and no route. Reach a server's address as `${nodes.<node>.url}`, which also works from that server's own `env` (the `NEXTAUTH_URL` / `BASE_URL` case)
 - **`--oneshot` needs a `command` node** — the terminal node must run to completion; a `start_server` is rejected. Its exit code becomes veld's exit code; only its logs stream to stdout unless `--all-logs`
-- **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Project-level variables only (`${veld.name}`, `${veld.root}`, `${veld.run}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}`, `${vars.*}`) — not `${veld.port}`, `${veld.node}`, or `${nodes.*}`
+- **`setup`/`teardown` are not nodes** — they have no variants, no health checks, no outputs. Project-level variables only (`${veld.name}`, `${veld.root}`, `${veld.run}`, `${veld.worktree}`, `${veld.branch}`, `${veld.username}`, `${vars.*}`) — not `${veld.port}`, `${veld.node}`, `${veld.run_id}` (a teardown can outlive the run row), or `${nodes.*}`
+- **The root config may be `veld.json` or `veld.jsonc`** — both are read identically. Both in one directory: `veld.json` wins and lint reports `ambiguous-root-config` (an error, so `start` refuses — but a *finding*, so `stop` still works and teardown hooks still run). `veld init` writes `veld.json`. Included files were always glob-matched, so `nodes/*.jsonc` already worked
 - **`hooks` and `ui` are reserved** — they parse and are stored but are **not executed** by this version; `veld lint` emits a notice saying so. Every *other* unknown top-level key is an error reported by `veld lint`/`veld start` — not a load failure, so a typo never blocks `veld stop`
 - **No default header stripping** — Veld no longer strips `Origin` by default (it used to, for dev-server WS HMR). `Origin` now passes through the local proxy and is rewritten coherently by the gateway. If a Next.js dev server rejects WS HMR, set `allowedDevOrigins` in `next.config.js`; the escape hatch is `"proxy": { "request": { "remove": ["Origin"] } }`. Proxy header rules never apply to direct peer shares (`veld share` without `--web`)
 - **Ports are dynamic** (19000–29999) — never hardcode a port in veld.json or dependent config

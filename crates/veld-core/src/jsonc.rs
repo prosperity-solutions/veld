@@ -15,10 +15,13 @@
 //! instead, and editing bytes is precisely why it could not tell that `hooks` and
 //! `ui` are opaque. Anything proposing to rewrite a config should read that twice.
 //!
-//! There is no `.jsonc` extension requirement: the file is always `veld.json` and
-//! it accepts comments as it is. Note that editors do not know that — a
-//! `veld.json` carrying a `$schema` is validated by their strict JSON parser, so
-//! a `files.associations` mapping to `jsonc` is needed to stop the red squiggles.
+//! There is no `.jsonc` extension **requirement**: every config file accepts
+//! comments whatever it is called, and an included file has always been matched
+//! by glob. The root file may nonetheless be named `veld.jsonc` as well as
+//! `veld.json` (`config::ROOT_CONFIG_NAMES`) — not because this module needs it,
+//! but because editors decide from the extension: a `veld.json` carrying a
+//! `$schema` is validated by their strict JSON parser, so `.jsonc` (or a
+//! `files.associations` mapping) is what stops the red squiggles.
 //!
 //! [`reject_duplicate_keys`] closes the other half of the hole: `serde_json` is
 //! silently last-wins, so a config with two `variants` blocks (or two nodes of
