@@ -237,6 +237,27 @@ const $$=(s,p)=>(p||document).querySelectorAll(s);
 const content=$('#content'),statusDot=$('#status-dot'),statusText=$('#status-text');
 let lastFP=null;
 let sharesByRun={};
+// Run ids this dashboard knows about, so `refreshShares` can tell a hosted
+// share whose run is gone (#171) from one that simply has no card in the
+// current view. Stays null until the first successful /api/environments fetch —
+// a slow first load must not flag every share as orphaned.
+let knownRunIds=null;
+// Bumped every time `refresh` replaces the run snapshot. `refresh` and
+// `refreshShares` are separate timers and either can also be called ad hoc, so
+// "two consecutive share polls" is NOT two observations — both can be taken
+// against one stale run list. The gate below requires the two to carry
+// different generations, i.e. a fresh run list in between.
+let runsGeneration=0;
+// Share ids that looked unattached on the previous poll, and the run-snapshot
+// generation they were judged against. A share minted between the two fetches —
+// or one whose run appeared just after the run list was read — looks unattached
+// for one poll, and rendering that at once would put a destructive Unshare
+// button next to a live share.
+let prevUnattachedShares={gen:-1,ids:new Set()};
+// Share ids that held across two run-snapshot generations — the ones actually
+// rendered. Sticky, so a later poll against the same generation doesn't hide
+// them again; dropped as soon as the share attaches to a run once more.
+let confirmedOrphanShares=new Set();
 let historyByKey={};
 let joinCount=0;
 // Top-level view: 'active' (live environments — the default, so ended runs
@@ -290,6 +311,7 @@ async function refresh(){
     // (two repos both on `main`), so a name key attaches a share to an
     // unrelated project's card.
     sharesByRun={};for(const s of shares){if(s.run_id)(sharesByRun[s.run_id]||(sharesByRun[s.run_id]=[])).push(s);}
+    knownRunIds=new Set();for(const p of data.projects)for(const r of p.runs)knownRunIds.add(r.run_id);runsGeneration++;
     const running=data.projects.reduce((n,p)=>n+p.runs.filter(r=>r.status==='running').length,0);
     const total=data.projects.reduce((n,p)=>n+p.runs.length,0);
     statusDot.innerHTML=(running>0||joinCount>0)?'<span class="dot"></span>':'<span class="dot off"></span>';
@@ -898,7 +920,13 @@ function connSpans(share){
   return h;
 }
 
-const linkUrls=us=>(us||[]).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
+// `esc` makes a URL safe as *text*, not as an href — it does not touch the
+// scheme, so a `javascript:` value would still execute on click. Every URL here
+// comes from a remote party (a peer's join payload, a gateway's registration
+// response), so the scheme is checked before it reaches an href. React's own
+// href sanitiser covers the v2 dashboard; this is its counterpart.
+const httpUrl=u=>typeof u==='string'&&/^https?:\/\//i.test(u);
+const linkUrls=us=>(us||[]).filter(httpUrl).map(u=>'<a class="surl" href="'+esc(u)+'" target="_blank" rel="noopener">'+esc(u)+'</a>').join('');
 function setJoinState(kind,data){
   const ov=document.getElementById('join-overlay'),body=document.getElementById('join-body');
   ov.hidden=false;
@@ -981,9 +1009,34 @@ async function refreshShares(){
     const resp=await fetch('/api/shares');if(!resp.ok)return;
     const d=await resp.json();
     const panel=document.getElementById('shares-panel');
-    const has=(d.pending&&d.pending.length)||(d.joins&&d.joins.length);
+    // Hosted shares normally fold into their run card, which is keyed by run_id
+    // and (here) gated on the run being live — so a share that outlived its run
+    // has nowhere to appear. List those here, or a public web share with a live
+    // URL becomes un-stoppable from the UI (#171).
+    const unattached=knownRunIds===null?new Set():new Set((d.shares||[]).filter(s=>!s.run_id||!knownRunIds.has(s.run_id)).map(s=>s.id));
+    // Promote only when the run snapshot has moved on since the last judgement;
+    // demote as soon as a share attaches again. Polls that share a generation
+    // neither promote (that would be one observation counted twice) nor hide what
+    // is already confirmed (that would flicker the panel).
+    if(prevUnattachedShares.gen!==runsGeneration){
+      if(prevUnattachedShares.gen>=0)for(const id of unattached)if(prevUnattachedShares.ids.has(id))confirmedOrphanShares.add(id);
+      prevUnattachedShares={gen:runsGeneration,ids:unattached};
+    }
+    for(const id of[...confirmedOrphanShares])if(!unattached.has(id))confirmedOrphanShares.delete(id);
+    const orphans=(d.shares||[]).filter(s=>confirmedOrphanShares.has(s.id));
+    const has=(d.pending&&d.pending.length)||(d.joins&&d.joins.length)||orphans.length;
     if(!has){panel.hidden=true;panel.innerHTML='';return;}
     let html='';
+    if(orphans.length){
+      html+='<h3>Shares without a run</h3>';
+      for(const s of orphans){
+        const urls=(s.public_urls||[]).map(u=>u.public_url);
+        html+='<div class="share-row pending"><div class="grow"><span class="label">'+esc(s.run||'(unknown run)')
+          +'</span> has ended'+(urls.length?'<div class="urls">'+linkUrls(urls)+'</div>':'')
+          +'<div class="nid">'+esc(s.id)+'</div></div>'
+          +'<button class="sbtn deny" data-sact="unshare" data-sid="'+esc(s.id)+'">Unshare</button></div>';
+      }
+    }
     if(d.pending&&d.pending.length){
       html+='<h3>Join requests</h3>';
       for(const p of d.pending){

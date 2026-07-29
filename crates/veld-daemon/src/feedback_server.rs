@@ -21,7 +21,7 @@ use veld_core::logging::LogWriter;
 mod feedback_assets;
 
 #[path = "management.rs"]
-mod management;
+pub mod management;
 
 #[path = "desktop.rs"]
 mod desktop;
@@ -205,7 +205,6 @@ fn resolve_store(
     // CLI upgrades that migrate the schema.
     let db = Db::open().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // (Also see #172 for the wider audit of alias/name-as-global-key sites.)
     // A caller-supplied `?project=` is validated against the registry; the
     // Caddy-injected header is not, and the asymmetry is the point.
     //

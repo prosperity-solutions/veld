@@ -686,8 +686,13 @@ async fn create_worktree(
     // `unique_alias`.
     if let Some(ref alias) = body.alias {
         let siblings = db.list_worktrees(&repo_root).map_err(db_err)?;
-        // Case-insensitive, matching `Db::patch_worktree` — hostnames are.
-        if siblings.iter().any(|w| w.alias.eq_ignore_ascii_case(alias)) {
+        // Slug comparison, matching `Db::patch_worktree` — the hostname is
+        // `slugify(alias)`, so `main-2` and `main_2` are one name, not two.
+        let slug = veld_core::url::slugify(alias);
+        if siblings
+            .iter()
+            .any(|w| veld_core::url::slugify(&w.alias) == slug)
+        {
             // Distinct wording from the authoritative post-create 409 in
             // `write_err`: this one guarantees nothing was created, and a
             // client that must decide whether to resync needs to tell them

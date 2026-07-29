@@ -5,6 +5,49 @@ export function runKey(projectRoot: string, run: string): string {
   return `${projectRoot}::${run}`;
 }
 
+/**
+ * Ids of hosted shares that belong to no known run (#171).
+ *
+ * A share is attached to its run card by `run_id`, so one whose run is gone — a
+ * crash the GC pass hasn't swept yet, possibly a public web share with a live
+ * URL — has no card to live on and would be invisible and un-stoppable.
+ *
+ * `knownRunIds` must cover EVERY run the dashboard knows about, not just the
+ * ones currently rendered: filtered to the History view, every live run's share
+ * would otherwise look orphaned. `null` means the environment list hasn't loaded
+ * yet and yields nothing, so a slow first fetch can't flash every share here.
+ */
+export function unattachedShareIds<T extends { id: string; run_id?: string | null }>(
+  shares: T[],
+  knownRunIds: Set<string> | null,
+): Set<string> {
+  if (knownRunIds === null) return new Set();
+  return new Set(
+    shares.filter((s) => !s.run_id || !knownRunIds.has(s.run_id)).map((s) => s.id),
+  );
+}
+
+/**
+ * Share ids unattached on this poll AND on the previous one — the set safe to
+ * render as "without a run".
+ *
+ * The runs and the shares arrive from two requests, so a share minted between
+ * them — or one whose run appeared just after the environment list was read —
+ * looks unattached for a single poll. Rendering that immediately would put a
+ * destructive Unshare button next to a live share, so it has to hold across two
+ * observations.
+ *
+ * Both arguments must come from *polls*, never from renders: advancing the
+ * previous set once per render would let an unrelated re-render (a stats tick)
+ * confirm a single poll against itself.
+ */
+export function confirmedUnattached(
+  now: ReadonlySet<string>,
+  prev: ReadonlySet<string>,
+): Set<string> {
+  return new Set([...now].filter((id) => prev.has(id)));
+}
+
 export function fmtBytes(b: number): string {
   if (b < 1024) return `${b} B`;
   if (b < 1024 * 1024) return `${(b / 1024).toFixed(0)} KB`;

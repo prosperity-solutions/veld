@@ -1008,19 +1008,12 @@ fn sole_run(registry: &GlobalRegistry, project: Option<&str>) -> Result<String, 
 }
 
 /// Strip scheme and port from a URL, leaving the bare hostname.
+///
+/// One implementation for the whole workspace: Caddy route ids are derived from
+/// this hostname, so a second copy that disagreed by a byte would produce routes
+/// nothing can remove.
 pub(crate) fn hostname_of(url: &str) -> String {
-    let no_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
-    no_scheme
-        .split('/')
-        .next()
-        .unwrap_or(no_scheme)
-        .split(':')
-        .next()
-        .unwrap_or(no_scheme)
-        .to_string()
+    veld_core::url::hostname_of_url(url).to_string()
 }
 
 #[cfg(test)]

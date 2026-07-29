@@ -85,6 +85,34 @@ pub enum OrchestratorError {
     /// against a config that has since been broken.
     #[error("{0}")]
     ConfigInvalid(String),
+
+    #[error(
+        "hostname {hostname} is already served by run '{run_name}' of {project_name} \
+         ({project_root}) — two checkouts that share a project name and a run name mint \
+         the same URL, and only one of them can be routed. Start this one under a \
+         different name (`veld start --name <other>`), or stop the other run first \
+         (`veld stop --name {run_name}` in {project_root}). If that run is actually \
+         gone, `veld gc` clears the stale record."
+    )]
+    HostnameClaimed {
+        hostname: String,
+        run_name: String,
+        project_name: String,
+        project_root: String,
+    },
+
+    #[error(
+        "hostname {hostname} is already served by run '{run_name}', started from \
+         {project_root} — the same directory as this one, reached by a different path \
+         (a symlink, or /tmp vs /private/tmp on macOS). Veld addresses runs by the path \
+         you invoke it from, so it cannot replace that run from here: re-run from \
+         {project_root}, or stop it there."
+    )]
+    HostnameClaimedByOtherSpelling {
+        hostname: String,
+        run_name: String,
+        project_root: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -131,6 +159,210 @@ fn is_reapable_orphan(status: &RunStatus, any_alive: bool, ever_spawned: bool) -
         RunStatus::Starting => ever_spawned,
         _ => false,
     }
+}
+
+/// Context values every URL template can interpolate, gathered once per start.
+///
+/// Gathered before anything is torn down, because the hostnames derived from it
+/// gate the start (see [`claimed_hostname`]).
+struct UrlContext {
+    branch: String,
+    worktree: String,
+    username: String,
+    hostname: String,
+}
+
+/// Every hostname a plan will serve, normalised the way route ids are.
+///
+/// Split out from `check_hostnames_unclaimed` so the selection rule is testable
+/// without a registry: `claimed_hostname` (the decision) already had tests, but
+/// *which nodes get offered to it* did not — and that is where this went wrong.
+/// The step type must come from [`config::resolve_variant`], because `type` may be
+/// declared once at node level (F3); reading it off the raw variant yields `None`
+/// for every variant that inherits it, silently skipping the collision check for
+/// exactly the configs using that feature.
+fn planned_hostnames(
+    config: &config::VeldConfig,
+    plan: &[Vec<NodeSelection>],
+    run_name: &str,
+    ctx: &UrlContext,
+) -> Result<Vec<String>, OrchestratorError> {
+    let mut planned = Vec::new();
+    for sel in plan.iter().flatten() {
+        let node_cfg = &config.nodes[&sel.node];
+        let variant_cfg = &node_cfg.variants[&sel.variant];
+        let resolved = config::resolve_variant(config, node_cfg, variant_cfg);
+        if resolved.step_type != config::StepType::StartServer {
+            continue;
+        }
+        // Normalised the same way the route id is, so a template carrying a literal
+        // port compares against the registry's stripped hostnames.
+        let rendered = node_hostname(config, sel, run_name, ctx)?;
+        planned.push(url::hostname_of_url(&rendered).to_owned());
+    }
+    Ok(planned)
+}
+
+/// The hostname a `start_server` node will be served at.
+///
+/// A free function taking `&VeldConfig` so both callers — the pre-start
+/// collision check and the port/URL pre-compute pass — derive the hostname the
+/// same way. If they diverged, a run could be checked against one hostname and
+/// have its route registered under another.
+fn node_hostname(
+    config: &config::VeldConfig,
+    sel: &NodeSelection,
+    run_name: &str,
+    ctx: &UrlContext,
+) -> Result<String, OrchestratorError> {
+    let node_cfg = &config.nodes[&sel.node];
+    let variant_cfg = &node_cfg.variants[&sel.variant];
+    let effective_template = url::resolve_url_template(
+        &config.url_template,
+        node_cfg.url_template.as_deref(),
+        variant_cfg.url_template.as_deref(),
+    );
+    let url_values = url::build_url_template_values(
+        &sel.node,
+        &sel.variant,
+        run_name,
+        &config.name,
+        &ctx.branch,
+        &ctx.worktree,
+        &ctx.username,
+        &ctx.hostname,
+    );
+    Ok(url::evaluate_url_template(effective_template, &url_values)?)
+}
+
+/// Whether two registry roots resolve to the same directory while being spelled
+/// differently — one checkout reached through a symlink, or `/tmp/x` versus
+/// `/private/tmp/x` on macOS.
+///
+/// `db::state::root_key` stores the spelling the CLI was invoked with, so such a
+/// checkout is two registry rows, and every lookup keyed by the path — including
+/// `cleanup_stale_run`'s `get_run` — sees only its own spelling. That is why this
+/// is *not* treated as "our own project" and skipped: the replace path cannot
+/// reach the other row, so the two runs really would fight over one hostname.
+/// [`claimed_hostname`] reports it with its own message instead.
+///
+/// Compared by device + inode, not by canonical path: `realpath` resolves
+/// symlinks and `/tmp` → `/private/tmp`, but it does NOT fold case, so on a
+/// case-insensitive volume (APFS's default) `~/Repo` and `~/repo` are one
+/// directory with two different canonical strings. One `stat` each catches
+/// symlinks, case and bind mounts alike.
+///
+/// Only ever called once a planned hostname has actually matched — it touches the
+/// filesystem, and a registry row rooted on an unresponsive network mount would
+/// otherwise stall every start.
+#[cfg(unix)]
+fn is_same_dir_other_spelling(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt as _;
+    if a == b {
+        return false;
+    }
+    match (std::fs::metadata(a), std::fs::metadata(b)) {
+        (Ok(x), Ok(y)) => x.dev() == y.dev() && x.ino() == y.ino(),
+        // One of them isn't reachable, so they cannot be shown to be the same
+        // directory. The caller still reports the conflict, just with the
+        // different-project message.
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn is_same_dir_other_spelling(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return false;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+/// A hostname another project's run already serves.
+struct HostnameClaim {
+    hostname: String,
+    run_name: String,
+    project_name: String,
+    project_root: String,
+    /// The claimant is this very directory under a different path spelling, so
+    /// no lookup keyed by our own spelling can see or replace it.
+    same_dir: bool,
+}
+
+/// Find a planned hostname that a run in a *different* project already serves.
+///
+/// Route ids are keyed by hostname ([`url::run_route_id`]), so an identical
+/// hostname is an identical route: whoever writes last wins and the other
+/// project's URL silently stops resolving to its own app. Two checkouts of one
+/// repo hit this — they share `config.name`, so
+/// `{service}.{run}.{project}.localhost` is byte-identical whenever the run
+/// names match too.
+///
+/// Scoped deliberately:
+/// - Only *other* project roots. Reusing a name inside one project is the
+///   documented replace path (`cleanup_stale_run`).
+/// - Only `RunStatus::Running`. `Db::registry` carries each environment's latest
+///   run whatever its status and keeps node URLs as history, so `is_live()`
+///   would also match a `Starting` run's partial URLs and a `Stopping` run whose
+///   ports are already going away.
+/// - Compared case-insensitively, because DNS and Caddy host matching are.
+///
+/// Not a lock: two `veld start`s racing in two checkouts of one repo are both
+/// `Starting`, so neither sees the other and both register the same route id.
+/// That lands on the pre-#170 behaviour for that pair — last write wins, and the
+/// first `veld stop` removes the route the other still needs. Closing it needs a
+/// claim registered before the check, which is a bigger change than the window
+/// justifies; a sequential second start is refused normally.
+///
+/// Returns the lowest-sorting conflict so the same state always reports the same
+/// one — registry maps iterate in arbitrary order.
+///
+/// Two veld *instances* (separate databases, one shared helper) cannot see each
+/// other's runs, so this never fires across them — see `instance.rs`.
+fn claimed_hostname(
+    registry: &crate::state::GlobalRegistry,
+    own_root: &Path,
+    planned: &[String],
+) -> Option<HostnameClaim> {
+    let mut conflicts: Vec<(String, String, String, String, bool)> = Vec::new();
+    for entry in registry.projects.values() {
+        if entry.project_root == own_root {
+            continue;
+        }
+        for run in entry.runs.values() {
+            if run.status != RunStatus::Running {
+                continue;
+            }
+            for claimed in run.urls.values().map(|u| url::hostname_of_url(u)) {
+                if let Some(ours) = planned.iter().find(|h| h.eq_ignore_ascii_case(claimed)) {
+                    conflicts.push((
+                        ours.clone(),
+                        run.name.clone(),
+                        entry.project_name.clone(),
+                        entry.project_root.display().to_string(),
+                        // Resolved only now that a hostname has actually matched:
+                        // it stats the filesystem, and doing it per registry entry
+                        // would make one stale root on an unresponsive mount stall
+                        // every start.
+                        is_same_dir_other_spelling(&entry.project_root, own_root),
+                    ));
+                }
+            }
+        }
+    }
+    conflicts.sort();
+    conflicts.into_iter().next().map(
+        |(hostname, run_name, project_name, project_root, same_dir)| HostnameClaim {
+            hostname,
+            run_name,
+            project_name,
+            project_root,
+            same_dir,
+        },
+    )
 }
 
 /// Best-effort kill of a set of PIDs, then a bounded wait for them to die.
@@ -494,6 +726,43 @@ impl Orchestrator {
             return Err(OrchestratorError::ConfigInvalid(msg));
         }
 
+        // Resolve the graph and the URL context up front, because the hostnames
+        // this run wants must be checked against other projects BEFORE anything
+        // irreversible happens (#170). Everything below this point either
+        // destroys state or has side effects the user can see: replacing a live
+        // same-named run kills it, unshares it and — since route ids are keyed by
+        // hostname — removes the very route the other project is serving; project
+        // `setup` steps run real commands; Caddy is started. Refusing after any of
+        // that would leave the user worse off than before they ran the command.
+        //
+        // Two consequences worth naming. An invalid selection now fails before
+        // the dead-run cleanup below rather than after it — cleanup is idempotent
+        // and the next start does it anyway — and before the internal log writer
+        // exists, so a refusal is reported to the caller (and, for a
+        // daemon-spawned start, logged from its stderr) rather than to
+        // `veld logs --source internal`.
+        //
+        // And `url_ctx` is now sampled BEFORE `setup` steps run, where it used to
+        // be sampled after. A setup step that switches branch therefore no longer
+        // changes `{branch}` in this run's hostnames. That is the point: the
+        // hostname checked here has to be the hostname the route is registered
+        // under, and a URL that depends on a side effect of its own setup step
+        // could not be checked at all.
+        let resolved = graph::resolve_selections(selections, &self.config)?;
+        let plan = graph::build_execution_plan(&resolved, &self.config)?;
+        let url_ctx = UrlContext {
+            branch: url::detect_git_branch(&self.project_root),
+            worktree: self
+                .project_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("default")
+                .to_owned(),
+            username: whoami_username(),
+            hostname: whoami_hostname(),
+        };
+        self.check_hostnames_unclaimed(&plan, run_name, &url_ctx)?;
+
         // Clean up any runs whose processes have all died. This catches
         // orphaned runs from previous sessions (crash, kill -9, etc.).
         self.cleanup_dead_runs().await;
@@ -524,9 +793,6 @@ impl Orchestrator {
             run_name,
             LogStream::Internal,
         ));
-
-        let resolved = graph::resolve_selections(selections, &self.config)?;
-        let plan = graph::build_execution_plan(&resolved, &self.config)?;
 
         // The terminal one-off node (`--oneshot`) is part of the graph — its
         // dependencies are brought up here — but the node itself is executed
@@ -595,17 +861,6 @@ impl Orchestrator {
             return Err(e);
         }
 
-        // Gather context info for URL templates.
-        let branch = url::detect_git_branch(&self.project_root);
-        let worktree = self
-            .project_root
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("default")
-            .to_owned();
-        let username = whoami_username();
-        let hostname = whoami_hostname();
-
         // Outputs collected as we execute stages (for variable resolution).
         let mut all_outputs: HashMap<String, HashMap<String, String>> = HashMap::new();
 
@@ -665,23 +920,10 @@ impl Orchestrator {
                 })?;
                 let port = reservation.port;
 
-                let node_cfg = &self.config.nodes[&sel.node];
-                let effective_template = url::resolve_url_template(
-                    &self.config.url_template,
-                    node_cfg.url_template.as_deref(),
-                    variant_cfg.url_template.as_deref(),
-                );
-                let url_values = url::build_url_template_values(
-                    &sel.node,
-                    &sel.variant,
-                    &run.name,
-                    &self.config.name,
-                    &branch,
-                    &worktree,
-                    &username,
-                    &hostname,
-                );
-                let node_url = url::evaluate_url_template(effective_template, &url_values)?;
+                // Same function the pre-start hostname check used, so the URL a
+                // route is registered under cannot drift from the one that was
+                // checked against other projects.
+                let node_url = node_hostname(&self.config, sel, &run.name, &url_ctx)?;
                 let https_url = if self.https_port == 443 {
                     format!("https://{node_url}")
                 } else {
@@ -825,9 +1067,9 @@ impl Orchestrator {
                     .execute_stage(
                         &stage_nodes,
                         &run,
-                        &branch,
-                        &worktree,
-                        &username,
+                        &url_ctx.branch,
+                        &url_ctx.worktree,
+                        &url_ctx.username,
                         &mut all_outputs,
                         &shared_vars,
                         total_nodes,
@@ -1445,15 +1687,10 @@ impl Orchestrator {
 
                 // Remove DNS + Caddy route.
                 if let Some(ref url_str) = node_state.url {
-                    let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-                    // Strip port if present (e.g., "host:18443" → "host")
-                    let hostname = hostname.split(':').next().unwrap_or(hostname);
+                    let hostname = url::hostname_of_url(url_str);
                     let _ = self.helper_client.remove_host(hostname).await;
-                    let route_id = format!(
-                        "veld-{}-{}-{}",
-                        run_name, node_state.node_name, node_state.variant
-                    );
-                    let _ = self.helper_client.remove_route(&route_id).await;
+                    self.remove_route_by_hostname(hostname, run_name, node_state)
+                        .await;
                 }
 
                 // Run on_stop hook if defined (skip nodes that never ran).
@@ -1483,6 +1720,47 @@ impl Orchestrator {
             .await;
 
         Ok(StopResult::Stopped)
+    }
+
+    /// Refuse to start when another *project's* running run already serves one
+    /// of this run's hostnames (#170).
+    ///
+    /// Best-effort: a registry read failure warns and lets the start proceed.
+    /// The decision itself lives in [`claimed_hostname`], which is where the
+    /// scoping rules are documented and tested.
+    fn check_hostnames_unclaimed(
+        &self,
+        plan: &[Vec<NodeSelection>],
+        run_name: &str,
+        ctx: &UrlContext,
+    ) -> Result<(), OrchestratorError> {
+        let planned = planned_hostnames(&self.config, plan, run_name, ctx)?;
+
+        let registry = match self.db.registry() {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, "could not check hostnames against other projects");
+                return Ok(());
+            }
+        };
+        match claimed_hostname(&registry, &self.project_root, &planned) {
+            None => Ok(()),
+            // Same directory, different path spelling: the remedy is a path, not
+            // a name, so it gets its own message.
+            Some(claim) if claim.same_dir => {
+                Err(OrchestratorError::HostnameClaimedByOtherSpelling {
+                    hostname: claim.hostname,
+                    run_name: claim.run_name,
+                    project_root: claim.project_root,
+                })
+            }
+            Some(claim) => Err(OrchestratorError::HostnameClaimed {
+                hostname: claim.hostname,
+                run_name: claim.run_name,
+                project_name: claim.project_name,
+                project_root: claim.project_root,
+            }),
+        }
     }
 
     /// Clean up a stale run with the given name if it exists in state.
@@ -1542,6 +1820,57 @@ impl Orchestrator {
             let _ = self.save_state(&ended);
         }
         let _ = self.db.finalize_run(&run.run_id);
+
+        self.release_shares_of_replaced_run(&run.run_id).await;
+    }
+
+    /// Release the daemon-held shares of a run we just replaced (#171).
+    ///
+    /// Shares are keyed by `run_id`, and a replacement mints a new one — so
+    /// without this the old run's peer/web share stays alive, pointing at
+    /// whatever now listens on that hostname, until its TTL expires. `veld stop`
+    /// and `veld restart` already do this explicitly, and the GC pass releases
+    /// runs it *finds* dead; a deliberate replacement is neither.
+    ///
+    /// Same shape as `veld restart`'s call: bounded by 5s so an unresponsive
+    /// daemon cannot stall a start, and silent on `NotRunning` — a daemon that
+    /// isn't up holds no shares, so there is nothing to report.
+    async fn release_shares_of_replaced_run(&self, run_id: &uuid::Uuid) {
+        let client = crate::share::DaemonClient::new();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.unshare_run(&run_id.to_string()),
+        )
+        .await
+        {
+            Ok(Ok(0)) => {}
+            Ok(Ok(n)) => {
+                self.emit(ProgressEvent::Notice {
+                    message: format!(
+                        "Released {n} share(s) of the replaced run — re-share if you still \
+                         need the URL."
+                    ),
+                });
+            }
+            Ok(Err(crate::share::DaemonError::NotRunning)) => {}
+            Ok(Err(e)) => {
+                self.emit(ProgressEvent::Notice {
+                    message: format!(
+                        "Could not release the replaced run's shares ({e}) — any share of it \
+                         now points at the new run. Check `veld shares` and stop it with \
+                         `veld unshare <id>`."
+                    ),
+                });
+            }
+            Err(_) => {
+                self.emit(ProgressEvent::Notice {
+                    message: "Timed out releasing the replaced run's shares — any share of it \
+                              now points at the new run. Check `veld shares` and stop it with \
+                              `veld unshare <id>`."
+                        .to_owned(),
+                });
+            }
+        }
     }
 
     /// Clean up ALL runs in the project whose processes have died.
@@ -1613,16 +1942,28 @@ impl Orchestrator {
     /// Remove the DNS host and Caddy route for a node (best-effort).
     async fn remove_node_routes(&self, run_name: &str, node_state: &NodeState) {
         if let Some(ref url_str) = node_state.url {
-            let hostname = url_str.strip_prefix("https://").unwrap_or(url_str);
-            // Strip port if present (e.g., "host:18443" → "host")
-            let hostname = hostname.split(':').next().unwrap_or(hostname);
+            let hostname = url::hostname_of_url(url_str);
             let _ = self.helper_client.remove_host(hostname).await;
-            let route_id = format!(
-                "veld-{}-{}-{}",
-                run_name, node_state.node_name, node_state.variant
-            );
-            let _ = self.helper_client.remove_route(&route_id).await;
+            self.remove_route_by_hostname(hostname, run_name, node_state)
+                .await;
         }
+    }
+
+    /// Remove a node's Caddy route: the hostname-keyed id this build writes,
+    /// plus the pre-#170 id, in case the route was stored by an older helper
+    /// that is still running after a `veld update` (see
+    /// `url::legacy_run_route_id`). Both deletes are best-effort — an id that
+    /// isn't there makes the helper answer with an error we ignore.
+    async fn remove_route_by_hostname(
+        &self,
+        hostname: &str,
+        run_name: &str,
+        node_state: &NodeState,
+    ) {
+        let route_id = url::run_route_id(hostname);
+        let _ = self.helper_client.remove_route(&route_id).await;
+        let legacy = url::legacy_run_route_id(run_name, &node_state.node_name, &node_state.variant);
+        let _ = self.helper_client.remove_route(&legacy).await;
     }
 
     /// Run the `on_stop` hook for a node if one is defined in the config.
@@ -2317,14 +2658,26 @@ async fn execute_start_server_isolated(
         ),
     )
     .await;
-    if let Err(e) = ctx.helper_client.add_host(&node_url, "127.0.0.1").await {
+    // Normalised, because every removal path removes the DNS host by the
+    // port-stripped name: a `urlTemplate` carrying a literal port would otherwise
+    // add `host:PORT` and leave it in `/etc/hosts` forever.
+    if let Err(e) = ctx
+        .helper_client
+        .add_host(url::hostname_of_url(&node_url), "127.0.0.1")
+        .await
+    {
         tracing::warn!(error = %e, "failed to add DNS host via helper");
     }
     let mut route = serde_json::json!({
-        // Route id is keyed by run NAME, which is not unique across projects —
-        // two repos both on `main` collide here and in GC. Tracked as #170;
-        // changing the format needs a migration for already-stored routes.
-        "route_id": format!("veld-{}-{}-{}", ctx.run_name, sel.node, sel.variant),
+        // Keyed by hostname (#170) — see `url::run_route_id` for why that, and
+        // not the run name or the run id. Normalised through `hostname_of_url`
+        // because a `urlTemplate` can carry a literal port or path
+        // (`app.localhost:3000`) that the removal sides strip; without this the
+        // two would derive different ids and the route would be unremovable.
+        // Deliberately no legacy-id delete here: the legacy id may belong to
+        // another project's live run, which is the very collision this fixes.
+        // Teardown handles the legacy entry.
+        "route_id": url::run_route_id(url::hostname_of_url(&node_url)),
         "hostname": &node_url,
         "upstream": format!("localhost:{port}"),
     });
@@ -3167,6 +3520,185 @@ mod tests {
         }
     }
 
+    /// A registry holding one run of one project, at the given status, serving
+    /// `hostname` — the shape `Db::registry` produces.
+    fn registry_with(
+        root: &str,
+        project_name: &str,
+        run_name: &str,
+        status: RunStatus,
+        hostname: &str,
+    ) -> crate::state::GlobalRegistry {
+        let mut runs = HashMap::new();
+        runs.insert(
+            run_name.to_owned(),
+            crate::state::RegistryRunInfo {
+                run_id: uuid::Uuid::new_v4(),
+                name: run_name.to_owned(),
+                status,
+                urls: HashMap::from([(
+                    "web:local".to_owned(),
+                    format!("https://{hostname}:18443"),
+                )]),
+            },
+        );
+        let mut projects = HashMap::new();
+        projects.insert(
+            root.to_owned(),
+            crate::state::RegistryEntry {
+                project_root: PathBuf::from(root),
+                project_name: project_name.to_owned(),
+                runs,
+            },
+        );
+        crate::state::GlobalRegistry { projects }
+    }
+
+    #[test]
+    fn another_projects_running_run_claims_the_hostname() {
+        let reg = registry_with(
+            "/repos/clone-a",
+            "app",
+            "main",
+            RunStatus::Running,
+            "web.main.app.localhost",
+        );
+        let planned = vec!["web.main.app.localhost".to_owned()];
+
+        let claim = claimed_hostname(&reg, Path::new("/repos/clone-b"), &planned)
+            .expect("clone B must be refused — one hostname cannot route to two apps");
+        assert_eq!(claim.hostname, "web.main.app.localhost");
+        assert_eq!(claim.run_name, "main");
+        assert_eq!(claim.project_root, "/repos/clone-a");
+
+        // Hostnames are case-insensitive in DNS and in Caddy's host matcher.
+        let shouty = vec!["WEB.MAIN.APP.LOCALHOST".to_owned()];
+        assert!(claimed_hostname(&reg, Path::new("/repos/clone-b"), &shouty).is_some());
+    }
+
+    #[test]
+    fn our_own_project_never_claims_against_itself() {
+        // Reusing a name inside one project is the replace path, not a conflict —
+        // `cleanup_stale_run` handles it, and this check must not pre-empt it.
+        let reg = registry_with(
+            "/repos/clone-a",
+            "app",
+            "main",
+            RunStatus::Running,
+            "web.main.app.localhost",
+        );
+        let planned = vec!["web.main.app.localhost".to_owned()];
+        assert!(claimed_hostname(&reg, Path::new("/repos/clone-a"), &planned).is_none());
+    }
+
+    #[test]
+    fn only_a_running_run_claims_a_hostname() {
+        // `Db::registry` reports each environment's LATEST run whatever its
+        // status, and node rows keep their URL as history — so anything but
+        // `Running` would block a start on a hostname nobody is serving.
+        // `is_live()` is the wrong predicate here: it admits `Starting` and
+        // `Stopping` too.
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Stopping,
+            RunStatus::Stopped,
+            RunStatus::Failed,
+            RunStatus::Crashed,
+        ] {
+            let reg = registry_with(
+                "/repos/clone-a",
+                "app",
+                "main",
+                status,
+                "web.main.app.localhost",
+            );
+            let planned = vec!["web.main.app.localhost".to_owned()];
+            assert!(
+                claimed_hostname(&reg, Path::new("/repos/clone-b"), &planned).is_none(),
+                "{status:?} must not claim a hostname"
+            );
+        }
+    }
+
+    #[test]
+    fn a_different_hostname_is_never_a_conflict() {
+        // The everyday case: two unrelated repos both running `main`. Their
+        // `{project}` labels differ, so the URLs differ and both must start.
+        let reg = registry_with(
+            "/repos/other",
+            "other",
+            "main",
+            RunStatus::Running,
+            "web.main.other.localhost",
+        );
+        let planned = vec!["web.main.app.localhost".to_owned()];
+        assert!(claimed_hostname(&reg, Path::new("/repos/app"), &planned).is_none());
+    }
+
+    #[test]
+    fn one_checkout_reached_by_two_paths_is_reported_as_such() {
+        // `root_key` stores the spelling the CLI was invoked with, so a symlinked
+        // checkout is two registry rows — and `cleanup_stale_run`'s `get_run`,
+        // keyed by our own spelling, cannot see the other one. Skipping it as
+        // "our own project" would let both runs claim one hostname; the claim is
+        // reported with `same_dir` so the caller can name the right remedy.
+        let dir = tempfile::TempDir::new().unwrap();
+        let real = dir.path().join("checkout");
+        std::fs::create_dir(&real).unwrap();
+        let link = dir.path().join("linked");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let reg = registry_with(
+            real.to_str().unwrap(),
+            "app",
+            "main",
+            RunStatus::Running,
+            "web.main.app.localhost",
+        );
+        let planned = vec!["web.main.app.localhost".to_owned()];
+
+        let claim = claimed_hostname(&reg, &link, &planned)
+            .expect("the run under the other spelling must be reported, not skipped");
+        assert!(
+            claim.same_dir,
+            "must be recognised as this same directory, not a different project"
+        );
+
+        // The identical spelling is still our own project and never a conflict.
+        assert!(claimed_hostname(&reg, &real, &planned).is_none());
+    }
+
+    #[test]
+    fn the_reported_conflict_is_stable_across_runs() {
+        // Registry maps iterate in arbitrary order; the same state must always
+        // name the same conflict, or the error text flickers between runs.
+        let mut reg = registry_with(
+            "/repos/zzz",
+            "app",
+            "zulu",
+            RunStatus::Running,
+            "web.zulu.app.localhost",
+        );
+        let other = registry_with(
+            "/repos/aaa",
+            "app",
+            "alpha",
+            RunStatus::Running,
+            "web.alpha.app.localhost",
+        );
+        reg.projects.extend(other.projects);
+        let planned = vec![
+            "web.zulu.app.localhost".to_owned(),
+            "web.alpha.app.localhost".to_owned(),
+        ];
+
+        for _ in 0..8 {
+            let claim = claimed_hostname(&reg, Path::new("/repos/mine"), &planned).unwrap();
+            assert_eq!(claim.hostname, "web.alpha.app.localhost");
+        }
+    }
+
     /// Build a minimal orchestrator backed by a throwaway database, with no
     /// helper interaction — enough to exercise `run_terminal` in isolation.
     fn test_orchestrator(project_root: &std::path::Path, config: VeldConfig) -> Orchestrator {
@@ -3416,6 +3948,79 @@ mod tests {
         assert!(
             reloaded.execution_order.contains(&key),
             "terminal node must be appended to execution_order for teardown"
+        );
+    }
+
+    /// A node that inherits `type` from the node level is still hostname-checked.
+    ///
+    /// #170's collision check read `step_type` off the raw variant. That predates
+    /// node-level defaults (F3), where `type` is declared once on the node and the
+    /// variant omits it — so the raw read saw `None`, decided the node was not a
+    /// `start_server`, and skipped it. The result was a *safety* check that quietly
+    /// stopped covering the configs using the newer feature: two checkouts could
+    /// both claim one hostname and only one of them would route.
+    ///
+    /// The plain-variant case is asserted alongside it, because "resolve everything"
+    /// must not have broken the shape that already worked.
+    #[test]
+    fn node_level_type_is_still_hostname_checked() {
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "app",
+                "url_template": "{service}.{run}.{project}.localhost",
+                "nodes": {
+                    "inherits": {
+                        "type": "start_server",
+                        "variants": { "dev": { "shell": "serve" } }
+                    },
+                    "explicit": {
+                        "variants": { "dev": { "type": "start_server", "shell": "serve" } }
+                    },
+                    "task": {
+                        "variants": { "dev": { "type": "command", "shell": "true" } }
+                    }
+                }
+            }"#,
+        )
+        .expect("fixture must parse");
+
+        let plan = vec![vec![
+            NodeSelection {
+                node: "inherits".to_owned(),
+                variant: "dev".to_owned(),
+            },
+            NodeSelection {
+                node: "explicit".to_owned(),
+                variant: "dev".to_owned(),
+            },
+            NodeSelection {
+                node: "task".to_owned(),
+                variant: "dev".to_owned(),
+            },
+        ]];
+        let ctx = UrlContext {
+            branch: "main".to_owned(),
+            worktree: "app".to_owned(),
+            username: "dev".to_owned(),
+            hostname: "box".to_owned(),
+        };
+
+        let planned = planned_hostnames(&config, &plan, "main", &ctx).expect("must render");
+
+        assert!(
+            planned.contains(&"inherits.main.app.localhost".to_owned()),
+            "a node inheriting `type` from the node level must be checked: {planned:?}"
+        );
+        assert!(
+            planned.contains(&"explicit.main.app.localhost".to_owned()),
+            "{planned:?}"
+        );
+        // A `command` node serves no hostname, so offering one would invent a
+        // collision that cannot happen.
+        assert!(
+            !planned.iter().any(|h| h.starts_with("task.")),
+            "a command node must not claim a hostname: {planned:?}"
         );
     }
 
