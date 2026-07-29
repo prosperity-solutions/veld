@@ -897,7 +897,7 @@ impl Orchestrator {
         // declared three lines up in the same file.
         let vars_ctx = self.vars_context(
             run_name,
-            run.run_id,
+            Some(run.run_id),
             &url_ctx.branch,
             &url_ctx.worktree,
             &url_ctx.username,
@@ -1685,7 +1685,11 @@ impl Orchestrator {
             Ok(Some(r)) => r,
             _ => {
                 // Environment unknown (e.g., setup failed before state was saved).
-                // Still run teardown steps to clean up anything setup may have created.
+                // Still run teardown steps to clean up anything setup may have
+                // created — with their vars, which they interpolate exactly like a
+                // `setup` step does. No run row here, so no node selections and no
+                // run id: project surfaces only.
+                self.ensure_stop_vars(run_name, None, &[]).await;
                 self.run_teardown_steps(run_name).await;
                 return Ok(StopResult::AlreadyStopped);
             }
@@ -1698,6 +1702,7 @@ impl Orchestrator {
         if !run.is_live() {
             // Latest run already ended — it is history now, never deleted here.
             // Teardown steps still run so a re-stop stays a cleanup tool.
+            self.ensure_stop_vars(run_name, Some(run.run_id), &[]).await;
             self.run_teardown_steps(run_name).await;
             return Ok(StopResult::AlreadyStopped);
         }
@@ -1717,53 +1722,21 @@ impl Orchestrator {
         // resolve in `on_stop` exactly as it did in the node's own command.
         let run_id = run.run_id;
 
-        // `on_stop` may reference `${vars.*}`. Reuse `start`'s values when this is
-        // the same process; otherwise (`veld stop` as its own invocation) resolve
-        // once for the whole teardown. A failing source must not abort the stop —
-        // teardown running is more important than every hook interpolating — so
-        // this degrades to no vars and the affected hooks report being skipped.
-        let stop_vars: Arc<HashMap<String, String>> = match &self.resolved_vars {
-            Some(v) => Arc::clone(v),
-            None => {
-                // Only what the stopping nodes and the project-level surfaces can
-                // reach, for the same reason `start` is selective: a `veld stop`
-                // must not run a credential helper for a var no `on_stop` here
-                // mentions.
-                let selections: Vec<graph::NodeSelection> = run
-                    .nodes
-                    .values()
-                    .map(|n| graph::NodeSelection {
-                        node: n.node_name.clone(),
-                        variant: n.variant.clone(),
-                    })
-                    .collect();
-                let ctx = self.vars_context(
-                    run_name,
-                    run_id,
-                    &url::detect_git_branch(&self.project_root),
-                    self.project_root
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("default"),
-                    &whoami_username(),
-                );
-                match crate::values::resolve_vars(
-                    self.config.vars.as_ref(),
-                    Some(&self.project_root),
-                    &ctx,
-                    &config::vars_for_teardown(&self.config, &selections),
-                    &HashMap::new(),
-                )
-                .await
-                {
-                    Ok(v) => Arc::new(v),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not resolve vars for teardown hooks");
-                        Arc::new(HashMap::new())
-                    }
-                }
-            }
-        };
+        // `on_stop` and the project `teardown` steps may both reference
+        // `${vars.*}`. Only what the stopping nodes and the project-level surfaces
+        // can reach, for the same reason `start` is selective: a `veld stop` must
+        // not run a credential helper for a var nothing here mentions.
+        let selections: Vec<graph::NodeSelection> = run
+            .nodes
+            .values()
+            .map(|n| graph::NodeSelection {
+                node: n.node_name.clone(),
+                variant: n.variant.clone(),
+            })
+            .collect();
+        let stop_vars = self
+            .ensure_stop_vars(run_name, Some(run_id), &selections)
+            .await;
 
         // Stop in reverse execution order (dependencies last). Fall back to
         // HashMap keys for runs created before execution_order was tracked.
@@ -2259,7 +2232,7 @@ impl Orchestrator {
     fn vars_context(
         &self,
         run_name: &str,
-        run_id: uuid::Uuid,
+        run_id: Option<uuid::Uuid>,
         branch: &str,
         worktree: &str,
         username: &str,
@@ -2267,7 +2240,10 @@ impl Orchestrator {
         let mut ctx = VariableContext::new();
         BuiltinScope {
             run_name,
-            run_id: Some(run_id.to_string()),
+            // `None` only on the stop paths that run after the run row is gone —
+            // `${veld.run_id}` in a var is then unavailable, exactly as it is in a
+            // project step.
+            run_id: run_id.map(|id| id.to_string()),
             project_root: &self.project_root,
             project_name: &self.config.name,
             worktree,
@@ -2283,6 +2259,59 @@ impl Orchestrator {
     /// (`setup` / `teardown`). Same closed `veld.*` set as a node context minus
     /// `node`/`variant`, so `${veld.branch}` does not silently work in a node
     /// command and fail in a setup step.
+    /// Resolve the `${vars.*}` the stop path needs, **into `self.resolved_vars`**.
+    ///
+    /// Into the field, not a local, because that is the only thing
+    /// [`Self::project_step_context`] can see — and that is what a project
+    /// `teardown` step interpolates against. A local map reaches
+    /// `run_on_stop_hook` and nothing else, which is how `${vars.*}` in a
+    /// `teardown` step came to fail with "no var named …" on a standalone
+    /// `veld stop` while working when start and stop shared a process. It is the
+    /// mirror of the `setup` bug, on the other end of the run.
+    ///
+    /// Extends rather than replaces, so a var already resolved by `start` in this
+    /// process is not resolved twice — two readings of a rotating credential would
+    /// disagree. A failing source must not abort the stop: teardown running
+    /// matters more than every step interpolating, so this degrades to whatever is
+    /// already cached and the affected steps report being skipped.
+    async fn ensure_stop_vars(
+        &mut self,
+        run_name: &str,
+        run_id: Option<uuid::Uuid>,
+        selections: &[graph::NodeSelection],
+    ) -> Arc<HashMap<String, String>> {
+        let mut merged: HashMap<String, String> =
+            self.resolved_vars.as_deref().cloned().unwrap_or_default();
+        let needed = config::vars_for_teardown(&self.config, selections);
+        if !needed.iter().all(|n| merged.contains_key(n)) {
+            let ctx = self.vars_context(
+                run_name,
+                run_id,
+                &url::detect_git_branch(&self.project_root),
+                self.project_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("default"),
+                &whoami_username(),
+            );
+            match crate::values::resolve_vars(
+                self.config.vars.as_ref(),
+                Some(&self.project_root),
+                &ctx,
+                &needed,
+                &merged,
+            )
+            .await
+            {
+                Ok(v) => merged.extend(v),
+                Err(e) => tracing::warn!(error = %e, "could not resolve vars for teardown"),
+            }
+        }
+        let shared = Arc::new(merged);
+        self.resolved_vars = Some(Arc::clone(&shared));
+        shared
+    }
+
     fn project_step_context(&self, run_name: &str) -> VariableContext {
         let mut ctx = VariableContext::new();
         for (name, value) in self.resolved_vars.iter().flat_map(|v| v.iter()) {
@@ -3837,6 +3866,53 @@ mod tests {
             let claim = claimed_hostname(&reg, Path::new("/repos/mine"), &planned).unwrap();
             assert_eq!(claim.hostname, "web.alpha.app.localhost");
         }
+    }
+
+    /// A project `teardown` step interpolates `${vars.*}` on a standalone
+    /// `veld stop`, where nothing on the start path has populated the cache.
+    ///
+    /// `run_teardown_steps` reads `self.resolved_vars` through
+    /// `project_step_context`, so a stop path that resolved its vars into a
+    /// *local* left teardown with none: the step was skipped with a warning. The
+    /// mirror of the `setup` bug, and invisible in the common case because a
+    /// foreground `start` leaves the cache populated in the same process.
+    #[tokio::test]
+    async fn teardown_steps_see_vars_on_a_standalone_stop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+        let marker = project_root.join("teardown-ran.txt");
+
+        let config: VeldConfig = serde_json::from_str(&format!(
+            r#"{{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "vars": {{ "marker": {} }},
+                "teardown": [
+                    {{ "name": "write", "shell": "echo saw-the-var > ${{vars.marker}}" }}
+                ],
+                "nodes": {{
+                    "task": {{ "default_variant": "local", "variants": {{
+                        "local": {{ "type": "command", "shell": "true" }}
+                    }}}}
+                }}
+            }}"#,
+            serde_json::to_string(&marker.to_string_lossy()).unwrap()
+        ))
+        .unwrap();
+
+        // A fresh orchestrator, exactly as `veld stop` builds one: no `start` ran
+        // in this process, so `resolved_vars` is None.
+        let mut orch = test_orchestrator(project_root, config);
+        assert!(orch.resolved_vars.is_none());
+
+        orch.ensure_stop_vars("dev", None, &[]).await;
+        orch.run_teardown_steps("dev").await;
+
+        assert_eq!(
+            std::fs::read_to_string(&marker).unwrap_or_default().trim(),
+            "saw-the-var",
+            "the teardown step must have interpolated its var and run"
+        );
     }
 
     /// Build a minimal orchestrator backed by a throwaway database, with no

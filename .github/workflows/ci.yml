@@ -257,7 +257,7 @@ jobs:
           set -e
           # `veld lint` exits 1 on any error-severity finding, so this gates the
           # repo's own configs against every rule in `config::validate`.
-          for cfg in $(git ls-files '*veld.json' | grep -v node_modules); do
+          for cfg in $(git ls-files '*veld.json' '*veld.jsonc' | grep -v node_modules); do
             dir=$(dirname "$cfg")
             echo "--- $cfg"
             (cd "$dir" && "$GITHUB_WORKSPACE/target/debug/veld" lint)
