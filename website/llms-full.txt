@@ -23,6 +23,8 @@ This detects your OS and architecture, downloads the latest release, and install
 
 No sudo required. Ensure `~/.local/bin` is on your `PATH`.
 
+**Upgrading from an older veld:** `veld.json` must declare `"schemaVersion": "3"`; `"1"` and `"2"` no longer load. The load error names every change needed. See `docs/migrating-to-v3.md` for the complete rule set, then `veld lint` to verify.
+
 Setup is optional — commands auto-bootstrap on first use with HTTPS on port 18443.
 For the full experience with clean URLs (no port numbers), run the one-time privileged setup:
 
@@ -110,6 +112,23 @@ veld stop --name dev
 ```
 
 ---
+
+## Config safety properties (schemaVersion 3)
+
+- **`argv` vs `shell`.** `argv` is an array spawned directly with no shell; interpolation runs per
+  element *after* the array is fixed, so an interpolated value containing spaces, quotes, or globs
+  can never change the argument count. `shell` is a string run via `sh -c` and is permanently
+  supported for pipes, `&&`, and redirection.
+- **Secrets are a pointer plus a flag, never custody.** A value can be read from `env`, a `file`, or
+  the stdout of an `argv`/`shell` command, and marked `secret: true`. veld resolves it at run start
+  and passes it via the process environment or a delivered file. A `secret` value interpolated into
+  an `argv` element or `shell` string is a lint **error**, because both appear in the process table.
+  `veld config` prints a redacted placeholder and there is no flag that prints a resolved secret.
+- **`veld lint` reports every semantic problem at once** and exits non-zero, for CI. Covers unknown
+  built-in variables, unresolvable presets (dangling `@ref`, cycles, unknown node or variant),
+  secrets heading for a command line, credential-shaped literals, and reserved-but-inert keys.
+  Semantic problems are deliberately *not* load errors, so a config that has drifted can still be
+  torn down with `veld stop`.
 
 ## CLI Reference
 
@@ -347,7 +366,7 @@ Project-level lifecycle steps that run outside the dependency graph. Not nodes �
 ]
 ```
 
-Step fields: `name` (required), `command` (required), `failureMessage` (optional — shown on failure).
+Step fields: `name` (required), `argv` or `shell` (required, exactly one), `failureMessage` (optional — shown on failure).
 
 Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plus shell env vars. No node-scoped vars.
 
@@ -357,7 +376,7 @@ Variables: `${veld.name}`, `${veld.project}`, `${veld.root}`, `${veld.run}`, plu
 
 Starts and manages a long-lived process. Veld allocates a port, injects it as `${veld.port}`, configures DNS and Caddy routing, and monitors health.
 
-- Must specify `command` (required)
+- Must specify exactly one of `argv` (array, spawned directly) or `shell` (string, via `sh -c`)
 - The process must bind to `${veld.port}`
 - Built-in outputs: `url` (full HTTPS URL) and `port` (allocated port number)
 - Supports synthetic `outputs` as an object (key → template string, interpolated after port allocation)
@@ -528,8 +547,9 @@ Usage: `veld start --preset fullstack --name my-feature`
 
 | Field | Type | Applies To | Description |
 |-------|------|------------|-------------|
-| `on_stop` | string | All | Teardown command on `veld stop` |
-| `skip_if` | string | `command` only | Idempotency check (exit 0 = skip). Alias: `verify` |
+| `argv` / `shell` | array / string | All | What to run — exactly one. `argv` is spawned directly (no shell, no word splitting); `shell` runs via `sh -c`. Interpolation in an `argv` runs per element after the array is fixed, so a value containing spaces can never change the argument count |
+| `on_stop` | object | All | Teardown command (`{"argv": …}` / `{"shell": …}`) on `veld stop`. Declarable at node level; a variant erases an inherited hook with `"on_stop": null` |
+| `skip_if` | object | `command` only | Idempotency check (exit 0 = skip), as `{"argv": …}` / `{"shell": …}`. Alias: `verify` |
 | `probes` | object | All | `{readiness?: HealthCheck, liveness?: LivenessProbe}` — supersedes `health_check` |
 | `sensitive_outputs` | array | All | Output keys to mask and encrypt |
 | `client_log_levels` | array | `start_server` | Browser log levels override (variant > node > project) |

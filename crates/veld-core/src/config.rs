@@ -2550,6 +2550,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_resolved_variants(config, &mut findings);
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
+    check_presets(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
@@ -2609,6 +2610,78 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
 /// Rule 3 — *a duplicate var name is a hard error* — is enforced by the
 /// duplicate-key check, since two entries of the same name in one `vars` object
 /// is exactly that. Across files it becomes F2's problem.
+/// Presets resolve: every `@ref` names a real preset, no cycles, and every
+/// selection names a real node and variant.
+///
+/// None of this was checked. `expand_preset` catches an unknown reference and a
+/// cycle, but only when `veld start` runs it, and the node/variant existence check
+/// happened later still, during graph construction. So a config with `["@nope"]`,
+/// with `a → b → a`, or naming a node that does not exist reported *"is valid"* —
+/// which is the one thing `veld lint` exists not to do. F0.1's promise is that
+/// every semantic problem is reported at once, before anything starts; a preset is
+/// exactly the kind of thing edited by hand and used weeks later.
+///
+/// Reuses [`crate::graph::expand_preset`] rather than re-walking the references,
+/// so the rule cannot disagree with the code that actually starts the run.
+fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let Some(presets) = config.presets.as_ref() else {
+        return;
+    };
+    let mut names: Vec<&String> = presets.keys().collect();
+    names.sort();
+    for name in names {
+        match crate::graph::expand_preset(name, config) {
+            Err(e) => out.push(Finding::error(
+                "preset-unresolvable",
+                format!("presets.{name}"),
+                format!(
+                    "{e}. `veld start --preset {name}` would fail here, so it is \
+                     reported now rather than at start"
+                ),
+            )),
+            Ok(selections) => {
+                // `expand_preset` resolves references; it does not know whether the
+                // node it named exists, which used to surface only once the graph
+                // was built.
+                for sel in selections {
+                    let Some(node) = config.nodes.get(&sel.node) else {
+                        out.push(Finding::error(
+                            "preset-unknown-node",
+                            format!("presets.{name}"),
+                            format!(
+                                "selects `{}:{}`, but no node named `{}` is defined. \
+                                 With `include` globs a node can also be missing \
+                                 because no glob matched its file — `veld config \
+                                 --files` prints the glob → file → node chain",
+                                sel.node, sel.variant, sel.node
+                            ),
+                        ));
+                        continue;
+                    };
+                    if !node.variants.contains_key(&sel.variant) {
+                        let mut known: Vec<&str> =
+                            node.variants.keys().map(String::as_str).collect();
+                        known.sort_unstable();
+                        out.push(Finding::error(
+                            "preset-unknown-variant",
+                            format!("presets.{name}"),
+                            format!(
+                                "selects `{}:{}`, but node `{}` has no variant `{}` \
+                                 (it has: {})",
+                                sel.node,
+                                sel.variant,
+                                sel.node,
+                                sel.variant,
+                                known.join(", ")
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
     let declared: BTreeMap<&str, &ConfigValue> = config
         .vars
@@ -4075,9 +4148,33 @@ mod tests {
             // …it must be semantically valid, since a documented example that
             // `veld start` would refuse is not an example…
             let findings = validate(&cfg);
+            // An example that declares `include` is a *root* file: its nodes live in
+            // files this test cannot load, because the globs point into a project
+            // layout that does not exist under `schema/v3/examples/`. So a preset
+            // selecting one of those nodes cannot resolve here, while in a real
+            // project `parse_config` merges the included files before `validate` ever
+            // runs. Only those two rules are exempted, only for such an example —
+            // everything else, including preset cycles and dangling `@refs`, still
+            // has to hold.
+            // `include` is consumed by merging, so it is not on the merged
+            // `VeldConfig` — read it off the raw document instead.
+            let raw: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("readable"))
+                    .expect("valid JSON");
+            let root_with_includes = raw
+                .get("include")
+                .and_then(|i| i.as_array())
+                .is_some_and(|i| !i.is_empty());
             let errors: Vec<&Finding> = findings
                 .iter()
                 .filter(|f| f.severity == Severity::Error)
+                .filter(|f| {
+                    !(root_with_includes
+                        && matches!(
+                            f.rule.as_str(),
+                            "preset-unknown-node" | "preset-unknown-variant"
+                        ))
+                })
                 .collect();
             assert!(errors.is_empty(), "{label} must be valid, got {errors:#?}");
 
@@ -4374,6 +4471,58 @@ mod tests {
             }"#,
         );
         assert!(!plain.iter().any(|f| f.rule == "secret-in-command"));
+    }
+
+    /// Every way a preset can be broken is reported by `veld lint`.
+    ///
+    /// All four of these used to report *"is valid"*: `expand_preset` catches an
+    /// unknown reference and a cycle, but only when `veld start` runs it, and the
+    /// node/variant existence check happened later still, during graph
+    /// construction. A preset is edited by hand and used weeks later — exactly the
+    /// thing that must fail at lint time rather than at 9am on a Monday.
+    #[test]
+    fn broken_presets_are_lint_errors_not_start_time_surprises() {
+        let f = findings_for(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "presets": {
+                    "dangling": ["@nope"],
+                    "cyclic":   ["@other"],
+                    "other":    ["@cyclic"],
+                    "ghost":    ["nosuch:dev"],
+                    "badvar":   ["api:missing"],
+                    "fine":     ["api:dev", "@fine-inner"],
+                    "fine-inner": ["api:dev"]
+                },
+                "nodes": { "api": { "variants": { "dev": {
+                    "type": "command", "argv": ["true"]
+                }}}}
+            }"#,
+        );
+        let by_location = |loc: &str| -> Vec<&str> {
+            f.iter()
+                .filter(|x| x.location == loc)
+                .map(|x| x.rule.as_str())
+                .collect()
+        };
+        assert_eq!(by_location("presets.dangling"), ["preset-unresolvable"]);
+        assert_eq!(by_location("presets.cyclic"), ["preset-unresolvable"]);
+        assert_eq!(by_location("presets.ghost"), ["preset-unknown-node"]);
+        assert_eq!(by_location("presets.badvar"), ["preset-unknown-variant"]);
+
+        // A valid preset — including one composing another with `@` — stays silent,
+        // or the rule is noise that trains people to ignore lint output.
+        assert!(by_location("presets.fine").is_empty(), "{f:?}");
+        assert!(by_location("presets.fine-inner").is_empty(), "{f:?}");
+
+        // The unknown-variant message lists what does exist, so the fix is visible
+        // without opening the config.
+        let msg = &f
+            .iter()
+            .find(|x| x.rule == "preset-unknown-variant")
+            .expect("expected the finding")
+            .message;
+        assert!(msg.contains("it has: dev"), "{msg}");
     }
 
     /// A credential-shaped `proxy` header value warns at every level.
