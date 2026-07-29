@@ -1,3 +1,5 @@
+use crate::presets::PresetDef;
+use indexmap::IndexMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -298,8 +300,21 @@ pub struct VeldConfig {
     pub url_template: String,
 
     /// Named shortcuts for node:variant selections.
+    ///
+    /// An `IndexMap`, not a `HashMap`: declaration order is what unpinned preset
+    /// keys are assigned from (see [`crate::presets`]), so throwing it away at
+    /// parse time would make the number a user types depend on hash iteration
+    /// order. It is also why the picker used to sort alphabetically — the only
+    /// deterministic order a `HashMap` could offer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub presets: Option<HashMap<String, Vec<String>>>,
+    pub presets: Option<IndexMap<String, PresetDef>>,
+
+    /// The preset `veld start` runs when given nothing to start.
+    ///
+    /// Answers "just start it" — the most common thing a human types and by far
+    /// the most common thing a coding agent is asked to do — without a guess.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_preset: Option<String>,
 
     /// Client-side log levels to capture (project-level default).
     /// Supported values: "log", "warn", "error", "info", "debug".
@@ -2444,6 +2459,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "include",
     "url_template",
     "presets",
+    "default_preset",
     "client_log_levels",
     "features",
     "proxy",
@@ -2551,6 +2567,7 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     check_secret_usage(config, &mut findings);
     check_vars(config, &mut findings);
     check_presets(config, &mut findings);
+    check_preset_keys(config, &mut findings);
     check_reserved_namespaces(config, &mut findings);
     // Total ordering, including `message`: several findings can share a
     // `location` (two bad `depends_on` entries in one variant), and `depends_on`
@@ -2680,6 +2697,142 @@ fn check_presets(config: &VeldConfig, out: &mut Vec<Finding>) {
             }
         }
     }
+}
+
+/// The preset *number* rules — everything that can make the digit a person types
+/// mean the wrong thing.
+///
+/// A pinned `key` is a promise: it is what somebody memorised, wrote in a
+/// runbook, or said out loud to a colleague. So every way that promise can be
+/// broken or ambiguous is an error here rather than a surprise at the picker,
+/// where the only symptom is the wrong environment starting.
+fn check_preset_keys(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let Some(presets) = config.presets.as_ref() else {
+        // `default_preset` without any presets at all is still worth naming.
+        check_default_preset(config, out);
+        return;
+    };
+
+    // Duplicate pinned keys. Reported against every name involved, sorted, so
+    // the message is the same whichever file the reader opens first.
+    let mut by_key: BTreeMap<u32, Vec<&str>> = BTreeMap::new();
+    for (name, def) in presets {
+        if let Some(key) = def.key() {
+            by_key.entry(key).or_default().push(name.as_str());
+        }
+        if def.key() == Some(0) {
+            out.push(Finding::error(
+                "preset-invalid-key",
+                format!("presets.{name}"),
+                "\"key\": 0 is not selectable — the picker numbers from 1. Pin a key of 1 \
+                 or more",
+            ));
+        }
+    }
+    for (key, mut names) in by_key {
+        if names.len() > 1 {
+            names.sort_unstable();
+            for name in &names {
+                out.push(Finding::error(
+                    "preset-duplicate-key",
+                    format!("presets.{name}"),
+                    format!(
+                        "pins \"key\": {key}, and so does {}. A key is the number a person \
+                         types at the picker, so two presets cannot share one — give each \
+                         its own",
+                        names
+                            .iter()
+                            .filter(|n| *n != name)
+                            .map(|n| format!("`{n}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                ));
+            }
+        }
+    }
+
+    // A preset *named* like a number that some other preset holds as a key.
+    // `presets::find` resolves the key first, so the name becomes unreachable;
+    // rather than document that as a rule, report it.
+    let assigned: Vec<(String, u32)> = crate::presets::resolve(config)
+        .into_iter()
+        .map(|p| (p.name, p.key))
+        .collect();
+    for (name, _) in &assigned {
+        if let Ok(as_number) = name.parse::<u32>()
+            && let Some((owner, _)) = assigned
+                .iter()
+                .find(|(other, key)| *key == as_number && other != name)
+        {
+            out.push(Finding::warning(
+                "preset-name-shadowed-by-key",
+                format!("presets.{name}"),
+                format!(
+                    "is named `{name}`, which is also the key of preset `{owner}`. Typing \
+                     `{name}` selects `{owner}`, so this preset is reachable only by \
+                     renaming it"
+                ),
+            ));
+        }
+    }
+
+    check_default_preset(config, out);
+
+    // One notice, not one per preset: the array form is fully supported and a
+    // small config saying `"dev": ["web:dev"]` needs no prose. It is at the scale
+    // where the list stops fitting in a glance that unlabelled presets start
+    // costing someone — a designer picking blind, or an agent guessing — which is
+    // the only case worth interrupting anyone about.
+    const CROWDED: usize = 8;
+    let documented = presets
+        .values()
+        .any(|d| d.label().is_some() || d.when_to_use().is_some());
+    if presets.len() >= CROWDED && !documented {
+        out.push(Finding::notice(
+            "presets-undocumented",
+            "presets",
+            format!(
+                "{} presets, none with a \"label\" or \"when_to_use\". At this size the \
+                 list is hard to pick from — for a person who did not write it, and for a \
+                 coding agent reading `veld presets --json` to decide what to start. The \
+                 object form adds both: `\"{}\": {{ \"label\": …, \"when_to_use\": …, \
+                 \"selections\": [...] }}`",
+                presets.len(),
+                presets.keys().next().map_or("dev", String::as_str),
+            ),
+        ));
+    }
+}
+
+/// `default_preset` must name a preset that exists — it is read when the user
+/// gave veld nothing to start, which is the moment they are least equipped to
+/// debug it.
+fn check_default_preset(config: &VeldConfig, out: &mut Vec<Finding>) {
+    let Some(name) = config.default_preset.as_deref() else {
+        return;
+    };
+    let known: Vec<&str> = config
+        .presets
+        .iter()
+        .flatten()
+        .map(|(n, _)| n.as_str())
+        .collect();
+    if known.contains(&name) {
+        return;
+    }
+    let mut sorted = known;
+    sorted.sort_unstable();
+    let known_list = if sorted.is_empty() {
+        "no presets are defined".to_owned()
+    } else {
+        format!("known presets: {}", sorted.join(", "))
+    };
+    out.push(Finding::error(
+        "default-preset-unknown",
+        "default_preset",
+        format!("names `{name}`, but {known_list}"),
+    ));
 }
 
 fn check_vars(config: &VeldConfig, out: &mut Vec<Finding>) {
@@ -4158,8 +4311,12 @@ mod tests {
             // has to hold.
             // `include` is consumed by merging, so it is not on the merged
             // `VeldConfig` — read it off the raw document instead.
+            // Comments stripped first: an example is a veld config, so it is
+            // JSONC. Reading it here as strict JSON made this half of the drift
+            // gate reject a file the loader above had just accepted.
+            let source = std::fs::read_to_string(&path).expect("readable");
             let raw: serde_json::Value =
-                serde_json::from_str(&std::fs::read_to_string(&path).expect("readable"))
+                serde_json::from_str(&crate::jsonc::strip(&source).expect("valid JSONC"))
                     .expect("valid JSON");
             let root_with_includes = raw
                 .get("include")

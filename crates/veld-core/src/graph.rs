@@ -209,7 +209,8 @@ fn expand_preset_inner(
         .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;
     let items = presets
         .get(preset_name)
-        .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?;
+        .ok_or_else(|| GraphError::UnknownPreset(preset_name.to_owned()))?
+        .selections();
 
     visiting.push(preset_name.to_owned());
     let mut out: Vec<NodeSelection> = Vec::new();
@@ -580,7 +581,23 @@ fn check_string_for_ambiguous_refs(
 mod tests {
     use super::*;
     use crate::config::{NodeConfig, StepType, VariantConfig, VeldConfig};
+    use crate::presets::PresetDef;
+    use indexmap::IndexMap;
     use std::collections::HashMap;
+
+    /// Build a `presets` map from the array form, which is all these tests need —
+    /// `@ref` expansion does not care about a preset's key or label.
+    fn presets<const N: usize>(entries: [(&str, &[&str]); N]) -> IndexMap<String, PresetDef> {
+        entries
+            .into_iter()
+            .map(|(name, items)| {
+                (
+                    name.to_owned(),
+                    PresetDef::Selections(items.iter().map(|s| (*s).to_owned()).collect()),
+                )
+            })
+            .collect()
+    }
 
     fn make_config() -> VeldConfig {
         // db -> api -> frontend (dependency chain)
@@ -666,6 +683,7 @@ mod tests {
             name: "test".into(),
             url_template: "{service}.{run}.{project}.localhost".into(),
             presets: None,
+            default_preset: None,
             client_log_levels: None,
             features: None,
             proxy: None,
@@ -760,20 +778,11 @@ mod tests {
     #[test]
     fn presets_compose_and_deduplicate() {
         let mut config = make_config();
-        config.presets = Some(HashMap::from([
-            (
-                "core".to_owned(),
-                vec!["db:local".to_owned(), "api:local".to_owned()],
-            ),
-            (
-                "full".to_owned(),
-                vec!["@core".to_owned(), "frontend:local".to_owned()],
-            ),
+        config.presets = Some(presets([
+            ("core", &["db:local", "api:local"][..]),
+            ("full", &["@core", "frontend:local"]),
             // Two references to the same preset must not start anything twice.
-            (
-                "ci".to_owned(),
-                vec!["@full".to_owned(), "@core".to_owned()],
-            ),
+            ("ci", &["@full", "@core"]),
         ]));
 
         let full = expand_preset("full", &config).unwrap();
@@ -793,20 +802,14 @@ mod tests {
     #[test]
     fn preset_cycle_is_an_error_naming_the_path() {
         let mut config = make_config();
-        config.presets = Some(HashMap::from([
-            ("a".to_owned(), vec!["@b".to_owned()]),
-            ("b".to_owned(), vec!["@a".to_owned()]),
-        ]));
+        config.presets = Some(presets([("a", &["@b"][..]), ("b", &["@a"])]));
         let err = expand_preset("a", &config).unwrap_err();
         assert!(matches!(err, GraphError::PresetCycle(_)), "{err:?}");
         let msg = err.to_string();
         assert!(msg.contains("@a") && msg.contains("@b"), "{msg}");
 
         // A preset referencing itself directly is the same class of mistake.
-        config.presets = Some(HashMap::from([(
-            "self".to_owned(),
-            vec!["@self".to_owned()],
-        )]));
+        config.presets = Some(presets([("self", &["@self"][..])]));
         assert!(matches!(
             expand_preset("self", &config),
             Err(GraphError::PresetCycle(_))
@@ -816,7 +819,7 @@ mod tests {
     #[test]
     fn unknown_preset_reference_is_named() {
         let mut config = make_config();
-        config.presets = Some(HashMap::from([("ci".to_owned(), vec!["@nope".to_owned()])]));
+        config.presets = Some(presets([("ci", &["@nope"][..])]));
         assert!(matches!(
             expand_preset("ci", &config),
             Err(GraphError::UnknownPreset(name)) if name == "nope"

@@ -22,12 +22,14 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
+use indexmap::IndexMap;
 use serde::Deserialize;
 
 use crate::config::{
     ConfigError, ConfigValue, FeaturesConfig, NodeConfig, NullableMap, ProxyConfig, SetupStep,
     SharingConfig, VeldConfig,
 };
+use crate::presets::PresetDef;
 
 /// One veld config file, as written.
 ///
@@ -61,8 +63,13 @@ pub struct Document {
 
     #[serde(default)]
     pub url_template: Option<String>,
+    /// `IndexMap`, so the order presets are written in survives to
+    /// [`crate::presets::resolve`], which assigns unpinned keys from it.
     #[serde(default)]
-    pub presets: Option<HashMap<String, Vec<String>>>,
+    pub presets: Option<IndexMap<String, PresetDef>>,
+    /// Root-file only, like every other project-level setting.
+    #[serde(default)]
+    pub default_preset: Option<String>,
     #[serde(default)]
     pub client_log_levels: Option<Vec<String>>,
     #[serde(default)]
@@ -370,7 +377,11 @@ fn merge(
 ) -> VeldConfig {
     let mut nodes: HashMap<String, NodeConfig> = HashMap::new();
     let mut node_origin: HashMap<String, usize> = HashMap::new();
-    let mut presets: HashMap<String, Vec<String>> = HashMap::new();
+    // Insertion-ordered: `docs` arrives in load order (root first, then include
+    // globs in sorted order), so preset declaration order is stable across
+    // machines — which is what makes an auto-assigned key the same number for
+    // everyone on the team.
+    let mut presets: IndexMap<String, PresetDef> = IndexMap::new();
     let mut preset_origin: HashMap<String, usize> = HashMap::new();
     let mut vars: HashMap<String, ConfigValue> = HashMap::new();
     let mut var_origin: HashMap<String, usize> = HashMap::new();
@@ -426,7 +437,7 @@ fn merge(
             nodes.insert(node_name.clone(), node.clone());
         }
 
-        for (preset_name, items) in doc.presets.iter().flatten() {
+        for (preset_name, def) in doc.presets.iter().flatten() {
             if let Some(previous) = preset_origin.get(preset_name) {
                 findings.push(crate::config::Finding::duplicate_definition(
                     "preset",
@@ -437,7 +448,7 @@ fn merge(
                 continue;
             }
             preset_origin.insert(preset_name.clone(), *file_index);
-            presets.insert(preset_name.clone(), items.clone());
+            presets.insert(preset_name.clone(), def.clone());
         }
 
         for (var_name, value) in doc.vars.iter().flatten() {
@@ -478,6 +489,7 @@ fn merge(
             .clone()
             .unwrap_or_else(crate::config::default_url_template),
         presets: (!presets.is_empty()).then_some(presets),
+        default_preset: root.default_preset.clone(),
         client_log_levels: root.client_log_levels.clone(),
         features: root.features.clone(),
         proxy: root.proxy.clone(),
@@ -919,7 +931,9 @@ mod tests {
         // landing in `unknown`.
         for key in crate::config::KNOWN_TOP_LEVEL_KEYS {
             let value = match *key {
-                "schemaVersion" | "name" | "url_template" | "$schema" => "\"x\"".to_owned(),
+                "schemaVersion" | "name" | "url_template" | "$schema" | "default_preset" => {
+                    "\"x\"".to_owned()
+                }
                 "include" | "client_log_levels" => "[]".to_owned(),
                 "setup" | "teardown" => "[]".to_owned(),
                 _ => "{}".to_owned(),

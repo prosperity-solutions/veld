@@ -24,7 +24,12 @@ export type StartSelection =
   | { kind: "nodes"; selections: string[] };
 
 export function defaultStartSelection(w: Worktree): StartSelection | null {
-  if (w.presets.length > 0) return { kind: "preset", name: w.presets[0] };
+  if (w.presets.length > 0) {
+    // `default_preset` first — the config author said which one this is, and
+    // "the first preset in the file" is a guess by comparison.
+    const preferred = w.presets.find((p) => p.is_default) ?? w.presets[0];
+    return { kind: "preset", name: preferred.name };
+  }
   if (w.nodes.length > 0) {
     return {
       kind: "nodes",
@@ -65,7 +70,7 @@ export function pruneStartSelection(
 ): StartSelection | null {
   if (!sel) return null;
   if (sel.kind === "preset") {
-    return w.presets.includes(sel.name) ? sel : null;
+    return w.presets.some((p) => p.name === sel.name) ? sel : null;
   }
   const valid = new Set(
     w.nodes.flatMap((n) => n.variants.map((v) => `${n.name}:${v}`)),
@@ -108,9 +113,20 @@ export function startBody(sel: StartSelection): {
     : { selections: sel.selections };
 }
 
-export function startSelectionLabel(sel: StartSelection | null): string {
+/**
+ * Button text for a selection. Given the worktree, a preset renders its
+ * human-readable `label`; without one it falls back to the config key, which is
+ * what a config with no labels has to show anyway.
+ */
+export function startSelectionLabel(
+  sel: StartSelection | null,
+  w?: Worktree,
+): string {
   if (!sel) return "nothing to start";
-  if (sel.kind === "preset") return sel.name;
+  if (sel.kind === "preset") {
+    const hit = w?.presets.find((p) => p.name === sel.name);
+    return hit?.label ?? sel.name;
+  }
   const n = sel.selections.length;
   return n === 1 ? sel.selections[0] : `${n} nodes`;
 }
@@ -221,7 +237,7 @@ export function StartConfig(props: {
           label: { fontFamily: "var(--mantine-font-family-monospace)" },
         }}
       >
-        {startSelectionLabel(sel)}
+        {startSelectionLabel(sel, w)}
       </Button>
       <Modal
         opened={opened}
@@ -252,20 +268,53 @@ export function StartConfig(props: {
                     }}
                   >
                     <Stack gap={7} pr={8}>
-                      {w.presets.map((p) => (
-                        <Radio
-                          key={p}
-                          value={p}
-                          label={p}
-                          size="xs"
-                          styles={{
-                            label: {
-                              fontFamily:
-                                "var(--mantine-font-family-monospace)",
-                            },
-                          }}
-                        />
-                      ))}
+                      {w.presets.map((p, i) => {
+                        // Presets arrive in display order already grouped, so a
+                        // heading is needed exactly where the group changes.
+                        const newGroup =
+                          p.group != null && p.group !== w.presets[i - 1]?.group;
+                        return (
+                          <div key={p.name}>
+                            {newGroup && (
+                              <Text
+                                size="xs"
+                                fw={600}
+                                c="dimmed"
+                                pt={i === 0 ? 0 : 8}
+                                pb={4}
+                              >
+                                {p.group}
+                              </Text>
+                            )}
+                            <Radio
+                              value={p.name}
+                              size="xs"
+                              label={
+                                <Stack gap={0}>
+                                  <Group gap={6} wrap="nowrap">
+                                    <Text size="xs" c="dimmed" ff="monospace">
+                                      {p.key}
+                                    </Text>
+                                    <Text size="xs">
+                                      {p.label ?? p.name}
+                                    </Text>
+                                    {p.is_default && (
+                                      <Text size="xs" c="dimmed">
+                                        default
+                                      </Text>
+                                    )}
+                                  </Group>
+                                  {p.when_to_use && (
+                                    <Text size="xs" c="dimmed">
+                                      {p.when_to_use}
+                                    </Text>
+                                  )}
+                                </Stack>
+                              }
+                            />
+                          </div>
+                        );
+                      })}
                     </Stack>
                   </Radio.Group>
                 </ScrollArea.Autosize>

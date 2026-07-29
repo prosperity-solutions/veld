@@ -16,6 +16,7 @@ const INIT_TEMPLATE: &str = r#"{
   "presets": {
     "default": []
   },
+  "default_preset": "default",
   "nodes": {}
 }
 "#;
@@ -529,6 +530,9 @@ fn generate_veld_json(
         preset_entries.join(", ")
     ));
     json.push_str("  },\n");
+    // So a bare `veld start` — and a coding agent told "start the app" — has a
+    // defined answer from the first run, rather than a prompt or an error.
+    json.push_str("  \"default_preset\": \"default\",\n");
     json.push_str("  \"nodes\": {\n");
 
     let mut node_entries: Vec<String> = Vec::new();
@@ -863,6 +867,7 @@ pub async fn run() -> i32 {
   "presets": {{
     "default": []
   }},
+  "default_preset": "default",
   "nodes": {{}}
 }}
 "#,

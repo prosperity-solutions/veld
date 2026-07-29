@@ -187,9 +187,9 @@ learn. Relative paths (`cwd`, `script`, output paths) stay relative to the
 
 Only `nodes`, `presets`, `vars`, `env`, `setup`, and `teardown` merge across files:
 each entry has an owning file, so there is nothing to arbitrate. The project-level
-singletons — `url_template`, `features`, `proxy`, `sharing`, `client_log_levels` —
-are read from the root file only, because a single value would need a precedence
-rule. Declaring one in an included file is a `root-only-key` error rather than a
+singletons — `url_template`, `default_preset`, `features`, `proxy`, `sharing`,
+`client_log_levels` — are read from the root file only, because a single value
+would need a precedence rule. Declaring one in an included file is a `root-only-key` error rather than a
 silent no-op.
 
 `veld config --files` prints the glob → file → node chain, which is the fastest
@@ -279,6 +279,40 @@ would commit.
 ```jsonc
 "presets": { "core": ["api:dev", "web:dev"], "ci": ["@core", "e2e:dev"] }
 ```
+
+### Presets gained keys and metadata — nothing to migrate
+
+A preset may now be an object as well as an array. **The array form stays valid
+and is not deprecated**, so no existing `presets` block needs to change:
+
+```jsonc
+"presets": {
+  "core": ["api:dev", "web:dev"],            // unchanged, still correct
+  "designer-preview": {
+    "key": 1,                                 // stable picker number
+    "label": "Site preview (staging content)",
+    "when_to_use": "Reviewing visuals against real CMS content. Slow to start.",
+    "group": "For non-developers",
+    "selections": ["web:prod", "api:staging"]
+  }
+},
+"default_preset": "core"
+```
+
+Worth adopting if the numbering at `veld start` has ever shifted under someone,
+or if a preset list has grown past what a newcomer can identify:
+
+- `key` pins the number typed at the picker so it stops moving. Unpinned presets
+  are numbered after the highest pinned key in declaration order —
+  `veld presets --pin` prints the current numbering as a block to paste.
+- `label` / `when_to_use` / `group` make the list pickable by people who did not
+  write the config, and by coding agents reading `veld presets`.
+- `default_preset` gives a bare `veld start` a defined answer, including in a
+  non-interactive shell where it previously failed with "No selections provided".
+
+`veld lint` reports a duplicate or zero `key`, a `default_preset` naming nothing,
+and — once, at eight or more presets with no metadata at all — a notice suggesting
+the object form.
 
 ---
 

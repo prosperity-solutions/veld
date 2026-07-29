@@ -23,19 +23,17 @@ pub async fn run(
     };
 
     // Determine what to start.
-    let parsed_selections = if let Some(ref preset_name) = preset {
-        match graph::expand_preset(preset_name, &config) {
-            Ok(sels) => match graph::resolve_selections(&sels, &config) {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    output::print_error(&format!("Invalid preset: {e}"), false);
-                    return 1;
-                }
-            },
-            Err(e) => {
-                output::print_error(&format!("Unknown preset: {e}"), false);
-                return 1;
-            }
+    let parsed_selections = if let Some(ref token) = preset {
+        // `--preset` takes a name or the key `veld presets` printed. Resolving
+        // the token here (rather than passing it straight to `expand_preset`)
+        // is what makes `--preset 3` and the picker's `3` the same thing.
+        let Some(chosen) = veld_core::presets::find(&config, token) else {
+            output::print_error(&unknown_preset_message(&config, token), false);
+            return 1;
+        };
+        match expand_and_resolve(&chosen.name, &config) {
+            Some(sels) => sels,
+            None => return 1,
         }
     } else if selections.is_empty() {
         match handle_no_selections(&config) {
@@ -888,69 +886,167 @@ async fn follow_dep_logs(
     }
 }
 
-/// Handle the case where no selections or preset were given.
-fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
-    let mut preset_names: Vec<String> = config
-        .presets
-        .as_ref()
-        .map(|p| p.keys().cloned().collect())
-        .unwrap_or_default();
-    preset_names.sort();
-
-    if is_tty() && !preset_names.is_empty() {
-        match interactive_preset_selector(&preset_names) {
-            Some(selected) => match graph::expand_preset(&selected, config) {
-                Ok(sels) => match graph::resolve_selections(&sels, config) {
-                    Ok(resolved) => Some(resolved),
-                    Err(e) => {
-                        output::print_error(&format!("{e}"), false);
-                        None
-                    }
-                },
-                Err(e) => {
-                    output::print_error(&format!("{e}"), false);
-                    None
-                }
-            },
-            None => {
-                output::print_info("Cancelled.");
+/// Expand a preset by name and resolve it to concrete selections, reporting the
+/// failure. `None` means the caller should exit non-zero.
+fn expand_and_resolve(name: &str, config: &VeldConfig) -> Option<Vec<NodeSelection>> {
+    match graph::expand_preset(name, config) {
+        Ok(sels) => match graph::resolve_selections(&sels, config) {
+            Ok(resolved) => Some(resolved),
+            Err(e) => {
+                output::print_error(&format!("Invalid preset `{name}`: {e}"), false);
                 None
             }
+        },
+        Err(e) => {
+            output::print_error(&format!("Invalid preset `{name}`: {e}"), false);
+            None
         }
-    } else if is_tty() {
-        interactive_node_variant_picker(config)
-    } else {
+    }
+}
+
+/// What to say when `--preset` names nothing. Lists what *is* available, keys
+/// included, because the next thing the reader needs is the thing they should
+/// have typed.
+fn unknown_preset_message(config: &VeldConfig, token: &str) -> String {
+    let available = veld_core::presets::resolve(config);
+    if available.is_empty() {
+        return format!("Unknown preset `{token}` — this project defines no presets.");
+    }
+    let list = available
+        .iter()
+        .map(|p| format!("{} ({})", p.name, p.key))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Unknown preset `{token}`. Available (name and key): {list}")
+}
+
+/// Handle the case where no selections or preset were given.
+fn handle_no_selections(config: &VeldConfig) -> Option<Vec<NodeSelection>> {
+    let presets = veld_core::presets::resolve(config);
+    let default = veld_core::presets::default_preset(config);
+
+    // A declared default is the answer to "just start it" whether or not anyone
+    // is watching — so it applies without a TTY too. That is the case a coding
+    // agent hits: `veld start` in a non-interactive shell used to be an error
+    // payload listing everything and choosing nothing.
+    if !is_tty() {
+        if let Some(default) = default {
+            // stderr, not `print_info`: without a TTY this run streams JSON
+            // events on stdout, and a chrome line in that stream corrupts the
+            // capture of the very agent this path exists to serve. Names the
+            // config key, which is what `--preset` takes, not just the label.
+            let label = default
+                .label
+                .as_deref()
+                .map(|l| format!(" ({l})"))
+                .unwrap_or_default();
+            eprintln!("Starting default preset `{}`{label}.", default.name);
+            return expand_and_resolve(&default.name, config);
+        }
         let node_names: Vec<String> = config.nodes.keys().cloned().collect();
         let payload = serde_json::json!({
             "error": "No selections provided",
             "nodes": node_names,
-            "presets": preset_names,
+            "presets": presets,
+            "hint": "Pass `--preset <name-or-key>`, explicit `node:variant` selections, \
+                     or set `default_preset` in veld.json so a bare `veld start` has an \
+                     answer.",
         });
         println!("{}", serde_json::to_string_pretty(&payload).unwrap());
-        None
+        return None;
     }
+
+    if presets.is_empty() {
+        return interactive_node_variant_picker(config);
+    }
+
+    let selected = interactive_preset_selector(config, &presets, default.as_ref())?;
+    expand_and_resolve(&selected, config)
 }
 
-/// Simple interactive preset selector for TTY mode.
-fn interactive_preset_selector(presets: &[String]) -> Option<String> {
+/// Interactive preset selector.
+///
+/// Accepts a **key**, not a list position. That is the entire point: the number
+/// beside a preset is assigned by [`veld_core::presets`] and does not move when
+/// other presets are added, so it survives in someone's muscle memory, in a
+/// runbook, and in a message to a colleague. A name is accepted too, and an
+/// empty line takes the default when one is declared.
+fn interactive_preset_selector(
+    config: &VeldConfig,
+    presets: &[veld_core::presets::ResolvedPreset],
+    default: Option<&veld_core::presets::ResolvedPreset>,
+) -> Option<String> {
     use std::io::{self, BufRead, Write};
 
+    let show_groups = veld_core::presets::has_groups(config);
+
     println!("{}", output::bold("Available presets:"));
-    println!();
-    for (i, p) in presets.iter().enumerate() {
-        println!("  {} {}", output::dim(&format!("[{}]", i + 1)), p);
+    let mut current_group: Option<Option<String>> = None;
+    for preset in presets {
+        if show_groups && current_group.as_ref() != Some(&preset.group) {
+            println!();
+            println!(
+                "  {}",
+                output::bold(preset.group.as_deref().unwrap_or("Other")),
+            );
+            current_group = Some(preset.group.clone());
+        } else if !show_groups && current_group.is_none() {
+            println!();
+            current_group = Some(None);
+        }
+
+        let name = if preset.label.is_some() {
+            format!(" {}", output::dim(&format!("({})", preset.name)))
+        } else {
+            String::new()
+        };
+        let marker = if preset.is_default {
+            format!(" {}", output::green("(default)"))
+        } else {
+            String::new()
+        };
+        println!(
+            "  {} {}{name}{marker}",
+            output::cyan(&format!("[{}]", preset.key)),
+            preset.display_label(),
+        );
+        if let Some(when) = &preset.when_to_use {
+            println!("      {}", output::dim(when));
+        }
     }
     println!();
-    print!("Select a preset (1-{}): ", presets.len());
+
+    let prompt = match default {
+        Some(d) => format!(
+            "Select a preset by number or name [{} = {}]: ",
+            output::bold("enter"),
+            d.display_label()
+        ),
+        None => "Select a preset by number or name: ".to_owned(),
+    };
+    print!("{prompt}");
     io::stdout().flush().ok()?;
 
     let stdin = io::stdin();
     let line = stdin.lock().lines().next()?.ok()?;
-    let idx: usize = line.trim().parse().ok()?;
-    if idx == 0 || idx > presets.len() {
-        return None;
+
+    match veld_core::presets::interpret_pick(&line, config) {
+        veld_core::presets::Pick::Chosen(hit) => Some(hit.name),
+        veld_core::presets::Pick::Cancelled => {
+            output::print_info("Cancelled.");
+            None
+        }
+        veld_core::presets::Pick::NotFound => {
+            output::print_error(
+                &format!(
+                    "No preset `{}`. Type one of the numbers above, or a preset name.",
+                    line.trim()
+                ),
+                false,
+            );
+            None
+        }
     }
-    Some(presets[idx - 1].clone())
 }
 
 /// Interactive node+variant picker for TTY mode when no presets are defined.

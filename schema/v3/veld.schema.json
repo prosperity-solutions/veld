@@ -50,12 +50,9 @@
     },
     "presets": {
       "type": "object",
-      "description": "Named selections for `veld start --preset <name>`. An entry starting with @ references another preset, so overlapping sets need not repeat every selection. Cycles are an error.",
+      "description": "Named selections for `veld start --preset <name-or-key>`. An entry starting with @ references another preset, so overlapping sets need not repeat every selection. Cycles are an error. A preset is either a bare list of selections, or an object adding a stable picker key and the metadata a person or a coding agent needs to choose it.",
       "additionalProperties": {
-        "type": "array",
-        "items": {
-          "type": "string"
-        }
+        "$ref": "#/$defs/preset"
       },
       "examples": [
         {
@@ -66,8 +63,25 @@
           "ci": [
             "@core",
             "e2e:dev"
-          ]
+          ],
+          "designer-preview": {
+            "key": 1,
+            "label": "Site preview (staging content)",
+            "when_to_use": "Reviewing visual changes against real CMS content. Not for API work.",
+            "group": "For non-developers",
+            "selections": [
+              "web:prod",
+              "api:staging"
+            ]
+          }
         }
+      ]
+    },
+    "default_preset": {
+      "type": "string",
+      "description": "The preset `veld start` runs when given nothing to start. Answers \"just start it\" — for a person pressing enter at the picker, and for a coding agent told to start the app — without a guess. Must name a preset defined in `presets`.",
+      "examples": [
+        "dev-local"
       ]
     },
     "client_log_levels": {
@@ -204,6 +218,51 @@
             },
             "secret": {
               "$ref": "#/$defs/secretFlag"
+            }
+          }
+        }
+      ]
+    },
+    "preset": {
+      "description": "A preset: either a bare list of selections, or an object that adds a stable picker key and the metadata needed to choose it. Both forms are fully supported — the list form is right for a small config, and the object form is for configs whose preset list has grown past what anyone can identify at a glance.",
+      "oneOf": [
+        {
+          "type": "array",
+          "description": "Selections: `node:variant` entries and `@preset` references.",
+          "items": {
+            "type": "string"
+          }
+        },
+        {
+          "type": "object",
+          "required": [
+            "selections"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "selections": {
+              "type": "array",
+              "description": "Selections: `node:variant` entries and `@preset` references.",
+              "items": {
+                "type": "string"
+              }
+            },
+            "key": {
+              "type": "integer",
+              "minimum": 1,
+              "description": "The number shown beside this preset in the picker. Pinning it makes it permanent: it does not move when presets are added, removed, renamed, or regrouped, so it stays valid in someone's muscle memory, in a runbook, and in a message to a colleague. Presets without a key are numbered after the highest pinned one, in declaration order — stable when a preset is appended, not when one is inserted ahead of it. `veld presets --pin` prints the current numbering as a block to paste."
+            },
+            "label": {
+              "type": "string",
+              "description": "Human-readable name, shown in the picker and the desktop UI instead of the preset's config key."
+            },
+            "when_to_use": {
+              "type": "string",
+              "description": "When someone — or something — should pick this preset. Read by coding agents deciding what to start from a plain-English request, and by anyone who did not write the config. Say what it gives you and what it costs (start time, network, credentials)."
+            },
+            "group": {
+              "type": "string",
+              "description": "Optional heading to chunk the picker list under. Purely visual: groups are ordered by their lowest key, so a group can move on screen but can never change a number."
             }
           }
         }

@@ -8,7 +8,20 @@
     "services/*/veld.node.json"
   ],
   "presets": {
+    // The list form: right for a preset whose name says everything.
     "core": ["api:dev", "web:dev"],
-    "ci": ["@core", "e2e:dev"]
-  }
+    "ci": ["@core", "e2e:dev"],
+    // The object form, for a preset picked by people who did not write this
+    // config — and by coding agents, which read `when_to_use` from
+    // `veld presets --json`. The pinned `key` is what someone types at the
+    // picker, and it does not move when presets are added around it.
+    "designer-preview": {
+      "key": 1,
+      "label": "Site preview (staging content)",
+      "when_to_use": "Reviewing visual changes against real CMS content. Slow to start; not for API work.",
+      "group": "For non-developers",
+      "selections": ["@core", "web:prod"]
+    }
+  },
+  "default_preset": "core"
 }

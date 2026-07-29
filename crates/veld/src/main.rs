@@ -53,7 +53,8 @@ enum Command {
         #[arg(value_name = "NODE:VARIANT")]
         selections: Vec<String>,
 
-        /// Use a named preset instead of individual selections.
+        /// Use a preset instead of individual selections: its name, or the key
+        /// shown by `veld presets`.
         #[arg(long)]
         preset: Option<String>,
 
@@ -250,6 +251,11 @@ enum Command {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+
+        /// Print the current numbering as a paste-ready `presets` block, so
+        /// auto-assigned keys can be pinned and stop moving.
+        #[arg(long)]
+        pin: bool,
     },
 
     /// Print the project's veld.json configuration.
@@ -649,7 +655,7 @@ async fn main() {
 
         Command::Nodes { json } => commands::nodes::run(json).await,
 
-        Command::Presets { json } => commands::presets::run(json).await,
+        Command::Presets { json, pin } => commands::presets::run(json, pin).await,
 
         Command::Config {
             path,

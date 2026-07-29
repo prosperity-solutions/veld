@@ -441,8 +441,10 @@ struct WorktreeView {
     /// Whether the checkout has a veld.json — drives whether the UI shows run
     /// controls for it.
     has_veld_config: bool,
-    /// Preset names from the checkout's veld.json (empty without a config).
-    presets: Vec<String>,
+    /// Presets from the checkout's veld.json, in display order, with their keys
+    /// and labels (empty without a config). The UI shows the label a human can
+    /// read; `name` is what it sends back to start the run.
+    presets: Vec<veld_core::presets::ResolvedPreset>,
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
@@ -463,12 +465,13 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
     } else {
         None
     };
-    let mut presets: Vec<String> = cfg
+    // Display order comes from the resolver, not a sort here — the UI list and
+    // the CLI picker must agree, or the key printed next to a preset in one
+    // surface means something else in the other.
+    let presets = cfg
         .as_ref()
-        .and_then(|c| c.presets.as_ref())
-        .map(|p| p.keys().cloned().collect())
+        .map(veld_core::presets::resolve)
         .unwrap_or_default();
-    presets.sort();
     let mut nodes: Vec<NodeOptionView> = cfg
         .as_ref()
         .map(|c| {

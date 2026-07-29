@@ -46,6 +46,7 @@ unreadable.
   "setup": [],
   "teardown": [],
   "presets": { },
+  // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
   "ui": { }       // reserved: parsed, stored, NOT rendered by this version
@@ -168,9 +169,20 @@ file is not ignored.
 
 ```jsonc
 "presets": {
+  // Array form: selections only.
   "core": ["api:dev", "web:dev"],
-  "ci":   ["@core", "e2e:dev"]     // @name references another preset
-}
+  "ci":   ["@core", "e2e:dev"],    // @name references another preset
+
+  // Object form: adds a stable picker key and the metadata needed to choose it.
+  "designer-preview": {
+    "key": 1,
+    "label": "Site preview (staging content)",
+    "when_to_use": "Reviewing visual changes against real CMS content. Slow to start; not for API work.",
+    "group": "For non-developers",
+    "selections": ["web:prod", "api:staging"]
+  }
+},
+"default_preset": "core"
 ```
 
 - An entry starting with `@` names **another preset** instead of a node, so
@@ -179,11 +191,46 @@ file is not ignored.
 - A **cycle is an error** naming the path (`@a → @b → @a`), not a hang.
 - Presets are additive — they select end nodes, and veld resolves the dependency
   graph from there, so upstream nodes start automatically.
+- **Both forms are fully supported.** The array form is right when the name says
+  everything; the object form is for a list too long to identify at a glance.
 
-`veld lint` checks presets statically: a dangling `@ref`, a cycle, a selection
-naming a node that does not exist (`preset-unknown-node`), and one naming a variant
-that does not exist (`preset-unknown-variant`) are all **errors** at lint time rather
-than surprises at `veld start`.
+### Keys
+
+`key` is the number typed at the `veld start` picker, and it is an **identity, not
+a list position** — a pinned key does not move when presets are added, removed,
+renamed, or regrouped. Presets without one are numbered after the highest pinned
+key, in declaration order: stable when a preset is appended, not when one is
+inserted ahead of it. `veld presets` marks the auto-assigned keys and
+`veld presets --pin` prints a paste-ready block that freezes them (veld never
+rewrites a config itself).
+
+`--preset` takes either: `veld start --preset 2` == `veld start --preset dev-staging`.
+
+Display order is derived from keys — groups by their lowest key, presets within a
+group by key — so a group can move on screen without changing a number.
+
+### `default_preset`
+
+Root file only. The preset used when `veld start` is given nothing: enter at the
+picker, and **without a TTY it is used directly** rather than failing with "No
+selections provided". This is the field that makes "start the app" a defined
+request. Must name a preset that exists.
+
+### Lint rules
+
+`veld lint` checks presets statically, so a broken preset fails at lint time
+rather than at `veld start`:
+
+| Rule | Severity | Fires when |
+|---|---|---|
+| `preset-unresolvable` | error | dangling `@ref`, or a cycle |
+| `preset-unknown-node` | error | a selection names a node that does not exist |
+| `preset-unknown-variant` | error | a real node, a variant it does not have |
+| `preset-duplicate-key` | error | two presets pin the same `key` |
+| `preset-invalid-key` | error | `"key": 0` — the picker numbers from 1 |
+| `preset-name-shadowed-by-key` | warning | a preset named like a number another preset holds as its key |
+| `default-preset-unknown` | error | `default_preset` names nothing |
+| `presets-undocumented` | notice | 8+ presets, none with a `label` or `when_to_use` |
 
 ## Setup & Teardown
 

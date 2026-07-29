@@ -1,13 +1,24 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import type { Worktree } from "../api";
+import type { Preset, Worktree } from "../api";
 import {
   defaultStartSelection,
   parseStartSelection,
   pruneStartSelection,
   resolveStartSelection,
   startBody,
+  startSelectionLabel,
   startStorageKey,
 } from "./StartConfig";
+
+/** A preset as the daemon sends it, with the keys already assigned. */
+const preset = (name: string, over: Partial<Preset> = {}): Preset => ({
+  name,
+  key: 1,
+  pinned: false,
+  selections: [`${name}:dev`],
+  is_default: false,
+  ...over,
+});
 
 const wt = (over: Partial<Worktree> = {}): Worktree => ({
   id: 1,
@@ -49,7 +60,7 @@ describe("parseStartSelection", () => {
 
 describe("pruneStartSelection", () => {
   const w = wt({
-    presets: ["full"],
+    presets: [preset("full")],
     nodes: [{ name: "api", variants: ["dev", "prod"], default_variant: "dev" }],
   });
 
@@ -89,10 +100,22 @@ describe("pruneStartSelection", () => {
 
 describe("defaultStartSelection", () => {
   it("prefers the first preset", () => {
-    expect(defaultStartSelection(wt({ presets: ["a", "b"] }))).toEqual({
-      kind: "preset",
-      name: "a",
-    });
+    expect(
+      defaultStartSelection(wt({ presets: [preset("a"), preset("b")] })),
+    ).toEqual({ kind: "preset", name: "a" });
+  });
+
+  it("prefers the config's default_preset over list position", () => {
+    // The author said which preset is the default; "first in the file" is a
+    // guess, and picking it would start the wrong thing for every project whose
+    // default isn't declared first.
+    expect(
+      defaultStartSelection(
+        wt({
+          presets: [preset("a"), preset("b", { is_default: true })],
+        }),
+      ),
+    ).toEqual({ kind: "preset", name: "b" });
   });
 
   it("falls back to every node at its default variant", () => {
@@ -139,7 +162,7 @@ describe("resolveStartSelection", () => {
   });
 
   const w = wt({
-    presets: ["full"],
+    presets: [preset("full")],
     nodes: [{ name: "api", variants: ["dev"], default_variant: "dev" }],
   });
 
@@ -174,6 +197,25 @@ describe("resolveStartSelection", () => {
 
   it("is null when the worktree has nothing to start", () => {
     expect(resolveStartSelection(wt())).toBeNull();
+  });
+});
+
+describe("startSelectionLabel", () => {
+  it("shows a preset's label, falling back to its config key", () => {
+    const w = wt({
+      presets: [preset("web-prod-stg", { label: "Site preview" })],
+    });
+    expect(startSelectionLabel({ kind: "preset", name: "web-prod-stg" }, w))
+      .toBe("Site preview");
+    // No worktree in hand, or no label declared: the config key is all there is.
+    expect(startSelectionLabel({ kind: "preset", name: "web-prod-stg" }))
+      .toBe("web-prod-stg");
+    expect(
+      startSelectionLabel(
+        { kind: "preset", name: "plain" },
+        wt({ presets: [preset("plain")] }),
+      ),
+    ).toBe("plain");
   });
 });
 
