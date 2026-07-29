@@ -54,7 +54,7 @@ cargo build --release
 
 ## Quick Start
 
-1. Create a `veld.json` (or `veld.jsonc` — both are read; both in one directory is an error) in your project root:
+1. Create a `veld.json` (or `veld.jsonc` — both are read; with both present `veld.json` wins and lint reports it) in your project root:
 
 ```json
 {
@@ -123,11 +123,12 @@ veld stop --name dev
   the stdout of an `argv`/`shell` command, and marked `secret: true`. veld resolves it at run start
   and passes it via the process environment or a delivered file (and only if the resolved plan
   reaches it, so a credential helper is not run for a service you did not start). A `secret` value
-  veld *interpolates* into an `argv` element or `shell` string is a lint **error**, because both
-  appear in the process table. A bare `$NAME` inside a `shell` string or an `sh -c` script is fine
-  and is the recommended form — the shell expands it at runtime in the child, so it never enters
-  argv. `veld config` prints a redacted placeholder and there is no flag that prints a resolved
-  secret.
+  veld *substitutes* into an `argv` element or `shell` string — `${vars.x}`, `${output.x}`,
+  `${nodes.a.x}` — is a lint **error**, because both appear in the process table. A bare `$NAME` is
+  fine anywhere and is the recommended form: veld's interpolation consumes `${…}` only, so `$NAME`
+  reaches argv untouched and a shell expands it later in the child, where the value never appears
+  in any process's arguments. `veld config` prints a redacted placeholder and there is no flag that
+  prints a resolved secret.
 - **`veld lint` reports every semantic problem at once** and exits non-zero, for CI. Covers unknown
   built-in variables, built-ins written where they are not populated (`${veld.url}` on a `command`
   node, `${veld.port}` in a `vars` value), a `${nodes.X}` naming a node that does not exist or one

@@ -4,7 +4,7 @@
 
 Veld is configured through a single root config file placed in the root of your project. This file is committed to version control and defines your entire local development environment: the services to run, how they depend on each other, health checks, environment wiring, and URL routing.
 
-The root file may be named **`veld.json` or `veld.jsonc`** — both are read identically, and `veld init` writes `veld.json`. A directory holding both is an error rather than a precedence rule: the two would almost certainly disagree, and picking one silently means you edit the file veld is not reading.
+The root file may be named **`veld.json` or `veld.jsonc`** — both are read identically, and `veld init` writes `veld.json`. If a directory holds both, `veld.json` wins and `veld lint` reports `ambiguous-root-config` as an error, so `veld start` refuses until you delete or rename one. It is a *finding* rather than a load failure on purpose: discovery runs on every subcommand including `stop`, and a root config that refuses to load is one whose `on_stop` hooks never run, leaking the containers they exist to remove.
 
 Veld discovers it by walking up the directory tree from your current working directory, exactly like Git discovers `.git`. If no config file is found, Veld exits with a clear error suggesting `veld init`.
 
@@ -1329,28 +1329,34 @@ interpolated by Veld into an `argv` element or a `shell` string (both appear in
 the process table, readable by every other user on the machine), not into logs,
 not into `--json` output, not into the share payload.
 
-**`$KEY` is fine; `${output.KEY}` is not.** A bare `$KEY` is expanded by the
-*shell*, at runtime, in the child — Veld never touches it, so the value never
-enters `argv`:
+**`$KEY` is fine; `${vars.db_pass}` is not.** The rule fires on the forms *Veld
+resolves*, and only those — they are the only ones that can put a value in the
+process table. A bare `$KEY` is not one: Veld's interpolation consumes `${…}` and
+nothing else, so `$KEY` reaches `argv` untouched and is expanded later by a shell
+*in the child*, where the value never appears in any process's arguments.
 
 ```jsonc
 "env": { "DB_PASS": { "shell": "pass show db", "secret": true } },
 // fine — the shell expands $DB_PASS after the process is already running
 "shell": "psql \"postgres://u:$DB_PASS@localhost/db\"",
+"argv": ["bash", "-lc", "psql \"postgres://u:$DB_PASS@localhost/db\""],
 // also fine — the container is handed the name, not the value
 "argv": ["docker", "run", "-e", "DB_PASS", "img"]
 ```
 
-Refused: `${output.DB_PASS}`, `${vars.db_pass}`, `${nodes.db.PASSWORD}` and
-`${DB_PASS}` anywhere in a command (Veld resolves every `${…}` itself), and a bare
-`$DB_PASS` in an `argv` element that is *not* a shell script — there no shell ever
-sees it, so it is the literal nine characters rather than an expansion.
+Refused: `${vars.db_pass}`, `${output.DB_PASS}`, and `${nodes.db.PASSWORD}`
+anywhere in a command — Veld substitutes those into the command string itself.
+
+Not refused, and not a leak either way: `${DB_PASS}` (no such Veld namespace, so
+interpolation fails rather than substituting) and a bare `$DB_PASS` in an `argv`
+element nothing expands (inert text — a mistake, but not an exposure).
 
 ### Lint rules
 
 | Rule id | What it catches | Severity |
 |---|---|---|
-| `secret-in-command` | A value marked `secret` interpolated by Veld into `argv` or `shell` | **error** |
+| `secret-in-command` | A value marked `secret` that Veld would *substitute* into `argv` or `shell` — `${vars.x}`, `${output.x}`, `${nodes.a.x}`. A bare `$NAME` is not flagged: Veld never expands it, so it cannot reach the process table | **error** |
+| `ambiguous-root-config` | A directory holding both `veld.json` and `veld.jsonc`. Veld reads `veld.json`, so the file you edit may not be the one it runs | **error** (a finding, not a load failure — `veld stop` still works) |
 | `credential-shaped-literal` | A credential-shaped literal (`sk-`, `ghp_`, a JWT, `scheme://user:pass@host`), marked or not | warn |
 | `credential-shaped-proxy-header` | The same shape in a `proxy` header value, which travels to Caddy and to every joiner verbatim | warn |
 | `start-server-needs-readiness` | A `start_server` with no readiness probe | **error** in a v3 config, warn in v1/v2 |

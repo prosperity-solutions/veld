@@ -1097,6 +1097,13 @@ impl Orchestrator {
         // start rather than surface as an empty value inside a service. Only the
         // plan's — a credential helper behind a var no selected node mentions is
         // not woken up, matching what a node-level `env` source already did.
+        //
+        // `plan`, not `resolved`: `resolved` is the *endpoints*, and a node pulled
+        // in only by `depends_on` interpolates its own `env` like any other. Asking
+        // the endpoints would leave a var that only a dependency uses unresolved,
+        // and the node would fail at spawn with "no var named …" for a var that is
+        // declared right there in the config.
+        let planned: Vec<NodeSelection> = plan.iter().flatten().cloned().collect();
         let mut all_vars: HashMap<String, String> =
             self.resolved_vars.as_deref().cloned().unwrap_or_default();
         all_vars.extend(
@@ -1104,7 +1111,7 @@ impl Orchestrator {
                 self.config.vars.as_ref(),
                 Some(&self.project_root),
                 &vars_ctx,
-                &config::vars_for_plan(&self.config, &resolved),
+                &config::vars_for_plan(&self.config, &planned),
                 &all_vars,
             )
             .await?,

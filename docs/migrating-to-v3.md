@@ -173,8 +173,10 @@ editors pick JSONC mode from the extension — or map the `.json` names to the
 { "files.associations": { "veld.json": "jsonc", "*.node.json": "jsonc" } }
 ```
 
-A directory holding both `veld.json` and `veld.jsonc` is an error, so rename
-rather than copy. `veld init` still writes `veld.json`.
+Rename rather than copy: in a directory holding both, `veld.json` wins and
+`veld lint` errors with `ambiguous-root-config`, so `veld start` refuses until you
+delete one. (`veld stop` keeps working — that is a lint finding, not a load
+failure, so teardown hooks still run.) `veld init` still writes `veld.json`.
 
 ### Splitting the config across files
 
@@ -276,10 +278,12 @@ veld never takes custody of a secret: it carries a pointer and a flag, resolves
 it at run start (only if the plan reaches it), and passes it to the process's
 environment or a file.
 `secret: true` is what lets veld *refuse* the unsafe uses — a secret veld
-*interpolates* into an `argv` element or a `shell` string is an error, because
-both appear in the process table. A bare `$SECRET_NAME` in a shell script is
-fine and is the recommended form: the shell expands it at runtime in the child,
-so the value never enters argv. So is handing a container the name only
+*substitutes* into an `argv` element or a `shell` string (`${vars.x}`,
+`${output.x}`, `${nodes.a.x}`) is an error, because both appear in the process
+table. A bare `$SECRET_NAME` is fine anywhere and is the recommended form: veld's
+interpolation consumes `${…}` only, so `$NAME` reaches argv untouched and a shell
+expands it later in the child, where the value never appears in any process's
+arguments. So is handing a container the name only
 (`["docker", "run", "-e", "SECRET_NAME", "img"]`).
 
 A missing `env` source is an error at start naming the node and the variable,

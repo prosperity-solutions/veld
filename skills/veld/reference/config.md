@@ -39,9 +39,9 @@ unreadable.
 ```jsonc
 {
   // Every config file accepts // and /* */ comments and trailing commas, at any
-  // schemaVersion. The root file may be veld.json OR veld.jsonc (both, in one
-  // directory, is an error); with .json, editors need
-  // `"files.associations": {"veld.json": "jsonc"}`.
+  // schemaVersion. The root file may be veld.json OR veld.jsonc; with both in
+  // one directory veld.json wins and lint errors `ambiguous-root-config`. With
+  // .json, editors need `"files.associations": {"veld.json": "jsonc"}`.
   "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "3",
   "name": "myproject",
@@ -166,17 +166,18 @@ naming the node and the variable. A source command has a 30s timeout (an
 interactive credential helper has no terminal under the daemon, so it hangs — use
 a non-interactive source).
 
-**A `secret` value must not be interpolated by veld into `argv` or `shell`** —
+**A `secret` value must not be substituted by veld into `argv` or `shell`** —
 that is a lint error (`secret-in-command`), because a command line lands in the
 process table. Deliver it via the environment or `files`.
 
-Refused: `${vars.x}`, `${output.x}`, `${nodes.a.x}` naming a secret, anywhere in a
-command; `${NAME}` (veld resolves every `${…}` itself, so it never reaches a
-shell); a bare `$NAME` in an argv element that is not a shell script.
+Refused — the forms veld resolves, so the value really does land in argv:
+`${vars.x}`, `${output.x}`, `${nodes.a.x}` naming a secret, anywhere in a command.
 
-Allowed, and the recommended form: a bare `$NAME` inside a `shell` string or the
-script argument of `sh -c` — the shell expands it at runtime, in the child, so the
-value never enters argv. Also allowed: handing a container the *name* only,
+Allowed, and the recommended form: a bare `$NAME`, in **any** position. veld's
+interpolation consumes `${…}` and nothing else, so `$NAME` reaches argv untouched
+— a shell expands it later in the child, where the value never appears in any
+process's arguments, and where no shell is involved it is inert text. There is no
+shell-detection heuristic. Also allowed: handing a container the *name* only,
 `["docker", "run", "-e", "NAME", "img"]`.
 
 ## `ports` and `files` (v3)

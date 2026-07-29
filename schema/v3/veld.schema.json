@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "title": "Veld Project Configuration (v3)",
-  "description": "Any Veld config file. All top-level keys are optional except in the root config (veld.json or veld.jsonc \u2014 both are read, and both in one directory is an error), which must declare schemaVersion and name \u2014 so one schema covers the root file and every file it includes, and $schema autocompletion works in all of them.",
+  "description": "Any Veld config file. All top-level keys are optional except in the root config (veld.json or veld.jsonc \u2014 both are read; with both present veld.json wins and lint reports ambiguous-root-config), which must declare schemaVersion and name \u2014 so one schema covers the root file and every file it includes, and $schema autocompletion works in all of them.",
   "type": "object",
   "additionalProperties": false,
   "properties": {
@@ -211,7 +211,7 @@
     },
     "secretFlag": {
       "type": "boolean",
-      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED where veld would interpolate it into an argv element or shell string (both appear in the process table). A bare $NAME inside a shell string or an `sh -c` script is fine and is the recommended form — the shell expands it at runtime in the child, so it never enters argv; so is handing a container the name only, [\"docker\", \"run\", \"-e\", \"NAME\", \"img\"]. A secret's sanctioned destinations are the process environment and a file."
+      "description": "Declares the value sensitive: masked in output, encrypted at rest, scrubbed from the share payload, and REFUSED where veld would substitute it into an argv element or shell string — ${vars.x}, ${output.x}, ${nodes.a.x} (both positions appear in the process table). A bare $NAME is fine anywhere and is the recommended form: veld's interpolation consumes ${…} only, so $NAME reaches argv untouched and a shell expands it later in the child, where the value never appears in any process's arguments. So is handing a container the name only, [\"docker\", \"run\", \"-e\", \"NAME\", \"img\"]. A secret's sanctioned destinations are the process environment and a file."
     },
     "envMap": {
       "type": "object",
