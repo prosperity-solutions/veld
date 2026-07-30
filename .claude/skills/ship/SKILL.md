@@ -8,6 +8,12 @@ description: >
   the run. Use when the maintainer says "ship this", "build and merge X",
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
+metadata:
+  # Contributor-only dev tool. `npx skills` scans `.claude/skills/` alongside
+  # `skills/`, so without this flag `npx skills add prosperity-solutions/veld`
+  # would install /ship into unrelated projects. `internal: true` makes the
+  # skills CLI skip it in both its clone and GitHub-tree discovery paths.
+  internal: true
 ---
 
 # ship — carry a veld change to merge

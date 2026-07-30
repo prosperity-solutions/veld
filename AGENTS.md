@@ -59,6 +59,16 @@ Veld ships consumer-facing skills in `skills/` for the [npx skills](https://gith
 
 For **contributors** working on this repo with Claude Code, `.claude/skills/ship/` provides a `/ship` workflow skill that wraps the PR Workflow below (kickoff questionnaire → autonomous implement → adversarial review rounds → draft PR → wait for green CI → bypass-merge when authorized). It's a dev tool, not a published consumer skill.
 
+**Every skill under `.claude/skills/` must carry `metadata.internal: true` in its
+SKILL.md frontmatter.** The `npx skills` CLI scans `.claude/skills/` alongside
+`skills/` — it is a built-in discovery prefix, not something the repo opts into —
+so a contributor-only skill without that flag gets installed into unrelated
+projects by `npx skills add prosperity-solutions/veld`. `internal: true` is the
+CLI's supported opt-out and is honoured by both its discovery paths (local clone
+and GitHub tree). Claude Code ignores the field, so `/ship` still loads here.
+Verify with `npx skills add . --list` from the repo root: only the `skills/`
+entries may appear.
+
 ## PR Workflow
 
 Follow this workflow for every feature or fix:
