@@ -50,6 +50,7 @@ import {
   clearBrowserSession,
   mountBrowser,
   navigateBrowser,
+  paneCovers,
   reloadBrowser,
   subscribeBrowser,
   unmountBrowser,
@@ -166,12 +167,14 @@ export function BrowserPane(props: {
   const external = state.url || tab.url || "";
   const canStop = state.loading && !iframeBackend;
 
-  // Which screen stands in for the page. Mirrors `covered()` in browserHost,
-  // which is what actually hides the native view — the two must agree, or a
-  // screen renders under a live page (invisible) or the pane shows nothing.
+  // Which screen stands in for the page. `paneCovers` is the *same* predicate that
+  // hides the native view in browserHost — shared rather than restated, because the
+  // two disagreeing means either a screen painted under a live page or a pane that
+  // stays blank, and neither is visible in the browser build.
+  const covered = paneCovers(state, tab.url);
   const failure = state.error ? describeBrowserError(state.error) : null;
-  const chooser = !failure && !state.url && !tab.url;
-  const opening = !failure && !chooser && !state.loaded && state.loading;
+  const chooser = covered && !failure && !state.url && !tab.url;
+  const opening = covered && !failure && !chooser;
   const color = BROWSER_PROFILE_COLORS[profile];
 
   // Anything but the default is removable, including the one this pane is on:

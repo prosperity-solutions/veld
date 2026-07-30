@@ -194,6 +194,12 @@ jobs:
           node --check src/main.js
           node --check src/preload.js
           node --check src/browserViews.js
+          node --check src/validate.js
+      # The shell's own trust boundary: what the page is allowed to hand the main
+      # process (view ids, session slot names, URLs). Pure and Electron-free on
+      # purpose, so it is testable without a Chromium binary.
+      - name: Test
+        run: npm test
 
   integration:
     name: Integration Tests (macOS)

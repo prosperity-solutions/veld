@@ -132,6 +132,17 @@ interface View {
   mounted: boolean;
   /** Last rect pushed to the shell, so the poll below only sends changes. */
   rect: { x: number; y: number; width: number; height: number } | null;
+  /**
+   * Whether the shell currently holds a view for this id.
+   *
+   * `create` can legitimately fail — the per-window cap is reachable, since a
+   * layout is kept for every worktree visited and each one opens with a browser
+   * pane. Without this flag a failed create left a renderer-side view whose every
+   * later call was a silent no-op in the shell (`navigate` and `command` return
+   * quietly on an unknown id), so the pane cleared its error on "Try again" and
+   * then hung on the spinner with no way out but closing the tab.
+   */
+  shellHasView: boolean;
   /** Bumped per freeze request, so a capture that lands after the pane came
    *  back is discarded instead of freezing a live page. */
   freezeGeneration: number;
@@ -161,6 +172,30 @@ const pending = new Map<string, Set<() => void>>();
  * bring the views back over the outer one.
  */
 let suspendDepth = 0;
+
+/**
+ * Ask the shell for a view, recording whether it now has one.
+ *
+ * Retried from [`navigateBrowser`] and [`reloadBrowser`] rather than only on
+ * creation, so a failure that has since cleared (a pane closed, freeing a slot
+ * under the per-window cap) is recoverable from the pane's own "Try again".
+ */
+async function createShellView(v: View, url: string | undefined): Promise<boolean> {
+  if (!desktop) return true;
+  try {
+    await desktop.create(v.id, { url, profile: v.profile });
+    v.shellHasView = true;
+    return true;
+  } catch (e: unknown) {
+    v.shellHasView = false;
+    patch(v, {
+      loading: false,
+      error: localError(e instanceof Error ? e.message : String(e)),
+    });
+    applyVisibility(v);
+    return false;
+  }
+}
 
 /** A failure raised on this side of the bridge, in the same shape as one the
  *  shell reports, so the pane has exactly one error path to render. */
@@ -210,9 +245,23 @@ function patch(v: View, next: Partial<BrowserState>): void {
  * spinner over nothing).
  */
 function covered(v: View): boolean {
-  if (v.state.error) return true;
-  if (!v.state.url) return true;
-  return !v.state.loaded && v.state.loading;
+  return paneCovers(v.state);
+}
+
+/**
+ * The same rule, as a function of state alone, so the pane that renders those
+ * screens and the code that hides the view cannot drift apart.
+ *
+ * They were two expressions of one invariant with no shared code and no test —
+ * and a divergence is invisible in the browser build (z-index works there),
+ * surfacing only in Electron as a screen painted under a live page, or a pane that
+ * stays blank. `fallbackUrl` is the tab's stored URL, which the pane knows on its
+ * first render, before any view exists.
+ */
+export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
+  if (state.error) return true;
+  if (!state.url && !fallbackUrl) return true;
+  return !state.loaded && state.loading;
 }
 
 /** Whether a mounted view should currently be on screen. */
@@ -233,7 +282,9 @@ function applyVisibility(v: View): void {
   const next = shouldShow(v);
   if (v.visible === next) return;
   v.visible = next;
-  void desktop.setVisible(v.id, next);
+  // Swallowed deliberately: visibility is re-asserted by every later mount,
+  // suspend and state event, so one lost call self-corrects — unlike a navigation.
+  void desktop.setVisible(v.id, next).catch(() => {});
 }
 
 /**
@@ -401,6 +452,7 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     observer: null,
     mounted: false,
     rect: null,
+    shellHasView: !desktop,
     freezeGeneration: 0,
     visible: true,
   };
@@ -412,12 +464,7 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
   }
 
   if (desktop) {
-    void desktop.create(id, { url, profile }).catch((e: unknown) => {
-      patch(v, {
-        loading: false,
-        error: localError(e instanceof Error ? e.message : String(e)),
-      });
-    });
+    void createShellView(v, url);
   } else {
     const frame = document.createElement("iframe");
     frame.className = "browser-frame";
@@ -426,7 +473,10 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     // no localStorage, no logged-in session, which is the whole point of the
     // pane. The frame is cross-origin to /ide either way, which is what keeps it
     // out of this document.
-    frame.setAttribute("allow", "clipboard-write");
+    // No `allow`: `clipboard-write` is `self` by default, and delegating it to
+    // arbitrary previewed content lets one click overwrite the user's clipboard.
+    // The Electron backend denies every permission, so granting one here would be
+    // the browser build being *less* careful than the desktop one.
     frame.addEventListener("load", () => patch(v, { loading: false, loaded: true }));
     if (url) frame.src = url;
     container.appendChild(frame);
@@ -472,12 +522,12 @@ export function navigateBrowser(id: string, raw: string): string | null {
   patch(v, { url, loading: true, error: null });
   applyVisibility(v);
   if (desktop) {
-    void desktop.navigate(id, url).catch((e: unknown) => {
-      patch(v, {
-        loading: false,
-        error: localError(e instanceof Error ? e.message : String(e)),
-      });
-    });
+    void (async () => {
+      // A view the shell never created (or has since destroyed) would swallow this
+      // silently, so ask for one first and let the failure surface on the pane.
+      if (!v.shellHasView && !(await createShellView(v, url))) return;
+      await desktop.navigate(id, url).catch(reportFailure(v));
+    })();
   } else if (v.iframe) {
     v.iframe.src = url;
   }
@@ -500,7 +550,15 @@ export function reloadBrowser(id: string): void {
   patch(v, { loading: true, error: null });
   applyVisibility(v);
   if (desktop) {
-    void desktop.command(id, "reload").catch(reportFailure(v));
+    void (async () => {
+      if (!v.shellHasView) {
+        // "Try again" after a failed create is the one place a pane can recover
+        // from the shell refusing it, so it has to be a real retry.
+        await createShellView(v, v.state.url || undefined);
+        return;
+      }
+      await desktop.command(id, "reload").catch(reportFailure(v));
+    })();
     return;
   }
   const frame = v.iframe;
@@ -525,13 +583,19 @@ export function reloadBrowser(id: string): void {
  */
 export function clearBrowserSession(profile: BrowserProfile): void {
   if (!desktop) return;
-  void desktop.clearSession(profile);
+  // Reported on every pane using the slot: the menu item claims to sign them out,
+  // so a refused or failed clear must not look like it worked.
+  void desktop.clearSession(profile).catch((e: unknown) => {
+    for (const v of views.values()) {
+      if (v.profile === profile) reportFailure(v)(e);
+    }
+  });
 }
 
 export function focusBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
-  if (desktop) void desktop.command(id, "focus");
+  if (desktop) void desktop.command(id, "focus").catch(() => {});
   else v.iframe?.focus();
 }
 
@@ -542,7 +606,8 @@ export function disposeBrowser(id: string): void {
   v.container.remove();
   v.listeners.clear();
   views.delete(id);
-  if (desktop) void desktop.destroy(id);
+  v.shellHasView = false;
+  if (desktop) void desktop.destroy(id).catch(() => {});
 }
 
 /** Dispose every view not in `keep` — the layouts are the record of which
@@ -590,7 +655,8 @@ function syncBounds(v: View): void {
     return;
   }
   v.rect = rect;
-  void desktop.setBounds(v.id, rect);
+  // Swallowed for the same reason as visibility: the 400 ms poll re-sends bounds.
+  void desktop.setBounds(v.id, rect).catch(() => {});
 }
 
 /**

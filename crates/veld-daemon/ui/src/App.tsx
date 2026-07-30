@@ -1089,7 +1089,7 @@ function AppInner(props: {
         pending={pendingFor(worktree)}
         run={run}
         urls={urls}
-        onShowServices={layout && showVeldLinks}
+        onShowVeldLinks={layout && showVeldLinks}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
@@ -1291,7 +1291,7 @@ function TopBar(props: {
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
   /** Open a pane on the run's URLs. Absent when there is no layout to open into. */
-  onShowServices: (() => void) | undefined;
+  onShowVeldLinks: (() => void) | undefined;
   onSelectRepo: (root: string) => void;
   onImport: () => void;
   onRemoveRepo: () => void;
@@ -1409,16 +1409,16 @@ function TopBar(props: {
                 </Tooltip>
               )}
               {run && (
-                // Opens the services pane, not an overlay of its own. One place
-                // the run's URLs live, and it is a pane like everything else —
+                // Opens a browser pane on the run's URLs, not an overlay of its
+                // own: the URLs live in whichever pane is about to need them, and
                 // a modal listing them was a second, inconsistent surface that
                 // also covered the panes it was talking about.
                 <Button
                   size="compact-sm"
                   variant="default"
                   leftSection={<IconWorld size={14} />}
-                  onClick={props.onShowServices}
-                  disabled={!props.onShowServices}
+                  onClick={props.onShowVeldLinks}
+                  disabled={!props.onShowVeldLinks}
                   title={`Open the run's URLs in a pane`}
                 >
                   {props.urls.length}

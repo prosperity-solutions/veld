@@ -90,6 +90,27 @@ export function PaneArea(props: {
   const areaRef = useRef<HTMLDivElement>(null);
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
 
+  /**
+   * Whether a splitter drag currently holds a suspend.
+   *
+   * In a ref, and released from an unmount effect as well as from the pointer
+   * listeners, because those listeners live on the handle element: if the dock
+   * unmounts mid-drag — a worktree or mode switch from the 5s poll, a palette
+   * accelerator forwarded out of a focused pane — the element takes them with it,
+   * `suspendDepth` never returns to zero, and every browser pane in the page stays
+   * hidden until a reload.
+   */
+  const dragSuspended = useRef(false);
+  useEffect(
+    () => () => {
+      if (dragSuspended.current) {
+        dragSuspended.current = false;
+        popBrowserSuspend();
+      }
+    },
+    [],
+  );
+
   // Pointer capture rather than window listeners: the drag then survives the
   // pointer crossing an iframe or leaving the window, and releases itself.
   //
@@ -109,7 +130,7 @@ export function PaneArea(props: {
     const handle = e.currentTarget;
     handle.setPointerCapture(e.pointerId);
     pushBrowserSuspend();
-    let released = false;
+    dragSuspended.current = true;
     const rect = area.getBoundingClientRect();
     const move = (ev: PointerEvent) => {
       if (rect.width <= 0) return;
@@ -118,8 +139,8 @@ export function PaneArea(props: {
     const up = (ev: PointerEvent) => {
       // `pointerup` and `pointercancel` can both arrive; the suspend must be
       // popped exactly once or the panes never come back.
-      if (released) return;
-      released = true;
+      if (!dragSuspended.current) return;
+      dragSuspended.current = false;
       popBrowserSuspend();
       handle.releasePointerCapture(ev.pointerId);
       handle.removeEventListener("pointermove", move);

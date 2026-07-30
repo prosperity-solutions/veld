@@ -16,14 +16,16 @@
 // painted underneath one. Everything that arrives here is treated as untrusted
 // input from the page: ids, profile names and URLs are all validated below.
 //
-// Ownership: views are keyed by (window id, view id). A renderer can therefore
-// only ever address its own views, and closing a window disposes its set.
+// Ownership: views are keyed by (window id, view id), and every handler resolves
+// the sender to a window's own **main frame** (`senderWindow`), so a renderer can
+// only address its own views. Closing a window disposes its set. Note that the
+// load-bearing isolation today is that pane views get no preload at all — pane
+// content cannot reach this IPC surface in the first place; the keying and the
+// frame check are what keep that true if one ever gains a preload.
 
-const { WebContentsView, ipcMain, session, shell } = require("electron");
-
-/** Ids and profile names come from the page; keep them to a boring charset. */
-const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
-const PROFILE_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const { WebContentsView, ipcMain, session } = require("electron");
+// The trust boundary lives in its own tested module — see src/validate.js.
+const { isProfileName, isViewId, partitionFor, safeUrl } = require("./validate");
 
 /**
  * Per-window view cap.
@@ -39,30 +41,6 @@ const MAX_VIEWS_PER_WINDOW = 16;
 /** window.id → (viewId → Entry) */
 /** @type {Map<number, Map<string, Entry>>} */
 const byWindow = new Map();
-
-/**
- * Only `http(s)`. A browser pane is a preview of a dev server, and anything
- * else reachable through it (`file:`, `chrome:`, `javascript:`, `data:`) turns
- * a pane into a local-file reader driven by whatever the page decided to
- * navigate to.
- */
-function safeUrl(raw) {
-  if (typeof raw !== "string" || raw === "") return null;
-  let u;
-  try {
-    u = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
-  return u.toString();
-}
-
-/** `persist:` so a profile's cookies survive a restart — that is the point of
- *  naming one. Namespaced so it can never collide with the app's own session. */
-function partitionFor(profile) {
-  return `persist:veld-browser-${profile}`;
-}
 
 function entriesFor(windowId) {
   const existing = byWindow.get(windowId);
@@ -174,9 +152,12 @@ function attachListeners(window, viewId, entry) {
     const safe = safeUrl(url);
     if (safe) {
       send(window, "veld:browser:open-request", { viewId, url: safe, profile: entry.profile });
-    } else if (/^(mailto|tel):/i.test(url)) {
-      void shell.openExternal(url);
     }
+    // Nothing else is launched. A `mailto:`/`tel:` here would hand a
+    // page-supplied string to `shell.openExternal` with no user gesture and no
+    // confirmation, so a previewed page could open prefilled Mail or FaceTime
+    // drafts in a loop that look like the user composed them. A preview of a dev
+    // server has no business launching applications.
     return { action: "deny" };
   });
 
@@ -205,10 +186,19 @@ function attachListeners(window, viewId, entry) {
   });
 
   // No device access from an embedded preview. Notifications, camera, mic,
-  // geolocation and the rest would be granted against the *pane's* origin with
-  // no chrome to attribute the prompt to, so the whole set is denied and the
-  // decision is documented rather than half-configured.
+  // geolocation and the rest would be granted against the *pane's* origin with no
+  // chrome to attribute the prompt to, so the whole set is denied.
+  //
+  // Both handlers, not just the request one: Electron's own docs say "you must
+  // also implement setPermissionRequestHandler to get complete permission
+  // handling. Most web APIs do a permission check and then make a permission
+  // request if the check is denied" — and four permissions appear in the *check*
+  // union and never in the request one (`deprecated-sync-clipboard-read`, `hid`,
+  // `serial`, `usb`). Sync clipboard read is the concrete one: without a check
+  // handler a previewed page could `document.execCommand("paste")` and read
+  // whatever the user last copied, with no prompt.
   wc.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
+  wc.session.setPermissionCheckHandler(() => false);
 }
 
 function disposeEntry(window, entry) {
@@ -237,9 +227,27 @@ function disposeWindow(window) {
  * a renderer that is already gone.
  */
 function registerBrowserViewIpc(resolveWindow) {
+  /**
+   * The window whose views this sender may address, or null.
+   *
+   * The main-frame assertion is what the (window id, view id) keying alone does
+   * not give: today the isolation rests on pane views having no preload, so no
+   * pane content can reach IPC at all. The moment one gets a preload — injecting
+   * veld's own overlay into a previewed page is the obvious next increment —
+   * arbitrary web content would inherit its host window's whole view set,
+   * including its siblings' cookie jars. Electron recommends this check for
+   * exactly that reason.
+   */
+  const senderWindow = (event) => {
+    const window = resolveWindow(event);
+    if (!window) return null;
+    if (event.senderFrame !== window.webContents.mainFrame) return null;
+    return window;
+  };
+
   /** Resolve (window, entry) for an addressed view, or null. */
   const lookup = (event, viewId) => {
-    const window = resolveWindow(event);
+    const window = senderWindow(event);
     if (!window || typeof viewId !== "string") return null;
     const entry = byWindow.get(window.id)?.get(viewId);
     return entry ? { window, entry } : null;
@@ -257,19 +265,17 @@ function registerBrowserViewIpc(resolveWindow) {
    * it from the renderer makes the ordering a queue instead of a race.
    */
   ipcMain.handle("veld:browser:reset", (event) => {
-    const window = resolveWindow(event);
+    const window = senderWindow(event);
     if (window) disposeWindow(window);
   });
 
   ipcMain.handle("veld:browser:create", (event, args) => {
-    const window = resolveWindow(event);
+    const window = senderWindow(event);
     if (!window) return null;
     const viewId = args?.viewId;
-    if (typeof viewId !== "string" || !ID_RE.test(viewId)) {
-      throw new Error("invalid view id");
-    }
+    if (!isViewId(viewId)) throw new Error("invalid view id");
     const profile = typeof args?.profile === "string" ? args.profile : "default";
-    if (!PROFILE_RE.test(profile)) throw new Error("invalid profile name");
+    if (!isProfileName(profile)) throw new Error("invalid profile name");
 
     const entries = entriesFor(window.id);
     const existing = entries.get(viewId);
@@ -318,11 +324,18 @@ function registerBrowserViewIpc(resolveWindow) {
     if (!found) return;
     const r = args?.rect;
     if (!r) return;
+    // The renderer measures in CSS pixels; `setBounds` is in DIP relative to the
+    // window's content view. Page zoom scales one and not the other, so without
+    // this a zoomed /ide puts every native view over the wrong region — which is
+    // the failure the renderer's geometry mirroring exists to prevent. Electron's
+    // default application menu supplies ⌘+/⌘− (this app never replaces it), so
+    // the zoom factor is one keystroke from being anything.
+    const zoom = event.sender.getZoomFactor();
     const rect = {
-      x: Math.round(Number(r.x)),
-      y: Math.round(Number(r.y)),
-      width: Math.round(Number(r.width)),
-      height: Math.round(Number(r.height)),
+      x: Math.round(Number(r.x) * zoom),
+      y: Math.round(Number(r.y) * zoom),
+      width: Math.round(Number(r.width) * zoom),
+      height: Math.round(Number(r.height) * zoom),
     };
     if (!Object.values(rect).every(Number.isFinite)) return;
     // A zero or negative box is what a hidden or mid-layout pane reports; keep
@@ -427,10 +440,10 @@ function registerBrowserViewIpc(resolveWindow) {
    * logged-in page whose session no longer exists is a lie about the state.
    */
   ipcMain.handle("veld:browser:clear-session", async (event, args) => {
-    const window = resolveWindow(event);
+    const window = senderWindow(event);
     if (!window) return;
     const profile = typeof args?.profile === "string" ? args.profile : "";
-    if (!PROFILE_RE.test(profile)) throw new Error("invalid profile name");
+    if (!isProfileName(profile)) throw new Error("invalid profile name");
     await session.fromPartition(partitionFor(profile)).clearStorageData();
     for (const entry of byWindow.get(window.id)?.values() ?? []) {
       if (entry.profile !== profile) continue;
