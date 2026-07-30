@@ -1625,12 +1625,6 @@ function Rail(props: {
 }
 
 // ---------------------------------------------------------------------------
-// Pane content (the terminal pane lives in panes/PaneArea.tsx)
-// ---------------------------------------------------------------------------
-
-/** The services tab: the run's live URLs. Rendered inside a dock, so it
- *  carries no tab strip of its own — the dock supplies that. */
-// ---------------------------------------------------------------------------
 // Command palette
 // ---------------------------------------------------------------------------
 
