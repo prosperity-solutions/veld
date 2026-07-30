@@ -472,7 +472,7 @@ select:focus {
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 26px;
+  width: 38px;
   pointer-events: none;
   opacity: 0;
   transition: opacity 0.18s ease;
@@ -482,14 +482,38 @@ select:focus {
   opacity: 1;
 }
 
+/* Three layers, because a single colour fade is nearly invisible in both themes
+   for opposite reasons: in the dark one an unselected tab is already the strip's
+   colour, and in the light one the tones are close. So the strip colour hides the
+   tab's edge, a black wash dims whatever is under it (text, in practice — that is
+   the part the eye reads as "cut off"), and a 1px line marks where the cut is. */
 .tab-fade.left {
   left: 0;
-  background: linear-gradient(to right, var(--tab-strip) 15%, transparent);
+  background:
+    linear-gradient(to right, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0) 75%),
+    linear-gradient(to right, var(--tab-strip) 25%, transparent);
 }
 
 .tab-fade.right {
   right: 0;
-  background: linear-gradient(to left, var(--tab-strip) 15%, transparent);
+  background:
+    linear-gradient(to left, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0) 75%),
+    linear-gradient(to left, var(--tab-strip) 25%, transparent);
+}
+
+.tab-fade::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border2);
+}
+.tab-fade.left::after {
+  left: 0;
+}
+.tab-fade.right::after {
+  right: 0;
 }
 
 /* The `+` sits immediately after the last tab, so it reads as the end of the

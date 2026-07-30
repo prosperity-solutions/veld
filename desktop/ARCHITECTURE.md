@@ -234,7 +234,11 @@ requests at runtime — branding rule.
   and a permanent gradient would dim the first and last tab of a strip that fits,
   saying the opposite of what it means. The edges are measured (`ResizeObserver` for
   the tab count and the dock's width, the scroll event for the position) rather than
-  inferred. One trap when wrapping the tabs in a scroll box: `.pane-tabs` centres
+  inferred. The fade is three layers, because one colour gradient is nearly
+  invisible in both themes for opposite reasons — in the dark theme an unselected
+  tab *is* the strip's colour, in the light one the tones are close: the strip
+  colour hides the tab's edge, a black wash dims what is under it (the text, which
+  is what the eye reads as cut off), and a 1px line marks where the cut is. One trap when wrapping the tabs in a scroll box: `.pane-tabs` centres
   its items, so the scroller needs `align-self: stretch` or it stops filling the
   strip and every tab in it renders as a floating chip — which is exactly how it
   shipped for one round.
