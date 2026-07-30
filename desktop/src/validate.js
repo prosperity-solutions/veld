@@ -114,6 +114,12 @@ function clampDevicePx(n) {
  * labels its menu with stays in the renderer, because the shell has no use for
  * it and no way to check it.
  */
+// Field parity with `PaneEmulation` (`crates/veld-daemon/ui/src/panes/devices.ts`) is
+// maintained by hand: this is plain JS, so nothing type-checks the two shapes against
+// each other. A field added there and forgotten here is silently *dropped at this
+// boundary* — working in a browser tab, absent in the desktop app, which is this
+// codebase's worst failure shape. The renderer holds the drift gate (a test asserting
+// the exact key set); this is the pointer from the side that does the dropping.
 function safeEmulation(raw) {
   if (typeof raw !== "object" || raw === null) return null;
   const width = clampDevicePx(raw.width);

@@ -53,6 +53,9 @@ import {
   DEVICE_GROUPS,
   DEVICE_PADDING,
   DEVICE_PRESETS,
+  HANDLE_CORNER_GAP,
+  HANDLE_EDGE_GAP,
+  HANDLE_LENGTH,
   MAX_DEVICE_PX,
   MIN_DEVICE_PX,
   type PaneEmulation,
@@ -1085,8 +1088,8 @@ export function BrowserPane(props: {
               aria-label="Resize the emulated screen horizontally"
               title="Drag to change the emulated width"
               style={{
-                left: screen.x + screen.width + 6,
-                top: screen.y + screen.height / 2 - 22,
+                left: screen.x + screen.width + HANDLE_EDGE_GAP,
+                top: screen.y + screen.height / 2 - HANDLE_LENGTH / 2,
               }}
               onPointerDown={(e) => startResize(e, "x")}
             />
@@ -1097,8 +1100,8 @@ export function BrowserPane(props: {
               aria-label="Resize the emulated screen vertically"
               title="Drag to change the emulated height"
               style={{
-                left: screen.x + screen.width / 2 - 22,
-                top: screen.y + screen.height + 6,
+                left: screen.x + screen.width / 2 - HANDLE_LENGTH / 2,
+                top: screen.y + screen.height + HANDLE_EDGE_GAP,
               }}
               onPointerDown={(e) => startResize(e, "y")}
             />
@@ -1109,8 +1112,8 @@ export function BrowserPane(props: {
               aria-label="Resize the emulated screen"
               title="Drag to change the emulated size"
               style={{
-                left: screen.x + screen.width + 4,
-                top: screen.y + screen.height + 4,
+                left: screen.x + screen.width + HANDLE_CORNER_GAP,
+                top: screen.y + screen.height + HANDLE_CORNER_GAP,
               }}
               onPointerDown={(e) => startResize(e, "both")}
             />

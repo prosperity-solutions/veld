@@ -256,6 +256,9 @@ function applyTouch(window, viewId, entry) {
   return entry.touchQueue;
 }
 
+/** The body of [`applyTouch`]. **Never call this directly** — it awaits CDP round
+ *  trips, and two interleaved runs are exactly what the queue above exists to
+ *  prevent. */
 async function applyTouchNow(window, viewId, entry) {
   const wc = entry.view.webContents;
   if (wc.isDestroyed()) return;

@@ -81,6 +81,34 @@ export const CUSTOM_RADIUS = 8;
  */
 export const DEVICE_PADDING = 20;
 
+/**
+ * The resize handles' geometry, in the gap.
+ *
+ * Here rather than as literals at the call site because the gap and the handles are
+ * one constraint, and it has already been got wrong once: at a 14px gap the corner
+ * handle sat inside the *window's* own resize zone, so reaching for it dragged the
+ * whole app. Widening the gap fixed it — and left the relationship undocumented, so
+ * the next person to make the gap smaller (it is already a parameter of
+ * [`deviceLayout`]) would reopen exactly that bug with nothing to stop them.
+ * [`MIN_DEVICE_PADDING`] is that floor, and a test asserts the gap clears it.
+ *
+ * The *visual* sizes live in `styles.css` (`.device-handle`), which owns hover and
+ * cursor states; these are the numbers the pane positions them with, and the two sets
+ * are kept in step by hand — which is fine while they are four numbers and a
+ * cross-reference, and is why the floor below is deliberately generous.
+ */
+export const HANDLE_EDGE_GAP = 6;
+export const HANDLE_THICKNESS = 6;
+export const HANDLE_LENGTH = 44;
+export const HANDLE_CORNER_GAP = 4;
+export const HANDLE_CORNER_SIZE = 12;
+
+/** The narrowest gap the handles still fit inside, with a pixel of air. Anything
+ *  tighter and a handle overlaps the pane's edge — which is the window's edge, and
+ *  therefore the OS resize grip, whenever the pane is the last one in the dock. */
+export const MIN_DEVICE_PADDING =
+  Math.max(HANDLE_EDGE_GAP + HANDLE_THICKNESS, HANDLE_CORNER_GAP + HANDLE_CORNER_SIZE) + 1;
+
 export interface DevicePreset {
   id: string;
   label: string;

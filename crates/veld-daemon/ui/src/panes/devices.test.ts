@@ -6,8 +6,13 @@ import {
   DEVICE_GROUPS,
   DEVICE_PADDING,
   DEVICE_PRESETS,
+  HANDLE_CORNER_GAP,
+  HANDLE_CORNER_SIZE,
+  HANDLE_EDGE_GAP,
+  HANDLE_THICKNESS,
   MAX_DEVICE_PX,
   MAX_DEVICE_RADIUS,
+  MIN_DEVICE_PADDING,
   MIN_DEVICE_PX,
   RESPONSIVE_DEVICE,
   ZOOM_STEPS,
@@ -254,6 +259,42 @@ describe("the resizable viewport", () => {
     expect(phoneNoUa.mobile).toBe(true);
     expect(phoneNoUa.ua).toBeNull();
     expect(withMobileUserAgent(customEmulation(400, 800), true, "143").mobile).toBe(false);
+  });
+});
+
+describe("the handles fit the gap", () => {
+  it("keeps the resize handles clear of the window's own edge", () => {
+    // The gap exists to hold the handles, and at 14px the corner one sat inside the
+    // OS window-resize zone — reaching for it dragged the whole app. This is the guard
+    // that stops the next person shrinking the gap (it is already a `deviceLayout`
+    // parameter) and reopening that silently.
+    expect(DEVICE_PADDING).toBeGreaterThanOrEqual(MIN_DEVICE_PADDING);
+    expect(HANDLE_EDGE_GAP + HANDLE_THICKNESS).toBeLessThan(DEVICE_PADDING);
+    expect(HANDLE_CORNER_GAP + HANDLE_CORNER_SIZE).toBeLessThan(DEVICE_PADDING);
+  });
+});
+
+describe("the wire shape the shell validates", () => {
+  it("has exactly these fields, so the shell's validator cannot drift", () => {
+    // `safeEmulation` in `desktop/src/validate.js` whitelists the fields it forwards to
+    // Electron, by hand, in plain JS with no type to check it against. So a field added
+    // here passes the typechecker, passes every test, and is then *silently dropped* at
+    // the trust boundary — the feature simply never reaches the desktop app while
+    // working in a browser tab, which is this codebase's worst failure shape.
+    //
+    // This list is the drift gate. If it fails, you added or renamed a field: update
+    // `safeEmulation` (and its test) in the same breath, then update this list.
+    expect(Object.keys(phone()).sort()).toEqual([
+      "device",
+      "deviceScaleFactor",
+      "fit",
+      "height",
+      "mobile",
+      "radius",
+      "touch",
+      "ua",
+      "width",
+    ]);
   });
 });
 
