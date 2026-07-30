@@ -955,11 +955,21 @@ function syncGeometry(v: View): void {
     // No device: the page is the pane. The frame fills the container, which keeps
     // one element meaning "where the page is" in both modes.
     v.frame.style.inset = "0";
+    // Clear the still **only when the frame was a device-sized screen**, i.e. when this
+    // call is the transition out of emulation. Then the still was captured at that
+    // smaller size and would stretch across the pane — picking "Pane size" from the open
+    // device menu is exactly that path, with views suspended and a still up.
+    //
+    // Not unconditionally, which is how the first version of this went wrong: this
+    // function has no `suspendDepth` guard and runs from a 400 ms tick and from every
+    // `ResizeObserver`, so on a pane with *no device at all* it wiped a perfectly good
+    // still — one frozen for a splitter drag or a modal elsewhere in the app — within
+    // 400 ms, mid-gesture, long before `thaw`'s grace. That is the blank-pane flicker the
+    // whole freeze/suspend/thaw mechanism exists to prevent, on the common case.
+    if (v.painted !== null && v.frame.style.backgroundImage) {
+      v.frame.style.backgroundImage = "";
+    }
     v.painted = null;
-    // The still was captured at the *screen's* size; the frame is about to become the
-    // whole pane, which would stretch it. Picking "Pane size" from the open device menu
-    // is exactly that path, with views suspended and a still up.
-    if (v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
     v.frame.style.removeProperty("width");
     v.frame.style.removeProperty("height");
     v.frame.style.removeProperty("border-radius");
