@@ -110,7 +110,12 @@ export function LogsPanel(props: {
   const { rows, matchCount } = useMemo(() => {
     const entries: Entry[] = [];
     for (const n of data?.nodes ?? []) {
-      if (nodeFilter && `${n.node}:${n.variant}` !== nodeFilter) continue;
+      // `_veld:*` sections (internal, setup/teardown steps) belong to the run,
+      // not to a node, so a node filter does not apply to them — same rule the
+      // daemon and `veld logs` follow for run-level streams. Filtering them out
+      // left the Setup view blank whenever a node was picked.
+      const runLevel = n.node === "_veld";
+      if (nodeFilter && !runLevel && `${n.node}:${n.variant}` !== nodeFilter) continue;
       for (const raw of n.lines) {
         entries.push({
           node: n.node,
@@ -198,6 +203,7 @@ export function LogsPanel(props: {
             { value: "all", label: "All" },
             { value: "server", label: "Server" },
             { value: "client", label: "Client" },
+            { value: "setup", label: "Setup" },
             { value: "internal", label: "Internal" },
           ]}
         />

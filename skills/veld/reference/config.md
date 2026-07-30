@@ -344,6 +344,10 @@ Must bind to `${veld.port}`. Requires a readiness probe (`probes.readiness` or l
 
 Emits outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE`.
 
+Its stdout and stderr go to that node's log stream, like a server's — live in
+`veld start`'s progress output, then `veld logs --node <name>`. A `skip_if`
+probe's output is not logged (it is a predicate, not the node's output).
+
 A `command` node can also be a run's **terminal node** via
 `veld start <node> --oneshot`: veld starts its dependencies, runs it to
 completion (streaming its output), then tears everything down and exits with the
