@@ -1,9 +1,11 @@
 // Veld Desktop — Electron shell around the veld daemon's /ide UI.
 //
 // Deliberately thin (see desktop/ARCHITECTURE.md): a frameless window that
-// loads the daemon-served UI, a macOS tray with run status, and nothing else.
-// The web UI must stay fully usable in a plain browser; everything the shell
-// adds is presentation (native title bar) and ambient status (tray).
+// loads the daemon-served UI, a macOS tray with run status, embedded browser
+// panes (src/browserViews.js), and nothing else. The web UI must stay fully
+// usable in a plain browser — the browser panes have an iframe fallback there —
+// so everything the shell adds is presentation (native title bar), ambient
+// status (tray), or a capability a page genuinely cannot have.
 
 const {
   app,
@@ -14,6 +16,7 @@ const {
   shell,
 } = require("electron");
 const fs = require("node:fs");
+const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 
 // Dev override: point the shell at the vite dev server
 // (VELD_DESKTOP_URL=http://localhost:5199). Default: the daemon directly —
@@ -23,6 +26,16 @@ const APP_URL = `${BASE_URL}/ide?shell=electron`;
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
 const REPOS_URL = `${BASE_URL}/api/repos`;
+
+/**
+ * Height of the UI's top bar in the Electron build (`.topbar.electron` in
+ * `crates/veld-daemon/ui/src/styles.css`) and the diameter of a macOS traffic
+ * light. Together they place the buttons, which the OS draws — no CSS can move
+ * them, so without this they sit at `hiddenInset`'s default and read as
+ * misaligned against the bar's own controls. Keep in sync with that stylesheet.
+ */
+const TOPBAR_HEIGHT = 42;
+const TRAFFIC_LIGHT_SIZE = 12;
 
 /** @type {BrowserWindow | null} */
 let win = null;
@@ -81,6 +94,11 @@ function createWindow() {
     // Frameless with native traffic lights: the web UI renders veld controls
     // into the title-bar row (drag region handled in its CSS).
     titleBarStyle: "hiddenInset",
+    // Vertically centred in the top bar; `x` keeps hiddenInset's own inset.
+    trafficLightPosition: {
+      x: 13,
+      y: Math.round((TOPBAR_HEIGHT - TRAFFIC_LIGHT_SIZE) / 2),
+    },
     backgroundColor: "#0d0e10",
     webPreferences: {
       contextIsolation: true,
@@ -116,6 +134,12 @@ function createWindow() {
   });
 
   void loadAppWhenReady(win);
+  // Before `closed`: the window's `contentView` must still exist to detach the
+  // browser panes from, and a view outliving its window keeps a renderer
+  // process alive with nothing to paint into.
+  win.on("close", () => {
+    if (win) disposeWindow(win);
+  });
   win.on("closed", () => {
     win = null;
   });
@@ -288,6 +312,9 @@ function createTray() {
 }
 
 app.whenReady().then(() => {
+  // Registered before any window exists, so the first page load already finds
+  // the handlers. A view is only ever addressable from the window that owns it.
+  registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender));
   createWindow();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {

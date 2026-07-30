@@ -25,27 +25,20 @@ import { Wordmark } from "./components/Wordmark";
 import {
   ActionIcon,
   Button,
-  Group,
   Loader,
   MantineProvider,
   Menu,
-  Modal as MantineModal,
-  ScrollArea,
   Select,
-  Text,
   Tooltip,
   TextInput,
 } from "@mantine/core";
 import {
   IconArrowsExchange,
-  IconCheck,
   IconChevronLeft,
   IconChevronRight,
-  IconCopy,
   IconDots,
   IconDotsVertical,
   IconFolderPlus,
-  IconExternalLink,
   IconMoon,
   IconPlayerPlayFilled,
   IconPlayerStopFilled,
@@ -62,26 +55,47 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import {
+  type BrowserProfile,
   DEFAULT_RATIO,
   LAYOUT_STORAGE_KEY,
-  loadLayouts,
   type PaneLayout,
-  SERVICES_TAB_ID,
+  type PaneLayoutUpdate,
+  SESSIONS_STORAGE_KEY,
   activateTab,
   activeTab,
+  addTab,
   addTabToFocused,
+  allTabs,
+  browserIds,
+  browserTab,
   closeTab,
   defaultLayout,
-  hasTab,
-  newTerminalId,
+  dockOf,
+  lastBlankBrowserId,
+  loadLayouts,
+  newTabId,
+  nextFreeProfile,
+  parseSessionSets,
   serializeLayouts,
+  serializeSessionSets,
+  sessionSetFor,
   terminalIds,
+  updateTab,
 } from "./panes/model";
 import {
   applyTerminalTheme,
   pruneTerminals,
   restartTerminal,
 } from "./panes/terminalHost";
+import {
+  onBrowserAccelerator,
+  onBrowserOpenRequest,
+  popBrowserSuspend,
+  pruneBrowsers,
+  pushBrowserSuspend,
+  reloadBrowser,
+} from "./panes/browserHost";
+import { watchOverlays } from "./panes/overlayGuard";
 import {
   StartConfig,
   defaultStartSelection,
@@ -234,6 +248,12 @@ export function App() {
     setThemePref(
       themePref === "auto" ? "light" : themePref === "light" ? "dark" : "auto",
     );
+
+  // An embedded browser pane is a native view in the desktop shell, so it paints
+  // over every menu and dropdown. This hides the panes while one is open; see
+  // panes/overlayGuard.ts. Mounted here rather than in IDE mode because it
+  // watches the document, and no-op in a plain browser.
+  useEffect(watchOverlays, []);
 
   // Providers live above AppInner so useContextMenu / Mantine hooks work
   // anywhere below; the color scheme follows our own persisted toggle.
@@ -482,6 +502,16 @@ function AppInner(props: {
     | { kind: "search" }
   >({ kind: "none" });
 
+  // This app's own overlays are not portalled the way Mantine's are, so
+  // `overlayGuard` cannot see them — they hide the embedded browser panes from
+  // the state that opens them instead. Without this the ⌘K palette opens
+  // *behind* a native view (see panes/overlayGuard.ts).
+  useEffect(() => {
+    if (dialog.kind === "none") return;
+    pushBrowserSuspend();
+    return popBrowserSuspend;
+  }, [dialog.kind]);
+
   /**
    * emoji → every worktree holding it, across all repos. Keyed by id and
    * carrying ALL holders, not the first alias: aliases are unique only within
@@ -622,14 +652,52 @@ function AppInner(props: {
     });
   }, [worktree?.id]);
 
+  // Accepts an updater as well as a value: two panes can report a change in the
+  // same commit (two browser panes both finishing a navigation), and a value
+  // computed from the render's `layout` would silently discard the other write.
   const setLayout = useCallback(
-    (next: PaneLayout) => {
+    (next: PaneLayoutUpdate) => {
       if (!worktree) return;
-      setLayouts((prev) =>
-        prev[worktree.id] === next ? prev : { ...prev, [worktree.id]: next },
-      );
+      setLayouts((prev) => {
+        const current = prev[worktree.id];
+        const resolved = typeof next === "function" ? current && next(current) : next;
+        if (!resolved || resolved === current) return prev;
+        return { ...prev, [worktree.id]: resolved };
+      });
     },
     [worktree?.id],
+  );
+
+  // A `target=_blank` inside a browser pane. It becomes a tab in the *same*
+  // dock, carrying the pane's profile so the popup keeps the session it was
+  // opened from — the shell denies the native window and defers the placement
+  // here, because the layout is the only thing that knows where the pane is.
+  // Keyed by the view id rather than by the selected worktree: a pane in a
+  // worktree the user has since switched away from is still live.
+  useEffect(
+    () =>
+      onBrowserOpenRequest(({ viewId, url, profile }) => {
+        setLayouts((prev) => {
+          for (const [key, l] of Object.entries(prev)) {
+            const dock = dockOf(l, viewId);
+            if (dock === null) continue;
+            return { ...prev, [Number(key)]: addTab(l, dock, browserTab({ url, profile })) };
+          }
+          return prev;
+        });
+      }),
+    [],
+  );
+
+  // A focused native view swallows every keystroke, so the shell forwards the
+  // palette accelerator back to us (it also moves focus to the page, or the
+  // palette would open with the keyboard still pointed at the view).
+  useEffect(
+    () =>
+      onBrowserAccelerator((accelerator) => {
+        if (accelerator === "palette") setDialog({ kind: "search" });
+      }),
+    [],
   );
 
   // Drop layouts for worktrees that no longer exist, so their terminals get
@@ -653,9 +721,65 @@ function AppInner(props: {
   // up, which closing the socket deliberately does not.
   useEffect(() => {
     pruneTerminals(Object.values(layouts).flatMap(terminalIds));
+    // Same contract for browser panes: a `WebContentsView` left behind is a
+    // renderer process with nothing to paint into.
+    pruneBrowsers(Object.values(layouts).flatMap(browserIds));
   }, [layouts]);
 
-  const [urlsOpen, setUrlsOpen] = useState(false);
+  // ---- browser sessions ---------------------------------------------------
+  //
+  // An explicit set per worktree, persisted. Deriving it from which slots panes
+  // occupy was the first attempt and it inverted the feature: moving a pane onto
+  // a new session vacated its old slot, so adding one appeared to delete the
+  // previous. See `SESSIONS_STORAGE_KEY` in panes/model.ts for why localStorage
+  // is the right home for this and not the daemon.
+  const [sessionsRaw, setSessionsRaw] = usePersisted(SESSIONS_STORAGE_KEY, "{}");
+  const sessionSets = useMemo(() => parseSessionSets(sessionsRaw), [sessionsRaw]);
+  const sessions = useMemo(
+    () => (worktree ? sessionSetFor(sessionSets, worktree.id, layout) : []),
+    [sessionSets, worktree?.id, layout],
+  );
+  const writeSessions = (next: Record<number, BrowserProfile[]>) =>
+    setSessionsRaw(serializeSessionSets(next));
+
+  // A new session is taken from the slots this worktree does not already list —
+  // not from page-wide occupancy, so two worktrees can each hold slot 2 (their
+  // runs are on different hostnames, so the shared jar never shows).
+  const nextSession = worktree ? nextFreeProfile(new Set(sessions)) : null;
+  const addSession = (tabId: string) => {
+    if (!worktree || !nextSession || !layout) return;
+    writeSessions({ ...sessionSets, [worktree.id]: [...sessions, nextSession] });
+    // Adding is only ever worth doing to put this pane on it.
+    setLayout((prev) => updateTab(prev, tabId, { profile: nextSession }));
+  };
+  // Removing a session returns its panes to the default one rather than being
+  // refused: the session you are looking at was otherwise the single one you
+  // could never remove. Only this worktree's panes are touched, because the sets
+  // are per worktree — another worktree still lists (and holds) its own.
+  const removeSession = (profile: BrowserProfile) => {
+    if (!worktree || profile === "default") return;
+    writeSessions({
+      ...sessionSets,
+      [worktree.id]: sessions.filter((p) => p !== profile),
+    });
+    setLayout((prev) =>
+      allTabs(prev)
+        .filter((t) => t.kind === "browser" && (t.profile ?? "default") === profile)
+        .reduce((acc, t) => updateTab(acc, t.id, { profile: "default" }), prev),
+    );
+  };
+
+  // The top bar's globe: a browser pane with nothing in it, which is where the
+  // run's URLs live now (`panes/VeldLinks.tsx`). An existing blank pane is already
+  // showing exactly that, so it gets focused instead of stacking up another one —
+  // and the *last* of them, so asking twice lands in the same place rather than
+  // cycling.
+  const showVeldLinks = () => {
+    if (!layout) return;
+    const blank = lastBlankBrowserId(layout);
+    setLayout(blank ? activateTab(layout, blank) : addTabToFocused(layout, browserTab({})));
+  };
+
   // Rail expanded by default; the choice sticks across reloads/windows.
   const [railWideRaw, setRailWideRaw] = usePersisted("veld.railWide", "1");
   const railWide = railWideRaw === "1";
@@ -731,6 +855,16 @@ function AppInner(props: {
           alt: [url],
           run: () => window.open(url, "_blank"),
         });
+        if (layout) {
+          items.push({
+            id: `url:pane:${name}`,
+            group: "Run",
+            label: `Open ${name} in a pane`,
+            hint: url,
+            alt: [url, "browser", "preview"],
+            run: () => setLayout(addTabToFocused(layout, browserTab({ url, title: name }))),
+          });
+        }
       }
       if (urls.length > 0) {
         items.push({
@@ -828,11 +962,18 @@ function AppInner(props: {
         run: () =>
           setLayout(
             addTabToFocused(layout, {
-              id: newTerminalId(),
+              id: newTabId(),
               kind: "terminal",
               title: "terminal",
             }),
           ),
+      });
+      items.push({
+        id: "pane:new-browser",
+        group: "Panes",
+        label: "New browser pane",
+        alt: ["preview", "webview", "url"],
+        run: () => setLayout(addTabToFocused(layout, browserTab({}))),
       });
       const focused = activeTab(layout, layout.focused);
       if (focused) {
@@ -852,15 +993,22 @@ function AppInner(props: {
           run: () => restartTerminal(focused.id),
         });
       }
-      if (hasTab(layout, SERVICES_TAB_ID)) {
+      if (focused?.kind === "browser") {
         items.push({
-          id: "pane:services",
+          id: "pane:reload-browser",
           group: "Panes",
-          label: "Show services",
-          alt: ["urls"],
-          run: () => setLayout(activateTab(layout, SERVICES_TAB_ID)),
+          label: "Reload this page",
+          hint: focused.url,
+          run: () => reloadBrowser(focused.id),
         });
       }
+      items.push({
+        id: "pane:veld-links",
+        group: "Panes",
+        label: "Open the run's URLs in a pane",
+        alt: ["urls", "services", "links"],
+        run: showVeldLinks,
+      });
     }
 
     items.push({
@@ -931,8 +1079,7 @@ function AppInner(props: {
         pending={pendingFor(worktree)}
         run={run}
         urls={urls}
-        urlsOpen={urlsOpen}
-        onUrlsOpen={setUrlsOpen}
+        onShowServices={layout && showVeldLinks}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
           setActiveWtKey("");
@@ -1014,9 +1161,15 @@ function AppInner(props: {
               layout={layout}
               onLayout={setLayout}
               worktreeId={worktree.id}
-              renderServices={() => (
-                <UrlLauncher worktree={worktree} urls={urls} />
-              )}
+              serviceUrls={urls}
+              urlsEmptyHint={
+                worktree.has_veld_config
+                  ? "Start the run and its services appear here."
+                  : "This worktree has no veld.json, so there is nothing to run."
+              }
+              sessions={sessions}
+              onAddSession={nextSession ? addSession : undefined}
+              onRemoveSession={removeSession}
             />
           )}
         </div>
@@ -1127,8 +1280,8 @@ function TopBar(props: {
   pending: PendingAction | null;
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
-  urlsOpen: boolean;
-  onUrlsOpen: (open: boolean) => void;
+  /** Open a pane on the run's URLs. Absent when there is no layout to open into. */
+  onShowServices: (() => void) | undefined;
   onSelectRepo: (root: string) => void;
   onImport: () => void;
   onRemoveRepo: () => void;
@@ -1246,74 +1399,20 @@ function TopBar(props: {
                 </Tooltip>
               )}
               {run && (
-                <>
-                  <Button
-                    size="compact-sm"
-                    variant="default"
-                    leftSection={<IconWorld size={14} />}
-                    onClick={() => props.onUrlsOpen(true)}
-                  >
-                    {props.urls.length}
-                  </Button>
-                  <MantineModal
-                    opened={props.urlsOpen}
-                    onClose={() => props.onUrlsOpen(false)}
-                    title={
-                      <Text size="sm">
-                        Run <b className="mono">{run.name}</b> ·{" "}
-                        {props.urls.length} URLs
-                      </Text>
-                    }
-                    size={640}
-                    yOffset={88}
-                    radius="lg"
-                    overlayProps={{ backgroundOpacity: 0.42 }}
-                    styles={{
-                      header: { borderBottom: "1px solid var(--border)" },
-                      body: { paddingTop: "var(--mantine-spacing-md)" },
-                    }}
-                  >
-                    <ScrollArea.Autosize mah={420}>
-                      <div
-                        style={{
-                          display: "flex",
-                          flexDirection: "column",
-                          gap: 6,
-                        }}
-                      >
-                        {props.urls.map(([name, url]) => (
-                          <ServiceCard key={name} name={name} url={url} />
-                        ))}
-                        {props.urls.length === 0 && (
-                          <div className="note-card">
-                            Start a run to see its URLs here.
-                          </div>
-                        )}
-                      </div>
-                    </ScrollArea.Autosize>
-                    {props.urls.length > 0 && (
-                      <Group
-                        justify="end"
-                        pt="md"
-                        mt="md"
-                        style={{ borderTop: "1px solid var(--border)" }}
-                      >
-                        <Button
-                          size="compact-sm"
-                          variant="default"
-                          onClick={() => {
-                            void navigator.clipboard.writeText(
-                              props.urls.map(([, u]) => u).join("\n"),
-                            );
-                            props.onUrlsOpen(false);
-                          }}
-                        >
-                          Copy all
-                        </Button>
-                      </Group>
-                    )}
-                  </MantineModal>
-                </>
+                // Opens the services pane, not an overlay of its own. One place
+                // the run's URLs live, and it is a pane like everything else —
+                // a modal listing them was a second, inconsistent surface that
+                // also covered the panes it was talking about.
+                <Button
+                  size="compact-sm"
+                  variant="default"
+                  leftSection={<IconWorld size={14} />}
+                  onClick={props.onShowServices}
+                  disabled={!props.onShowServices}
+                  title={`Open the run's URLs in a pane`}
+                >
+                  {props.urls.length}
+                </Button>
               )}
             </>
           )}
@@ -1515,88 +1614,8 @@ function Rail(props: {
 
 /** The services tab: the run's live URLs. Rendered inside a dock, so it
  *  carries no tab strip of its own — the dock supplies that. */
-function UrlLauncher(props: {
-  worktree: Worktree | null;
-  urls: Array<[string, string]>;
-}) {
-  return (
-    <div className="launcher">
-      <div className="launcher-head">
-        <span className="chip">opens in your browser</span>
-        <div style={{ flex: 1 }} />
-        {props.urls.length > 1 && (
-          <button
-            className="btn"
-            style={{ border: "none", color: "var(--accent)" }}
-            onClick={() =>
-              props.urls.forEach(([, url]) => window.open(url, "_blank"))
-            }
-          >
-            Open all ↗
-          </button>
-        )}
-      </div>
-      <div className="launcher-list">
-        {props.urls.length === 0 && (
-          <div className="note-card">
-            {props.worktree?.has_veld_config
-              ? "No live URLs — start the run to see its services here."
-              : "This worktree has no veld.json, so there is nothing to run."}
-          </div>
-        )}
-        {props.urls.map(([name, url]) => (
-          <ServiceCard key={name} name={name} url={url} />
-        ))}
-        {props.urls.length > 0 && (
-          <div className="note-card">
-            Embedded preview &amp; isolated sessions arrive with the desktop
-            app&apos;s webview increment.
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function ServiceCard(props: { name: string; url: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div className="svc-card">
-      <span className="dot running" style={{ animation: "none" }} />
-      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 1 }}>
-        <span className="name">{props.name}</span>
-        <span className="url">{props.url}</span>
-      </div>
-      <ActionIcon
-        size="sm"
-        variant="subtle"
-        color="gray"
-        title="Copy URL"
-        onClick={() => {
-          void navigator.clipboard.writeText(props.url);
-          setCopied(true);
-          window.setTimeout(() => setCopied(false), 1200);
-        }}
-      >
-        {copied ? <IconCheck size={13} /> : <IconCopy size={13} />}
-      </ActionIcon>
-      <ActionIcon
-        size="sm"
-        variant="subtle"
-        component="a"
-        href={props.url}
-        target="_blank"
-        rel="noreferrer"
-        title="Open"
-      >
-        <IconExternalLink size={13} />
-      </ActionIcon>
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------------
-// URLs popover + search overlay
+// Command palette
 // ---------------------------------------------------------------------------
 
 /** Header order for the idle (no-query) list. Also the grouping key. */

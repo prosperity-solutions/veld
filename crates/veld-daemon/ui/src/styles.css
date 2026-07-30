@@ -429,6 +429,13 @@ select:focus {
   font-weight: 600;
 }
 
+/* The `+` sits immediately after the last tab, so it reads as the end of the
+   strip rather than as an unrelated control on the far right. */
+.pane-add-btn {
+  flex: none;
+  margin-left: 4px;
+}
+
 /* Tabs inside a dock's strip. The label and the close button are siblings —
    a button nested in a button is invalid, and the rail's div[role=button]
    workaround hides its inner controls from assistive tech. */
@@ -481,6 +488,20 @@ select:focus {
   opacity: 0.4;
 }
 
+/* The kind's glyph, dimmer than the label so it reads as a category rather than
+   competing with the name. Full strength on the open tab. */
+.pane-tab-icon {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  margin-right: 5px;
+  opacity: 0.55;
+}
+
+.pane-tab.sel .pane-tab-icon {
+  opacity: 1;
+}
+
 .pane-tab-label,
 .pane-tab-close {
   background: none;
@@ -490,6 +511,14 @@ select:focus {
   cursor: pointer;
   padding: 0 4px 0 10px;
   align-self: stretch;
+}
+
+/* Flex, so the glyph and the label are centred against each other. As inline
+   content they were baseline-aligned instead — an icon's box bottom sits on the
+   text baseline, which leaves it visibly riding high. */
+.pane-tab-label {
+  display: inline-flex;
+  align-items: center;
 }
 
 .pane-tab-close {
@@ -569,36 +598,95 @@ select:focus {
   overflow: hidden;
 }
 
-.dock-empty {
+.pane-chooser {
   flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  overflow-y: auto;
+  /* The same surface as a Veld URLs pane: both are content, and a pane that
+     changes colour depending on what it holds reads as a different kind of
+     thing. */
+  background: var(--panel);
+}
+
+.pane-chooser-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: center;
 }
 
+/* Separates "what should this pane be" from "where should it go" — two questions
+   that happen to share a screen. */
+.pane-chooser-rule {
+  width: 100%;
+  max-width: 520px;
+  height: 0;
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+
+/* A pane-sized target rather than a toolbar-sized one: these are the primary
+   action of a whole pane, not a chip in a dense row. */
+.btn.big {
+  gap: 7px;
+  padding: 9px 14px;
+  border-radius: 9px;
+  font-size: 12.5px;
+}
+
+/* Session identity pip: on a browser tab, in the session menu, and on the
+   pane's own session control. Colours come from the model (they must mean the
+   same thing in both themes), so only the shape lives here. */
+.session-dot {
+  flex: none;
+  display: inline-block;
+  border-radius: 50%;
+}
+
+
+
+/* The grab target is the element's own 7px box, with the 1px divider drawn
+   inside it — NOT a 1px element with an overhanging `::after` hit area, which is
+   what this was.
+   An overhang reaches over the neighbouring pane, and an embedded browser pane
+   is a native view in the desktop shell: it is not part of the DOM's hit
+   testing, so it takes every click over it. That left a literal 1px line as the
+   only grabbable part of the splitter. Real layout width costs 6px of pane and
+   is reachable everywhere. */
 .dock-splitter {
   position: relative;
   flex: none;
-  width: 1px;
+  width: 7px;
   cursor: col-resize;
-  background: var(--border);
+  background: transparent;
 }
 
-/* Widen only the pointer target. Doing this with transparent borders plus
-   background-clip instead leaves the border box painting the page background
-   through — a pale band beside the line, which is not what a divider is. */
 .dock-splitter::after {
   content: "";
   position: absolute;
   top: 0;
   bottom: 0;
-  left: -3px;
-  right: -3px;
+  left: 3px;
+  width: 1px;
+  background: var(--border);
 }
 
-.dock-splitter:hover,
-.dock-splitter:focus-visible {
+.dock-splitter:hover::after,
+.dock-splitter:focus-visible::after {
+  /* The whole 7px lights up, so the affordance reads as wide as it is. */
+  left: 0;
+  width: 100%;
   background: var(--accent);
+  opacity: 0.55;
+}
+
+.dock-splitter:focus-visible {
   outline: none;
 }
 
@@ -650,48 +738,249 @@ select:focus {
   box-shadow: var(--shadow);
 }
 
-.launcher {
+/* ---- embedded browser ----------------------------------------------------- */
+
+.browser-pane {
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   min-width: 0;
   background: var(--panel);
 }
 
-.launcher-head {
+.browser-bar {
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px 0;
-  font-size: 11.5px;
+  gap: 3px;
+  padding: 5px 7px;
+  border-bottom: 1px solid var(--border);
 }
 
-.launcher-list {
+.browser-address {
   flex: 1;
-  overflow-y: auto;
-  padding: 12px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  outline: none;
+}
+
+.browser-address:focus {
+  border-color: var(--accent);
+}
+
+/* The box a live view occupies. Under Electron the content is a native
+   WebContentsView positioned over this element — it is NOT a child, and it
+   ignores z-index — so nothing may be layered on top of it. `position:
+   relative` is what the placeholder inside is measured against; the placeholder
+   only renders while the pane has no page. */
+.browser-slot {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--bg);
+}
+
+/* The iframe backend's frame, reparented here by panes/browserHost.ts. */
+/* The host is the element the live content is reparented into: the iframe under
+   the browser backend, nothing at all under Electron (the native view is
+   positioned over it, and the frozen still is painted as its background).
+   Deliberately *not* opaque — it is appended to the slot by `mountBrowser`, so it
+   sits after React's children in DOM order and an opaque background here painted
+   a white box over every screen below. */
+.browser-host,
+.browser-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
+.browser-frame {
+  background: #fff;
+}
+
+/* Stand-ins for the page, shown only while the native view is hidden (see
+   `covered()` in panes/browserHost.ts). They must never be layered over a live
+   view: under Electron the view paints over DOM, so anything here would simply be
+   invisible — which is why the visibility decision and these screens read the
+   same state. */
+.browser-screen {
+  position: absolute;
+  inset: 0;
+  /* Above the reparented host. DOM order would otherwise decide it, and the host
+     is appended *after* these — see `.browser-host`. */
+  z-index: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 24px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--panel);
+}
+
+.browser-screen p {
+  margin: 0;
+  max-width: 380px;
+}
+
+.pane-screen-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.pane-screen-icon {
+  display: flex;
+  color: var(--faint);
+}
+
+.pane-screen-url {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--faint);
+  word-break: break-all;
+}
+
+/* The still of a hidden view is painted as this element's background (set by
+   panes/browserHost.ts, not by React — see `freezeThenHide`). Sized here so the
+   host has nothing to compute at paint time. */
+.browser-host {
+  background-repeat: no-repeat;
+  background-size: cover;
+  background-position: top left;
+}
+
+.browser-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: center;
+}
+
+
+
+.browser-note {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 5px 9px;
+  border-top: 1px solid var(--border);
+  background: var(--panel2);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.browser-note.danger {
+  background: var(--danger-bg);
+  color: var(--danger);
+}
+
+.browser-note code {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+}
+
+/* ---- Veld URLs (panes/VeldLinks.tsx) ------------------------------------- */
+
+.links-list {
+  width: 100%;
+  max-width: 520px;
   display: flex;
   flex-direction: column;
   gap: 7px;
+  /* The list scrolls, not the screen around it. Centring a flex child inside a
+     scrolling container clips its top once it overflows; scrolling the child
+     instead keeps it centred while it fits and readable when it doesn't. */
+  max-height: 100%;
+  overflow-y: auto;
 }
 
-.svc-card {
+.links-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--faint);
+}
+
+.links-empty p {
+  margin: 0;
+  max-width: 320px;
+}
+
+.links-all {
+  align-self: center;
+  margin-top: 4px;
+}
+
+/* One URL. The card is the frame; the button inside is the click target and takes
+   all the space the two icon controls don't — siblings rather than nested, since a
+   button inside a button is invalid HTML. */
+.link-row {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 8px 10px;
-  border-radius: 8px;
+  gap: 4px;
+  padding: 3px 6px 3px 3px;
+  border-radius: 9px;
   border: 1px solid var(--border);
   background: var(--panel2);
 }
-.svc-card .name {
+
+.link-row:hover {
+  border-color: var(--border2);
+  background: var(--elev);
+}
+
+.link-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 7px;
+  background: none;
+  text-align: left;
+  color: inherit;
+}
+
+.link-open:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.link-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.link-row .name {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 11.5px;
   font-weight: 600;
   color: var(--text);
 }
-.svc-card .url {
+.link-row .url {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 10.5px;
   color: var(--faint);

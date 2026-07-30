@@ -193,6 +193,7 @@ jobs:
         run: |
           node --check src/main.js
           node --check src/preload.js
+          node --check src/browserViews.js
 
   integration:
     name: Integration Tests (macOS)

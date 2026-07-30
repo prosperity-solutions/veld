@@ -2,16 +2,16 @@
 
 Veld Desktop is a desktop shell around veld's management UI. It lets a developer
 import git repositories ("repos"), manage git worktrees per repo, and drive veld
-runs per worktree — with the terminal and embedded-browser panes arriving in
-later increments.
+runs per worktree, with terminal and embedded-browser panes in a dock.
 
-This document covers the foundation increment: what exists, why it's shaped
-this way, and how to run it locally. The visual design source of truth is the
-Claude Design handoff (kept outside the repo under `tmp/`, gitignored); of the
-stripped add-ons listed there, PR badges, the extension system, isolated
-browser sessions, the pinned agent session and the overview board are
-deliberately **not** part of this foundation. (The command palette was also
-stripped from the foundation, but has since shipped — see below.)
+This document covers the foundation increment plus the increments that have
+landed on top of it: what exists, why it's shaped this way, and how to run it
+locally. The visual design source of truth is the Claude Design handoff (kept
+outside the repo under `tmp/`, gitignored); of the stripped add-ons listed there,
+PR badges, the extension system, the pinned agent session and the overview board
+are deliberately **not** part of this foundation. (The command palette, terminal
+panes and isolated browser sessions were also stripped from the foundation, and
+have since shipped — see below.)
 
 ## Decision log
 
@@ -28,6 +28,15 @@ stripped from the foundation, but has since shipped — see below.)
 | Terminal session lifetime | Sessions outlive their socket; explicit `DELETE` ends one | A terminal is not re-creatable state — dropping it kills the shell and everything in it — and a reload drops the socket. So a socket closing means "come back later" (scrollback is buffered and replayed on reattach) while closing a *pane* means "done". Two consequences are accepted rather than solved: selecting a worktree opens a terminal in its default layout and that shell lives as long as the page, so browsing the rail spends the session budget (hence a cap of 48 and a readable error on hitting it); and closing the browser window discards the `sessionStorage` holding the session ids, leaving shells that can never be reattached — the detach grace is what collects those. Disconnecting a hidden pane and reattaching on return would fix both, and is cheap *because* reattach is lossless, but it is a behaviour change worth its own increment. |
 | Terminal renderer | **xterm.js**, with `ghostty-web` a fast-follow candidate | `ghostty-web` is the better emulator but pre-1.0, with an unverified addon story (fit-addon is required for resize) and a ~400 KB WASM blob that `vite-plugin-singlefile` would base64-inline into the daemon binary. It is API-compatible with xterm.js, so swapping stays cheap and this does not gate the terminal work. |
 | Pane layout | Two docks of tabs with a draggable split | The terminal, the embedded browser and run diagnostics all want the same region; each one added as another fixed column makes the window unusable. A tab kind per content type means the next increment is a renderer, not a layout rewrite. Layouts persist per worktree in `sessionStorage` — per browser tab, since a layout names live shells and two tabs must not claim the same one. |
+| Embedded browser | **Electron `WebContentsView`**, with an `<iframe>` fallback in a plain browser | The pane has to render the user's own dev server, which frequently sends `X-Frame-Options`/`frame-ancestors` — an iframe shows those as a blank rectangle with nothing observable to report. A native view also has real back/forward, a readable URL and title, and per-pane cookie jars. The iframe stays because "usable without Electron" is the invariant above; it is honest about what it cannot do (no history, no separate sessions, no way to detect a refused frame) rather than pretending. |
+| Browser sessions | An explicit, persisted set of colour-coded, animal-named `persist:` partitions per worktree: the default plus up to 8 | The point of the feature is being two logged-in users of your own app at once, which is a cookie jar per pane. The *allowed* slot names are a closed list because the name becomes an Electron partition — an identifier the main process has to validate anyway — but which of them **exist** is a set the user builds up, stored in `localStorage` and keyed by worktree. Deriving that set from which slots panes occupy was the first attempt and it inverted the feature: moving a pane onto a new session vacated its old slot, so adding one appeared to delete the previous. `localStorage` rather than the daemon because a session only means anything under Electron (the browser build's iframe backend has no cookie jars of its own), so there is no second client for the list to disagree with — this is one client's preference about its own capability, not the shared settings store batch 5 needs. Eight above the default is the colour ceiling: more dots stop being tellable apart, and the colour is what makes "which session is this pane?" answerable without opening a menu. The slots are **named** (otter, wombat, gecko…) rather than numbered, because a number implies a sequence: removing "Session 2" and being left with "Default, Session 3" reads as breakage, while a name has no successor to be missing. The name is also the partition, so the identifier says what it is. Partitions stay global, so two worktrees whose sets both hold slot 2 share that jar — invisible in practice, since their runs are on different hostnames. Clearing data is addressed by partition, not by pane, so a slot no pane holds can still be emptied. |
+| Native-view z-order | The renderer hides views while a DOM overlay is open | A `WebContentsView` is a native sibling of the page: it paints over every menu, dialog and dropdown regardless of z-index, and there is no CSS answer. `panes/overlayGuard.ts` suspends the views while one is open. It watches the subtree of Mantine's *shared* portal node — `Portal` reuses one container that is appended to `body` once and never removed, so watching `body`'s children sees a single mutation and then goes deaf — and it requires a match to be actually painted, because `Combobox` keeps its dropdown mounted at `display: none` and `mantine-Modal-root` stays in the DOM when the modal is closed. Both of those shipped as bugs first: the deaf observer, then a permanent false positive that hid every pane. Hidden is not blank, though: each visible view is **captured first, decoded, and painted onto the container before the view goes**, so a pane freezes rather than disappearing every time a menu opens — hiding first and painting when the capture landed was itself a visible flicker — and so was routing the still through React state, which costs a render plus an async image decode. Bounded by a timeout, so a slow capture cannot leave the overlay stuck behind a view. App-owned surfaces that aren't portalled call `pushBrowserSuspend` from their own state; app-owned surfaces that aren't portalled call `pushBrowserSuspend` from their own state. It is a heuristic, and deliberately the kind that fails *visibly* (a dropdown behind a pane) rather than the kind that blanks a pane at random. |
+| The run's URLs are not a pane kind | A launcher component (`panes/VeldLinks.tsx`) shown inside whatever pane is about to need it | They are how you *get* a page, not a peer of a terminal and a page. A kind for them meant a singleton tab id, a "does one already exist" check at every call site that could open one, and a second implementation of the same rows. Now a `new` pane and a browser pane **with no URL** both show them — the second being the useful one, since the list sits in the thing that is one click from becoming the page. The top bar's globe just opens an empty browser pane, and a worktree's default layout is a terminal beside one. Links that are *not* veld's belong in the project's config, not hardcoded: `ui.quicklinks`, issue #167 item 3b. |
+| Pane creation | `+` opens an undecided `new` pane; the choice happens inside it | A menu off a `+` button is the size of a cursor and vanishes when you look away, while the thing being chosen is a whole pane. So `+` opens the pane and the pane asks what it should be, at content size — and picking a kind *replaces* the tab (`replaceTab`) rather than adding one, so the flow costs a single tab. The same screen serves an empty dock and a closed-everything region, which is why they now look identical. Hovering `+` still offers the one-click shortcuts for people who know what they want. |
+| Pane screens | Loading, error and chooser are DOM screens *and* they hide the view | A native view paints over DOM, so "the pane has something to say" and "the view is off screen" are one decision, not two — `covered()` in `browserHost.ts` owns it and the pane's render mirrors it. Error copy is keyed off Chromium's net error, not its message: "nothing is listening" (start the run) and "that hostname doesn't resolve" (`veld doctor`) are different problems, and the codes are stable where the prose is not. A *re*-load keeps the old page up rather than covering it with a spinner, which is what `loaded` is for. |
+| Orphan views are dropped by the *page*, not by a navigation event | `reset()` at module load, before any `create` | A reload replaces the page's registry of views, so the old ones are orphans painting over the new document. Disposing them from the shell's own `did-navigate` is a race against the renderer's first `create` — and losing it destroyed the view the new page had just asked for, which is why the first browser pane after a hard reload came up blank with reload as the only escape. Driving it from the renderer makes the ordering a queue. |
+| Views start visible | `create` no longer hides the view and then shows it | Chromium background-throttles a hidden `WebContents`, and a view created hidden and loaded in the same tick sometimes never rendered its first page — blank until you pressed Reload. The renderer sends its own visibility immediately, so starting visible costs nothing and removes the race. The spinner's 8-second "taking a while" reload is the backstop, since a genuinely slow dev server must not be called an error. |
+| Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to. So the shell disposes a window's views on every main-frame navigation, because a view outliving its renderer's registry is an orphan painting over the new page that nothing can address. A shell is the opposite — see the terminal row above. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -125,6 +134,11 @@ requests at runtime — branding rule.
   with an active tab, plus a split ratio. Every mutation is a function on that
   value, so the layout rules are unit-testable without a DOM and the React side
   holds only the state cell.
+- **One visible dock is always the left one.** Every mutation ends in
+  `normalizeDocks`, so a layout is never left-empty-and-right-full. With a single
+  pane on screen "left" and "right" name nothing, and the distinction surfaced as
+  a tab menu offering *Move to the left pane* with nothing to the left of
+  anything. With one dock that action is a split, and it is labelled as one.
 - **Terminals live outside React** (`panes/terminalHost.ts`). Unmounting a
   terminal would close its socket and kill the shell, and React unmounts freely
   — on a tab switch, and on every worktree switch, since each worktree has its
@@ -154,6 +168,55 @@ requests at runtime — branding rule.
   the focused dock's terminal claims the keyboard on mount; both docks mount on
   load, so focusing unconditionally handed it to whichever mounted last.
 
+#### Browser panes (`ui/src/panes/browserHost.ts`, `BrowserPane.tsx`)
+
+- **Two backends behind one registry**, chosen once at module load by whether
+  `window.veldDesktop.browser` exists. Views live outside React for the same
+  reason terminals do, one notch weaker: a remount would reload the page and
+  discard scroll position, form state and anything the dev server had
+  hot-reloaded in.
+- **Nothing may render on top of the slot.** Under Electron the content is a
+  native view at the slot's screen rect — chrome goes above it, status below it,
+  and the empty-pane placeholder only exists while there is no page. A `position:
+  absolute` decoration over the slot would be invisible in the browser build and
+  cover the page in the desktop one.
+- **The renderer owns the geometry.** A `ResizeObserver` on the container covers
+  resizes; a 400 ms tick catches a pane that *moved* without resizing (a banner
+  appears above the dock, a transition settles after the observer fired), and only
+  sends IPC when the box actually differs. A native view left behind does not
+  glitch subtly — it covers the wrong part of the window.
+- **Only `http(s)` reaches a view**, checked in `normalizeBrowserUrl` *and* again
+  in the shell (`safeUrl`), because a renderer is not a trust boundary. The
+  renderer copy is what turns a bad address into an error instead of a silently
+  ignored Enter; restored layouts are re-validated on the way in, since storage
+  is where a hand-edited `javascript:` URL would sit waiting.
+- **A focused native view swallows every keystroke**, so the app's accelerators
+  are dead while a pane has focus. The shell intercepts `Ctrl/⌘+Shift+P` only,
+  moves focus back to the page, and forwards it — `⌘K` is left to the previewed
+  page, which is likelier to want it.
+- **A URL row's primary action is opening it here**, with copy and
+  open-externally as siblings rather than the row's only affordances. Siblings,
+  not nested: a `<button>` inside a `<button>` is invalid HTML and browsers
+  resolve it by dropping the inner one.
+- **The session set is per worktree**, so two worktrees can each hold the same
+  slot (their runs are on different hostnames, so the shared jar never shows).
+  Removing a session returns its panes to Default rather than being refused —
+  refusing meant the session you were looking at was the one you could never
+  remove. Only this worktree's panes move, because the sets are per worktree.
+- **A pane's own slot is unioned into its menu** (`sessionSetFor`). A restored
+  layout can name a session the stored set has lost, and a pane missing from its
+  own menu is worse than an extra row.
+- **A session is a colour, in three places** — the tab's own kind glyph (a globe,
+  tinted; one marker rather than an icon *and* a dot at tab size), the pane's
+  session control, and the chrome's bottom edge. The edge rather than a strip above the
+  view: a strip would move the native view's box every time the session changed.
+  The colours are literal hexes in the model, not theme tokens, because an
+  identity marker that changes with the theme identifies nothing.
+- **`target=_blank` becomes a tab in the same dock**, carrying the pane's
+  profile, because the shell denies the native popup and defers placement to the
+  layout. A popup that relies on `window.opener` therefore breaks; the OAuth
+  flows that need one are the known cost.
+
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
 is an application with a different toolchain (Vite, React, HMR). Two small
@@ -169,10 +232,17 @@ Minimal by design. Main process only does:
    install/start instructions) and poll until it appears.
 3. macOS tray (template icon): shows running-run count, per-run stop/restart
    later; click focuses the window.
-4. `contextIsolation: true`, `nodeIntegration: false`, tiny preload exposing
-   `veldDesktop.shell` metadata only. No IPC surface beyond that yet — the
-   webview/session APIs from the handoff arrive with the embedded-browser
-   increment.
+4. `contextIsolation: true`, `nodeIntegration: false`, preload exposing
+   `veldDesktop.shell` metadata plus `veldDesktop.browser` — the embedded
+   browser panes (`src/browserViews.js`), which is the one thing a page cannot
+   do for itself. Every method is a fixed channel with a fixed shape: the page
+   never names a channel, so it cannot reach a handler the preload doesn't list.
+5. Own the browser panes' lifetime: views are keyed by (window, view id), so a
+   renderer can only address its own; they are disposed when the window closes
+   **and** on every main-frame navigation, because a view outliving its
+   renderer's registry paints over the new page with nothing able to close it.
+   Views run sandboxed with no preload, in a `persist:veld-browser-<profile>`
+   partition, with all permission requests denied and only `http(s)` accepted.
 
 No packaging/signing in this increment — `npm start` (dev run) only.
 
@@ -398,9 +468,8 @@ already lives in the URL, so modes are just routes.
 
 1. **Runs mode** (v1-dashboard parity in React/Mantine) + view switcher +
    `/` / `/ide` routing as above.
-2. Embedded webviews + isolated sessions (Electron `WebContentsView`,
-   `session.fromPartition`). These are meant to arrive as a new `PaneKind` in
-   the dock (`crates/veld-daemon/ui/src/panes/`), not as another column.
+2. ~~Embedded webviews + isolated sessions~~ — shipped as the `browser`
+   `PaneKind`; see the decision log and the browser-panes notes above.
 3. ~~Terminal panes~~ — shipped; see the decision log above.
 4. Start-run UX beyond preset picking; `veld share` from the UI.
 5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
