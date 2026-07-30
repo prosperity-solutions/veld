@@ -312,18 +312,61 @@ setup-frontend:
 
 # --- Management UI v2 (crates/veld-daemon/ui) + desktop shell (desktop/) ---
 
-build-ui:
+# npm deps for ui/, installed only when they are missing.
+#
+# A dependency of every ui/ recipe rather than something to remember: a fresh
+# worktree has no node_modules (they are per checkout, not shared), and the
+# failure is a bare "vitest: command not found" that says nothing about which
+# setup step was skipped. `just setup-ui` stays as the explicit, always-runs
+# version — use it after a dependency bump.
+[private]
+ui-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/crates/veld-daemon/ui"
+    [ -d node_modules ] || npm install
+
+# The same for desktop/, plus the Electron binary.
+#
+# `npm install` alone is not enough: the binary is fetched by electron's install
+# script, and npm defers install scripts it has not been told to allow (`npm
+# approve-scripts`), which leaves a complete node_modules whose `electron` cannot
+# run — `sh: electron: command not found`. `install-electron` is the bin electron
+# ships for exactly this, and `path.txt` is the marker it writes when the download
+# landed, so this is a no-op on every later run.
+[private]
+desktop-deps:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/desktop"
+    [ -d node_modules ] || npm install
+    if [ ! -f node_modules/electron/path.txt ]; then
+        echo "Fetching the Electron binary (npm deferred its install script)…"
+        ./node_modules/.bin/install-electron
+    fi
+
+build-ui: ui-deps
     cd crates/veld-daemon/ui && npm run build
 
-test-ui:
+test-ui: ui-deps
     cd crates/veld-daemon/ui && npm test
 
-lint-ui:
+lint-ui: ui-deps
     cd crates/veld-daemon/ui && npm run typecheck
 
+# Install/refresh every npm dep the UI and the desktop shell need. Unlike the
+# guarded checks above this always runs npm, so it also picks up a bump.
 setup-ui:
-    cd crates/veld-daemon/ui && npm install
-    cd desktop && npm install
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd "{{justfile_directory()}}/crates/veld-daemon/ui"
+    npm install
+    cd "{{justfile_directory()}}/desktop"
+    npm install
+    # Unconditionally, unlike `desktop-deps`: after an electron bump the previous
+    # binary is still on disk with its marker file, and only electron's own
+    # installer knows that version is now the wrong one.
+    ./node_modules/.bin/install-electron
 
 # Vite dev server for the /ide UI (HMR). Proxies /api — including the terminal
 # WebSocket upgrade — to the DEV daemon (port {{dev_daemon_port}}); start
@@ -334,20 +377,20 @@ setup-ui:
 # when it is a dev instance, so the installed one on the default port refuses the
 # upgrade (see `allowed_origins` in crates/veld-daemon/src/pty.rs). Deliberate —
 # a dev server must not be able to open a shell through the installed daemon.
-dev-ui:
+dev-ui: ui-deps
     cd crates/veld-daemon/ui && npm run dev
 
 # Electron shell pointed at the vite dev server (start `just dev-ui` first).
-dev-desktop:
+dev-desktop: desktop-deps
     cd desktop && VELD_DESKTOP_URL=http://localhost:5199 npm start
 
 # Electron shell straight at the dev daemon's embedded /ide (no HMR) —
 # start `just dev-daemon` first.
-dev-desktop-embedded:
+dev-desktop-embedded: desktop-deps
     cd desktop && VELD_DESKTOP_URL=http://127.0.0.1:{{dev_daemon_port}} npm start
 
 # Electron shell against the installed daemon's embedded /ide.
-desktop:
+desktop: desktop-deps
     cd desktop && npm start
 
 # --- Licenses ---

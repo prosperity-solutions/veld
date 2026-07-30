@@ -444,7 +444,9 @@ same-named run in another repo.
 Prereqs: Rust stable, Node 22+, a working `veld` install (`veld doctor`).
 
 ```sh
-# 0. once: npm deps for ui/ and desktop/
+# 0. optional: npm deps for ui/ and desktop/ up front (also how you refresh them
+#    after a dependency bump). Every recipe below installs what it needs first,
+#    so a fresh worktree can skip straight to step 1.
 just setup-ui
 
 # 1. dev daemon — a full parallel instance alongside the installed one:
@@ -480,7 +482,12 @@ Electron adds the native shell (`just dev-desktop-embedded` points it at the
 dev daemon without vite).
 
 `just` recipes: `build-ui`, `test-ui`, `lint-ui`, `dev-desktop`,
-`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes. CI
+`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes; each
+depends on a guarded deps step, so a checkout with no `node_modules` installs them
+instead of failing on a missing binary. For `desktop/` that step also fetches the
+Electron binary explicitly: npm defers install scripts it has not been told to
+allow, which otherwise leaves a complete `node_modules` whose `electron` reports
+`command not found`. CI
 runs typecheck + vitest + build for `ui/` and a syntax check for `desktop/`
 (see `.github/workflows/ci.yml`); the Rust build jobs install `ui/` npm deps
 because `veld-daemon`'s build.rs now builds both frontend packages.
