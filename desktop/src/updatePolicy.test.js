@@ -20,6 +20,17 @@ test("an unpackaged run never updates itself", () => {
 
 test("macOS is download-only until the app is signed", () => {
   assert.equal(updateMode({ platform: "darwin", isPackaged: true }), "download");
+  // The other side of the switch, so flipping MACOS_SIGNED is a change this
+  // suite has already checked rather than one it silently accepts.
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, macSigned: true }),
+    "install",
+  );
+  // Signing says nothing about Linux packaging.
+  assert.equal(
+    updateMode({ platform: "linux", isPackaged: true, env: {}, macSigned: true }),
+    "download",
+  );
 });
 
 test("only an AppImage can install in place on Linux", () => {

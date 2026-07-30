@@ -8,6 +8,19 @@
 const GITHUB_REPO = "prosperity-solutions/veld";
 
 /**
+ * Whether the macOS build carries a Developer ID signature (issue #167 §10).
+ *
+ * A constant rather than a branch to delete, because "delete this line" was the
+ * wrong instruction: `updateMode`'s catch-all also returns `"download"`, so
+ * removing the darwin case changes nothing and the existing test still passes —
+ * a contributor doing exactly what the comment said would ship no behaviour
+ * change and believe otherwise. Flipping this to `true` (and packaging with a
+ * real identity, and notarizing) is the whole switch, and both sides of it are
+ * tested.
+ */
+const MACOS_SIGNED = false;
+
+/**
  * How this build is allowed to apply an update.
  *
  * - `"off"` — an unpackaged run (`npm start`): there is no bundle to replace,
@@ -22,15 +35,16 @@ const GITHUB_REPO = "prosperity-solutions/veld";
  *   code signature as the running app, and veld has no Developer ID yet (issue
  *   #167 §10); the .deb is here because its files belong to dpkg.
  *
- * The macOS half flips to `"install"` by deleting one line, once signing lands.
+ * The macOS half flips with `MACOS_SIGNED` above, once signing lands.
  *
- * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>}} ctx
+ * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean}} ctx
  * @returns {"off" | "install" | "download"}
  */
-function updateMode({ platform, isPackaged, env = {} }) {
+function updateMode({ platform, isPackaged, env = {}, macSigned = MACOS_SIGNED }) {
   if (!isPackaged) return "off";
-  // Not signed yet → Squirrel.Mac would reject the swap after the download.
-  if (platform === "darwin") return "download";
+  // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
+  // nothing to gain by starting one.
+  if (platform === "darwin") return macSigned ? "install" : "download";
   if (platform === "linux") return env.APPIMAGE ? "install" : "download";
   return "download";
 }

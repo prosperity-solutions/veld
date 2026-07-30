@@ -576,9 +576,12 @@ Two different mismatches, deliberately reported differently:
   notice.
 
 The app is a shell around a daemon it does not ship, so its waiting screen spells
-out the install command rather than saying "install veld" — for a packaged
-download on a machine that has never had it, that screen is the whole first
-impression.
+out both commands — the installer *and* `veld setup unprivileged` — rather than
+saying "install veld". For a packaged download on a machine that has never had
+it, that screen is the whole first impression, and the installer deliberately
+does not run setup, which is the step that actually installs the daemon agent
+the screen is waiting for. `veld doctor` only diagnoses, so it is offered to
+someone who is already set up.
 
 ## Data model
 

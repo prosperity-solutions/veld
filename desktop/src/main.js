@@ -84,13 +84,17 @@ if (!isPrimaryInstance) app.quit();
 // Shown while the daemon is unreachable; self-contained and branded
 // (dark tokens + wordmark dot styling from the design handoff).
 //
-// The install command is spelled out rather than linked, because this screen is
-// what a packaged download shows on a machine that has never had veld: the app
-// is a shell around a daemon it does not ship, and "install veld" with no
-// command is a dead end. `-webkit-user-select` is re-enabled on the command
-// alone — the rest of the page is a drag region, which otherwise swallows the
-// selection.
+// The commands are spelled out rather than linked, because this screen is what a
+// packaged download shows on a machine that has never had veld: the app is a
+// shell around a daemon it does not ship, and "install veld" with no command is
+// a dead end. Both steps are named because the installer deliberately does not
+// run setup (`install.sh` → "no auto-run of veld setup"), and setup is what
+// installs the daemon agent this screen is waiting for
+// (`commands/setup/unprivileged.rs:38`) — `veld doctor` only *diagnoses* it.
+// `-webkit-user-select` is re-enabled on the commands alone — the rest of the
+// page is a drag region, which otherwise swallows the selection.
 const INSTALL_COMMAND = "curl -fsSL https://veld.oss.life.li/get | bash";
+const SETUP_COMMAND = "veld setup unprivileged";
 const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Veld</title><style>
   body{margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
        background:#0d0e10;color:#98a0a9;font:13px/1.6 system-ui,sans-serif;-webkit-app-region:drag}
@@ -101,9 +105,10 @@ const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Ve
 </style></head><body>
   <div class="wm">veld<i>.</i></div>
   <p>Waiting for the veld daemon…</p>
-  <p>On a fresh machine, install it with</p>
+  <p>On a fresh machine, install veld and set it up — no sudo needed:</p>
   <p><code class="cmd">${INSTALL_COMMAND}</code></p>
-  <p>Already installed? Run <code>veld doctor</code>. Retrying automatically.</p>
+  <p><code class="cmd">${SETUP_COMMAND}</code></p>
+  <p>Already set up? Run <code>veld doctor</code> to see what's wrong. Retrying automatically.</p>
 </body></html>`;
 
 /**
