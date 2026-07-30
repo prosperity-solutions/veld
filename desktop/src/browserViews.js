@@ -546,6 +546,10 @@ function attachListeners(window, viewId, entry) {
 }
 
 function disposeEntry(window, entry) {
+  // A view disposed mid-gesture must not stay armed: nothing else clears this once the
+  // entry is unreachable, and a forwarding view costs a cursor read and an IPC message
+  // per mouse move.
+  entry.dragging = false;
   const wc = entry.view.webContents;
   // Before the view goes: a detached inspector is a window of its own, and one
   // left open for a pane that no longer exists is a window with no way back to
@@ -786,8 +790,13 @@ function registerBrowserViewIpc(resolveWindow) {
    * keep a gesture alive and not worth paying at any other time.
    */
   ipcMain.handle("veld:browser:drag", (event, args) => {
-    const found = lookup(event, args?.viewId);
-    if (!found) return;
+    // Resolved from the *window*, with no view id involved. Requiring one meant the
+    // disarm was dropped whenever the pane that started the gesture had gone — closed
+    // mid-drag, or rebuilt by a session switch — and since arming is window-wide, every
+    // view then kept forwarding a cursor read plus an IPC message per mouse move until
+    // the page reloaded.
+    const window = senderWindow(event);
+    if (!window) return;
     const dragging = args?.dragging === true;
     // **Every view in the window, not just the dragged one.** A pointer released
     // over a *sibling* pane's view reaches neither this document's `pointerup` (that
@@ -798,7 +807,7 @@ function registerBrowserViewIpc(resolveWindow) {
     // Two browser panes side by side is the documented layout, so this is a
     // straight-line path, not a corner. The coordinates are window-relative and come
     // from the cursor, so an event forwarded by any view is equally usable.
-    for (const entry of byWindow.get(found.window.id)?.values() ?? []) {
+    for (const entry of byWindow.get(window.id)?.values() ?? []) {
       entry.dragging = dragging;
     }
   });

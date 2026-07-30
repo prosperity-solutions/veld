@@ -604,6 +604,43 @@ export function dragSize(
   };
 }
 
+/**
+ * Which of the screen's edges cannot move, because the pane is already what limits
+ * them.
+ *
+ * The question [`dragSize`] needs answered: pulling an edge that is pinned changes
+ * the *number* without moving anything, so the centre-growth doubling has nothing to
+ * correct for and only doubles how fast the number runs from the pointer.
+ *
+ * Derived from `deviceLayout` on purpose — that is the one owner of the placement, and
+ * an axis is pinned exactly when the layout it produces is capped by the available
+ * box. Two ways that happens: fitting binds on that axis (`scale = avail/size`, so the
+ * drawn size *is* the available size no matter how the emulated one changes), or
+ * fitting is off and the device is bigger than the pane, where the screen is cropped.
+ *
+ * Must be computed from the same box and the same emulated size as everything else in
+ * the tick that uses it. A version of this read the *published* geometry instead — the
+ * box last painted — which is coalesced to one animation frame while a mouse reports
+ * faster than the display: the answer then flipped between moves and the emulated size
+ * stopped being monotonic in pointer travel.
+ */
+export function edgePinned(
+  e: PaneEmulation,
+  box: { width: number; height: number },
+  padding: number = DEVICE_PADDING,
+): { width: boolean; height: boolean } {
+  const availWidth = box.width - padding * 2;
+  const availHeight = box.height - padding * 2;
+  if (!(availWidth >= 1) || !(availHeight >= 1)) return { width: false, height: false };
+  const layout = deviceLayout(e, box, padding);
+  return {
+    // A half-pixel of slack: these are floats out of a division, and "equal" here
+    // means "the layout hit the cap", not "the two doubles agree bit for bit".
+    width: layout.width >= availWidth - 0.5,
+    height: layout.height >= availHeight - 0.5,
+  };
+}
+
 /** The screen's corner radius at the scale it is being shown at, so a phone at
  *  40% keeps its shape instead of its pixel count. */
 export function scaledRadius(e: PaneEmulation, scale: number): number {

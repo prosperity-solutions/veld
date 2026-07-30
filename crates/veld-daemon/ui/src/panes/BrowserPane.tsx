@@ -63,7 +63,9 @@ import {
   chromeVersionFrom,
   clampZoom,
   customEmulation,
+  deviceLayout,
   dragSize,
+  edgePinned,
   emulationForPreset,
   emulationLabel,
   emulationSize,
@@ -349,35 +351,48 @@ export function BrowserPane(props: {
     const originY = event.clientY;
     const from = { width: emulation.width, height: emulation.height };
     let latest = from;
+    const pointerId = event.pointerId;
+
+    // Sampled once, from the pane's own box, in this tick — not read per move from the
+    // published geometry. Two reasons, both learned the hard way:
+    //
+    // - the published box is coalesced to one animation frame, and a mouse reports
+    //   faster than the display, so a per-move read describes the *previous* painted
+    //   size. The pinned answer then flipped between moves and the emulated size
+    //   stopped being monotonic in pointer travel — worse than no correction at all.
+    // - a gain that changes mid-gesture is applied to the *whole* travel (`from` plus
+    //   the total delta), so every flip jumps the size. Sampling once makes the
+    //   mapping linear for the gesture, which is what a drag should be.
+    //
+    // The cost is that dragging from pinned into unpinned keeps the slower gain. That
+    // is predictable, and it is the direction that errs quietly.
+    const paneBox = slot.current?.getBoundingClientRect();
+    const startBox = paneBox ? { width: paneBox.width, height: paneBox.height } : null;
+    const scale = startBox ? deviceLayout(emulation, startBox).scale : state.emulationScale;
+    const pinned = startBox
+      ? edgePinned(emulation, startBox)
+      : { width: false, height: false };
+
     setDrag(from);
     setBrowserResizing(id, true);
 
     // One core for both pointer sources, so a cursor crossing onto the page cannot
     // change how the drag behaves — only where its events arrive from.
     const to = (clientX: number, clientY: number) => {
-      // Read live rather than captured at gesture start: the scale changes *during* a
-      // drag as fitting starts and stops binding, and whether the dragged axis is
-      // clamped is what decides whether the centre-growth doubling applies at all — a
-      // screen already clamped to the pane has no edge left to track the cursor with
-      // (see `dragSize`).
-      const live = browserStatus(id);
-      const clamped = {
-        width: live.deviceWidth < latest.width * live.emulationScale - 0.5,
-        height: live.deviceHeight < latest.height * live.emulationScale - 0.5,
-      };
-      latest = dragSize(
-        from,
-        { x: clientX - originX, y: clientY - originY },
-        axis,
-        live.emulationScale,
-        clamped,
-      );
+      latest = dragSize(from, { x: clientX - originX, y: clientY - originY }, axis, scale, pinned);
       setDrag(latest);
       // The page itself resizes and reflows, which is the point: a drag is a
       // responsive test rather than a preview of one.
       previewBrowserResize(id, latest.width, latest.height);
     };
-    const move = (e: PointerEvent) => to(e.clientX, e.clientY);
+    // Gated on the pointer that started the gesture: a second finger's press or
+    // release on touch hardware is not this drag's business.
+    const move = (e: PointerEvent) => {
+      if (e.pointerId === pointerId) to(e.clientX, e.clientY);
+    };
+    const release = (e: PointerEvent) => {
+      if (e.pointerId === pointerId) finish();
+    };
     // Any view's forwarded pointer, not just this pane's: a sideways drag ends over
     // the *neighbouring* pane as often as not, and that view owns its own mouse-up.
     // The coordinates are window-relative and taken from the cursor, so whichever view
@@ -388,9 +403,10 @@ export function BrowserPane(props: {
       else to(e.x, e.y);
     });
     const finish = () => {
+      window.clearTimeout(armBackstop);
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", finish);
-      window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
       window.removeEventListener("pointerdown", finish);
       forwarded();
       setDrag(null);
@@ -414,11 +430,16 @@ export function BrowserPane(props: {
     // and the native view is hidden for the duration, so nothing else can take the
     // events.
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", finish);
-    window.addEventListener("pointercancel", finish);
-    // Backstop: if a release is lost despite all of the above, the next press
-    // anywhere ends the gesture rather than leaving it resizing a button-less cursor.
-    window.addEventListener("pointerdown", finish);
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    // Backstop: if a release is lost despite all of the above, the next press anywhere
+    // ends the gesture rather than leaving it resizing a button-less cursor. Armed off
+    // this tick — registering it inline made it depend on `stopPropagation` above to
+    // avoid firing on the very press that starts the drag, which is a dependency
+    // nothing states and one reorder away from ending every gesture as it begins.
+    const armBackstop = window.setTimeout(() => {
+      window.addEventListener("pointerdown", finish);
+    }, 0);
   };
 
   /**
@@ -430,6 +451,15 @@ export function BrowserPane(props: {
    * Deriving it here from the dragged size was the earlier shape, and it drifted the
    * moment fitting clamped the screen to the pane.
    */
+  /** The pane's content box, which is what "the size the pane can hold" means. Falls
+   *  back to the published geometry only when the element is not laid out yet — never
+   *  to zero, which would clamp a new Responsive viewport to the minimum size. */
+  const paneSize = () => {
+    const box = slot.current?.getBoundingClientRect();
+    if (box && box.width >= 1 && box.height >= 1) return { width: box.width, height: box.height };
+    return { width: state.deviceWidth, height: state.deviceHeight };
+  };
+
   const screen = {
     x: state.deviceX,
     y: state.deviceY,
@@ -758,9 +788,16 @@ export function BrowserPane(props: {
                       }
                       onClick={() =>
                         applyEmulation(
+                          // Measured from the pane's own box. `state.device*` is the
+                          // *screen's* drawn box once a device is set — already inset,
+                          // and scaled if it was fitted — so a phone at 50% made
+                          // "Responsive starts at what the pane can hold" mean 172px.
+                          // Skipped rather than guessed when the slot is not laid out:
+                          // falling back to 0 would clamp to the minimum device size,
+                          // which is a wrong answer dressed as a real one.
                           responsiveEmulation(
-                            state.deviceWidth - DEVICE_PADDING * 2,
-                            state.deviceHeight - DEVICE_PADDING * 2,
+                            paneSize().width - DEVICE_PADDING * 2,
+                            paneSize().height - DEVICE_PADDING * 2,
                           ),
                         )
                       }

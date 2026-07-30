@@ -21,6 +21,7 @@ import {
   customEmulation,
   deviceLayout,
   dragSize,
+  edgePinned,
   emulationForPreset,
   emulationLabel,
   emulationSize,
@@ -337,6 +338,39 @@ describe("dragSize", () => {
     // of "we do not know how far this is scaled".
     expect(dragSize(from, { x: 10, y: 0 }, "x", 0)).toEqual({ width: 420, height: 800 });
     expect(dragSize(from, { x: 10, y: 0 }, "x", Number.NaN).width).toBe(420);
+  });
+});
+
+describe("edgePinned", () => {
+  const pane = (width: number, height: number) => ({
+    width: width + DEVICE_PADDING * 2,
+    height: height + DEVICE_PADDING * 2,
+  });
+
+  it("pins the axis that fitting binds on — the case the doubling must not apply to", () => {
+    // A 1920x1080 screen in a 600-wide pane: width binds, so the drawn width *is* the
+    // available width whatever the emulated number does. The predicate this replaced
+    // compared the drawn box against `size * scale`, which `deviceLayout` makes exactly
+    // equal on the binding axis — so it could never fire, and the doubling stayed on in
+    // the one case it was written to switch off.
+    expect(edgePinned(desktop(), pane(600, 900))).toEqual({ width: true, height: false });
+    // Short pane, same device: height binds instead.
+    expect(edgePinned(desktop(), pane(1920, 300))).toEqual({ width: false, height: true });
+  });
+
+  it("pins nothing when the screen fits", () => {
+    expect(edgePinned(phone(), pane(1200, 1200))).toEqual({ width: false, height: false });
+  });
+
+  it("pins both axes of an unfitted oversized screen, which is cropped", () => {
+    expect(edgePinned({ ...desktop(), fit: false }, pane(400, 300))).toEqual({
+      width: true,
+      height: true,
+    });
+  });
+
+  it("pins nothing in a pane too small to lay out", () => {
+    expect(edgePinned(phone(), { width: 4, height: 4 })).toEqual({ width: false, height: false });
   });
 });
 

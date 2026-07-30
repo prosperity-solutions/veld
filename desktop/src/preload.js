@@ -45,10 +45,12 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  inspector and the renderer's bounds mirroring fight over the view's box. */
     devTools: (viewId, action) =>
       ipcRenderer.invoke("veld:browser:devtools", { viewId, action }),
-    /** Ask the shell to forward this view's pointer while the page drags the
-     *  screen's edge. Without it a drag dies the moment the cursor crosses the
-     *  view, which owns every mouse event inside its own rect. */
-    drag: (viewId, dragging) => ipcRenderer.invoke("veld:browser:drag", { viewId, dragging }),
+    /** Ask the shell to forward the window's pane pointers while the page drags a
+     *  screen's edge. Without it a drag dies the moment the cursor crosses a view,
+     *  which owns every mouse event inside its own rect. Window-wide and view-less on
+     *  purpose: the release often lands on a *different* pane, and the disarm has to
+     *  work after the dragged pane is gone. */
+    drag: (dragging) => ipcRenderer.invoke("veld:browser:drag", { dragging }),
     /** Mouse moves and the mouse-up seen *by the pane's page*, in the window's CSS
      *  pixels — only while `drag` is on. */
     onPointer: (fn) => on("veld:browser:pointer", fn),

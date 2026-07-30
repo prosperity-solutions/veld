@@ -139,7 +139,9 @@ interface DesktopBrowserApi {
   emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
   setZoom(viewId: string, zoom: number): Promise<void>;
   devTools(viewId: string, action: "toggle" | "open" | "close"): Promise<void>;
-  drag(viewId: string, dragging: boolean): Promise<void>;
+  /** Window-wide: the shell resolves the window from the sender, so a disarm lands
+   *  even when the view that started the gesture is already gone. */
+  drag(dragging: boolean): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
   clearSession(profile: BrowserProfile): Promise<void>;
@@ -828,7 +830,11 @@ export function setBrowserResizing(id: string, resizing: boolean): void {
   if (!v) return;
   patch(v, { resizing });
   if (v.iframe) v.iframe.style.pointerEvents = resizing ? "none" : "";
-  if (desktop && v.shellHasView) void desktop.drag(id, resizing).catch(() => {});
+  // Not gated on `shellHasView`: the shell resolves this from the sender's window, not
+  // from a view, precisely so that a disarm still lands when the view it belonged to has
+  // gone. A drag that ends because its pane was closed mid-gesture would otherwise leave
+  // every view in the window forwarding its pointer until the page reloaded.
+  if (desktop) void desktop.drag(resizing).catch(() => {});
   if (resizing) return;
   // Drop a frame that has not fired yet, or it would repaint the drag's last size
   // after the applied one has already been drawn.
@@ -989,14 +995,27 @@ function paintScreen(
     emulationScale: layout.scale,
   });
   v.container.dataset.emulated = "true";
-  // A still is a picture of the screen at its *previous* size, so any geometry change
-  // invalidates it. Both the "Fit to pane" toggle and the zoom stepper keep their menu
-  // open — views suspended, still up — so without this they showed a stretched stale
-  // capture until the thaw 250ms after the menu closed.
-  if (v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
-  v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
-  v.frame.style.width = `${layout.width}px`;
-  v.frame.style.height = `${layout.height}px`;
+  const inset = `${layout.y}px auto auto ${layout.x}px`;
+  const width = `${layout.width}px`;
+  const height = `${layout.height}px`;
+  // A still is a picture of the screen at its *previous* size, so a geometry change
+  // invalidates it — "Fit to pane" and the zoom stepper both keep their menu open, so
+  // views are suspended and a still is up while they change it, and it would otherwise
+  // stay on screen stretched until the thaw 250ms after the menu closed.
+  //
+  // Only on an actual change, which is the whole point of comparing here: this function
+  // also runs from the 400ms geometry tick, which fires *while* views are suspended and
+  // computes the same layout it computed last time. Clearing unconditionally wiped the
+  // still within 400ms of every menu opening, leaving a blank frame — defeating the
+  // freeze in this feature's own mainline interaction, and only in the desktop app.
+  const moved =
+    v.frame.style.inset !== inset ||
+    v.frame.style.width !== width ||
+    v.frame.style.height !== height;
+  if (moved && v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
+  v.frame.style.inset = inset;
+  v.frame.style.width = width;
+  v.frame.style.height = height;
   v.frame.style.borderRadius = `${radius}px`;
 
   if (v.iframe) {
