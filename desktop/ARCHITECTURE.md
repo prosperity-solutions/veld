@@ -228,7 +228,16 @@ requests at runtime — branding rule.
   lines deformed the whole strip), tabs shrink to a floor that still shows the kind
   glyph and the close button, and past that the strip scrolls. The active tab
   scrolls itself into view, because a tab can become active without being clicked —
-  ⌘K, a drop, or closing its neighbour.
+  ⌘K, a drop, or closing its neighbour. There is no scrollbar (30px has no room for
+  one), so each edge carries a **fade that appears only while something is past
+  it** — otherwise a scrolled strip has a hidden state with nothing to announce it,
+  and a permanent gradient would dim the first and last tab of a strip that fits,
+  saying the opposite of what it means. The edges are measured (`ResizeObserver` for
+  the tab count and the dock's width, the scroll event for the position) rather than
+  inferred. One trap when wrapping the tabs in a scroll box: `.pane-tabs` centres
+  its items, so the scroller needs `align-self: stretch` or it stops filling the
+  strip and every tab in it renders as a floating chip — which is exactly how it
+  shipped for one round.
 - **`LogsPanel` has two shapes, one implementation.** In a card it is a
   fixed-height area that stays mounted while its tab is hidden (filters and scroll
   survive); in a pane (`fill`) it is the whole dock body, with the toolbar fixed

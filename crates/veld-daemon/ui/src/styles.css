@@ -434,11 +434,25 @@ select:focus {
    there is space and pinned to the end of the strip once there is not — the
    Chrome behaviour, without a second layout mode. The scrollbar is hidden
    because a 30px strip has no room for one; a trackpad, a wheel over the strip,
-   and focusing a tab (which scrolls it into view) all still reach the ends. */
+   and focusing a tab (which scrolls it into view) all still reach the ends.
+
+   `align-self: stretch` on both boxes is load-bearing: `.pane-tabs` centres its
+   items, so a scroller left to its own height stops filling the strip and every
+   tab inside it turns into a floating chip with the strip's background showing
+   above and below. */
+.pane-tab-strip {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 .pane-tab-scroll {
   display: flex;
   align-items: stretch;
-  flex: 0 1 auto;
+  align-self: stretch;
+  flex: 1 1 auto;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
@@ -448,6 +462,34 @@ select:focus {
 .pane-tab-scroll::-webkit-scrollbar {
   height: 0;
   width: 0;
+}
+
+/* "There are tabs that way." Fades in over the strip's own colour, so it reads as
+   the tabs sliding under an edge rather than as a border. Only rendered on when
+   there is something past that edge — a permanent gradient would dim the first and
+   last tab of a strip that fits, which says the opposite of what it means. */
+.tab-fade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 26px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.tab-fade.on {
+  opacity: 1;
+}
+
+.tab-fade.left {
+  left: 0;
+  background: linear-gradient(to right, var(--tab-strip) 15%, transparent);
+}
+
+.tab-fade.right {
+  right: 0;
+  background: linear-gradient(to left, var(--tab-strip) 15%, transparent);
 }
 
 /* The `+` sits immediately after the last tab, so it reads as the end of the

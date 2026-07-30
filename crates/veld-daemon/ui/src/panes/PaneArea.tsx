@@ -375,9 +375,9 @@ function DockView(props: {
         onDrop={(e) => dropTab(e)}
       >
         {/* Only the tabs scroll. The `+` sits outside this box so it survives a
-            strip full of tabs — and `role="tablist"` lives here rather than on the
-            row, because a tablist's tabs have to be its own children. */}
-        <div className="pane-tab-scroll" role="tablist" aria-label="Panes">
+            strip full of tabs — and `role="tablist"` lives on the scroller rather
+            than on the row, because a tablist's tabs have to be its own children. */}
+        <TabScroller>
         {dock.tabs.map((tab, at) => (
           <TabButton
             key={tab.id}
@@ -405,7 +405,7 @@ function DockView(props: {
             onDragEndTab={() => setDropAt(null)}
           />
         ))}
-        </div>
+        </TabScroller>
         {/* Immediately after the last tab, not pinned to the right: it is the
             end of the strip, and a control 600px from the thing it extends reads
             as unrelated to it.
@@ -620,6 +620,61 @@ function tabIcon(tab: PaneTab): React.ReactNode {
 /** Turns a missing `PaneKind` branch into a compile error at the call site. */
 function unhandledKind(kind: never): never {
   throw new Error(`unhandled pane kind: ${String(kind)}`);
+}
+
+/**
+ * The scrolling part of a tab strip, with fades that say which way it can go.
+ *
+ * A strip that scrolls with no scrollbar (there is no room for one in 30px) has a
+ * hidden state: tabs to the left of the first visible one are invisible, and
+ * nothing says they exist. So each edge carries a fade that appears only while
+ * there is something past it — the signal a scrollbar would give, in the space
+ * available.
+ *
+ * The edges are measured rather than guessed, because "can it scroll" has three
+ * inputs that change independently: the tab count, the dock's width (the splitter
+ * drags), and the scroll position. A `ResizeObserver` covers the first two, the
+ * scroll event the third.
+ */
+function TabScroller(props: { children: React.ReactNode }) {
+  const box = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const measure = () => {
+      // 1px of slack: a fractional scroll offset (a trackpad, a zoomed page) would
+      // otherwise leave a fade on at the very end of the strip.
+      const left = el.scrollLeft > 1;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setEdges((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+    };
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = new ResizeObserver(measure);
+    // The box for the dock's width, its children for the tab count — a tab opening
+    // or closing changes the scrollable width without resizing the box.
+    ro.observe(el);
+    for (const child of Array.from(el.children)) ro.observe(child);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      ro.disconnect();
+    };
+    // Re-run when the tab set changes, so the observer follows the new children.
+  }, [props.children]);
+
+  return (
+    <div className="pane-tab-strip">
+      <div className="pane-tab-scroll" role="tablist" aria-label="Panes" ref={box}>
+        {props.children}
+      </div>
+      {/* Decorative and un-clickable: what it says is "there is more that way",
+          which the tablist already conveys to a screen reader. */}
+      <span className={`tab-fade left${edges.left ? " on" : ""}`} aria-hidden />
+      <span className={`tab-fade right${edges.right ? " on" : ""}`} aria-hidden />
+    </div>
+  );
 }
 
 /**
