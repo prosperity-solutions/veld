@@ -1115,6 +1115,9 @@ fn spawn_veld_in(
     {
         Ok(mut child) => {
             let label = args.join(" ");
+            // Owned: the reaper outlives this call, so it cannot borrow the
+            // caller's PATH.
+            let path_env = path_env.to_owned();
             // Reap the child in the background so nothing waits on it here (a
             // synchronous wait would deadlock against a `veld stop` that calls
             // back into this daemon). The tail read and unlink below are blocking
@@ -1129,6 +1132,10 @@ fn spawn_veld_in(
                         warn!(
                             command = %label,
                             code = status.code().unwrap_or(-1),
+                            // The bug class this spawn path exists for is
+                            // "command not found", so the PATH the child was
+                            // given is the first thing worth knowing.
+                            path = %path_env,
                             stderr = %stderr_path.as_deref().map(stderr_tail).unwrap_or_default(),
                             "spawned veld command failed"
                         );
@@ -1156,6 +1163,7 @@ fn spawn_veld_in(
                 command = %args.join(" "),
                 bin = %veld_bin,
                 cwd = %project_root.display(),
+                path = %path_env,
                 error = %e,
                 "failed to spawn veld command"
             );
@@ -1349,11 +1357,41 @@ mod tests {
     /// `sh: npx: command not found` for node commands. The binary path and PATH
     /// are arguments rather than process env so the test never touches
     /// `set_var` (an env data race under multithreaded `cargo test`).
+    /// Serialises the two tests that spawn through `spawn_veld_in`. They share
+    /// one real directory (`~/.veld/spawn-logs`) and identify their own capture
+    /// file by set difference, which only holds if no sibling is creating one
+    /// concurrently — `cargo test` runs them on parallel threads by default.
+    #[cfg(unix)]
+    fn capture_dir_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Names of this process's own capture files currently in the shared
+    /// `~/.veld/spawn-logs` (the filename carries the creating pid, so a real
+    /// daemon writing to the same directory is excluded).
+    #[cfg(unix)]
+    fn own_capture_files() -> std::collections::HashSet<String> {
+        let mine = format!("{}-", std::process::id());
+        spawn_log_dir()
+            .and_then(|d| std::fs::read_dir(d).ok())
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|e| e.file_name().to_string_lossy().into_owned())
+                    .filter(|n| n.starts_with(&mine))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn spawned_veld_gets_the_injected_path_and_cwd() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _serialised = capture_dir_lock().lock().await;
+        let before = own_capture_files();
         let bin_dir = tempfile::tempdir().unwrap();
         let project = tempfile::tempdir().unwrap();
         let receipt = bin_dir.path().join("receipt");
@@ -1410,6 +1448,20 @@ mod tests {
         );
         // Arguments reach the CLI as argv, unquoted — no shell in between.
         assert_eq!(lines.next().unwrap(), "stop --name main");
+
+        // Wait for this spawn's capture file to be unlinked before returning.
+        // The reaper that does it is a `tokio::spawn` on this test's runtime,
+        // which is dropped when the test function returns — so without waiting,
+        // the task is simply cancelled and the file is orphaned in the real
+        // `~/.veld/spawn-logs` on every run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !own_capture_files().is_subset(&before) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "spawn stderr capture file was never reaped"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     /// A project root that no longer exists must fail the request, not answer
@@ -1420,26 +1472,12 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn vanished_project_root_is_an_error_not_an_accept() {
+        let _serialised = capture_dir_lock().lock().await;
         let gone = tempfile::tempdir().unwrap();
         let path = gone.path().to_path_buf();
         drop(gone);
 
-        // Count only this process's own capture files (the name carries the
-        // creating pid), so a real daemon writing to the same directory can't
-        // affect the assertion.
-        let mine = format!("{}-", std::process::id());
-        let count = || {
-            spawn_log_dir()
-                .and_then(|d| std::fs::read_dir(d).ok())
-                .map(|entries| {
-                    entries
-                        .flatten()
-                        .filter(|e| e.file_name().to_string_lossy().starts_with(&mine))
-                        .count()
-                })
-                .unwrap_or(0)
-        };
-        let before = count();
+        let before = own_capture_files();
 
         assert_eq!(
             spawn_veld_in("/bin/echo", "/usr/bin:/bin", &path, &["stop".to_owned()]),
@@ -1448,18 +1486,14 @@ mod tests {
 
         // The capture file created for this spawn must be unlinked: there is no
         // child, so no reaper task will do it, and `sweep_spawn_logs`
-        // deliberately spares files belonging to a live pid — ours. Polled down
-        // to the baseline rather than asserted once, because the sibling test
-        // spawns a real child whose reaper unlinks *its* file asynchronously and
-        // both tests share this directory; a leak here holds the count above the
-        // baseline permanently.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-        while count() > before {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "spawn stderr capture file leaked on the error path"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
+        // deliberately spares files belonging to a live pid — ours. Checked
+        // once, not polled: the unlink on that arm is synchronous, so anything
+        // new here is a leak. By set difference rather than by count, so the
+        // sibling test's concurrent file (same pid prefix, different name)
+        // neither fails this nor masks a real leak.
+        assert!(
+            own_capture_files().difference(&before).next().is_none(),
+            "spawn stderr capture file leaked on the error path"
+        );
     }
 }

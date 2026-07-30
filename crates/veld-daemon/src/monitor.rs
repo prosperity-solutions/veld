@@ -34,12 +34,11 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
         debug!("running health-check scan");
 
         // The user's full PATH, so probe commands find tools like pg_isready
-        // even when the daemon starts at boot. Through the shared cache, whose
-        // TTL is the 60s re-resolution cadence this loop used to implement
-        // itself: the scan is the most frequent caller, so it is the one that
-        // keeps the entry warm, and the management API's request handlers —
-        // which cannot afford to wait on a login shell — then almost always
-        // hit it rather than resolving inline.
+        // even when the daemon starts at boot. Read from the shared cache, which
+        // `warm_user_path_cache` keeps fresh — this loop used to own a 60s timer
+        // for it, but its own cadence is not something to hang a TTL on: a
+        // liveness probe blocks for up to 30s and a recovery restart for up to
+        // 300s.
         let user_path = cached_user_path().await;
 
         match scan_and_update(&broadcaster, &mut last_checks, &user_path).await {

@@ -193,6 +193,12 @@ async fn main() -> Result<()> {
         gc::run_gc_scheduler(gc_manager).await;
     });
 
+    // The user's login-shell PATH, kept warm on its own timer for the same
+    // reason stats is: resolving it spawns a login shell (up to 10s on a stalled
+    // rc file), and the request handlers that need it — stop/restart/action,
+    // Desktop's start, share start — must never pay that on a click.
+    let user_path_handle = tokio::spawn(veld_core::user_path::warm_user_path_cache());
+
     // Resource-stats sampling runs on its own timer, deliberately separate from
     // the health monitor: liveness probes there can block for tens of seconds,
     // which would stretch the sampling gap and make live stats read as stale.
@@ -232,6 +238,7 @@ async fn main() -> Result<()> {
     monitor_handle.abort();
     gc_handle.abort();
     stats_handle.abort();
+    user_path_handle.abort();
     accept_handle.abort();
     feedback_handle.abort();
 
