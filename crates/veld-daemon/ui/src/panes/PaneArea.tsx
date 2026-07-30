@@ -19,9 +19,20 @@
  * 7. The ⌘K palette in `App.tsx` — `focused?.kind === …` gates the per-kind
  *    commands. Additive, so skipping it breaks nothing; it just leaves the kind
  *    unreachable from the keyboard.
+ * 8. **Where its data comes from**, if it needs any. A pane renders inside the
+ *    dock and has no access to the app's state, so anything server-backed arrives
+ *    through `RunPaneContext` (`panes/RunPanes.tsx`), which `App.tsx` builds as
+ *    `runCtx` and threads down. `logs` and `nodes` are the two examples: both are
+ *    thin wrappers whose whole job is to resolve that context, and adding a field
+ *    to it means touching both ends. A kind that needs *different* data
+ *    (environment variables, say) adds it there rather than fetching on its own —
+ *    a pane that polls is a pane that keeps polling while nobody is looking at it.
+ * 9. `DiagKind` in `model.ts`, if it is a run view — `diagTab` and the chooser's
+ *    `onDiag` are typed by it, so a kind that is one has to be in that subset.
  *
- * Only 1-3 are enforced. Note what is *not* a kind: the run's URLs, which are a
- * launcher shown inside a pane rather than a pane of their own (`VeldLinks.tsx`).
+ * Only 1-3 and 9 are enforced. Note what is *not* a kind: the run's URLs, which
+ * are a launcher shown inside a pane rather than a pane of their own
+ * (`VeldLinks.tsx`).
  */
 
 import { ActionIcon, Menu } from "@mantine/core";
@@ -45,6 +56,7 @@ import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserH
 import {
   type BrowserProfile,
   DEFAULT_RATIO,
+  type DiagKind,
   type DockIndex,
   MAX_RATIO,
   MIN_RATIO,
@@ -551,7 +563,7 @@ function PaneChooser(props: {
   urlsEmptyHint: string;
   onTerminal: () => void;
   onBrowser: (tab: PaneTab) => void;
-  onDiag: (kind: "logs" | "nodes") => void;
+  onDiag: (kind: DiagKind) => void;
 }) {
   return (
     <div className="pane-chooser">

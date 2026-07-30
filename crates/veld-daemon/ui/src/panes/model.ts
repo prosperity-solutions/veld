@@ -623,6 +623,16 @@ export function newPaneTab(): PaneTab {
 }
 
 /**
+ * The kinds that render a run view (`shared/RunViews.tsx`).
+ *
+ * Declared *from* `PaneKind` rather than as its own literal union: a second
+ * hardcoded kind list is the trap this module warns about for `parseTab`, and
+ * `Extract` means renaming a kind in `PANE_KINDS` collapses this to `never` and
+ * breaks the build at the call sites instead of silently disagreeing.
+ */
+export type DiagKind = Extract<PaneKind, "logs" | "nodes">;
+
+/**
  * A run-diagnostics tab.
  *
  * The stored `title` is only a fallback for a layout an older build wrote — the
@@ -631,7 +641,7 @@ export function newPaneTab(): PaneTab {
  * the tab holds no run identity of its own: switching worktrees re-points it,
  * which is the same rule the rest of IDE mode follows.
  */
-export function diagTab(kind: "logs" | "nodes"): PaneTab {
+export function diagTab(kind: DiagKind): PaneTab {
   return { id: newTabId(), kind, title: kind === "logs" ? "Logs" : "Nodes" };
 }
 

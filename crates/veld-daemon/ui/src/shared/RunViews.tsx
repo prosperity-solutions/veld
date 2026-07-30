@@ -8,7 +8,8 @@
  * - `fill` — take the parent's whole height (a pane) instead of sitting at a fixed
  *   height inside a scrolling card.
  * - `visible` — card mode keeps a hidden view mounted so its filters and scroll
- *   survive a tab switch; a pane unmounts the tab it is not showing.
+ *   survive a tab switch; a pane unmounts the tab it is not showing. Read by
+ *   `LogsView` only — see the prop's own note.
  * - `selected` / `onSelected` — who owns the history selection. Runs mode's card
  *   head has the picker (it also drives the card's outcome line), so it passes the
  *   entry down; a pane has no head, so the view shows its own picker. One switch,
@@ -45,7 +46,16 @@ export interface RunViewTarget {
 interface HostProps {
   /** Fill the parent (a pane) rather than sit at a fixed height in a card. */
   fill?: boolean;
-  /** Card mode: false keeps the view mounted but hidden. Defaults to visible. */
+  /**
+   * Card mode: false keeps the view mounted but hidden. Defaults to visible.
+   *
+   * **Only `LogsView` reads it**, because only it has state worth keeping while
+   * hidden: a 2s poll, fetched lines, filters and a scroll position. `NodesView`
+   * ignores it — its rows come from the props it is given and its one piece of
+   * local state (which past run to show) is cheap to re-choose, so a card
+   * unmounts it on a tab switch. Wire it up there before passing it, rather than
+   * expecting it to work.
+   */
   visible?: boolean;
   /**
    * The history entry being viewed, when the *host* owns that choice. `undefined`
