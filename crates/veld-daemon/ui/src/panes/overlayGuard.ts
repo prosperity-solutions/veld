@@ -127,7 +127,8 @@ export function hasOverlay(root: { children: ArrayLike<OverlayCandidate> }): boo
  */
 export function watchOverlays(): () => void {
   let suspended = false;
-  let scheduled = false;
+  let scheduled = 0;
+  let stopped = false;
   let watchedPortal: Element | null = null;
 
   const observer = new MutationObserver(() => schedule());
@@ -150,7 +151,13 @@ export function watchOverlays(): () => void {
   };
 
   const evaluate = () => {
-    scheduled = false;
+    scheduled = 0;
+    // A frame still queued when `stop()` ran would otherwise re-arm the observer
+    // through `watchSharedPortal`, and could take a suspend that nothing will ever
+    // pop — hiding every native view for the life of the page. StrictMode's
+    // synchronous remount cannot land in that window; an HMR remount of `App`
+    // while a Mantine portal mutates can.
+    if (stopped) return;
     watchSharedPortal();
     const open = hasOverlay(document.body);
     if (open === suspended) return;
@@ -162,9 +169,8 @@ export function watchOverlays(): () => void {
   // Coalesced to a frame: opening one dropdown is several mutations, and
   // re-querying on each is wasted work.
   const schedule = () => {
-    if (scheduled) return;
-    scheduled = true;
-    requestAnimationFrame(evaluate);
+    if (scheduled || stopped) return;
+    scheduled = requestAnimationFrame(evaluate);
   };
 
   // `body`'s children: enough to notice the shared portal node appearing (and a
@@ -173,6 +179,9 @@ export function watchOverlays(): () => void {
   evaluate();
 
   return () => {
+    stopped = true;
+    if (scheduled) cancelAnimationFrame(scheduled);
+    scheduled = 0;
     observer.disconnect();
     watchedPortal = null;
     if (suspended) {

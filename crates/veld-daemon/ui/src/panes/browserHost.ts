@@ -146,9 +146,16 @@ interface View {
   /** Bumped per freeze request, so a capture that lands after the pane came
    *  back is discarded instead of freezing a live page. */
   freezeGeneration: number;
-  /** Last visibility pushed to the shell, so unchanged answers cost no IPC.
-   *  Starts `true` because the shell creates views visible — it must not be
-   *  throttled while loading its first page (see `create` in browserViews.js). */
+  /**
+   * Last visibility pushed to the shell, so unchanged answers cost no IPC.
+   *
+   * Starts `true` to match the shell, which creates views visible. Be precise
+   * about what that buys: the *load* starts against a visible view, but the very
+   * next `applyVisibility` hides it again, because a first load is `covered()` —
+   * the spinner is DOM, and a native view would paint over it. So this avoids
+   * create-hidden-and-load-in-one-tick; it does not keep the view visible while
+   * the page arrives, and it cannot, as long as the pane draws its own spinner.
+   */
   visible: boolean;
 }
 
@@ -185,6 +192,17 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
   try {
     await desktop.create(v.id, { url, profile: v.profile });
     v.shellHasView = true;
+    // Forget what the *failed* attempt mirrored. Both caches were written while no
+    // shell entry existed, so their sends were dropped: `v.rect` by a `syncBounds`
+    // that went nowhere, `v.visible` by the `applyVisibility` in `mountBrowser`.
+    // Leaving them meant the retried view received neither `setBounds` (the rect
+    // compares equal, so `syncBounds` early-returns) nor `setVisible` — a view at
+    // its default bounds, which is the blank pane this retry path exists to fix,
+    // reintroduced one step later.
+    v.rect = null;
+    v.visible = true;
+    applyVisibility(v);
+    scheduleBoundsSync();
     return true;
   } catch (e: unknown) {
     v.shellHasView = false;
@@ -477,7 +495,13 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     // arbitrary previewed content lets one click overwrite the user's clipboard.
     // The Electron backend denies every permission, so granting one here would be
     // the browser build being *less* careful than the desktop one.
-    frame.addEventListener("load", () => patch(v, { loading: false, loaded: true }));
+    frame.addEventListener("load", () => {
+      // `reloadBrowser` bounces this frame through `about:blank`, which fires the
+      // same event — treating that as the page having arrived cleared the loading
+      // indicator one navigation early.
+      if (frame.src === "about:blank") return;
+      patch(v, { loading: false, loaded: true });
+    });
     if (url) frame.src = url;
     container.appendChild(frame);
     v.iframe = frame;

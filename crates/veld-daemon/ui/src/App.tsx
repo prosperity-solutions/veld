@@ -786,8 +786,14 @@ function AppInner(props: {
   // cycling.
   const showVeldLinks = () => {
     if (!layout) return;
-    const blank = lastBlankBrowserId(layout);
-    setLayout(blank ? activateTab(layout, blank) : addTabToFocused(layout, browserTab({})));
+    // Updater form, like every other layout mutation here: a browser pane writes
+    // the layout on its own schedule (`did-navigate` → `updateTab`), and that URL
+    // is what a reload restores — so a value computed from this render would drop
+    // a navigation that landed in the same commit.
+    setLayout((prev) => {
+      const blank = lastBlankBrowserId(prev);
+      return blank ? activateTab(prev, blank) : addTabToFocused(prev, browserTab({}));
+    });
   };
 
   // Rail expanded by default; the choice sticks across reloads/windows.
