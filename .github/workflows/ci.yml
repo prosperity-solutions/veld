@@ -195,6 +195,9 @@ jobs:
           node --check src/preload.js
           node --check src/browserViews.js
           node --check src/validate.js
+          node --check src/updater.js
+          node --check src/updatePolicy.js
+          node --check scripts/adhoc-sign.js
       # The icons are generated and committed (see docs/branding.md). The generator
       # is stdlib-only and byte-deterministic, so re-running it is the drift gate:
       # without one, a hand-edited or stale asset ships silently — the same reason
@@ -214,6 +217,94 @@ jobs:
       # purpose, so it is testable without a Chromium binary.
       - name: Test
         run: npm test
+
+  # Packaging is verified here rather than only at release time: the release
+  # workflow builds the app *before* it tags, so a broken electron-builder config
+  # blocks the CLI's release too, and the change that broke it merged green. That
+  # is not hypothetical — the Linux leg of this job is what caught
+  # `executableName` rejecting the scoped package name, which a macOS-only local
+  # build could not have.
+  #
+  # It runs on every PR, including Rust-only ones: `ci.yml` has no path filters
+  # anywhere and a partial gate here would be the first. The split is about what
+  # each platform costs, not about how often it is needed:
+  #
+  #   Linux  — the full installers (AppImage + deb, two invocations), on a
+  #            standard runner.
+  #   macOS  — both arches, but `--dir`: it exercises everything up to and
+  #            including the ad-hoc signing hook (the mac-specific risk) without
+  #            spending ~8 minutes of a 10×-billed runner on dmg/zip
+  #            compression.
+  #
+  # Residual gap, stated rather than implied: dmg/zip creation and the
+  # `latest-mac.yml` the updater feeds on are produced only by the release build.
+  # A change that breaks those (a dmg layout, a publish block) still fails at
+  # release time and still blocks the tag.
+  desktop-package:
+    name: Desktop Packaging (${{ matrix.name }})
+    needs: desktop
+    # This job downloads and runs third-party build tooling (the Electron dist,
+    # app-builder-bin), so it gets the token scope its release-workflow twin has
+    # rather than the repo default.
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-24.04
+            run: npm run package:linux
+          - name: macos
+            os: macos-latest
+            run: npx electron-builder --mac --arm64 --x64 --dir --publish never
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+      # No ELECTRON_SKIP_BINARY_DOWNLOAD here, unlike the job above: packaging
+      # needs the real dist.
+      - run: npm ci
+      - name: Package
+        run: ${{ matrix.run }}
+      # The AppImage must not carry a `package-type` file: it is what
+      # electron-updater dispatches on, and a `deb` there would send the one
+      # self-updating Linux build down the dpkg path. The separate output
+      # directories are what prevent it; this is the assertion that they did.
+      - name: The AppImage was not packed with a package manager's marker
+        if: matrix.name == 'linux'
+        run: |
+          if [ -e dist/linux-unpacked/resources/package-type ]; then
+            echo "::error::dist/linux-unpacked/resources/package-type exists — the deb build leaked into the AppImage's staging dir"
+            exit 1
+          fi
+      # The signature is the part that decides whether a downloaded build opens
+      # at all on Apple Silicon, and it comes from our own afterPack hook rather
+      # than from electron-builder — so assert it instead of trusting the log.
+      # Both arches: electron-builder writes x64 to dist/mac and arm64 to
+      # dist/mac-arm64, and the hook runs once per arch.
+      - name: Verify the ad-hoc signature
+        if: matrix.name == 'macos'
+        run: |
+          codesign --verify --deep --strict dist/mac-arm64/Veld.app
+          codesign --verify --deep --strict dist/mac/Veld.app
+      # Same reason the release job checks it: a missing feed is invisible until
+      # an installed app asks for an update. The macOS leg is `--dir`, which
+      # produces no feed by design.
+      # The listing comes first so a failed assertion still leaves the one piece
+      # of output that says what *was* produced.
+      - name: List artifacts
+        run: ls -la dist
+      - name: The update feed was written
+        if: matrix.name == 'linux'
+        run: test -f dist/latest-linux.yml
 
   integration:
     name: Integration Tests (macOS)

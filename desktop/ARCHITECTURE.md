@@ -42,6 +42,11 @@ have since shipped — see below.)
 | Device emulation | **Native Electron `enableDeviceEmulation` for the metrics and the UA, CDP only for touch**, per pane, with detached DevTools beside it — presets as **size classes**, plus a draggable screen | The case that justifies doing this inside the dock rather than saying "use Chrome" is not the phone — it is the *desktop*: emulating a 1440-wide viewport **scaled down to fit a 600px pane** is what no real browser window can give you without a second monitor, and it is one API call. The metrics and `setUserAgent` are native, so the useful 90% costs no CDP plumbing. Touch is the exception and it is a deliberate one: `Emulation.setEmitTouchEventsForMouse` needs `webContents.debugger.attach()`, which Electron's docs say the built-in DevTools takes over — measured on Electron 43, it does not, and the two sessions coexist. Both outcomes are handled rather than either being trusted, and the pane reports what it *achieved* (`touchActive`, separate from the `touch` it asked for) instead of asserting a mode it may not have. Touch is worth the state machine because metrics alone test the layout and never the interaction: a swipe carousel, a `@media (hover: none)` rule and any library that branches on `ontouchstart` are all invisible to a narrow viewport that still receives mouse events. Emulation is **per pane**, not per window — a phone beside a desktop is the comparison people actually want — which follows from it being per-`WebContents` anyway. Page zoom rides along in the same control and the same layout field, because it has the same shape of problem (per-`WebContents`, lost when the view is recreated) and is useful well before any preset is: a 1440-wide layout is readable in a 600px pane at 60%. Zoom carries one honest caveat — Chromium's zoom policy is per *origin*, so two panes on one session and origin cannot hold different zooms across a navigation; the alternative is a partition per pane, which is a heavier feature than the problem. |
 | Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to, so a reload is allowed to drop the views and rebuild them. The page asks for that itself (`reset()`, see the row above) rather than the shell inferring it from a navigation event. A shell is the opposite — see the terminal row above. |
 | Icons | One mark, two assets, drawn by a stdlib-only rasteriser (`desktop/scripts/make-icons.py`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. The generator draws the mark analytically — it is a polygon and a circle, since every segment of `logo.svg`'s V is a straight line — so there is nothing to install and the bytes are identical on every machine. Both tools tried first were wrong in the same direction: `qlmanage` (QuickLook) composites thumbnails on an **opaque white background** and pads below its minimum size, which shipped a menu-bar icon that was a white tile with a dark V (a template image is alpha, so an opaque render is a solid blob — and invisible as a bug in any light-background preview), and ImageMagick's SVG renderer is blobby at icon sizes *and* its resize dropped the alpha channel to grayscale. The app icon is inset in a transparent margin, because macOS draws its own shadow into one and a full-bleed tile reads as a bigger, blockier icon than everything beside it in the dock. |
+| Packaging | **electron-builder**, macOS + Linux, riding the CLI's release pipeline | The app is packaged in the same workflow run that builds the CLI binaries, before the tag is created, and its artifacts are attached to the same GitHub release. A parallel pipeline would have been less plumbing exactly once and a version-skew source forever. No Windows target: the UI is served by the daemon, so a plain browser already covers that platform and a Windows build would be an installer around a page you can already open. |
+| Versioning | **One version, one tag** — the app's `package.json` version is the CLI's `Cargo.toml` version | The shell renders the daemon's UI, so the two halves are one product with one compatibility surface (the preload IPC a newer UI expects from an older shell). Release CI writes the version into `package.json` before packaging and semantic-release commits the same bump, which is exactly what it already does to `Cargo.toml`. The app reports skew (`updatePolicy.js` → `versionSkew`) rather than blocking on it: the fix is `veld update` in one direction and an app update in the other, and neither is something to refuse to start over. |
+| Auto-update | electron-updater against the same GitHub releases, **install-in-place only where it can actually work** | The check is uniform; applying it is not. macOS is download-only because Squirrel.Mac verifies that the replacement carries the running app's code signature and there is no Developer ID yet (see the row below) — a downloaded-then-rejected update is worse than no button. A Linux `.deb` is download-only because its files belong to dpkg. The AppImage self-installs, being a single file the running process may swap; `APPIMAGE` in the environment is how it knows it is one. `updateMode()` is one pure function, and the macOS half flips with the `MACOS_SIGNED` constant beside it — a constant rather than a branch to delete, because deleting the darwin case would fall through to a catch-all that returns `"download"` anyway, i.e. a no-op the existing test still passes. Both sides of the constant are tested. Every download is offered in a dialog first, including where it could be silent: applying an update restarts the app, and a dock full of terminal panes is not something to interrupt unannounced. |
+| Linux artifact naming | `executableName: veld-desktop`, set explicitly | electron-builder derives the Linux executable name from the npm package name, and `@veld/desktop` becomes `@velddesktop`, which its own path validation then rejects — *every* Linux build fails, which (because `release` needs the desktop job) takes the CLI's release with it. The scoped name stays: it is what keeps this npm project unpublishable by accident. Caught by CI's Linux packaging job, not by a local macOS build — which is the argument for that job existing. |
+| macOS signing | **Ad-hoc signed** (`scripts/adhoc-sign.js`), not unsigned, until a Developer ID exists | An ad-hoc signature is not a trust signal and Gatekeeper still quarantines the download. What it buys is launchability: on Apple Silicon every executable needs *some* valid signature, repacking Electron invalidates the one the prebuilt binaries shipped with, and the failure mode is "Veld is damaged and can't be opened" — which reads as a corrupt download and has no in-UI way out, unlike the "unidentified developer" prompt an ad-hoc build gets. electron-builder's own signing is explicitly disabled (`identity: null`) rather than left to auto-discovery, so the artifacts do not depend on which certificates happen to be in the building machine's keychain. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -493,11 +498,107 @@ Minimal by design. Main process only does:
    losing it destroys the view the new page just asked for.
    Views run sandboxed with no preload, in a `persist:veld-browser-<profile>`
    partition, with all permission requests denied and only `http(s)` accepted.
+6. Own the update story (`src/updater.js`, `src/updatePolicy.js`) — see
+   *Packaging and updates* below.
+7. An application menu and a single-instance lock, both of which only matter once
+   there is a bundle: Electron's default menu has nowhere to put *Check for
+   Updates…* (and on Linux there is no tray to put it in instead), and a second
+   launch of an installed app would otherwise open a window that fights the first
+   one over the same daemon, tray and browser partitions. The lock is taken only
+   when packaged — two *dev* instances are a normal thing to want, and they would
+   share one lock because they share one `appId`.
 
-No packaging/signing in this increment — `npm start` (dev run) only. The app icon
-`electron-builder` will want already exists (`assets/icon.png`); an unpackaged run
-sets it on the dock itself, since otherwise a dev window is indistinguishable from
-any other Electron app.
+## Packaging and updates
+
+Config: `desktop/electron-builder.yml`. Local build: `just desktop-package`
+(output in `desktop/dist/`, and `desktop/dist-deb/` on Linux — both gitignored).
+
+Linux takes **two electron-builder invocations**, into separate output
+directories. `FpmTarget` writes a `package-type` file naming its format into
+`<out>/linux-unpacked/resources`, which is the same directory the AppImage packs
+from, and the two targets run concurrently — so a single invocation can produce
+an AppImage that claims to be a .deb. electron-updater dispatches on exactly that
+file, so the one self-updating Linux build would download a .deb and run
+`dpkg -i` while never replacing itself. CI asserts the marker is absent.
+
+The .deb is then **moved into `dist/`**, so everything published comes from one
+directory (`upload-artifact` roots an artifact at the least common ancestor of
+its patterns, and a second directory silently nests every file a level deeper).
+What stays behind in `dist-deb/` is that invocation's own `latest-linux.yml`,
+describing the .deb — publishing it would overwrite the AppImage's feed and point
+the one self-updating Linux build at a package it cannot install. Only `dist/`'s
+feed is ever uploaded, and both workflows assert it exists.
+
+### Artifacts
+
+| Platform | Targets | Self-updates? |
+|---|---|---|
+| macOS arm64 + x64 | `.dmg` (install) and `.zip` (the update payload Squirrel.Mac reads) | No — unsigned; the app opens the release page |
+| Linux x64 | `.AppImage` | Yes, in place |
+| Linux x64 | `.deb` | No — the files belong to dpkg |
+
+Alongside them, `latest-mac.yml` / `latest-linux.yml` (electron-updater's feed)
+and the `.blockmap` files it uses to download a delta rather than 120 MB. The
+feed is only written when a publish provider is configured, which is why
+`electron-builder.yml` has a `publish:` block even though CI always packages with
+`--publish never` and attaches the files through the release workflow's own
+`publish` job. That same block is baked into the bundle as `app-update.yml`,
+which is how an installed app knows where to look.
+
+### Version flow
+
+The app and the CLI are one release. `.github/workflows/release.yml`:
+
+1. `plan` — semantic-release dry run computes the next version.
+2. `build` (CLI binaries) and `desktop` (the app) both write that version into
+   their manifest and build. This is *before* the tag exists, so the checkout is
+   still on the previous version — the same reason the CLI job seds `Cargo.toml`.
+3. `release` — needs **both**, then tags. A broken app build blocks the tag
+   rather than producing a release the app is missing from.
+4. `publish` — attaches everything to the GitHub release and checksums it.
+
+`.releaserc.json` then commits the bump to `desktop/package.json` (and its lock)
+beside `Cargo.toml`, so `main` reflects what shipped.
+
+CI verifies packaging on every PR (`desktop-package` in `ci.yml`) rather than
+finding out at release time: Linux builds the real installers, macOS builds
+`--dir` and asserts the ad-hoc signature verifies. macOS stops short of the
+dmg/zip because most PRs here never touch `desktop/` and that runner is billed at
+10×; the full macOS build runs at release.
+
+### Installing an unsigned macOS build
+
+Gatekeeper quarantines it. First launch: let the warning appear, then **System
+Settings → Privacy & Security → *Open Anyway***; `xattr -dr
+com.apple.quarantine /Applications/Veld.app` is the scriptable equivalent.
+Right-click → *Open* is the instruction everyone remembers and it is no longer
+true — macOS 15 removed that bypass for apps that aren't notarized. This
+goes away with a Developer ID + notarization (issue #167 §10), which is also what
+turns macOS self-updates on.
+
+### What the app tells the user
+
+Two different mismatches, deliberately reported differently:
+
+- **A newer release exists.** Checked 15 s after launch and every 6 h, silent
+  unless it finds something, never re-prompting for a version already declined in
+  this session. A user-initiated *Check for Updates…* (tray on macOS, application
+  menu everywhere) reports every outcome including "up to date".
+- **The app and the daemon disagree.** A notification once per session, plus a
+  row in the application menu (and in the tray, which is macOS-only — Linux is
+  the platform whose app can update itself and so the likelier one to drift, so
+  the row cannot live only there). `/api/health` carries the daemon's version and the
+  shell already polls it, so this costs one field; it is polled on a minute so a
+  `veld update` performed while the app is open both raises and clears the
+  notice.
+
+The app is a shell around a daemon it does not ship, so its waiting screen spells
+out both commands — the installer *and* `veld setup unprivileged` — rather than
+saying "install veld". For a packaged download on a machine that has never had
+it, that screen is the whole first impression, and the installer deliberately
+does not run setup, which is the step that actually installs the daemon agent
+the screen is waiting for. `veld doctor` only diagnoses, so it is offered to
+someone who is already set up.
 
 ## Data model
 
@@ -698,13 +799,14 @@ Electron adds the native shell (`just dev-desktop-embedded` points it at the
 dev daemon without vite).
 
 `just` recipes: `build-ui`, `test-ui`, `lint-ui`, `dev-desktop`,
-`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes; each
+`dev-desktop-embedded`, `desktop`, `desktop-package` mirror the existing frontend recipes; each
 depends on a guarded deps step, so a checkout with no `node_modules` installs them
 instead of failing on a missing binary. For `desktop/` that step also fetches the
 Electron binary explicitly: npm defers install scripts it has not been told to
 allow, which otherwise leaves a complete `node_modules` whose `electron` reports
 `command not found`. CI
-runs typecheck + vitest + build for `ui/` and a syntax check for `desktop/`
+runs typecheck + vitest + build for `ui/`, and for `desktop/` a syntax check, the
+`node --test` suite, the icon drift gate and a packaging build
 (see `.github/workflows/ci.yml`); the Rust build jobs install `ui/` npm deps
 because `veld-daemon`'s build.rs now builds both frontend packages.
 
@@ -736,7 +838,10 @@ already lives in the URL, so modes are just routes.
 5. ~~Device emulation + DevTools for browser panes~~ — shipped; see the decision
    log and the emulation notes above.
 6. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
-7. Packaging, auto-update, CLI installation from the app.
+7. ~~Packaging, auto-update~~ — shipped; see *Packaging and updates* above.
+   Still open: macOS Developer ID signing + notarization (which is also what
+   turns macOS self-updates on), and installing the veld CLI *from* the app
+   rather than pointing at the install command.
 
 The sequencing and the transport/renderer decisions for these live in
 [issue #167](https://github.com/prosperity-solutions/veld/issues/167).
