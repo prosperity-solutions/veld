@@ -50,7 +50,11 @@ import { popBrowserSuspend, pushBrowserSuspend } from "./browserHost";
  *   role of their own.
  * - `.mantine-contextmenu` — mantine-contextmenu's paper.
  * - `[data-veld-overlay]` — an opt-in for anything hand-built that does get
- *   portalled.
+ *   portalled. **Toasts use it** (`shared/notify.ts` sets it per notification):
+ *   an error toast landing on a browser pane would otherwise be painted over and
+ *   never read. Per notification, never on the `<Notifications />` container —
+ *   that one is mounted for the life of the page and would hide every pane
+ *   forever.
  *
  * Not matched: tooltips and notifications. They are transient and mostly
  * pointer-triggered, so suspending on them would flicker a pane on every hover

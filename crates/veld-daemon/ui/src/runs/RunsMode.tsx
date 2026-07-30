@@ -15,6 +15,7 @@ import {
 } from "../api";
 import { EnvCard } from "./EnvCard";
 import { JoinRequestRow, runOfShare } from "../shared/Sharing";
+import { notifyError } from "../shared/notify";
 import { confirmedUnattached, unattachedShareIds } from "../shared/util";
 import { topbarClass } from "../shell";
 import type { ReactNode } from "react";
@@ -76,6 +77,17 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
     const t = window.setInterval(() => void tick(), 5000);
     return () => window.clearInterval(t);
   }, []);
+
+  /** A share mutation from this panel: report a failure, then re-poll. Without
+   *  this an unshare that the daemon refused vanished into an unhandled rejection. */
+  const shareAction = async (context: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (e) {
+      notifyError(context, e);
+    }
+    await refresh();
+  };
 
   const setViewPersist = (v: string) => {
     setView(v);
@@ -179,7 +191,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
                 size="compact-xs"
                 color="red"
                 variant="light"
-                onClick={() => void api.stopShare(s.id).then(refresh)}
+                onClick={() => void shareAction("Unshare", () => api.stopShare(s.id))}
               >
                 Unshare
               </Button>
@@ -191,7 +203,6 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
               pending={p}
               runLabel={runOfShare(shares?.shares ?? [], p.share_id)}
               onChanged={() => void refresh()}
-              onError={(m) => window.alert(m)}
             />
           ))}
           {joins.map((j) => (
@@ -212,7 +223,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
                 size="compact-xs"
                 color="red"
                 variant="subtle"
-                onClick={() => void api.leaveJoin(j.id).then(refresh)}
+                onClick={() => void shareAction("Leave", () => api.leaveJoin(j.id))}
               >
                 Leave
               </Button>

@@ -155,6 +155,16 @@ export interface ShareConnectionInfo {
   rtt_ms?: number | null;
 }
 
+/**
+ * A share, **after normalisation** — see {@link normalizeShare}.
+ *
+ * The arrays are declared as always-present because that is what consumers get,
+ * not because that is what the daemon sends: `veld_core::share::ShareInfo` marks
+ * `public_urls` and `connections` `skip_serializing_if = "Vec::is_empty"`, so a
+ * peer share with no joiners arrives with neither key. Reading `.length` off those
+ * is a TypeError that takes the whole view down, so the client fills them in once,
+ * at the boundary, instead of asking every call site to remember.
+ */
 export interface ShareInfo {
   id: string;
   /** Display only — attach a share to its run via {@link ShareInfo.run_id}. */
@@ -170,6 +180,33 @@ export interface ShareInfo {
   public_urls: GatewayPublicUrl[];
   web_password?: string | null;
   connections: ShareConnectionInfo[];
+}
+
+/**
+ * Fill in the arrays the daemon omits when they are empty.
+ *
+ * `joiners` gets the same treatment: it is `#[serde(default)]` on a `usize`, so a
+ * `0` is serialised, but a payload from an older daemon that predates the field
+ * would otherwise render "undefined connected".
+ */
+export function normalizeShare(s: ShareInfo): ShareInfo {
+  return {
+    ...s,
+    nodes: s.nodes ?? [],
+    urls: s.urls ?? [],
+    joiners: s.joiners ?? 0,
+    public_urls: s.public_urls ?? [],
+    connections: s.connections ?? [],
+  };
+}
+
+/** The share list with every entry normalised. */
+export function normalizeShares(list: SharesList): SharesList {
+  return {
+    shares: (list.shares ?? []).map(normalizeShare),
+    joins: (list.joins ?? []).map(normalizeShare),
+    pending: list.pending ?? [],
+  };
 }
 
 export interface PendingInfo {
@@ -249,6 +286,42 @@ export const runPath = (run: RunRef) => encodeURIComponent(run.name);
 export const runScope = (run: RunRef) =>
   new URLSearchParams({ project_root: run.projectRoot }).toString();
 
+/**
+ * The most useful message a failed response carries.
+ *
+ * **The daemon has two error shapes**, and reading only one of them threw the
+ * actionable half away: the management and desktop routers answer with
+ * `{"error": "…"}`, while the share router returns a bare `text/plain` body
+ * (`(StatusCode, String)` in `crates/veld-daemon/src/share/api.rs`). Sharing's
+ * refusals are exactly the ones worth reading — "run 'x' has no services opted
+ * into peer sharing. Add `"share": { "expose": ["peer"] }` …" is the whole fix —
+ * and they surfaced as `400 Bad Request`, which reads as a bug in Veld rather than
+ * as a config that has not opted in.
+ *
+ * Read as text once (a body can only be consumed once), then try JSON on it.
+ * Anything that looks like a page rather than a message falls back to the status,
+ * since a proxy's HTML error page is not something to paste into a toast.
+ */
+export async function errorMessage(res: Response): Promise<string> {
+  const status = `${res.status} ${res.statusText}`.trim();
+  let raw = "";
+  try {
+    raw = (await res.text()).trim();
+  } catch {
+    return status;
+  }
+  if (!raw || raw.startsWith("<")) return status;
+  try {
+    const body = JSON.parse(raw);
+    if (body && typeof body.error === "string" && body.error) return body.error;
+  } catch {
+    // Not JSON: the plain-text shape below.
+  }
+  // Long enough for the daemon's multi-sentence refusals, capped so a runaway
+  // body can't become the whole toast.
+  return raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const mutating = init?.method && init.method !== "GET";
   const res = await fetch(path, {
@@ -260,16 +333,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       ...init?.headers,
     },
   });
-  if (!res.ok) {
-    let message = `${res.status} ${res.statusText}`;
-    try {
-      const body = await res.json();
-      if (body && typeof body.error === "string") message = body.error;
-    } catch {
-      // non-JSON error body — keep the status text
-    }
-    throw new Error(message);
-  }
+  if (!res.ok) throw new Error(await errorMessage(res));
   if (res.status === 204 || res.status === 202) return undefined as T;
   return (await res.json()) as T;
 }
@@ -331,16 +395,7 @@ export const api = {
       headers: { "X-Veld-Request": "1" },
     });
     if (res.status === 204) return null;
-    if (!res.ok) {
-      let message = `${res.status} ${res.statusText}`;
-      try {
-        const body = await res.json();
-        if (body && typeof body.error === "string") message = body.error;
-      } catch {
-        // keep status text
-      }
-      throw new Error(message);
-    }
+    if (!res.ok) throw new Error(await errorMessage(res));
     return ((await res.json()) as { path: string }).path;
   },
   startRun: (
@@ -408,7 +463,7 @@ export const api = {
     if (opts.runId) q.set("run_id", opts.runId);
     return request<LogResponse>(`/api/logs/${runPath(run)}?${q.toString()}`);
   },
-  shares: () => request<SharesList>("/api/shares"),
+  shares: async () => normalizeShares(await request<SharesList>("/api/shares")),
   startShare: (run: RunRef, opts: { web?: boolean } = {}) =>
     request<{ join_url?: string }>("/api/shares", {
       method: "POST",

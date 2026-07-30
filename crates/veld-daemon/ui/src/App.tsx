@@ -56,11 +56,13 @@ import {
   IconDeviceDesktop,
   IconWorld,
 } from "@tabler/icons-react";
+import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
+import { notifyError } from "./shared/notify";
 import {
   JoinRequestRow,
   RunSharePanel,
@@ -277,6 +279,11 @@ export function App() {
       forceColorScheme={theme === "light" ? "light" : "dark"}
     >
       <ContextMenuProvider borderRadius="md">
+        {/* Toasts are the app's one error surface (see shared/notify.ts). Top-right
+            rather than the default bottom-right: that is the corner the run
+            controls and the Sharing surface sit in, so a failure appears next to
+            what was clicked. */}
+        <Notifications position="top-right" limit={4} />
         <AppInner theme={theme} themePref={themePref} onCycleTheme={cycleTheme} />
       </ContextMenuProvider>
     </MantineProvider>
@@ -484,13 +491,11 @@ function AppInner(props: {
     pendingFor(w) === null &&
     resolveStartSelection(w) !== null;
 
-  const [actionError, setActionError] = useState<string | null>(null);
   const act = async (
     w: Worktree,
     label: PendingAction,
     fn: () => Promise<void>,
   ) => {
-    setActionError(null);
     const sigAtSet = runSignature(runsForWorktree(envs, w));
     setPending((cur) => ({
       ...cur,
@@ -504,11 +509,10 @@ function AppInner(props: {
         delete next[w.id];
         return next;
       });
-      // Name the worktree: actions now fire from the rail, the context menu
-      // and the palette on ANY row, so an unattributed banner leaves the user
-      // guessing which one failed.
-      const message = e instanceof Error ? e.message : String(e);
-      setActionError(`${w.alias}: ${label} failed — ${message}`);
+      // Name the worktree: actions fire from the rail, the context menu and the
+      // palette on ANY row, so an unattributed message leaves the user guessing
+      // which one failed.
+      notifyError(`${label} failed on ${w.alias}`, e);
     }
   };
 
@@ -520,8 +524,9 @@ function AppInner(props: {
       // Defence in depth: all four ▶ surfaces gate on `canStartWorktree`,
       // which rejects exactly this case, so this should be unreachable. If a
       // future caller skips the guard, say what's wrong instead of no-opping.
-      setActionError(
-        `${w.alias}: nothing to start — no presets or startable nodes in its veld.json.`,
+      notifyError(
+        `Start ${w.alias}`,
+        "nothing to start — no presets or startable nodes in its veld.json.",
       );
       return;
     }
@@ -549,9 +554,6 @@ function AppInner(props: {
     stats: diagStats,
     emptyHint: runEmptyHint,
     onChanged: () => void refresh(),
-    // The banner, not an alert: a pane action failing while the pointer is
-    // somewhere else should not steal the keyboard with a modal dialog.
-    onError: setActionError,
   };
 
   // ---- sharing ------------------------------------------------------------
@@ -573,13 +575,11 @@ function AppInner(props: {
    */
   const shareAction = (label: string, fn: () => Promise<unknown>) => {
     void (async () => {
-      setActionError(null);
       try {
         await fn();
         await refresh();
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        setActionError(`${label} failed — ${message}`);
+        notifyError(label, e);
       }
     })();
   };
@@ -1279,7 +1279,6 @@ function AppInner(props: {
             shares={shares?.shares ?? []}
             emptyHint={runEmptyHint}
             onChanged={() => void refresh()}
-            onError={setActionError}
           />
         </Popover.Dropdown>
       </Popover>
@@ -1334,27 +1333,6 @@ function AppInner(props: {
           Can&apos;t reach the veld daemon — is it running? Retrying…
         </div>
       )}
-      {actionError && (
-        <div
-          style={{
-            padding: "6px 14px",
-            background: "var(--danger-bg)",
-            color: "var(--danger)",
-            fontSize: 12,
-            flex: "none",
-            display: "flex",
-            gap: 10,
-          }}
-        >
-          <span style={{ flex: 1 }}>{actionError}</span>
-          <button
-            style={{ border: "none", background: "none", color: "inherit" }}
-            onClick={() => setActionError(null)}
-          >
-            ×
-          </button>
-        </div>
-      )}
       {/* Join requests are a prompt, so they go where they are visible without
           opening anything — someone is sitting on the other end waiting for an
           answer, and a badge on a popover is not that. Every share's requests,
@@ -1367,7 +1345,6 @@ function AppInner(props: {
               pending={p}
               runLabel={runOfShare(shares?.shares ?? [], p.share_id)}
               onChanged={() => void refresh()}
-              onError={setActionError}
             />
           ))}
         </div>

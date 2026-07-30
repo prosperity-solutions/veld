@@ -17,6 +17,7 @@ import { Badge, Button, Checkbox, Group, Text, Tooltip } from "@mantine/core";
 import { useEffect, useRef, useState } from "react";
 import { api, type PendingInfo, type RunRef, type ShareInfo } from "../api";
 import { useCopyFlash } from "./copy";
+import { notifyDone, notifyError } from "./notify";
 
 /** This run's shares: the peer share (at most one) and any public web shares. */
 export function sharesForRun(
@@ -42,12 +43,14 @@ export function runOfShare(shares: ShareInfo[], shareId: string): string | null 
 }
 
 /**
- * Run a share mutation, reporting failure to the host and refreshing after.
+ * Run a share mutation, reporting failure as a toast and refreshing after.
  *
  * A hook rather than a helper because every surface needs the same in-flight
- * label for its button spinners.
+ * label for its button spinners. `context` names the attempt, since the daemon's
+ * refusals ("run 'x' has no services opted into peer sharing…") do not say which
+ * control produced them.
  */
-function useShareAction(onChanged: () => void, onError: (message: string) => void) {
+function useShareAction(onChanged: () => void) {
   const [busy, setBusy] = useState<string | null>(null);
   // Whether this component is still mounted — a share can be started from a
   // popover that closes while the request is in flight. Re-armed in the effect
@@ -61,13 +64,13 @@ function useShareAction(onChanged: () => void, onError: (message: string) => voi
       alive.current = false;
     };
   }, []);
-  const act = async (label: string, fn: () => Promise<unknown>) => {
+  const act = async (label: string, context: string, fn: () => Promise<unknown>) => {
     setBusy(label);
     try {
       await fn();
       onChanged();
     } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
+      notifyError(context, e);
     } finally {
       if (alive.current) setBusy(null);
     }
@@ -113,8 +116,9 @@ export function ConnBadges(props: { share: ShareInfo }) {
  * Start/stop controls for a run's shares.
  *
  * Starting a peer share copies the join link straight to the clipboard — that is
- * the entire point of starting one — and says so for a moment, since the button
- * it was clicked on is replaced by "Stop sharing" in the same breath.
+ * the entire point of starting one — and confirms it with a toast, because the
+ * button that was clicked is replaced by "Stop sharing" in the same breath and so
+ * cannot carry the confirmation itself.
  */
 export function ShareControls(props: {
   run: RunRef;
@@ -123,17 +127,8 @@ export function ShareControls(props: {
   peer: ShareInfo | null;
   web: ShareInfo[];
   onChanged: () => void;
-  onError: (message: string) => void;
 }) {
-  const { busy, act } = useShareAction(props.onChanged, props.onError);
-  const [copied, setCopied] = useState(false);
-  const timer = useRef(0);
-  useEffect(() => () => window.clearTimeout(timer.current), []);
-  const flashCopied = () => {
-    setCopied(true);
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setCopied(false), 1500);
-  };
+  const { busy, act } = useShareAction(props.onChanged);
 
   return (
     <>
@@ -143,11 +138,11 @@ export function ShareControls(props: {
           variant="light"
           loading={busy === "share"}
           onClick={() =>
-            void act("share", async () => {
+            void act("share", "Start sharing", async () => {
               const r = await api.startShare(props.run);
               if (r?.join_url) {
-                void navigator.clipboard.writeText(r.join_url);
-                flashCopied();
+                await navigator.clipboard.writeText(r.join_url);
+                notifyDone("Sharing — join link copied to the clipboard");
               }
             })
           }
@@ -161,7 +156,7 @@ export function ShareControls(props: {
           color="red"
           variant="light"
           loading={busy === "stop-share"}
-          onClick={() => void act("stop-share", () => api.stopShare(props.peer!.id))}
+          onClick={() => void act("stop-share", "Stop sharing", () => api.stopShare(props.peer!.id))}
         >
           Stop sharing
         </Button>
@@ -171,15 +166,10 @@ export function ShareControls(props: {
           size="compact-xs"
           variant="light"
           loading={busy === "web-share"}
-          onClick={() => void act("web-share", () => api.startShare(props.run, { web: true }))}
+          onClick={() => void act("web-share", "Share to the web", () => api.startShare(props.run, { web: true }))}
         >
           Share to web
         </Button>
-      )}
-      {copied && (
-        <Text size="xs" c="dimmed">
-          Link copied
-        </Text>
       )}
     </>
   );
@@ -189,9 +179,8 @@ export function ShareControls(props: {
 export function PeerShareStrip(props: {
   share: ShareInfo;
   onChanged: () => void;
-  onError: (message: string) => void;
 }) {
-  const { act } = useShareAction(props.onChanged, props.onError);
+  const { act } = useShareAction(props.onChanged);
   const { flash, copy } = useCopyFlash();
   const share = props.share;
   return (
@@ -222,7 +211,7 @@ export function PeerShareStrip(props: {
         label="auto-accept"
         checked={share.approve === "auto"}
         onChange={(e) =>
-          void act("mode", () =>
+          void act("mode", "Change the approval mode", () =>
             api.setShareMode(share.id, e.currentTarget.checked ? "auto" : "manual"),
           )
         }
@@ -236,9 +225,8 @@ export function PeerShareStrip(props: {
 export function WebShareStrip(props: {
   share: ShareInfo;
   onChanged: () => void;
-  onError: (message: string) => void;
 }) {
-  const { act } = useShareAction(props.onChanged, props.onError);
+  const { act } = useShareAction(props.onChanged);
   const { flash, copy } = useCopyFlash();
   const w = props.share;
   return (
@@ -270,7 +258,7 @@ export function WebShareStrip(props: {
         size="compact-xs"
         color="red"
         variant="light"
-        onClick={() => void act("stop-share", () => api.stopShare(w.id))}
+        onClick={() => void act("stop-share", "Stop the web share", () => api.stopShare(w.id))}
       >
         Stop web
       </Button>
@@ -297,7 +285,6 @@ export function RunSharePanel(props: {
   /** Why there is nothing to share — only the host knows (no run, no config). */
   emptyHint: string;
   onChanged: () => void;
-  onError: (message: string) => void;
 }) {
   if (!props.run || !props.runId) {
     return (
@@ -317,7 +304,6 @@ export function RunSharePanel(props: {
           peer={peer}
           web={web}
           onChanged={props.onChanged}
-          onError={props.onError}
         />
         {idle && !props.running && (
           <Text size="xs" c="dimmed">
@@ -331,15 +317,10 @@ export function RunSharePanel(props: {
         )}
       </Group>
       {peer && (
-        <PeerShareStrip share={peer} onChanged={props.onChanged} onError={props.onError} />
+        <PeerShareStrip share={peer} onChanged={props.onChanged} />
       )}
       {web.map((w) => (
-        <WebShareStrip
-          key={w.id}
-          share={w}
-          onChanged={props.onChanged}
-          onError={props.onError}
-        />
+        <WebShareStrip key={w.id} share={w} onChanged={props.onChanged} />
       ))}
     </div>
   );
@@ -357,9 +338,8 @@ export function JoinRequestRow(props: {
   pending: PendingInfo;
   runLabel?: string | null;
   onChanged: () => void;
-  onError: (message: string) => void;
 }) {
-  const { busy, act } = useShareAction(props.onChanged, props.onError);
+  const { busy, act } = useShareAction(props.onChanged);
   const p = props.pending;
   return (
     <Group gap="xs" className="share-row pending" p={8} wrap="wrap">
@@ -383,7 +363,7 @@ export function JoinRequestRow(props: {
         size="compact-xs"
         variant="light"
         loading={busy === "approve"}
-        onClick={() => void act("approve", () => api.approveJoin(p.id))}
+        onClick={() => void act("approve", "Approve the join request", () => api.approveJoin(p.id))}
       >
         Approve
       </Button>
@@ -392,7 +372,7 @@ export function JoinRequestRow(props: {
         color="red"
         variant="light"
         loading={busy === "deny"}
-        onClick={() => void act("deny", () => api.denyJoin(p.id))}
+        onClick={() => void act("deny", "Deny the join request", () => api.denyJoin(p.id))}
       >
         Deny
       </Button>

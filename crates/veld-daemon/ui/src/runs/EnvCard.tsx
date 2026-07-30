@@ -1,12 +1,15 @@
+/**
+ * One environment, as a card: head, run controls, share strips, and a
+ * Nodes|Logs switcher over the **shared run views**.
+ *
+ * The card owns three things and no more — which run this is (head), what you can
+ * do to it (controls), and which view you are looking at (switcher). The views
+ * themselves are `shared/RunViews.tsx`, the same components IDE mode puts in panes,
+ * so a change to what a node row or a log line shows lands in both places at once.
+ */
+
 import { useState } from "react";
-import {
-  Badge,
-  Button,
-  Group,
-  NativeSelect,
-  SegmentedControl,
-  Text,
-} from "@mantine/core";
+import { Badge, Button, Group, NativeSelect, SegmentedControl, Text } from "@mantine/core";
 import {
   api,
   runRef,
@@ -14,33 +17,83 @@ import {
   type NodeStats,
   type ProjectInfo,
   type RunInfo,
+  type RunRef,
   type ShareInfo,
 } from "../api";
-import { LogsPanel } from "../shared/LogsPanel";
-import { NodeTable, nodeRows } from "../shared/NodeTable";
-import {
-  PeerShareStrip,
-  ShareControls,
-  WebShareStrip,
-  sharesForRun,
-} from "../shared/Sharing";
+import { LogsView, NodesView, badgeColor, type RunViewTarget } from "../shared/RunViews";
+import { PeerShareStrip, ShareControls, WebShareStrip, sharesForRun } from "../shared/Sharing";
 import { useCopyFlash } from "../shared/copy";
+import { notifyError } from "../shared/notify";
 import { fmtWhen, statusBucket } from "../shared/util";
 
-function badgeColor(status: string): string {
-  switch (statusBucket(status)) {
-    case "green":
-      return "green";
-    case "red":
-      return "red";
-    case "yellow":
-      return "yellow";
-    case "dim":
-      return "gray";
-  }
+/** Restart / Stop / Terminal / Copy path — everything you can do to this run. */
+function RunControls(props: {
+  run: RunInfo;
+  /** Not called `ref`: React treats that prop name as an element ref. */
+  address: RunRef;
+  projectRoot: string;
+  onChanged: () => void;
+}) {
+  const { run } = props;
+  const [busy, setBusy] = useState<string | null>(null);
+  const { flash, copy } = useCopyFlash();
+
+  const act = async (label: string, context: string, fn: () => Promise<unknown>) => {
+    setBusy(label);
+    try {
+      await fn();
+      props.onChanged();
+    } catch (e) {
+      notifyError(context, e);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <>
+      <Button
+        size="compact-xs"
+        variant="default"
+        loading={busy === "restart"}
+        onClick={() => void act("restart", `Restart ${run.name}`, () => api.restartRun(props.address))}
+      >
+        Restart
+      </Button>
+      {run.live && (
+        <Button
+          size="compact-xs"
+          variant="default"
+          loading={busy === "stop"}
+          onClick={() => {
+            if (window.confirm(`Stop environment "${run.name}"?`)) {
+              void act("stop", `Stop ${run.name}`, () => api.stopRun(props.address));
+            }
+          }}
+        >
+          Stop
+        </Button>
+      )}
+      <Button
+        size="compact-xs"
+        variant="default"
+        onClick={() =>
+          void act("terminal", "Open a terminal", () => api.openTerminal(props.projectRoot))
+        }
+      >
+        Terminal
+      </Button>
+      <Button
+        size="compact-xs"
+        variant="default"
+        onClick={() => copy(props.projectRoot, "path")}
+      >
+        {flash === "path" ? "Copied" : "Copy path"}
+      </Button>
+    </>
+  );
 }
 
-/** One environment card: head, toolbar, share strips, Services|Logs tabs. */
 export function EnvCard(props: {
   project: ProjectInfo;
   run: RunInfo;
@@ -52,11 +105,9 @@ export function EnvCard(props: {
   // Every run-addressed call goes through this — the card's own project scope,
   // so a same-named run in another repo can never be the one acted on.
   const ref = runRef(project.project_root, run);
-  const [tab, setTab] = useState<string>("services");
+  const [view, setView] = useState<string>("nodes");
   const [logsEverOpened, setLogsEverOpened] = useState(false);
   const [histSel, setHistSel] = useState<string>("");
-  const [busy, setBusy] = useState<string | null>(null);
-  const { flash, copy } = useCopyFlash();
 
   const history: HistoryEntry[] = run.history ?? [];
   // History selection only applies to ended runs — guard against a future
@@ -70,24 +121,14 @@ export function EnvCard(props: {
 
   const { peer: peerShare, web: webShares } = sharesForRun(props.shares, run.run_id);
 
-  // Runs mode reports a failed action where the click happened: an alert. (IDE
-  // mode has a banner for the same job, which is why the shared components take
-  // the reporter as a prop.) Wrapped rather than passed as `window.alert`, which
-  // is only callable with `window` as its receiver.
-  const onError = (message: string) => window.alert(message);
-  const act = async (label: string, fn: () => Promise<unknown>) => {
-    setBusy(label);
-    try {
-      await fn();
-      props.onChanged();
-    } catch (e) {
-      onError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(null);
-    }
+  // The card's head picker owns the history selection, so the views take it as a
+  // prop rather than growing a second picker of their own.
+  const target: RunViewTarget = {
+    ref,
+    run,
+    stats: props.stats,
+    onChanged: props.onChanged,
   };
-
-  const nodes = nodeRows(run, selected);
 
   return (
     <div className="env-card">
@@ -105,6 +146,8 @@ export function EnvCard(props: {
         {!run.live && history.length > 0 && (
           <NativeSelect
             size="xs"
+            title="Which run"
+            aria-label="Run"
             value={histSel}
             onChange={(e) => setHistSel(e.currentTarget.value)}
             data={[
@@ -137,66 +180,24 @@ export function EnvCard(props: {
       )}
 
       <Group gap={6} px={12} py={8} wrap="wrap">
-        <Button
-          size="compact-xs"
-          variant="default"
-          loading={busy === "restart"}
-          onClick={() => void act("restart", () => api.restartRun(ref))}
-        >
-          Restart
-        </Button>
-        {run.live && (
-          <Button
-            size="compact-xs"
-            variant="default"
-            loading={busy === "stop"}
-            onClick={() => {
-              if (window.confirm(`Stop environment "${run.name}"?`)) {
-                void act("stop", () => api.stopRun(ref));
-              }
-            }}
-          >
-            Stop
-          </Button>
-        )}
-        <Button
-          size="compact-xs"
-          variant="default"
-          onClick={() => void act("terminal", () => api.openTerminal(project.project_root))}
-        >
-          Terminal
-        </Button>
-        <Button
-          size="compact-xs"
-          variant="default"
-          onClick={() => copy(project.project_root, "path")}
-        >
-          {flash === "path" ? "Copied" : "Copy path"}
-        </Button>
+        <RunControls
+          run={run}
+          address={ref}
+          projectRoot={project.project_root}
+          onChanged={props.onChanged}
+        />
         <ShareControls
           run={ref}
           running={run.status === "running"}
           peer={peerShare}
           web={webShares}
           onChanged={props.onChanged}
-          onError={onError}
         />
       </Group>
 
-      {peerShare && (
-        <PeerShareStrip
-          share={peerShare}
-          onChanged={props.onChanged}
-          onError={onError}
-        />
-      )}
+      {peerShare && <PeerShareStrip share={peerShare} onChanged={props.onChanged} />}
       {webShares.map((w) => (
-        <WebShareStrip
-          key={w.id}
-          share={w}
-          onChanged={props.onChanged}
-          onError={onError}
-        />
+        <WebShareStrip key={w.id} share={w} onChanged={props.onChanged} />
       ))}
 
       <SegmentedControl
@@ -210,35 +211,24 @@ export function EnvCard(props: {
             border: "1px solid var(--border)",
           },
         }}
-        value={tab}
+        value={view}
         onChange={(v) => {
-          setTab(v);
+          setView(v);
           if (v === "logs") setLogsEverOpened(true);
         }}
         data={[
-          { value: "services", label: "Services" },
+          { value: "nodes", label: "Nodes" },
           { value: "logs", label: "Logs" },
         ]}
       />
 
-      {tab === "services" && (
-        <NodeTable
-          run={ref}
-          nodes={nodes}
-          stats={props.stats}
-          canAct={run.status === "running"}
-          onChanged={props.onChanged}
-          onError={onError}
-        />
-      )}
+      {view === "nodes" && <NodesView target={target} selected={selected} />}
 
+      {/* Mounted from the first time it is opened and kept mounted after: the
+          filters, the scroll position and the fetched lines all survive a switch
+          back to Nodes. */}
       {logsEverOpened && (
-        <LogsPanel
-          run={ref}
-          history={history}
-          histSel={histSel || null}
-          visible={tab === "logs"}
-        />
+        <LogsView target={target} selected={selected} visible={view === "logs"} />
       )}
     </div>
   );

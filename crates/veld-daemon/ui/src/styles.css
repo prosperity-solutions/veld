@@ -1063,8 +1063,77 @@ select:focus {
   border-color: var(--warn);
 }
 
+/* The node table sizes itself against its own width, not the viewport's: the same
+   table lives in a 400px pane and in a 1080px card, and a media query cannot tell
+   those apart. */
+.node-table-wrap {
+  container-type: inline-size;
+  width: 100%;
+}
+
 .node-table {
   font-size: 12px;
+  width: 100%;
+}
+
+/* Quiet headers: they label the columns without competing with the rows, which
+   are the content. */
+.node-table thead th {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--faint);
+  white-space: nowrap;
+}
+
+/* The URL column absorbs the slack. Without this, an auto-layout table spreads six
+   short cells evenly across a wide pane and the row reads as six unrelated things
+   floating in a line. */
+.node-table .col-url {
+  width: 100%;
+  min-width: 0;
+}
+
+.node-table .col-node,
+.node-table .col-actions,
+.node-table .col-variant,
+.node-table .col-pid,
+.node-table .col-res {
+  width: 1%;
+  white-space: nowrap;
+}
+
+/* Shown only while their columns are hidden — see the queries below. */
+.node-compact-meta,
+.node-compact-url {
+  display: none;
+}
+
+/* Narrow: variant and PID lose their columns and move under the node's name. */
+@container (max-width: 620px) {
+  .node-table .col-variant,
+  .node-table .col-pid {
+    display: none;
+  }
+  .node-compact-meta {
+    display: block;
+  }
+}
+
+/* Narrower still: the URL joins them, and the sparkline goes — the memory and CPU
+   numbers beside it say the same thing in less room. Copy and Open stay, so the
+   URL is still reachable at any width. */
+@container (max-width: 460px) {
+  .node-table .col-url {
+    display: none;
+  }
+  .node-compact-url {
+    display: block;
+  }
+  .node-table .spark {
+    display: none;
+  }
 }
 
 .node-url {
@@ -1109,13 +1178,24 @@ select:focus {
   background: var(--panel);
 }
 
-/* The `nodes` pane: the same table runs mode shows, scrolling inside a pane. */
-.nodes-pane {
+/* A shared run view (`shared/RunViews.tsx`). In a card it is a block that grows
+   with its content; in a pane it fills the dock body and scrolls inside it. */
+.run-view.fill {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
   background: var(--panel);
+}
+
+/* The rows scroll, the view's header (which run, what state, which past run) does
+   not — it is the answer to "what am I looking at" and must not scroll away. */
+.run-view.fill .node-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 /* The `logs` pane wrapper. The card variant stays `display: block` inside a
