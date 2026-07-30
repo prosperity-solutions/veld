@@ -30,6 +30,7 @@ import {
   IconPlugConnectedX,
   IconPlus,
   IconRefresh,
+  IconRestore,
   IconRotateClockwise,
   IconTrash,
   IconUserCircle,
@@ -317,8 +318,6 @@ export function BrowserPane(props: {
     if (!emulation) return;
     event.preventDefault();
     event.stopPropagation();
-    const handle = event.currentTarget as HTMLElement;
-    handle.setPointerCapture(event.pointerId);
     const originX = event.clientX;
     const originY = event.clientY;
     const from = { width: emulation.width, height: emulation.height };
@@ -338,9 +337,9 @@ export function BrowserPane(props: {
       setDrag(latest);
     };
     const finish = () => {
-      handle.removeEventListener("pointermove", move);
-      handle.removeEventListener("pointerup", finish);
-      handle.removeEventListener("pointercancel", finish);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", finish);
+      window.removeEventListener("pointercancel", finish);
       setDrag(null);
       setBrowserResizing(id, false);
       // Applied on release rather than on every move: each apply is an
@@ -350,9 +349,33 @@ export function BrowserPane(props: {
         applyEmulation(resizeEmulation(emulation, latest.width, latest.height));
       }
     };
-    handle.addEventListener("pointermove", move);
-    handle.addEventListener("pointerup", finish);
-    handle.addEventListener("pointercancel", finish);
+    // On `window`, not on the handle: the handle is a React element whose position
+    // is a function of the size being dragged, so it re-renders — and moves — under
+    // the pointer on every event. Listeners on it (and the pointer capture that
+    // went with them) died with the first re-render, which is exactly the shape of
+    // "the outline appears and then nothing moves". The window survives the render,
+    // and the native view is hidden for the duration, so nothing else can take the
+    // events.
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", finish);
+    window.addEventListener("pointercancel", finish);
+  };
+
+  /**
+   * Where the screen is drawn right now — the applied box, or the one being dragged
+   * to.
+   *
+   * One expression for the handles *and* the outline, so they cannot drift apart
+   * mid-gesture: the handles have to stay on the edge you are pulling, and the
+   * outline is that edge. During a drag the pre-drag `emulationScale` is used, which
+   * is what makes the edge track the cursor one-to-one — the applied emulation has
+   * not changed yet, so the factor is still the one the screen is drawn at.
+   */
+  const screen = {
+    x: state.deviceX,
+    y: state.deviceY,
+    width: drag ? drag.width * state.emulationScale : state.deviceWidth,
+    height: drag ? drag.height * state.emulationScale : state.deviceHeight,
   };
 
   // Empty means "keep the current one", so one field can be changed without
@@ -787,6 +810,22 @@ export function BrowserPane(props: {
                   </button>
                 </div>
 
+                <Menu.Divider />
+                {/* One way out of every setting at once. Each control undoes itself,
+                    but after a session of dragging, rotating and zooming, "put it
+                    back" is a single intention and should be a single click —
+                    otherwise it is four, and you have to remember which four. */}
+                <Menu.Item
+                  leftSection={<IconRestore size={14} />}
+                  disabled={!emulation && zoom === DEFAULT_ZOOM}
+                  onClick={() => {
+                    applyEmulation(null);
+                    applyZoom(DEFAULT_ZOOM);
+                  }}
+                >
+                  Reset to pane size, 100%
+                </Menu.Item>
+
                 {iframeBackend && (
                   <Menu.Label>
                     Sizes work in a browser tab; user agent, touch and zoom need the desktop app
@@ -843,36 +882,30 @@ export function BrowserPane(props: {
             handles are only reachable because an emulated screen is inset from the
             pane: under Electron the view covers its own rect and swallows the
             pointer there. */}
-        {emulation && !covered && !drag && (
+        {emulation && !covered && (
           <>
             <div
               className="device-handle east"
+              data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen horizontally"
-              style={{
-                left: state.deviceX + state.deviceWidth + 4,
-                top: state.deviceY + state.deviceHeight / 2 - 17,
-              }}
+              style={{ left: screen.x + screen.width + 4, top: screen.y + screen.height / 2 - 17 }}
               onPointerDown={(e) => startResize(e, "x")}
             />
             <div
               className="device-handle south"
+              data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen vertically"
-              style={{
-                left: state.deviceX + state.deviceWidth / 2 - 17,
-                top: state.deviceY + state.deviceHeight + 4,
-              }}
+              style={{ left: screen.x + screen.width / 2 - 17, top: screen.y + screen.height + 4 }}
               onPointerDown={(e) => startResize(e, "y")}
             />
             <div
               className="device-handle corner"
+              data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen"
-              style={{
-                left: state.deviceX + state.deviceWidth + 3,
-                top: state.deviceY + state.deviceHeight + 3,
-              }}
+              style={{ left: screen.x + screen.width + 3, top: screen.y + screen.height + 3 }}
               onPointerDown={(e) => startResize(e, "both")}
             />
           </>
@@ -884,10 +917,10 @@ export function BrowserPane(props: {
           <div
             className="device-outline"
             style={{
-              left: state.deviceX,
-              top: state.deviceY,
-              width: drag.width * state.emulationScale,
-              height: drag.height * state.emulationScale,
+              left: screen.x,
+              top: screen.y,
+              width: screen.width,
+              height: screen.height,
             }}
           >
             <span>

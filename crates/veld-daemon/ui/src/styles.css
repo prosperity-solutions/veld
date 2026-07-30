@@ -958,7 +958,11 @@ select:focus {
 }
 
 .browser-host[data-emulated="true"] .browser-device-frame {
-  background: #fff;
+  /* `background-color`, never the `background` shorthand: the shorthand resets
+     `background-size` to `auto`, and this rule wins over the one above — which is
+     how the freeze still ended up drawn at image scale (i.e. zoomed into its
+     top-left corner) even after that was supposedly fixed. */
+  background-color: #fff;
   box-shadow:
     0 0 0 1px var(--border2),
     0 10px 30px rgb(0 0 0 / 28%);
@@ -1181,14 +1185,14 @@ select:focus {
   word-break: break-all;
 }
 
-/* The still of a hidden view is painted as this element's background (set by
-   panes/browserHost.ts, not by React — see `freezeThenHide`). Sized here so the
-   host has nothing to compute at paint time. */
-.browser-host {
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: top left;
-}
+/* The still of a hidden view is painted on `.browser-device-frame` — the screen's
+   own box — and sized there. It used to be painted on `.browser-host` and sized
+   here with `cover`, which is a *second* reason the still came out wrong once the
+   frame existed: this rule sits later in the file than the frame's own, and while
+   it cannot reach the frame, it did keep re-declaring a `background-size` for the
+   element that now carries the dotted backdrop instead. Rules for a background
+   this element no longer has are worse than dead code — they are a trap for the
+   next person who moves the still. */
 
 .browser-suggestions {
   display: flex;
