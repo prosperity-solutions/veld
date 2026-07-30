@@ -1103,6 +1103,13 @@ select:focus {
   border-radius: 3px;
   cursor: nwse-resize;
 }
+/* A smaller bleed than the edge handles get (`HANDLE_CORNER_HIT_BLEED` in
+   panes/devices.ts, which the padding floor is computed from): this is the handle
+   anchored diagonally into the corner, so its hit area is the one that would otherwise
+   reach the window's own resize grip. */
+.device-handle.corner::before {
+  inset: -3px;
+}
 
 /* No outline and no readout over the screen: the page is live while you drag, and a
    native view paints over DOM — anything here would be invisible in the desktop app

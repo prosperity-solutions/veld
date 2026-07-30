@@ -451,13 +451,19 @@ export function BrowserPane(props: {
    * Deriving it here from the dragged size was the earlier shape, and it drifted the
    * moment fitting clamped the screen to the pane.
    */
-  /** The pane's content box, which is what "the size the pane can hold" means. Falls
-   *  back to the published geometry only when the element is not laid out yet — never
-   *  to zero, which would clamp a new Responsive viewport to the minimum size. */
-  const paneSize = () => {
+  /**
+   * The pane's content box — what "the size the pane can hold" means — or `null` when
+   * the slot is not laid out.
+   *
+   * `null` rather than a fallback, and specifically not `state.device*`: that is the
+   * *screen's* drawn box, already inset and scaled, which is the 172px-for-a-phone-at-50%
+   * answer this whole path exists to stop producing. A plausible wrong number here is
+   * worse than no number, because the caller cannot tell it apart from a real one.
+   */
+  const paneSize = (): { width: number; height: number } | null => {
     const box = slot.current?.getBoundingClientRect();
-    if (box && box.width >= 1 && box.height >= 1) return { width: box.width, height: box.height };
-    return { width: state.deviceWidth, height: state.deviceHeight };
+    if (!box || box.width < 1 || box.height < 1) return null;
+    return { width: box.width, height: box.height };
   };
 
   const screen = {
@@ -786,21 +792,20 @@ export function BrowserPane(props: {
                           <IconCheck size={14} />
                         ) : undefined
                       }
-                      onClick={() =>
+                      // Measured from the pane's own box, and genuinely skipped when
+                      // there is none to measure — `state.device*` is the screen's drawn
+                      // box, already inset and scaled, which is the wrong-but-plausible
+                      // number this path exists to stop producing.
+                      onClick={() => {
+                        const box = paneSize();
+                        if (!box) return;
                         applyEmulation(
-                          // Measured from the pane's own box. `state.device*` is the
-                          // *screen's* drawn box once a device is set — already inset,
-                          // and scaled if it was fitted — so a phone at 50% made
-                          // "Responsive starts at what the pane can hold" mean 172px.
-                          // Skipped rather than guessed when the slot is not laid out:
-                          // falling back to 0 would clamp to the minimum device size,
-                          // which is a wrong answer dressed as a real one.
                           responsiveEmulation(
-                            paneSize().width - DEVICE_PADDING * 2,
-                            paneSize().height - DEVICE_PADDING * 2,
+                            box.width - DEVICE_PADDING * 2,
+                            box.height - DEVICE_PADDING * 2,
                           ),
-                        )
-                      }
+                        );
+                      }}
                       rightSection={
                         <span className="menu-size faint">drag to resize</span>
                       }

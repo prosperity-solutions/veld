@@ -275,16 +275,20 @@ describe("the handles fit the gap", () => {
   });
 });
 
-describe("the wire shape the shell validates", () => {
-  it("has exactly these fields, so the shell's validator cannot drift", () => {
-    // `safeEmulation` in `desktop/src/validate.js` whitelists the fields it forwards to
-    // Electron, by hand, in plain JS with no type to check it against. So a field added
-    // here passes the typechecker, passes every test, and is then *silently dropped* at
-    // the trust boundary — the feature simply never reaches the desktop app while
-    // working in a browser tab, which is this codebase's worst failure shape.
+describe("the emulation's field set", () => {
+  it("is exactly this, so a new field cannot be forgotten at the trust boundary", () => {
+    // This pins *this* side's shape only — be precise about that, because the earlier
+    // version of this test claimed to gate the shell's validator and did not.
+    // `safeEmulation` in `desktop/src/validate.js` whitelists what it forwards to
+    // Electron by hand, in plain JS, with nothing type-checking it against
+    // `PaneEmulation`; a field added here therefore passes the typechecker, passes every
+    // test, and is then silently dropped at that boundary — working in a browser tab,
+    // absent in the desktop app, which is this codebase's worst failure shape.
     //
-    // This list is the drift gate. If it fails, you added or renamed a field: update
-    // `safeEmulation` (and its test) in the same breath, then update this list.
+    // So: if this list fails, you added or renamed a field. Update `safeEmulation` and
+    // *its* key-set test (`validate.test.js`, "forwards exactly the fields Electron
+    // applies") in the same breath, then update this list. The two tests are the pair —
+    // this one catches a field appearing here, that one catches a field vanishing there.
     expect(Object.keys(phone()).sort()).toEqual([
       "device",
       "deviceScaleFactor",

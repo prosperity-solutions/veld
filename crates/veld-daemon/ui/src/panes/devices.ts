@@ -103,11 +103,29 @@ export const HANDLE_LENGTH = 44;
 export const HANDLE_CORNER_GAP = 4;
 export const HANDLE_CORNER_SIZE = 12;
 
-/** The narrowest gap the handles still fit inside, with a pixel of air. Anything
- *  tighter and a handle overlaps the pane's edge — which is the window's edge, and
- *  therefore the OS resize grip, whenever the pane is the last one in the dock. */
+/**
+ * How far each handle's *clickable* box extends past its mark (`::before` in
+ * `styles.css`), which is what actually reaches the pane's edge — the marks are only
+ * what you see. The floor below is computed from these, not from the marks: a floor that
+ * measured the visible pixels only understated the reach by the whole bleed, which is
+ * how a "documented minimum" ends up documenting the wrong number.
+ *
+ * The corner's is smaller than the edges' on purpose. It is the one anchored diagonally
+ * into the corner, so it is the one whose bleed lands where the OS window-resize grip
+ * is, and 12px of mark plus 7px of bleed would not fit the gap at all.
+ */
+export const HANDLE_HIT_BLEED = 7;
+export const HANDLE_CORNER_HIT_BLEED = 3;
+
+/** The narrowest gap the handles still fit inside — marks *and* hit areas — with a pixel
+ *  of air. Anything tighter and a handle's clickable box overlaps the pane's edge, which
+ *  is the window's edge, and therefore the OS resize grip, whenever the pane is the last
+ *  one in the dock. Reaching for the handle would drag the whole app instead. */
 export const MIN_DEVICE_PADDING =
-  Math.max(HANDLE_EDGE_GAP + HANDLE_THICKNESS, HANDLE_CORNER_GAP + HANDLE_CORNER_SIZE) + 1;
+  Math.max(
+    HANDLE_EDGE_GAP + HANDLE_THICKNESS + HANDLE_HIT_BLEED,
+    HANDLE_CORNER_GAP + HANDLE_CORNER_SIZE + HANDLE_CORNER_HIT_BLEED,
+  ) + 1;
 
 export interface DevicePreset {
   id: string;
@@ -577,13 +595,20 @@ export function deviceLayout(
  *    cursor travels only half of whatever the size changes by — doubling puts the
  *    edge back under the pointer.
  *
- * The second correction only applies while the screen has room to grow. Once fitting
- * clamps it to the pane (`deviceLayout`), the drawn edge cannot move at all, and
- * doubling then only doubles how fast the number runs away from the pointer — at 30%
- * that is nearly 7 device pixels per pixel of travel, in exactly the
- * big-screen-in-a-small-pane case this feature exists for. So the caller says whether
- * the dragged axis is currently clamped, and it is read per move rather than once at
- * gesture start, because fitting starts and stops binding *during* a drag.
+ * The second correction only applies while the screen has room to grow. Once the pane is
+ * what limits the drawn size, the edge cannot move at all, and doubling then only
+ * doubles how fast the number runs away from the pointer — in exactly the
+ * big-screen-in-a-small-pane case this feature exists for. The caller passes that per
+ * axis, from [`edgePinned`].
+ *
+ * **Both `scale` and `pinned` are sampled once, when the gesture starts**, and the whole
+ * pointer travel is mapped with them. Reading them per move is the obvious idea and it
+ * is wrong twice over: the published geometry a per-move read sees is coalesced to one
+ * animation frame while a mouse reports faster than the display, so the answer flips
+ * between moves — and because the gain applies to the *total* travel, every flip jumps
+ * the size, which made the emulated width non-monotonic for a steadily advancing
+ * cursor. Sampling once makes the gesture linear, which is what a drag should be. The
+ * cost is that dragging from pinned into unpinned keeps the slower gain until you let go.
  */
 export function dragSize(
   from: { width: number; height: number },

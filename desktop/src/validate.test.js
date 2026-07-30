@@ -173,6 +173,23 @@ test("safeEmulation clamps every number and keeps only what Electron consumes", 
   }
 });
 
+test("safeEmulation forwards exactly the fields Electron applies", () => {
+  // The other half of the drift gate. Its twin lives in
+  // `crates/veld-daemon/ui/src/panes/devices.test.ts` ("the emulation's field set") and
+  // catches a field *appearing* on the renderer's `PaneEmulation`; this one catches a
+  // field quietly *vanishing* from what this process forwards — a rename here, or a
+  // dropped `touch`, is otherwise silent in both packages: the pane keeps offering the
+  // control and the shell stops applying it.
+  //
+  // `device` and `fit` are absent on purpose and documented in `safeEmulation`: a preset
+  // id means nothing here, and fitting is a question about the pane that the renderer
+  // answers, sending on only the resulting scale (with the bounds).
+  assert.deepEqual(
+    Object.keys(safeEmulation({ width: 400, height: 800, ua: "UA/1.0" })).sort(),
+    ["deviceScaleFactor", "height", "mobile", "touch", "userAgent", "width"],
+  );
+});
+
 test("safeZoom stays inside Chromium's own range", () => {
   assert.equal(safeZoom(1), 1);
   assert.equal(safeZoom(0.67), 0.67);

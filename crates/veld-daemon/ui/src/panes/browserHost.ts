@@ -251,6 +251,11 @@ interface View {
    *  changes neither costs no re-emulation — which relayouts the guest page. */
   scale: number;
   radius: number;
+  /** The screen's box as last *painted*, in the numbers it was computed from — so a
+   *  redraw can tell a real geometry change from the same layout recomputed. Never
+   *  compare the frame's inline styles for this: Chromium round-trips lengths through
+   *  ~6 significant digits, so the strings differ when the numbers do not. */
+  painted: { x: number; y: number; width: number; height: number } | null;
   /** The size a drag is currently at, and the frame it will be applied on.
    *  Coalesced because a mouse produces several moves per painted frame and each
    *  applied size relayouts the user's page. */
@@ -628,6 +633,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
     zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
     scale: 1,
     radius: 0,
+    painted: null,
     pending: null,
     pendingFrame: 0,
   };
@@ -826,15 +832,17 @@ export function setBrowserEmulation(id: string, emulation: PaneEmulation | null)
  * never an option there.
  */
 export function setBrowserResizing(id: string, resizing: boolean): void {
+  // Before the view lookup, deliberately. A pane disposed mid-gesture (a tab closed, a
+  // worktree switched, `pruneBrowsers` from an async list change) has already been
+  // deleted from `views`, so a disarm behind that guard never ran — and since arming is
+  // window-wide, every *sibling* view kept forwarding a cursor read plus an IPC message
+  // per mouse move until the page reloaded. The shell resolves this from the window, so
+  // it needs nothing of ours to still exist.
+  if (desktop) void desktop.drag(resizing).catch(() => {});
   const v = views.get(id);
   if (!v) return;
   patch(v, { resizing });
   if (v.iframe) v.iframe.style.pointerEvents = resizing ? "none" : "";
-  // Not gated on `shellHasView`: the shell resolves this from the sender's window, not
-  // from a view, precisely so that a disarm still lands when the view it belonged to has
-  // gone. A drag that ends because its pane was closed mid-gesture would otherwise leave
-  // every view in the window forwarding its pointer until the page reloaded.
-  if (desktop) void desktop.drag(resizing).catch(() => {});
   if (resizing) return;
   // Drop a frame that has not fired yet, or it would repaint the drag's last size
   // after the applied one has already been drawn.
@@ -947,6 +955,7 @@ function syncGeometry(v: View): void {
     // No device: the page is the pane. The frame fills the container, which keeps
     // one element meaning "where the page is" in both modes.
     v.frame.style.inset = "0";
+    v.painted = null;
     v.frame.style.removeProperty("width");
     v.frame.style.removeProperty("height");
     v.frame.style.removeProperty("border-radius");
@@ -995,27 +1004,33 @@ function paintScreen(
     emulationScale: layout.scale,
   });
   v.container.dataset.emulated = "true";
-  const inset = `${layout.y}px auto auto ${layout.x}px`;
-  const width = `${layout.width}px`;
-  const height = `${layout.height}px`;
   // A still is a picture of the screen at its *previous* size, so a geometry change
   // invalidates it — "Fit to pane" and the zoom stepper both keep their menu open, so
   // views are suspended and a still is up while they change it, and it would otherwise
   // stay on screen stretched until the thaw 250ms after the menu closed.
   //
-  // Only on an actual change, which is the whole point of comparing here: this function
-  // also runs from the 400ms geometry tick, which fires *while* views are suspended and
-  // computes the same layout it computed last time. Clearing unconditionally wiped the
-  // still within 400ms of every menu opening, leaving a blank frame — defeating the
-  // freeze in this feature's own mainline interaction, and only in the desktop app.
+  // Only on an actual change, because this also runs from the 400ms geometry tick, which
+  // fires *while* views are suspended and recomputes the layout it already drew.
+  // Clearing unconditionally wiped the still within 400ms of every menu opening —
+  // defeating the freeze in this feature's own mainline interaction, desktop-only.
+  //
+  // Compared as **numbers**, against what was last painted. Comparing the inline style
+  // strings instead looks equivalent and is not: Chromium round-trips a length through
+  // ~6 significant digits, so `533.3333333333334px` reads back as `533.333px` and the
+  // test was permanently unequal. Measured across realistic pane sizes, that wiped the
+  // still on most of them — the first version of this fix did nothing at all.
+  const painted = v.painted;
   const moved =
-    v.frame.style.inset !== inset ||
-    v.frame.style.width !== width ||
-    v.frame.style.height !== height;
+    painted === null ||
+    painted.x !== layout.x ||
+    painted.y !== layout.y ||
+    painted.width !== layout.width ||
+    painted.height !== layout.height;
   if (moved && v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
-  v.frame.style.inset = inset;
-  v.frame.style.width = width;
-  v.frame.style.height = height;
+  v.painted = { x: layout.x, y: layout.y, width: layout.width, height: layout.height };
+  v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
+  v.frame.style.width = `${layout.width}px`;
+  v.frame.style.height = `${layout.height}px`;
   v.frame.style.borderRadius = `${radius}px`;
 
   if (v.iframe) {
