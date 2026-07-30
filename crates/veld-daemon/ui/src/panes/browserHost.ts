@@ -906,6 +906,13 @@ function scheduleGeometrySync(): void {
  */
 function syncGeometry(v: View): void {
   if (!v.mounted || !v.container.isConnected) return;
+  // A drag owns the frame while it lasts. This runs on a 400 ms tick and on every
+  // window resize, and it draws from the *applied* emulation — so during a drag it
+  // is the second writer of one element, and it wins whenever the pointer is still:
+  // hold the button without moving and the screen snapped back to its pre-drag
+  // size, then jumped forward again on the next move. `setBrowserResizing(false)`
+  // clears the flag before calling this, so the final size is not skipped.
+  if (v.state.resizing) return;
   const box = v.container.getBoundingClientRect();
   if (box.width < 1 || box.height < 1) return;
   const e = v.emulation;
