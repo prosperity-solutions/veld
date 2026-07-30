@@ -273,7 +273,11 @@ export function BrowserPane(props: {
   // fitted viewport had to shrink, and `touchActive` is false while DevTools
   // holds the CDP session touch needs.
   const fitted = emulation?.fit === true && state.emulationScale < 0.995;
-  const touchSuspended = !iframeBackend && emulation?.touch === true && !state.touchActive;
+  // `state.loaded` gates it: a pane with no page yet has nothing emulated *at all*
+  // — the shell cannot touch a view that has never navigated — so reporting that
+  // as "paused" would explain a state the user is not in.
+  const touchSuspended =
+    !iframeBackend && emulation?.touch === true && !state.touchActive && state.loaded;
 
   const applyEmulation = (next: PaneEmulation | null) => {
     setBrowserEmulation(id, next);
@@ -581,8 +585,12 @@ export function BrowserPane(props: {
             >
               Touch events
             </Menu.Item>
+            {/* Touch needs Chromium's debugger session, which something else can
+                hold — DevTools does on some Electron versions, though not this
+                one. Reported from what the shell actually achieved rather than
+                from a guess about the cause. */}
             {touchSuspended && (
-              <Menu.Label>Touch is paused while this pane's DevTools is open</Menu.Label>
+              <Menu.Label>Touch is paused — Chromium's debugger is in use elsewhere</Menu.Label>
             )}
             <Menu.Divider />
             <Menu.Label>Custom size</Menu.Label>
