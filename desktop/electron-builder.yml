@@ -18,8 +18,8 @@ copyright: Copyright © Prosperity Solutions
 directories:
   output: dist
 
-# An allow-list, not an ignore-list: the shell is four source files plus the
-# generated icons, and anything else in here (scripts/, tests, dist/) has no
+# An allow-list, not an ignore-list: the shell is a handful of source files plus
+# the generated icons, and anything else in here (scripts/, tests, dist/) has no
 # business inside the bundle. Production `dependencies` are added implicitly.
 files:
   - src/**/*.js

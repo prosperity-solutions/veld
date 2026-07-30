@@ -70,9 +70,15 @@ function downloadOnlyReason({ platform }) {
 
 /**
  * Compare two `major.minor.patch` strings. Missing or non-numeric components
- * count as 0, matching `veld_core::setup::is_newer` — the CLI's own comparison,
- * against the same GitHub releases, so "is there an update" cannot answer
- * differently in the two places a user might ask it.
+ * count as 0, following `veld_core::setup::is_newer` — the CLI's own comparison,
+ * against the same GitHub releases, so "is there an update" answers the same way
+ * in the two places a user might ask it.
+ *
+ * The two agree on every version either side publishes, and only there: on a
+ * component like `5-rc`, `parseInt` takes the leading 5 where Rust's `parse`
+ * rejects the whole component and falls back to 0. Neither side tags a
+ * prerelease, so this stays a difference in the parsers rather than in the
+ * answers — worth knowing before anyone adds one.
  *
  * @returns {number} negative if `a` < `b`, 0 if equal, positive if `a` > `b`
  */

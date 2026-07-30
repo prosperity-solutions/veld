@@ -67,9 +67,12 @@ test("compareVersions tolerates a v prefix, short and junk versions", () => {
   assert.equal(compareVersions("v12.4.0", "12.4.0"), 0);
   assert.equal(compareVersions("12.4", "12.4.0"), 0);
   assert.equal(compareVersions("", "0.0.0"), 0);
-  // A prerelease suffix parses as its numeric prefix, matching the CLI's
-  // `is_newer` — deliberately, since neither side ever publishes one.
+  // A prerelease suffix parses as its numeric prefix — which is where this
+  // stops matching the CLI's `is_newer` (Rust rejects the whole component and
+  // reads 0). Pinned rather than asserted-as-parity, since neither side ever
+  // publishes one; see the note on `compareVersions`.
   assert.equal(compareVersions("12.4.0-rc.1", "12.4.0"), 0);
+  assert.equal(compareVersions("12.4.5-rc.1", "12.4.5"), 0);
 });
 
 test("versionSkew names the half that is behind", () => {
