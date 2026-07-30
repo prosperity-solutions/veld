@@ -1056,8 +1056,10 @@ pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) 
     // contract the monitor's liveness probes and `SecretSource::Command` hold.
     // The visible consequence: a node command that needs a variable exported
     // only from `.zprofile`/`.profile` used to see it here and no longer does.
-    // Declare such a variable in the node's `env` instead of relying on the
-    // daemon's shell, which the CLI path never provided either.
+    // That is a real asymmetry with the CLI path, where a macOS terminal's zsh
+    // *is* a login shell and those exports are simply in the environment veld
+    // inherits — so a node needing one must declare it in its `env` rather than
+    // rely on who started the run.
     //
     // Dropping the shell also drops the shell-escaping of a client-supplied
     // run name; arguments now reach the binary as argv.
@@ -1157,6 +1159,15 @@ fn spawn_veld_in(
                 error = %e,
                 "failed to spawn veld command"
             );
+            // No child means no reaper task, so unlink here or the capture file
+            // leaks for the daemon's whole uptime: `sweep_spawn_logs` spares
+            // files whose owning pid is still alive, and that pid is ours. The
+            // old shell-wrapped spawn never reached this arm — a failed `cd`
+            // happened inside a successfully spawned shell — so this cleanup
+            // path is new with the direct spawn.
+            if let Some(path) = stderr_path {
+                let _ = std::fs::remove_file(&path);
+            }
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -1413,9 +1424,42 @@ mod tests {
         let path = gone.path().to_path_buf();
         drop(gone);
 
+        // Count only this process's own capture files (the name carries the
+        // creating pid), so a real daemon writing to the same directory can't
+        // affect the assertion.
+        let mine = format!("{}-", std::process::id());
+        let count = || {
+            spawn_log_dir()
+                .and_then(|d| std::fs::read_dir(d).ok())
+                .map(|entries| {
+                    entries
+                        .flatten()
+                        .filter(|e| e.file_name().to_string_lossy().starts_with(&mine))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+        let before = count();
+
         assert_eq!(
             spawn_veld_in("/bin/echo", "/usr/bin:/bin", &path, &["stop".to_owned()]),
             StatusCode::INTERNAL_SERVER_ERROR
         );
+
+        // The capture file created for this spawn must be unlinked: there is no
+        // child, so no reaper task will do it, and `sweep_spawn_logs`
+        // deliberately spares files belonging to a live pid — ours. Polled down
+        // to the baseline rather than asserted once, because the sibling test
+        // spawns a real child whose reaper unlinks *its* file asynchronously and
+        // both tests share this directory; a leak here holds the count above the
+        // baseline permanently.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while count() > before {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "spawn stderr capture file leaked on the error path"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }

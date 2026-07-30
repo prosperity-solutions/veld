@@ -9,7 +9,7 @@ use veld_core::logging::LogWriter;
 use veld_core::state::{NodeStatus, RunStatus};
 // Shared login-shell PATH helper — see `veld_core::user_path` for why (bare
 // launchd/systemd service PATH) and the timeout/fallback semantics.
-use veld_core::user_path::resolve_user_path;
+use veld_core::user_path::cached_user_path;
 
 /// Interval between health-check scans (seconds).
 const SCAN_INTERVAL_SECS: u64 = 5;
@@ -29,20 +29,18 @@ pub async fn run_health_monitor(broadcaster: Broadcaster) {
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_checks: LastCheckMap = HashMap::new();
 
-    // Resolve the user's full PATH once at startup so probe commands can
-    // find tools like pg_isready even when the daemon starts at boot.
-    let mut user_path = resolve_user_path().await;
-    let mut path_resolved_at = Instant::now();
-
     loop {
         interval.tick().await;
         debug!("running health-check scan");
 
-        // Re-resolve PATH every 60s to pick up changes after user login.
-        if path_resolved_at.elapsed() > Duration::from_secs(60) {
-            user_path = resolve_user_path().await;
-            path_resolved_at = Instant::now();
-        }
+        // The user's full PATH, so probe commands find tools like pg_isready
+        // even when the daemon starts at boot. Through the shared cache, whose
+        // TTL is the 60s re-resolution cadence this loop used to implement
+        // itself: the scan is the most frequent caller, so it is the one that
+        // keeps the entry warm, and the management API's request handlers —
+        // which cannot afford to wait on a login shell — then almost always
+        // hit it rather than resolving inline.
+        let user_path = cached_user_path().await;
 
         match scan_and_update(&broadcaster, &mut last_checks, &user_path).await {
             Ok(changes) => {

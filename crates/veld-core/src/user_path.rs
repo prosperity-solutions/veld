@@ -53,6 +53,14 @@ pub async fn resolve_user_path() -> String {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
+    process_path_fallback()
+}
+
+/// The value used when the login shell can't be consulted: this process's own
+/// `PATH`. On a daemon that is the bare service `PATH` — the value that made
+/// user CLIs unfindable in the first place — so it is a floor, not an answer,
+/// and [`cached_user_path`] deliberately does not treat it as one.
+fn process_path_fallback() -> String {
     match std::env::var("PATH") {
         Ok(p) if !p.is_empty() => p,
         // Never return "" — `.env("PATH", "")` would disable lookup entirely,
@@ -69,8 +77,25 @@ pub async fn resolve_user_path() -> String {
 /// to be seen.
 const PATH_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// [`resolve_user_path`] with a process-wide 60s cache, for callers on a
-/// request path.
+/// How long a *failed* resolution is remembered. Far shorter than
+/// [`PATH_CACHE_TTL`], because what gets served in its place is the bare
+/// process `PATH`: a transient stall must not keep answering with the broken
+/// value, and the user's instinctive retry has to be able to clear it. Not
+/// zero, so a shell that is reliably hanging costs one 10s resolution per
+/// window rather than one per click.
+const PATH_CACHE_FAILURE_TTL: Duration = Duration::from_secs(15);
+
+/// A resolved `PATH` plus when and how it was obtained.
+struct CachedPath {
+    at: std::time::Instant,
+    path: String,
+    /// `true` when the login shell actually answered. A fallback value gets
+    /// [`PATH_CACHE_FAILURE_TTL`] instead of [`PATH_CACHE_TTL`].
+    from_login_shell: bool,
+}
+
+/// [`resolve_user_path`] with a process-wide cache, for callers on a request
+/// path.
 ///
 /// Resolution spawns an interactive login shell — sub-second normally, but up
 /// to [`PATH_RESOLVE_TIMEOUT`] when an rc file stalls, and the machines with
@@ -79,30 +104,56 @@ const PATH_CACHE_TTL: Duration = Duration::from_secs(60);
 /// that on every click of the management UI's stop/restart/action buttons and
 /// Veld Desktop's start button, whose `fetch` calls carry no timeout.
 ///
+/// A failed resolution is cached only briefly. `resolve_user_path` cannot fail
+/// — it falls back to this process's `PATH`, which on a daemon is the bare
+/// service one — so caching that for a full minute would make every command in
+/// the window fail to find the user's tools, indistinguishably from a real
+/// answer and un-clearable by retrying.
+///
+/// The daemon's health monitor calls this on its own scan cadence, so on a live
+/// daemon a request usually finds a warm entry and never waits on a shell.
+///
 /// Concurrent misses may each resolve — the lock is never held across the
 /// await, because a stalled shell must not serialise unrelated requests behind
 /// it, and the redundant work produces the same value.
 pub async fn cached_user_path() -> String {
-    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, String)>>> =
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<CachedPath>>> =
         std::sync::OnceLock::new();
     let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
 
     // A poisoned mutex would mean a panic while holding a `String` clone;
-    // treat it as a miss rather than propagating, since the fallback is only
+    // treat it as a miss rather than propagating, since the recovery is only
     // ever "resolve again".
     if let Ok(guard) = cache.lock() {
-        if let Some((at, path)) = guard.as_ref() {
-            if at.elapsed() < PATH_CACHE_TTL {
-                return path.clone();
+        if let Some(entry) = guard.as_ref() {
+            let ttl = if entry.from_login_shell {
+                PATH_CACHE_TTL
+            } else {
+                PATH_CACHE_FAILURE_TTL
+            };
+            if entry.at.elapsed() < ttl {
+                return entry.path.clone();
             }
         }
     }
 
-    let fresh = resolve_user_path().await;
-    if let Ok(mut guard) = cache.lock() {
-        *guard = Some((std::time::Instant::now(), fresh.clone()));
+    // Calls `login_shell_path` rather than `resolve_user_path` so the fallback
+    // is distinguishable from a real answer — the whole point of the two TTLs.
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+    let resolved = login_shell_path(&shell).await;
+    if let Some(path) = &resolved {
+        info!(path = %path, "resolved user PATH from login shell");
     }
-    fresh
+    let from_login_shell = resolved.is_some();
+    let path = resolved.unwrap_or_else(process_path_fallback);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(CachedPath {
+            at: std::time::Instant::now(),
+            path: path.clone(),
+            from_login_shell,
+        });
+    }
+    path
 }
 
 /// Run `shell -l -i -c 'command env'` and extract the `PATH=` line, bounded
