@@ -45,7 +45,8 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// (a share's relay/gateway tokens, a gateway boot), and the health monitor
 /// keeps its own 60s refresh. A healthy login shell answers in well under a
 /// second; only a hung rc file costs the full timeout, and then the fallback
-/// applies.
+/// applies. A caller on a **request path** — where that worst case is a
+/// user-visible stall — wants [`cached_user_path`] instead.
 pub async fn resolve_user_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
     if let Some(path) = login_shell_path(&shell).await {
@@ -59,6 +60,49 @@ pub async fn resolve_user_path() -> String {
         // prevent.
         _ => "/usr/local/bin:/usr/bin:/bin".to_owned(),
     }
+}
+
+/// How long a cached [`cached_user_path`] value stays fresh. Matches the
+/// health monitor's own re-resolution cadence: long enough that a burst of
+/// requests costs one login shell, short enough that a user who edits their
+/// `.zshrc` (or installs a version manager) doesn't have to restart the daemon
+/// to be seen.
+const PATH_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// [`resolve_user_path`] with a process-wide 60s cache, for callers on a
+/// request path.
+///
+/// Resolution spawns an interactive login shell — sub-second normally, but up
+/// to [`PATH_RESOLVE_TIMEOUT`] when an rc file stalls, and the machines with
+/// the slowest `.zshrc` are exactly the ones (nvm, rbenv, `brew shellenv`) that
+/// need the resolved PATH in the first place. Per-request resolution would put
+/// that on every click of the management UI's stop/restart/action buttons and
+/// Veld Desktop's start button, whose `fetch` calls carry no timeout.
+///
+/// Concurrent misses may each resolve — the lock is never held across the
+/// await, because a stalled shell must not serialise unrelated requests behind
+/// it, and the redundant work produces the same value.
+pub async fn cached_user_path() -> String {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<Option<(std::time::Instant, String)>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(None));
+
+    // A poisoned mutex would mean a panic while holding a `String` clone;
+    // treat it as a miss rather than propagating, since the fallback is only
+    // ever "resolve again".
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, path)) = guard.as_ref() {
+            if at.elapsed() < PATH_CACHE_TTL {
+                return path.clone();
+            }
+        }
+    }
+
+    let fresh = resolve_user_path().await;
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((std::time::Instant::now(), fresh.clone()));
+    }
+    fresh
 }
 
 /// Run `shell -l -i -c 'command env'` and extract the `PATH=` line, bounded

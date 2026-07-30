@@ -15,7 +15,7 @@ use tracing::warn;
 use veld_core::config;
 use veld_core::db::{Db, LogFilter, LogStream};
 use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
-use veld_core::user_path::resolve_user_path;
+use veld_core::user_path::cached_user_path;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -1054,9 +1054,19 @@ pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) 
     // and `export PATH=…` inside the command string is not fish syntax. Only
     // PATH is inherited, never the rest of the login environment — the same
     // contract the monitor's liveness probes and `SecretSource::Command` hold.
+    // The visible consequence: a node command that needs a variable exported
+    // only from `.zprofile`/`.profile` used to see it here and no longer does.
+    // Declare such a variable in the node's `env` instead of relying on the
+    // daemon's shell, which the CLI path never provided either.
+    //
     // Dropping the shell also drops the shell-escaping of a client-supplied
     // run name; arguments now reach the binary as argv.
-    let path_env = resolve_user_path().await;
+    //
+    // Cached (60s) rather than resolved per call: this runs inside the
+    // stop/restart/action/start handlers, whose UI `fetch` calls carry no
+    // timeout, and a stalled rc file would otherwise hang the click for the
+    // full 10s resolution budget.
+    let path_env = cached_user_path().await;
     spawn_veld_in(&veld_bin, &path_env, project_root, args)
 }
 
@@ -1134,8 +1144,19 @@ fn spawn_veld_in(
             });
             StatusCode::ACCEPTED
         }
+        // Without a shell in between, this arm now catches what the shell used
+        // to report as a nonzero exit with captured stderr: a project root that
+        // vanished since the registry lookup, and a veld binary that isn't
+        // executable. Structured like the exit-code warn above so both failure
+        // classes are one query, not two log shapes.
         Err(e) => {
-            warn!("failed to run veld {}: {e}", args.join(" "));
+            warn!(
+                command = %args.join(" "),
+                bin = %veld_bin,
+                cwd = %project_root.display(),
+                error = %e,
+                "failed to spawn veld command"
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -1143,8 +1164,12 @@ fn spawn_veld_in(
 
 /// Allow only conservative identifier characters for action/node names that
 /// originate from the browser. Kept as defence in depth now that arguments
-/// reach the CLI as argv rather than through a shell string: it also bounds
-/// what can be passed as a flag-shaped value.
+/// reach the CLI as argv rather than through a shell string: no shell parses
+/// these, but the charset still keeps whitespace, quotes and `=` out of an
+/// argv element. It does **not** reject a leading `-` — `--force` passes —
+/// which is unchanged from the shell-escaping era (single-quoting produced the
+/// same argv element); what stops a flag-shaped value is clap refusing it as
+/// the value of `--name`, plus the action-exists check above.
 pub(super) fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -1374,5 +1399,23 @@ mod tests {
         );
         // Arguments reach the CLI as argv, unquoted — no shell in between.
         assert_eq!(lines.next().unwrap(), "stop --name main");
+    }
+
+    /// A project root that no longer exists must fail the request, not answer
+    /// `202 ACCEPTED` for a run that will never appear. The old shell-wrapped
+    /// spawn always started successfully and let `cd … &&` short-circuit
+    /// inside the child, so this failure was visible only in the daemon's own
+    /// stderr capture; `current_dir` makes it synchronous.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn vanished_project_root_is_an_error_not_an_accept() {
+        let gone = tempfile::tempdir().unwrap();
+        let path = gone.path().to_path_buf();
+        drop(gone);
+
+        assert_eq!(
+            spawn_veld_in("/bin/echo", "/usr/bin:/bin", &path, &["stop".to_owned()]),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 }
