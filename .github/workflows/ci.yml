@@ -237,6 +237,11 @@ jobs:
   desktop-package:
     name: Desktop Packaging (${{ matrix.name }})
     needs: desktop
+    # This job downloads and runs third-party build tooling (the Electron dist,
+    # app-builder-bin), so it gets the token scope its release-workflow twin has
+    # rather than the repo default.
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:

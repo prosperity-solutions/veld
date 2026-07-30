@@ -88,6 +88,16 @@ test("versionSkew stays quiet when it cannot mean anything", () => {
     versionSkew({ appVersion: "12.4.0", daemonVersion: undefined, isPackaged: true }),
     null,
   );
+  // Anything that isn't a version string. Whatever answers /api/health is not
+  // necessarily veld's daemon, and a non-string would otherwise become a Set key
+  // that never matches the next poll's — re-notifying every minute forever.
+  for (const junk of [{}, [], 12, true, null]) {
+    assert.equal(
+      versionSkew({ appVersion: "12.4.0", daemonVersion: junk, isPackaged: true }),
+      null,
+      `daemonVersion ${JSON.stringify(junk)} must not report skew`,
+    );
+  }
 });
 
 test("releasePageUrl points at the tag, or at latest without one", () => {

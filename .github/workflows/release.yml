@@ -293,8 +293,8 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
-          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%P\n' \
-            | sort | xargs -r sha256sum > checksums.txt
+          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%P\0' \
+            | sort -z | xargs -0r sha256sum > checksums.txt
 
       - name: Write release notes
         run: echo "$RELEASE_NOTES" > release-notes.md

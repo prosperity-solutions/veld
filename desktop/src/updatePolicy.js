@@ -100,7 +100,17 @@ function compareVersions(a, b) {
  * @returns {{behind: "daemon" | "app", appVersion: string, daemonVersion: string} | null}
  */
 function versionSkew({ appVersion, daemonVersion, isPackaged }) {
-  if (!isPackaged || !appVersion || !daemonVersion) return null;
+  if (!isPackaged) return null;
+  // Strings only. `daemonVersion` comes off the wire from whatever answers
+  // `127.0.0.1:19899/api/health`, and a non-string sails through
+  // `compareVersions` (which coerces) into a `Set` key and a notification body:
+  // an object key is never equal to the next poll's, so the once-per-session
+  // guard stops guarding and the toast repeats every minute. A daemon that
+  // cannot state its version has nothing to say here anyway.
+  if (typeof appVersion !== "string" || typeof daemonVersion !== "string") {
+    return null;
+  }
+  if (!appVersion || !daemonVersion) return null;
   const diff = compareVersions(appVersion, daemonVersion);
   if (diff === 0) return null;
   return {
