@@ -471,9 +471,13 @@ export function nextFreeProfile(taken: Set<BrowserProfile>): BrowserProfile | nu
  * two windows sharing it is correct rather than a conflict.
  *
  * Partitions themselves stay global (`persist:veld-browser-<slot>`), so two
- * worktrees whose sets both contain slot 2 share that jar. Invisible in
- * practice — their runs are on different hostnames, so the cookies never meet —
- * and it keeps the slot name a plain identifier rather than a composite.
+ * worktrees whose sets both hold the same slot share that jar. That keeps the slot
+ * name a plain identifier rather than a composite, at a cost worth stating
+ * honestly: cookies scoped to the *project* rather than the run are shared (the
+ * default template is `{service}.{run}.{project}.localhost`, so only the run
+ * differs between worktrees), and a third-party origin — a login provider on its
+ * own domain — is shared unconditionally. Keying the partition by worktree as well
+ * is the fix if that ever bites.
  */
 export const SESSIONS_STORAGE_KEY = "veld.browserSessions.v1";
 

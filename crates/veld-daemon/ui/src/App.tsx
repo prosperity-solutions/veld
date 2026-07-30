@@ -739,8 +739,21 @@ function AppInner(props: {
     () => (worktree ? sessionSetFor(sessionSets, worktree.id, layout) : []),
     [sessionSets, worktree?.id, layout],
   );
-  const writeSessions = (next: Record<number, BrowserProfile[]>) =>
-    setSessionsRaw(serializeSessionSets(next));
+  /**
+   * Write one worktree's session set, merging onto what is *currently* on disk.
+   *
+   * Not onto the React copy: `usePersisted` reads localStorage in a `useState`
+   * initialiser and re-reads only when the key changes, and this key is a
+   * constant. A second `/ide` tab therefore holds a snapshot from its own boot,
+   * and writing that back would drop every change the other tab has made since —
+   * including other worktrees' sets, which this tab never touched. Sharing across
+   * tabs is the reason localStorage was chosen (see `SESSIONS_STORAGE_KEY`), so
+   * the read has to be as fresh as the write.
+   */
+  const writeSessions = (worktreeId: number, slots: BrowserProfile[]) => {
+    const onDisk = parseSessionSets(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
+    setSessionsRaw(serializeSessionSets({ ...onDisk, [worktreeId]: slots }));
+  };
 
   // A new session is taken from the slots this worktree does not already list —
   // not from page-wide occupancy, so two worktrees can each hold slot 2 (their
@@ -748,7 +761,7 @@ function AppInner(props: {
   const nextSession = worktree ? nextFreeProfile(new Set(sessions)) : null;
   const addSession = (tabId: string) => {
     if (!worktree || !nextSession || !layout) return;
-    writeSessions({ ...sessionSets, [worktree.id]: [...sessions, nextSession] });
+    writeSessions(worktree.id, [...sessions, nextSession]);
     // Adding is only ever worth doing to put this pane on it.
     setLayout((prev) => updateTab(prev, tabId, { profile: nextSession }));
   };
@@ -758,10 +771,7 @@ function AppInner(props: {
   // are per worktree — another worktree still lists (and holds) its own.
   const removeSession = (profile: BrowserProfile) => {
     if (!worktree || profile === "default") return;
-    writeSessions({
-      ...sessionSets,
-      [worktree.id]: sessions.filter((p) => p !== profile),
-    });
+    writeSessions(worktree.id, sessions.filter((p) => p !== profile));
     setLayout((prev) =>
       allTabs(prev)
         .filter((t) => t.kind === "browser" && (t.profile ?? "default") === profile)

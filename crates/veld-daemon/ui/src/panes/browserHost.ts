@@ -168,6 +168,23 @@ function localError(text: string): BrowserError {
   return { kind: "load", code: null, text, url: "" };
 }
 
+/**
+ * Surface a rejected bridge call on the pane instead of dropping it.
+ *
+ * Every command is issued after the pane has already been patched optimistically
+ * (`loading: true, error: null`), so swallowing the rejection leaves a spinner
+ * that never resolves and hides the error it replaced.
+ */
+function reportFailure(v: View): (e: unknown) => void {
+  return (e: unknown) => {
+    patch(v, {
+      loading: false,
+      error: localError(e instanceof Error ? e.message : String(e)),
+    });
+    applyVisibility(v);
+  };
+}
+
 function notify(v: View): void {
   for (const fn of v.listeners) fn();
 }
@@ -471,7 +488,7 @@ export function browserCommand(id: string, command: "back" | "forward" | "stop")
   const v = views.get(id);
   if (!v) return;
   if (desktop) {
-    void desktop.command(id, command);
+    void desktop.command(id, command).catch(reportFailure(v));
   }
   // The iframe backend has no history to walk and nothing to cancel: the
   // buttons are disabled, and this is only reachable via the palette.
@@ -483,7 +500,7 @@ export function reloadBrowser(id: string): void {
   patch(v, { loading: true, error: null });
   applyVisibility(v);
   if (desktop) {
-    void desktop.command(id, "reload");
+    void desktop.command(id, "reload").catch(reportFailure(v));
     return;
   }
   const frame = v.iframe;

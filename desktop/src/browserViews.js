@@ -147,7 +147,17 @@ function attachListeners(window, viewId, entry) {
   // system trust store the load fails here — report it and point at the fix.
   // Never `event.preventDefault()`: silently trusting a bad certificate inside
   // an embedded view is exactly the hole this pane must not open.
-  wc.on("certificate-error", (_e, url, error) => {
+  // Main frame only — `isMainFrame` is the 6th parameter of the *webContents*
+  // form of this event (the 7-parameter form with a `webContents` argument is
+  // `app.on`). A subresource with a bad certificate inside a page that rendered
+  // fine would otherwise raise a full-pane error screen, which `covered()` in the
+  // renderer answers by hiding the live view — and it would stick, because the
+  // error is only cleared by `did-start-loading`, which a subresource failure
+  // never fires. Nothing is lost by filtering: a main-frame certificate failure
+  // also arrives as `did-fail-load` with −200..−299, which `describeBrowserError`
+  // already maps to `cert`.
+  wc.on("certificate-error", (_e, url, error, _certificate, _callback, isMainFrame) => {
+    if (!isMainFrame) return;
     push({ kind: "cert", code: null, text: String(error), url });
   });
 
@@ -343,6 +353,12 @@ function registerBrowserViewIpc(resolveWindow) {
     const found = lookup(event, args?.viewId);
     if (!found) return;
     const wc = found.entry.view.webContents;
+    // A guest that closed itself leaves the entry holding a dead WebContents, and
+    // every call below throws on one. The renderer has already patched the pane
+    // optimistically by this point (`loading: true, error: null`), so a throw here
+    // strands it on a spinner with the real error wiped — see `stateOf`, which
+    // guards for the same reason.
+    if (wc.isDestroyed()) return;
     switch (args?.command) {
       case "back":
         wc.navigationHistory.goBack();

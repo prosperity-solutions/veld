@@ -229,28 +229,6 @@ function DockView(props: {
   // Which tab currently shows a drop indicator, and on which side.
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
 
-  const openTerminal = () =>
-    onLayout(
-      addTab(layout, index, {
-        id: newTabId(),
-        kind: "terminal",
-        title: "terminal",
-      }),
-    );
-
-  /**
-   * Open a browser tab. From the services list it goes to the *other* dock when
-   * that one is visible — the point of "open in a pane" is to see the service
-   * next to the list it was launched from, not to replace it.
-   */
-  const openBrowser = (tab: PaneTab, beside = false) => {
-    const target =
-      beside && dockVisible(layout, index === 0 ? 1 : 0)
-        ? ((index === 0 ? 1 : 0) as DockIndex)
-        : index;
-    onLayout(addTab(layout, target, tab));
-  };
-
   /**
    * Turn the `new` pane the user is choosing from into the kind they picked, or
    * open a fresh tab when there is nothing to convert (an empty dock).
@@ -404,12 +382,21 @@ function DockView(props: {
             </ActionIcon>
           </Menu.Target>
           <Menu.Dropdown>
-            <Menu.Item leftSection={<IconTerminal2 size={14} />} onClick={openTerminal}>
+            {/* Through `convertOrAdd`, not `addTab`: clicking `+` opens a `new`
+                pane and hovering it opens this menu, so the two compose — picking
+                a kind here has to consume that pane rather than leave it orphaned
+                beside the one it just made. */}
+            <Menu.Item
+              leftSection={<IconTerminal2 size={14} />}
+              onClick={() =>
+                convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
+              }
+            >
               New terminal
             </Menu.Item>
             <Menu.Item
               leftSection={<IconWorld size={14} />}
-              onClick={() => openBrowser(browserTab({}))}
+              onClick={() => convertOrAdd(active, browserTab({}))}
             >
               New browser pane
             </Menu.Item>
@@ -427,7 +414,7 @@ function DockView(props: {
               <Menu.Item
                 key={name}
                 leftSection={<IconWorld size={14} />}
-                onClick={() => openBrowser(browserTab({ url, title: name }))}
+                onClick={() => convertOrAdd(active, browserTab({ url, title: name }))}
               >
                 {name}
               </Menu.Item>
