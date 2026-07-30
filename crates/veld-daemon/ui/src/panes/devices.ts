@@ -25,6 +25,21 @@
 export const CUSTOM_DEVICE = "custom";
 
 /**
+ * The id of the resizable viewport — the one you drag rather than pick.
+ *
+ * A fixed list cannot cover the size your layout actually breaks at, and finding
+ * that size is most of what this feature is for: you drag until it breaks and then
+ * read the number off the chrome. It starts at whatever the pane can hold, so
+ * turning it on changes nothing visually and only adds the handles.
+ *
+ * Distinct from [`CUSTOM_DEVICE`] because they mean different things to a reader:
+ * "Responsive" is a mode you are in, while "Custom" is a size you set on a device.
+ * Dragging a *preset* therefore lands on `custom` (it is no longer that class),
+ * while dragging the responsive viewport stays responsive.
+ */
+export const RESPONSIVE_DEVICE = "responsive";
+
+/**
  * Bounds on an emulated viewport.
  *
  * The lower one is below any real device because rotating a 120-wide viewport is
@@ -113,53 +128,51 @@ export interface DevicePreset {
 }
 
 /**
- * The menu.
+ * The user agents the mobile classes send.
  *
- * Deliberately short. This is a layout-checking tool, not a device lab: two
- * phone sizes per platform, two tablets, and the screen sizes that do not fit in
- * a pane, which are the reason `fit` exists. Sizes are CSS pixels as the device
- * reports them, so they match what a page's media queries see.
+ * Android Chrome rather than iOS Safari, for both: `{chrome}` keeps the version
+ * honest against the engine actually making the request ([`resolveUserAgent`]),
+ * which an iOS string cannot do — it would have to carry a hardcoded iOS release
+ * that goes stale silently. The load-bearing part of a mobile UA for a dev preview
+ * is the `Mobile` token and the platform, not which vendor it names. A test that
+ * genuinely needs iOS sniffing wants a real device, not an emulated one.
+ *
+ * The tablet string drops `Mobile`, because that token is exactly how a server
+ * tells a tablet from a phone.
+ */
+const MOBILE_UA =
+  "Mozilla/5.0 (Linux; Android 16; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36";
+const TABLET_UA =
+  "Mozilla/5.0 (Linux; Android 16; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Safari/537.36";
+
+/**
+ * The menu: **size classes, not model names.**
+ *
+ * A list of named handsets is the thing everyone dislikes about the browser
+ * devtools version of this — it is long, it is a year out of date the moment it
+ * ships, and "iPhone 14 Pro" tells you nothing about the only question you are
+ * asking, which is *how wide*. So the classes are named by what they are, and each
+ * one carries the metrics a current device of that class actually reports:
+ *
+ * - phones: 360 is the commonest Android viewport, 402 the current flagship
+ *   width, 440 the large/Max end
+ * - tablets: the 8-inch, 11-inch and 13-inch classes
+ * - screens: a 14-inch laptop at its default scaled resolution, a 24-inch 1080p
+ *   monitor, and a 27-inch QHD one
+ *
+ * Anything between them is a drag away — [`RESPONSIVE_DEVICE`] and the custom
+ * size are what a fixed list can never cover, which is also why this one stays
+ * short instead of trying.
+ *
+ * Sizes are CSS pixels as the device reports them, so they are what a page's media
+ * queries see. Device pixel ratios are integers because Electron types the
+ * parameter that way; a real 2.625 or 3.75 rounds, which changes which `srcset`
+ * candidate is picked and nothing about layout.
  */
 export const DEVICE_PRESETS: readonly DevicePreset[] = [
   {
-    id: "iphone-se",
-    label: "iPhone SE",
-    group: "Phones",
-    width: 375,
-    height: 667,
-    deviceScaleFactor: 2,
-    radius: 40,
-    mobile: true,
-    touch: true,
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-  },
-  {
-    id: "iphone-pro",
-    label: "iPhone Pro",
-    group: "Phones",
-    width: 393,
-    height: 852,
-    deviceScaleFactor: 3,
-    radius: 48,
-    mobile: true,
-    touch: true,
-    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
-  },
-  {
-    id: "pixel",
-    label: "Pixel",
-    group: "Phones",
-    width: 412,
-    height: 915,
-    deviceScaleFactor: 3,
-    radius: 40,
-    mobile: true,
-    touch: true,
-    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
-  },
-  {
-    id: "galaxy",
-    label: "Galaxy S",
+    id: "phone-small",
+    label: "Small phone",
     group: "Phones",
     width: 360,
     height: 780,
@@ -167,38 +180,77 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     radius: 36,
     mobile: true,
     touch: true,
-    ua: "Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
+    ua: MOBILE_UA,
   },
   {
-    id: "ipad-mini",
-    label: "iPad mini",
+    id: "phone",
+    label: "Phone",
+    group: "Phones",
+    width: 402,
+    height: 874,
+    deviceScaleFactor: 3,
+    radius: 44,
+    mobile: true,
+    touch: true,
+    ua: MOBILE_UA,
+  },
+  {
+    id: "phone-large",
+    label: "Large phone",
+    group: "Phones",
+    width: 440,
+    height: 956,
+    deviceScaleFactor: 3,
+    radius: 48,
+    mobile: true,
+    touch: true,
+    ua: MOBILE_UA,
+  },
+  {
+    id: "tablet-small",
+    label: "Small tablet",
     group: "Tablets",
     width: 744,
     height: 1133,
     deviceScaleFactor: 2,
-    radius: 22,
+    radius: 20,
     mobile: true,
     touch: true,
-    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: TABLET_UA,
   },
   {
-    id: "ipad-pro",
-    label: 'iPad Pro 11"',
+    id: "tablet",
+    label: "Tablet",
     group: "Tablets",
-    width: 834,
-    height: 1194,
+    width: 820,
+    height: 1180,
     deviceScaleFactor: 2,
     radius: 22,
     mobile: true,
     touch: true,
-    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+    ua: TABLET_UA,
   },
   {
+    id: "tablet-large",
+    label: "Large tablet",
+    group: "Tablets",
+    width: 1024,
+    height: 1366,
+    deviceScaleFactor: 2,
+    radius: 22,
+    mobile: true,
+    touch: true,
+    ua: TABLET_UA,
+  },
+  {
+    // A 14-inch laptop's *default scaled* resolution, not its panel: that is what
+    // the browser lays out against, and it is the one screen size where the two
+    // differ enough to matter.
     id: "laptop",
-    label: "Laptop",
+    label: 'Laptop 14"',
     group: "Screens",
-    width: 1280,
-    height: 800,
+    width: 1512,
+    height: 982,
     deviceScaleFactor: 2,
     radius: 10,
     mobile: false,
@@ -207,19 +259,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
   },
   {
     id: "desktop",
-    label: "Desktop",
-    group: "Screens",
-    width: 1440,
-    height: 900,
-    deviceScaleFactor: 1,
-    radius: 8,
-    mobile: false,
-    touch: false,
-    ua: null,
-  },
-  {
-    id: "desktop-hd",
-    label: "Desktop HD",
+    label: 'Desktop 24"',
     group: "Screens",
     width: 1920,
     height: 1080,
@@ -229,6 +269,18 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     touch: false,
     ua: null,
   },
+  {
+    id: "widescreen",
+    label: 'Widescreen 27"',
+    group: "Screens",
+    width: 2560,
+    height: 1440,
+    deviceScaleFactor: 1,
+    radius: 8,
+    mobile: false,
+    touch: false,
+    ua: null,
+  }
 ];
 
 /** The groups in menu order, derived so adding a preset needs no second edit. */
@@ -317,6 +369,67 @@ export function customEmulation(
   };
 }
 
+/**
+ * The resizable viewport, starting at the size the pane can currently hold.
+ *
+ * Deliberately a plain desktop viewport: it is "the pane, but with a number on it
+ * and handles to drag", so claiming a device pixel ratio, touch support or a mobile
+ * user agent would make turning it on change how the page *behaves* rather than
+ * just how wide it is. The toggles are there if you want any of that.
+ */
+export function responsiveEmulation(width: number, height: number): PaneEmulation {
+  return {
+    device: RESPONSIVE_DEVICE,
+    width: clampDevicePx(width),
+    height: clampDevicePx(height),
+    deviceScaleFactor: 0,
+    mobile: false,
+    touch: false,
+    ua: null,
+    // Fitting on, so dragging *past* what the pane can show scales it down rather
+    // than cropping it — the same rule as a screen preset too big for the pane.
+    fit: true,
+    radius: CUSTOM_RADIUS,
+  };
+}
+
+/**
+ * The emulation a drag lands on.
+ *
+ * Keeps every flag — a phone dragged narrower is still a phone, with its touch
+ * events and its user agent — and only the identity changes: a dragged preset
+ * becomes `custom`, because it is no longer the class the menu named, while the
+ * responsive viewport stays itself. The shape goes with the flags, so a dragged
+ * phone keeps its rounded screen.
+ */
+export function resizeEmulation(e: PaneEmulation, width: number, height: number): PaneEmulation {
+  return {
+    ...e,
+    device: e.device === RESPONSIVE_DEVICE ? RESPONSIVE_DEVICE : CUSTOM_DEVICE,
+    width: clampDevicePx(width),
+    height: clampDevicePx(height),
+  };
+}
+
+/**
+ * Turn the mobile user agent on or off, whatever size is set.
+ *
+ * The one device claim worth changing independently of the size: "does my app
+ * serve the mobile bundle at this width" and "does my layout survive this width"
+ * are different questions, and a custom or responsive size has no preset to
+ * inherit a UA from at all. Sends the tablet string above the phone classes' widest
+ * point, since dropping `Mobile` is exactly how a server tells the two apart.
+ */
+export function withMobileUserAgent(
+  e: PaneEmulation,
+  on: boolean,
+  chrome?: string,
+): PaneEmulation {
+  if (!on) return { ...e, ua: null, mobile: false };
+  const template = e.width > 600 ? TABLET_UA : MOBILE_UA;
+  return { ...e, ua: resolveUserAgent(template, chrome), mobile: true };
+}
+
 /** Swap width and height. The preset id is kept: it is still that device, held
  *  the other way round, and [`isLandscape`] tells the label which way. */
 export function rotateEmulation(e: PaneEmulation): PaneEmulation {
@@ -348,6 +461,7 @@ export function emulationSize(e: PaneEmulation): string {
  * with metrics and no matching device is.
  */
 export function emulationLabel(e: PaneEmulation): string {
+  if (e.device === RESPONSIVE_DEVICE) return "Responsive";
   const preset = presetById(e.device);
   if (!preset) return "Custom";
   const rotated = isLandscape(e) !== preset.width > preset.height;
@@ -544,7 +658,11 @@ export function sanitizeEmulation(raw: unknown): PaneEmulation | null {
   if (!Number.isFinite(Number(e.width)) || !Number.isFinite(Number(e.height))) return null;
   const dsf = Number(e.deviceScaleFactor);
   return {
-    device: typeof e.device === "string" && presetById(e.device) ? e.device : CUSTOM_DEVICE,
+    device:
+      e.device === RESPONSIVE_DEVICE ||
+      (typeof e.device === "string" && presetById(e.device) !== null)
+        ? e.device
+        : CUSTOM_DEVICE,
     width: clampDevicePx(Number(e.width)),
     height: clampDevicePx(Number(e.height)),
     // 0 means "the host display's", which is also the honest answer for a value

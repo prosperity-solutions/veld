@@ -79,6 +79,22 @@ export interface BrowserState {
    */
   emulationScale: number;
   /**
+   * The emulated screen's box inside the pane's content area, in CSS pixels; the
+   * full content area when no device is set.
+   *
+   * Published because the *resize handles* are React's — they have to sit exactly
+   * on the screen's edges, and only `syncGeometry` knows where those are. Kept as
+   * four numbers rather than a rect object so `patch`'s `!==` comparison still
+   * works; a new object every frame would re-render every pane on every tick.
+   */
+  deviceX: number;
+  deviceY: number;
+  deviceWidth: number;
+  deviceHeight: number;
+  /** Whether a resize drag is in progress, which hides the native view so the
+   *  renderer receives the pointer at all. */
+  resizing: boolean;
+  /**
    * Whether touch emulation is *actually* in force.
    *
    * Separate from the `touch` the pane asked for, because touch needs Chromium's
@@ -373,7 +389,7 @@ export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
 
 /** Whether a mounted view should currently be on screen. */
 function shouldShow(v: View): boolean {
-  return v.mounted && suspendDepth === 0 && !covered(v);
+  return v.mounted && suspendDepth === 0 && !covered(v) && !v.state.resizing;
 }
 
 /**
@@ -507,6 +523,11 @@ export function browserStatus(id: string): BrowserState {
       profile: "default",
       loaded: false,
       emulationScale: 1,
+      deviceX: 0,
+      deviceY: 0,
+      deviceWidth: 0,
+      deviceHeight: 0,
+      resizing: false,
       touchActive: false,
       devToolsOpen: false,
     }
@@ -574,6 +595,11 @@ function ensure(id: string, options: BrowserViewOptions): View {
       profile,
       loaded: false,
       emulationScale: 1,
+      deviceX: 0,
+      deviceY: 0,
+      deviceWidth: 0,
+      deviceHeight: 0,
+      resizing: false,
       touchActive: false,
       devToolsOpen: false,
     },
@@ -761,6 +787,27 @@ export function setBrowserEmulation(id: string, emulation: PaneEmulation | null)
   void desktop.emulate(id, emulation).catch(reportFailure(v));
 }
 
+/**
+ * Enter or leave a resize drag.
+ *
+ * The native view has to go for the duration, and not for looks: a
+ * `WebContentsView` is an OS-level sibling of the page, so while the pointer is
+ * over it the *guest* receives the events and this document sees nothing — not the
+ * moves, and not the `pointerup` either, which would leave the drag stuck on
+ * whatever the cursor last crossed. With the view hidden the pane is all DOM: the
+ * backdrop, and the outline the pane draws at the size being dragged.
+ *
+ * No frozen still while dragging, deliberately — the still is a picture of the
+ * *old* size, and stretching it to follow the drag is the one thing that would
+ * make the new size unreadable.
+ */
+export function setBrowserResizing(id: string, resizing: boolean): void {
+  const v = views.get(id);
+  if (!v) return;
+  patch(v, { resizing });
+  applyVisibility(v);
+}
+
 /** Page zoom for one pane. Stored live for the same recreation reason as the
  *  emulation; under the iframe backend there is no zoom to set (see
  *  [`syncGeometry`]). */
@@ -857,12 +904,22 @@ function syncGeometry(v: View): void {
     v.frame.style.removeProperty("border-radius");
     delete v.container.dataset.emulated;
     if (v.iframe) resetIframe(v.iframe);
+    patch(v, { deviceX: 0, deviceY: 0, deviceWidth: box.width, deviceHeight: box.height });
     pushGeometry(v, { x: box.left, y: box.top, width: box.width, height: box.height }, 1, 0);
     return;
   }
 
   const layout = deviceLayout(e, box);
   const radius = scaledRadius(e, layout.scale);
+  // Container-local, which is the coordinate space the pane's own resize handles
+  // are positioned in — the page rect below is the same box in window coordinates,
+  // which is what a native view's bounds are relative to.
+  patch(v, {
+    deviceX: layout.x,
+    deviceY: layout.y,
+    deviceWidth: layout.width,
+    deviceHeight: layout.height,
+  });
   v.container.dataset.emulated = "true";
   v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
   v.frame.style.width = `${layout.width}px`;

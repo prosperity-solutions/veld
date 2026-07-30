@@ -50,11 +50,14 @@ import { VeldLinks } from "./VeldLinks";
 import {
   DEFAULT_ZOOM,
   DEVICE_GROUPS,
+  DEVICE_PADDING,
   DEVICE_PRESETS,
   MAX_DEVICE_PX,
   MIN_DEVICE_PX,
   type PaneEmulation,
+  RESPONSIVE_DEVICE,
   chromeVersionFrom,
+  clampDevicePx,
   clampZoom,
   customEmulation,
   emulationForPreset,
@@ -64,7 +67,10 @@ import {
   formatZoom,
   isLandscape,
   orientationLabel,
+  resizeEmulation,
+  responsiveEmulation,
   rotateEmulation,
+  withMobileUserAgent,
   zoomStep,
 } from "./devices";
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
@@ -79,6 +85,7 @@ import {
   paneCovers,
   reloadBrowser,
   setBrowserEmulation,
+  setBrowserResizing,
   setBrowserZoom,
   subscribeBrowser,
   unmountBrowser,
@@ -292,6 +299,60 @@ export function BrowserPane(props: {
     const next = clampZoom(factor);
     setBrowserZoom(id, next);
     onTab({ zoom: next === DEFAULT_ZOOM ? undefined : next });
+  };
+
+  // ---- Dragging the screen's edges ---------------------------------------
+  //
+  // The size a fixed list can never contain: you drag until the layout breaks and
+  // read the number off the chrome. Any device can be dragged — a phone dragged
+  // narrower keeps its touch events and its user agent and becomes a custom size —
+  // while the responsive viewport stays itself.
+  //
+  // The pointer is captured on the handle, and the native view is hidden for the
+  // duration (`setBrowserResizing`): while the cursor is over a `WebContentsView`
+  // the *guest* gets the events and this document sees neither the moves nor the
+  // `pointerup`, which would strand the drag.
+  const [drag, setDrag] = useState<{ width: number; height: number } | null>(null);
+  const startResize = (event: React.PointerEvent, axis: "x" | "y" | "both") => {
+    if (!emulation) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const handle = event.currentTarget as HTMLElement;
+    handle.setPointerCapture(event.pointerId);
+    const originX = event.clientX;
+    const originY = event.clientY;
+    const from = { width: emulation.width, height: emulation.height };
+    // The drag moves the *screen's* edge, and the screen is drawn at `scale`; so a
+    // pointer moved 100px widens a viewport shown at 50% by 200 of its own pixels.
+    const factor = state.emulationScale > 0 ? 1 / state.emulationScale : 1;
+    let latest = from;
+    setDrag(from);
+    setBrowserResizing(id, true);
+
+    const move = (e: PointerEvent) => {
+      const width =
+        axis === "y" ? from.width : clampDevicePx(from.width + (e.clientX - originX) * factor);
+      const height =
+        axis === "x" ? from.height : clampDevicePx(from.height + (e.clientY - originY) * factor);
+      latest = { width, height };
+      setDrag(latest);
+    };
+    const finish = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", finish);
+      handle.removeEventListener("pointercancel", finish);
+      setDrag(null);
+      setBrowserResizing(id, false);
+      // Applied on release rather than on every move: each apply is an
+      // `enableDeviceEmulation`, which relayouts the guest page, and a layout write
+      // per pointer move would also fill the undo-less layout history with noise.
+      if (latest.width !== from.width || latest.height !== from.height) {
+        applyEmulation(resizeEmulation(emulation, latest.width, latest.height));
+      }
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", finish);
+    handle.addEventListener("pointercancel", finish);
   };
 
   // Empty means "keep the current one", so one field can be changed without
@@ -530,6 +591,26 @@ export function BrowserPane(props: {
                 >
                   Pane size
                 </Menu.Item>
+                {/* The size no list can contain. Starts at what the pane can hold,
+                    so turning it on changes nothing except that the screen now has
+                    edges you can drag and a number on it. */}
+                <Menu.Item
+                  fw={emulation?.device === RESPONSIVE_DEVICE ? 700 : undefined}
+                  leftSection={
+                    emulation?.device === RESPONSIVE_DEVICE ? <IconCheck size={14} /> : undefined
+                  }
+                  onClick={() =>
+                    applyEmulation(
+                      responsiveEmulation(
+                        state.deviceWidth - DEVICE_PADDING * 2,
+                        state.deviceHeight - DEVICE_PADDING * 2,
+                      ),
+                    )
+                  }
+                  rightSection={<span className="menu-size faint">drag to resize</span>}
+                >
+                  Responsive
+                </Menu.Item>
                 {DEVICE_GROUPS.map((group) => (
                   <div key={group}>
                     <Menu.Label>{group}</Menu.Label>
@@ -611,6 +692,22 @@ export function BrowserPane(props: {
                   }
                 >
                   Touch events
+                </Menu.Item>
+                {/* Separate from the size, because "does my app serve the mobile
+                    bundle at this width" and "does my layout survive this width" are
+                    different questions — and a responsive or custom size has no
+                    preset to inherit a user agent from at all. Reloads the pane: a
+                    document reads `navigator.userAgent` once, while it loads. */}
+                <Menu.Item
+                  closeMenuOnClick={false}
+                  leftSection={emulation?.ua ? <IconCheck size={14} /> : undefined}
+                  disabled={!emulation || iframeBackend}
+                  onClick={() =>
+                    emulation &&
+                    applyEmulation(withMobileUserAgent(emulation, !emulation.ua, HOST_CHROME))
+                  }
+                >
+                  Mobile user agent
                 </Menu.Item>
                 {/* Touch needs Chromium's debugger session, which something else
                     can hold — DevTools does on some Electron versions, though not
@@ -737,8 +834,67 @@ export function BrowserPane(props: {
 
       {/* The view's box. Nothing may be painted over this — under Electron the
           content is a native view that ignores z-index. The placeholder below
-          only renders while there is no page, so it never overlaps one. */}
+          only renders while there is no page, so it never overlaps one; the resize
+          handles sit in the gap *around* the emulated screen, which is DOM the
+          native view does not cover. */}
       <div className="browser-slot" ref={slot}>
+        {/* Drag any edge to resize the emulated screen — the answer to "which
+            width does this break at", which no list of devices can give you. The
+            handles are only reachable because an emulated screen is inset from the
+            pane: under Electron the view covers its own rect and swallows the
+            pointer there. */}
+        {emulation && !covered && !drag && (
+          <>
+            <div
+              className="device-handle east"
+              role="separator"
+              aria-label="Resize the emulated screen horizontally"
+              style={{
+                left: state.deviceX + state.deviceWidth + 4,
+                top: state.deviceY + state.deviceHeight / 2 - 17,
+              }}
+              onPointerDown={(e) => startResize(e, "x")}
+            />
+            <div
+              className="device-handle south"
+              role="separator"
+              aria-label="Resize the emulated screen vertically"
+              style={{
+                left: state.deviceX + state.deviceWidth / 2 - 17,
+                top: state.deviceY + state.deviceHeight + 4,
+              }}
+              onPointerDown={(e) => startResize(e, "y")}
+            />
+            <div
+              className="device-handle corner"
+              role="separator"
+              aria-label="Resize the emulated screen"
+              style={{
+                left: state.deviceX + state.deviceWidth + 3,
+                top: state.deviceY + state.deviceHeight + 3,
+              }}
+              onPointerDown={(e) => startResize(e, "both")}
+            />
+          </>
+        )}
+        {/* While the pointer is down the native view is hidden — it would take the
+            events otherwise — so this outline is the only thing moving. Drawn at the
+            pre-drag scale so its edge tracks the cursor one-to-one. */}
+        {drag && (
+          <div
+            className="device-outline"
+            style={{
+              left: state.deviceX,
+              top: state.deviceY,
+              width: drag.width * state.emulationScale,
+              height: drag.height * state.emulationScale,
+            }}
+          >
+            <span>
+              {drag.width} × {drag.height}
+            </span>
+          </div>
+        )}
         {/* Everything below stands in for the native view, and only ever while
             it is hidden — `covered()` in browserHost decides that from the same
             state, so a screen can never end up painted under a live page. The

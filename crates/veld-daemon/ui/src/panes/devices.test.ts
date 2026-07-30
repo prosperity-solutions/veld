@@ -9,6 +9,7 @@ import {
   MAX_DEVICE_PX,
   MAX_DEVICE_RADIUS,
   MIN_DEVICE_PX,
+  RESPONSIVE_DEVICE,
   ZOOM_STEPS,
   chromeVersionFrom,
   clampZoom,
@@ -22,16 +23,19 @@ import {
   isLandscape,
   orientationLabel,
   presetById,
+  resizeEmulation,
   resolveUserAgent,
+  responsiveEmulation,
   rotateEmulation,
   safeUserAgentText,
   sanitizeEmulation,
   sanitizeZoom,
   scaledRadius,
+  withMobileUserAgent,
   zoomStep,
 } from "./devices";
 
-const phone = () => emulationForPreset(presetById("iphone-pro")!, { chrome: "143.0.0.0" });
+const phone = () => emulationForPreset(presetById("phone")!, { chrome: "143.0.0.0" });
 const desktop = () => emulationForPreset(presetById("desktop")!, {});
 
 describe("the preset table", () => {
@@ -87,33 +91,39 @@ describe("the preset table", () => {
 describe("emulationForPreset", () => {
   it("carries the preset's metrics and resolves its user agent", () => {
     const e = phone();
-    expect(e).toMatchObject({ device: "iphone-pro", width: 393, height: 852, touch: true });
+    expect(e).toMatchObject({ device: "phone", width: 402, height: 874, touch: true });
     expect(e.fit).toBe(true);
-    const pixel = emulationForPreset(presetById("pixel")!, { chrome: "143.0.0.0" });
-    expect(pixel.ua).toContain("Chrome/143.0.0.0 Mobile");
-    expect(pixel.ua).not.toContain("{chrome}");
+    // The mobile classes carry the host Chromium's version, so a UA never claims a
+    // release older than the engine sending the request.
+    expect(e.ua).toContain("Chrome/143.0.0.0 Mobile");
+    expect(e.ua).not.toContain("{chrome}");
+    // A tablet's UA drops `Mobile`, which is exactly how a server tells the two
+    // classes apart.
+    const tablet = emulationForPreset(presetById("tablet")!, { chrome: "143.0.0.0" });
+    expect(tablet.ua).toContain("Chrome/143.0.0.0 Safari");
+    expect(tablet.ua).not.toContain("Mobile");
   });
 
   it("opens landscape when asked, keeping the preset's identity", () => {
-    const e = emulationForPreset(presetById("iphone-pro")!, { landscape: true });
-    expect([e.width, e.height]).toEqual([852, 393]);
-    expect(e.device).toBe("iphone-pro");
-    expect(emulationLabel(e)).toBe("iPhone Pro · landscape");
+    const e = emulationForPreset(presetById("phone")!, { landscape: true });
+    expect([e.width, e.height]).toEqual([874, 402]);
+    expect(e.device).toBe("phone");
+    expect(emulationLabel(e)).toBe("Phone · landscape");
   });
 });
 
 describe("rotate and label", () => {
   it("swaps the axes and says which way round it is", () => {
     const e = phone();
-    expect(emulationLabel(e)).toBe("iPhone Pro");
+    expect(emulationLabel(e)).toBe("Phone");
     const sideways = rotateEmulation(e);
-    expect([sideways.width, sideways.height]).toEqual([852, 393]);
+    expect([sideways.width, sideways.height]).toEqual([874, 402]);
     expect(isLandscape(sideways)).toBe(true);
-    expect(emulationLabel(sideways)).toBe("iPhone Pro · landscape");
+    expect(emulationLabel(sideways)).toBe("Phone · landscape");
     // A screen preset is landscape *already*, so rotating one is what reads as
     // "· landscape" turning off rather than on.
-    expect(emulationLabel(desktop())).toBe("Desktop");
-    expect(emulationLabel(rotateEmulation(desktop()))).toBe("Desktop · landscape");
+    expect(emulationLabel(desktop())).toBe('Desktop 24"');
+    expect(emulationLabel(rotateEmulation(desktop()))).toBe("Desktop 24\" · landscape");
     // Twice is a round trip.
     expect(rotateEmulation(sideways)).toEqual(e);
     // The state the Rotate control is in, which is otherwise only inferable by
@@ -125,7 +135,7 @@ describe("rotate and label", () => {
   it("calls an emulation with no matching preset what it is", () => {
     // A preset that has since been renamed or removed. The metrics are still
     // valid, so the emulation survives — it just isn't that device any more.
-    expect(emulationLabel({ ...phone(), device: "iphone-42" })).toBe("Custom");
+    expect(emulationLabel({ ...phone(), device: "phone-42" })).toBe("Custom");
     expect(emulationLabel(customEmulation(500, 900))).toBe("Custom");
     expect(emulationSize(customEmulation(500, 900))).toBe("500 × 900");
   });
@@ -166,6 +176,80 @@ describe("customEmulation", () => {
   });
 });
 
+describe("the resizable viewport", () => {
+  it("starts as the pane, with nothing claimed about the device", () => {
+    // "The pane, but with a number on it and edges you can drag." Claiming touch,
+    // a DPR or a mobile UA would make turning it on change how the page behaves
+    // rather than only how wide it is.
+    const r = responsiveEmulation(900, 600);
+    expect(r).toEqual({
+      device: RESPONSIVE_DEVICE,
+      width: 900,
+      height: 600,
+      deviceScaleFactor: 0,
+      mobile: false,
+      touch: false,
+      ua: null,
+      fit: true,
+      radius: CUSTOM_RADIUS,
+    });
+    expect(emulationLabel(r)).toBe("Responsive");
+    // Clamped like any other size, so a drag past the bounds cannot store one.
+    expect(responsiveEmulation(1, 99999)).toMatchObject({
+      width: MIN_DEVICE_PX,
+      height: MAX_DEVICE_PX,
+    });
+  });
+
+  it("survives a restore, unlike an unknown preset id", () => {
+    // The one id that is not in the preset table and still means something, so
+    // `sanitizeEmulation` has to know it — otherwise dragging a responsive pane and
+    // reloading would silently demote it to "Custom".
+    const restored = sanitizeEmulation(JSON.parse(JSON.stringify(responsiveEmulation(900, 600))));
+    expect(restored?.device).toBe(RESPONSIVE_DEVICE);
+    expect(sanitizeEmulation({ device: "made-up", width: 400, height: 800 })?.device).toBe(
+      CUSTOM_DEVICE,
+    );
+  });
+
+  it("keeps a dragged device's flags but not its identity", () => {
+    // A phone dragged narrower is still a phone — touch, UA, shape — it is just no
+    // longer the class the menu named.
+    const dragged = resizeEmulation(phone(), 340, 700);
+    expect(dragged).toMatchObject({
+      device: CUSTOM_DEVICE,
+      width: 340,
+      height: 700,
+      touch: true,
+      mobile: true,
+      radius: phone().radius,
+    });
+    expect(dragged.ua).toBe(phone().ua);
+    // ...while the responsive viewport stays itself, because that is a mode rather
+    // than a device.
+    expect(resizeEmulation(responsiveEmulation(900, 600), 500, 400).device).toBe(RESPONSIVE_DEVICE);
+    expect(resizeEmulation(phone(), 1, 99999)).toMatchObject({
+      width: MIN_DEVICE_PX,
+      height: MAX_DEVICE_PX,
+    });
+  });
+
+  it("can be given a mobile user agent, and have it taken away", () => {
+    // The reason this is separate from the size: a responsive or custom viewport has
+    // no preset to inherit a UA from, and "does my app serve the mobile bundle at
+    // this width" is a different question from "does my layout survive it".
+    const narrow = withMobileUserAgent(responsiveEmulation(420, 800), true, "143.0.0.0");
+    expect(narrow.ua).toContain("Mobile Safari");
+    expect(narrow.mobile).toBe(true);
+    // Above the phone widths it sends the tablet string, since dropping `Mobile` is
+    // how a server tells the two apart.
+    const wide = withMobileUserAgent(responsiveEmulation(900, 1200), true, "143.0.0.0");
+    expect(wide.ua).not.toContain("Mobile");
+    expect(withMobileUserAgent(narrow, false).ua).toBeNull();
+    expect(withMobileUserAgent(narrow, false).mobile).toBe(false);
+  });
+});
+
 describe("deviceLayout", () => {
   // The pane's box, plus the inset on both sides, so a test can say "a pane with
   // exactly this much room for a screen".
@@ -177,13 +261,13 @@ describe("deviceLayout", () => {
   it("is the reason emulation belongs in a pane at all", () => {
     // A 1440-wide layout in a 720px-wide pane: the case a real browser window
     // cannot give you without a second monitor.
-    const l = deviceLayout(desktop(), pane(720, 900));
+    const l = deviceLayout(desktop(), pane(960, 900));
     expect(l.scale).toBe(0.5);
-    expect(l.width).toBe(720);
-    expect(l.height).toBe(450);
+    expect(l.width).toBe(960);
+    expect(l.height).toBe(540);
     // Height binds too — the emulated screen *is* the pane, so a viewport scaled
     // to the width but taller than the box is clipped with nothing to scroll it.
-    expect(deviceLayout(desktop(), pane(1440, 450)).scale).toBe(0.5);
+    expect(deviceLayout(desktop(), pane(1920, 540)).scale).toBe(0.5);
     // Never magnified: a phone in a wide pane stays phone-sized.
     expect(deviceLayout(phone(), pane(1200, 1200)).scale).toBe(1);
   });
@@ -192,14 +276,14 @@ describe("deviceLayout", () => {
     // The gap is what makes "a device inside a pane" readable rather than the pane
     // simply being that page, and the centring is what makes it look placed.
     const l = deviceLayout(phone(), pane(1000, 1000));
-    expect(l.x).toBe(DEVICE_PADDING + (1000 - 393) / 2);
-    expect(l.y).toBe(DEVICE_PADDING + (1000 - 852) / 2);
+    expect(l.x).toBe(DEVICE_PADDING + (1000 - 402) / 2);
+    expect(l.y).toBe(DEVICE_PADDING + (1000 - 874) / 2);
     // A screen scaled to exactly fit is inset on all four sides, never flush.
-    const tight = deviceLayout(desktop(), pane(720, 450));
+    const tight = deviceLayout(desktop(), pane(960, 540));
     expect(tight.x).toBe(DEVICE_PADDING);
     expect(tight.y).toBe(DEVICE_PADDING);
-    expect(tight.width).toBe(720);
-    expect(tight.height).toBe(450);
+    expect(tight.width).toBe(960);
+    expect(tight.height).toBe(540);
   });
 
   it("crops an unfitted oversized device instead of overflowing the pane", () => {
@@ -215,8 +299,8 @@ describe("deviceLayout", () => {
     expect(l.y).toBe(DEVICE_PADDING);
     // Unfitted but small enough: no cropping, and centred like any other.
     const fits = deviceLayout({ ...phone(), fit: false }, pane(1000, 1000));
-    expect(fits.width).toBe(393);
-    expect(fits.x).toBe(DEVICE_PADDING + (1000 - 393) / 2);
+    expect(fits.width).toBe(402);
+    expect(fits.x).toBe(DEVICE_PADDING + (1000 - 402) / 2);
   });
 
   it("fills a pane too small to inset rather than computing a negative box", () => {
@@ -235,8 +319,8 @@ describe("deviceLayout", () => {
   it("scales the corner radius with the screen", () => {
     // A phone at 40% that kept a 48px radius would read as a rounded rectangle
     // someone forgot to scale.
-    expect(scaledRadius(phone(), 1)).toBe(48);
-    expect(scaledRadius(phone(), 0.5)).toBe(24);
+    expect(scaledRadius(phone(), 1)).toBe(44);
+    expect(scaledRadius(phone(), 0.5)).toBe(22);
     expect(scaledRadius(desktop(), 1)).toBe(8);
     // Bounded and non-negative whatever storage held.
     expect(scaledRadius({ ...phone(), radius: 9999 }, 1)).toBe(MAX_DEVICE_RADIUS);
@@ -317,7 +401,7 @@ describe("restore", () => {
 
   it("clamps a stale or hand-edited emulation instead of trusting it", () => {
     const stored = sanitizeEmulation({
-      device: "iphone-pro",
+      device: "phone",
       width: 99999,
       height: -3,
       deviceScaleFactor: 2.625,
@@ -328,7 +412,7 @@ describe("restore", () => {
       radius: 9999,
     });
     expect(stored).toEqual({
-      device: "iphone-pro",
+      device: "phone",
       width: MAX_DEVICE_PX,
       height: MIN_DEVICE_PX,
       deviceScaleFactor: 3,
@@ -346,7 +430,7 @@ describe("restore", () => {
   it("degrades an unusable emulation to none at all", () => {
     // "No emulation" is a correct state — the pane at pane size — while a pane
     // sized from `NaN` is not.
-    for (const junk of [null, undefined, 42, "iphone-pro", [], {}, { width: 400 }]) {
+    for (const junk of [null, undefined, 42, "phone", [], {}, { width: 400 }]) {
       expect(sanitizeEmulation(junk)).toBeNull();
     }
     // An unknown preset id keeps its metrics and becomes Custom, rather than

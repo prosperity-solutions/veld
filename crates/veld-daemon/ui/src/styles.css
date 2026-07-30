@@ -896,6 +896,9 @@ select:focus {
   min-height: 0;
   min-width: 0;
   background: var(--bg);
+  /* Dragging an emulated screen wider than the pane draws an outline past this
+     box; without clipping it would paint over the pane beside it. */
+  overflow: hidden;
 }
 
 /* The iframe backend's frame, reparented here by panes/browserHost.ts. */
@@ -945,6 +948,13 @@ select:focus {
   position: absolute;
   inset: 0;
   overflow: hidden;
+  /* The freeze still (painted as this element's background by browserHost) is a
+     capture at the view's *device* resolution — 3× the CSS box on an emulated
+     phone — so the default `auto` sizing drew it at image scale, i.e. zoomed into
+     its top-left corner. `100% 100%` maps it back onto the box it was taken from,
+     which is exactly the screen. */
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
 }
 
 .browser-host[data-emulated="true"] .browser-device-frame {
@@ -1017,10 +1027,77 @@ select:focus {
 /* The device list scrolls on its own, so adding presets can never push the
    controls beside it off screen again. */
 .device-menu-col.devices {
-  max-height: min(58vh, 420px);
+  /* As tall as the window comfortably allows: the list is the part worth seeing
+     whole, and 420px was cutting the Screens group off on a laptop for no reason. */
+  max-height: min(76vh, 640px);
   overflow-y: auto;
   border-right: 1px solid var(--border);
   padding-right: 4px;
+}
+
+/* ---- resizing an emulated screen ---- */
+
+/* Drag handles on the screen's right edge, bottom edge and corner — the same
+   gesture Chrome's device toolbar has, and the answer to "which width does this
+   break at", which no fixed list of devices can give you.
+
+   They live in the gap *outside* the screen, which is the only place they can:
+   under Electron the native view covers the screen's own rect and would swallow
+   the pointer. The drag itself hides the view for the same reason (see
+   `setBrowserResizing`). */
+.device-handle {
+  position: absolute;
+  z-index: 2;
+  border-radius: 999px;
+  background: var(--border2);
+  opacity: 0;
+  transition: opacity 90ms ease;
+}
+.browser-slot:hover .device-handle,
+.device-handle[data-dragging="true"] {
+  opacity: 1;
+}
+.device-handle:hover,
+.device-handle[data-dragging="true"] {
+  background: var(--accent);
+}
+.device-handle.east {
+  width: 5px;
+  height: 34px;
+  cursor: ew-resize;
+}
+.device-handle.south {
+  width: 34px;
+  height: 5px;
+  cursor: ns-resize;
+}
+.device-handle.corner {
+  width: 9px;
+  height: 9px;
+  cursor: nwse-resize;
+}
+
+/* The size being dragged to, drawn where the screen will be. Dashed, because it
+   is a proposal rather than the page: the view is hidden while the pointer is
+   down, so this is the only thing moving. */
+.device-outline {
+  position: absolute;
+  z-index: 2;
+  border: 1px dashed var(--accent);
+  border-radius: 4px;
+  background: rgb(from var(--accent) r g b / 6%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+.device-outline span {
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--elev);
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
 }
 
 /* A row of fields inside a menu — the custom size and the zoom stepper. Not

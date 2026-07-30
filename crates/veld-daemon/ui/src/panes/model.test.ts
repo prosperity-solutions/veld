@@ -669,15 +669,15 @@ describe("browser tabs", () => {
     // per-`WebContents`, and the view is recreated on a session switch and on a
     // reload, so the layout is the only thing that outlives it.
     const emulation = {
-      device: "iphone-pro",
-      width: 393,
-      height: 852,
+      device: "phone",
+      width: 402,
+      height: 874,
       deviceScaleFactor: 3,
       mobile: true,
       touch: true,
       ua: "Mozilla/5.0 (iPhone) Safari/604.1",
       fit: true,
-      radius: 48,
+      radius: 44,
     };
     const restored = restore({ id: "a", kind: "browser", title: "t", emulation, zoom: 1.25 });
     expect(restored?.emulation).toEqual(emulation);
