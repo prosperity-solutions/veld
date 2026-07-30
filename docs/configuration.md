@@ -763,6 +763,8 @@ Extra environment variables injected into the process. Values support Veld varia
 
 **Precedence:** The merged `env` block takes strict precedence over the inherited shell environment. Shell variables not overridden by `env` are passed through unchanged.
 
+**Which shell environment gets inherited depends on who started the run.** `veld start` in a terminal passes your terminal's environment straight through, including anything exported from `.zprofile`/`.profile` and `.zshrc`. A run started from the management UI or Veld Desktop is spawned by the Veld daemon, which inherits only `PATH` — resolved from your login shell so `npx`, `pg_isready`, `op` and version-manager shims are found — and not the rest of your shell environment. So a node that depends on a variable you export from a shell rc file works from the terminal and not from the UI. Declare it in `env` and it works from both; that is the only form that doesn't depend on how the run was launched.
+
 ### `outputs`
 
 Output declarations differ based on the variant type.

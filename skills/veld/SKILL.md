@@ -430,6 +430,7 @@ step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging
 - **`skip_if` replaces `verify`** — `verify` still works as an alias but `skip_if` is the canonical name
 - **Outputs are volatile** — after a recovery restart, outputs like `DATABASE_URL` may change. Never cache outputs long-term; re-read with `veld status --outputs` when needed
 - **`depends_on` needs the variant** — write `"backend": "local"`, not just `"backend"`
+- **"Works in my terminal, fails from the UI" is an environment difference, not a flake** — a run started from the management UI or Veld Desktop is spawned by the daemon, which passes node commands only `PATH` (resolved from the user's login shell, so `npx`/`pg_isready`/version-manager shims *are* found) and not the rest of the shell environment. `veld start` in a terminal passes everything through. A node depending on a variable exported from a shell rc file must declare it in `env` to behave the same both ways
 - **`${...}` vs `{...}`** — `${veld.port}` in commands/env, `{service}` in URL templates. Mixing them up silently produces wrong values.
 - **`outputs` shape** — a map (`{"KEY": "template"}`) publishes computed values, an array (`["KEY"]`) declares names captured from the node's own output. Both work on both node types now; on a `command` node the map is interpolated *after* the command runs, with its captured outputs in scope
 - **`veld lint` is the fast feedback loop** — it reports every semantic problem at once and exits 1 on any error. `veld start` refuses on the same errors, but only one at a time
