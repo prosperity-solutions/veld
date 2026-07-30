@@ -1,0 +1,479 @@
+/**
+ * Device emulation and page zoom for browser panes — the pure half.
+ *
+ * A pane is small and a desktop layout is not, which is the whole argument for
+ * doing this inside the dock rather than saying "use Chrome": emulating a
+ * 1440-wide viewport *scaled down to fit a 600px pane* is the one case a real
+ * browser window cannot give you without a second monitor.
+ *
+ * Everything here is data and arithmetic, so the rules are testable without a
+ * DOM and without an Electron binary — the same discipline as `model.ts`. What
+ * *applies* an emulation lives in `browserHost.ts` (which owns the live views)
+ * and `desktop/src/browserViews.js` (which owns the native ones).
+ *
+ * ## Why the stored shape is metrics and not a preset id
+ *
+ * [`PaneEmulation`] carries every number it needs. A tab could instead store
+ * `device: "iphone-15-pro"` and have the renderer look the metrics up, but then
+ * a layout written by a build whose preset table has since changed restores as
+ * something else — silently, and only for the presets that moved. The id is kept
+ * alongside for the *label* only, and a restored emulation with an unknown id
+ * degrades to "Custom", which is exactly what it now is.
+ */
+
+/** The preset id a hand-entered size carries. */
+export const CUSTOM_DEVICE = "custom";
+
+/**
+ * Bounds on an emulated viewport.
+ *
+ * The lower one is below any real device because rotating a 120-wide viewport is
+ * a legitimate thing to try; the upper one is a 4K width plus room, because
+ * beyond that the emulation is larger than the compositor surface anyone has and
+ * `scale` is doing all the work anyway.
+ */
+export const MIN_DEVICE_PX = 120;
+export const MAX_DEVICE_PX = 4096;
+
+/**
+ * Cap on a user-agent string.
+ *
+ * A UA becomes a request header on every navigation the pane makes, so its
+ * length and charset are a real constraint rather than a formatting preference —
+ * see [`safeUserAgentText`], and `safeUserAgent` in `desktop/src/validate.js`,
+ * which is the copy that actually guards the header.
+ */
+export const MAX_UA_LEN = 512;
+
+export interface DevicePreset {
+  id: string;
+  label: string;
+  /** The submenu it appears under. */
+  group: "Phones" | "Tablets" | "Screens";
+  width: number;
+  height: number;
+  /**
+   * Emulated DPR, or 0 for "whatever the host display has".
+   *
+   * Integers only: Electron types this parameter `Integer`, so a real device's
+   * fractional ratio (a Pixel's 2.625) is not expressible — it is rounded to the
+   * nearest whole one here rather than passed and quietly truncated in the
+   * shell. It affects `devicePixelRatio` and which `srcset` candidate a page
+   * picks, not layout, so the rounding costs nothing a layout review would see.
+   */
+  deviceScaleFactor: number;
+  /**
+   * Chromium's `mobile` screen position: viewport meta tag handling, overlay
+   * scrollbars, text autosizing. Independent of touch — a page can be laid out
+   * as mobile and still receive mouse events.
+   */
+  mobile: boolean;
+  /** Whether picking this preset also turns touch emulation on. */
+  touch: boolean;
+  /**
+   * UA template, or `null` to keep the shell's own.
+   *
+   * `{chrome}` is substituted with the host Chromium's version at the moment the
+   * preset is picked ([`resolveUserAgent`]), so an Android UA does not claim a
+   * Chrome release that predates the app by two years. The *resolved* string is
+   * what gets stored: it is a claim about the emulated device, and freezing it
+   * keeps a restored layout emulating what it emulated yesterday.
+   *
+   * The screen presets carry `null` on purpose. Emulating a 1440-wide laptop is
+   * a layout question, and the shell already *is* a desktop browser — sending a
+   * second desktop UA would only add a way for the string to be wrong.
+   */
+  ua: string | null;
+}
+
+/**
+ * The menu.
+ *
+ * Deliberately short. This is a layout-checking tool, not a device lab: two
+ * phone sizes per platform, two tablets, and the screen sizes that do not fit in
+ * a pane, which are the reason `fit` exists. Sizes are CSS pixels as the device
+ * reports them, so they match what a page's media queries see.
+ */
+export const DEVICE_PRESETS: readonly DevicePreset[] = [
+  {
+    id: "iphone-se",
+    label: "iPhone SE",
+    group: "Phones",
+    width: 375,
+    height: 667,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  {
+    id: "iphone-pro",
+    label: "iPhone Pro",
+    group: "Phones",
+    width: 393,
+    height: 852,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  {
+    id: "pixel",
+    label: "Pixel",
+    group: "Phones",
+    width: 412,
+    height: 915,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
+  },
+  {
+    id: "galaxy",
+    label: "Galaxy S",
+    group: "Phones",
+    width: 360,
+    height: 780,
+    deviceScaleFactor: 3,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
+  },
+  {
+    id: "ipad-mini",
+    label: "iPad mini",
+    group: "Tablets",
+    width: 744,
+    height: 1133,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  {
+    id: "ipad-pro",
+    label: 'iPad Pro 11"',
+    group: "Tablets",
+    width: 834,
+    height: 1194,
+    deviceScaleFactor: 2,
+    mobile: true,
+    touch: true,
+    ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+  },
+  {
+    id: "laptop",
+    label: "Laptop",
+    group: "Screens",
+    width: 1280,
+    height: 800,
+    deviceScaleFactor: 2,
+    mobile: false,
+    touch: false,
+    ua: null,
+  },
+  {
+    id: "desktop",
+    label: "Desktop",
+    group: "Screens",
+    width: 1440,
+    height: 900,
+    deviceScaleFactor: 1,
+    mobile: false,
+    touch: false,
+    ua: null,
+  },
+  {
+    id: "desktop-hd",
+    label: "Desktop HD",
+    group: "Screens",
+    width: 1920,
+    height: 1080,
+    deviceScaleFactor: 1,
+    mobile: false,
+    touch: false,
+    ua: null,
+  },
+];
+
+/** The groups in menu order, derived so adding a preset needs no second edit. */
+export const DEVICE_GROUPS: ReadonlyArray<DevicePreset["group"]> = ["Phones", "Tablets", "Screens"];
+
+export function presetById(id: string): DevicePreset | null {
+  return DEVICE_PRESETS.find((p) => p.id === id) ?? null;
+}
+
+/**
+ * What a pane emulates, as stored in its tab.
+ *
+ * Absent (rather than a disabled instance) when the pane is showing itself at
+ * pane size, so a layout written before this existed and one with emulation
+ * switched off are the same thing.
+ */
+export interface PaneEmulation {
+  /** Preset id, or [`CUSTOM_DEVICE`]. Label only — the metrics below win. */
+  device: string;
+  /** Emulated viewport, in CSS pixels. */
+  width: number;
+  height: number;
+  /** Emulated DPR; 0 keeps the host display's. */
+  deviceScaleFactor: number;
+  mobile: boolean;
+  /**
+   * Emit touch events for mouse input, and report a touch-capable device.
+   *
+   * The only field here that is not native Electron: it needs a CDP session, and
+   * Chromium gives the built-in DevTools that session exclusively — so touch is
+   * *suspended* while a pane's DevTools is open and resumes when it closes. The
+   * pane says so rather than silently lying (`touchActive` in `BrowserState`).
+   */
+  touch: boolean;
+  /** UA to send, already resolved; `null` keeps the shell's own. */
+  ua: string | null;
+  /** Scale the emulated viewport down so all of it fits in the pane. */
+  fit: boolean;
+}
+
+/** An emulation from a preset. `chrome` fills the UA template's `{chrome}`. */
+export function emulationForPreset(
+  preset: DevicePreset,
+  opts: { landscape?: boolean; chrome?: string; fit?: boolean } = {},
+): PaneEmulation {
+  const landscape = opts.landscape ?? false;
+  return {
+    device: preset.id,
+    width: landscape ? preset.height : preset.width,
+    height: landscape ? preset.width : preset.height,
+    deviceScaleFactor: preset.deviceScaleFactor,
+    mobile: preset.mobile,
+    touch: preset.touch,
+    ua: preset.ua === null ? null : resolveUserAgent(preset.ua, opts.chrome),
+    fit: opts.fit ?? true,
+  };
+}
+
+/**
+ * An emulation at a hand-entered size.
+ *
+ * Keeps `base`'s device flags when there is one, so nudging a phone's width by
+ * 10px does not also drop touch and the mobile UA — which is what makes the
+ * custom size useful as "this preset, but narrower".
+ */
+export function customEmulation(
+  width: number,
+  height: number,
+  base?: PaneEmulation | null,
+): PaneEmulation {
+  return {
+    device: CUSTOM_DEVICE,
+    width: clampDevicePx(width),
+    height: clampDevicePx(height),
+    deviceScaleFactor: base?.deviceScaleFactor ?? 0,
+    mobile: base?.mobile ?? false,
+    touch: base?.touch ?? false,
+    ua: base?.ua ?? null,
+    fit: base?.fit ?? true,
+  };
+}
+
+/** Swap width and height. The preset id is kept: it is still that device, held
+ *  the other way round, and [`isLandscape`] tells the label which way. */
+export function rotateEmulation(e: PaneEmulation): PaneEmulation {
+  return { ...e, width: e.height, height: e.width };
+}
+
+/** Whether an emulation is wider than it is tall. Used for the label and to
+ *  decide which way `rotate` is about to turn a preset. */
+export function isLandscape(e: PaneEmulation): boolean {
+  return e.width > e.height;
+}
+
+export function clampDevicePx(n: number): number {
+  if (!Number.isFinite(n)) return MIN_DEVICE_PX;
+  return Math.min(MAX_DEVICE_PX, Math.max(MIN_DEVICE_PX, Math.round(n)));
+}
+
+/** `393 × 852` — the size, with the multiplication sign a human would write. */
+export function emulationSize(e: PaneEmulation): string {
+  return `${e.width} × ${e.height}`;
+}
+
+/**
+ * The device's name.
+ *
+ * A preset held sideways says so, because a rotated phone and a small tablet are
+ * the same numbers and not the same test. An unknown id — a preset that has
+ * since been renamed or removed — reads as "Custom", which is what an emulation
+ * with metrics and no matching device is.
+ */
+export function emulationLabel(e: PaneEmulation): string {
+  const preset = presetById(e.device);
+  if (!preset) return "Custom";
+  const rotated = isLandscape(e) !== preset.width > preset.height;
+  return rotated ? `${preset.label} · landscape` : preset.label;
+}
+
+/**
+ * How far the emulated viewport has to shrink to fit a box, never above 1.
+ *
+ * Both dimensions, not just width: a viewport scaled to the pane's width but
+ * taller than the pane is *clipped*, and there is nothing to scroll — the
+ * emulated screen is the pane, so the missing part is unreachable rather than
+ * below the fold.
+ *
+ * The shell has its own copy of this (`fitScale` in `desktop/src/validate.js`)
+ * and needs one: the native view's box is in device-independent pixels, which
+ * only the main process knows, since page zoom scales the renderer's CSS pixels
+ * and not the view's bounds. This copy serves the iframe backend, where the box
+ * and the frame are both CSS pixels in the same document.
+ */
+export function fitScale(e: PaneEmulation, box: { width: number; height: number }): number {
+  if (!e.fit) return 1;
+  if (!(box.width > 0) || !(box.height > 0)) return 1;
+  return Math.min(1, box.width / e.width, box.height / e.height);
+}
+
+/**
+ * A UA string that is safe to make into a request header, or `null`.
+ *
+ * Rejects rather than strips: a UA with a newline in it is not a UA with a typo,
+ * and quietly repairing one hides where it came from. Printable ASCII only —
+ * `setUserAgent` takes a header value, and CR/LF is header injection while
+ * non-ASCII is not representable in one.
+ *
+ * The shell repeats this check (`safeUserAgent` in `desktop/src/validate.js`),
+ * because a renderer is not a trust boundary; this copy is what keeps a
+ * hand-edited `sessionStorage` from restoring a pane that then fails in the
+ * shell with nothing to show for it.
+ */
+export function safeUserAgentText(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (text === "" || text.length > MAX_UA_LEN) return null;
+  if (!/^[\x20-\x7e]+$/.test(text)) return null;
+  return text;
+}
+
+/**
+ * Fill a UA template's `{chrome}` with the host Chromium version.
+ *
+ * Falls back to dropping the version rather than emitting a literal `{chrome}`:
+ * a UA that names no Chrome release is a UA a server may not recognise, while
+ * one containing braces is a UA no server has ever seen.
+ */
+export function resolveUserAgent(template: string, chrome: string | undefined): string {
+  if (!template.includes("{chrome}")) return template;
+  const version = chrome && /^[0-9][0-9.]{0,15}$/.test(chrome) ? chrome : null;
+  if (!version) return template.replace(/\s*Chrome\/\{chrome\}/g, "").replace("{chrome}", "");
+  return template.replaceAll("{chrome}", version);
+}
+
+/** The Chromium version out of a UA string, or `undefined`. The /ide renderer's
+ *  own UA is the honest source for it: whatever Chromium the shell is built on
+ *  is the one that will make the request. */
+export function chromeVersionFrom(ua: string | undefined): string | undefined {
+  const m = ua?.match(/Chrome\/([0-9][0-9.]*)/);
+  return m ? m[1] : undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Zoom
+// ---------------------------------------------------------------------------
+
+/**
+ * Page zoom bounds, matching Chromium's own (25%–300%).
+ *
+ * Zoom is stored and applied as a *factor*, not Chromium's zoom level, because
+ * the pane shows a percentage and `1.2 ^ level` is a needless conversion in
+ * between.
+ */
+export const MIN_ZOOM = 0.25;
+export const MAX_ZOOM = 3;
+export const DEFAULT_ZOOM = 1;
+
+/** The steps ⌘+/⌘− walk. Chrome's own ladder, which is uneven on purpose: the
+ *  small end needs finer steps than the large one. */
+export const ZOOM_STEPS: readonly number[] = [
+  0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3,
+];
+
+export function clampZoom(n: number): number {
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_ZOOM;
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n));
+}
+
+/**
+ * The next step up or down from wherever the pane currently is.
+ *
+ * Snaps to the ladder rather than assuming the current factor is on it: a zoom
+ * restored from storage, or set before the ladder changed, must still step
+ * somewhere sensible instead of jumping to one end.
+ */
+export function zoomStep(current: number, direction: 1 | -1): number {
+  const now = clampZoom(current);
+  const steps = direction === 1 ? ZOOM_STEPS : [...ZOOM_STEPS].reverse();
+  // A tolerance, because 0.67 and 0.6700000000000001 are the same step.
+  const next = steps.find((s) => (direction === 1 ? s > now + 1e-6 : s < now - 1e-6));
+  return next ?? now;
+}
+
+/** `100%`, `67%`, `42%` — a factor as a percentage, rounded. */
+export function formatPercent(factor: number): string {
+  return `${Math.round(factor * 100)}%`;
+}
+
+/**
+ * A zoom factor as a percentage.
+ *
+ * Clamped, because this labels a control whose range is Chromium's — unlike
+ * [`formatPercent`], which also renders the *fit* scale, and a viewport shrunk to
+ * 12% of a narrow pane is a real 12% rather than the zoom floor.
+ */
+export function formatZoom(factor: number): string {
+  return formatPercent(clampZoom(factor));
+}
+
+// ---------------------------------------------------------------------------
+// Restore
+// ---------------------------------------------------------------------------
+
+/**
+ * Accept a stored emulation, or reject it.
+ *
+ * `sessionStorage` is where a stale build's — or a hand-edited — emulation sits
+ * waiting to be handed to a view on restore, exactly as a pane's URL does
+ * (`parseTab` in `model.ts`). Everything is clamped rather than trusted, and a
+ * value that cannot be repaired into a number drops the whole emulation instead
+ * of restoring a pane at a size nobody chose: the honest degradation is "no
+ * emulation", which is a pane showing itself at pane size.
+ */
+export function sanitizeEmulation(raw: unknown): PaneEmulation | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const e = raw as Record<string, unknown>;
+  if (!Number.isFinite(Number(e.width)) || !Number.isFinite(Number(e.height))) return null;
+  const dsf = Number(e.deviceScaleFactor);
+  return {
+    device: typeof e.device === "string" && presetById(e.device) ? e.device : CUSTOM_DEVICE,
+    width: clampDevicePx(Number(e.width)),
+    height: clampDevicePx(Number(e.height)),
+    // 0 means "the host display's", which is also the honest answer for a value
+    // that is missing, negative, or fractional past what Electron accepts.
+    deviceScaleFactor: Number.isFinite(dsf) ? Math.min(4, Math.max(0, Math.round(dsf))) : 0,
+    mobile: e.mobile === true,
+    touch: e.touch === true,
+    ua: safeUserAgentText(e.ua),
+    // Absent means fitting, which is what every emulation this build writes does
+    // and the only setting under which a screen preset is usable in a pane.
+    fit: e.fit !== false,
+  };
+}
+
+/** Accept a stored zoom factor, or `null` for "the pane was at 100%". Stored
+ *  only when it isn't, so an untouched pane writes nothing. */
+export function sanitizeZoom(raw: unknown): number | null {
+  if (raw === undefined || raw === null) return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const zoom = clampZoom(n);
+  return zoom === DEFAULT_ZOOM ? null : zoom;
+}

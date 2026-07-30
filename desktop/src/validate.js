@@ -61,4 +61,112 @@ function partitionFor(profile) {
   return `persist:veld-browser-${profile}`;
 }
 
-module.exports = { ID_RE, PROFILE_RE, safeUrl, isViewId, isProfileName, partitionFor };
+/**
+ * Emulated viewport bounds, mirroring `MIN_DEVICE_PX`/`MAX_DEVICE_PX` in
+ * `crates/veld-daemon/ui/src/panes/devices.ts`.
+ *
+ * Restated rather than shared for the same reason `safeUrl` restates
+ * `normalizeBrowserUrl`: this is the copy that guards the main process, and the
+ * renderer's is defence-in-depth. The renderer's numbers are what the pane's
+ * controls offer; these are what the shell will actually apply.
+ */
+const MIN_DEVICE_PX = 120;
+const MAX_DEVICE_PX = 4096;
+const MAX_UA_LEN = 512;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 3;
+
+/**
+ * A user-agent string the shell is willing to put in a request header, or `null`.
+ *
+ * This is the one field of an emulation that leaves the process as protocol
+ * rather than as geometry, so it is the one with a real threat behind it:
+ * `setUserAgent` takes a header value, and a CR or LF in it is header injection
+ * against every origin the pane visits. Printable ASCII only, bounded, and
+ * **rejected rather than repaired** — a UA with a newline in it is not a UA with
+ * a typo.
+ */
+function safeUserAgent(raw) {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  if (text === "" || text.length > MAX_UA_LEN) return null;
+  if (!/^[\x20-\x7e]+$/.test(text)) return null;
+  return text;
+}
+
+function clampDevicePx(n) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return null;
+  return Math.min(MAX_DEVICE_PX, Math.max(MIN_DEVICE_PX, Math.round(v)));
+}
+
+/**
+ * The device-emulation parameters the page asked for, normalised, or `null`.
+ *
+ * `null` means "no emulation", which is also what an unusable payload degrades
+ * to: a view showing itself at pane size is a correct state, while a view at a
+ * size derived from `NaN` is not. Only the fields Electron's
+ * `enableDeviceEmulation` consumes come out of here — the preset id the pane
+ * labels its menu with stays in the renderer, because the shell has no use for
+ * it and no way to check it.
+ */
+function safeEmulation(raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const width = clampDevicePx(raw.width);
+  const height = clampDevicePx(raw.height);
+  if (width === null || height === null) return null;
+  const dsf = Number(raw.deviceScaleFactor);
+  return {
+    width,
+    height,
+    // Electron types this `Integer`, and 0 means "the host display's own".
+    deviceScaleFactor: Number.isFinite(dsf) ? Math.min(4, Math.max(0, Math.round(dsf))) : 0,
+    mobile: raw.mobile === true,
+    touch: raw.touch === true,
+    userAgent: safeUserAgent(raw.ua),
+    fit: raw.fit !== false,
+  };
+}
+
+/** A page zoom factor within Chromium's own range, or `null`. `setZoomFactor`
+ *  throws on a non-positive one, and the pane is not a trusted caller. */
+function safeZoom(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, n));
+}
+
+/**
+ * How far an emulated viewport has to shrink to fit the view's box, never above 1.
+ *
+ * The "larger screen than the pane" case, which is the reason emulation is worth
+ * having *inside* a dock: a 1440-wide layout is readable in a 600px pane at 40%,
+ * and unreachable in one at 100%.
+ *
+ * Both dimensions, because the emulated screen **is** the view — a viewport
+ * scaled to the box's width but taller than it is clipped, and the missing part
+ * has nothing to scroll it into sight.
+ *
+ * The box is in device-independent pixels, which is why this lives here and not
+ * beside the renderer's copy (`fitScale` in `panes/devices.ts`): page zoom scales
+ * the CSS pixels the renderer measures and not the bounds a native view is given,
+ * so only the main process knows the number this needs.
+ */
+function fitScale(emulation, box) {
+  if (!emulation || !emulation.fit) return 1;
+  if (!box || !(box.width > 0) || !(box.height > 0)) return 1;
+  return Math.min(1, box.width / emulation.width, box.height / emulation.height);
+}
+
+module.exports = {
+  ID_RE,
+  PROFILE_RE,
+  safeUrl,
+  isViewId,
+  isProfileName,
+  partitionFor,
+  safeUserAgent,
+  safeEmulation,
+  safeZoom,
+  fitScale,
+};

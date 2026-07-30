@@ -19,13 +19,18 @@ import {
   IconArrowLeft,
   IconArrowRight,
   IconBug,
+  IconCheck,
   IconClockExclamation,
+  IconCode,
+  IconDeviceMobile,
+  IconDevices,
   IconExternalLink,
   IconLockOff,
   IconMinus,
   IconPlugConnectedX,
   IconPlus,
   IconRefresh,
+  IconRotateClockwise,
   IconTrash,
   IconUserCircle,
   IconWorldOff,
@@ -42,19 +47,53 @@ import {
   urlLabel,
 } from "./model";
 import { VeldLinks } from "./VeldLinks";
+import {
+  DEFAULT_ZOOM,
+  DEVICE_GROUPS,
+  DEVICE_PRESETS,
+  MAX_DEVICE_PX,
+  MIN_DEVICE_PX,
+  type PaneEmulation,
+  chromeVersionFrom,
+  clampZoom,
+  customEmulation,
+  emulationForPreset,
+  emulationLabel,
+  emulationSize,
+  formatPercent,
+  formatZoom,
+  isLandscape,
+  rotateEmulation,
+  zoomStep,
+} from "./devices";
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
 import {
   browserBackend,
   browserCommand,
+  browserDevTools,
   browserStatus,
   clearBrowserSession,
   mountBrowser,
   navigateBrowser,
   paneCovers,
   reloadBrowser,
+  setBrowserEmulation,
+  setBrowserZoom,
   subscribeBrowser,
   unmountBrowser,
 } from "./browserHost";
+
+/**
+ * The Chromium version the shell is built on, for the mobile user-agent presets.
+ *
+ * Read off this document's own UA because that is the browser which will make the
+ * request: a hardcoded Chrome version in a preset goes stale with every Electron
+ * bump, and a UA claiming a release two years older than the engine sending it is
+ * exactly the kind of thing a server's feature gating notices.
+ */
+const HOST_CHROME = chromeVersionFrom(
+  typeof navigator === "undefined" ? undefined : navigator.userAgent,
+);
 
 /** A session's identity marker, or `null` for the default slot (which stays
  *  unmarked, so the common case has nothing to read). */
@@ -121,13 +160,33 @@ export function BrowserPane(props: {
   const currentUrl = useRef(tab.url);
   currentUrl.current = tab.url;
 
+  // The layout is the record for the emulated device and the zoom; `browserHost`
+  // holds the live copy. Read here so both the chrome and the mount below work
+  // off the state that gets persisted.
+  const emulation = tab.emulation ?? null;
+  const zoom = tab.zoom ?? DEFAULT_ZOOM;
+
+  // Refs for the same reason `currentUrl` is one: `mountBrowser` uses these only
+  // when it *creates* a view — a first mount, or a session switch, which rebuilds
+  // one — and making them effect dependencies would remount the view, reloading
+  // the page, every time you picked a device or nudged the zoom.
+  const currentEmulation = useRef(emulation);
+  currentEmulation.current = emulation;
+  const currentZoom = useRef(zoom);
+  currentZoom.current = zoom;
+
   useEffect(() => {
     const el = slot.current;
     if (!el) return;
     // Mount first, then subscribe: a profile change disposes the old view
     // (dropping its listeners) and creates a new one, so subscribing first
     // would attach to the view that is about to go away.
-    mountBrowser(id, el, { url: currentUrl.current, profile });
+    mountBrowser(id, el, {
+      url: currentUrl.current,
+      profile,
+      emulation: currentEmulation.current,
+      zoom: currentZoom.current,
+    });
     const unsubscribe = subscribeBrowser(id, bump);
     return () => {
       unsubscribe();
@@ -202,6 +261,44 @@ export function BrowserPane(props: {
       setDraft(target);
       onTab({ url: target });
     }
+  };
+
+  // ---- Device emulation and zoom -----------------------------------------
+  //
+  // Every change writes both sides: `browserHost` applies it to the view that
+  // exists now, and the tab is what a *recreated* view (a session switch, a
+  // retried create) comes back as.
+  //
+  // What the pane asked for versus what it got: `emulationScale` is how far a
+  // fitted viewport had to shrink, and `touchActive` is false while DevTools
+  // holds the CDP session touch needs.
+  const fitted = emulation?.fit === true && state.emulationScale < 0.995;
+  const touchSuspended = !iframeBackend && emulation?.touch === true && !state.touchActive;
+
+  const applyEmulation = (next: PaneEmulation | null) => {
+    setBrowserEmulation(id, next);
+    // `undefined`, not `null`: "no device" is the absence of the field, so a tab
+    // that never emulated anything and one switched back to pane size serialise
+    // the same way.
+    onTab({ emulation: next ?? undefined });
+  };
+
+  const applyZoom = (factor: number) => {
+    const next = clampZoom(factor);
+    setBrowserZoom(id, next);
+    onTab({ zoom: next === DEFAULT_ZOOM ? undefined : next });
+  };
+
+  // Empty means "keep the current one", so one field can be changed without
+  // retyping the other. The placeholders show what that currently is.
+  const [customW, setCustomW] = useState("");
+  const [customH, setCustomH] = useState("");
+  const applyCustom = () => {
+    const w = Number(customW) || emulation?.width || 1280;
+    const h = Number(customH) || emulation?.height || 800;
+    // Keeps the device flags of whatever is set now, so nudging a phone's width
+    // stays a phone — the useful reading of "custom size".
+    applyEmulation(customEmulation(w, h, emulation));
   };
 
   return (
@@ -372,6 +469,213 @@ export function BrowserPane(props: {
             </Menu.Sub>
           </Menu.Dropdown>
         </Menu>
+
+        {/* Device emulation and zoom. One menu, because they are one question —
+            "what size is this page being shown at" — and because a pane is a
+            narrow strip: the chrome is already six controls wide before this. The
+            target carries the answer as text when there is one to carry, so the
+            emulated size is readable without opening anything, and nothing is
+            added to the bar while the pane is just a pane. */}
+        <Menu position="bottom-end" withinPortal>
+          <Menu.Target>
+            <button
+              className="browser-device"
+              data-active={emulation ? "true" : undefined}
+              aria-label={`Device and zoom: ${
+                emulation ? emulationLabel(emulation) : "pane size"
+              }, zoom ${formatZoom(zoom)}`}
+              title={
+                emulation
+                  ? `${emulationLabel(emulation)} · ${emulationSize(emulation)}${
+                      fitted ? ` at ${formatPercent(state.emulationScale)}` : ""
+                    }`
+                  : "Emulate a device, or zoom"
+              }
+            >
+              {emulation ? <IconDeviceMobile size={14} /> : <IconDevices size={14} />}
+              {emulation && (
+                <span className="browser-chip">
+                  {emulationSize(emulation)}
+                  {fitted ? ` · ${formatPercent(state.emulationScale)}` : ""}
+                </span>
+              )}
+              {/* Not under the iframe backend: there is no zoom to apply there, so
+                  a percentage in the chrome would be a claim about the page that
+                  isn't true. The value is kept in the layout regardless, so opening
+                  the same worktree in Veld Desktop gets it back. */}
+              {!iframeBackend && zoom !== DEFAULT_ZOOM && (
+                <span className="browser-chip">{formatZoom(zoom)}</span>
+              )}
+            </button>
+          </Menu.Target>
+          <Menu.Dropdown>
+            <Menu.Label>
+              {iframeBackend
+                ? "Sizes work in a browser tab; user agent, touch and zoom need the desktop app"
+                : "Emulated viewport, scaled to fit the pane"}
+            </Menu.Label>
+            <Menu.Item
+              fw={emulation ? undefined : 700}
+              leftSection={emulation ? undefined : <IconCheck size={14} />}
+              onClick={() => applyEmulation(null)}
+            >
+              Pane size
+            </Menu.Item>
+            {DEVICE_GROUPS.map((group) => (
+              <div key={group}>
+                <Menu.Label>{group}</Menu.Label>
+                {DEVICE_PRESETS.filter((p) => p.group === group).map((preset) => (
+                  <Menu.Item
+                    key={preset.id}
+                    fw={emulation?.device === preset.id ? 700 : undefined}
+                    leftSection={
+                      emulation?.device === preset.id ? <IconCheck size={14} /> : undefined
+                    }
+                    // Keeps the current orientation when swapping devices: having
+                    // rotated one phone, the next one you compare it against
+                    // should arrive the same way round.
+                    onClick={() =>
+                      applyEmulation(
+                        emulationForPreset(preset, {
+                          landscape: emulation ? isLandscape(emulation) : false,
+                          chrome: HOST_CHROME,
+                          fit: emulation?.fit ?? true,
+                        }),
+                      )
+                    }
+                    rightSection={
+                      <span className="menu-size faint">
+                        {preset.width} × {preset.height}
+                      </span>
+                    }
+                  >
+                    {preset.label}
+                  </Menu.Item>
+                ))}
+              </div>
+            ))}
+            <Menu.Divider />
+            {/* Everything below acts on the current device, so it is all inert
+                without one — disabled rather than hidden, because a menu whose
+                length changes is a menu you have to re-read. */}
+            <Menu.Item
+              leftSection={<IconRotateClockwise size={14} />}
+              disabled={!emulation}
+              onClick={() => emulation && applyEmulation(rotateEmulation(emulation))}
+            >
+              Rotate
+            </Menu.Item>
+            <Menu.Item
+              closeMenuOnClick={false}
+              leftSection={emulation?.fit ? <IconCheck size={14} /> : undefined}
+              disabled={!emulation}
+              onClick={() => emulation && applyEmulation({ ...emulation, fit: !emulation.fit })}
+            >
+              Fit to pane
+            </Menu.Item>
+            <Menu.Item
+              closeMenuOnClick={false}
+              leftSection={emulation?.touch ? <IconCheck size={14} /> : undefined}
+              disabled={!emulation || iframeBackend}
+              onClick={() => emulation && applyEmulation({ ...emulation, touch: !emulation.touch })}
+            >
+              Touch events
+            </Menu.Item>
+            {touchSuspended && (
+              <Menu.Label>Touch is paused while this pane's DevTools is open</Menu.Label>
+            )}
+            <Menu.Divider />
+            <Menu.Label>Custom size</Menu.Label>
+            {/* Not a Menu.Item: these are fields, and a click in one must not
+                close the menu it lives in. */}
+            <div className="menu-fields">
+              <input
+                type="number"
+                aria-label="Custom width"
+                min={MIN_DEVICE_PX}
+                max={MAX_DEVICE_PX}
+                placeholder={String(emulation?.width ?? 1280)}
+                value={customW}
+                onChange={(e) => setCustomW(e.currentTarget.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyCustom()}
+              />
+              <span className="faint">×</span>
+              <input
+                type="number"
+                aria-label="Custom height"
+                min={MIN_DEVICE_PX}
+                max={MAX_DEVICE_PX}
+                placeholder={String(emulation?.height ?? 800)}
+                value={customH}
+                onChange={(e) => setCustomH(e.currentTarget.value)}
+                onKeyDown={(e) => e.key === "Enter" && applyCustom()}
+              />
+              <button className="btn" onClick={applyCustom}>
+                Apply
+              </button>
+            </div>
+            <Menu.Divider />
+            <Menu.Label>
+              {iframeBackend ? "Page zoom needs the desktop app" : "Page zoom"}
+            </Menu.Label>
+            {/* A 1440-wide layout is readable in a 600px pane at 60%, which is
+                useful well before any device preset is — and it is the same
+                "state lives in the layout, re-asserted when the view is
+                recreated" problem, so it belongs in the same menu. */}
+            <div className="menu-fields">
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                aria-label="Zoom out"
+                disabled={iframeBackend}
+                onClick={() => applyZoom(zoomStep(zoom, -1))}
+              >
+                <IconMinus size={14} />
+              </ActionIcon>
+              <span className="menu-value">{formatZoom(zoom)}</span>
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                aria-label="Zoom in"
+                disabled={iframeBackend}
+                onClick={() => applyZoom(zoomStep(zoom, 1))}
+              >
+                <IconPlus size={14} />
+              </ActionIcon>
+              <button
+                className="btn"
+                disabled={iframeBackend || zoom === DEFAULT_ZOOM}
+                onClick={() => applyZoom(DEFAULT_ZOOM)}
+              >
+                Reset
+              </button>
+            </div>
+          </Menu.Dropdown>
+        </Menu>
+
+        {/* Detached, always — a docked inspector resizes the view from the inside
+            while the renderer mirrors the pane's box from the outside, and the two
+            fight. In a browser tab the page has the browser's own inspector, so
+            this is the one control with nothing to fall back to. */}
+        <ActionIcon
+          size="sm"
+          variant={state.devToolsOpen ? "light" : "subtle"}
+          color={state.devToolsOpen ? "blue" : "gray"}
+          aria-label={state.devToolsOpen ? "Close DevTools" : "Open DevTools"}
+          title={
+            iframeBackend
+              ? "DevTools for a pane needs the desktop app"
+              : state.devToolsOpen
+                ? "Close DevTools"
+                : "Inspect this pane (opens a separate window)"
+          }
+          disabled={iframeBackend}
+          onClick={() => browserDevTools(id, "toggle")}
+        >
+          <IconCode size={14} />
+        </ActionIcon>
 
         <ActionIcon
           size="sm"

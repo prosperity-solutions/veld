@@ -32,6 +32,15 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** One of "back" | "forward" | "reload" | "stop" | "focus". */
     command: (viewId, command) =>
       ipcRenderer.invoke("veld:browser:command", { viewId, command }),
+    /** Emulate a device, or `null` to show the pane at pane size. */
+    emulate: (viewId, emulation) =>
+      ipcRenderer.invoke("veld:browser:emulate", { viewId, emulation }),
+    /** Page zoom factor for this pane (1 = 100%). */
+    setZoom: (viewId, zoom) => ipcRenderer.invoke("veld:browser:zoom", { viewId, zoom }),
+    /** One of "toggle" | "open" | "close". Always opens detached — a docked
+     *  inspector and the renderer's bounds mirroring fight over the view's box. */
+    devTools: (viewId, action) =>
+      ipcRenderer.invoke("veld:browser:devtools", { viewId, action }),
     destroy: (viewId) => ipcRenderer.invoke("veld:browser:destroy", { viewId }),
     /** Clear one session slot's cookies and storage, pane or no pane. */
     clearSession: (profile) => ipcRenderer.invoke("veld:browser:clear-session", { profile }),

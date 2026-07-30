@@ -24,6 +24,7 @@
  * exists or it doesn't, and a mid-session change is not a thing.
  */
 
+import { type PaneEmulation, DEFAULT_ZOOM, clampZoom, fitScale } from "./devices";
 import { type BrowserProfile, normalizeBrowserUrl } from "./model";
 
 export type BrowserBackend = "electron" | "iframe";
@@ -60,13 +61,43 @@ export interface BrowserState {
    *  where a spinner is the honest thing to show — from "reloading", where the
    *  page underneath is still worth looking at. */
   loaded: boolean;
+  /**
+   * How far a fitted emulated viewport ended up scaled, 1 when it fits or when
+   * there is no emulation.
+   *
+   * Reported by the backend rather than computed here because under Electron it
+   * is a function of the native view's box in device-independent pixels, which
+   * only the main process knows (page zoom scales the renderer's CSS pixels and
+   * not the view's bounds). The pane shows it — "1440 × 900 at 42%" — because a
+   * scaled-down device is otherwise indistinguishable from a small one.
+   */
+  emulationScale: number;
+  /**
+   * Whether touch emulation is *actually* in force.
+   *
+   * Separate from the `touch` the pane asked for, because Chromium hands the
+   * built-in DevTools an exclusive CDP session and touch needs that same session:
+   * opening a pane's inspector suspends its touch emulation until it closes. The
+   * pane says so rather than claiming a mode it does not have.
+   */
+  touchActive: boolean;
+  /** Whether this pane's (detached) DevTools window is open. */
+  devToolsOpen: boolean;
 }
 
 /** The bridge the desktop shell injects (desktop/src/preload.js). */
 interface DesktopBrowserApi {
   create(
     viewId: string,
-    options: { url?: string; profile: BrowserProfile },
+    options: {
+      url?: string;
+      profile: BrowserProfile;
+      /** Sent with `create` rather than after it: a pane switching session
+       *  recreates its view, and a device arriving a round trip late is visible
+       *  as the page laying out at pane size and then jumping. */
+      emulation: PaneEmulation | null;
+      zoom: number;
+    },
   ): Promise<unknown>;
   setBounds(
     viewId: string,
@@ -78,6 +109,9 @@ interface DesktopBrowserApi {
     viewId: string,
     command: "back" | "forward" | "reload" | "stop" | "focus",
   ): Promise<void>;
+  emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
+  setZoom(viewId: string, zoom: number): Promise<void>;
+  devTools(viewId: string, action: "toggle" | "open" | "close"): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
   clearSession(profile: BrowserProfile): Promise<void>;
@@ -157,6 +191,17 @@ interface View {
    * the page arrives, and it cannot, as long as the pane draws its own spinner.
    */
   visible: boolean;
+  /**
+   * The device this view emulates, and its page zoom.
+   *
+   * The layout is the record (`PaneTab.emulation` / `PaneTab.zoom`); these are the
+   * live copies, kept because **the view can be recreated underneath them** — a
+   * session switch destroys and rebuilds one, as does recovering from a refused
+   * `create` — and both are per-`WebContents` state that has to be re-asserted
+   * when that happens. Same shape as `url`, for the same reason.
+   */
+  emulation: PaneEmulation | null;
+  zoom: number;
 }
 
 const views = new Map<string, View>();
@@ -195,7 +240,18 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
     // this `Promise<unknown>`, so nothing else would notice. Believing it would set
     // `shellHasView` for a view that does not exist and re-open the silent
     // spinner-forever hang this whole path exists to prevent.
-    if (!(await desktop.create(v.id, { url, profile: v.profile }))) {
+    // The emulation and the zoom go in with the create, so a rebuilt view is
+    // never briefly the wrong device: the shell applies both *before* the first
+    // `loadURL`, which is also what keeps the emulated user agent on the page's
+    // first request instead of costing a reload.
+    if (
+      !(await desktop.create(v.id, {
+        url,
+        profile: v.profile,
+        emulation: v.emulation,
+        zoom: v.zoom,
+      }))
+    ) {
       throw new Error("the desktop shell refused this pane");
     }
     v.shellHasView = true;
@@ -209,7 +265,7 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
     v.rect = null;
     v.visible = true;
     applyVisibility(v);
-    scheduleBoundsSync();
+    scheduleGeometrySync();
     return true;
   } catch (e: unknown) {
     v.shellHasView = false;
@@ -424,6 +480,9 @@ export function browserStatus(id: string): BrowserState {
       error: null,
       profile: "default",
       loaded: false,
+      emulationScale: 1,
+      touchActive: false,
+      devToolsOpen: false,
     }
   );
 }
@@ -444,7 +503,17 @@ export function subscribeBrowser(id: string, fn: () => void): () => void {
   };
 }
 
-function ensure(id: string, url: string | undefined, profile: BrowserProfile): View {
+/** Everything a view needs when it is created — and, because a session switch
+ *  recreates one, everything that has to be re-asserted when it is. */
+export interface BrowserViewOptions {
+  url?: string;
+  profile: BrowserProfile;
+  emulation?: PaneEmulation | null;
+  zoom?: number;
+}
+
+function ensure(id: string, options: BrowserViewOptions): View {
+  const { url, profile } = options;
   const existing = views.get(id);
   if (existing) {
     // A profile is a cookie jar, and a view is bound to one for life. Switching
@@ -472,6 +541,9 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
       error: null,
       profile,
       loaded: false,
+      emulationScale: 1,
+      touchActive: false,
+      devToolsOpen: false,
     },
     listeners: new Set(),
     observer: null,
@@ -480,6 +552,8 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     shellHasView: !desktop,
     freezeGeneration: 0,
     visible: true,
+    emulation: options.emulation ?? null,
+    zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
   };
   views.set(id, v);
   const waiting = pending.get(id);
@@ -512,25 +586,25 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     if (url) frame.src = url;
     container.appendChild(frame);
     v.iframe = frame;
+    applyIframeEmulation(v);
   }
   return v;
 }
 
 /** Mount a view into `parent`, creating it on first call. */
-export function mountBrowser(
-  id: string,
-  parent: HTMLElement,
-  options: { url?: string; profile: BrowserProfile },
-): void {
-  const v = ensure(id, options.url, options.profile);
+export function mountBrowser(id: string, parent: HTMLElement, options: BrowserViewOptions): void {
+  const v = ensure(id, options);
   if (v.container.parentElement !== parent) parent.appendChild(v.container);
   v.mounted = true;
   applyVisibility(v);
-  if (!v.observer && desktop) {
-    v.observer = new ResizeObserver(scheduleBoundsSync);
+  // Observed under both backends: the native view mirrors the box, and a fitted
+  // emulated viewport is scaled to it, so either way the answer changes with the
+  // pane's size.
+  if (!v.observer) {
+    v.observer = new ResizeObserver(scheduleGeometrySync);
     v.observer.observe(v.container);
   }
-  scheduleBoundsSync();
+  scheduleGeometrySync();
 }
 
 /** Detach the element without destroying the view. */
@@ -627,6 +701,50 @@ export function clearBrowserSession(profile: BrowserProfile): void {
   });
 }
 
+/**
+ * Point a pane at a device, or at nothing (`null` — the pane at pane size).
+ *
+ * The live copy is written **before** the call, and unconditionally: a view the
+ * shell has not created yet (a refused `create` the pane can still retry from
+ * "Try again") must come back as the device the pane is set to, not as the one it
+ * was opened with. That is what makes this survive a session switch, which
+ * destroys and rebuilds the view.
+ */
+export function setBrowserEmulation(id: string, emulation: PaneEmulation | null): void {
+  const v = views.get(id);
+  if (!v) return;
+  v.emulation = emulation;
+  if (!desktop) {
+    applyIframeEmulation(v);
+    return;
+  }
+  // Nothing to talk to yet; `createShellView` sends it with the create.
+  if (!v.shellHasView) return;
+  // Surfaced rather than swallowed: the pane's chrome has already changed to say
+  // it is emulating a phone, so a refused call has to be visible or the chrome is
+  // lying about what the page is being shown as.
+  void desktop.emulate(id, emulation).catch(reportFailure(v));
+}
+
+/** Page zoom for one pane. Stored live for the same recreation reason as the
+ *  emulation; under the iframe backend there is no zoom to set (see
+ *  [`applyIframeEmulation`]). */
+export function setBrowserZoom(id: string, zoom: number): void {
+  const v = views.get(id);
+  if (!v) return;
+  v.zoom = clampZoom(zoom);
+  if (!desktop || !v.shellHasView) return;
+  void desktop.setZoom(id, v.zoom).catch(reportFailure(v));
+}
+
+/** Open, close or toggle this pane's DevTools — always detached; see the shell's
+ *  handler for why a docked inspector cannot work here. */
+export function browserDevTools(id: string, action: "toggle" | "open" | "close"): void {
+  const v = views.get(id);
+  if (!v || !desktop || !v.shellHasView) return;
+  void desktop.devTools(id, action).catch(reportFailure(v));
+}
+
 export function focusBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
@@ -655,24 +773,73 @@ export function pruneBrowsers(keep: Iterable<string>): void {
 }
 
 // ---------------------------------------------------------------------------
-// Geometry (Electron only)
+// Geometry
 // ---------------------------------------------------------------------------
 
 /**
- * Mirror every mounted container's box onto its native view, next frame.
+ * Bring every mounted view's geometry back in line with its container, next frame.
+ *
+ * Two backends, one trigger, because both answers are a function of the pane's
+ * box: Electron mirrors it onto the native view, and the iframe backend scales a
+ * fitted emulated viewport to it.
  *
  * Coalesced to one frame for all views: a splitter drag fires `ResizeObserver`
- * per pointer move on both panes, and each push is an IPC round trip. Deferring
- * also gets the *settled* box — the one read mid-layout is frequently zero.
+ * per pointer move on both panes, and under Electron each push is an IPC round
+ * trip. Deferring also gets the *settled* box — the one read mid-layout is
+ * frequently zero.
  */
 let framePending = false;
-function scheduleBoundsSync(): void {
-  if (!desktop || framePending) return;
+function scheduleGeometrySync(): void {
+  if (framePending) return;
   framePending = true;
   requestAnimationFrame(() => {
     framePending = false;
-    for (const view of views.values()) syncBounds(view);
+    for (const view of views.values()) {
+      if (desktop) syncBounds(view);
+      else applyIframeEmulation(view);
+    }
   });
+}
+
+/**
+ * Size the frame to the emulated viewport and scale it to fit the pane.
+ *
+ * The honest half of emulation in a plain browser: an iframe's *own* width is a
+ * real viewport, so a page laid out in a 390px frame sees 390px in its media
+ * queries — the layout case, which is most of why anyone reaches for this. What a
+ * frame has no API for is the rest: no user agent, no touch events, no device
+ * pixel ratio, and no page zoom. The pane states that gap rather than implying
+ * parity (`BrowserPane`'s device menu), and `browserBackend` is what it keys off.
+ *
+ * `transform` rather than `zoom`: scaling the *rendered result* is the point —
+ * the frame keeps its 390 CSS pixels and merely takes up fewer of the pane's.
+ */
+function applyIframeEmulation(v: View): void {
+  const frame = v.iframe;
+  if (!frame) return;
+  const e = v.emulation;
+  if (!e) {
+    // Back to the stylesheet's own 100%/100%, rather than to a computed size:
+    // the pane can be resized while no emulation is set, and a leftover pixel
+    // width would not follow it.
+    frame.style.removeProperty("width");
+    frame.style.removeProperty("height");
+    frame.style.removeProperty("transform");
+    frame.style.removeProperty("transform-origin");
+    delete frame.dataset.emulated;
+    patch(v, { emulationScale: 1 });
+    return;
+  }
+  const box = v.container.getBoundingClientRect();
+  const scale = fitScale(e, box);
+  // The attribute is what releases the stylesheet's `inset: 0`, which would
+  // otherwise over-constrain the box and win against the width below.
+  frame.dataset.emulated = "true";
+  frame.style.width = `${e.width}px`;
+  frame.style.height = `${e.height}px`;
+  frame.style.transform = `scale(${scale})`;
+  frame.style.transformOrigin = "top left";
+  patch(v, { emulationScale: scale });
 }
 
 function syncBounds(v: View): void {
@@ -744,6 +911,15 @@ if (desktop) {
     } else if (payload.error === null) {
       next.error = null;
     }
+    // What the pane cannot know for itself: how far a fitted viewport is scaled,
+    // whether touch survived (DevTools takes its CDP session), and whether the
+    // inspector is open. Each is read only when present, so an event about
+    // something else cannot reset it.
+    if (typeof payload.emulationScale === "number" && Number.isFinite(payload.emulationScale)) {
+      next.emulationScale = payload.emulationScale;
+    }
+    if (typeof payload.touchActive === "boolean") next.touchActive = payload.touchActive;
+    if (typeof payload.devToolsOpen === "boolean") next.devToolsOpen = payload.devToolsOpen;
     // A committed page is what makes a reload keep showing the old one rather
     // than a spinner over nothing.
     if (next.url) next.loaded = true;

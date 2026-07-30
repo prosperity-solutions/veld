@@ -14,6 +14,8 @@
  * the React side owns only the state cell and the rendering.
  */
 
+import { type PaneEmulation, sanitizeEmulation, sanitizeZoom } from "./devices";
+
 /**
  * What a tab shows.
  *
@@ -133,6 +135,24 @@ export interface PaneTab {
   url?: string;
   /** `browser` only; defaults to `default`. */
   profile?: BrowserProfile;
+  /**
+   * `browser` only: the device this pane emulates, absent when it shows itself
+   * at pane size.
+   *
+   * In the layout for the same reason the URL is, plus a harder one: emulation is
+   * per-`WebContents` and a pane switching session **destroys and recreates its
+   * view**, so the state has to live somewhere that outlives the view and be
+   * re-asserted on create. `browserHost` holds the live copy; this is the record.
+   */
+  emulation?: PaneEmulation;
+  /**
+   * `browser` only: page zoom factor, absent at 100%.
+   *
+   * Same recreation problem as `emulation`, and one of its own — Chromium's zoom
+   * is per *origin*, so a navigation adopts whatever the origin was last viewed
+   * at and the pane's own setting has to be re-asserted over it.
+   */
+  zoom?: number;
 }
 
 export interface Dock {
@@ -796,6 +816,12 @@ function parseTab(value: unknown): PaneTab | null {
     const url = typeof t.url === "string" ? normalizeBrowserUrl(t.url) : null;
     if (url) tab.url = url;
     tab.profile = isBrowserProfile(t.profile) ? t.profile : "default";
+    // Same rule for the emulation: every number is clamped and the user-agent
+    // string is re-checked, because this one ends up in a request header.
+    const emulation = sanitizeEmulation(t.emulation);
+    if (emulation) tab.emulation = emulation;
+    const zoom = sanitizeZoom(t.zoom);
+    if (zoom !== null) tab.zoom = zoom;
   }
   return tab;
 }

@@ -914,8 +914,87 @@ select:focus {
   border: 0;
 }
 
+/* An emulated frame is a device-sized box scaled to fit, which is routinely
+   *larger* than the pane before the transform is applied. Clipped here so it can
+   never paint outside the slot. */
+.browser-host {
+  overflow: hidden;
+}
+
 .browser-frame {
   background: #fff;
+}
+
+/* Device emulation under the iframe backend: the frame keeps the emulated
+   viewport's own pixel size (so the page's media queries see a phone) and
+   `transform: scale()` shrinks the rendered result to fit. `inset: 0` would
+   otherwise fight the inline width/height — an absolutely positioned box with
+   left+right+width set is over-constrained — so the emulated frame is anchored
+   top-left and sized instead. Set by `applyIframeEmulation` in browserHost.ts. */
+.browser-frame[data-emulated="true"] {
+  inset: 0 auto auto 0;
+}
+
+/* The device/zoom control. A chip that only carries text when there is something
+   to say: an emulated size, and a zoom that isn't 100%. */
+.browser-device {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--faint);
+}
+.browser-device:hover {
+  border-color: var(--border);
+  color: var(--text);
+}
+.browser-device[data-active="true"] {
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.browser-chip {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+
+/* A row of fields inside a menu — the custom size and the zoom stepper. Not
+   Menu.Items: a click in a field must not close the menu it lives in. */
+.menu-fields {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px 7px;
+}
+.menu-fields input[type="number"] {
+  width: 58px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  outline: none;
+}
+.menu-fields input[type="number"]:focus {
+  border-color: var(--accent);
+}
+.menu-value {
+  min-width: 42px;
+  text-align: center;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+}
+.menu-size {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
 }
 
 /* Stand-ins for the page, shown only while the native view is hidden (see
