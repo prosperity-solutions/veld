@@ -20,7 +20,10 @@ pub enum LogStream {
     Server,
     /// Browser-side client logs (per node).
     Client,
-    /// Setup/command step output (per node).
+    /// Project `setup`/`teardown` step output. Read run-level, but the rows
+    /// carry a pseudo-node (`setup`/`teardown` + the step name as variant) so
+    /// two steps stay distinguishable in one interleaved stream. A `command`
+    /// node's output is *not* here — it goes to `Server`, like any node's.
     Setup,
     /// Orchestration trace (`--debug`, per run).
     Debug,
@@ -151,6 +154,54 @@ impl Db {
             ts_to_str(ts),
             line,
         ])?;
+        Ok(())
+    }
+
+    /// Append many lines that share a scope, as one transaction.
+    ///
+    /// A build tool emits tens of thousands of lines through one sink, and each
+    /// autocommit `INSERT` takes the process-wide connection lock on its own —
+    /// serializing against every other node in the stage and against the daemon.
+    /// Grouping the batch the reader already produced makes that one lock
+    /// acquisition and one commit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_logs(
+        &self,
+        project_root: &Path,
+        run_name: &str,
+        run_id: Option<&str>,
+        node: Option<&str>,
+        variant: Option<&str>,
+        stream: LogStream,
+        ts: chrono::DateTime<chrono::Utc>,
+        lines: &[String],
+    ) -> Result<(), DbError> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.lock();
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare_cached(
+                "INSERT INTO log_lines (project_root, run_name, run_id, node, variant, stream, ts, line)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            )?;
+            let root = root_key(project_root);
+            let ts = ts_to_str(ts);
+            for line in lines {
+                stmt.execute(params![
+                    root,
+                    run_name,
+                    run_id,
+                    node,
+                    variant,
+                    stream.as_str(),
+                    ts,
+                    line,
+                ])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
 

@@ -557,6 +557,7 @@ function ensureLogPanel(key){
         '<button class="active" data-action="source-filter" data-source="all">All</button>'+
         '<button data-action="source-filter" data-source="server">Server</button>'+
         '<button data-action="source-filter" data-source="client">Client</button>'+
+        '<button data-action="source-filter" data-source="setup">Setup</button>'+
         '<button data-action="source-filter" data-source="internal">Internal</button>'+
       '</div>'+
       '<input class="log-search" type="text" placeholder="Search logs..." data-action="log-search">'+
@@ -651,7 +652,9 @@ async function fetchLogs(key,runName,projectRoot){
 
 function doRenderLogs(key){
   const s=runState[key];if(!s||!s.lastData)return;
-  const data=s.logFilter?{nodes:s.lastData.nodes.filter(n=>n.node===s.logFilter)}:s.lastData;
+  // `_veld:*` sections (internal, setup/teardown) belong to the run, not a
+  // node, so a node filter must not hide them.
+  const data=s.logFilter?{nodes:s.lastData.nodes.filter(n=>n.node===s.logFilter||n.node==='_veld')}:s.lastData;
   renderLogs(key,data,s.lastData.nodes.length);
 }
 

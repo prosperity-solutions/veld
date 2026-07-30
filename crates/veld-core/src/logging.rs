@@ -103,6 +103,25 @@ impl LogWriter {
         self.write_line(&format!("[VELD] {message}")).await
     }
 
+    /// Write a batch of lines under one timestamp, as one transaction.
+    ///
+    /// The batch is what a pipe reader hands its sink; writing it line by line
+    /// would take the database lock once per line (see [`Db::append_logs`]).
+    pub fn write_lines(&self, ts: chrono::DateTime<Utc>, lines: &[String]) -> Result<(), LogError> {
+        let run_id = self.run_id.map(|id| id.to_string());
+        self.db.append_logs(
+            &self.project_root,
+            &self.run_name,
+            run_id.as_deref(),
+            self.node.as_deref(),
+            self.variant.as_deref(),
+            self.stream,
+            ts,
+            lines,
+        )?;
+        Ok(())
+    }
+
     /// Write a line with an explicit timestamp (client logs carry their own).
     pub fn write_with_ts(&self, ts: chrono::DateTime<Utc>, line: &str) -> Result<(), LogError> {
         let run_id = self.run_id.map(|id| id.to_string());

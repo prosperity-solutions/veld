@@ -408,6 +408,20 @@ veld logs --source internal --name my-feature     # shows probe stderr, recovery
 veld logs --source internal -f --name my-feature  # follow mode
 ```
 
+Log sources, and where each kind of output lands:
+
+| `--source` | Contains |
+|---|---|
+| `server` | Node output — both `start_server` processes and `command` steps (a `docker build`'s progress is here, under that node). Read one node with `--node <name>` |
+| `client` | Browser `console.*` from the client-log collector |
+| `setup` | Project-level `setup`/`teardown` step output, labelled `setup:<step name>` |
+| `internal` | Liveness probe outcomes, recovery decisions |
+| `all` (default) | All four, interleaved by timestamp |
+
+Step output is recorded verbatim and never redacted, so a node or step that
+echoes a secret from its environment puts it in that run's log. A `command`
+step's stdin is `/dev/null` — one that prompts fails on EOF instead of hanging.
+
 **Outputs can change after a recovery restart.** When a liveness probe triggers recovery (e.g., SSH tunnel drops and the DB clone restarts), the restarted node may produce new outputs (different port, new password, new connection string). Always re-read outputs with `veld status --outputs` after a restart rather than caching them. If you observe connection failures to a previously-working service, check whether a recovery happened and refresh your outputs.
 
 ## Gotchas

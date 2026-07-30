@@ -437,7 +437,9 @@ struct LogQuery {
     #[serde(default = "default_lines")]
     lines: usize,
     node: Option<String>,
-    /// Filter by source: "all" (default), "server", or "client".
+    /// Filter by source: "all" (default), "server" (node output), "client",
+    /// "setup" (project setup/teardown steps, alias "teardown"), or "internal"
+    /// (alias "veld"). Mirrors `veld logs --source`.
     #[serde(default = "default_source")]
     source: String,
     /// Run instance to read (id prefix). Default: the environment's latest
@@ -553,6 +555,10 @@ async fn get_logs(
     let include_server = q.source == "all" || q.source == "server";
     let include_client = q.source == "all" || q.source == "client";
     let include_internal = q.source == "all" || q.source == "internal" || q.source == "veld";
+    // Project setup/teardown steps: run-level rows that carry a pseudo-node
+    // (`setup`/`teardown`) rather than a real one, so they are not reachable
+    // through the per-node loop below.
+    let include_setup = q.source == "all" || q.source == "setup" || q.source == "teardown";
     let mut nodes = Vec::new();
 
     let tail = |node: Option<&str>, variant: Option<&str>, stream: LogStream| {
@@ -579,6 +585,46 @@ async fn get_logs(
                 node: "_veld".to_owned(),
                 variant: "internal".to_owned(),
                 source: "internal".to_owned(),
+                lines,
+            });
+        }
+    }
+
+    // Project setup/teardown output — shown as _veld:setup, like the internal
+    // stream, since it belongs to the run rather than to any one node.
+    // Not gated on `q.node`: `setup` is a run-level stream, so a node filter
+    // does not apply to it — the same rule `veld logs` follows for the run-level
+    // streams (see `crates/veld/src/commands/logs.rs`, run-level filter branch).
+    if include_setup {
+        // Labelled per step: the rows of every step share one section, and
+        // `setup:install` vs `teardown:compose-down` is the only thing telling
+        // a reader which lines came from where.
+        let filter = LogFilter {
+            node: None,
+            variant: None,
+            streams: Some(vec![LogStream::Setup.as_str()]),
+            run_id: run_scope.clone(),
+        };
+        let lines: Vec<String> = db
+            .tail_logs(&project_root, &run_name, &filter, lines_limit)
+            .map(|rows| {
+                rows.into_iter()
+                    .map(|r| match (&r.node, &r.variant) {
+                        (Some(node), Some(variant)) => {
+                            format!("[{}] [{node}:{variant}] {}", r.ts, r.line)
+                        }
+                        // Every writer of this stream labels its rows; this is
+                        // for a row some other version of veld left behind.
+                        _ => format!("[{}] {}", r.ts, r.line),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !lines.is_empty() {
+            nodes.push(NodeLogs {
+                node: "_veld".to_owned(),
+                variant: "setup".to_owned(),
+                source: "setup".to_owned(),
                 lines,
             });
         }
@@ -1011,12 +1057,14 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
     // trace anywhere and the UI would just never show a run.
     //
     // Captured to a FILE, not a pipe. A pipe would have to be drained to keep
-    // from blocking the child, would not reach EOF when the shell exits (setup
-    // steps and actions inherit stderr via `process::run_command`, so anything
-    // they background holds the write end open), and closing the read end on
-    // such a survivor would hand it EPIPE/SIGPIPE and kill it — a process the
-    // user started. A file blocks nobody, stays writable for any descendant
-    // that inherited it, and needs no reader at all.
+    // from blocking the child, would not reach EOF when the shell exits
+    // (`veld action` inherits stderr, so anything it backgrounds holds the
+    // write end open — `process::run_command` now captures both of a step's own
+    // pipes, but the CLI's stderr, which this file is, is still inherited by
+    // whatever a step leaves running), and closing the read end on such a
+    // survivor would hand it EPIPE/SIGPIPE and kill it — a process the user
+    // started. A file blocks nobody, stays writable for any descendant that
+    // inherited it, and needs no reader at all.
     let (stderr_sink, stderr_path) = match spawn_stderr_file() {
         Some((file, path)) => (std::process::Stdio::from(file), Some(path)),
         None => (std::process::Stdio::null(), None),

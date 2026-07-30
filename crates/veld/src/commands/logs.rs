@@ -10,6 +10,7 @@ pub enum SourceFilter {
     All,
     Server,
     Client,
+    Setup,
     Internal,
 }
 
@@ -19,6 +20,7 @@ impl SourceFilter {
             "all" => Some(Self::All),
             "server" => Some(Self::Server),
             "client" => Some(Self::Client),
+            "setup" | "teardown" => Some(Self::Setup),
             "internal" | "veld" => Some(Self::Internal),
             _ => None,
         }
@@ -40,8 +42,15 @@ impl SourceFilter {
                 LogStream::Debug.as_str(),
                 LogStream::Internal.as_str(),
             ],
-            Self::Server => vec![LogStream::Server.as_str(), LogStream::Setup.as_str()],
+            // Node output only. `Setup` used to be listed here as well, back
+            // when it had no writers at all and the inclusion was inert; now
+            // that project steps write to it, keeping it would mean
+            // `--source server` printed project setup output too.
+            Self::Server => vec![LogStream::Server.as_str()],
             Self::Client => vec![LogStream::Client.as_str()],
+            // Project `setup`/`teardown` steps only — node output, including a
+            // `command` node's, is on the `server` stream.
+            Self::Setup => vec![LogStream::Setup.as_str()],
             Self::Internal => vec![LogStream::Internal.as_str()],
         }
     }

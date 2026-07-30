@@ -928,7 +928,7 @@ impl Orchestrator {
             Ok(vars) => {
                 self.resolved_vars = Some(Arc::new(vars));
                 self.resolved_vars_run = Some(run_name.to_owned());
-                self.run_setup_steps(run_name).await
+                self.run_setup_steps(run_name, Some(run.run_id)).await
             }
             Err(e) => Err(e.into()),
         };
@@ -1419,8 +1419,29 @@ impl Orchestrator {
         // Idempotency: if skip_if passes, skip the run entirely (exit 0).
         if let Some(ref skip_if_cmd) = resolved.skip_if {
             let skip_if_resolved = skip_if_cmd.interpolate(&var_ctx)?;
-            if let Ok(out) = process::run_command(&skip_if_resolved, &working_dir, &env, None).await
-            {
+            // No sink: a probe's output is a predicate, not the node's output.
+            let probe = process::run_command(&skip_if_resolved, &working_dir, &env, None, None)
+                .await
+                .inspect_err(|e| {
+                    tracing::warn!(
+                        node = sel.node,
+                        variant = sel.variant,
+                        error = %e,
+                        "skip_if probe could not run — treating the node as not skippable"
+                    );
+                })
+                .inspect(|out| {
+                    if probe_could_not_run(out.exit_code) {
+                        tracing::warn!(
+                            node = sel.node,
+                            variant = sel.variant,
+                            exit_code = out.exit_code,
+                            command = skip_if_resolved.display(),
+                            "skip_if probe could not be executed — treating the node as not skippable"
+                        );
+                    }
+                });
+            if let Ok(out) = probe {
                 if out.exit_code == 0 {
                     tracing::info!(
                         node = sel.node,
@@ -1702,7 +1723,7 @@ impl Orchestrator {
                 // `setup` step does. No run row here, so no node selections and no
                 // run id: project surfaces only.
                 self.ensure_stop_vars(run_name, None, &[]).await;
-                self.run_teardown_steps(run_name).await;
+                self.run_teardown_steps(run_name, None).await;
                 return Ok(StopResult::AlreadyStopped);
             }
         };
@@ -1715,7 +1736,7 @@ impl Orchestrator {
             // Latest run already ended — it is history now, never deleted here.
             // Teardown steps still run so a re-stop stays a cleanup tool.
             self.ensure_stop_vars(run_name, Some(run.run_id), &[]).await;
-            self.run_teardown_steps(run_name).await;
+            self.run_teardown_steps(run_name, Some(run.run_id)).await;
             return Ok(StopResult::AlreadyStopped);
         }
 
@@ -1798,7 +1819,7 @@ impl Orchestrator {
         }
 
         // Run project-level teardown steps after all per-node on_stop hooks.
-        self.run_teardown_steps(run_name).await;
+        self.run_teardown_steps(run_name, Some(run.run_id)).await;
 
         // Persist the final node states while the run is still `stopping`
         // (save_run refuses to touch terminal runs), then finalize it into
@@ -2213,7 +2234,26 @@ impl Orchestrator {
             self.project_root.clone()
         });
 
-        match process::run_command(&resolved_cmd, &working_dir, &env, None).await {
+        // An `on_stop` hook is that node's teardown, so its output goes to that
+        // node's own `server` stream — the container it removed is the last
+        // thing in the node's log, which is where someone debugging a leak
+        // looks. Without a run instance there is nothing to attach rows to.
+        let sink = step_line_sink(
+            run_id.map(|id| {
+                LogWriter::for_node(
+                    self.db.clone(),
+                    &self.project_root,
+                    run_name,
+                    id,
+                    &node_state.node_name,
+                    &node_state.variant,
+                    LogStream::Server,
+                )
+            }),
+            &self.progress_tx,
+            (node_state.node_name.clone(), node_state.variant.clone()),
+        );
+        match process::run_command(&resolved_cmd, &working_dir, &env, None, Some(sink)).await {
             Ok(result) => {
                 if result.exit_code != 0 {
                     tracing::warn!(
@@ -2366,7 +2406,11 @@ impl Orchestrator {
 
     /// Run project-level setup steps sequentially. Returns an error if any
     /// step exits non-zero, aborting startup.
-    async fn run_setup_steps(&self, run_name: &str) -> Result<(), OrchestratorError> {
+    async fn run_setup_steps(
+        &self,
+        run_name: &str,
+        run_id: Option<uuid::Uuid>,
+    ) -> Result<(), OrchestratorError> {
         let steps = match self.config.setup.as_ref() {
             Some(steps) if !steps.is_empty() => steps,
             _ => return Ok(()),
@@ -2412,7 +2456,10 @@ impl Orchestrator {
             };
 
             let env = HashMap::new();
-            match process::run_command(&resolved_cmd, &self.project_root, &env, None).await {
+            let sink = self.project_step_sink(run_name, run_id, "setup", &step.name);
+            match process::run_command(&resolved_cmd, &self.project_root, &env, None, Some(sink))
+                .await
+            {
                 Ok(result) => {
                     if result.exit_code != 0 {
                         let reason = format!("exited with code {}", result.exit_code);
@@ -2450,9 +2497,53 @@ impl Orchestrator {
         Ok(())
     }
 
+    /// Sink for a project-level `setup`/`teardown` step's output.
+    ///
+    /// These steps belong to no node, so their lines go to the run-level
+    /// `setup` stream (`veld logs` reads it by default) and are attributed in
+    /// the UI to a pseudo-node — `setup:<step name>` — which is how a reader
+    /// tells two steps apart in one interleaved stream. A `setup` step runs
+    /// before the run row is written; the rows still carry the run id it is
+    /// about to get, so they are in scope the moment it exists.
+    fn project_step_sink(
+        &self,
+        run_name: &str,
+        run_id: Option<uuid::Uuid>,
+        kind: &str,
+        step_name: &str,
+    ) -> process::LineSink {
+        // `setup` rows are read run-level but carry a node, which is what makes
+        // two steps distinguishable in one interleaved stream: `veld logs`
+        // labels them `setup:<step name>`.
+        //
+        // With no run instance (a `veld stop` on an environment veld has no row
+        // for) nothing is written. Such rows would carry a NULL `run_id`, which
+        // every run-scoped read filters out — `veld logs --all-runs` drops the
+        // `run_id` predicate and would surface them, but that is the only way to
+        // reach them, and a line you can read only under a flag you did not know
+        // to pass is not worth keeping forever. Whoever ran the `stop` sees the
+        // output live: the sink still reports it.
+        let writer = run_id.map(|id| {
+            LogWriter::for_node(
+                self.db.clone(),
+                &self.project_root,
+                run_name,
+                id,
+                kind,
+                step_name,
+                LogStream::Setup,
+            )
+        });
+        step_line_sink(
+            writer,
+            &self.progress_tx,
+            (kind.to_owned(), step_name.to_owned()),
+        )
+    }
+
     /// Run project-level teardown steps sequentially. Best-effort: failures
     /// are logged but never propagated.
-    async fn run_teardown_steps(&self, run_name: &str) {
+    async fn run_teardown_steps(&self, run_name: &str, run_id: Option<uuid::Uuid>) {
         let steps = match self.config.teardown.as_ref() {
             Some(steps) if !steps.is_empty() => steps,
             _ => return,
@@ -2488,7 +2579,10 @@ impl Orchestrator {
             };
 
             let env = HashMap::new();
-            match process::run_command(&resolved_cmd, &self.project_root, &env, None).await {
+            let sink = self.project_step_sink(run_name, run_id, "teardown", &step.name);
+            match process::run_command(&resolved_cmd, &self.project_root, &env, None, Some(sink))
+                .await
+            {
                 Ok(result) => {
                     if result.exit_code != 0 {
                         tracing::warn!(
@@ -2533,6 +2627,67 @@ fn emit_progress(tx: &Option<mpsc::UnboundedSender<ProgressEvent>>, event: Progr
     if let Some(tx) = tx {
         let _ = tx.send(event);
     }
+}
+
+/// Whether a probe's exit code means the shell could not run it at all, rather
+/// than that it ran and answered "no".
+///
+/// A `skip_if` is a predicate, so its output is deliberately not logged — but a
+/// typo'd or missing binary is not an answer, and since the probe's stderr no
+/// longer reaches the terminal, `sh: docker: command not found` would otherwise
+/// be silent in every channel. 126/127 are the shell's conventional
+/// "found but not executable" / "not found".
+fn probe_could_not_run(exit_code: i32) -> bool {
+    exit_code == 126 || exit_code == 127
+}
+
+/// Build the line sink for a step run through [`process::run_command`].
+///
+/// Every line the step prints goes to up to two places: the log stream `writer`
+/// belongs to, so `veld logs` and the management UI can show it after the fact,
+/// and the progress channel, so it is visible while the step runs. Either may be
+/// absent — a step with no run instance to attach rows to has no writer, and a
+/// `veld stop` has no progress channel (see below) — but never both silently:
+/// with no channel the lines go to stderr. It goes to the
+/// progress channel rather than straight to the terminal because the CLI draws
+/// spinners there — a child writing to the inherited stderr (what `command`
+/// steps used to do) scribbles over them.
+///
+/// With no progress channel there are no spinners to protect and nothing else
+/// to show the user the step's output live, so the lines go to stderr instead.
+/// That is the `veld stop` path: teardown steps and `on_stop` hooks used to
+/// print straight to the terminal, and a `docker compose down` that takes
+/// twenty seconds must not become a silent pause.
+///
+/// `label` is the `node:variant` pair the line is attributed to in the UI; for
+/// project-level steps it is a pseudo-node (`setup`, `teardown`) and the step
+/// name, since those have no node.
+fn step_line_sink(
+    writer: Option<LogWriter>,
+    tx: &Option<mpsc::UnboundedSender<ProgressEvent>>,
+    label: (String, String),
+) -> process::LineSink {
+    let tx = tx.clone();
+    let (node, variant) = label;
+    Arc::new(move |lines: &[String]| {
+        if let Some(ref w) = writer {
+            let _ = w.write_lines(chrono::Utc::now(), lines);
+        }
+        match tx {
+            Some(ref tx) => {
+                let _ = tx.send(ProgressEvent::NodeLogLines {
+                    node: node.clone(),
+                    variant: variant.clone(),
+                    lines: lines.to_vec(),
+                });
+            }
+            None => {
+                for line in lines {
+                    eprintln!("  {node}:{variant} {line}");
+                }
+            }
+        }
+    })
 }
 
 /// Write a line to the debug log (no-op when writer is None).
@@ -3102,7 +3257,7 @@ async fn execute_start_server_isolated(
                         }
                         let lines: Vec<String> = rows
                             .into_iter()
-                            .map(|r| format!("[{}] {}", r.ts, r.line))
+                            .map(|r| r.line)
                             .filter(|l| !l.is_empty())
                             .collect();
                         if !lines.is_empty() {
@@ -3362,11 +3517,31 @@ async fn execute_command_isolated(
         .await?;
     }
 
-    // Idempotency check (skip_if).
+    // Idempotency check (skip_if). No sink: a probe's output is a predicate,
+    // not the node's output — logging it would put a "not installed" message in
+    // the log of a node that then installed it. A probe that cannot even be
+    // spawned is a different thing and must not be silent, since its output no
+    // longer reaches the terminal either.
     if let Some(ref skip_if_cmd) = resolved.skip_if {
         let skip_if_resolved = skip_if_cmd.interpolate(var_ctx)?;
         let skip_if_result =
-            process::run_command(&skip_if_resolved, &working_dir, &env, None).await;
+            process::run_command(&skip_if_resolved, &working_dir, &env, None, None).await;
+        match skip_if_result {
+            Err(ref e) => tracing::warn!(
+                node = sel.node,
+                variant = sel.variant,
+                error = %e,
+                "skip_if probe could not run — treating the node as not skippable"
+            ),
+            Ok(ref out) if probe_could_not_run(out.exit_code) => tracing::warn!(
+                node = sel.node,
+                variant = sel.variant,
+                exit_code = out.exit_code,
+                command = skip_if_resolved.display(),
+                "skip_if probe could not be executed — treating the node as not skippable"
+            ),
+            Ok(_) => {}
+        }
         if let Ok(ref out) = skip_if_result {
             if out.exit_code == 0 {
                 tracing::info!(
@@ -3393,8 +3568,31 @@ async fn execute_command_isolated(
     );
     let output_file =
         logging::output_file(&ctx.project_root, &ctx.run_name, &sel.node, &sel.variant);
-    let result =
-        process::run_command(&resolved_cmd, &working_dir, &env, Some(&output_file)).await?;
+    // A command node's output belongs to that node's `server` stream, exactly
+    // like a `start_server` node's — same rows, so `veld logs --node <n>`, the
+    // failure tail and the management UI all show it without knowing which kind
+    // of node produced it.
+    let sink = step_line_sink(
+        Some(LogWriter::for_node(
+            ctx.db.clone(),
+            &ctx.project_root,
+            &ctx.run_name,
+            ctx.run_id,
+            &sel.node,
+            &sel.variant,
+            LogStream::Server,
+        )),
+        &ctx.progress_tx,
+        (sel.node.clone(), sel.variant.clone()),
+    );
+    let result = process::run_command(
+        &resolved_cmd,
+        &working_dir,
+        &env,
+        Some(&output_file),
+        Some(sink),
+    )
+    .await?;
 
     node_state
         .outputs
@@ -3931,13 +4129,79 @@ mod tests {
         assert!(orch.resolved_vars.is_none());
 
         orch.ensure_stop_vars("dev", None, &[]).await;
-        orch.run_teardown_steps("dev").await;
+        orch.run_teardown_steps("dev", None).await;
 
         assert_eq!(
             std::fs::read_to_string(&marker).unwrap_or_default().trim(),
             "saw-the-var",
             "the teardown step must have interpolated its var and run"
         );
+
+        // The `None` run id path writes no rows on purpose: they would carry a
+        // NULL `run_id`, reachable only by `veld logs --all-runs`. The step's
+        // output is reported live instead.
+        let all = LogFilter {
+            streams: Some(vec![LogStream::Setup.as_str()]),
+            ..Default::default()
+        };
+        assert!(
+            orch.db
+                .tail_logs(project_root, "dev", &all, 100)
+                .unwrap()
+                .is_empty(),
+            "a stop with no run instance must not persist unreachable rows"
+        );
+    }
+
+    /// A project step's output lands on the run's `setup` stream, labelled with
+    /// the step it came from.
+    ///
+    /// The label is the whole point of the pseudo-node: `setup` is read
+    /// run-level, so without `node`/`variant` two steps' lines interleave into
+    /// one anonymous blob. Both pipes are covered — stderr is where a build tool
+    /// actually talks, and it is the one that used to be inherited.
+    #[tokio::test]
+    async fn teardown_step_output_is_recorded_under_its_step_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path();
+
+        let config: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3",
+                "name": "testcfg",
+                "teardown": [
+                    { "name": "compose-down", "shell": "echo on-stdout; echo on-stderr >&2" }
+                ],
+                "nodes": {
+                    "task": { "default_variant": "local", "variants": {
+                        "local": { "type": "command", "shell": "true" }
+                    }}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut orch = test_orchestrator(project_root, config);
+        let run_id = uuid::Uuid::new_v4();
+        orch.ensure_stop_vars("dev", Some(run_id), &[]).await;
+        orch.run_teardown_steps("dev", Some(run_id)).await;
+
+        let filter = LogFilter {
+            streams: Some(vec![LogStream::Setup.as_str()]),
+            run_id: Some(run_id.to_string()),
+            ..Default::default()
+        };
+        let rows = orch
+            .db
+            .tail_logs(project_root, "dev", &filter, 100)
+            .unwrap();
+        let lines: Vec<&str> = rows.iter().map(|r| r.line.as_str()).collect();
+        assert!(lines.contains(&"on-stdout"), "got {lines:?}");
+        assert!(lines.contains(&"on-stderr"), "got {lines:?}");
+        for row in &rows {
+            assert_eq!(row.node.as_deref(), Some("teardown"));
+            assert_eq!(row.variant.as_deref(), Some("compose-down"));
+        }
     }
 
     /// `veld stop --all` loops one `Orchestrator` over every run, so the var

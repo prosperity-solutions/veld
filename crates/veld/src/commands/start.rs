@@ -267,11 +267,22 @@ pub async fn run(
                     ..
                 } = e
                 {
+                    // Scoped to this run. Unscoped, the tail spans every run
+                    // ever started under this name — and now that a `command`
+                    // node produces log rows at all, a node that failed after
+                    // three lines would have the other seventeen filled in from
+                    // a previous attempt and presented as this failure's.
+                    let run_id = orchestrator
+                        .db
+                        .get_run(&project_root, run_name_str)
+                        .ok()
+                        .flatten()
+                        .map(|r| r.run_id.to_string());
                     let filter = veld_core::db::LogFilter {
                         node: Some(node.clone()),
                         variant: Some(variant.clone()),
                         streams: Some(vec![veld_core::db::LogStream::Server.as_str()]),
-                        run_id: None,
+                        run_id,
                     };
                     if let Ok(rows) =
                         orchestrator
@@ -608,11 +619,11 @@ fn render_progress_tty(event: &ProgressEvent, ctx: &mut TtyProgressCtx) {
         } => {
             let label = output::dim(&format!("{node}:{variant}"));
             for line in lines {
-                // Strip timestamp prefix for readability.
-                let content = line.find("] ").map(|i| &line[i + 2..]).unwrap_or(line);
+                // Lines are verbatim; printed through `multi` so they interleave
+                // with the spinners instead of overwriting them.
                 let _ = ctx
                     .multi
-                    .println(format!("  {label} {}", output::dim(content)));
+                    .println(format!("  {label} {}", output::dim(line)));
             }
         }
         ProgressEvent::SetupStepStarting { name, index, total } => {

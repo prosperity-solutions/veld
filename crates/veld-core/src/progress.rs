@@ -92,10 +92,19 @@ pub enum ProgressEvent {
     /// A teardown step completed.
     TeardownStepCompleted { name: String },
 
-    /// Service log lines streamed during slow readiness checks.
+    /// Output lines from a node's process, streamed while it runs.
     ///
-    /// Emitted after a delay when readiness checks are taking longer than
-    /// expected, giving the user visibility into what the service is doing.
+    /// For a `start_server` node these appear after a delay when readiness
+    /// checks are taking longer than expected; for a `command` node (and for
+    /// project `setup`/`teardown` steps, attributed to a pseudo-node) every
+    /// line is streamed as it is printed, since a build step has nothing else
+    /// to show for itself while it runs.
+    ///
+    /// Lines are verbatim — no timestamp prefix. The event carries none either:
+    /// it is a live progress signal, delivered as the line is printed, and the
+    /// stored copy in `log_lines` is the timestamped record. A prefix here only
+    /// meant the renderer had to strip it back off, which it did by cutting at
+    /// the first `"] "` — and that truncated any real line containing one.
     NodeLogLines {
         node: String,
         variant: String,

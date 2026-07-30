@@ -96,6 +96,195 @@ pub struct LogTarget {
     pub variant: String,
 }
 
+/// Where a command step's live output goes: one call per batch of lines, from
+/// the reader task that drains the pipe.
+///
+/// A `command` step's output used to be thrown away — stdout was read only for
+/// `VELD_OUTPUT` control lines and stderr was inherited straight onto the
+/// terminal, so a `docker build` or `pnpm install` node scrolled past the
+/// progress bars and was in no log the user could read afterwards. The sink is
+/// how the caller re-attaches that output to something: the database, the
+/// progress channel, or both. `None` keeps a step's output off the record
+/// entirely (`skip_if` probes, which are predicates).
+///
+/// It takes a **batch**, not a line, because the caller's per-call cost is not
+/// free: the progress renderer redraws every spinner per `println`, and a build
+/// tool emits tens of thousands of lines. One call per read from the pipe keeps
+/// that proportional to I/O rather than to line count.
+pub type LineSink = std::sync::Arc<dyn Fn(&[String]) + Send + Sync>;
+
+/// Longest line kept whole before it is split and sinked as-is.
+///
+/// A progress meter that only ever emits `\r` (curl, some installers) has no
+/// line breaks at all from a `\n`-only reader's point of view — without a cap
+/// its output accumulates in memory for the life of the step and lands as one
+/// enormous row. 64 KiB is far past any real log line.
+const MAX_LINE_BYTES: usize = 64 * 1024;
+
+/// How long the pipe readers get to finish after the step's own process exits.
+///
+/// A step that backgrounds something (`sh -c 'server >/dev/null &'`) leaves a
+/// descendant holding the write end of these pipes, so EOF may never come.
+/// Waiting for it wedges the CLI for as long as that descendant lives — and
+/// before this file captured stderr, not wedging is exactly what the daemon
+/// relied on (see `veld-daemon/src/management.rs`, spawn-log capture). Whatever
+/// is still buffered when the child exits drains in microseconds; this bounds
+/// only the pathological case.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// The pipe readers, aborted when they go out of scope.
+///
+/// They must not outlive the call that spawned them. A [`LineSink`] captures
+/// whatever the caller wired it to — the orchestrator's progress channel, among
+/// other things — so a reader that survives its `run_command` keeps a sender
+/// alive, and the CLI's progress task, which ends when the last sender drops,
+/// never finishes. Ctrl+C during a `command` node drops this future without
+/// reaching the grace period above, and that is exactly when it matters: the
+/// step's process is still running, so the pipes are still open, and `veld
+/// start` would hang instead of tearing the run down.
+struct DrainTasks(Vec<tokio::task::JoinHandle<()>>);
+
+impl Drop for DrainTasks {
+    fn drop(&mut self) {
+        for task in &self.0 {
+            task.abort();
+        }
+    }
+}
+
+/// How many bytes at the end of `buf` are the start of a multi-byte character
+/// whose remaining bytes have not arrived (0 if it ends on a boundary).
+///
+/// A UTF-8 character is at most 4 bytes, so at most 3 can be pending.
+fn trailing_partial_char(buf: &[u8]) -> usize {
+    for back in 1..=3.min(buf.len()) {
+        let byte = buf[buf.len() - back];
+        // Continuation bytes are 10xxxxxx; anything else starts a character.
+        if byte & 0b1100_0000 != 0b1000_0000 {
+            let width = match byte {
+                0x00..=0x7F => 1,
+                0xC0..=0xDF => 2,
+                0xE0..=0xEF => 3,
+                0xF0..=0xF7 => 4,
+                // Not a lead byte at all — invalid input, nothing to hold back.
+                _ => return 0,
+            };
+            return if width > back { back } else { 0 };
+        }
+    }
+    0
+}
+
+/// Drain one pipe, sinking whole lines in batches.
+///
+/// Splits on `\n` **and** `\r`, because the tools this exists for (build tools,
+/// installers, `curl`) redraw a progress line with a bare carriage return; a
+/// `\r\n` counts once, and a `\r` that follows a line break terminates nothing.
+/// Lines are decoded lossily: a stray non-UTF-8 byte must cost one character,
+/// not the rest of the stream.
+///
+/// `outputs` is `Some` only for stdout, the legacy `VELD_OUTPUT key=value`
+/// channel. Control lines are peeled off either stream and never sinked.
+async fn drain_pipe<R: tokio::io::AsyncRead + Unpin>(
+    reader: R,
+    sink: Option<LineSink>,
+    outputs: Option<tokio::sync::mpsc::UnboundedSender<(String, String)>>,
+) {
+    let mut reader = BufReader::new(reader);
+    let mut pending: Vec<u8> = Vec::new();
+    // Both carried across reads: a `\r\n` can straddle two chunks.
+    let mut last_was_cr = false;
+    // Whether that `\r` ended a line with content in it. It is what separates a
+    // meter redraw from a real blank line: in `100%\r\n` the `\r` terminated
+    // `100%` and the `\n` completes the same terminator, but in `\r\n\r\n` the
+    // second `\r` terminated nothing, so its `\n` completes a blank line.
+    let mut cr_ended_content = false;
+
+    let take_line = |pending: &mut Vec<u8>, batch: &mut Vec<String>| {
+        let line = String::from_utf8_lossy(pending).into_owned();
+        pending.clear();
+        match line.strip_prefix("VELD_OUTPUT ") {
+            Some(kv) => {
+                if let (Some(tx), Some((key, value))) = (outputs.as_ref(), kv.split_once('=')) {
+                    let _ = tx.send((key.trim().to_owned(), value.trim().to_owned()));
+                }
+                // Control line — machinery, never sinked.
+            }
+            None => batch.push(line),
+        }
+    };
+
+    loop {
+        let chunk = match reader.fill_buf().await {
+            Ok([]) => break,
+            // A signal can interrupt the read with nothing wrong with the pipe.
+            // Treating that as EOF would stop draining while the child is still
+            // writing, and it would then block forever on a full pipe.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+            Ok(buf) => buf.to_vec(),
+        };
+        reader.consume(chunk.len());
+
+        let mut batch: Vec<String> = Vec::new();
+        for byte in chunk {
+            match byte {
+                b'\r' => {
+                    // A `\r` with nothing before it ends no line: it is a meter
+                    // redrawing (`50%\r\r100%`) or following a break (`\n\r`).
+                    // Whether it nonetheless starts a blank line is decided by
+                    // the next byte — only `\r\n` there means the step really
+                    // printed one.
+                    cr_ended_content = !pending.is_empty();
+                    if cr_ended_content {
+                        take_line(&mut pending, &mut batch);
+                    }
+                    last_was_cr = true;
+                }
+                b'\n' => {
+                    // Emit unless this `\n` is the tail of a `\r\n` whose `\r`
+                    // already ended the line.
+                    if !(last_was_cr && cr_ended_content) {
+                        take_line(&mut pending, &mut batch);
+                    }
+                    last_was_cr = false;
+                    cr_ended_content = false;
+                }
+                b => {
+                    pending.push(b);
+                    last_was_cr = false;
+                    if pending.len() >= MAX_LINE_BYTES {
+                        // Cut on a character boundary: splitting a multi-byte
+                        // char would corrupt one character on each side of a
+                        // break the step never asked for.
+                        let keep = pending.len() - trailing_partial_char(&pending);
+                        let tail = pending.split_off(keep);
+                        take_line(&mut pending, &mut batch);
+                        pending = tail;
+                    }
+                }
+            }
+        }
+        if !batch.is_empty() {
+            if let Some(ref s) = sink {
+                s(&batch);
+            }
+        }
+    }
+
+    // Output that never got its newline (a truncated final line) is still
+    // output — dropping it would hide the last thing a step said.
+    if !pending.is_empty() {
+        let mut batch = Vec::new();
+        take_line(&mut pending, &mut batch);
+        if !batch.is_empty() {
+            if let Some(ref s) = sink {
+                s(&batch);
+            }
+        }
+    }
+}
+
 impl LogTarget {
     fn append(&self, line: &str) {
         let _ = self.db.append_log(
@@ -384,11 +573,41 @@ async fn log_pipe<R: tokio::io::AsyncRead + Unpin>(reader: R, target: LogTarget)
 ///    discouraged because it exposes values in the terminal and logs.
 ///
 /// When both channels produce the same key, the file-based value wins.
+///
+/// Both pipes are captured, never inherited: everything the step prints is
+/// handed to `sink` as it arrives, in batches (see [`LineSink`]). Inheriting
+/// stderr wrote a `docker build` straight over the progress bars and left
+/// nothing behind for `veld logs`.
+///
+/// `VELD_OUTPUT ` control lines are peeled off **both** streams and never
+/// sinked — they can carry secrets, which is the whole reason the file channel
+/// exists. Only the stdout ones become outputs; stderr was never an output
+/// channel, so a control line there is dropped rather than parsed.
+///
+/// The peel is a literal prefix match and nothing more. It does not, and cannot,
+/// find a value a step prints some other way — `set -x` traces the line as
+/// `+ echo 'VELD_OUTPUT token=…'`, which is not a control line and is recorded
+/// like any other output. Steps that handle secrets should use
+/// `$VELD_OUTPUT_FILE`, which never touches a stream at all.
+///
+/// stdin is `/dev/null`: with both outputs captured, a step that prompts would
+/// otherwise block on a prompt nobody can see. Failing fast on EOF is the
+/// legible outcome, and it matches every other spawn path in veld.
+///
+/// **Deliberately different from [`run_command_streaming`]**, which reads like a
+/// near-twin: that one echoes to the CLI's own stdout/stderr (a `--oneshot`
+/// terminal node's output *is* the command's result), splits on `\n` only, and
+/// drains before waiting because it owns the Ctrl+C handling for its child.
+/// This one routes output through a sink instead, splits on `\r` too, and waits
+/// on the child *before* draining — a `command` step is not the run's output,
+/// and it may leave a descendant holding these pipes open. Don't unify them
+/// without deciding which of those each caller needs.
 pub async fn run_command(
     command: &CommandSpec,
     working_dir: &Path,
     env: &HashMap<String, String>,
     output_file: Option<&Path>,
+    sink: Option<LineSink>,
 ) -> Result<CommandOutput, ProcessError> {
     // Prepare the output file and augmented env.
     let mut env = env.clone();
@@ -424,8 +643,9 @@ pub async fn run_command(
         Ok(mut cmd) => cmd
             .current_dir(working_dir)
             .envs(&env)
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn(),
         Err(e) => {
             if let Some(path) = output_file {
@@ -447,20 +667,42 @@ pub async fn run_command(
     };
 
     let stdout = child.stdout.take().expect("stdout should be piped");
+    let stderr = child.stderr.take().expect("stderr should be piped");
 
-    let mut reader = BufReader::new(stdout).lines();
-    let mut outputs = HashMap::new();
+    // Both pipes are drained by their own task. Reading them in sequence would
+    // deadlock the moment a step writes more than a pipe buffer to the stream
+    // we are not reading yet — which is exactly what a build tool does.
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+    let mut drains = DrainTasks(vec![
+        tokio::spawn(drain_pipe(stdout, sink.clone(), Some(out_tx))),
+        tokio::spawn(drain_pipe(stderr, sink, None)),
+    ]);
 
-    // Legacy stdout channel.
-    while let Ok(Some(line)) = reader.next_line().await {
-        if let Some(kv) = line.strip_prefix("VELD_OUTPUT ") {
-            if let Some((key, value)) = kv.split_once('=') {
-                outputs.insert(key.trim().to_owned(), value.trim().to_owned());
-            }
-        }
-    }
-
+    // The step is over when *its* process exits, not when the last descendant
+    // that inherited these pipes closes them — see [`DRAIN_GRACE`]. The readers
+    // keep running while we wait, so the child can never block on a full pipe.
     let status = child.wait().await.map_err(ProcessError::SpawnFailed)?;
+    let drained = tokio::time::timeout(DRAIN_GRACE, async {
+        for task in drains.0.iter_mut() {
+            let _ = task.await;
+        }
+    })
+    .await;
+    if drained.is_err() {
+        tracing::warn!(
+            command = command.display(),
+            "step exited but something it started still holds its output pipes — \
+             stopped collecting its output"
+        );
+    }
+    // Whether the drain finished, timed out, or this whole future was cancelled,
+    // the tasks stop here.
+    drop(drains);
+
+    let mut outputs = HashMap::new();
+    while let Ok((key, value)) = out_rx.try_recv() {
+        outputs.insert(key, value);
+    }
 
     // Read file-based outputs (overrides stdout for duplicate keys).
     if let Some(path) = output_file {
@@ -529,6 +771,11 @@ pub async fn run_command(
 /// `VELD_OUTPUT key=value` control lines on stdout are still parsed (for
 /// declared outputs) but are never echoed or logged — they are machinery, not
 /// program output.
+///
+/// The line splitting here is `\n`-only and the drain is unbounded, unlike
+/// [`run_command`]: this path echoes to a terminal that was never taken away
+/// from it, and its child is one veld owns the interrupt handling for. Those
+/// are the two differences to weigh before sharing code between them.
 ///
 /// The child runs in its own process group so a Ctrl+C delivered to the CLI's
 /// controlling terminal is not auto-forwarded to it; instead we catch the
@@ -1220,5 +1467,331 @@ mod streaming_tests {
         .expect("streaming run should tolerate non-UTF-8 output");
         assert_eq!(out.exit_code, 0);
         assert_eq!(out.outputs.get("foo").map(String::as_str), Some("bar"));
+    }
+}
+
+#[cfg(test)]
+mod command_capture_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    /// Collect every line a sink is handed.
+    fn recording_sink() -> (LineSink, Arc<Mutex<Vec<String>>>) {
+        let lines: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink_lines = Arc::clone(&lines);
+        let sink: LineSink = Arc::new(move |batch: &[String]| {
+            sink_lines.lock().unwrap().extend_from_slice(batch);
+        });
+        (sink, lines)
+    }
+
+    /// The regression this whole path exists for: a `command` step's output —
+    /// on *both* pipes — reaches the sink. stderr used to be inherited straight
+    /// onto the terminal and stdout was read only for control lines, so a
+    /// `docker build` left nothing behind for `veld logs`.
+    #[tokio::test]
+    async fn captures_stdout_and_stderr() {
+        let (sink, lines) = recording_sink();
+        let out = run_command(
+            &CommandSpec::Shell("echo to-stdout; echo to-stderr >&2".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should succeed");
+
+        assert_eq!(out.exit_code, 0);
+        let lines = lines.lock().unwrap().clone();
+        assert!(lines.contains(&"to-stdout".to_owned()), "got {lines:?}");
+        assert!(lines.contains(&"to-stderr".to_owned()), "got {lines:?}");
+    }
+
+    /// `VELD_OUTPUT` control lines are machinery, not output: they are parsed
+    /// into `outputs` and must never reach the sink, or a value the author
+    /// deliberately kept off the terminal lands in the log instead.
+    #[tokio::test]
+    async fn control_lines_are_parsed_but_never_sinked() {
+        let (sink, lines) = recording_sink();
+        let out = run_command(
+            &CommandSpec::Shell("echo 'VELD_OUTPUT token=s3cret'; echo visible".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should succeed");
+
+        assert_eq!(out.outputs.get("token").map(String::as_str), Some("s3cret"));
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines, vec!["visible".to_owned()]);
+    }
+
+    /// The same peel on **stderr**, where it matters more: stderr is not an
+    /// output channel, so a control line there is not a declared output — it is
+    /// a `set -x` trace, or a script echoing to the wrong stream. Parsing it
+    /// would invent an output; sinking it would put the value in the log the
+    /// file channel exists to keep it out of.
+    #[tokio::test]
+    async fn control_lines_on_stderr_are_dropped_not_parsed() {
+        let (sink, lines) = recording_sink();
+        let out = run_command(
+            &CommandSpec::Shell(
+                "echo 'VELD_OUTPUT token=s3cret' >&2; echo 'real error' >&2".to_owned(),
+            ),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should succeed");
+
+        assert!(out.outputs.is_empty(), "stderr is not an output channel");
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines, vec!["real error".to_owned()]);
+    }
+
+    /// A step that backgrounds something leaves a descendant holding the write
+    /// end of both pipes, so they never reach EOF. The step is over when its own
+    /// process exits — waiting for the pipes wedged the CLI for as long as the
+    /// survivor lived.
+    #[tokio::test]
+    async fn backgrounded_grandchild_does_not_wedge_the_step() {
+        let (sink, lines) = recording_sink();
+        let started = std::time::Instant::now();
+        let out = tokio::time::timeout(
+            DRAIN_GRACE + std::time::Duration::from_secs(8),
+            run_command(
+                &CommandSpec::Shell("sleep 30 & echo done".to_owned()),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                Some(sink),
+            ),
+        )
+        .await
+        .expect("must not wait for the backgrounded process")
+        .expect("run should succeed");
+
+        assert_eq!(out.exit_code, 0);
+        assert!(
+            started.elapsed() < DRAIN_GRACE + std::time::Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
+        // Output printed before the child exited still made it through.
+        assert!(lines.lock().unwrap().contains(&"done".to_owned()));
+    }
+
+    /// A progress meter that redraws with a bare `\r` never emits a newline. A
+    /// `\n`-only reader accumulates its whole run in memory and stores it as one
+    /// row; each redraw is its own line. `\r\n` still counts once.
+    #[tokio::test]
+    async fn carriage_returns_split_lines() {
+        let (sink, lines) = recording_sink();
+        run_command(
+            &CommandSpec::Shell("printf '10%%\\r50%%\\r100%%\\r\\ndone\\n'".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should succeed");
+
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(
+            lines,
+            vec![
+                "10%".to_owned(),
+                "50%".to_owned(),
+                "100%".to_owned(),
+                "done".to_owned()
+            ],
+        );
+    }
+
+    /// A single line with no break at all is capped rather than buffered
+    /// without bound, and the tail that never got a newline is still sinked.
+    #[tokio::test]
+    async fn unterminated_output_is_capped_and_still_sinked() {
+        let (sink, lines) = recording_sink();
+        let bytes = MAX_LINE_BYTES + 100;
+        run_command(
+            &CommandSpec::Shell(format!("printf 'x%.0s' $(seq 1 {bytes})")),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should succeed");
+
+        let lines = lines.lock().unwrap().clone();
+        assert_eq!(lines.len(), 2, "capped into two lines, got {}", lines.len());
+        assert_eq!(lines[0].len(), MAX_LINE_BYTES);
+        assert_eq!(lines[1].len(), 100);
+    }
+
+    /// Cancelling the call stops the pipe readers.
+    ///
+    /// The sink holds whatever the caller wired into it — for the orchestrator,
+    /// a clone of the progress channel's sender. A reader that outlives its
+    /// `run_command` keeps that sender alive, and the CLI's progress task ends
+    /// only when the last sender drops: Ctrl+C during a `command` node would
+    /// hang `veld start` instead of tearing the run down, with the step's
+    /// process still running and its pipes still open.
+    #[tokio::test]
+    async fn cancelling_the_call_releases_what_the_sink_holds() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let sink: LineSink = Arc::new(move |batch: &[String]| {
+            for line in batch {
+                let _ = tx.send(line.clone());
+            }
+        });
+
+        let call = tokio::spawn(async move {
+            // Long-lived: still running when the call is cancelled.
+            let _ = run_command(
+                &CommandSpec::Shell("echo hi; sleep 60".to_owned()),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                Some(sink),
+            )
+            .await;
+        });
+
+        // Let the step start and print, so the readers are live.
+        assert_eq!(rx.recv().await.as_deref(), Some("hi"));
+        call.abort();
+
+        // The channel must close (every sender dropped), not stall.
+        let closed = tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+            .await
+            .expect("sender clones must be released when the call is cancelled");
+        assert!(closed.is_none(), "expected the channel to close");
+    }
+
+    /// A `\r` that ends no line is a meter redraw, not a blank line — but a
+    /// blank line the step really printed survives, in either line ending.
+    ///
+    /// The two halves pull against each other: `\n\r` must not produce a blank
+    /// row, while `\r\n\r\n` must, and only the byte after the `\r` tells them
+    /// apart.
+    #[tokio::test]
+    async fn blank_lines_survive_but_meter_redraws_do_not() {
+        for (script, expected) in [
+            // LF: a redraw after a break, then a real blank line.
+            ("printf 'a\\n\\rb\\n\\n c\\n'", vec!["a", "b", "", " c"]),
+            // CRLF: the blank line between two paragraphs is real.
+            ("printf 'a\\r\\n\\r\\nb\\r\\n'", vec!["a", "", "b"]),
+            // A meter redrawing, CRLF-terminated: three states, no blank.
+            (
+                "printf '10%%\\r50%%\\r100%%\\r\\n'",
+                vec!["10%", "50%", "100%"],
+            ),
+            // Consecutive redraws collapse rather than emitting empties.
+            ("printf '50%%\\r\\r100%%\\n'", vec!["50%", "100%"]),
+        ] {
+            let (sink, lines) = recording_sink();
+            run_command(
+                &CommandSpec::Shell(script.to_owned()),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                Some(sink),
+            )
+            .await
+            .expect("run should succeed");
+
+            let lines = lines.lock().unwrap().clone();
+            assert_eq!(lines, expected, "for {script}");
+        }
+    }
+
+    /// The length cap must not cut a multi-byte character in half: that would
+    /// corrupt one character on each side of a break the step never asked for.
+    #[test]
+    fn the_length_cap_retreats_to_a_character_boundary() {
+        // "é" is two bytes; a buffer ending on its lead byte holds one back.
+        assert_eq!(trailing_partial_char("aé".as_bytes()), 0);
+        assert_eq!(trailing_partial_char(&"aé".as_bytes()[..2]), 1);
+        // Three-byte "€", cut after one and after two bytes.
+        assert_eq!(trailing_partial_char(&"€".as_bytes()[..1]), 1);
+        assert_eq!(trailing_partial_char(&"€".as_bytes()[..2]), 2);
+        assert_eq!(trailing_partial_char("€".as_bytes()), 0);
+        // Invalid input holds nothing back rather than stalling.
+        assert_eq!(trailing_partial_char(&[0xFF]), 0);
+        assert_eq!(trailing_partial_char(b""), 0);
+    }
+
+    /// stdin is `/dev/null`: a step that reads it gets EOF immediately instead
+    /// of blocking on a prompt that, with both pipes captured, nobody can see.
+    #[tokio::test]
+    async fn stdin_is_closed_so_a_prompt_cannot_hang() {
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            run_command(
+                &CommandSpec::Shell("read -r answer; echo \"got:${answer:-nothing}\"".to_owned()),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                None,
+            ),
+        )
+        .await
+        .expect("must not block waiting for input")
+        .expect("run should succeed");
+
+        // `read` hits EOF and returns non-zero; the point is that it returns.
+        assert_ne!(out.exit_code, -1);
+    }
+
+    /// Both pipes are drained concurrently. Reading them in sequence deadlocks
+    /// as soon as a step writes more than a pipe buffer (~64 KiB) to the stream
+    /// that is not being read — which is what a build tool does.
+    #[tokio::test]
+    async fn large_output_on_both_pipes_does_not_deadlock() {
+        let (sink, lines) = recording_sink();
+        let script = "i=0; while [ $i -lt 4000 ]; do \
+                      echo \"out-$i\"; echo \"err-$i\" >&2; i=$((i+1)); done";
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            run_command(
+                &CommandSpec::Shell(script.to_owned()),
+                &std::env::temp_dir(),
+                &HashMap::new(),
+                None,
+                Some(sink),
+            ),
+        )
+        .await
+        .expect("must not deadlock on a full pipe buffer")
+        .expect("run should succeed");
+
+        assert_eq!(out.exit_code, 0);
+        assert_eq!(lines.lock().unwrap().len(), 8000);
+    }
+
+    /// A non-UTF-8 byte costs one character, not the rest of the stream.
+    #[tokio::test]
+    async fn lossy_decode_survives_non_utf8() {
+        let (sink, lines) = recording_sink();
+        let out = run_command(
+            &CommandSpec::Shell("printf '\\377\\n'; echo after".to_owned()),
+            &std::env::temp_dir(),
+            &HashMap::new(),
+            None,
+            Some(sink),
+        )
+        .await
+        .expect("run should tolerate non-UTF-8 output");
+
+        assert_eq!(out.exit_code, 0);
+        assert!(lines.lock().unwrap().contains(&"after".to_owned()));
     }
 }

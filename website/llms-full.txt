@@ -296,10 +296,15 @@ Captured logs appear alongside server logs in `veld logs` and the management UI.
 
 ```sh
 veld logs --source client          # Browser logs only
-veld logs --source server          # Server logs only
+veld logs --source server          # Node output — servers and `command` nodes alike
+veld logs --source setup           # Project setup/teardown step output
 veld logs --source internal        # Liveness probe & recovery logs
 veld logs --source all             # All sources (default)
 ```
+
+Every step's output is collected, not just a server's: a `command` node (a
+`docker build`, a `pnpm install`) logs to that node's stream, and project
+`setup`/`teardown` steps to the run's, labelled `setup:<step name>`.
 
 ### Configuration
 

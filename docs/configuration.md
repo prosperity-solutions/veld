@@ -338,6 +338,24 @@ Setup and teardown are project-level lifecycle steps that run outside the depend
 | `argv` / `shell` | array / string | Yes (exactly one) | What to run. See [`argv` and `shell`](#argv-and-shell) |
 | `failureMessage` | string | No       | Message shown when the command fails (non-zero exit) |
 
+#### Step output
+
+Everything a step prints — stdout and stderr — is streamed into `veld start`'s
+progress output as it arrives and recorded under the run's `setup` stream, so
+`veld logs --source setup` (and the management UI's **Setup** filter) shows it
+after the fact. Lines are labelled `setup:<step name>` / `teardown:<step name>`,
+which is what tells two steps apart in one stream.
+
+Because it is recorded, **a value a step prints is in the log**: veld stores
+step output verbatim and does not redact it, the same as it has always done for
+a `start_server`'s output. A secret reaches a step through its environment or a
+`files:` entry (see [`secret`](#secret)) — don't `echo` it, and remember that
+`set -x` echoes the command line for you.
+
+A step's stdin is `/dev/null`, so a command that prompts fails on EOF rather
+than blocking a startup nobody can answer. Steps that need a credential should
+read it from the environment.
+
 #### Variable availability
 
 Setup and teardown steps run outside the node graph, so node-scoped variables —
@@ -507,6 +525,11 @@ Runs a shell command or script to completion. Used for setup tasks such as datab
 - Can declare outputs by writing `key=value` lines to `$VELD_OUTPUT_FILE` (preferred) or via `VELD_OUTPUT key=value` on stdout (legacy, discouraged — exposes values in terminal/logs)
 - Built-in output: `exit_code`
 - Supports the `skip_if` field for idempotency
+- Everything it prints (stdout and stderr, minus the `VELD_OUTPUT` control
+  lines) goes to that node's log stream, exactly like a `start_server`'s: read
+  it live in `veld start`'s progress output, afterwards with
+  `veld logs --node <name>`, or in the management UI. A `skip_if` probe's output
+  is a predicate, not the node's, and is not logged
 
 ```json
 {
@@ -1341,6 +1364,11 @@ Where a secret may go: a child process's environment, or a [file](#files). **Not
 interpolated by Veld into an `argv` element or a `shell` string (both appear in
 the process table, readable by every other user on the machine), not into logs,
 not into `--json` output, not into the share payload.
+
+That is a rule about what *Veld* does with the value. It cannot un-print what a
+process does with it: a node or step that echoes its own environment puts the
+value in that run's log, which `veld logs` and the management UI will show. Veld
+records process output verbatim and never redacts it.
 
 **Two different rules, because there are two different risks.**
 
