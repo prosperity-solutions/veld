@@ -696,16 +696,19 @@ function TabButton(props: {
           if (e.button === 1) props.onClose();
         }}
         onDoubleClick={() => props.canMove && props.onMove()}
+        // The label leads, because it is clamped in CSS (a page title can be a
+        // sentence) and the tooltip is then the only place the whole thing is
+        // readable — the drag hints follow it rather than replacing it.
         title={
           props.canMove
-            ? "Drag to reorder or move · double-click to send to the other pane · right-click for more"
-            : "Drag to move to the other pane · right-click for more"
+            ? `${props.label}\nDrag to reorder or move · double-click to send to the other pane · right-click for more`
+            : `${props.label}\nDrag to move to the other pane · right-click for more`
         }
       >
         <span className="pane-tab-icon" aria-hidden>
           {props.icon}
         </span>
-        {props.label}
+        <span className="pane-tab-text">{props.label}</span>
       </button>
       <button
         type="button"

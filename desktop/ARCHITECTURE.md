@@ -40,6 +40,7 @@ have since shipped — see below.)
 | Orphan views are dropped by the *page*, not by a navigation event | `reset()` at module load, before any `create` | A reload replaces the page's registry of views, so the old ones are orphans painting over the new document. Disposing them from the shell's own `did-navigate` is a race against the renderer's first `create` — and losing it destroyed the view the new page had just asked for, which is why the first browser pane after a hard reload came up blank with reload as the only escape. Driving it from the renderer makes the ordering a queue. |
 | Views start visible | `create` no longer hides the view and then shows it | Chromium background-throttles a hidden `WebContents`, and a view created hidden and loaded in the same tick sometimes never rendered its first page — blank until you pressed Reload. The renderer sends its own visibility immediately, so starting visible costs nothing and removes the race. The spinner's 8-second "taking a while" reload is the backstop, since a genuinely slow dev server must not be called an error. |
 | Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to, so a reload is allowed to drop the views and rebuild them. The page asks for that itself (`reset()`, see the row above) rather than the shell inferring it from a navigation event. A shell is the opposite — see the terminal row above. |
+| Icons | One mark, two assets, generated from the repo's canonical sources (`desktop/scripts/make-icons.sh`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. Rasterising is QuickLook (WebKit), so the generator is macOS-only — acceptable because the outputs are committed and only change when the brand does. ImageMagick's own SVG renderer was the first try and its curves are visibly blobby at 18px. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -310,7 +311,10 @@ Minimal by design. Main process only does:
    Views run sandboxed with no preload, in a `persist:veld-browser-<profile>`
    partition, with all permission requests denied and only `http(s)` accepted.
 
-No packaging/signing in this increment — `npm start` (dev run) only.
+No packaging/signing in this increment — `npm start` (dev run) only. The app icon
+`electron-builder` will want already exists (`assets/icon.png`); an unpackaged run
+sets it on the dock itself, since otherwise a dev window is indistinguishable from
+any other Electron app.
 
 ## Data model
 

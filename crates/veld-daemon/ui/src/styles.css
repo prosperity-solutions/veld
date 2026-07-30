@@ -519,6 +519,22 @@ select:focus {
 .pane-tab-label {
   display: inline-flex;
   align-items: center;
+  /* A browser pane's label is the *page's* title, which can be a sentence — one
+     of those wrapped to two lines and pushed the whole strip (and the `+`
+     button) out of shape. Clamp it and ellipsize; the full title is in the tab's
+     tooltip, and the kind glyph never truncates because it is a sibling. */
+  max-width: 220px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The text node itself does the ellipsis — the flex row above cannot, since the
+   glyph is one of its items. */
+.pane-tab-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pane-tab-close {

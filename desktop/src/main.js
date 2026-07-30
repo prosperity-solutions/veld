@@ -16,7 +16,22 @@ const {
   shell,
 } = require("electron");
 const fs = require("node:fs");
+const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
+
+/**
+ * Brand assets, generated from the repo's canonical sources by
+ * `scripts/make-icons.sh` (see that file for what comes from where).
+ *
+ * `icon.png` is the app icon — the same rounded-tile mark the favicon shows in a
+ * browser tab. `trayTemplate.png` is the menu-bar icon and carries the mark the
+ * Hammerspoon widget also uses, so veld has one menu-bar identity; the
+ * `Template` suffix is what makes macOS tint it for the current menu bar, which
+ * is the only way one asset stays legible in light *and* dark mode.
+ */
+const ASSETS = path.join(__dirname, "..", "assets");
+const APP_ICON = path.join(ASSETS, "icon.png");
+const TRAY_ICON = path.join(ASSETS, "trayTemplate.png");
 
 // Dev override: point the shell at the vite dev server
 // (VELD_DESKTOP_URL=http://localhost:5199). Default: the daemon directly —
@@ -100,6 +115,9 @@ function createWindow() {
       y: Math.round((TOPBAR_HEIGHT - TRAFFIC_LIGHT_SIZE) / 2),
     },
     backgroundColor: "#0d0e10",
+    // Windows/Linux take the window icon from here; macOS uses the bundle's (or
+    // the dock icon set in `whenReady` while running unpackaged).
+    icon: APP_ICON,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -145,10 +163,27 @@ function createWindow() {
   });
 }
 
-// 16×16 template icon (macOS renders it theme-aware): a "v" glyph drawn as
-// a data-URI PNG would be blurry — use a simple vector-ish bitmap instead.
+/**
+ * The menu-bar icon: the veld mark as a macOS template image.
+ *
+ * `nativeImage.createFromPath` picks up the `@2x` file beside it, and the
+ * `Template` filename suffix marks it template — so the mark is tinted for the
+ * current menu bar instead of being a white glyph that vanishes in light mode.
+ * The accent dot survives as a shape rather than as a colour, which is the
+ * trade macOS asks of every menu-bar icon.
+ *
+ * Falls back to the hand-plotted bitmap below if the asset is missing, because a
+ * packaging slip should cost the icon, not the tray.
+ */
 function trayIcon() {
-  // 1-bit "v" in a 16x16 grid, generated at runtime to avoid a binary asset.
+  const asset = nativeImage.createFromPath(TRAY_ICON);
+  if (!asset.isEmpty()) return asset;
+  return fallbackTrayIcon();
+}
+
+// 16×16 template icon plotted by hand — the fallback, kept because it needs no
+// asset at all: a 1-bit "v" in a 16x16 grid.
+function fallbackTrayIcon() {
   const size = 16;
   const buf = Buffer.alloc(size * size * 4, 0);
   const set = (x, y) => {
@@ -315,6 +350,13 @@ app.whenReady().then(() => {
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
   registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender));
+  // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which
+  // makes a dev window indistinguishable from any other Electron app. A packaged
+  // build gets this from the bundle, so only set it when there is no bundle.
+  if (process.platform === "darwin" && !app.isPackaged) {
+    const icon = nativeImage.createFromPath(APP_ICON);
+    if (!icon.isEmpty()) app.dock?.setIcon(icon);
+  }
   createWindow();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {
