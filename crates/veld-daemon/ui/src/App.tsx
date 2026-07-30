@@ -751,16 +751,16 @@ function AppInner(props: {
    * localStorage was chosen (see `SESSIONS_STORAGE_KEY`), so both the set being
    * edited and the sets beside it have to be as fresh as the write.
    *
-   * Returns the slots it wrote, so a caller can act on what it actually did.
+   * `mutate` runs synchronously against that fresh list, which is what lets
+   * `addSession` below capture the slot it picked.
    */
   const editSessions = (
     worktreeId: number,
     mutate: (current: BrowserProfile[]) => BrowserProfile[],
-  ): BrowserProfile[] => {
+  ): void => {
     const onDisk = parseSessionSets(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
     const next = mutate(sessionSetFor(onDisk, worktreeId, layout));
     setSessionsRaw(serializeSessionSets({ ...onDisk, [worktreeId]: next }));
-    return next;
   };
 
   // Whether *anything* can be added, for the menu's disabled state. The slot that
