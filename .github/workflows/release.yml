@@ -170,10 +170,79 @@ jobs:
           name: veld-${{ matrix.suffix }}
           path: veld-*.tar.gz
 
+  # ── Veld Desktop: the Electron app, from the same tag ──────────────
+  # Rides this pipeline rather than a parallel one, so the app and the CLI can
+  # never be two versions of the same release (issue #167 §9). The version is
+  # written into package.json here for the same reason Cargo.toml's is: this all
+  # runs *before* semantic-release commits the bump, so the checkout is still on
+  # the previous version.
+  #
+  # macOS is unsigned (issue #167 §10) — `scripts/adhoc-sign.js` ad-hoc signs the
+  # bundle so it launches on Apple Silicon at all, and the app knows it cannot
+  # replace itself until a Developer ID exists. Linux is x64 only: there is no
+  # arm64 Linux runner in this matrix, and no reported demand.
+  desktop:
+    name: Build Desktop (${{ matrix.name }})
+    permissions:
+      contents: read
+    needs: plan
+    if: >-
+      github.event_name == 'push'
+      && needs.plan.outputs.new_release_published == 'true'
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: macos
+            os: macos-latest
+            args: --mac --arm64 --x64
+          - name: linux
+            os: ubuntu-24.04
+            args: --linux
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: desktop/package-lock.json
+
+      # Before `npm ci`, which refuses a package.json and lock that disagree.
+      # `npm version` writes both.
+      - name: Set release version
+        run: npm version --no-git-tag-version --allow-same-version "$VERSION"
+        env:
+          VERSION: ${{ needs.plan.outputs.new_release_version }}
+
+      - run: npm ci
+
+      - name: Package
+        run: npx electron-builder ${{ matrix.args }} --publish never
+
+      # The .yml files are electron-updater's feed and the blockmaps are how it
+      # downloads a delta instead of 120 MB — both belong on the release beside
+      # the installers, not just in the build's dist/.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: veld-desktop-${{ matrix.name }}
+          path: |
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+            desktop/dist/*.blockmap
+            desktop/dist/latest*.yml
+          if-no-files-found: error
+
   # ── All builds passed → create the tag ─────────────────────────────
   release:
     name: Tag & Release
-    needs: [plan, build]
+    needs: [plan, build, desktop]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -216,10 +285,16 @@ jobs:
           path: artifacts
           merge-multiple: true
 
+      # Everything that lands on the release, not just the tarballs — the app
+      # installers are downloaded by hand from a browser, which is exactly the
+      # case a published checksum is for. `checksums.txt` itself is excluded
+      # rather than filtered afterwards, since it is being written here.
+      # install.sh looks its own tarball up by name, so extra lines are inert.
       - name: Generate checksums
         run: |
           cd artifacts
-          sha256sum *.tar.gz > checksums.txt
+          find . -maxdepth 1 -type f ! -name checksums.txt -printf '%P\n' \
+            | sort | xargs -r sha256sum > checksums.txt
 
       - name: Write release notes
         run: echo "$RELEASE_NOTES" > release-notes.md
@@ -245,9 +320,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Pattern-filtered: without it this pulls every desktop installer too —
+      # hundreds of megabytes this job has no use for.
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: veld-linux-*
           path: artifacts
           merge-multiple: true
 

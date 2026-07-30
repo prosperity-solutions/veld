@@ -360,6 +360,18 @@ The dock also holds the run's **diagnostics**, so a worktree that is misbehaving
 
 Because a terminal is a shell on your machine, `/api/pty/attach` is gated more tightly than the rest of the daemon's API: WebSocket handshakes cannot carry the `X-Veld-Request` CSRF header, so an attach needs a single-use ticket minted through a CSRF-gated `POST` **and** an `Origin` on the allowlist, failing closed when `Origin` is absent. Details and the reasoning are in `crates/veld-daemon/src/pty.rs`.
 
+### Veld Desktop
+
+The same `/ide` UI as a desktop app: a native window with a menu-bar icon, real Chromium browser panes (working history, page titles, isolated cookie jars, and pages that refuse to be framed), device emulation and per-pane DevTools. Everything else works identically in a browser — the app is a shell around the daemon, not a second implementation.
+
+**It needs the veld CLI**, which it does not ship. On a machine that has never had veld the app shows the install command and waits for the daemon to appear.
+
+Download the `.dmg` (macOS) or `.AppImage` / `.deb` (Linux x64) from the [latest release](https://github.com/prosperity-solutions/veld/releases/latest). The app ships with every veld release and carries the same version number as the CLI — one tag, one version, so the app and the daemon it talks to are halves of the same thing. When they drift apart (you updated one and not the other) the app says so and names the fix: `veld update` for the CLI, its own updater for itself.
+
+> **macOS: not code-signed yet.** Gatekeeper will refuse the first launch. Right-click the app → **Open** (or System Settings → Privacy & Security → *Open Anyway*); `xattr -dr com.apple.quarantine /Applications/Veld.app` does the same thing from a terminal. Developer ID signing and notarization are [tracked in #167](https://github.com/prosperity-solutions/veld/issues/167).
+
+Updates are checked in the background and offered, never applied behind your back — applying one restarts the app. The Linux AppImage installs the update itself; on macOS and on `.deb` installs the app opens the release page instead, because macOS only lets an app replace itself when the replacement carries the same code signature (and there isn't one yet) and a `.deb`'s files belong to your package manager. *Check for Updates…* is in the menu bar icon (macOS) and the application menu.
+
 ### Hammerspoon (macOS)
 
 If you use [Hammerspoon](https://www.hammerspoon.org/), Veld ships a menu bar widget that shows running environments at a glance.

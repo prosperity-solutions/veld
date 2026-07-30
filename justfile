@@ -384,6 +384,15 @@ setup-ui:
 desktop-icons:
     python3 desktop/scripts/make-icons.py
 
+# Package Veld Desktop for this machine's OS into desktop/dist/ (electron-builder).
+#
+# The same command release CI runs, minus the version injection — a local build
+# is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
+# artifacts are ad-hoc signed only (no Developer ID yet), so a build handed to
+# someone else needs `xattr -dr com.apple.quarantine` on the other end.
+desktop-package: desktop-deps
+    cd desktop && npm run package
+
 # Vite dev server for the /ide UI (HMR). Proxies /api — including the terminal
 # WebSocket upgrade — to the DEV daemon (port {{dev_daemon_port}}); start
 # `just dev-daemon` first.

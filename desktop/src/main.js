@@ -18,6 +18,12 @@ const {
 const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
+const {
+  checkForUpdates,
+  initUpdater,
+  noteDaemonVersion,
+  skewMenuItem,
+} = require("./updater");
 
 /**
  * Brand assets, generated from the repo's canonical sources by
@@ -61,25 +67,61 @@ const TRAFFIC_LIGHT_SIZE = 12;
 let win = null;
 /** @type {Tray | null} */
 let tray = null;
+/** Set once the tray exists; the updater calls it when the skew notice changes. */
+/** @type {(() => Promise<void>) | null} */
+let refreshTray = null;
+
+/**
+ * A second launch of an installed app focuses the running one instead of opening
+ * a window that would fight it over the same daemon, tray and browser
+ * partitions. Only when packaged: two *dev* instances are a normal thing to want
+ * (`just dev-desktop` against vite beside `just desktop` against the installed
+ * daemon), and they share one lock because they share one appId.
+ */
+const isPrimaryInstance = !app.isPackaged || app.requestSingleInstanceLock();
+if (!isPrimaryInstance) app.quit();
 
 // Shown while the daemon is unreachable; self-contained and branded
 // (dark tokens + wordmark dot styling from the design handoff).
+//
+// The install command is spelled out rather than linked, because this screen is
+// what a packaged download shows on a machine that has never had veld: the app
+// is a shell around a daemon it does not ship, and "install veld" with no
+// command is a dead end. `-webkit-user-select` is re-enabled on the command
+// alone — the rest of the page is a drag region, which otherwise swallows the
+// selection.
+const INSTALL_COMMAND = "curl -fsSL https://veld.oss.life.li/get | bash";
 const WAITING_HTML = `<!doctype html><html><head><meta charset="utf-8"><title>Veld</title><style>
   body{margin:0;height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;
        background:#0d0e10;color:#98a0a9;font:13px/1.6 system-ui,sans-serif;-webkit-app-region:drag}
   .wm{font-weight:700;font-size:22px;color:#e7e9ec}.wm i{color:oklch(0.74 0.14 158);font-style:normal}
   code{font-family:ui-monospace,monospace;background:#1a1d21;border:1px solid #2a2e35;border-radius:6px;padding:2px 7px}
-  p{max-width:380px;text-align:center;margin:0}
+  code.cmd{-webkit-user-select:text;user-select:text;-webkit-app-region:no-drag;color:#e7e9ec}
+  p{max-width:420px;text-align:center;margin:0}
 </style></head><body>
   <div class="wm">veld<i>.</i></div>
   <p>Waiting for the veld daemon…</p>
-  <p>Install veld and run <code>veld doctor</code> if this is a fresh machine. Retrying automatically.</p>
+  <p>On a fresh machine, install it with</p>
+  <p><code class="cmd">${INSTALL_COMMAND}</code></p>
+  <p>Already installed? Run <code>veld doctor</code>. Retrying automatically.</p>
 </body></html>`;
 
+/**
+ * Liveness plus the daemon's version, which is half of the skew check in
+ * `updater.js` — asked here because this is the one request the shell already
+ * makes on a schedule.
+ *
+ * @returns {Promise<boolean>}
+ */
 async function daemonReachable() {
   try {
     const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(2000) });
-    return res.ok;
+    if (!res.ok) return false;
+    // A daemon old enough to have no version field is still reachable; the skew
+    // check treats the unknown as "nothing to say".
+    const body = await res.json().catch(() => null);
+    noteDaemonVersion(body?.version);
+    return true;
   } catch {
     return false;
   }
@@ -341,6 +383,15 @@ async function trayMenu() {
   items.push(
     { type: "separator" },
     { label: "Open Veld Desktop", click: () => focusWindow() },
+    { label: `Version ${app.getVersion()}`, enabled: false },
+  );
+  const skew = skewMenuItem();
+  if (skew) items.push(skew);
+  items.push(
+    {
+      label: "Check for Updates…",
+      click: () => void checkForUpdates({ manual: true }),
+    },
     { label: "Quit", role: "quit" },
   );
   return Menu.buildFromTemplate(items);
@@ -355,15 +406,114 @@ function focusWindow() {
 function createTray() {
   tray = new Tray(trayIcon());
   tray.setToolTip("Veld");
-  const refresh = async () => tray?.setContextMenu(await trayMenu());
-  void refresh();
-  setInterval(() => void refresh(), 10_000);
+  refreshTray = async () => tray?.setContextMenu(await trayMenu());
+  void refreshTray();
+  setInterval(() => void refreshTray?.(), 10_000);
 }
 
+/**
+ * The application menu.
+ *
+ * Electron builds a default one, but it is Electron's — there is nowhere in it
+ * to check for updates, and on Linux there is no tray to put that anywhere else.
+ * The standard roles are kept verbatim (an app with no Edit menu has no ⌘C), so
+ * this template is the default plus a Veld section.
+ */
+function buildAppMenu() {
+  const isMac = process.platform === "darwin";
+  const updateItem = {
+    label: "Check for Updates…",
+    click: () => void checkForUpdates({ manual: true }),
+  };
+  /** @type {Electron.MenuItemConstructorOptions[]} */
+  const template = [
+    ...(isMac
+      ? [
+          {
+            label: app.name,
+            submenu: [
+              { role: "about" },
+              { type: "separator" },
+              updateItem,
+              { type: "separator" },
+              { role: "services" },
+              { type: "separator" },
+              { role: "hide" },
+              { role: "hideOthers" },
+              { role: "unhide" },
+              { type: "separator" },
+              { role: "quit" },
+            ],
+          },
+        ]
+      : []),
+    {
+      label: "File",
+      submenu: isMac
+        ? [{ role: "close" }]
+        : [updateItem, { type: "separator" }, { role: "about" }, { role: "quit" }],
+    },
+    {
+      label: "Edit",
+      submenu: [
+        { role: "undo" },
+        { role: "redo" },
+        { type: "separator" },
+        { role: "cut" },
+        { role: "copy" },
+        { role: "paste" },
+        { role: "selectAll" },
+      ],
+    },
+    {
+      label: "View",
+      submenu: [
+        { role: "reload" },
+        { role: "forceReload" },
+        { role: "toggleDevTools" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" },
+      ],
+    },
+    {
+      label: "Window",
+      submenu: [
+        { role: "minimize" },
+        { role: "zoom" },
+        ...(isMac ? [{ type: "separator" }, { role: "front" }] : [{ role: "close" }]),
+      ],
+    },
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+app.on("second-instance", () => focusWindow());
+
+/**
+ * Keep the daemon's version current for the skew notice. The reachability poll
+ * in `loadAppWhenReady` stops as soon as the app loads, and `veld update` lands
+ * long after that — so without this, a mismatch that appears (or is fixed) while
+ * the app is open would never be seen. Loopback GET, so a minute is cheap.
+ */
+const VERSION_POLL_MS = 60_000;
+
 app.whenReady().then(() => {
+  if (!isPrimaryInstance) return;
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
   registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender));
+  buildAppMenu();
+  app.setAboutPanelOptions({
+    applicationName: "Veld",
+    applicationVersion: app.getVersion(),
+    copyright: "Prosperity Solutions",
+  });
+  initUpdater({ onSkewChange: () => void refreshTray?.() });
+  setInterval(() => void daemonReachable(), VERSION_POLL_MS);
   // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which
   // makes a dev window indistinguishable from any other Electron app. A packaged
   // build gets this from the bundle, so only set it when there is no bundle.

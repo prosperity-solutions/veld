@@ -28,6 +28,9 @@
 node_modules/
 crates/veld-daemon/ui/dist/
 
+# Packaged Veld Desktop builds (electron-builder output)
+desktop/dist/
+
 # Working documents — RFCs, PRDs, plans, scratch notes. Never tracked (see AGENTS.md).
 /notes/
 
