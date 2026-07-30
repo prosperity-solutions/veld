@@ -190,7 +190,14 @@ let suspendDepth = 0;
 async function createShellView(v: View, url: string | undefined): Promise<boolean> {
   if (!desktop) return true;
   try {
-    await desktop.create(v.id, { url, profile: v.profile });
+    // A *resolved* create is not a successful one: the shell answers `null` when it
+    // cannot resolve the sender to its window's main frame, and the bridge types
+    // this `Promise<unknown>`, so nothing else would notice. Believing it would set
+    // `shellHasView` for a view that does not exist and re-open the silent
+    // spinner-forever hang this whole path exists to prevent.
+    if (!(await desktop.create(v.id, { url, profile: v.profile }))) {
+      throw new Error("the desktop shell refused this pane");
+    }
     v.shellHasView = true;
     // Forget what the *failed* attempt mirrored. Both caches were written while no
     // shell entry existed, so their sends were dropped: `v.rect` by a `syncBounds`
@@ -571,7 +578,11 @@ export function browserCommand(id: string, command: "back" | "forward" | "stop")
 export function reloadBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
-  patch(v, { loading: true, error: null });
+  // `loading` only if there is something to load. A blank pane has no navigation
+  // to clear the flag, so an unconditional `true` left a live spinner and an
+  // enabled Stop over the URL launcher — a state a freshly opened blank pane
+  // never shows.
+  patch(v, { loading: Boolean(v.state.url), error: null });
   applyVisibility(v);
   if (desktop) {
     void (async () => {
@@ -679,8 +690,14 @@ function syncBounds(v: View): void {
     return;
   }
   v.rect = rect;
-  // Swallowed for the same reason as visibility: the 400 ms poll re-sends bounds.
-  void desktop.setBounds(v.id, rect).catch(() => {});
+  // Forget the cache if the send failed, or the poll below can never re-try it:
+  // the rect is recorded *before* the send, and `syncBounds` early-returns while
+  // the cached value matches — so a pane sitting still would keep a view at stale
+  // bounds forever. (`applyVisibility` writes before sending too, but its value
+  // flips on every suspend and resume, so it self-corrects.)
+  void desktop.setBounds(v.id, rect).catch(() => {
+    v.rect = null;
+  });
 }
 
 /**

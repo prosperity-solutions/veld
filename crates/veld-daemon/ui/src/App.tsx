@@ -740,30 +740,44 @@ function AppInner(props: {
     [sessionSets, worktree?.id, layout],
   );
   /**
-   * Write one worktree's session set, merging onto what is *currently* on disk.
+   * Mutate one worktree's session set against what is *currently* on disk.
    *
-   * Not onto the React copy: `usePersisted` reads localStorage in a `useState`
-   * initialiser and re-reads only when the key changes, and this key is a
-   * constant. A second `/ide` tab therefore holds a snapshot from its own boot,
-   * and writing that back would drop every change the other tab has made since —
-   * including other worktrees' sets, which this tab never touched. Sharing across
-   * tabs is the reason localStorage was chosen (see `SESSIONS_STORAGE_KEY`), so
-   * the read has to be as fresh as the write.
+   * The whole operation reads through, not just the merge of the other keys:
+   * `usePersisted` reads localStorage in a `useState` initialiser and re-reads only
+   * when the key changes, and this key is a constant — so a second `/ide` tab holds
+   * a snapshot from its own boot. Merging a stale *slot list* is the same bug one
+   * level down: tab B adds `otter`, then stale tab A removes `wombat` and writes
+   * its own list back, and `otter` is gone. Sharing across tabs is the reason
+   * localStorage was chosen (see `SESSIONS_STORAGE_KEY`), so both the set being
+   * edited and the sets beside it have to be as fresh as the write.
+   *
+   * Returns the slots it wrote, so a caller can act on what it actually did.
    */
-  const writeSessions = (worktreeId: number, slots: BrowserProfile[]) => {
+  const editSessions = (
+    worktreeId: number,
+    mutate: (current: BrowserProfile[]) => BrowserProfile[],
+  ): BrowserProfile[] => {
     const onDisk = parseSessionSets(window.localStorage.getItem(SESSIONS_STORAGE_KEY));
-    setSessionsRaw(serializeSessionSets({ ...onDisk, [worktreeId]: slots }));
+    const next = mutate(sessionSetFor(onDisk, worktreeId, layout));
+    setSessionsRaw(serializeSessionSets({ ...onDisk, [worktreeId]: next }));
+    return next;
   };
 
-  // A new session is taken from the slots this worktree does not already list —
-  // not from page-wide occupancy, so two worktrees can each hold slot 2 (their
-  // runs are on different hostnames, so the shared jar never shows).
+  // Whether *anything* can be added, for the menu's disabled state. The slot that
+  // actually gets used is chosen inside `editSessions` from the on-disk set, since
+  // another tab may have taken this one in the meantime.
   const nextSession = worktree ? nextFreeProfile(new Set(sessions)) : null;
   const addSession = (tabId: string) => {
-    if (!worktree || !nextSession || !layout) return;
-    writeSessions(worktree.id, [...sessions, nextSession]);
+    if (!worktree || !layout) return;
+    let chosen: BrowserProfile | null = null;
+    editSessions(worktree.id, (current) => {
+      // Taken from the slots this worktree does not already list — not from
+      // page-wide occupancy, so two worktrees can each hold the same slot.
+      chosen = nextFreeProfile(new Set(current));
+      return chosen ? [...current, chosen] : current;
+    });
     // Adding is only ever worth doing to put this pane on it.
-    setLayout((prev) => updateTab(prev, tabId, { profile: nextSession }));
+    if (chosen) setLayout((prev) => updateTab(prev, tabId, { profile: chosen! }));
   };
   // Removing a session returns its panes to the default one rather than being
   // refused: the session you are looking at was otherwise the single one you
@@ -771,7 +785,7 @@ function AppInner(props: {
   // are per worktree — another worktree still lists (and holds) its own.
   const removeSession = (profile: BrowserProfile) => {
     if (!worktree || profile === "default") return;
-    writeSessions(worktree.id, sessions.filter((p) => p !== profile));
+    editSessions(worktree.id, (current) => current.filter((p) => p !== profile));
     setLayout((prev) =>
       allTabs(prev)
         .filter((t) => t.kind === "browser" && (t.profile ?? "default") === profile)
