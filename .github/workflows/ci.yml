@@ -295,8 +295,14 @@ jobs:
         run: |
           codesign --verify --deep --strict dist/mac-arm64/Veld.app
           codesign --verify --deep --strict dist/mac/Veld.app
+      # Same reason the release job checks it: a missing feed is invisible until
+      # an installed app asks for an update. The macOS leg is `--dir`, which
+      # produces no feed by design.
+      - name: The update feed was written
+        if: matrix.name == 'linux'
+        run: test -f dist/latest-linux.yml
       - name: List artifacts
-        run: ls -la dist dist-deb 2>/dev/null || ls -la dist
+        run: ls -la dist
 
   integration:
     name: Integration Tests (macOS)

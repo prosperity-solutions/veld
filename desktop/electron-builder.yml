@@ -71,8 +71,11 @@ linux:
   # executable is named here.
   executableName: veld-desktop
   # AppImage ONLY. The .deb is built by a second, separate invocation
-  # (`npm run package:linux`) into its own output directory, and that separation
-  # is load-bearing rather than tidiness: `FpmTarget` writes a `package-type`
+  # (`npm run package:linux`) into its own output directory — and then moved
+  # into `dist/`, leaving that directory's own `latest-linux.yml` behind, since
+  # publishing a feed describing the .deb would point the AppImage's updater at
+  # a package it cannot install. The separation itself is load-bearing rather
+  # than tidiness: `FpmTarget` writes a `package-type`
   # file naming its format into `<out>/linux-unpacked/resources` — the same
   # directory the AppImage packs from — and the two targets run concurrently.
   # If the deb's write wins the race, the AppImage ships `package-type: deb`,

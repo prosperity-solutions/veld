@@ -81,6 +81,12 @@ function initUpdater(opts = {}) {
   autoUpdater.on("error", (err) => {
     if (!installing) return; // the awaiting caller reports it with context
     installing = false;
+    // The lock was handed to a successor that never arrived: `install()` can
+    // return false without quitting, and this process then keeps running with
+    // no single-instance lock — so a second launch would open a second window
+    // against the same daemon instead of focusing this one. Re-take it; the
+    // successor cannot be holding it, or we would not be here.
+    app.requestSingleInstanceLock();
     void reportInstallFailure(err);
   });
 
@@ -116,16 +122,21 @@ async function checkForUpdates({ manual }) {
     }
     return;
   }
-  // Guards the network check only, never the dialogs that follow it: held
-  // across those, a second *Check for Updates…* while one is open would return
-  // in silence — from the one path that promises to report every outcome.
+  // Guards the network check only, never the dialogs that follow it — and
+  // cleared before any of them opens, including the failure one. A `finally`
+  // would not do: it runs after the `catch` block, which awaits its dialog, so
+  // a second *Check for Updates…* while "Could not check for updates." is on
+  // screen would return in silence — from the one path that promises to report
+  // every outcome.
   if (checking) return;
   checking = true;
   /** @type {import("electron-updater").UpdateCheckResult | null} */
   let result = null;
   try {
     result = await autoUpdater.checkForUpdates();
+    checking = false;
   } catch (err) {
+    checking = false;
     if (manual) {
       await dialog.showMessageBox({
         type: "warning",
@@ -135,8 +146,6 @@ async function checkForUpdates({ manual }) {
       });
     }
     return;
-  } finally {
-    checking = false;
   }
 
   const version = result?.updateInfo?.version;
