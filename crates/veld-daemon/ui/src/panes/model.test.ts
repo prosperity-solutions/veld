@@ -918,3 +918,47 @@ describe("lastBlankBrowserId", () => {
     expect(lastBlankBrowserId(l)).toBeNull();
   });
 });
+
+describe("restoring a layout from the pre-branch build", () => {
+  it("drops only the removed kind, keeping the terminal and its session id", () => {
+    // The `services` pane kind was deleted (its content is now a launcher shown
+    // inside other panes), so a layout persisted by an older build names a kind
+    // `PANE_KINDS` no longer contains. That must degrade, not throw and not take
+    // the dock with it — and the terminal's id is its daemon PTY session, so
+    // losing it would strand a running shell on upgrade.
+    const legacy = JSON.stringify({
+      1: {
+        docks: [
+          { tabs: [{ id: "t-abc", kind: "terminal", title: "terminal" }], activeId: "t-abc" },
+          { tabs: [{ id: "services", kind: "services", title: "services" }], activeId: "services" },
+        ],
+        ratio: 0.5,
+        focused: 1,
+      },
+    });
+    const l = parseLayouts(legacy)[1];
+    expect(l).toBeDefined();
+    expect(l.docks[0].tabs.map((t) => t.id)).toEqual(["t-abc"]);
+    expect(l.docks[0].activeId).toBe("t-abc");
+    expect(l.docks[1].tabs).toEqual([]);
+    // `focused` pointed at the dock that is now empty, and normalisation slid the
+    // survivor left, so it has to follow rather than aim at a hidden column.
+    expect(l.focused).toBe(0);
+  });
+
+  it("drops a layout whose only tab was the removed kind", () => {
+    // Nothing left to render: the worktree falls back to a fresh default layout
+    // rather than restoring an empty dock pair.
+    const legacy = JSON.stringify({
+      1: {
+        docks: [
+          { tabs: [{ id: "services", kind: "services", title: "services" }], activeId: "services" },
+          { tabs: [], activeId: null },
+        ],
+        ratio: 0.5,
+        focused: 0,
+      },
+    });
+    expect(parseLayouts(legacy)).toEqual({});
+  });
+});
