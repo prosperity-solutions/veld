@@ -2,8 +2,8 @@
  * The dock region of IDE mode: two tab hosts side by side with a draggable
  * split. See `model.ts` for why this replaced the fixed columns.
  *
- * Run diagnostics (#167 batch 4) is meant to land as a tab here rather than as a
- * new column — as the embedded browser did. Adding a content type means:
+ * Adding a content type means (the embedded browser and the run's diagnostics both
+ * landed this way, as tabs here rather than as new columns):
  *
  * 1. `PANE_KINDS` in `model.ts` — also what validates a restored layout, so a
  *    kind missing from it works until the first reload and then vanishes.
@@ -26,8 +26,10 @@
 
 import { ActionIcon, Menu } from "@mantine/core";
 import {
+  IconActivityHeartbeat,
   IconArrowsExchange,
   IconLayoutColumns,
+  IconLogs,
   IconPlus,
   IconRefresh,
   IconTerminal2,
@@ -37,6 +39,7 @@ import {
 import { useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
+import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
 import { VeldLinks } from "./VeldLinks";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
@@ -53,6 +56,7 @@ import {
   addTab,
   browserTab,
   closeTab,
+  diagTab,
   dockOf,
   dockVisible,
   focusDock,
@@ -98,6 +102,8 @@ export function PaneArea(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** The selected worktree's run, for the `logs` and `nodes` panes. */
+  runCtx: RunPaneContext;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -181,6 +187,7 @@ export function PaneArea(props: {
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
           onBrowser={(tab) => onLayout(addTab(layout, 0, tab))}
+          onDiag={(kind) => onLayout(addTab(layout, 0, diagTab(kind)))}
         />
       </div>
     );
@@ -236,6 +243,7 @@ export function PaneArea(props: {
               sessions={props.sessions}
               onAddSession={props.onAddSession}
               onRemoveSession={props.onRemoveSession}
+              runCtx={props.runCtx}
             />
           </Fragment>
         );
@@ -255,6 +263,7 @@ function DockView(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  runCtx: RunPaneContext;
 }) {
   const { index, layout, onLayout } = props;
   const dock = layout.docks[index];
@@ -434,6 +443,18 @@ function DockView(props: {
             >
               New browser pane
             </Menu.Item>
+            <Menu.Item
+              leftSection={<IconLogs size={14} />}
+              onClick={() => convertOrAdd(active, diagTab("logs"))}
+            >
+              Run logs
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<IconActivityHeartbeat size={14} />}
+              onClick={() => convertOrAdd(active, diagTab("nodes"))}
+            >
+              Node health
+            </Menu.Item>
             <Menu.Divider />
             <Menu.Item
               leftSection={<IconLayoutColumns size={14} />}
@@ -471,8 +492,11 @@ function DockView(props: {
               convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
             }
             onBrowser={(tab) => convertOrAdd(active, tab)}
+            onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
           />
         )}
+        {active?.kind === "logs" && <LogsPane ctx={props.runCtx} />}
+        {active?.kind === "nodes" && <NodesPane ctx={props.runCtx} />}
         {active?.kind === "browser" && (
           <BrowserPane
             key={active.id}
@@ -521,6 +545,7 @@ function PaneChooser(props: {
   urlsEmptyHint: string;
   onTerminal: () => void;
   onBrowser: (tab: PaneTab) => void;
+  onDiag: (kind: "logs" | "nodes") => void;
 }) {
   return (
     <div className="pane-chooser">
@@ -530,6 +555,17 @@ function PaneChooser(props: {
         </button>
         <button className="btn big" onClick={() => props.onBrowser(browserTab({}))}>
           <IconWorld size={15} /> Browser
+        </button>
+      </div>
+      {/* Second row, not four buttons in one: the first two are what a pane
+          usually becomes, and the diagnostics are what you add when something is
+          wrong. Same size, so neither reads as disabled. */}
+      <div className="pane-chooser-row">
+        <button className="btn big" onClick={() => props.onDiag("logs")}>
+          <IconLogs size={15} /> Logs
+        </button>
+        <button className="btn big" onClick={() => props.onDiag("nodes")}>
+          <IconActivityHeartbeat size={15} /> Nodes
         </button>
       </div>
       {/* The run's URLs, one click from being the pane's content. Not a third
@@ -561,6 +597,10 @@ function tabIcon(tab: PaneTab): React.ReactNode {
       const color = browserTabDot(tab);
       return <IconWorld size={12} style={color ? { color } : undefined} />;
     }
+    case "logs":
+      return <IconLogs size={12} />;
+    case "nodes":
+      return <IconActivityHeartbeat size={12} />;
     case "new":
       return <IconPlus size={12} />;
     default:

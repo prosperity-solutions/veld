@@ -1077,6 +1077,63 @@ select:focus {
   opacity: 0.9;
 }
 
+/* Sharing popover (IDE mode's top-level surface). The strips inside carry the
+   card's own padding, so the container only holds them. */
+.share-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Pending join requests, above the panes: a prompt someone is waiting on, so it
+   sits in the layout rather than behind a popover. `flex: none` for the same
+   reason the offline banner has it — the panes below own the remaining height. */
+.join-banner {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px;
+}
+
+/* ---- run diagnostics panes ------------------------------------------------- */
+
+/* A pane with nothing to show. Centres the same empty screen the URL launcher
+   uses (`.links-empty`), which on its own sits wherever its parent puts it. */
+.pane-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--panel);
+}
+
+/* The `nodes` pane: the same table runs mode shows, scrolling inside a pane. */
+.nodes-pane {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
+  background: var(--panel);
+}
+
+/* The `logs` pane wrapper. The card variant stays `display: block` inside a
+   scrolling card; this one is the pane's whole body, so the toolbar is fixed and
+   the log area takes what is left. */
+.logs-fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--panel);
+}
+
+.logs-card {
+  display: block;
+}
+
 /* log viewer */
 .log-area {
   height: 320px;
@@ -1089,6 +1146,19 @@ select:focus {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 11px;
   line-height: 1.7;
+}
+
+/* In a pane the area is the pane: no fixed height, no rounded island inset from
+   a card's edge. `min-height: 0` so the flex child may actually shrink and scroll
+   instead of growing the dock past its box. */
+.log-area.fill {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
 }
 
 .log-line {

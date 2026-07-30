@@ -3,6 +3,7 @@ import type { EnvironmentList, RunInfo, Worktree } from "./api";
 import {
   activeRun,
   bestFuzzyMatch,
+  diagnosticsRun,
   fuzzyMatch,
   prunePending,
   runSignature,
@@ -84,6 +85,39 @@ describe("activeRun / worktreeStatus", () => {
     expect(
       activeRun([run("a", "failed", false), run("b", "running")])?.name,
     ).toBe("b");
+  });
+});
+
+describe("diagnosticsRun", () => {
+  it("is the active run when there is one", () => {
+    expect(
+      diagnosticsRun([run("a", "stopped"), run("b", "running")])?.name,
+    ).toBe("b");
+  });
+
+  it("keeps the ended runs activeRun drops, so their logs stay readable", () => {
+    // The whole reason this predicate exists: once a run has ended there is
+    // nothing to stop or restart (activeRun → null) but the logs and the last
+    // node states are exactly what the user is looking for, and
+    // /api/logs/{run} serves an ended run's output.
+    const stopped = run("dev", "stopped", true);
+    expect(activeRun([stopped])).toBeNull();
+    expect(diagnosticsRun([stopped])?.name).toBe("dev");
+
+    const crashedHistory = run("dev", "failed", false);
+    expect(activeRun([crashedHistory])).toBeNull();
+    expect(diagnosticsRun([crashedHistory])?.name).toBe("dev");
+  });
+
+  it("prefers the environment holding the live slot over a history row", () => {
+    const history = run("old", "failed", false);
+    const liveSlot = run("dev", "stopped", true);
+    expect(diagnosticsRun([history, liveSlot])?.name).toBe("dev");
+  });
+
+  it("falls back to the first listed run, and to null with none", () => {
+    expect(diagnosticsRun([run("a", "failed", false)])?.name).toBe("a");
+    expect(diagnosticsRun([])).toBeNull();
   });
 });
 

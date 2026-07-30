@@ -43,6 +43,22 @@ export function activeRun(runs: RunInfo[]): RunInfo | null {
 }
 
 /**
+ * The run the *diagnostics* surfaces read — a superset of [`activeRun`].
+ *
+ * Deliberately not the same predicate: run controls bind to a live run because
+ * there is nothing to stop or restart otherwise, but logs and the last node
+ * states are exactly what you want **after** a crash, and `/api/logs/{run}`
+ * serves an ended run's output. So this falls back to the environment holding the
+ * live slot even when its latest run is stopped, and then to the first one
+ * listed. A worktree normally has one environment; when it has several the
+ * ordering is the daemon's, which is the honest answer to "which one" without
+ * inventing a rule the user cannot see.
+ */
+export function diagnosticsRun(runs: RunInfo[]): RunInfo | null {
+  return activeRun(runs) ?? runs.find((r) => r.live) ?? runs[0] ?? null;
+}
+
+/**
  * Rail status dot: running (green, pulsing), partial (amber, in transition),
  * failed (red), stopped (gray).
  */

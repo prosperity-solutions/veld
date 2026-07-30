@@ -14,7 +14,8 @@ import {
   type StatsResponse,
 } from "../api";
 import { EnvCard } from "./EnvCard";
-import { confirmedUnattached, unattachedShareIds } from "./util";
+import { JoinRequestRow, runOfShare } from "../shared/Sharing";
+import { confirmedUnattached, unattachedShareIds } from "../shared/util";
 import { topbarClass } from "../shell";
 import type { ReactNode } from "react";
 
@@ -185,33 +186,13 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
             </Group>
           ))}
           {pending.map((p) => (
-            <Group key={p.id} gap="xs" className="share-row pending" p={8} wrap="wrap">
-              <Badge size="xs" color="yellow" variant="light">
-                join request
-              </Badge>
-              <Text size="xs">
-                <b>{p.label || "(no label)"}</b> wants to join
-              </Text>
-              <Text size="xs" c="dimmed" ff="monospace">
-                {p.share_id} · {p.node_id.slice(0, 10)}
-              </Text>
-              <div style={{ flex: 1 }} />
-              <Button
-                size="compact-xs"
-                variant="light"
-                onClick={() => void api.approveJoin(p.id).then(refresh)}
-              >
-                Approve
-              </Button>
-              <Button
-                size="compact-xs"
-                color="red"
-                variant="light"
-                onClick={() => void api.denyJoin(p.id).then(refresh)}
-              >
-                Deny
-              </Button>
-            </Group>
+            <JoinRequestRow
+              key={p.id}
+              pending={p}
+              runLabel={runOfShare(shares?.shares ?? [], p.share_id)}
+              onChanged={() => void refresh()}
+              onError={(m) => window.alert(m)}
+            />
           ))}
           {joins.map((j) => (
             <Group key={j.id} gap="xs" className="share-row" p={8} wrap="wrap">
