@@ -650,6 +650,75 @@ describe("browser tabs", () => {
     });
   });
 
+  it("restores the emulated device and the zoom, re-validated", () => {
+    const restore = (tab: unknown) =>
+      parseLayouts(
+        JSON.stringify({
+          1: {
+            docks: [
+              { tabs: [tab], activeId: "a" },
+              { tabs: [], activeId: null },
+            ],
+            ratio: 0.5,
+            focused: 0,
+          },
+        }),
+      )[1]?.docks[0].tabs[0];
+
+    // The point of storing them at all: emulation and zoom are
+    // per-`WebContents`, and the view is recreated on a session switch and on a
+    // reload, so the layout is the only thing that outlives it.
+    const emulation = {
+      device: "phone",
+      width: 402,
+      height: 874,
+      deviceScaleFactor: 3,
+      mobile: true,
+      touch: true,
+      ua: "Mozilla/5.0 (iPhone) Safari/604.1",
+      fit: true,
+      radius: 44,
+    };
+    const restored = restore({ id: "a", kind: "browser", title: "t", emulation, zoom: 1.25 });
+    expect(restored?.emulation).toEqual(emulation);
+    expect(restored?.zoom).toBe(1.25);
+
+    // Clamped and re-checked, exactly as the URL is: storage is where a stale
+    // build's or a hand-edited value sits waiting to be applied. The user agent is
+    // the one that matters — it becomes a request header in the shell.
+    const hostile = restore({
+      id: "a",
+      kind: "browser",
+      title: "t",
+      emulation: { ...emulation, width: 99999, ua: "UA/1.0\r\nX-Injected: 1" },
+      zoom: 99,
+    });
+    expect(hostile?.emulation?.width).toBe(4096);
+    expect(hostile?.emulation?.ua).toBeNull();
+    expect(hostile?.zoom).toBe(3);
+
+    // Junk degrades to "no device, 100%" — a pane at pane size — rather than
+    // dropping the tab or restoring a size nobody chose.
+    const junk = restore({ id: "a", kind: "browser", title: "t", emulation: 42, zoom: "big" });
+    expect(junk?.emulation).toBeUndefined();
+    expect(junk?.zoom).toBeUndefined();
+
+    // A tab written before this existed, and a pane switched back to pane size,
+    // are the same record.
+    const plain = restore({ id: "a", kind: "browser", title: "t", url: "http://x.test/" });
+    expect(plain?.emulation).toBeUndefined();
+    expect(plain?.zoom).toBeUndefined();
+    // 100% is nothing to store, so it never comes back as a field either.
+    expect(restore({ id: "a", kind: "browser", title: "t", zoom: 1 })?.zoom).toBeUndefined();
+
+    // A terminal tab gains none of it, however the storage was edited.
+    expect(restore({ id: "a", kind: "terminal", title: "t", emulation, zoom: 2 })).toEqual({
+      id: "a",
+      kind: "terminal",
+      title: "t",
+    });
+  });
+
   it("lists browser ids separately from terminal ids", () => {
     let l = defaultLayout();
     // The default layout already holds one (the right-hand pane).

@@ -2,7 +2,18 @@
 // no Electron binary needed, which is why the validation lives in its own module.
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { safeUrl, isViewId, isProfileName, partitionFor } = require("./validate");
+const {
+  isProfileName,
+  isViewId,
+  partitionFor,
+  safeColor,
+  safeEmulation,
+  safeRadius,
+  safeScale,
+  safeUrl,
+  safeUserAgent,
+  safeZoom,
+} = require("./validate");
 
 test("safeUrl accepts only http(s)", () => {
   assert.equal(safeUrl("http://localhost:3000/"), "http://localhost:3000/");
@@ -79,4 +90,165 @@ test("partitionFor is namespaced and persistent", () => {
   // `persist:` is what makes a named session mean anything across restarts, and
   // the prefix is what keeps it out of the app's own session.
   assert.ok(partitionFor("default").startsWith("persist:veld-browser-"));
+});
+
+test("safeUserAgent refuses anything that could not be a header value", () => {
+  const real =
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1";
+  assert.equal(safeUserAgent(real), real);
+  assert.equal(safeUserAgent("  trimmed/1.0  "), "trimmed/1.0");
+
+  // The reason this function exists: `setUserAgent` takes a header value, so a
+  // CR or LF in it is header injection against every origin the pane visits.
+  for (const hostile of [
+    "UA/1.0\r\nX-Injected: 1",
+    "UA/1.0\nX-Injected: 1",
+    "UA/1.0\r\n\r\nGET /admin HTTP/1.1",
+    "UA/1.0\u0000embedded",
+    "UA/1.0\tTabbed",
+    "UA/1.0 üñïçø∂é",
+  ]) {
+    assert.equal(safeUserAgent(hostile), null, JSON.stringify(hostile));
+  }
+
+  // Bounded, and non-strings are a null rather than a throw — this is on the
+  // path of every emulation the page sets.
+  assert.equal(safeUserAgent("a".repeat(512)), "a".repeat(512));
+  assert.equal(safeUserAgent("a".repeat(513)), null);
+  for (const junk of ["", "   ", null, undefined, 42, {}, []]) {
+    assert.equal(safeUserAgent(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("safeEmulation clamps every number and keeps only what Electron consumes", () => {
+  assert.deepEqual(
+    safeEmulation({
+      device: "iphone-pro",
+      width: 393,
+      height: 852,
+      deviceScaleFactor: 3,
+      mobile: true,
+      touch: true,
+      ua: "UA/1.0",
+      fit: true,
+    }),
+    {
+      width: 393,
+      height: 852,
+      deviceScaleFactor: 3,
+      mobile: true,
+      touch: true,
+      userAgent: "UA/1.0",
+      // No `fit`: it arrives on the wire and is dropped here, because fitting is a
+      // question about the pane that `deviceLayout` answers in the renderer.
+    },
+  );
+
+  // Out of range in both directions, and fractional sizes rounded.
+  assert.equal(safeEmulation({ width: 1, height: 99999 }).width, 120);
+  assert.equal(safeEmulation({ width: 1, height: 99999 }).height, 4096);
+  assert.equal(safeEmulation({ width: 390.6, height: 800.2 }).width, 391);
+
+  // `deviceScaleFactor` is typed Integer by Electron, and 0 means "the display's
+  // own" — which is also the honest answer for a value that makes no sense.
+  assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: 2.625 }).deviceScaleFactor, 3);
+  assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: -1 }).deviceScaleFactor, 0);
+  assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: 99 }).deviceScaleFactor, 4);
+  assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: "x" }).deviceScaleFactor, 0);
+
+  // Flags default to off. `fit` is not part of this shape at all — see above.
+  const bare = safeEmulation({ width: 400, height: 800 });
+  assert.equal(bare.mobile, false);
+  assert.equal(bare.touch, false);
+  assert.equal(bare.userAgent, null);
+  assert.equal(bare.fit, undefined);
+  assert.equal(safeEmulation({ width: 400, height: 800, mobile: "yes" }).mobile, false);
+
+  // A hostile user agent drops the UA, not the emulation: the size is still a
+  // legitimate thing to apply.
+  assert.equal(safeEmulation({ width: 400, height: 800, ua: "UA\r\nX: 1" }).userAgent, null);
+
+  // Unusable payloads degrade to "no emulation", which is a correct state.
+  for (const junk of [null, undefined, 42, "iphone", [], {}, { width: 400 }, { width: "x", height: 8 }]) {
+    assert.equal(safeEmulation(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("safeEmulation forwards exactly the fields Electron applies", () => {
+  // The other half of the drift gate. Its twin lives in
+  // `crates/veld-daemon/ui/src/panes/devices.test.ts` ("the emulation's field set") and
+  // catches a field *appearing* on the renderer's `PaneEmulation`; this one catches a
+  // field quietly *vanishing* from what this process forwards — a rename here, or a
+  // dropped `touch`, is otherwise silent in both packages: the pane keeps offering the
+  // control and the shell stops applying it.
+  //
+  // `device` and `fit` are absent on purpose and documented in `safeEmulation`: a preset
+  // id means nothing here, and fitting is a question about the pane that the renderer
+  // answers, sending on only the resulting scale (with the bounds).
+  assert.deepEqual(
+    Object.keys(safeEmulation({ width: 400, height: 800, ua: "UA/1.0" })).sort(),
+    ["deviceScaleFactor", "height", "mobile", "touch", "userAgent", "width"],
+  );
+});
+
+test("safeColor takes hex and nothing else", () => {
+  // The page sends its theme's surface so a view does not flash white in a dark app.
+  assert.equal(safeColor("#0d0e10"), "#0d0e10");
+  assert.equal(safeColor("  #FFF  "), "#FFF");
+  assert.equal(safeColor("#0d0e10ff"), "#0d0e10ff");
+  // Chromium accepts a broad colour syntax; there is no reason for a page-supplied string
+  // to be parsed liberally here, and a partial match is how a validator becomes a hole.
+  for (const bad of [
+    "red",
+    "rgb(0,0,0)",
+    "#0d0e1",
+    "#0d0e10; background: url(x)",
+    "javascript:alert(1)",
+    "",
+    null,
+    undefined,
+    0x0d0e10,
+    {},
+  ]) {
+    assert.equal(safeColor(bad), null, JSON.stringify(bad));
+  }
+});
+
+test("safeZoom stays inside Chromium's own range", () => {
+  assert.equal(safeZoom(1), 1);
+  assert.equal(safeZoom(0.67), 0.67);
+  assert.equal(safeZoom(0.01), 0.25);
+  assert.equal(safeZoom(99), 3);
+  // `setZoomFactor` throws on a non-positive factor, and the page is not a
+  // trusted caller.
+  for (const junk of [0, -1, NaN, Infinity, "big", null, undefined, {}]) {
+    assert.equal(safeZoom(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("safeScale bounds what the renderer asks for", () => {
+  // The fit calculation itself lives in the renderer (`deviceLayout`), which is
+  // the side that knows the pane's padding and where the screen is centred. This
+  // only has to keep the number applicable.
+  assert.equal(safeScale(0.5), 0.5);
+  assert.equal(safeScale(1), 1);
+  // Never magnified — emulation shrinks a screen to fit a pane, and enlarging one
+  // is what page zoom is for.
+  assert.equal(safeScale(4), 1);
+  // Never zero: a page rendered into nothing looks exactly like a broken view.
+  assert.equal(safeScale(0), 1);
+  assert.equal(safeScale(0.0001), 0.02);
+  for (const junk of [-1, NaN, Infinity, "half", null, undefined, {}]) {
+    assert.equal(safeScale(junk), 1, JSON.stringify(junk));
+  }
+});
+
+test("safeRadius bounds the screen's corners", () => {
+  assert.equal(safeRadius(48), 48);
+  assert.equal(safeRadius(12.4), 12);
+  assert.equal(safeRadius(9999), 64);
+  // A square screen is the honest answer for anything unusable.
+  for (const none of [0, -8, NaN, "round", null, undefined, {}]) {
+    assert.equal(safeRadius(none), 0, JSON.stringify(none));
+  }
 });

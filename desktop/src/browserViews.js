@@ -23,9 +23,19 @@
 // content cannot reach this IPC surface in the first place; the keying and the
 // frame check are what keep that true if one ever gains a preload.
 
-const { WebContentsView, ipcMain, session } = require("electron");
+const { WebContentsView, ipcMain, screen, session } = require("electron");
 // The trust boundary lives in its own tested module — see src/validate.js.
-const { isProfileName, isViewId, partitionFor, safeUrl } = require("./validate");
+const {
+  isProfileName,
+  isViewId,
+  safeColor,
+  partitionFor,
+  safeEmulation,
+  safeRadius,
+  safeScale,
+  safeUrl,
+  safeZoom,
+} = require("./validate");
 
 /**
  * Per-window view cap.
@@ -36,7 +46,18 @@ const { isProfileName, isViewId, partitionFor, safeUrl } = require("./validate")
  */
 const MAX_VIEWS_PER_WINDOW = 16;
 
-/** @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean}} Entry */
+/**
+ * @typedef {{width: number, height: number, deviceScaleFactor: number, mobile: boolean,
+ *            touch: boolean, userAgent: string|null}} Emulation
+ */
+
+/**
+ * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
+ *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
+ *            scale: number, radius: number, touchActive: boolean,
+ *            frameReady: boolean, emulated: boolean, dragging: boolean,
+ *            touchQueue: Promise<void>|undefined}} Entry
+ */
 
 /** window.id → (viewId → Entry) */
 /** @type {Map<number, Map<string, Entry>>} */
@@ -73,6 +94,8 @@ function stateOf(viewId, entry, error) {
       canGoBack: false,
       canGoForward: false,
       profile: entry.profile,
+      touchActive: false,
+      devToolsOpen: false,
       ...(error === undefined ? {} : { error }),
     };
   }
@@ -84,6 +107,14 @@ function stateOf(viewId, entry, error) {
     canGoBack: wc.navigationHistory.canGoBack(),
     canGoForward: wc.navigationHistory.canGoForward(),
     profile: entry.profile,
+    // The two things the pane cannot work out for itself: whether touch is
+    // actually in force (something else can hold Chromium's debugger — see
+    // [`applyTouch`]) and whether the inspector is open. The emulated size, the
+    // zoom and the scale are all the renderer's own. Flat primitives on purpose:
+    // the renderer's `patch` compares values with `!==`, so a nested object would
+    // count as changed on every event and re-render every pane.
+    touchActive: entry.touchActive,
+    devToolsOpen: wc.isDevToolsOpened(),
     ...(error === undefined ? {} : { error }),
   };
 }
@@ -91,6 +122,230 @@ function stateOf(viewId, entry, error) {
 function send(window, channel, payload) {
   if (window.isDestroyed() || window.webContents.isDestroyed()) return;
   window.webContents.send(channel, payload);
+}
+
+function pushState(window, viewId, entry) {
+  send(window, "veld:browser:state", stateOf(viewId, entry));
+}
+
+// ---------------------------------------------------------------------------
+// Device emulation, zoom and DevTools
+// ---------------------------------------------------------------------------
+//
+// A pane is small and a desktop layout is not, which is the whole reason this
+// is worth having *inside* the dock: emulating a 1440-wide viewport scaled down
+// to fit a 600px pane is the one case a real browser window cannot give you
+// without a second monitor.
+//
+// Four rules hold this together, each of which is a bug if broken:
+//
+// 1. **The state lives in the renderer's layout, not here.** Emulation, zoom and
+//    UA are per-`WebContents`, and a pane switching session destroys and
+//    recreates its view — so everything below is re-asserted from the `create`
+//    payload, exactly as the URL is. This module is the applier, not the owner.
+// 2. **`enableDeviceEmulation` and `disableDeviceEmulation` need a committed
+//    frame.** Calling either on a `WebContentsView` that has not navigated yet
+//    **segfaults the whole app** — not an exception, a `SIGSEGV`, so there is
+//    nothing to catch and the window is simply gone. Verified on Electron 43,
+//    including the `disable` call on a view that never had emulation enabled,
+//    which is what the no-device path used to do on every pane. Hence
+//    `frameReady`: the metrics are applied on the first `did-navigate` and
+//    immediately after that. `setUserAgent` and `setZoomFactor` are safe before a
+//    load (checked the same way), which is what matters — the UA has to be set
+//    before the first request or the page has to be reloaded to see it.
+// 3. **Zoom is re-asserted after every navigation.** Chromium's zoom policy is
+//    per *origin*, so navigating adopts whatever that origin was last viewed at,
+//    in *any* pane sharing the session. Without re-assertion a pane's zoom
+//    silently changes when you follow a link, and setting one pane's zoom moves
+//    its neighbour's.
+// 4. **Touch is the one thing that can be taken away.** It needs a CDP session
+//    (`Emulation.setEmitTouchEventsForMouse` has no Electron API). Electron's docs
+//    say opening DevTools detaches an attached debugger; on Electron 43 it does
+//    not (the two sessions coexist — measured, not assumed). Both worlds are
+//    handled rather than either being trusted: nothing is detached pre-emptively,
+//    a `detach` from any cause flips `touchActive` to false, and `devtools-closed`
+//    re-attaches. `touchActive` is therefore reported separately from the `touch`
+//    the pane asked for, and the pane shows what it actually has.
+
+/**
+ * Push the emulated viewport onto the view.
+ *
+ * `entry.scale` arrives **with the bounds**, from the renderer: the screen's box,
+ * the factor its viewport is rendered at and the corner radius are one calculation
+ * (`deviceLayout` in `panes/devices.ts`), and the renderer is the side that knows
+ * the pane's padding and where the screen is centred. Deriving the factor here
+ * from the box meant one number with two owners, which is a drift waiting to be a
+ * half-off-screen device.
+ */
+function applyMetrics(entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed()) return;
+  const emulation = entry.emulation;
+  // Rule 2: both calls below segfault the process on a view with no committed
+  // frame. A pane that has not been pointed anywhere yet is exactly that state —
+  // it shows the run's URL list, and its view has never navigated — so the
+  // emulation waits for the first navigation, which re-applies it (see
+  // `attachListeners`). `emulated` keeps the no-device path from calling `disable`
+  // on a view that never had it on, which is a call with nothing to undo.
+  if (!entry.frameReady) return;
+  if (!emulation) {
+    if (!entry.emulated) return;
+    entry.emulated = false;
+    wc.disableDeviceEmulation();
+    return;
+  }
+  entry.emulated = true;
+  wc.enableDeviceEmulation({
+    // `mobile` is Chromium's own word for viewport-meta handling, overlay
+    // scrollbars and text autosizing — not for touch, which is separate below.
+    screenPosition: emulation.mobile ? "mobile" : "desktop",
+    screenSize: { width: emulation.width, height: emulation.height },
+    viewSize: { width: emulation.width, height: emulation.height },
+    viewPosition: { x: 0, y: 0 },
+    deviceScaleFactor: emulation.deviceScaleFactor,
+    scale: entry.scale,
+  });
+}
+
+/**
+ * Set or restore the user agent.
+ *
+ * The default is read off the view at creation rather than reconstructed: it is
+ * the session's, which depends on the Chromium and Electron the app was built
+ * with, and getting it wrong means every pane that ever emulated a phone keeps
+ * claiming to be one after emulation is switched off.
+ */
+function applyUserAgent(entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed()) return;
+  wc.setUserAgent(entry.emulation?.userAgent ?? entry.defaultUserAgent);
+}
+
+/** Re-assert the pane's zoom. See rule 2 above for why this is not a one-shot. */
+function applyZoom(entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed()) return;
+  wc.setZoomFactor(entry.zoom);
+}
+
+/**
+ * Turn touch emulation on or off, and report what actually happened.
+ *
+ * Two CDP calls, because they answer different questions and a page asks both:
+ * `setTouchEmulationEnabled` is what makes `ontouchstart` exist and
+ * `navigator.maxTouchPoints` non-zero (feature detection), while
+ * `setEmitTouchEventsForMouse` is what turns a drag into `touchstart`/`touchmove`
+ * (the behaviour). Only the pair makes a swipe gesture testable.
+ *
+ * `attach` throws when a debugger is already attached — which is exactly what the
+ * built-in DevTools is — so a failure here is a normal state, not an error worth
+ * raising on the pane. It is reported as `touchActive: false` and retried when
+ * DevTools closes.
+ *
+ * **Serialised per view.** Every branch here awaits a CDP round trip, so two runs
+ * can interleave — and toggling the menu's Touch item twice inside one round trip
+ * does exactly that, since the item deliberately keeps the menu open. An off-run
+ * resuming after an on-run detached the debugger while `emulation.touch` was still
+ * true, leaving the pane claiming touch was paused by something else, which was a
+ * lie with nothing to retry it until DevTools closed or the page navigated. Chaining
+ * makes the last caller win, which is what a toggle means.
+ */
+function applyTouch(window, viewId, entry) {
+  entry.touchQueue = (entry.touchQueue ?? Promise.resolve())
+    .then(() => applyTouchNow(window, viewId, entry))
+    .catch(() => {});
+  return entry.touchQueue;
+}
+
+/** The body of [`applyTouch`]. **Never call this directly** — it awaits CDP round
+ *  trips, and two interleaved runs are exactly what the queue above exists to
+ *  prevent. */
+async function applyTouchNow(window, viewId, entry) {
+  const wc = entry.view.webContents;
+  if (wc.isDestroyed()) return;
+  const wanted = entry.emulation?.touch === true;
+  const dbg = wc.debugger;
+
+  if (!wanted) {
+    if (entry.touchActive && dbg.isAttached()) {
+      // Explicitly off before detaching. Detaching *should* drop the session's
+      // overrides on its own, but "should" is the wrong footing for a page that
+      // would otherwise keep answering mouse drags with touch events.
+      try {
+        await dbg.sendCommand("Emulation.setEmitTouchEventsForMouse", { enabled: false });
+        await dbg.sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false });
+      } catch {
+        // The session went away underneath us — which is the state we wanted.
+      }
+    }
+    if (dbg.isAttached()) {
+      try {
+        dbg.detach();
+      } catch {
+        // Already gone.
+      }
+    }
+    if (entry.touchActive) {
+      entry.touchActive = false;
+      pushState(window, viewId, entry);
+    }
+    return;
+  }
+
+  try {
+    if (!dbg.isAttached()) dbg.attach("1.3");
+    await dbg.sendCommand("Emulation.setTouchEmulationEnabled", {
+      enabled: true,
+      maxTouchPoints: 1,
+    });
+    await dbg.sendCommand("Emulation.setEmitTouchEventsForMouse", {
+      enabled: true,
+      configuration: "mobile",
+    });
+    if (!entry.touchActive) {
+      entry.touchActive = true;
+      pushState(window, viewId, entry);
+    }
+  } catch {
+    // DevTools holds the session, or the view is tearing down. The pane shows
+    // touch as suspended rather than as on.
+    if (entry.touchActive) {
+      entry.touchActive = false;
+      pushState(window, viewId, entry);
+    }
+  }
+}
+
+/**
+ * Whether a change of emulation needs the page reloaded to be visible.
+ *
+ * Size and scale are live — Chromium relays out the emulated viewport and the
+ * page's media queries follow. The user agent and touch support are not: a
+ * document read `navigator.userAgent` and tested for `ontouchstart` while it was
+ * loading, and every library that branched on either did so once. Picking
+ * "iPhone" and being handed the desktop page is the confusing half of that, so
+ * those two reload and the rest do not.
+ */
+function emulationNeedsReload(prev, next) {
+  const ua = (e) => e?.userAgent ?? null;
+  const touch = (e) => e?.touch === true;
+  return ua(prev) !== ua(next) || touch(prev) !== touch(next);
+}
+
+/**
+ * Apply everything an emulation controls.
+ *
+ * Split by *when it is safe*, not by what it does: the user agent is set before
+ * the first `loadURL` — that is the whole point of it, since a document reads
+ * `navigator.userAgent` once, while it loads — but the metrics need a committed
+ * frame or the process dies (rule 2), so on a fresh view they land on the first
+ * `did-navigate` instead. `applyMetrics` enforces that itself, so this is safe to
+ * call at any point in a view's life.
+ */
+function applyEmulation(window, viewId, entry) {
+  applyUserAgent(entry);
+  applyMetrics(entry);
+  void applyTouch(window, viewId, entry);
 }
 
 /**
@@ -185,6 +440,96 @@ function attachListeners(window, viewId, entry) {
     send(window, "veld:browser:accelerator", { viewId, accelerator: "palette" });
   });
 
+  // While the pane's screen is being resized by dragging its edge, forward the
+  // pointer to the page.
+  //
+  // This is what lets the *real* view resize live instead of being hidden for the
+  // gesture. A `WebContentsView` is an OS-level widget with its own WebContents, so
+  // a mouse event over it belongs to the guest and the /ide document never sees it —
+  // a drag whose pointer crosses the view therefore loses both its moves and its
+  // `mouseup`, leaving a gesture that can never end. Forwarding closes that hole at
+  // the source instead of with a timeout heuristic (and a heuristic would have to
+  // guess between "the pointer is over the page" and "the user is holding still").
+  //
+  // The **position comes from the cursor, not from the event**: `input-event`'s
+  // `x`/`y` are documented without saying which space they are in, and a
+  // half-window offset in a drag is not a bug worth shipping to discover.
+  // `getCursorScreenPoint` minus the window's content origin is unambiguous, and
+  // dividing by the zoom factor is the exact inverse of the CSS→DIP conversion the
+  // bounds handler does — so the page receives the coordinates its own
+  // `pointermove` would have carried.
+  wc.on("input-event", (_e, input) => {
+    if (!entry.dragging) return;
+    if (input.type !== "mouseMove" && input.type !== "mouseUp") return;
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return;
+    const cursor = screen.getCursorScreenPoint();
+    const content = window.getContentBounds();
+    const zoom = window.webContents.getZoomFactor() || 1;
+    send(window, "veld:browser:pointer", {
+      viewId,
+      type: input.type,
+      x: (cursor.x - content.x) / zoom,
+      y: (cursor.y - content.y) / zoom,
+    });
+  });
+
+  // The first committed navigation is what makes the emulation calls safe to make
+  // at all (rule 2), and every later one is what keeps zoom and touch in force.
+  //
+  // Zoom, because Chromium's zoom policy is **per origin**: a navigation adopts
+  // whatever the destination origin was last viewed at — including a level set by
+  // a *different* pane on the same session — so a pane that does not re-assert
+  // changes zoom on its own as you browse. Touch, because the CDP overrides are
+  // tied to the session and a cross-origin navigation can replace the render frame
+  // underneath them. Re-sending both is cheap and idempotent: `applyMetrics`
+  // recomputes the same scale, and `applyTouch` only pushes state when the answer
+  // changes.
+  const ready = () => {
+    const first = !entry.frameReady;
+    entry.frameReady = true;
+    applyMetrics(entry);
+    applyZoom(entry);
+    void applyTouch(window, viewId, entry);
+    // The scale is part of what the pane renders, and on the first navigation it
+    // has just gone from "asked for" to "in force".
+    if (first) push();
+  };
+  // **`did-navigate` only**, deliberately. A `did-fail-load` listener used to open
+  // this gate too, on the reasoning that a failed load still commits an error page
+  // and setting a device from the pane's error screen has to work. That reasoning is
+  // false for the one code that matters: `ERR_ABORTED` (-3) commits *nothing* — it is
+  // what Stop on a first load reports, and what a navigation superseded by another
+  // one reports — so the gate opened on a view with no frame, and the next
+  // `applyMetrics` then made exactly the `enableDeviceEmulation` call rule 2 says
+  // takes the whole app down with it. Nothing is lost: a committed error page fires
+  // `did-navigate` as well, which is the case that listener was added for, and while
+  // a load has failed the pane is showing its own error screen with the view hidden
+  // anyway (`paneCovers`). Note that this file already knows -3 is not a fault — see
+  // the `did-fail-load` handler above, which filters it for the same reason.
+  wc.on("did-navigate", ready);
+  // A dead renderer has no frame to emulate against, which is the state rule 2 is
+  // about. The next navigation makes it safe again.
+  wc.on("render-process-gone", () => {
+    entry.frameReady = false;
+    entry.emulated = false;
+  });
+
+  // Electron's docs say opening DevTools detaches an attached debugger; on
+  // Electron 43 the two coexist. Nothing is detached pre-emptively on that basis —
+  // doing so threw touch away for a conflict this version does not have — so this
+  // reacts instead: a `detach` from any cause is reported as touch being off, and
+  // closing DevTools retries the attach in case that version does take it.
+  wc.on("devtools-opened", () => push());
+  wc.on("devtools-closed", () => {
+    push();
+    void applyTouch(window, viewId, entry);
+  });
+  wc.debugger.on("detach", () => {
+    if (!entry.touchActive) return;
+    entry.touchActive = false;
+    push();
+  });
+
   // No device access from an embedded preview. Notifications, camera, mic,
   // geolocation and the rest would be granted against the *pane's* origin with no
   // chrome to attribute the prompt to, so the whole set is denied.
@@ -202,12 +547,31 @@ function attachListeners(window, viewId, entry) {
 }
 
 function disposeEntry(window, entry) {
+  // A view disposed mid-gesture must not stay armed: nothing else clears this once the
+  // entry is unreachable, and a forwarding view costs a cursor read and an IPC message
+  // per mouse move.
+  entry.dragging = false;
+  const wc = entry.view.webContents;
+  // Before the view goes: a detached inspector is a window of its own, and one
+  // left open for a pane that no longer exists is a window with no way back to
+  // the app that opened it. The debugger goes with it, so a closing pane cannot
+  // leave a CDP session attached to a dying WebContents.
+  if (!wc.isDestroyed()) {
+    if (wc.isDevToolsOpened()) wc.closeDevTools();
+    if (wc.debugger.isAttached()) {
+      try {
+        wc.debugger.detach();
+      } catch {
+        // Already detached, or the target is gone.
+      }
+    }
+  }
   try {
     window.contentView.removeChildView(entry.view);
   } catch {
     // Window already tearing down — nothing to detach from.
   }
-  if (!entry.view.webContents.isDestroyed()) entry.view.webContents.close();
+  if (!wc.isDestroyed()) wc.close();
 }
 
 /** Drop every view a window owns. Called when the window closes. */
@@ -303,16 +667,48 @@ function registerBrowserViewIpc(resolveWindow) {
         webviewTag: false,
       },
     });
-    view.setBackgroundColor("#ffffff");
+    // The page's own theme surface, not white: this is what shows before the guest paints
+    // and at the screen's rounded corners, and a white flash in a dark app is exactly
+    // where an embedded view stops looking embedded. Falls back to white, which is what
+    // every browser does with no better answer.
+    view.setBackgroundColor(safeColor(args?.background) ?? "#ffffff");
     // Created **visible**, and only hidden when the renderer says so. A hidden
     // WebContents is background-throttled by Chromium, and a view created hidden
     // and loaded in the same tick sometimes never rendered its first page — blank
     // until you hit Reload. The renderer sends its own `visible` immediately, so
     // starting visible costs nothing.
-    const entry = { view, profile, visible: true };
+    const entry = {
+      view,
+      profile,
+      visible: true,
+      // Emulation and zoom arrive with `create` rather than in a follow-up call,
+      // because a pane switching session recreates its view and a device that
+      // came back one round trip late would be visible as the page laying out at
+      // pane size and then jumping.
+      emulation: safeEmulation(args?.emulation),
+      zoom: safeZoom(args?.zoom) ?? 1,
+      // The session's own UA, captured before anything overrides it — what
+      // "no emulated device" has to restore.
+      defaultUserAgent: view.webContents.getUserAgent(),
+      scale: 1,
+      radius: 0,
+      touchActive: false,
+      // Nothing has navigated yet, so the emulation calls are not safe to make —
+      // rule 2. The first `did-navigate` flips this and applies them.
+      frameReady: false,
+      emulated: false,
+      // Set only while the page is dragging this screen's edge; see the
+      // `input-event` listener for what it turns on and why.
+      dragging: false,
+    };
     entries.set(viewId, entry);
     window.contentView.addChildView(view);
     attachListeners(window, viewId, entry);
+    // The user agent goes on before the first load, so the page's first request
+    // carries it rather than needing a reload to see it. The metrics wait for the
+    // navigation `loadURL` is about to start.
+    applyEmulation(window, viewId, entry);
+    applyZoom(entry);
 
     const url = safeUrl(args?.url);
     if (url) void view.webContents.loadURL(url);
@@ -342,7 +738,142 @@ function registerBrowserViewIpc(resolveWindow) {
     // the last good bounds and let visibility do the hiding, so returning to
     // the tab doesn't flash a 1px view.
     if (rect.width < 1 || rect.height < 1) return;
-    found.entry.view.setBounds(rect);
+    const { entry } = found;
+    entry.view.setBounds(rect);
+    // The screen's shape travels with its box. `setBorderRadius` clips the *page*
+    // to the device's corners; the frame the renderer draws around it is what makes
+    // them visible, since a native view paints over any DOM inside its own rect.
+    const radius = safeRadius(args?.radius);
+    if (radius !== entry.radius) {
+      entry.radius = radius;
+      entry.view.setBorderRadius(radius);
+    }
+    // Re-emulate only when the factor actually moves: the renderer coalesces a
+    // splitter drag to one push per frame, and `enableDeviceEmulation` relayouts
+    // the guest page, so re-sending an unchanged scale would do that per frame.
+    //
+    // The factor is recorded whether or not a device is set. Recording it only while
+    // emulating meant a pane that spent a while at "Pane size" kept the *previous*
+    // device's factor, and the next `emulate` applied metrics with it — corrected
+    // only by luck, when the rect happened to change in the same breath.
+    const scale = safeScale(args?.scale);
+    const moved = scale !== entry.scale;
+    entry.scale = scale;
+    if (entry.emulation && moved) applyMetrics(entry);
+  });
+
+  /**
+   * Set (or clear) the pane's emulated device.
+   *
+   * `null` is a first-class argument, not a missing one: "show this pane at pane
+   * size" is a state the user picks, and it has to reach `disableDeviceEmulation`
+   * and restore the default user agent.
+   */
+  ipcMain.handle("veld:browser:emulate", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const { window, entry } = found;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed()) return;
+    const next = safeEmulation(args?.emulation);
+    const prev = entry.emulation;
+    entry.emulation = next;
+    applyEmulation(window, args.viewId, entry);
+    // The size is live; the UA and touch support are not — a document read them
+    // while it was loading. Reload only for those, and only when there is a page
+    // to reload: a blank pane has nothing to re-request, and `reload()` on one
+    // would report a navigation the pane never made.
+    if (emulationNeedsReload(prev, next) && wc.getURL()) wc.reload();
+    pushState(window, args.viewId, entry);
+  });
+
+  /**
+   * Start or stop forwarding this view's pointer events to the page.
+   *
+   * On only for the duration of a resize drag: it is one IPC message per mouse move
+   * *while the cursor is over the pane's own page*, which is a cost worth paying to
+   * keep a gesture alive and not worth paying at any other time.
+   */
+  ipcMain.handle("veld:browser:drag", (event, args) => {
+    // Resolved from the *window*, with no view id involved. Requiring one meant the
+    // disarm was dropped whenever the pane that started the gesture had gone — closed
+    // mid-drag, or rebuilt by a session switch — and since arming is window-wide, every
+    // view then kept forwarding a cursor read plus an IPC message per mouse move until
+    // the page reloaded.
+    const window = senderWindow(event);
+    if (!window) return;
+    const dragging = args?.dragging === true;
+    // **Every view in the window, not just the dragged one.** A pointer released
+    // over a *sibling* pane's view reaches neither this document's `pointerup` (that
+    // view owns its own rect) nor the forwarded channel if only the dragged view is
+    // forwarding — so the gesture could never end: `resizing` stayed true, which
+    // disables geometry sync for that view for the life of the page, and the
+    // renderer's window listeners kept resizing the guest to a button-less cursor.
+    // Two browser panes side by side is the documented layout, so this is a
+    // straight-line path, not a corner. The coordinates are window-relative and come
+    // from the cursor, so an event forwarded by any view is equally usable.
+    for (const entry of byWindow.get(window.id)?.values() ?? []) {
+      entry.dragging = dragging;
+    }
+  });
+
+  /**
+   * Repaint every view in the window on the page's theme surface.
+   *
+   * Window-wide and view-less, like `drag`: a theme switch is one event for the whole
+   * app, and addressing it per view would mean the renderer walking its own registry to
+   * say the same thing sixteen times.
+   */
+  ipcMain.handle("veld:browser:background", (event, args) => {
+    const window = senderWindow(event);
+    if (!window) return;
+    const color = safeColor(args?.background);
+    if (!color) return;
+    for (const entry of byWindow.get(window.id)?.values() ?? []) {
+      if (!entry.view.webContents.isDestroyed()) entry.view.setBackgroundColor(color);
+    }
+  });
+
+  /** Page zoom for one pane. Chromium stores zoom per origin, so this is
+   *  re-asserted after every navigation (see `attachListeners`). */
+  ipcMain.handle("veld:browser:zoom", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const zoom = safeZoom(args?.zoom);
+    if (zoom === null) return;
+    found.entry.zoom = zoom;
+    applyZoom(found.entry);
+  });
+
+  /**
+   * Open or close this pane's DevTools.
+   *
+   * **Detached is the only workable mode.** A docked inspector resizes the view
+   * from the inside while the renderer mirrors the pane's box from the outside,
+   * and the two fight: every resize the inspector makes is undone by the next
+   * `setBounds`, which arrives on a 400 ms tick.
+   *
+   * An attached debugger is **left alone** here. Electron's docs say the inspector
+   * takes the CDP session, and this handler used to detach first so the pane would
+   * hear about it in the same round trip — but on Electron 43 the two coexist, so
+   * that was throwing touch emulation away to avoid a conflict that does not
+   * happen. If a version does take the session, the `detach` listener in
+   * `attachListeners` reports it and `devtools-closed` retries.
+   */
+  ipcMain.handle("veld:browser:devtools", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const { window, entry } = found;
+    const wc = entry.view.webContents;
+    if (wc.isDestroyed()) return;
+    const action = args?.action;
+    const open = action === "open" || (action === "toggle" && !wc.isDevToolsOpened());
+    if (open) wc.openDevTools({ mode: "detach", activate: true });
+    else wc.closeDevTools();
+    // `devtools-opened` / `devtools-closed` push the authoritative state; this is
+    // the same push one round trip earlier, so the button does not wait on an
+    // event to stop looking un-pressed.
+    pushState(window, args.viewId, entry);
   });
 
   ipcMain.handle("veld:browser:visible", (event, args) => {

@@ -24,14 +24,40 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Create (or adopt) the view for `viewId`; resolves to its state. */
     create: (viewId, options) =>
       ipcRenderer.invoke("veld:browser:create", { viewId, ...options }),
-    /** Mirror the pane's rect, in CSS pixels relative to the window. */
-    setBounds: (viewId, rect) => ipcRenderer.invoke("veld:browser:bounds", { viewId, rect }),
+    /** Mirror the emulated screen's rect, in CSS pixels relative to the window,
+     *  with the factor its viewport is rendered at inside it and the screen's
+     *  corner radius. One call because they are one calculation: the page owns the
+     *  geometry, the shell applies it. */
+    setBounds: (viewId, rect, scale, radius) =>
+      ipcRenderer.invoke("veld:browser:bounds", { viewId, rect, scale, radius }),
     setVisible: (viewId, visible) =>
       ipcRenderer.invoke("veld:browser:visible", { viewId, visible }),
     navigate: (viewId, url) => ipcRenderer.invoke("veld:browser:navigate", { viewId, url }),
     /** One of "back" | "forward" | "reload" | "stop" | "focus". */
     command: (viewId, command) =>
       ipcRenderer.invoke("veld:browser:command", { viewId, command }),
+    /** Emulate a device, or `null` to show the pane at pane size. */
+    emulate: (viewId, emulation) =>
+      ipcRenderer.invoke("veld:browser:emulate", { viewId, emulation }),
+    /** Repaint every pane view on the page's theme surface — what shows before a guest
+     *  paints. Window-wide: a theme switch is one event for the whole app. */
+    setBackground: (background) =>
+      ipcRenderer.invoke("veld:browser:background", { background }),
+    /** Page zoom factor for this pane (1 = 100%). */
+    setZoom: (viewId, zoom) => ipcRenderer.invoke("veld:browser:zoom", { viewId, zoom }),
+    /** One of "toggle" | "open" | "close". Always opens detached — a docked
+     *  inspector and the renderer's bounds mirroring fight over the view's box. */
+    devTools: (viewId, action) =>
+      ipcRenderer.invoke("veld:browser:devtools", { viewId, action }),
+    /** Ask the shell to forward the window's pane pointers while the page drags a
+     *  screen's edge. Without it a drag dies the moment the cursor crosses a view,
+     *  which owns every mouse event inside its own rect. Window-wide and view-less on
+     *  purpose: the release often lands on a *different* pane, and the disarm has to
+     *  work after the dragged pane is gone. */
+    drag: (dragging) => ipcRenderer.invoke("veld:browser:drag", { dragging }),
+    /** Mouse moves and the mouse-up seen *by the pane's page*, in the window's CSS
+     *  pixels — only while `drag` is on. */
+    onPointer: (fn) => on("veld:browser:pointer", fn),
     destroy: (viewId) => ipcRenderer.invoke("veld:browser:destroy", { viewId }),
     /** Clear one session slot's cookies and storage, pane or no pane. */
     clearSession: (profile) => ipcRenderer.invoke("veld:browser:clear-session", { profile }),

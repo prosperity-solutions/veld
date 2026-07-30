@@ -39,6 +39,7 @@ have since shipped — see below.)
 | Pane screens | Loading, error and chooser are DOM screens *and* they hide the view | A native view paints over DOM, so "the pane has something to say" and "the view is off screen" are one decision, not two — `covered()` in `browserHost.ts` owns it and the pane's render mirrors it. Error copy is keyed off Chromium's net error, not its message: "nothing is listening" (start the run) and "that hostname doesn't resolve" (`veld doctor`) are different problems, and the codes are stable where the prose is not. A *re*-load keeps the old page up rather than covering it with a spinner, which is what `loaded` is for. |
 | Orphan views are dropped by the *page*, not by a navigation event | `reset()` at module load, before any `create` | A reload replaces the page's registry of views, so the old ones are orphans painting over the new document. Disposing them from the shell's own `did-navigate` is a race against the renderer's first `create` — and losing it destroyed the view the new page had just asked for, which is why the first browser pane after a hard reload came up blank with reload as the only escape. Driving it from the renderer makes the ordering a queue. |
 | Views start visible | `create` no longer hides the view and then shows it | Chromium background-throttles a hidden `WebContents`, and a view created hidden and loaded in the same tick sometimes never rendered its first page — blank until you pressed Reload. The renderer sends its own visibility immediately, so starting visible costs nothing and removes the race. The spinner's 8-second "taking a while" reload is the backstop, since a genuinely slow dev server must not be called an error. |
+| Device emulation | **Native Electron `enableDeviceEmulation` for the metrics and the UA, CDP only for touch**, per pane, with detached DevTools beside it — presets as **size classes**, plus a draggable screen | The case that justifies doing this inside the dock rather than saying "use Chrome" is not the phone — it is the *desktop*: emulating a 1440-wide viewport **scaled down to fit a 600px pane** is what no real browser window can give you without a second monitor, and it is one API call. The metrics and `setUserAgent` are native, so the useful 90% costs no CDP plumbing. Touch is the exception and it is a deliberate one: `Emulation.setEmitTouchEventsForMouse` needs `webContents.debugger.attach()`, which Electron's docs say the built-in DevTools takes over — measured on Electron 43, it does not, and the two sessions coexist. Both outcomes are handled rather than either being trusted, and the pane reports what it *achieved* (`touchActive`, separate from the `touch` it asked for) instead of asserting a mode it may not have. Touch is worth the state machine because metrics alone test the layout and never the interaction: a swipe carousel, a `@media (hover: none)` rule and any library that branches on `ontouchstart` are all invisible to a narrow viewport that still receives mouse events. Emulation is **per pane**, not per window — a phone beside a desktop is the comparison people actually want — which follows from it being per-`WebContents` anyway. Page zoom rides along in the same control and the same layout field, because it has the same shape of problem (per-`WebContents`, lost when the view is recreated) and is useful well before any preset is: a 1440-wide layout is readable in a 600px pane at 60%. Zoom carries one honest caveat — Chromium's zoom policy is per *origin*, so two panes on one session and origin cannot hold different zooms across a navigation; the alternative is a partition per pane, which is a heavier feature than the problem. |
 | Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to, so a reload is allowed to drop the views and rebuild them. The page asks for that itself (`reset()`, see the row above) rather than the shell inferring it from a navigation event. A shell is the opposite — see the terminal row above. |
 | Icons | One mark, two assets, drawn by a stdlib-only rasteriser (`desktop/scripts/make-icons.py`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. The generator draws the mark analytically — it is a polygon and a circle, since every segment of `logo.svg`'s V is a straight line — so there is nothing to install and the bytes are identical on every machine. Both tools tried first were wrong in the same direction: `qlmanage` (QuickLook) composites thumbnails on an **opaque white background** and pads below its minimum size, which shipped a menu-bar icon that was a white tile with a dark V (a template image is alpha, so an opaque render is a solid blob — and invisible as a bug in any light-background preview), and ImageMagick's SVG renderer is blobby at icon sizes *and* its resize dropped the alpha channel to grayscale. The app icon is inset in a transparent margin, because macOS draws its own shadow into one and a full-bleed tile reads as a bigger, blockier icon than everything beside it in the dock. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
@@ -313,6 +314,152 @@ requests at runtime — branding rule.
   layout. A popup that relies on `window.opener` therefore breaks; the OAuth
   flows that need one are the known cost.
 
+#### Device emulation, zoom and DevTools (`ui/src/panes/devices.ts`)
+
+- **The state lives in the layout, and is re-asserted on create.** Emulation, page
+  zoom and the user agent are per-`WebContents`, and a pane switching session
+  *destroys and recreates its view* — so `PaneTab.emulation` and `PaneTab.zoom` are
+  the record, `browserHost` holds the live copy, and both go in with the shell's
+  `create` call rather than in a follow-up. A device that arrived one round trip
+  late would be visible as the page laying out at pane size and then jumping.
+- **The presets are size classes, not model names.** Small/medium/large phone,
+  three tablet sizes, a 14″ laptop, a 24″ monitor, a 27″ widescreen — each carrying
+  the metrics a current device of that class reports. A list of named handsets is
+  the disliked part of every browser's version of this feature: it is long, it is
+  out of date within a year of shipping, and the name never answers the question
+  being asked, which is *how wide*. It also keeps the table short enough that
+  nobody has to maintain a device database.
+- **Metrics are stored, not a preset id.** A tab could store `device: "phone"` and
+  look the numbers up, but then a layout written by a build whose preset table has
+  since moved restores as a different device — silently, and only for the presets
+  that changed. The id is kept for the *label* only, and an emulation whose id no
+  longer exists reads as "Custom", which is what it now is. Two ids are not in the
+  table and still mean something: `custom` (a hand-entered size) and `responsive`,
+  which `sanitizeEmulation` therefore has to know about or a dragged pane would
+  silently demote itself on reload.
+- **The screen is draggable, and the page reflows live while it is.** A fixed list
+  cannot contain the width a layout actually breaks at, so any emulated screen can
+  be resized from handles on its right edge, bottom edge and corner — the
+  `Responsive` entry is that with nothing else claimed, starting at the pane's own
+  size. Dragging a preset lands on `custom` and keeps its flags; dragging the
+  responsive viewport stays responsive. The screen grows about its **centre**
+  (`deviceLayout` again — one placement rule, not a second one for drags), so the
+  edge under the cursor moves half of what the size does, and the pointer delta is
+  doubled to keep the edge glued to the cursor.
+- **The pointer is the hard part of that, in both backends, for one reason: the
+  thing being resized owns the events that land on it.** A `WebContentsView` is an
+  OS-level sibling, so a mouse event inside its rect belongs to the guest and the
+  /ide document never sees it; a cross-origin iframe consumes the ones on it too.
+  Either way a drag whose pointer crossed the page would lose its moves *and* never
+  see `pointerup` — a gesture that cannot end. The handles being *outside* the
+  screen (in the inset) is what makes the common case work; the rest is:
+  - under Electron, the shell forwards the view's own mouse events while a drag is
+    live (`webContents.on('input-event')` → `veld:browser:pointer`), which is what
+    lets the view stay **visible**. The coordinates come from
+    `screen.getCursorScreenPoint()` minus the window's content origin, divided by the
+    zoom factor — deliberately *not* from the event's own `x`/`y`, whose coordinate
+    space the docs never state. That makes them the exact inverse of the CSS→DIP
+    conversion the bounds handler does, so the page receives what its own
+    `pointermove` would have carried;
+  - the iframe backend has no such channel, so its frame goes `pointer-events: none`
+    for the gesture. It cannot be hidden — there the frame *is* the thing being
+    resized.
+  An earlier version hid the native view for the whole drag instead. That was
+  reliable and it was worse: you were resizing a rectangle rather than watching a
+  layout reflow, which is the entire point of doing this in a pane.
+- **Applied sizes are coalesced to one animation frame.** Each one is an
+  `enableDeviceEmulation`, which relayouts *the user's page* and fires its `resize`
+  handlers; a mouse emits several moves per painted frame, and there is no sense
+  relayouting someone's app twice for one frame. The layout write happens once, on
+  release. `syncGeometry` also stands down while a drag is live — it draws from the
+  applied emulation on a 400 ms tick, so it was a second writer of the one element
+  the drag owns, and it won whenever the pointer went still.
+- **No DOM readout over the screen.** The size being dragged to goes in the chrome's
+  chip, where the emulated size lives anyway. A label over the screen would be
+  painted over by the native view in the desktop app and visible in a browser tab,
+  which is the worst of both.
+- **The renderer computes `scale`; the shell only clamps it.** Fitting a 1920-wide
+  viewport into a 600px pane is the entire argument for doing this inside the dock,
+  and the arithmetic lives in `deviceLayout` (`panes/devices.ts`) with the rest of
+  the placement — where the screen sits, how far it is scaled and what radius that
+  leaves are one calculation, and they are pushed together with the bounds. The shell
+  applies what it is handed (`safeScale`, `safeRadius`) and deliberately re-derives
+  nothing: an earlier version had the shell compute the factor from the box it was
+  given, which is one number with two owners and a half-off-screen device waiting to
+  happen. Both dimensions bind: the emulated screen *is* the view, so a viewport
+  scaled to the width but taller than the box is clipped with nothing to scroll it
+  into sight. Note the one thing the renderer cannot see — a native view's bounds are
+  device-independent pixels while the renderer measures CSS pixels — which is why the
+  *bounds* are converted in the shell (`rect * getZoomFactor()`) even though the
+  factor is not.
+- **The mobile user agent is the string only.** `setUserAgent` takes a string and
+  Electron exposes no metadata argument, so `navigator.userAgentData` and the
+  `Sec-CH-UA*` request headers keep reporting the host desktop while
+  `navigator.userAgent` claims a phone — a stack that branches on client hints still
+  serves its desktop bundle. The pane's device menu says so, in the same spirit as the
+  iframe backend's gaps. Closing it properly means `Emulation.setUserAgentOverride`
+  with `userAgentMetadata` over CDP, which would put the user agent behind a debugger
+  attach that DevTools can take away; that is a trade worth its own increment rather
+  than a quiet half-fix.
+- **Zoom is re-asserted after every navigation.** Chromium's zoom policy is
+  per *origin*, not per view: navigating adopts whatever that origin was last
+  viewed at — including a level set by a different pane on the same session — so a
+  pane that does not re-assert changes zoom on its own as you browse. That also
+  means two panes on the same origin and session cannot hold different zooms
+  indefinitely; the last one set wins on the next navigation. Documented rather
+  than worked around, because the workaround is a partition per pane.
+- **The emulation calls need a committed frame — or the app dies.**
+  `enableDeviceEmulation` *and* `disableDeviceEmulation` on a `WebContentsView`
+  that has not navigated yet **SIGSEGV the whole process**: not an exception, so
+  there is nothing to catch, and the window is simply gone. That includes the
+  `disable` call on a view where emulation was never enabled, which is what the
+  no-device path did on every pane — the first version of this feature killed
+  Electron on startup for exactly that reason. So the metrics are applied on the
+  first `did-navigate` (or a main-frame `did-fail-load`, since an error page is a
+  normal place to set a device from) and directly thereafter, tracked by
+  `frameReady`; a `render-process-gone` clears it again. `setUserAgent` and
+  `setZoomFactor` *are* safe before a load, which is the half that matters —
+  a document reads `navigator.userAgent` once, while it loads. All of this was
+  measured against the installed Electron rather than read, because the docs say
+  nothing about it.
+- **Touch is the one thing that can be taken away.** There is no Electron API for
+  it: `Emulation.setTouchEmulationEnabled` (which makes `ontouchstart` exist) and
+  `setEmitTouchEventsForMouse` (which turns a drag into `touchstart`) are CDP, so
+  it needs `webContents.debugger.attach()`. Electron's docs say the built-in
+  DevTools takes that session — on Electron 43 it does not, and the two coexist
+  (measured; `isAttached()` is still true with the inspector open). Both worlds are
+  handled rather than either being trusted: nothing is detached pre-emptively (an
+  earlier version did, and threw touch away for a conflict this Electron does not
+  have), a `detach` from any cause flips `touchActive` to false, and
+  `devtools-closed` retries the attach. The pane therefore reports what it
+  *achieved* — `touchActive`, separate from the `touch` it asked for — and its menu
+  says touch is paused without claiming to know why. Both CDP calls are sent,
+  because a page asks both questions: feature detection and behaviour.
+- **A user-agent change reloads the pane; a size change does not.** The emulated
+  viewport is live — Chromium relays out and the media queries follow — but a
+  document read `navigator.userAgent` and tested for `ontouchstart` once, while it
+  was loading. Picking "iPhone" and being handed the desktop bundle is the
+  confusing half of that, so the UA and touch flags reload and nothing else does.
+  On a *fresh* view the order avoids it entirely: emulation is applied before the
+  first `loadURL`, so the page's first request already carries the emulated UA.
+- **DevTools is always detached** (`openDevTools({ mode: "detach" })`). A docked
+  inspector resizes the view from the inside while the renderer mirrors the pane's
+  box from the outside, and the two fight — every resize the inspector makes is
+  undone by the next `setBounds`, which arrives on a 400 ms tick.
+- **The user agent is validated in the shell**, not only in the renderer
+  (`safeUserAgent` in `desktop/src/validate.js`). It is the one field of an
+  emulation that leaves the process as *protocol* rather than as geometry:
+  `setUserAgent` takes a header value, so a CR or LF in one is header injection
+  against every origin the pane visits. Printable ASCII, bounded, and rejected
+  rather than repaired.
+- **The browser build gets the layout half and says so.** An iframe's own width
+  *is* a real viewport, so a page in a 393px frame sees 393px in its media queries,
+  and a CSS `transform` scales the rendered result to fit the pane. What a frame has
+  no API for is the rest — no user agent, no touch, no device pixel ratio, no page
+  zoom — so the device menu states the gap instead of implying parity. (A CSS
+  transform is not zoom: it scales the *rendered result* rather than the viewport,
+  which is exactly why it is the right tool for `fit` and the wrong one for zoom.)
+
 Why not join `crates/veld-daemon/frontend/`? That package builds IIFE snippets
 (feedback overlay, client-log) with esbuild and no framework; the management UI
 is an application with a different toolchain (Vite, React, HMR). Two small
@@ -586,8 +733,10 @@ already lives in the URL, so modes are just routes.
 3. ~~Terminal panes~~ — shipped; see the decision log above.
 4. ~~`veld share` from the UI~~ — shipped as IDE mode's Sharing surface; see the
    decision log. Start-run UX beyond preset picking is still open.
-5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
-6. Packaging, auto-update, CLI installation from the app.
+5. ~~Device emulation + DevTools for browser panes~~ — shipped; see the decision
+   log and the emulation notes above.
+6. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
+7. Packaging, auto-update, CLI installation from the app.
 
 The sequencing and the transport/renderer decisions for these live in
 [issue #167](https://github.com/prosperity-solutions/veld/issues/167).

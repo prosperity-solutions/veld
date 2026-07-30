@@ -10,6 +10,14 @@ const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   error: null,
   profile: "default",
   loaded: false,
+  emulationScale: 1,
+  deviceX: 0,
+  deviceY: 0,
+  deviceWidth: 0,
+  deviceHeight: 0,
+  resizing: false,
+  touchActive: false,
+  devToolsOpen: false,
   ...over,
 });
 

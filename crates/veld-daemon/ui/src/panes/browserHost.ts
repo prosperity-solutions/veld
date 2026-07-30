@@ -24,6 +24,14 @@
  * exists or it doesn't, and a mid-session change is not a thing.
  */
 
+import {
+  type DeviceLayout,
+  type PaneEmulation,
+  DEFAULT_ZOOM,
+  clampZoom,
+  deviceLayout,
+  scaledRadius,
+} from "./devices";
 import { type BrowserProfile, normalizeBrowserUrl } from "./model";
 
 export type BrowserBackend = "electron" | "iframe";
@@ -60,17 +68,70 @@ export interface BrowserState {
    *  where a spinner is the honest thing to show — from "reloading", where the
    *  page underneath is still worth looking at. */
   loaded: boolean;
+  /**
+   * How far a fitted emulated viewport ended up scaled, 1 when it fits or when
+   * there is no emulation.
+   *
+   * Computed here, by `deviceLayout`, and pushed to the shell with the bounds —
+   * the box and the factor are one calculation, and having the shell derive the
+   * factor from the box it was given was two owners of one number. The pane shows
+   * it ("1440 × 900 · 42%") because a scaled-down device is otherwise
+   * indistinguishable from a small one.
+   */
+  emulationScale: number;
+  /**
+   * The emulated screen's box inside the pane's content area, in CSS pixels; the
+   * full content area when no device is set.
+   *
+   * Published because the *resize handles* are React's — they have to sit exactly
+   * on the screen's edges, and only `syncGeometry` knows where those are. Kept as
+   * four numbers rather than a rect object so `patch`'s `!==` comparison still
+   * works; a new object every frame would re-render every pane on every tick.
+   */
+  deviceX: number;
+  deviceY: number;
+  deviceWidth: number;
+  deviceHeight: number;
+  /** Whether a resize drag is in progress, which hides the native view so the
+   *  renderer receives the pointer at all. */
+  resizing: boolean;
+  /**
+   * Whether touch emulation is *actually* in force.
+   *
+   * Separate from the `touch` the pane asked for, because touch needs Chromium's
+   * debugger session and something else can hold it. The pane says so rather than
+   * claiming a mode it does not have.
+   */
+  touchActive: boolean;
+  /** Whether this pane's (detached) DevTools window is open. */
+  devToolsOpen: boolean;
 }
 
 /** The bridge the desktop shell injects (desktop/src/preload.js). */
 interface DesktopBrowserApi {
   create(
     viewId: string,
-    options: { url?: string; profile: BrowserProfile },
+    options: {
+      url?: string;
+      profile: BrowserProfile;
+      /** Sent with `create` rather than after it: a pane switching session
+       *  recreates its view, and a device arriving a round trip late is visible
+       *  as the page laying out at pane size and then jumping. */
+      emulation: PaneEmulation | null;
+      zoom: number;
+      /** The theme's content surface, so a view does not flash white in a dark app
+       *  before the guest paints. */
+      background: string;
+    },
   ): Promise<unknown>;
   setBounds(
     viewId: string,
     rect: { x: number; y: number; width: number; height: number },
+    /** The factor the emulated viewport is rendered at inside `rect`, and the
+     *  screen's corner radius at that scale. Sent with the box because all three
+     *  are one calculation and one moment: see `deviceLayout`. */
+    scale: number,
+    radius: number,
   ): Promise<void>;
   setVisible(viewId: string, visible: boolean): Promise<void>;
   navigate(viewId: string, url: string): Promise<void>;
@@ -78,6 +139,14 @@ interface DesktopBrowserApi {
     viewId: string,
     command: "back" | "forward" | "reload" | "stop" | "focus",
   ): Promise<void>;
+  emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
+  setZoom(viewId: string, zoom: number): Promise<void>;
+  devTools(viewId: string, action: "toggle" | "open" | "close"): Promise<void>;
+  /** Window-wide: the shell resolves the window from the sender, so a disarm lands
+   *  even when the view that started the gesture is already gone. */
+  drag(dragging: boolean): Promise<void>;
+  /** Window-wide: the surface a view shows before its guest paints. */
+  setBackground(background: string): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
   clearSession(profile: BrowserProfile): Promise<void>;
@@ -87,6 +156,9 @@ interface DesktopBrowserApi {
     fn: (payload: { viewId: string; url: string; profile: BrowserProfile }) => void,
   ): () => void;
   onAccelerator(fn: (payload: { accelerator: string }) => void): () => void;
+  onPointer(
+    fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
+  ): () => void;
 }
 
 declare global {
@@ -116,14 +188,26 @@ interface View {
   id: string;
   profile: BrowserProfile;
   /**
-   * The element the pane reparents.
+   * The element the pane reparents: the whole content area of the pane.
    *
-   * Under the iframe backend it *contains* the live frame. Under Electron it is
-   * empty and exists only to be measured — the native view is positioned to
-   * match its box, which is also why it must be a real laid-out element rather
-   * than the React slot (that one is recreated on every remount).
+   * Measured, never painted into. Under Electron it is empty apart from
+   * [`View.frame`] — the native view is positioned to match that child's box,
+   * which is also why this must be a real laid-out element rather than the React
+   * slot (that one is recreated on every remount). While a device is emulated it
+   * carries the backdrop the screen sits on.
    */
   container: HTMLDivElement;
+  /**
+   * The emulated screen's own box inside the container: centred, inset, rounded to
+   * the device's shape, and the thing the native view's bounds mirror.
+   *
+   * Always present, even with no emulation, where it simply fills the container —
+   * so there is exactly one element that means "where the page is", rather than a
+   * second geometry path that only exists in one of the two modes. It is also what
+   * the freeze still is painted onto, so the still lands on the screen rather than
+   * across the backdrop.
+   */
+  frame: HTMLDivElement;
   iframe: HTMLIFrameElement | null;
   state: BrowserState;
   listeners: Set<() => void>;
@@ -157,6 +241,31 @@ interface View {
    * the page arrives, and it cannot, as long as the pane draws its own spinner.
    */
   visible: boolean;
+  /**
+   * The device this view emulates, and its page zoom.
+   *
+   * The layout is the record (`PaneTab.emulation` / `PaneTab.zoom`); these are the
+   * live copies, kept because **the view can be recreated underneath them** — a
+   * session switch destroys and rebuilds one, as does recovering from a refused
+   * `create` — and both are per-`WebContents` state that has to be re-asserted
+   * when that happens. Same shape as `url`, for the same reason.
+   */
+  emulation: PaneEmulation | null;
+  zoom: number;
+  /** The factor and corner radius last pushed with the bounds, so a resize that
+   *  changes neither costs no re-emulation — which relayouts the guest page. */
+  scale: number;
+  radius: number;
+  /** The screen's box as last *painted*, in the numbers it was computed from — so a
+   *  redraw can tell a real geometry change from the same layout recomputed. Never
+   *  compare the frame's inline styles for this: Chromium round-trips lengths through
+   *  ~6 significant digits, so the strings differ when the numbers do not. */
+  painted: { x: number; y: number; width: number; height: number } | null;
+  /** The size a drag is currently at, and the frame it will be applied on.
+   *  Coalesced because a mouse produces several moves per painted frame and each
+   *  applied size relayouts the user's page. */
+  pending: { width: number; height: number } | null;
+  pendingFrame: number;
 }
 
 const views = new Map<string, View>();
@@ -195,21 +304,33 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
     // this `Promise<unknown>`, so nothing else would notice. Believing it would set
     // `shellHasView` for a view that does not exist and re-open the silent
     // spinner-forever hang this whole path exists to prevent.
-    if (!(await desktop.create(v.id, { url, profile: v.profile }))) {
+    // The emulation and the zoom go in with the create, so a rebuilt view is
+    // never briefly the wrong device: the shell applies both *before* the first
+    // `loadURL`, which is also what keeps the emulated user agent on the page's
+    // first request instead of costing a reload.
+    if (
+      !(await desktop.create(v.id, {
+        url,
+        profile: v.profile,
+        emulation: v.emulation,
+        zoom: v.zoom,
+        background: paneSurface(),
+      }))
+    ) {
       throw new Error("the desktop shell refused this pane");
     }
     v.shellHasView = true;
     // Forget what the *failed* attempt mirrored. Both caches were written while no
-    // shell entry existed, so their sends were dropped: `v.rect` by a `syncBounds`
+    // shell entry existed, so their sends were dropped: `v.rect` by a geometry sync
     // that went nowhere, `v.visible` by the `applyVisibility` in `mountBrowser`.
     // Leaving them meant the retried view received neither `setBounds` (the rect
-    // compares equal, so `syncBounds` early-returns) nor `setVisible` — a view at
+    // compares equal, so `pushGeometry` early-returns) nor `setVisible` — a view at
     // its default bounds, which is the blank pane this retry path exists to fix,
     // reintroduced one step later.
     v.rect = null;
     v.visible = true;
     applyVisibility(v);
-    scheduleBoundsSync();
+    scheduleGeometrySync();
     return true;
   } catch (e: unknown) {
     v.shellHasView = false;
@@ -220,6 +341,26 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
     applyVisibility(v);
     return false;
   }
+}
+
+/**
+ * The theme's content surface, as a hex colour for the shell.
+ *
+ * A `WebContentsView` paints its own background until the guest does, and Electron's
+ * default is white — which in a dark app is a white rectangle flashing on every create,
+ * every navigation to a slow page, and at the emulated screen's rounded corners. Read
+ * from the same `--term-bg` token the terminal uses, so the two content surfaces agree
+ * and neither has to know about the other's theme.
+ *
+ * Read live rather than cached: it is one `getComputedStyle` on a theme switch and on a
+ * view create, and caching it means the first pane after a switch keeps the old one.
+ */
+function paneSurface(): string {
+  if (typeof document === "undefined") return "#ffffff";
+  const token = getComputedStyle(document.body).getPropertyValue("--term-bg").trim();
+  // Hex only — the shell validates the same way, and a token that has been themed into
+  // something exotic should fall back rather than be half-applied.
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(token) ? token : "#ffffff";
 }
 
 /** A failure raised on this side of the bridge, in the same shape as one the
@@ -289,7 +430,9 @@ export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
   return !state.loaded && state.loading;
 }
 
-/** Whether a mounted view should currently be on screen. */
+/** Whether a mounted view should currently be on screen. A resize drag no longer
+ *  hides it — the shell forwards the pointer instead, so the page can reflow under
+ *  the cursor (see [`setBrowserResizing`]). */
 function shouldShow(v: View): boolean {
   return v.mounted && suspendDepth === 0 && !covered(v);
 }
@@ -378,7 +521,7 @@ async function freezeThenHide(v: View): Promise<void> {
   if (image && suspendDepth > 0) {
     await Promise.race([decoded(image), deadline]);
     if (v.freezeGeneration !== generation || suspendDepth === 0) return;
-    v.container.style.backgroundImage = `url("${image}")`;
+    v.frame.style.backgroundImage = `url("${image}")`;
   }
   applyVisibility(v);
 }
@@ -405,11 +548,11 @@ async function decoded(dataUrl: string): Promise<null> {
  * it (`covered`) is opaque.
  */
 function thaw(v: View): void {
-  if (!v.container.style.backgroundImage) return;
+  if (!v.frame.style.backgroundImage) return;
   const generation = v.freezeGeneration;
   window.setTimeout(() => {
     if (v.freezeGeneration !== generation || suspendDepth > 0) return;
-    v.container.style.backgroundImage = "";
+    v.frame.style.backgroundImage = "";
   }, 250);
 }
 
@@ -424,6 +567,14 @@ export function browserStatus(id: string): BrowserState {
       error: null,
       profile: "default",
       loaded: false,
+      emulationScale: 1,
+      deviceX: 0,
+      deviceY: 0,
+      deviceWidth: 0,
+      deviceHeight: 0,
+      resizing: false,
+      touchActive: false,
+      devToolsOpen: false,
     }
   );
 }
@@ -444,7 +595,17 @@ export function subscribeBrowser(id: string, fn: () => void): () => void {
   };
 }
 
-function ensure(id: string, url: string | undefined, profile: BrowserProfile): View {
+/** Everything a view needs when it is created — and, because a session switch
+ *  recreates one, everything that has to be re-asserted when it is. */
+export interface BrowserViewOptions {
+  url?: string;
+  profile: BrowserProfile;
+  emulation?: PaneEmulation | null;
+  zoom?: number;
+}
+
+function ensure(id: string, options: BrowserViewOptions): View {
+  const { url, profile } = options;
   const existing = views.get(id);
   if (existing) {
     // A profile is a cookie jar, and a view is bound to one for life. Switching
@@ -457,11 +618,17 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
 
   const container = document.createElement("div");
   container.className = "browser-host";
+  // The screen, inside the pane's content area. Present in both modes and with or
+  // without a device, so "where the page is" is one element and one calculation.
+  const frame = document.createElement("div");
+  frame.className = "browser-device-frame";
+  container.appendChild(frame);
 
   const v: View = {
     id,
     profile,
     container,
+    frame,
     iframe: null,
     state: {
       url: url ?? "",
@@ -472,6 +639,14 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
       error: null,
       profile,
       loaded: false,
+      emulationScale: 1,
+      deviceX: 0,
+      deviceY: 0,
+      deviceWidth: 0,
+      deviceHeight: 0,
+      resizing: false,
+      touchActive: false,
+      devToolsOpen: false,
     },
     listeners: new Set(),
     observer: null,
@@ -480,6 +655,13 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     shellHasView: !desktop,
     freezeGeneration: 0,
     visible: true,
+    emulation: options.emulation ?? null,
+    zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
+    scale: 1,
+    radius: 0,
+    painted: null,
+    pending: null,
+    pendingFrame: 0,
   };
   views.set(id, v);
   const waiting = pending.get(id);
@@ -491,8 +673,8 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
   if (desktop) {
     void createShellView(v, url);
   } else {
-    const frame = document.createElement("iframe");
-    frame.className = "browser-frame";
+    const iframe = document.createElement("iframe");
+    iframe.className = "browser-frame";
     // No `sandbox`: the pane previews the user's *own* application, and a
     // sandbox without allow-same-origin gives it an opaque origin — no cookies,
     // no localStorage, no logged-in session, which is the whole point of the
@@ -502,35 +684,36 @@ function ensure(id: string, url: string | undefined, profile: BrowserProfile): V
     // arbitrary previewed content lets one click overwrite the user's clipboard.
     // The Electron backend denies every permission, so granting one here would be
     // the browser build being *less* careful than the desktop one.
-    frame.addEventListener("load", () => {
+    iframe.addEventListener("load", () => {
       // `reloadBrowser` bounces this frame through `about:blank`, which fires the
       // same event — treating that as the page having arrived cleared the loading
       // indicator one navigation early.
-      if (frame.src === "about:blank") return;
+      if (iframe.src === "about:blank") return;
       patch(v, { loading: false, loaded: true });
     });
-    if (url) frame.src = url;
-    container.appendChild(frame);
-    v.iframe = frame;
+    if (url) iframe.src = url;
+    // Inside the device frame, not the container: the frame is the screen, and it
+    // is what clips the page to the device's rounded corners.
+    frame.appendChild(iframe);
+    v.iframe = iframe;
   }
   return v;
 }
 
 /** Mount a view into `parent`, creating it on first call. */
-export function mountBrowser(
-  id: string,
-  parent: HTMLElement,
-  options: { url?: string; profile: BrowserProfile },
-): void {
-  const v = ensure(id, options.url, options.profile);
+export function mountBrowser(id: string, parent: HTMLElement, options: BrowserViewOptions): void {
+  const v = ensure(id, options);
   if (v.container.parentElement !== parent) parent.appendChild(v.container);
   v.mounted = true;
   applyVisibility(v);
-  if (!v.observer && desktop) {
-    v.observer = new ResizeObserver(scheduleBoundsSync);
+  // Observed under both backends: the native view mirrors the box, and a fitted
+  // emulated viewport is scaled to it, so either way the answer changes with the
+  // pane's size.
+  if (!v.observer) {
+    v.observer = new ResizeObserver(scheduleGeometrySync);
     v.observer.observe(v.container);
   }
-  scheduleBoundsSync();
+  scheduleGeometrySync();
 }
 
 /** Detach the element without destroying the view. */
@@ -627,6 +810,98 @@ export function clearBrowserSession(profile: BrowserProfile): void {
   });
 }
 
+/**
+ * Point a pane at a device, or at nothing (`null` — the pane at pane size).
+ *
+ * The live copy is written **before** the call, and unconditionally: a view the
+ * shell has not created yet (a refused `create` the pane can still retry from
+ * "Try again") must come back as the device the pane is set to, not as the one it
+ * was opened with. That is what makes this survive a session switch, which
+ * destroys and rebuilds the view.
+ */
+export function setBrowserEmulation(id: string, emulation: PaneEmulation | null): void {
+  const v = views.get(id);
+  if (!v) return;
+  v.emulation = emulation;
+  // The screen's box is a function of the emulation, so changing one has to redraw
+  // the other — and *this* side owns that box now. Without it the frame kept the
+  // previous device's size until something else happened to trigger a sync: the
+  // 400 ms tick under Electron, and under the iframe backend nothing at all, where
+  // picking a device would appear to do nothing until you resized the pane.
+  scheduleGeometrySync();
+  if (!desktop) {
+    syncGeometry(v);
+    return;
+  }
+  // Nothing to talk to yet; `createShellView` sends it with the create.
+  if (!v.shellHasView) return;
+  // Surfaced rather than swallowed: the pane's chrome has already changed to say
+  // it is emulating a phone, so a refused call has to be visible or the chrome is
+  // lying about what the page is being shown as.
+  void desktop.emulate(id, emulation).catch(reportFailure(v));
+}
+
+/**
+ * Enter or leave a resize drag.
+ *
+ * The page stays live and reflows as you drag — which needs one thing arranged
+ * first, in each backend, for the same reason: **the thing being resized owns the
+ * pointer events that land on it.** A `WebContentsView` is an OS-level sibling, so
+ * a mouse event inside its rect belongs to the guest; a cross-origin iframe
+ * consumes the ones that land on it too. Either way the drag would lose its moves
+ * and never see its `pointerup`, which is a gesture that cannot end.
+ *
+ * Under Electron the shell forwards the view's own pointer instead
+ * (`onBrowserPointer`), which is what lets the view stay visible. The iframe
+ * backend has no such channel, so its frame goes pointer-transparent for the
+ * gesture — it keeps painting, and it is the thing being resized, so hiding it was
+ * never an option there.
+ */
+export function setBrowserResizing(id: string, resizing: boolean): void {
+  // Before the view lookup, deliberately. A pane disposed mid-gesture (a tab closed, a
+  // worktree switched, `pruneBrowsers` from an async list change) has already been
+  // deleted from `views`, so a disarm behind that guard never ran — and since arming is
+  // window-wide, every *sibling* view kept forwarding a cursor read plus an IPC message
+  // per mouse move until the page reloaded. The shell resolves this from the window, so
+  // it needs nothing of ours to still exist.
+  if (desktop) void desktop.drag(resizing).catch(() => {});
+  const v = views.get(id);
+  if (!v) return;
+  patch(v, { resizing });
+  if (v.iframe) v.iframe.style.pointerEvents = resizing ? "none" : "";
+  if (resizing) return;
+  // Drop a frame that has not fired yet, or it would repaint the drag's last size
+  // after the applied one has already been drawn.
+  if (v.pendingFrame !== 0) cancelAnimationFrame(v.pendingFrame);
+  v.pendingFrame = 0;
+  v.pending = null;
+  // Re-assert the applied emulation, which the drag has been overwriting in the
+  // shell. Matters most when the gesture was *cancelled*: the layout still holds the
+  // pre-drag device, and without this the view would keep the size the pointer
+  // happened to be at when the drag was interrupted.
+  if (desktop && v.shellHasView) void desktop.emulate(id, v.emulation).catch(reportFailure(v));
+  syncGeometry(v);
+}
+
+/** Page zoom for one pane. Stored live for the same recreation reason as the
+ *  emulation; under the iframe backend there is no zoom to set (see
+ *  [`syncGeometry`]). */
+export function setBrowserZoom(id: string, zoom: number): void {
+  const v = views.get(id);
+  if (!v) return;
+  v.zoom = clampZoom(zoom);
+  if (!desktop || !v.shellHasView) return;
+  void desktop.setZoom(id, v.zoom).catch(reportFailure(v));
+}
+
+/** Open, close or toggle this pane's DevTools — always detached; see the shell's
+ *  handler for why a docked inspector cannot work here. */
+export function browserDevTools(id: string, action: "toggle" | "open" | "close"): void {
+  const v = views.get(id);
+  if (!v || !desktop || !v.shellHasView) return;
+  void desktop.devTools(id, action).catch(reportFailure(v));
+}
+
 export function focusBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
@@ -655,47 +930,282 @@ export function pruneBrowsers(keep: Iterable<string>): void {
 }
 
 // ---------------------------------------------------------------------------
-// Geometry (Electron only)
+// Geometry
 // ---------------------------------------------------------------------------
 
 /**
- * Mirror every mounted container's box onto its native view, next frame.
+ * Bring every mounted view's geometry back in line with its container, next frame.
+ *
+ * Two backends, one trigger and one calculation (`deviceLayout`): the emulated
+ * screen's box is a function of the pane's, and Electron mirrors that box onto the
+ * native view while the browser build lays the iframe out inside it.
  *
  * Coalesced to one frame for all views: a splitter drag fires `ResizeObserver`
- * per pointer move on both panes, and each push is an IPC round trip. Deferring
- * also gets the *settled* box — the one read mid-layout is frequently zero.
+ * per pointer move on both panes, and under Electron each push is an IPC round
+ * trip. Deferring also gets the *settled* box — the one read mid-layout is
+ * frequently zero.
  */
 let framePending = false;
-function scheduleBoundsSync(): void {
-  if (!desktop || framePending) return;
+function scheduleGeometrySync(): void {
+  if (framePending) return;
   framePending = true;
   requestAnimationFrame(() => {
     framePending = false;
-    for (const view of views.values()) syncBounds(view);
+    for (const view of views.values()) syncGeometry(view);
   });
 }
 
-function syncBounds(v: View): void {
-  if (!desktop || !v.mounted || !v.container.isConnected) return;
+/**
+ * Place the emulated screen, then hand the result to whichever backend is live.
+ *
+ * The single geometry path. `frame` is positioned and shaped here for both
+ * backends — the border, the shadow and the rounded corners are DOM even under
+ * Electron, because they sit *outside* the native view's rect where DOM is
+ * visible; the view itself gets Electron's own `setBorderRadius` so the page is
+ * clipped to the same shape rather than squaring off the corners the frame draws.
+ */
+function syncGeometry(v: View): void {
+  if (!v.mounted || !v.container.isConnected) return;
+  // A drag owns the frame while it lasts. This runs on a 400 ms tick and on every
+  // window resize, and it draws from the *applied* emulation — so during a drag it
+  // is the second writer of one element, and it wins whenever the pointer is still:
+  // hold the button without moving and the screen snapped back to its pre-drag
+  // size, then jumped forward again on the next move. `setBrowserResizing(false)`
+  // clears the flag before calling this, so the final size is not skipped.
+  if (v.state.resizing) return;
   const box = v.container.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1) return;
+  const e = v.emulation;
+
+  if (!e) {
+    // No device: the page is the pane. The frame fills the container, which keeps
+    // one element meaning "where the page is" in both modes.
+    v.frame.style.inset = "0";
+    // Clear the still **only when the frame was a device-sized screen**, i.e. when this
+    // call is the transition out of emulation. Then the still was captured at that
+    // smaller size and would stretch across the pane — picking "Pane size" from the open
+    // device menu is exactly that path, with views suspended and a still up.
+    //
+    // Not unconditionally, which is how the first version of this went wrong: this
+    // function has no `suspendDepth` guard and runs from a 400 ms tick and from every
+    // `ResizeObserver`, so on a pane with *no device at all* it wiped a perfectly good
+    // still — one frozen for a splitter drag or a modal elsewhere in the app — within
+    // 400 ms, mid-gesture, long before `thaw`'s grace. That is the blank-pane flicker the
+    // whole freeze/suspend/thaw mechanism exists to prevent, on the common case.
+    if (v.painted !== null && v.frame.style.backgroundImage) {
+      v.frame.style.backgroundImage = "";
+    }
+    v.painted = null;
+    v.frame.style.removeProperty("width");
+    v.frame.style.removeProperty("height");
+    v.frame.style.removeProperty("border-radius");
+    delete v.container.dataset.emulated;
+    if (v.iframe) resetIframe(v.iframe);
+    patch(v, { deviceX: 0, deviceY: 0, deviceWidth: box.width, deviceHeight: box.height });
+    pushGeometry(v, { x: box.left, y: box.top, width: box.width, height: box.height }, 1, 0);
+    return;
+  }
+
+  const { layout, radius } = paintScreen(v, e, box);
+  pushGeometry(
+    v,
+    { x: box.left + layout.x, y: box.top + layout.y, width: layout.width, height: layout.height },
+    layout.scale,
+    radius,
+  );
+}
+
+/**
+ * Draw the screen at a given emulation: position, size, shape, and the iframe
+ * inside it under the browser backend.
+ *
+ * Split out from [`syncGeometry`] because a resize drag needs exactly this and
+ * *not* the part that talks to the shell — the native view is hidden while the
+ * pointer is down, so there is nothing to move, and re-emulating per pointer move
+ * would relayout the guest page dozens of times. Sharing it is also what makes the
+ * dragged screen grow from its centre: `deviceLayout` centres, and there is only
+ * one of it.
+ */
+function paintScreen(
+  v: View,
+  e: PaneEmulation,
+  box: { width: number; height: number },
+): { layout: DeviceLayout; radius: number } {
+  const layout = deviceLayout(e, box);
+  const radius = scaledRadius(e, layout.scale);
+  // Container-local, which is the coordinate space the pane's own resize handles
+  // are positioned in — the page rect in `syncGeometry` is the same box in window
+  // coordinates, which is what a native view's bounds are relative to.
+  patch(v, {
+    deviceX: layout.x,
+    deviceY: layout.y,
+    deviceWidth: layout.width,
+    deviceHeight: layout.height,
+    emulationScale: layout.scale,
+  });
+  v.container.dataset.emulated = "true";
+  // A still is a picture of the screen at its *previous* size, so a geometry change
+  // invalidates it — "Fit to pane" keeps its menu open, so views are suspended and a
+  // still is up while it changes the layout, and the still would otherwise stay on
+  // screen stretched until the thaw 250ms after the menu closed. (The zoom stepper is
+  // *not* such a case: page zoom moves no geometry, so `moved` stays false and the pane
+  // rightly keeps its still.)
+  //
+  // Only on an actual change, because this also runs from the 400ms geometry tick, which
+  // fires *while* views are suspended and recomputes the layout it already drew.
+  // Clearing unconditionally wiped the still within 400ms of every menu opening —
+  // defeating the freeze in this feature's own mainline interaction, desktop-only.
+  //
+  // Compared as **numbers**, against what was last painted. Comparing the inline style
+  // strings instead looks equivalent and is not: Chromium round-trips a length through
+  // ~6 significant digits, so `533.3333333333334px` reads back as `533.333px` and the
+  // test was permanently unequal. Measured across realistic pane sizes, that wiped the
+  // still on most of them — the first version of this fix did nothing at all.
+  const painted = v.painted;
+  const moved =
+    painted === null ||
+    painted.x !== layout.x ||
+    painted.y !== layout.y ||
+    painted.width !== layout.width ||
+    painted.height !== layout.height;
+  if (moved && v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
+  v.painted = { x: layout.x, y: layout.y, width: layout.width, height: layout.height };
+  v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
+  v.frame.style.width = `${layout.width}px`;
+  v.frame.style.height = `${layout.height}px`;
+  v.frame.style.borderRadius = `${radius}px`;
+
+  if (v.iframe) {
+    // The frame's *own* width is a real viewport, so a page in a 393px iframe sees
+    // 393px in its media queries — the layout half of emulation, and most of why
+    // anyone reaches for it. `transform` rather than `zoom` because scaling the
+    // rendered result is the point: the frame keeps its 393 CSS pixels and takes up
+    // fewer of the pane's. What an iframe has no API for is the rest — user agent,
+    // touch, device pixel ratio, page zoom — which the device menu states.
+    v.iframe.dataset.emulated = "true";
+    v.iframe.style.width = `${e.width}px`;
+    v.iframe.style.height = `${e.height}px`;
+    v.iframe.style.transform = `scale(${layout.scale})`;
+    v.iframe.style.transformOrigin = "top left";
+  }
+
+  return { layout, radius };
+}
+
+/**
+ * Resize the screen — for real — to the size a drag is currently at.
+ *
+ * The page reflows live, so a drag is a responsive test rather than a preview of
+ * one: that is the whole reason to have this inside the pane. Centred, because it
+ * goes through the same `deviceLayout` as everything else.
+ *
+ * Coalesced to one frame. Every applied size is an `enableDeviceEmulation`, which
+ * relayouts the *user's* page and fires its `resize` handlers — a mouse can produce
+ * several moves per frame, and there is no point relayouting an app twice for one
+ * painted frame. The emulation is written to the layout only on release.
+ */
+export function previewBrowserResize(id: string, width: number, height: number): void {
+  const v = views.get(id);
+  if (!v || !v.emulation) return;
+  v.pending = { width, height };
+  if (v.pendingFrame !== 0) return;
+  v.pendingFrame = requestAnimationFrame(() => {
+    v.pendingFrame = 0;
+    const size = v.pending;
+    if (!size || !v.emulation || !v.mounted || !v.container.isConnected) return;
+    const box = v.container.getBoundingClientRect();
+    if (box.width < 1 || box.height < 1) return;
+    const preview = { ...v.emulation, width: size.width, height: size.height };
+    const { layout, radius } = paintScreen(v, preview, box);
+    if (!desktop || !v.shellHasView) return;
+    // Emulation before bounds: the shell's bounds handler re-applies the metrics
+    // when the scale moves, so the other order would apply the *new* scale to the
+    // old viewport for one call. Both land in the same tick, so nothing paints in
+    // between either way — it is the ordering that is correct, not the timing.
+    void desktop.emulate(id, preview).catch(reportFailure(v));
+    pushGeometry(
+      v,
+      { x: box.left + layout.x, y: box.top + layout.y, width: layout.width, height: layout.height },
+      layout.scale,
+      radius,
+    );
+  });
+}
+
+/**
+ * Mouse events the *pane's page* saw, forwarded by the shell during a drag.
+ *
+ * The gesture's second source of pointer data, and the thing that makes a live
+ * resize possible at all: a `WebContentsView` owns every mouse event inside its own
+ * rect, so a drag whose pointer crosses the page would otherwise lose its moves and
+ * never see its `mouseup`. Coordinates are already in this window's CSS pixels (the
+ * shell derives them from the cursor position, not from the event), so a consumer
+ * can treat them exactly like a `pointermove`.
+ */
+export function onBrowserPointer(
+  fn: (event: { viewId: string; type: string; x: number; y: number }) => void,
+): () => void {
+  return desktop ? desktop.onPointer(fn) : () => {};
+}
+
+/** Back to the stylesheet's own 100%/100%, rather than to a computed size: the
+ *  pane can be resized while no device is set, and a leftover pixel width would
+ *  not follow it. */
+function resetIframe(frame: HTMLIFrameElement): void {
+  delete frame.dataset.emulated;
+  frame.style.removeProperty("width");
+  frame.style.removeProperty("height");
+  frame.style.removeProperty("transform");
+  frame.style.removeProperty("transform-origin");
+}
+
+/**
+ * Report the screen's box to whatever needs it: the pane's own state, and — under
+ * Electron — the native view.
+ *
+ * `scale` and `radius` ride along with the rect because they are one calculation
+ * and one moment: a resize changes all three, and applying them in separate round
+ * trips shows as a frame of a device at the wrong size or shape.
+ */
+function pushGeometry(
+  v: View,
+  box: { x: number; y: number; width: number; height: number },
+  scale: number,
+  radius: number,
+): void {
   const rect = {
-    x: Math.round(box.left),
-    y: Math.round(box.top),
+    x: Math.round(box.x),
+    y: Math.round(box.y),
     width: Math.round(box.width),
     height: Math.round(box.height),
   };
   if (rect.width < 1 || rect.height < 1) return;
+  // The pane renders the scale ("1440 × 900 · 42%"), and it is the renderer's
+  // number now — the shell used to derive it from the native bounds, which put one
+  // calculation in two places.
+  patch(v, { emulationScale: scale });
+  if (!desktop) return;
   const last = v.rect;
-  if (last && last.x === rect.x && last.y === rect.y && last.width === rect.width && last.height === rect.height) {
+  if (
+    last &&
+    last.x === rect.x &&
+    last.y === rect.y &&
+    last.width === rect.width &&
+    last.height === rect.height &&
+    v.scale === scale &&
+    v.radius === radius
+  ) {
     return;
   }
   v.rect = rect;
+  v.scale = scale;
+  v.radius = radius;
   // Forget the cache if the send failed, or the poll below can never re-try it:
-  // the rect is recorded *before* the send, and `syncBounds` early-returns while
-  // the cached value matches — so a pane sitting still would keep a view at stale
+  // the rect is recorded *before* the send, and this early-returns while the
+  // cached value matches — so a pane sitting still would keep a view at stale
   // bounds forever. (`applyVisibility` writes before sending too, but its value
   // flips on every suspend and resume, so it self-corrects.)
-  void desktop.setBounds(v.id, rect).catch(() => {
+  void desktop.setBounds(v.id, rect, scale, radius).catch(() => {
     v.rect = null;
   });
 }
@@ -707,15 +1217,15 @@ function syncBounds(v: View): void {
  * rail animates, a CSS transition settles a frame after the observer fired. A
  * native view left behind is not a subtle glitch: it covers the wrong part of
  * the window. So the settled box is re-read on a slow tick, and IPC only
- * happens when it actually differs (`syncBounds`), which makes the idle cost one
+ * happens when it actually differs (`pushGeometry`), which makes the idle cost one
  * `getBoundingClientRect` per visible pane per interval.
  */
 if (desktop) {
   window.setInterval(() => {
-    for (const v of views.values()) syncBounds(v);
+    for (const v of views.values()) syncGeometry(v);
   }, 400);
   window.addEventListener("resize", () => {
-    for (const v of views.values()) syncBounds(v);
+    for (const v of views.values()) syncGeometry(v);
   });
 }
 
@@ -744,6 +1254,12 @@ if (desktop) {
     } else if (payload.error === null) {
       next.error = null;
     }
+    // What the pane cannot know for itself: whether touch survived (something
+    // else can hold Chromium's debugger) and whether the inspector is open. Read
+    // only when present, so an event about something else cannot reset them. The
+    // scale is *not* here — it is this side's own number, pushed with the bounds.
+    if (typeof payload.touchActive === "boolean") next.touchActive = payload.touchActive;
+    if (typeof payload.devToolsOpen === "boolean") next.devToolsOpen = payload.devToolsOpen;
     // A committed page is what makes a reload keep showing the old one rather
     // than a spinner over nothing.
     if (next.url) next.loaded = true;
@@ -752,6 +1268,20 @@ if (desktop) {
     // its own screen to show, and the view has to be out of the way for it.
     applyVisibility(v);
   });
+}
+
+/**
+ * Repaint every native view when the app's theme changes.
+ *
+ * The theme lives on `body[data-theme]`, which is the fact itself rather than a second
+ * signal that could drift from it. Without this a view keeps the surface it was created
+ * with, so switching to dark leaves every already-open pane flashing white on its next
+ * navigation.
+ */
+if (desktop && typeof document !== "undefined") {
+  new MutationObserver(() => {
+    void desktop.setBackground(paneSurface()).catch(() => {});
+  }).observe(document.body, { attributes: true, attributeFilter: ["data-theme"] });
 }
 
 /**

@@ -896,6 +896,9 @@ select:focus {
   min-height: 0;
   min-width: 0;
   background: var(--bg);
+  /* Dragging an emulated screen wider than the pane draws an outline past this
+     box; without clipping it would paint over the pane beside it. */
+  overflow: hidden;
 }
 
 /* The iframe backend's frame, reparented here by panes/browserHost.ts. */
@@ -914,8 +917,248 @@ select:focus {
   border: 0;
 }
 
+/* An emulated screen is a device-sized box scaled to fit, which before the
+   transform is routinely *larger* than the pane. Clipped here so it can never
+   paint outside the slot. */
+.browser-host {
+  overflow: hidden;
+}
+
+/* The backdrop an emulated screen sits on: a dotted drafting-paper field, so the
+   pane reads as "a device on a surface" rather than as a page with odd margins.
+   Only while a device is set — without one the page fills the pane and there is
+   no surface to see. Set by `syncGeometry` in panes/browserHost.ts. */
+.browser-host[data-emulated="true"] {
+  background-color: var(--panel2);
+  background-image: radial-gradient(var(--border2) 1px, transparent 1px);
+  background-size: 12px 12px;
+  background-position: -1px -1px;
+}
+
+/* The emulated screen itself: positioned, sized and rounded by `syncGeometry`,
+   which owns the geometry for both backends. With no device it fills the host and
+   is invisible — one element always means "where the page is".
+
+   The border and the shadow are **outside** the box on purpose (`box-shadow`
+   spread rather than `border`): under Electron the native view covers this
+   element's own rect exactly, so anything painted inside it would be hidden, while
+   a shadow that spreads outward is not. The page is clipped to the same corners by
+   Electron's `setBorderRadius`, and by `overflow: hidden` in the browser build. */
+.browser-device-frame {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* The freeze still (painted as this element's background by browserHost) is a
+     capture at the view's *device* resolution — 3× the CSS box on an emulated
+     phone — so the default `auto` sizing drew it at image scale, i.e. zoomed into
+     its top-left corner. `100% 100%` maps it back onto the box it was taken from,
+     which is exactly the screen. */
+  background-repeat: no-repeat;
+  background-size: 100% 100%;
+}
+
+.browser-host[data-emulated="true"] .browser-device-frame {
+  /* `background-color`, never the `background` shorthand: the shorthand resets
+     `background-size` to `auto`, and this rule wins over the one above — which is
+     how the freeze still ended up drawn at image scale (i.e. zoomed into its
+     top-left corner) even after that was supposedly fixed.
+
+     `--term-bg` rather than white: this is what shows through before a page paints and
+     at the screen's rounded corners, and a white flash in a dark app is the one place
+     this feature was visibly not part of it. Same token the terminal uses for "content
+     surface", so the two agree. */
+  background-color: var(--term-bg);
+  box-shadow:
+    0 0 0 1px var(--border2),
+    0 10px 30px rgb(0 0 0 / 28%);
+}
+
 .browser-frame {
-  background: #fff;
+  /* Theme-aware for the same reason as the frame above — this is the iframe backend's
+     surface, visible until the page paints. */
+  background: var(--term-bg);
+}
+
+/* Device emulation under the iframe backend: the frame keeps the emulated
+   viewport's own pixel size (so the page's media queries see a phone) and
+   `transform: scale()` shrinks the rendered result to fit. `inset: 0` would
+   otherwise fight the inline width/height — an absolutely positioned box with
+   left+right+width set is over-constrained — so the emulated frame is anchored
+   top-left and sized instead. Set by `syncGeometry` in browserHost.ts. */
+.browser-frame[data-emulated="true"] {
+  inset: 0 auto auto 0;
+}
+
+/* The device/zoom control. A chip that only carries text when there is something
+   to say: an emulated size, and a zoom that isn't 100%. */
+/* Layout only. The colour is Mantine's — this is a `Button variant="subtle"`, the
+   same component and variant the `ActionIcon`s beside it are, because their ink
+   comes from a variant resolver that runs in JS and no token here can be relied on
+   to match it. Naming one is what made an enabled control look disabled. */
+.browser-device {
+  gap: 4px;
+  height: 24px;
+}
+.browser-device .mantine-Button-label {
+  gap: 4px;
+}
+
+/* Anchor for a tooltip on a control that cannot hold one itself — a menu target,
+   whose ref Mantine's Popover claims. Purely a hover surface: it must not change the
+   bar's layout. */
+.bar-tip {
+  display: inline-flex;
+  align-items: center;
+}
+
+.browser-chip {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  white-space: nowrap;
+}
+/* The size under the pointer during a drag — the one number that is changing, so it
+   takes the accent while it changes. */
+.browser-chip[data-live="true"] {
+  color: var(--accent);
+}
+
+/* The device/zoom menu: two columns for its two concerns — *which* device on the
+   left, *how* it is shown on the right. One list of both was taller than the
+   window it opened in (a pane's chrome sits near the top, so the dropdown has the
+   whole window height to overflow). */
+.device-menu {
+  /* Capped to the viewport, with the whole dropdown scrollable as the last
+     resort — a short window must never hide the zoom controls. */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+}
+.device-menu-cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.device-menu-col {
+  min-width: 190px;
+}
+/* The device list scrolls on its own, so adding presets can never push the
+   controls beside it off screen again. */
+.device-menu-col.devices {
+  /* As tall as the window comfortably allows: the list is the part worth seeing
+     whole, and 420px was cutting the Screens group off on a laptop for no reason. */
+  max-height: min(76vh, 640px);
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding-right: 4px;
+}
+
+/* ---- resizing an emulated screen ---- */
+
+/* Drag handles on the screen's right edge, bottom edge and corner — the same
+   gesture Chrome's device toolbar has, and the answer to "which width does this
+   break at", which no fixed list of devices can give you.
+
+   They live in the gap *outside* the screen, which is the only place they can:
+   under Electron the native view covers the screen's own rect and would swallow
+   the pointer. The drag itself hides the view for the same reason (see
+   `setBrowserResizing`). */
+.device-handle {
+  position: absolute;
+  z-index: 2;
+  border-radius: 999px;
+  /* Accent-tinted and **always visible** while a device is emulated, not revealed
+     on hover: a handle you cannot see is a handle you reach for by guessing, and
+     the wrong guess near a pane's corner is the *window's* resize edge — you drag
+     the whole app instead of the screen. Reading as veld's own green also
+     distinguishes it from the OS chrome it sits near. */
+  background: var(--accent);
+  opacity: 0.5;
+  transition: opacity 90ms ease;
+}
+.device-handle:hover,
+.device-handle[data-dragging="true"] {
+  opacity: 1;
+}
+/* A hit area larger than the mark, extending *away* from the screen — the pixels
+   on the screen's side belong to the native view and are dead to the DOM anyway,
+   so there is nothing to lose there and nothing to gain by growing into it.
+
+   The distance comes from `--handle-bleed`, set inline from `HANDLE_HIT_BLEED` /
+   `HANDLE_CORNER_HIT_BLEED` in panes/devices.ts — the same constants
+   `MIN_DEVICE_PADDING` is computed from. One owner rather than two: a literal here
+   could be edited to reach past the gap into the OS window-resize grip while the
+   constant that documents the floor went on claiming otherwise. */
+.device-handle::before {
+  content: "";
+  position: absolute;
+  inset: calc(-1 * var(--handle-bleed));
+}
+.device-handle.east {
+  width: 6px;
+  height: 44px;
+  cursor: ew-resize;
+}
+.device-handle.east::before {
+  /* Wider along the handle's *length* axis, which is centred on the screen and cannot
+     reach the padding; the padding axis keeps the shared bleed. */
+  inset: calc(-1 * var(--handle-bleed) - 2px) calc(-1 * var(--handle-bleed));
+}
+.device-handle.south {
+  width: 44px;
+  height: 6px;
+  cursor: ns-resize;
+}
+.device-handle.south::before {
+  inset: calc(-1 * var(--handle-bleed)) calc(-1 * var(--handle-bleed) - 2px);
+}
+.device-handle.corner {
+  width: 12px;
+  height: 12px;
+  /* Square-ish rather than a pill, so the corner reads as a corner grip and not as
+     a stray dot beside two bars. */
+  border-radius: 3px;
+  cursor: nwse-resize;
+}
+/* The corner's bleed is set inline too, from `HANDLE_CORNER_HIT_BLEED` — smaller than
+   the edge handles', because this is the handle anchored diagonally into the corner and
+   so the one whose hit area would otherwise reach the window's own resize grip. */
+
+/* No outline and no readout over the screen: the page is live while you drag, and a
+   native view paints over DOM — anything here would be invisible in the desktop app
+   and visible in a browser tab. The size lives in the chrome's chip, which is where
+   it lives the rest of the time too. */
+
+/* A row of fields inside a menu — the custom size and the zoom stepper. Not
+   Menu.Items: a click in a field must not close the menu it lives in. */
+.menu-fields {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px 7px;
+}
+.menu-fields input[type="number"] {
+  width: 58px;
+  height: 24px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+  outline: none;
+}
+.menu-fields input[type="number"]:focus {
+  border-color: var(--accent);
+}
+.menu-value {
+  min-width: 42px;
+  text-align: center;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 11px;
+}
+.menu-size {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
 }
 
 /* Stand-ins for the page, shown only while the native view is hidden (see
@@ -965,14 +1208,14 @@ select:focus {
   word-break: break-all;
 }
 
-/* The still of a hidden view is painted as this element's background (set by
-   panes/browserHost.ts, not by React — see `freezeThenHide`). Sized here so the
-   host has nothing to compute at paint time. */
-.browser-host {
-  background-repeat: no-repeat;
-  background-size: cover;
-  background-position: top left;
-}
+/* The still of a hidden view is painted on `.browser-device-frame` — the screen's
+   own box — and sized there. It used to be painted on `.browser-host` and sized
+   here with `cover`, which is a *second* reason the still came out wrong once the
+   frame existed: this rule sits later in the file than the frame's own, and while
+   it cannot reach the frame, it did keep re-declaring a `background-size` for the
+   element that now carries the dotted backdrop instead. Rules for a background
+   this element no longer has are worse than dead code — they are a trap for the
+   next person who moves the still. */
 
 .browser-suggestions {
   display: flex;
