@@ -1099,21 +1099,18 @@ select:focus {
   cursor: nwse-resize;
 }
 
-/* The size being dragged to, drawn where the screen will be. Dashed, because it
-   is a proposal rather than the page: the view is hidden while the pointer is
-   down, so this is the only thing moving. */
-.device-outline {
+/* The size being dragged to, centred on the screen that is following the drag.
+   No border and no fill: the white screen is already the outline, and a second
+   rectangle over it is two edges to read instead of one. */
+.device-readout {
   position: absolute;
   z-index: 2;
-  border: 1px dashed var(--accent);
-  border-radius: 4px;
-  background: rgb(from var(--accent) r g b / 6%);
   display: flex;
   align-items: center;
   justify-content: center;
   pointer-events: none;
 }
-.device-outline span {
+.device-readout span {
   padding: 2px 7px;
   border-radius: 6px;
   background: var(--elev);

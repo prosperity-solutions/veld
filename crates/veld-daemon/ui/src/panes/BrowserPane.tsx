@@ -84,6 +84,7 @@ import {
   mountBrowser,
   navigateBrowser,
   paneCovers,
+  previewBrowserResize,
   reloadBrowser,
   setBrowserEmulation,
   setBrowserResizing,
@@ -321,9 +322,12 @@ export function BrowserPane(props: {
     const originX = event.clientX;
     const originY = event.clientY;
     const from = { width: emulation.width, height: emulation.height };
-    // The drag moves the *screen's* edge, and the screen is drawn at `scale`; so a
-    // pointer moved 100px widens a viewport shown at 50% by 200 of its own pixels.
-    const factor = state.emulationScale > 0 ? 1 / state.emulationScale : 1;
+    // Two conversions in one number. The screen is drawn at `scale`, so a pointer
+    // moved 100px changes a viewport shown at 50% by 200 of its own pixels — and the
+    // screen grows about its **centre**, so the edge under the cursor only travels
+    // half of whatever the size changes by. Doubling puts it back: the edge stays
+    // glued to the pointer while both edges move outward evenly.
+    const factor = (state.emulationScale > 0 ? 1 / state.emulationScale : 1) * 2;
     let latest = from;
     setDrag(from);
     setBrowserResizing(id, true);
@@ -335,19 +339,26 @@ export function BrowserPane(props: {
         axis === "x" ? from.height : clampDevicePx(from.height + (e.clientY - originY) * factor);
       latest = { width, height };
       setDrag(latest);
+      // The screen itself follows, rather than an outline beside a stale box: two
+      // rectangles disagreeing is harder to read than one that moves.
+      previewBrowserResize(id, width, height);
     };
     const finish = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
       setDrag(null);
-      setBrowserResizing(id, false);
-      // Applied on release rather than on every move: each apply is an
+      // Apply *before* leaving resize mode, not after: leaving it redraws the screen
+      // from the applied emulation, so the other order repaints the pre-drag size for
+      // a frame and reads as the drag snapping back before it takes.
+      //
+      // Applied on release rather than on every move, though: each apply is an
       // `enableDeviceEmulation`, which relayouts the guest page, and a layout write
       // per pointer move would also fill the undo-less layout history with noise.
       if (latest.width !== from.width || latest.height !== from.height) {
         applyEmulation(resizeEmulation(emulation, latest.width, latest.height));
       }
+      setBrowserResizing(id, false);
     };
     // On `window`, not on the handle: the handle is a React element whose position
     // is a function of the size being dragged, so it re-renders — and moves — under
@@ -362,20 +373,19 @@ export function BrowserPane(props: {
   };
 
   /**
-   * Where the screen is drawn right now — the applied box, or the one being dragged
-   * to.
+   * Where the screen is drawn right now.
    *
-   * One expression for the handles *and* the outline, so they cannot drift apart
-   * mid-gesture: the handles have to stay on the edge you are pulling, and the
-   * outline is that edge. During a drag the pre-drag `emulationScale` is used, which
-   * is what makes the edge track the cursor one-to-one — the applied emulation has
-   * not changed yet, so the factor is still the one the screen is drawn at.
+   * Straight from the host's own geometry, during a drag as well as outside one:
+   * `previewBrowserResize` redraws the frame *and* republishes this box, so the
+   * handles ride the screen's edges without a second calculation to disagree with.
+   * Deriving it here from the dragged size was the earlier shape, and it drifted the
+   * moment fitting clamped the screen to the pane.
    */
   const screen = {
     x: state.deviceX,
     y: state.deviceY,
-    width: drag ? drag.width * state.emulationScale : state.deviceWidth,
-    height: drag ? drag.height * state.emulationScale : state.deviceHeight,
+    width: state.deviceWidth,
+    height: state.deviceHeight,
   };
 
   // Empty means "keep the current one", so one field can be changed without
@@ -913,12 +923,15 @@ export function BrowserPane(props: {
             />
           </>
         )}
-        {/* While the pointer is down the native view is hidden — it would take the
-            events otherwise — so this outline is the only thing moving. Drawn at the
-            pre-drag scale so its edge tracks the cursor one-to-one. */}
+        {/* The size in the device's own pixels, over the screen that is following the
+            drag. Only the number needs saying: the box is right there, resizing, and
+            a dashed rectangle on top of it would be a second outline for the same
+            edge. It keeps counting past the point where fitting clamps the screen to
+            the pane, which is the only moment the two disagree — and the number is
+            the part you were reading. */}
         {drag && (
           <div
-            className="device-outline"
+            className="device-readout"
             style={{
               left: screen.x,
               top: screen.y,

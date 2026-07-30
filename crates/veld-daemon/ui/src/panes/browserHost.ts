@@ -25,6 +25,7 @@
  */
 
 import {
+  type DeviceLayout,
   type PaneEmulation,
   DEFAULT_ZOOM,
   clampZoom,
@@ -775,6 +776,12 @@ export function setBrowserEmulation(id: string, emulation: PaneEmulation | null)
   const v = views.get(id);
   if (!v) return;
   v.emulation = emulation;
+  // The screen's box is a function of the emulation, so changing one has to redraw
+  // the other — and *this* side owns that box now. Without it the frame kept the
+  // previous device's size until something else happened to trigger a sync: the
+  // 400 ms tick under Electron, and under the iframe backend nothing at all, where
+  // picking a device would appear to do nothing until you resized the pane.
+  scheduleGeometrySync();
   if (!desktop) {
     syncGeometry(v);
     return;
@@ -806,6 +813,14 @@ export function setBrowserResizing(id: string, resizing: boolean): void {
   if (!v) return;
   patch(v, { resizing });
   applyVisibility(v);
+  // The iframe backend has the same problem for a different reason: a cross-origin
+  // frame consumes the pointer events that land on it, so the drag would die the
+  // moment the cursor crossed the page — no `pointermove`, and no `pointerup`
+  // either. It cannot be *hidden* though, because there the frame is the thing
+  // being resized and watching it reflow is the whole point.
+  if (v.iframe) v.iframe.style.pointerEvents = resizing ? "none" : "";
+  // Back to the applied emulation, undoing whatever the last preview drew.
+  if (!resizing) syncGeometry(v);
 }
 
 /** Page zoom for one pane. Stored live for the same recreation reason as the
@@ -909,16 +924,42 @@ function syncGeometry(v: View): void {
     return;
   }
 
+  const { layout, radius } = paintScreen(v, e, box);
+  pushGeometry(
+    v,
+    { x: box.left + layout.x, y: box.top + layout.y, width: layout.width, height: layout.height },
+    layout.scale,
+    radius,
+  );
+}
+
+/**
+ * Draw the screen at a given emulation: position, size, shape, and the iframe
+ * inside it under the browser backend.
+ *
+ * Split out from [`syncGeometry`] because a resize drag needs exactly this and
+ * *not* the part that talks to the shell — the native view is hidden while the
+ * pointer is down, so there is nothing to move, and re-emulating per pointer move
+ * would relayout the guest page dozens of times. Sharing it is also what makes the
+ * dragged screen grow from its centre: `deviceLayout` centres, and there is only
+ * one of it.
+ */
+function paintScreen(
+  v: View,
+  e: PaneEmulation,
+  box: { width: number; height: number },
+): { layout: DeviceLayout; radius: number } {
   const layout = deviceLayout(e, box);
   const radius = scaledRadius(e, layout.scale);
   // Container-local, which is the coordinate space the pane's own resize handles
-  // are positioned in — the page rect below is the same box in window coordinates,
-  // which is what a native view's bounds are relative to.
+  // are positioned in — the page rect in `syncGeometry` is the same box in window
+  // coordinates, which is what a native view's bounds are relative to.
   patch(v, {
     deviceX: layout.x,
     deviceY: layout.y,
     deviceWidth: layout.width,
     deviceHeight: layout.height,
+    emulationScale: layout.scale,
   });
   v.container.dataset.emulated = "true";
   v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
@@ -940,12 +981,28 @@ function syncGeometry(v: View): void {
     v.iframe.style.transformOrigin = "top left";
   }
 
-  pushGeometry(
-    v,
-    { x: box.left + layout.x, y: box.top + layout.y, width: layout.width, height: layout.height },
-    layout.scale,
-    radius,
-  );
+  return { layout, radius };
+}
+
+/**
+ * Redraw the screen at the size a drag is currently at, without applying it.
+ *
+ * The white screen *is* the feedback — an outline beside a stale box reads as two
+ * disagreeing rectangles — so the frame follows the pointer while the emulation
+ * itself is only written on release. Centred, because it goes through the same
+ * `deviceLayout` as everything else: the screen grows and shrinks about its middle
+ * rather than trailing off to the bottom right.
+ *
+ * Nothing is sent to the shell: the native view is hidden for the duration of the
+ * drag, and `enableDeviceEmulation` per pointer move would relayout the guest page
+ * dozens of times for frames nobody sees.
+ */
+export function previewBrowserResize(id: string, width: number, height: number): void {
+  const v = views.get(id);
+  if (!v || !v.emulation || !v.mounted || !v.container.isConnected) return;
+  const box = v.container.getBoundingClientRect();
+  if (box.width < 1 || box.height < 1) return;
+  paintScreen(v, { ...v.emulation, width, height }, box);
 }
 
 /** Back to the stylesheet's own 100%/100%, rather than to a computed size: the
