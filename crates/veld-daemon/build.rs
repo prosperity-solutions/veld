@@ -2,11 +2,49 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-/// Ensure a package's npm deps are present. Fresh checkouts have no
-/// node_modules, which would make the build step fail with a cryptic
-/// "Cannot find package". Install them once if missing.
+/// Ensure a package's npm deps are present **and match its lockfile**.
+///
+/// Fresh checkouts have no node_modules, which would make the build step fail
+/// with a cryptic "Cannot find package". Presence alone is not enough, though:
+/// npm records the tree it installed in `node_modules/.package-lock.json`, and a
+/// checkout that predates a *new dependency* has a complete-looking node_modules
+/// that is missing it — so `git pull && cargo build` failed with the same cryptic
+/// error, on the branch that added the dependency, for everyone who already had
+/// the directory. Comparing the two lockfiles catches that; `npm ci` is
+/// idempotent, so a false positive costs one reinstall.
 fn ensure_node_modules(dir: &Path) {
-    if dir.join("node_modules").exists() {
+    let modules = dir.join("node_modules");
+    let marker = modules.join(".package-lock.json");
+    // npm's own staleness signal: it writes `node_modules/.package-lock.json`
+    // after installing, so a `package-lock.json` newer than that marker means the
+    // tree on disk was built from a different lockfile. Mtimes rather than a JSON
+    // diff because the two documents differ by design (the marker has no
+    // name/version header), and because this runs on every build — the cost of a
+    // false positive is one idempotent `npm ci`, the cost of a false negative is
+    // the cryptic "Cannot find package" this function exists to prevent.
+    let stale = if !modules.exists() || !marker.exists() {
+        // No marker with a directory present is a tree npm did not finish writing:
+        // `npm ci` deletes node_modules *first*, so a Ctrl-C mid-install leaves
+        // exactly that — a partial tree which presence alone reads as fine.
+        true
+    } else {
+        match (
+            dir.join("package-lock.json")
+                .metadata()
+                .and_then(|m| m.modified()),
+            marker.metadata().and_then(|m| m.modified()),
+        ) {
+            // Two seconds of slack, because npm writes both files in the same
+            // breath: measured, the lockfile lands ~9ms *before* the marker, and a
+            // bare `>` on a machine where that order inverts would reinstall every
+            // package on every build, clippy run and rust-analyzer save-check. A
+            // pull that really changes the lockfile moves it by minutes.
+            (Ok(lock), Ok(installed)) => lock > installed + std::time::Duration::from_secs(2),
+            // Unreadable metadata: reinstall rather than risk the cryptic failure.
+            _ => true,
+        }
+    };
+    if !stale {
         return;
     }
     let install = Command::new("npm")

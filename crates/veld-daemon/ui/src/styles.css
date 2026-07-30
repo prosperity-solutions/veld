@@ -429,6 +429,93 @@ select:focus {
   font-weight: 600;
 }
 
+/* Only the tabs scroll, and only once they have run out of room to shrink into.
+   `flex: 0 1 auto` is what keeps the `+` immediately after the last tab while
+   there is space and pinned to the end of the strip once there is not — the
+   Chrome behaviour, without a second layout mode. The scrollbar is hidden
+   because a 30px strip has no room for one; a trackpad, a wheel over the strip,
+   and focusing a tab (which scrolls it into view) all still reach the ends.
+
+   `align-self: stretch` on both boxes is load-bearing: `.pane-tabs` centres its
+   items, so a scroller left to its own height stops filling the strip and every
+   tab inside it turns into a floating chip with the strip's background showing
+   above and below. */
+.pane-tab-strip {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.pane-tab-scroll {
+  display: flex;
+  align-items: stretch;
+  align-self: stretch;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.pane-tab-scroll::-webkit-scrollbar {
+  height: 0;
+  width: 0;
+}
+
+/* "There are tabs that way." Fades in over the strip's own colour, so it reads as
+   the tabs sliding under an edge rather than as a border. Only rendered on when
+   there is something past that edge — a permanent gradient would dim the first and
+   last tab of a strip that fits, which says the opposite of what it means. */
+.tab-fade {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
+.tab-fade.on {
+  opacity: 1;
+}
+
+/* Three layers, because a single colour fade is nearly invisible in both themes
+   for opposite reasons: in the dark one an unselected tab is already the strip's
+   colour, and in the light one the tones are close. So the strip colour hides the
+   tab's edge, a black wash dims whatever is under it (text, in practice — that is
+   the part the eye reads as "cut off"), and a 1px line marks where the cut is. */
+.tab-fade.left {
+  left: 0;
+  background:
+    linear-gradient(to right, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0) 75%),
+    linear-gradient(to right, var(--tab-strip) 25%, transparent);
+}
+
+.tab-fade.right {
+  right: 0;
+  background:
+    linear-gradient(to left, rgba(0, 0, 0, 0.3), rgba(0, 0, 0, 0) 75%),
+    linear-gradient(to left, var(--tab-strip) 25%, transparent);
+}
+
+.tab-fade::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border2);
+}
+.tab-fade.left::after {
+  left: 0;
+}
+.tab-fade.right::after {
+  right: 0;
+}
+
 /* The `+` sits immediately after the last tab, so it reads as the end of the
    strip rather than as an unrelated control on the far right. */
 .pane-add-btn {
@@ -444,6 +531,11 @@ select:focus {
   display: inline-flex;
   align-items: center;
   align-self: stretch;
+  /* Tabs share the strip: they shrink together as more open, down to a floor that
+     still shows the kind glyph, a few characters and the close button. Past that
+     the strip scrolls rather than shrinking tabs into unreadable slivers. */
+  flex: 0 1 auto;
+  min-width: 92px;
   border-radius: 0;
   background: transparent;
   color: var(--muted);
@@ -519,6 +611,23 @@ select:focus {
 .pane-tab-label {
   display: inline-flex;
   align-items: center;
+  flex: 1 1 auto;
+  /* A browser pane's label is the *page's* title, which can be a sentence — one
+     of those wrapped to two lines and pushed the whole strip (and the `+`
+     button) out of shape. Clamp it and ellipsize; the full title is in the tab's
+     tooltip, and the kind glyph never truncates because it is a sibling. */
+  max-width: 220px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* The text node itself does the ellipsis — the flex row above cannot, since the
+   glyph is one of its items. */
+.pane-tab-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pane-tab-close {
@@ -1063,8 +1172,135 @@ select:focus {
   border-color: var(--warn);
 }
 
-.node-table {
+/* ---- node list ------------------------------------------------------------- */
+
+/* A card per node instead of a table: this list lives in a 300px pane and in a
+   1080px card, and columns are what cannot survive that range — they either
+   squeeze every cell to two characters or get dropped, losing a fact exactly when
+   someone needed it. Nothing here has a fixed width; width only decides where
+   lines wrap. */
+.node-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+
+.node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+/* Identity and state on the left, resources on the right — the one thing you scan
+   down a list for stays on the same edge in every card. `wrap` is what makes the
+   layout width-proof: the stats drop to their own line rather than crushing the
+   name. */
+.node-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.node-head-gap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.node-name {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  /* Shrinks before it truncates, and truncates before it pushes anything out. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The variant qualifies the name, so it reads as attached to it. */
+.node-variant {
+  flex: none;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 4px;
+}
+
+.node-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+.node-status.green {
+  color: var(--live);
+}
+.node-status.red {
+  color: var(--danger);
+}
+.node-status.yellow {
+  color: var(--warn);
+}
+
+.node-pid {
+  flex: none;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.node-stats {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* The URL gets a whole line, because it is the longest thing in the card and the
+   only one worth truncating. */
+.node-url-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.node-url-row .node-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-health {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.node-health.bad {
+  color: var(--danger);
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
 }
 
 .node-url {
@@ -1075,6 +1311,81 @@ select:focus {
 .spark {
   flex: none;
   opacity: 0.9;
+}
+
+/* Sharing popover (IDE mode's top-level surface). The strips inside carry the
+   card's own padding, so the container only holds them. */
+.share-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+/* Pending join requests, above the panes: a prompt someone is waiting on, so it
+   sits in the layout rather than behind a popover. `flex: none` for the same
+   reason the offline banner has it — the panes below own the remaining height. */
+.join-banner {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 14px;
+  /* Bounded and scrollable, because the number of rows is not ours to choose: a
+     join link posted in a channel can produce many pending requests at once (each
+     lives ~60s and is refreshable by reconnecting), and IDE mode's frame does not
+     scroll — an unbounded banner squeezed the panes towards zero height, which
+     also strands the native browser views at stale bounds. */
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* ---- run diagnostics panes ------------------------------------------------- */
+
+/* A pane with nothing to show. Centres the same empty screen the URL launcher
+   uses (`.links-empty`), which on its own sits wherever its parent puts it. */
+.pane-empty {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--panel);
+}
+
+/* A shared run view (`shared/RunViews.tsx`). In a card it is a block that grows
+   with its content; in a pane it fills the dock body and scrolls inside it. */
+.run-view.fill {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--panel);
+}
+
+/* The rows scroll, the view's header (which run, what state, which past run) does
+   not — it is the answer to "what am I looking at" and must not scroll away. */
+.run-view.fill .node-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* The `logs` pane wrapper. The card variant stays `display: block` inside a
+   scrolling card; this one is the pane's whole body, so the toolbar is fixed and
+   the log area takes what is left. */
+.logs-fill {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  background: var(--panel);
+}
+
+.logs-card {
+  display: block;
 }
 
 /* log viewer */
@@ -1089,6 +1400,19 @@ select:focus {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 11px;
   line-height: 1.7;
+}
+
+/* In a pane the area is the pane: no fixed height, no rounded island inset from
+   a card's edge. `min-height: 0` so the flex child may actually shrink and scroll
+   instead of growing the dock past its box. */
+.log-area.fill {
+  height: auto;
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
 }
 
 .log-line {

@@ -54,6 +54,19 @@ describe("hasOverlay", () => {
     }
   });
 
+  it("suspends for a toast, but not for the empty notifications container", () => {
+    // `shared/notify.ts` marks every toast `[data-veld-overlay]`: without it a
+    // toast landing on a browser pane is painted over by the native view and the
+    // error is simply never seen. The `<Notifications />` container is mounted for
+    // the life of the page, so it must NOT carry the attribute itself — that would
+    // hide every pane forever, which is the failure this file's other tests exist
+    // for.
+    const idle = el([".mantine-Notifications-root"]);
+    expect(hasOverlay(body([idle]))).toBe(false);
+    const showing = el([".mantine-Notifications-root"], [el(["[data-veld-overlay]"])]);
+    expect(hasOverlay(body([showing]))).toBe(true);
+  });
+
   it("is false while Mantine's shared portal node is empty", () => {
     // `Portal` reuses one container: it is appended to body the first time any
     // overlay opens and then stays there forever. An empty one must not read as

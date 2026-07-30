@@ -50,11 +50,18 @@ import { popBrowserSuspend, pushBrowserSuspend } from "./browserHost";
  *   role of their own.
  * - `.mantine-contextmenu` — mantine-contextmenu's paper.
  * - `[data-veld-overlay]` — an opt-in for anything hand-built that does get
- *   portalled.
+ *   portalled. **Toasts use it** (`shared/notify.ts` sets it per notification):
+ *   an error toast landing on a browser pane would otherwise be painted over and
+ *   never read. Per notification, never on the `<Notifications />` container —
+ *   that one is mounted for the life of the page and would hide every pane
+ *   forever.
  *
- * Not matched: tooltips and notifications. They are transient and mostly
- * pointer-triggered, so suspending on them would flicker a pane on every hover
- * — and nobody needs to read *through* a browser pane to a tooltip.
+ * Not matched by pattern: tooltips, and toasts that carry no opt-in. A tooltip is
+ * transient and pointer-triggered, so matching it would flicker a pane on every
+ * hover, and nobody needs to read *through* a browser pane to a tooltip. Toasts opt
+ * in individually instead (`shared/notify.ts` marks errors, not confirmations),
+ * which is what keeps the always-mounted notifications container from reading as a
+ * permanently open overlay.
  * `role="listbox"` is left out on purpose too: the worktree rail is slated to
  * become one (#169), which would suspend every pane permanently.
  */

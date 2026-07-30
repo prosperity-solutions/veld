@@ -6,11 +6,15 @@ import {
   type EnvironmentList,
   type Repo,
   type RepoList,
+  type RunInfo,
+  type SharesList,
+  type StatsResponse,
   type Worktree,
 } from "./api";
 import {
   activeRun,
   bestFuzzyMatch,
+  diagnosticsRun,
   fuzzyMatch,
   prunePending,
   runSignature,
@@ -28,6 +32,7 @@ import {
   Loader,
   MantineProvider,
   Menu,
+  Popover,
   Select,
   Tooltip,
   TextInput,
@@ -45,15 +50,25 @@ import {
   IconPlus,
   IconRefresh,
   IconSearch,
+  IconShare2,
   IconTrash,
   IconSun,
   IconDeviceDesktop,
   IconWorld,
 } from "@tabler/icons-react";
+import { Notifications } from "@mantine/notifications";
 import { ContextMenuProvider, useContextMenu } from "mantine-contextmenu";
 import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
+import type { RunPaneContext } from "./panes/RunPanes";
+import { notifyError } from "./shared/notify";
+import {
+  JoinRequestRow,
+  RunSharePanel,
+  runOfShare,
+  sharesForRun,
+} from "./shared/Sharing";
 import {
   type BrowserProfile,
   DEFAULT_RATIO,
@@ -70,6 +85,7 @@ import {
   browserTab,
   closeTab,
   defaultLayout,
+  diagTab,
   dockOf,
   lastBlankBrowserId,
   loadLayouts,
@@ -263,6 +279,11 @@ export function App() {
       forceColorScheme={theme === "light" ? "light" : "dark"}
     >
       <ContextMenuProvider borderRadius="md">
+        {/* Toasts are the app's one error surface (see shared/notify.ts). Top-right
+            rather than the default bottom-right: that is the corner the run
+            controls and the Sharing surface sit in, so a failure appears next to
+            what was clicked. */}
+        <Notifications position="top-right" limit={4} />
         <AppInner theme={theme} themePref={themePref} onCycleTheme={cycleTheme} />
       </ContextMenuProvider>
     </MantineProvider>
@@ -294,7 +315,14 @@ function AppInner(props: {
   // ---- polled server state ------------------------------------------------
   const [repoList, setRepoList] = useState<RepoList | null>(null);
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
+  const [shares, setShares] = useState<SharesList | null>(null);
+  /** Whether the last `/api/shares` read failed — see `refresh`. */
+  const [sharesStale, setSharesStale] = useState(false);
+  const [stats, setStats] = useState<StatsResponse | null>(null);
   const [offline, setOffline] = useState(false);
+  // Runs mode does its own polling on its own cadence, so the diagnostics reads
+  // below are fetched only while IDE mode is the one on screen.
+  const wantRunState = mode === "ide";
 
   // Known, accepted: refreshes are not sequenced. A poll issued before a
   // mutation but resolving after it writes the pre-mutation payload back, so
@@ -303,6 +331,14 @@ function AppInner(props: {
   // setters; not worth it while every mutation is followed by its own
   // `refresh()`.
   const refresh = useCallback(async () => {
+    // Shares and stats ride the same tick, but they are `allSettled` and must not
+    // decide the offline banner: the view is built on repos + environments, while
+    // a hiccup on either of these two keeps the last known values (the same rule
+    // runs mode follows for stats). Issued before the await below so all four
+    // requests are in flight together.
+    const extras = wantRunState
+      ? Promise.allSettled([api.shares(), api.stats()])
+      : null;
     try {
       // refreshRepos (not the plain GET): reconciles worktree rows with git
       // so out-of-app `git worktree add/remove` appears on the next poll.
@@ -316,7 +352,15 @@ function AppInner(props: {
     } catch {
       setOffline(true);
     }
-  }, []);
+    if (!extras) return;
+    const [sharesResult, statsResult] = await extras;
+    if (sharesResult.status === "fulfilled") setShares(sharesResult.value);
+    // Tracked, unlike stats: shares drive a *control* surface, and a panel that
+    // says "nothing shared" from a read that never landed invites the user to
+    // start a second share of a run that already has one.
+    setSharesStale(sharesResult.status !== "fulfilled");
+    if (statsResult.status === "fulfilled") setStats(statsResult.value);
+  }, [wantRunState]);
 
   // Tick counter, bumped per poll. Effects that must re-evaluate on a
   // schedule (not only when the payload changes) depend on it — a failed
@@ -377,6 +421,23 @@ function AppInner(props: {
   const run = activeRun(runs);
   const urls = sortedUrls(run);
   const status = worktreeStatus(runs);
+  // What the diagnostics panes and the Sharing surface read. Wider than `run` on
+  // purpose: an ended run still has logs, last node states and possibly a share
+  // left to stop — see `diagnosticsRun`.
+  const diagRun: RunInfo | null = diagnosticsRun(runs);
+  const diagRef = worktree && diagRun ? runRef(worktree.path, diagRun) : null;
+  const diagStats =
+    worktree && diagRun
+      ? stats?.projects?.[worktree.path]?.[diagRun.name]
+      : undefined;
+  /** Why a worktree has nothing to show — the one wording for every empty pane. */
+  const runEmptyHint = !worktree
+    ? "Select a worktree."
+    : !worktree.has_veld_config
+      ? "This worktree has no veld.json, so there is nothing to run."
+      : !repo?.available
+        ? "Repository directory not found on disk — showing last known state."
+        : "Start the run and its logs, nodes and URLs appear here.";
 
   // Start configuration (preset or explicit node selections), remembered
   // per worktree. Falls back to a sensible default: first preset, else all
@@ -436,13 +497,11 @@ function AppInner(props: {
     pendingFor(w) === null &&
     resolveStartSelection(w) !== null;
 
-  const [actionError, setActionError] = useState<string | null>(null);
   const act = async (
     w: Worktree,
     label: PendingAction,
     fn: () => Promise<void>,
   ) => {
-    setActionError(null);
     const sigAtSet = runSignature(runsForWorktree(envs, w));
     setPending((cur) => ({
       ...cur,
@@ -456,11 +515,10 @@ function AppInner(props: {
         delete next[w.id];
         return next;
       });
-      // Name the worktree: actions now fire from the rail, the context menu
-      // and the palette on ANY row, so an unattributed banner leaves the user
-      // guessing which one failed.
-      const message = e instanceof Error ? e.message : String(e);
-      setActionError(`${w.alias}: ${label} failed — ${message}`);
+      // Name the worktree: actions fire from the rail, the context menu and the
+      // palette on ANY row, so an unattributed message leaves the user guessing
+      // which one failed.
+      notifyError(`${label} failed on ${w.alias}`, e);
     }
   };
 
@@ -472,8 +530,9 @@ function AppInner(props: {
       // Defence in depth: all four ▶ surfaces gate on `canStartWorktree`,
       // which rejects exactly this case, so this should be unreachable. If a
       // future caller skips the guard, say what's wrong instead of no-opping.
-      setActionError(
-        `${w.alias}: nothing to start — no presets or startable nodes in its veld.json.`,
+      notifyError(
+        `Start ${w.alias}`,
+        "nothing to start — no presets or startable nodes in its veld.json.",
       );
       return;
     }
@@ -489,6 +548,63 @@ function AppInner(props: {
   const restartWorktree = (w: Worktree) => {
     const r = activeRun(runsForWorktree(envs, w));
     if (r) void act(w, "restart", () => api.restartRun(runRef(w.path, r)));
+  };
+
+  // ---- run diagnostics ----------------------------------------------------
+  // One object rather than six props threaded through PaneArea → DockView: the
+  // `logs` and `nodes` panes read the *selected* worktree's run, so every pane
+  // re-points on a worktree switch and none of them captures a run of its own.
+  const runCtx: RunPaneContext = {
+    ref: diagRef,
+    run: diagRun,
+    stats: diagStats,
+    emptyHint: runEmptyHint,
+    onChanged: () => void refresh(),
+    // A node's URL, opened beside the terminal instead of in another application.
+    // The same action ⌘K and the URL launcher offer, so all three land a pane in
+    // the focused dock rather than each inventing a placement.
+    onOpenPane: (name, url) =>
+      setLayout((prev) => addTabToFocused(prev, browserTab({ url, title: name }))),
+  };
+
+  // ---- sharing ------------------------------------------------------------
+  // Pending join requests are page-global, not scoped to the selected worktree:
+  // someone waiting on a share whose worktree is not on screen must still be
+  // visible, so the banner lists all of them and names the run each one is for.
+  const pendingJoins = shares?.pending ?? [];
+  const runShares = diagRun
+    ? sharesForRun(shares?.shares ?? [], diagRun.run_id)
+    : { peer: null, web: [] };
+  /**
+   * Shares of this worktree's *other* runs.
+   *
+   * A worktree can hold several environments, and a crashed run's shares outlive it
+   * until the GC pass releases them — so scoping the Sharing surface to `diagRun`
+   * alone hid live shares (possibly a public URL still serving) behind a button
+   * that offered to start another one.
+   */
+  const worktreeShares = (shares?.shares ?? []).filter(
+    (s) => s.run_id && runs.some((r) => r.run_id === s.run_id),
+  );
+  const otherRunShares = worktreeShares.filter((s) => s.run_id !== diagRun?.run_id);
+  const sharingActive = worktreeShares.length > 0;
+  /**
+   * A share mutation fired from the palette.
+   *
+   * Not tracked as a pending marker: those watch the *run* signature
+   * (`PendingAction`), which a share never moves — a marker for one would stay
+   * stuck until its TTL. The 5s poll is what confirms it, and a failure surfaces
+   * as a toast, like every other action's.
+   */
+  const shareAction = (label: string, fn: () => Promise<unknown>) => {
+    void (async () => {
+      try {
+        await fn();
+        await refresh();
+      } catch (e) {
+        notifyError(label, e);
+      }
+    })();
   };
 
   // ---- dialogs ------------------------------------------------------------
@@ -907,6 +1023,60 @@ function AppInner(props: {
             ),
         });
       }
+      // Sharing, from the keyboard. The same three actions the top bar's Sharing
+      // surface offers, gated the same way — sharing needs a live *running* run,
+      // which the daemon enforces anyway.
+      if (diagRef && diagRun) {
+        const ref = diagRef;
+        const live = diagRun.status === "running";
+        if (live && !runShares.peer) {
+          items.push({
+            id: "share:start",
+            group: "Run",
+            label: `Share ${w.alias}`,
+            hint: "copies the join link",
+            alt: ["share", "invite", "join"],
+            run: () =>
+              shareAction("share", async () => {
+                const r = await api.startShare(ref);
+                // Not awaited into the share's own error path — see ShareControls:
+                // the share is already live, so a refused clipboard write must not
+                // report that sharing failed.
+                // Not an error when it is refused: WebKit only allows a write in
+                // the same task as the gesture, and this follows a round-trip. The
+                // Sharing surface's Copy link button is the fallback.
+                if (r?.join_url) void navigator.clipboard.writeText(r.join_url).catch(() => {});
+              }),
+          });
+        }
+        if (runShares.peer) {
+          const share = runShares.peer;
+          items.push({
+            id: "share:stop",
+            group: "Run",
+            label: `Stop sharing ${w.alias}`,
+            run: () => shareAction("stop sharing", () => api.stopShare(share.id)),
+          });
+        }
+        if (live && runShares.web.length === 0) {
+          items.push({
+            id: "share:web",
+            group: "Run",
+            label: `Share ${w.alias} to the web`,
+            alt: ["public", "gateway", "tunnel"],
+            run: () => shareAction("web share", () => api.startShare(ref, { web: true })),
+          });
+        }
+        for (const web of runShares.web) {
+          items.push({
+            id: `share:web-stop:${web.id}`,
+            group: "Run",
+            label: `Stop the public web share of ${w.alias}`,
+            hint: web.public_urls[0]?.public_url,
+            run: () => shareAction("stop web share", () => api.stopShare(web.id)),
+          });
+        }
+      }
     }
 
     if (repo) {
@@ -1005,6 +1175,22 @@ function AppInner(props: {
         alt: ["preview", "webview", "url"],
         run: () => setLayout(addTabToFocused(layout, browserTab({}))),
       });
+      items.push({
+        id: "pane:logs",
+        group: "Panes",
+        label: "Run logs in a pane",
+        alt: ["logs", "output", "stderr", "diagnostics"],
+        hint: diagRun?.name,
+        run: () => setLayout(addTabToFocused(layout, diagTab("logs"))),
+      });
+      items.push({
+        id: "pane:nodes",
+        group: "Panes",
+        label: "Node health in a pane",
+        alt: ["nodes", "services", "health", "cpu", "memory", "diagnostics"],
+        hint: diagRun?.name,
+        run: () => setLayout(addTabToFocused(layout, diagTab("nodes"))),
+      });
       const focused = activeTab(layout, layout.focused);
       if (focused) {
         items.push({
@@ -1088,6 +1274,57 @@ function AppInner(props: {
     );
   }
 
+  /**
+   * The top-level Sharing surface (#152: one surface, not a relay-details dump).
+   *
+   * A popover rather than a `Menu`, because its content is interactive — the
+   * auto-accept checkbox and the copy buttons must not close it on click. It is
+   * portalled, so `overlayGuard` hides the embedded browser panes while it is
+   * open without this having to say so.
+   */
+  const shareEmptyHint = !worktree
+    ? "Select a worktree."
+    : !worktree.has_veld_config
+      ? "This worktree has no veld.json, so it has no run to share."
+      : !diagRun
+        ? "Start the run to share it."
+        : "This run has nothing shared yet.";
+  // Shown while the worktree *could* run something, and also whenever a share is
+  // live: a repo whose directory has gone missing still has a share to stop, and
+  // gating on startability was the one path that hid the only control that ends it.
+  const sharingSurface =
+    worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
+      <Popover position="bottom-end" width={430} shadow="md" withinPortal>
+        <Popover.Target>
+          <Button
+            size="compact-sm"
+            variant={sharingActive ? "light" : "default"}
+            color={sharingActive ? "green" : undefined}
+            leftSection={<IconShare2 size={14} />}
+            title={
+              sharingActive
+                ? "This run is shared — open for links and connections"
+                : "Share this run"
+            }
+          >
+            {sharingActive ? "Sharing" : "Share"}
+          </Button>
+        </Popover.Target>
+        <Popover.Dropdown p={0}>
+          <RunSharePanel
+            run={diagRef}
+            runId={diagRun?.run_id ?? null}
+            running={diagRun?.status === "running"}
+            shares={shares?.shares ?? []}
+            unknown={shares === null || sharesStale}
+            otherRuns={otherRunShares}
+            emptyHint={shareEmptyHint}
+            onChanged={() => void refresh()}
+          />
+        </Popover.Dropdown>
+      </Popover>
+    ) : null;
+
   return (
     <div className="frame">
       <TopBar
@@ -1109,6 +1346,7 @@ function AppInner(props: {
         pending={pendingFor(worktree)}
         run={run}
         urls={urls}
+        sharing={sharingSurface}
         onShowVeldLinks={layout && showVeldLinks}
         onSelectRepo={(root) => {
           setActiveRepoRoot(root);
@@ -1136,25 +1374,20 @@ function AppInner(props: {
           Can&apos;t reach the veld daemon — is it running? Retrying…
         </div>
       )}
-      {actionError && (
-        <div
-          style={{
-            padding: "6px 14px",
-            background: "var(--danger-bg)",
-            color: "var(--danger)",
-            fontSize: 12,
-            flex: "none",
-            display: "flex",
-            gap: 10,
-          }}
-        >
-          <span style={{ flex: 1 }}>{actionError}</span>
-          <button
-            style={{ border: "none", background: "none", color: "inherit" }}
-            onClick={() => setActionError(null)}
-          >
-            ×
-          </button>
+      {/* Join requests are a prompt, so they go where they are visible without
+          opening anything — someone is sitting on the other end waiting for an
+          answer, and a badge on a popover is not that. Every share's requests,
+          not the selected worktree's, each naming the run it is for. */}
+      {pendingJoins.length > 0 && (
+        <div className="join-banner">
+          {pendingJoins.map((p) => (
+            <JoinRequestRow
+              key={p.id}
+              pending={p}
+              runLabel={runOfShare(shares?.shares ?? [], p.share_id)}
+              onChanged={() => void refresh()}
+            />
+          ))}
         </div>
       )}
 
@@ -1200,6 +1433,7 @@ function AppInner(props: {
               sessions={sessions}
               onAddSession={nextSession ? addSession : undefined}
               onRemoveSession={removeSession}
+              runCtx={runCtx}
             />
           )}
         </div>
@@ -1310,6 +1544,8 @@ function TopBar(props: {
   pending: PendingAction | null;
   run: { name: string; status: string } | null;
   urls: Array<[string, string]>;
+  /** The Sharing surface, built by the app (it owns the shares poll). */
+  sharing: React.ReactNode;
   /** Open a pane on the run's URLs. Absent when there is no layout to open into. */
   onShowVeldLinks: (() => void) | undefined;
   onSelectRepo: (root: string) => void;
@@ -1444,6 +1680,7 @@ function TopBar(props: {
                   {props.urls.length}
                 </Button>
               )}
+              {props.sharing}
             </>
           )}
           {!canRun && (

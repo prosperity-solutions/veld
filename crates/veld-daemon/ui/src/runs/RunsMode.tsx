@@ -14,7 +14,9 @@ import {
   type StatsResponse,
 } from "../api";
 import { EnvCard } from "./EnvCard";
-import { confirmedUnattached, unattachedShareIds } from "./util";
+import { JoinRequestRow, runOfShare } from "../shared/Sharing";
+import { notifyError } from "../shared/notify";
+import { confirmedUnattached, unattachedShareIds } from "../shared/util";
 import { topbarClass } from "../shell";
 import type { ReactNode } from "react";
 
@@ -75,6 +77,17 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
     const t = window.setInterval(() => void tick(), 5000);
     return () => window.clearInterval(t);
   }, []);
+
+  /** A share mutation from this panel: report a failure, then re-poll. Without
+   *  this an unshare that the daemon refused vanished into an unhandled rejection. */
+  const shareAction = async (context: string, fn: () => Promise<unknown>) => {
+    try {
+      await fn();
+    } catch (e) {
+      notifyError(context, e);
+    }
+    await refresh();
+  };
 
   const setViewPersist = (v: string) => {
     setView(v);
@@ -178,40 +191,19 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
                 size="compact-xs"
                 color="red"
                 variant="light"
-                onClick={() => void api.stopShare(s.id).then(refresh)}
+                onClick={() => void shareAction("Unshare", () => api.stopShare(s.id))}
               >
                 Unshare
               </Button>
             </Group>
           ))}
           {pending.map((p) => (
-            <Group key={p.id} gap="xs" className="share-row pending" p={8} wrap="wrap">
-              <Badge size="xs" color="yellow" variant="light">
-                join request
-              </Badge>
-              <Text size="xs">
-                <b>{p.label || "(no label)"}</b> wants to join
-              </Text>
-              <Text size="xs" c="dimmed" ff="monospace">
-                {p.share_id} · {p.node_id.slice(0, 10)}
-              </Text>
-              <div style={{ flex: 1 }} />
-              <Button
-                size="compact-xs"
-                variant="light"
-                onClick={() => void api.approveJoin(p.id).then(refresh)}
-              >
-                Approve
-              </Button>
-              <Button
-                size="compact-xs"
-                color="red"
-                variant="light"
-                onClick={() => void api.denyJoin(p.id).then(refresh)}
-              >
-                Deny
-              </Button>
-            </Group>
+            <JoinRequestRow
+              key={p.id}
+              pending={p}
+              runLabel={runOfShare(shares?.shares ?? [], p.share_id)}
+              onChanged={() => void refresh()}
+            />
           ))}
           {joins.map((j) => (
             <Group key={j.id} gap="xs" className="share-row" p={8} wrap="wrap">
@@ -231,7 +223,7 @@ export function RunsMode(props: { modeSwitch: ReactNode; themeButton: ReactNode 
                 size="compact-xs"
                 color="red"
                 variant="subtle"
-                onClick={() => void api.leaveJoin(j.id).then(refresh)}
+                onClick={() => void shareAction("Leave", () => api.leaveJoin(j.id))}
               >
                 Leave
               </Button>

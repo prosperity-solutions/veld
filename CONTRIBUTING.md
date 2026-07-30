@@ -22,7 +22,9 @@ Why? Because that's how this project was built, and it's how we believe modern s
 git clone https://github.com/prosperity-solutions/veld.git
 cd veld
 just setup-frontend   # install Node.js dependencies (once)
-just setup-ui         # deps for the /ide management UI + desktop shell (once)
+just setup-ui         # deps for the /ide management UI + desktop shell (also
+                      # refreshes them after a bump; the ui/desktop recipes
+                      # install what they need on their own)
 just build            # build Rust + frontend
 just test             # run all tests
 ```

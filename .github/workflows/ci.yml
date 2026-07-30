@@ -195,6 +195,20 @@ jobs:
           node --check src/preload.js
           node --check src/browserViews.js
           node --check src/validate.js
+      # The icons are generated and committed (see docs/branding.md). The generator
+      # is stdlib-only and byte-deterministic, so re-running it is the drift gate:
+      # without one, a hand-edited or stale asset ships silently — the same reason
+      # THIRD-PARTY-LICENSES.md has a check.
+      - name: Icons match the generator
+        run: |
+          python3 scripts/make-icons.py
+          # `git status`, not `git diff`: a generator that grows an output writes an
+          # *untracked* file, which a diff ignores by definition.
+          if [ -n "$(git status --porcelain -- assets)" ]; then
+            git status --porcelain -- assets
+            echo "::error::desktop/assets is out of date — run 'just desktop-icons' and commit"
+            exit 1
+          fi
       # The shell's own trust boundary: what the page is allowed to hand the main
       # process (view ids, session slot names, URLs). Pure and Electron-free on
       # purpose, so it is testable without a Chromium binary.

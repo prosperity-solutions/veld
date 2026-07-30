@@ -2,7 +2,8 @@
 
 Veld Desktop is a desktop shell around veld's management UI. It lets a developer
 import git repositories ("repos"), manage git worktrees per repo, and drive veld
-runs per worktree, with terminal and embedded-browser panes in a dock.
+runs per worktree, with terminal, embedded-browser and run-diagnostics panes in a
+dock, and sharing from the top bar.
 
 This document covers the foundation increment plus the increments that have
 landed on top of it: what exists, why it's shaped this way, and how to run it
@@ -31,12 +32,15 @@ have since shipped — see below.)
 | Embedded browser | **Electron `WebContentsView`**, with an `<iframe>` fallback in a plain browser | The pane has to render the user's own dev server, which frequently sends `X-Frame-Options`/`frame-ancestors` — an iframe shows those as a blank rectangle with nothing observable to report. A native view also has real back/forward, a readable URL and title, and per-pane cookie jars. The iframe stays because "usable without Electron" is the invariant above; it is honest about what it cannot do (no history, no separate sessions, no way to detect a refused frame) rather than pretending. |
 | Browser sessions | Global, colour-coded, animal-named `persist:` partitions — the default plus up to 8 — with the set that *exists* tracked per worktree in `localStorage` | The point of the feature is being two logged-in users of your own app at once, which is a cookie jar per pane. The *allowed* slot names are a closed list because the name becomes an Electron partition — an identifier the main process has to validate anyway — but which of them **exist** is a set the user builds up, stored in `localStorage` and keyed by worktree. Deriving that set from which slots panes occupy was the first attempt and it inverted the feature: moving a pane onto a new session vacated its old slot, so adding one appeared to delete the previous. `localStorage` rather than the daemon because a session only means anything under Electron (the browser build's iframe backend has no cookie jars of its own), so there is no second client for the list to disagree with — this is one client's preference about its own capability, not the shared settings store batch 5 needs. Eight above the default is the colour ceiling: more dots stop being tellable apart, and the colour is what makes "which session is this pane?" answerable without opening a menu. The slots are **named** (otter, wombat, gecko…) rather than numbered, because a number implies a sequence: removing "Session 2" and being left with "Default, Session 3" reads as breakage, while a name has no successor to be missing. The name is also the partition, so the identifier says what it is. Partitions stay global, so two worktrees whose sets both hold the same slot share that jar. Stated rather than hand-waved: only the *run* differs between two worktrees' hostnames (`{service}.{run}.{project}.localhost`), so a project-scoped cookie is shared, and a third-party login domain is shared unconditionally. Keying the partition by worktree is the fix if it bites. Clearing data is addressed by partition, not by pane, so a slot no pane holds can still be emptied. |
 | Native-view z-order | The renderer hides views while a DOM overlay is open | A `WebContentsView` is a native sibling of the page: it paints over every menu, dialog and dropdown regardless of z-index, and there is no CSS answer. `panes/overlayGuard.ts` suspends the views while one is open. It watches the subtree of Mantine's *shared* portal node — `Portal` reuses one container that is appended to `body` once and never removed, so watching `body`'s children sees a single mutation and then goes deaf — and it requires a match to be actually painted, because `Combobox` keeps its dropdown mounted at `display: none` and `mantine-Modal-root` stays in the DOM when the modal is closed. Both of those shipped as bugs first: the deaf observer, then a permanent false positive that hid every pane. Hidden is not blank, though: each visible view is **captured first, decoded, and painted onto the container before the view goes**, so a pane freezes rather than disappearing every time a menu opens — hiding first and painting when the capture landed was itself a visible flicker — and so was routing the still through React state, which costs a render plus an async image decode. Bounded by a timeout, so a slow capture cannot leave the overlay stuck behind a view. App-owned surfaces that aren't portalled call `pushBrowserSuspend` from their own state. It is a heuristic, and deliberately the kind that fails *visibly* (a dropdown behind a pane) rather than the kind that blanks a pane at random. |
-| The run's URLs are not a pane kind | A launcher component (`panes/VeldLinks.tsx`) shown inside whatever pane is about to need it | They are how you *get* a page, not a peer of a terminal and a page. A kind for them meant a singleton tab id, a "does one already exist" check at every call site that could open one, and a second implementation of the same rows. Now a `new` pane and a browser pane **with no URL** both show them — the second being the useful one, since the list sits in the thing that is one click from becoming the page. The top bar's globe just opens an empty browser pane, and a worktree's default layout is a terminal beside one. Links that are *not* veld's belong in the project's config, not hardcoded: `ui.quicklinks`, issue #167 item 3b. |
+| Run diagnostics | Two pane kinds (`logs`, `nodes`) rendering **the same views runs mode renders** (`ui/src/shared/RunViews.tsx`) | Every endpoint already existed (`/api/logs/{run}`, `/api/stats`, per-node health on `/api/environments`), so this is a UI question only, and the UI question is where they live. Panes rather than a third fixed column, for the reason the dock exists at all. Extraction rather than a second implementation, because the pair would have drifted on the first change to what a node row says — the health sub-line (failures / recoveries / last liveness error) is exactly what a fork forgets. The panes hold **no run identity**: they read whichever run the selected worktree has, so a worktree switch re-points every open one, and a pane can never show a run whose worktree is off screen. They also read a *wider* run than the top bar's controls do (`diagnosticsRun` vs `activeRun`): after a crash there is nothing to stop or restart, but the logs and the last node states are the whole reason you opened the pane. |
+| Sharing in IDE mode | One top-level surface in the top bar (a popover), with join requests as a **banner above the panes** | Follows #152's rule — a Sharing surface, not a relay-details dump — and a popover rather than a `Menu` because the content is interactive (the auto-accept checkbox and the copy buttons must not close it). Sharing is *refused* far more often than it fails — a service has to opt in (`share.expose`) and a relay has to be configured (`sharing.relays`) — so the daemon's refusal text is the feature, and it reaches the user as a toast. The join requests are deliberately *not* in it: someone is sitting on the other end waiting for an answer, so the prompt has to be visible without opening anything, and it lists **every** share's requests rather than the selected worktree's — a request against a worktree you are not looking at must not be invisible. It names the run each one is for, since a request carries only its `share_id`. |
+| The run's URLs are not a pane kind | A launcher component (`panes/VeldLinks.tsx`) shown inside whatever pane is about to need it | They are how you *get* a page, not a peer of a terminal and a page. A kind for them meant a singleton tab id, a "does one already exist" check at every call site that could open one, and a second implementation of the same rows. Now a `new` pane and a browser pane **with no URL** both show them — the second being the useful one, since the list sits in the thing that is one click from becoming the page. The top bar's globe just opens an empty browser pane, and a worktree's default layout is a terminal beside one. Links that are *not* veld's belong in the project's config, not hardcoded: `ui.quicklinks`, the *Per-project quicklinks* item in issue #167 (referenced by name, not by its number, which moves as the roadmap is reordered). |
 | Pane creation | `+` opens an undecided `new` pane; the choice happens inside it | A menu off a `+` button is the size of a cursor and vanishes when you look away, while the thing being chosen is a whole pane. So `+` opens the pane and the pane asks what it should be, at content size — and picking a kind *replaces* the tab (`replaceTab`) rather than adding one, so the flow costs a single tab. The same screen serves an empty dock and a closed-everything region, which is why they now look identical. Hovering `+` still offers the one-click shortcuts for people who know what they want. |
 | Pane screens | Loading, error and chooser are DOM screens *and* they hide the view | A native view paints over DOM, so "the pane has something to say" and "the view is off screen" are one decision, not two — `covered()` in `browserHost.ts` owns it and the pane's render mirrors it. Error copy is keyed off Chromium's net error, not its message: "nothing is listening" (start the run) and "that hostname doesn't resolve" (`veld doctor`) are different problems, and the codes are stable where the prose is not. A *re*-load keeps the old page up rather than covering it with a spinner, which is what `loaded` is for. |
 | Orphan views are dropped by the *page*, not by a navigation event | `reset()` at module load, before any `create` | A reload replaces the page's registry of views, so the old ones are orphans painting over the new document. Disposing them from the shell's own `did-navigate` is a race against the renderer's first `create` — and losing it destroyed the view the new page had just asked for, which is why the first browser pane after a hard reload came up blank with reload as the only escape. Driving it from the renderer makes the ordering a queue. |
 | Views start visible | `create` no longer hides the view and then shows it | Chromium background-throttles a hidden `WebContents`, and a view created hidden and loaded in the same tick sometimes never rendered its first page — blank until you pressed Reload. The renderer sends its own visibility immediately, so starting visible costs nothing and removes the race. The spinner's 8-second "taking a while" reload is the backstop, since a genuinely slow dev server must not be called an error. |
 | Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to, so a reload is allowed to drop the views and rebuild them. The page asks for that itself (`reset()`, see the row above) rather than the shell inferring it from a navigation event. A shell is the opposite — see the terminal row above. |
+| Icons | One mark, two assets, drawn by a stdlib-only rasteriser (`desktop/scripts/make-icons.py`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. The generator draws the mark analytically — it is a polygon and a circle, since every segment of `logo.svg`'s V is a straight line — so there is nothing to install and the bytes are identical on every machine. Both tools tried first were wrong in the same direction: `qlmanage` (QuickLook) composites thumbnails on an **opaque white background** and pads below its minimum size, which shipped a menu-bar icon that was a white tile with a dark V (a template image is alpha, so an opaque render is a solid blob — and invisible as a bug in any light-background preview), and ImageMagick's SVG renderer is blobby at icon sizes *and* its resize dropped the alpha channel to grayscale. The app icon is inset in a transparent margin, because macOS draws its own shadow into one and a full-bleed tile reads as a bigger, blockier icon than everything beside it in the dock. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -67,6 +71,11 @@ client, not surgery.
 │  POST /api/worktrees/{id}/start → `veld start`  │
 │  POST /api/environments/{run}/stop|restart      │
 │       ?project_root=… (run names repeat!)       │
+│  POST /api/environments/{run}/action → node act │
+│  GET  /api/logs/{run}    → run + node logs      │
+│  GET  /api/stats         → per-node cpu/memory  │
+│  GET  /api/shares        → shares/joins/pending │
+│  POST /api/shares…       → share, mode, approve │
 │  POST /api/pty/tickets   → attach ticket        │
 │  GET  /api/pty/attach    → terminal WebSocket   │
 │  DEL  /api/pty/sessions/{id} → end a shell      │
@@ -90,7 +99,8 @@ requests at runtime — branding rule.
 - Talks to the same-origin `/api/*`. All mutating calls send the
   `X-Veld-Request: 1` CSRF header the daemon requires.
 - Polls `/api/environments` + `/api/repos` (5s) — same model as the v1
-  dashboard. Push/SSE is a later increment.
+  dashboard — plus `/api/shares` and `/api/stats` on the same tick while IDE mode
+  is on screen (runs mode does its own). Push/SSE is a later increment.
 - Detects the Electron shell via a `?shell=electron` query param to render the
   native-title-bar layout (drag region, traffic-light inset padding) instead of
   the browser-build header row.
@@ -168,6 +178,92 @@ requests at runtime — branding rule.
   the focused dock's terminal claims the keyboard on mount; both docks mount on
   load, so focusing unconditionally handed it to whichever mounted last.
 
+#### Run diagnostics and sharing (`ui/src/shared/`, `panes/RunPanes.tsx`)
+
+- **`ui/src/shared/` is what both modes render.** `RunViews.tsx` is the unit of
+  reuse — `NodesView` and `LogsView`, over `NodeList`/`nodeRows` and `LogsPanel` —
+  with the sharing pieces (`ShareControls`, `PeerShareStrip`, `WebShareStrip`,
+  `JoinRequestRow`, `RunSharePanel`) and the formatting helpers beside them. Runs
+  mode is now *only* a head, run controls and a Nodes|Logs switcher over those
+  views; IDE mode is the same two behind pane tabs. Anything host-specific is a
+  prop: `fill` (own the parent's height vs. sit in a card), `visible` (a card keeps
+  a hidden view mounted so its filters and scroll survive; a pane unmounts), and
+  `selected` (whether the *host* owns the history choice — a card's head picker
+  does, a pane has none, so the view grows its own). When the nodes view gets
+  scrubbable resource timelines, it gets them once.
+- **Errors are toasts, everywhere** (`shared/notify.ts`), which is why no shared
+  component takes an error-reporting prop: there is one behaviour, not one per
+  host. It replaced `window.alert` in runs mode (blocks the page, steals the
+  keyboard) and a banner in IDE mode (reflows the panes on every failure). Each
+  toast carries `data-veld-overlay`, because a native browser pane paints over DOM
+  — an unmarked toast is an error nobody sees. The attribute goes on the
+  notification, never on the always-mounted container.
+- **The daemon omits empty arrays.** `veld_core::share::ShareInfo` marks
+  `public_urls` and `connections` `skip_serializing_if = "Vec::is_empty"`, so a
+  peer share with no joiners arrives with neither key while the TS type claims
+  both — and `s.public_urls.length` is a TypeError that takes the view down.
+  `normalizeShare` in `api.ts` fills them once, at the boundary; the declared type
+  describes what consumers get, and the comment says why it is not what the wire
+  carries.
+- **Two error shapes on one API.** The management and desktop routers answer
+  `{"error": …}`; the share router returns a bare `text/plain` body. The client
+  read only the first, so sharing's refusals — the ones that tell you exactly what
+  to add to `veld.json` — surfaced as `400 Bad Request`, which reads as a bug in
+  Veld rather than as a config that has not opted in. `errorMessage` handles both.
+- **The nodes view is a card per node, not a table.** The same view renders in a
+  300px pane and in a 1080px card, and columns cannot survive that range: they
+  either squeeze every cell to two characters or get dropped as the width shrinks,
+  which loses a fact (the pid, the URL) exactly when someone needed it. Container
+  queries doing the dropping was the first attempt and it is the wrong shape. A card
+  has nothing to lose — the long values get their own line, and width only decides
+  where things wrap. Ordered by how often each part is read: identity and state,
+  then the URL with its actions, then what is wrong, then what you can do about it;
+  resources sit on the opposite edge of the first line, because that is the column
+  people scan *down*. With no header row to carry meaning, units travel with the
+  values (`pid 21672`, an `aria-label` of "Memory 212 MB").
+- **Opening a node's URL in a pane is a prop, not a capability check.** The card
+  shows that button when the host passes `onOpenPane`, which only IDE mode does —
+  runs mode has no panes, and a control saying "open here" with no *here* is worse
+  than no control. It is deliberately not gated on Electron: a pane is a pane in
+  the browser build too (an iframe there), and all three entry points — this
+  button, the URL launcher and ⌘K — go through the same `addTabToFocused`, so none
+  of them invents its own placement.
+- **Tabs shrink before the strip scrolls.** Only the tabs are in the scroll box, so
+  the `+` follows the last tab while there is room and pins to the end of the strip
+  once there is not — one layout, not a second mode. Labels are clamped (a browser
+  pane's label is the *page title*, which can be a sentence, and one wrapped to two
+  lines deformed the whole strip), tabs shrink to a floor that still shows the kind
+  glyph and the close button, and past that the strip scrolls. The active tab
+  scrolls itself into view, because a tab can become active without being clicked —
+  ⌘K, a drop, or closing its neighbour. There is no scrollbar (30px has no room for
+  one), so each edge carries a **fade that appears only while something is past
+  it** — otherwise a scrolled strip has a hidden state with nothing to announce it,
+  and a permanent gradient would dim the first and last tab of a strip that fits,
+  saying the opposite of what it means. The edges are measured (`ResizeObserver` for
+  the tab count and the dock's width, the scroll event for the position) rather than
+  inferred. The fade is three layers, because one colour gradient is nearly
+  invisible in both themes for opposite reasons — in the dark theme an unselected
+  tab *is* the strip's colour, in the light one the tones are close: the strip
+  colour hides the tab's edge, a black wash dims what is under it (the text, which
+  is what the eye reads as cut off), and a 1px line marks where the cut is. One trap when wrapping the tabs in a scroll box: `.pane-tabs` centres
+  its items, so the scroller needs `align-self: stretch` or it stops filling the
+  strip and every tab in it renders as a floating chip — which is exactly how it
+  shipped for one round.
+- **`LogsPanel` has two shapes, one implementation.** In a card it is a
+  fixed-height area that stays mounted while its tab is hidden (filters and scroll
+  survive); in a pane (`fill`) it is the whole dock body, with the toolbar fixed
+  and the log area taking the rest. The pane variant is keyed by run instance, so
+  a restart or a worktree switch does not carry another run's node filter in.
+- **The panes poll through the app, not themselves.** `/api/shares` and
+  `/api/stats` ride IDE mode's existing 5s tick, `allSettled` beside the two calls
+  that decide the offline banner — a stats hiccup must keep the last values rather
+  than blank the view, and runs mode already polls its own on its own cadence, so
+  the extra two reads are skipped while it is the mode on screen.
+- **A share action is not a `PendingAction`.** Those markers clear when the
+  *run signature* moves, which a share never touches; one taken out for a share
+  would sit spinning until its 60s TTL. The poll is what confirms a share, and a
+  failure surfaces as a toast, like every other action's.
+
 #### Browser panes (`ui/src/panes/browserHost.ts`, `BrowserPane.tsx`)
 
 - **Two backends behind one registry**, chosen once at module load by whether
@@ -227,7 +323,11 @@ npm projects beat one franken-config.
 Minimal by design. Main process only does:
 
 1. Create a frameless `BrowserWindow` (`titleBarStyle: 'hiddenInset'`) and load
-   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/ide?shell=electron`.
+   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/ide?shell=electron`. The window
+   is titled by the app and `page-title-updated` is cancelled — the UI arrives over
+   HTTP, so otherwise the window takes whatever `<title>` that bundle carries, and
+   a reload could rename it. `app.setName("Veld")` for the same reason: an
+   unpackaged run would call itself "Electron" in the macOS application menu.
 2. If the daemon isn't reachable, show a local retry page (embedded data URL —
    install/start instructions) and poll until it appears.
 3. macOS tray (template icon): shows running-run count, per-run stop/restart
@@ -247,7 +347,10 @@ Minimal by design. Main process only does:
    Views run sandboxed with no preload, in a `persist:veld-browser-<profile>`
    partition, with all permission requests denied and only `http(s)` accepted.
 
-No packaging/signing in this increment — `npm start` (dev run) only.
+No packaging/signing in this increment — `npm start` (dev run) only. The app icon
+`electron-builder` will want already exists (`assets/icon.png`); an unpackaged run
+sets it on the dock itself, since otherwise a dev window is indistinguishable from
+any other Electron app.
 
 ## Data model
 
@@ -410,7 +513,9 @@ same-named run in another repo.
 Prereqs: Rust stable, Node 22+, a working `veld` install (`veld doctor`).
 
 ```sh
-# 0. once: npm deps for ui/ and desktop/
+# 0. optional: npm deps for ui/ and desktop/ up front (also how you refresh them
+#    after a dependency bump). Every recipe below installs what it needs first,
+#    so a fresh worktree can skip straight to step 1.
 just setup-ui
 
 # 1. dev daemon — a full parallel instance alongside the installed one:
@@ -446,7 +551,12 @@ Electron adds the native shell (`just dev-desktop-embedded` points it at the
 dev daemon without vite).
 
 `just` recipes: `build-ui`, `test-ui`, `lint-ui`, `dev-desktop`,
-`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes. CI
+`dev-desktop-embedded`, `desktop` mirror the existing frontend recipes; each
+depends on a guarded deps step, so a checkout with no `node_modules` installs them
+instead of failing on a missing binary. For `desktop/` that step also fetches the
+Electron binary explicitly: npm defers install scripts it has not been told to
+allow, which otherwise leaves a complete `node_modules` whose `electron` reports
+`command not found`. CI
 runs typecheck + vitest + build for `ui/` and a syntax check for `desktop/`
 (see `.github/workflows/ci.yml`); the Rust build jobs install `ui/` npm deps
 because `veld-daemon`'s build.rs now builds both frontend packages.
@@ -474,7 +584,8 @@ already lives in the URL, so modes are just routes.
 2. ~~Embedded webviews + isolated sessions~~ — shipped as the `browser`
    `PaneKind`; see the decision log and the browser-panes notes above.
 3. ~~Terminal panes~~ — shipped; see the decision log above.
-4. Start-run UX beyond preset picking; `veld share` from the UI.
+4. ~~`veld share` from the UI~~ — shipped as IDE mode's Sharing surface; see the
+   decision log. Start-run UX beyond preset picking is still open.
 5. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
 6. Packaging, auto-update, CLI installation from the app.
 

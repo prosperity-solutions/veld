@@ -22,6 +22,7 @@ import {
   clampRatio,
   closeTab,
   defaultLayout,
+  diagTab,
   dockVisible,
   findTab,
   focusDock,
@@ -881,6 +882,9 @@ describe("paneTabLabel", () => {
     expect(paneTabLabel(l, { ...terminal, title: "stale" })).toBe("Terminal");
 
     expect(paneTabLabel(l, newPaneTab())).toBe("New pane");
+    expect(paneTabLabel(l, diagTab("logs"))).toBe("Logs");
+    expect(paneTabLabel(l, diagTab("nodes"))).toBe("Nodes");
+    expect(paneTabLabel(l, { ...diagTab("logs"), title: "stale" })).toBe("Logs");
   });
 
   it("uses a browser pane's page title, falling back to its host", () => {

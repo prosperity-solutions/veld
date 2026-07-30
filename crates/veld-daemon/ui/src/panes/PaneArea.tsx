@@ -2,8 +2,8 @@
  * The dock region of IDE mode: two tab hosts side by side with a draggable
  * split. See `model.ts` for why this replaced the fixed columns.
  *
- * Run diagnostics (#167 batch 4) is meant to land as a tab here rather than as a
- * new column — as the embedded browser did. Adding a content type means:
+ * Adding a content type means (the embedded browser and the run's diagnostics both
+ * landed this way, as tabs here rather than as new columns):
  *
  * 1. `PANE_KINDS` in `model.ts` — also what validates a restored layout, so a
  *    kind missing from it works until the first reload and then vanishes.
@@ -19,15 +19,28 @@
  * 7. The ⌘K palette in `App.tsx` — `focused?.kind === …` gates the per-kind
  *    commands. Additive, so skipping it breaks nothing; it just leaves the kind
  *    unreachable from the keyboard.
+ * 8. **Where its data comes from**, if it needs any. A pane renders inside the
+ *    dock and has no access to the app's state, so anything server-backed arrives
+ *    through `RunPaneContext` (`panes/RunPanes.tsx`), which `App.tsx` builds as
+ *    `runCtx` and threads down. `logs` and `nodes` are the two examples: both are
+ *    thin wrappers whose whole job is to resolve that context, and adding a field
+ *    to it means touching both ends. A kind that needs *different* data
+ *    (environment variables, say) adds it there rather than fetching on its own —
+ *    a pane that polls is a pane that keeps polling while nobody is looking at it.
+ * 9. `DiagKind` in `model.ts`, if it is a run view — `diagTab` and the chooser's
+ *    `onDiag` are typed by it, so a kind that is one has to be in that subset.
  *
- * Only 1-3 are enforced. Note what is *not* a kind: the run's URLs, which are a
- * launcher shown inside a pane rather than a pane of their own (`VeldLinks.tsx`).
+ * Only 1-3 and 9 are enforced. Note what is *not* a kind: the run's URLs, which
+ * are a launcher shown inside a pane rather than a pane of their own
+ * (`VeldLinks.tsx`).
  */
 
 import { ActionIcon, Menu } from "@mantine/core";
 import {
+  IconActivityHeartbeat,
   IconArrowsExchange,
   IconLayoutColumns,
+  IconLogs,
   IconPlus,
   IconRefresh,
   IconTerminal2,
@@ -37,11 +50,13 @@ import {
 import { useContextMenu } from "mantine-contextmenu";
 import { Fragment, useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { BrowserPane, browserTabDot } from "./BrowserPane";
+import { LogsPane, NodesPane, type RunPaneContext } from "./RunPanes";
 import { VeldLinks } from "./VeldLinks";
 import { popBrowserSuspend, pushBrowserSuspend, reloadBrowser } from "./browserHost";
 import {
   type BrowserProfile,
   DEFAULT_RATIO,
+  type DiagKind,
   type DockIndex,
   MAX_RATIO,
   MIN_RATIO,
@@ -53,6 +68,7 @@ import {
   addTab,
   browserTab,
   closeTab,
+  diagTab,
   dockOf,
   dockVisible,
   focusDock,
@@ -98,6 +114,8 @@ export function PaneArea(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  /** The selected worktree's run, for the `logs` and `nodes` panes. */
+  runCtx: RunPaneContext;
 }) {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
@@ -181,6 +199,7 @@ export function PaneArea(props: {
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
           }
           onBrowser={(tab) => onLayout(addTab(layout, 0, tab))}
+          onDiag={(kind) => onLayout(addTab(layout, 0, diagTab(kind)))}
         />
       </div>
     );
@@ -236,6 +255,7 @@ export function PaneArea(props: {
               sessions={props.sessions}
               onAddSession={props.onAddSession}
               onRemoveSession={props.onRemoveSession}
+              runCtx={props.runCtx}
             />
           </Fragment>
         );
@@ -255,6 +275,7 @@ function DockView(props: {
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
+  runCtx: RunPaneContext;
 }) {
   const { index, layout, onLayout } = props;
   const dock = layout.docks[index];
@@ -358,8 +379,6 @@ function DockView(props: {
     >
       <div
         className="pane-tabs"
-        role="tablist"
-        aria-label="Panes"
         // Dropping on the empty part of the strip appends to this dock, which
         // is the only way to move a tab into a dock that has none.
         onDragOver={(e) => {
@@ -367,6 +386,13 @@ function DockView(props: {
         }}
         onDrop={(e) => dropTab(e)}
       >
+        {/* Only the tabs scroll. The `+` sits outside this box so it survives a
+            strip full of tabs, and `role="tablist"` lives on the scroller rather
+            than on this row — a tablist whose children include a menu button and a
+            drop spacer is not one. The wrapper each tab needs (label and close as
+            siblings) is `role="presentation"`, so the `role="tab"` button inside it
+            is the tablist's effective child. */}
+        <TabScroller tabKey={dock.tabs.map((t) => t.id).join(",")}>
         {dock.tabs.map((tab, at) => (
           <TabButton
             key={tab.id}
@@ -394,6 +420,7 @@ function DockView(props: {
             onDragEndTab={() => setDropAt(null)}
           />
         ))}
+        </TabScroller>
         {/* Immediately after the last tab, not pinned to the right: it is the
             end of the strip, and a control 600px from the thing it extends reads
             as unrelated to it.
@@ -434,6 +461,18 @@ function DockView(props: {
             >
               New browser pane
             </Menu.Item>
+            <Menu.Item
+              leftSection={<IconLogs size={14} />}
+              onClick={() => convertOrAdd(active, diagTab("logs"))}
+            >
+              Run logs
+            </Menu.Item>
+            <Menu.Item
+              leftSection={<IconActivityHeartbeat size={14} />}
+              onClick={() => convertOrAdd(active, diagTab("nodes"))}
+            >
+              Node health
+            </Menu.Item>
             <Menu.Divider />
             <Menu.Item
               leftSection={<IconLayoutColumns size={14} />}
@@ -471,8 +510,11 @@ function DockView(props: {
               convertOrAdd(active, { id: newTabId(), kind: "terminal", title: "Terminal" })
             }
             onBrowser={(tab) => convertOrAdd(active, tab)}
+            onDiag={(kind) => convertOrAdd(active, diagTab(kind))}
           />
         )}
+        {active?.kind === "logs" && <LogsPane ctx={props.runCtx} />}
+        {active?.kind === "nodes" && <NodesPane ctx={props.runCtx} />}
         {active?.kind === "browser" && (
           <BrowserPane
             key={active.id}
@@ -521,6 +563,7 @@ function PaneChooser(props: {
   urlsEmptyHint: string;
   onTerminal: () => void;
   onBrowser: (tab: PaneTab) => void;
+  onDiag: (kind: DiagKind) => void;
 }) {
   return (
     <div className="pane-chooser">
@@ -530,6 +573,17 @@ function PaneChooser(props: {
         </button>
         <button className="btn big" onClick={() => props.onBrowser(browserTab({}))}>
           <IconWorld size={15} /> Browser
+        </button>
+      </div>
+      {/* Second row, not four buttons in one: the first two are what a pane
+          usually becomes, and the diagnostics are what you add when something is
+          wrong. Same size, so neither reads as disabled. */}
+      <div className="pane-chooser-row">
+        <button className="btn big" onClick={() => props.onDiag("logs")}>
+          <IconLogs size={15} /> Logs
+        </button>
+        <button className="btn big" onClick={() => props.onDiag("nodes")}>
+          <IconActivityHeartbeat size={15} /> Nodes
         </button>
       </div>
       {/* The run's URLs, one click from being the pane's content. Not a third
@@ -561,6 +615,10 @@ function tabIcon(tab: PaneTab): React.ReactNode {
       const color = browserTabDot(tab);
       return <IconWorld size={12} style={color ? { color } : undefined} />;
     }
+    case "logs":
+      return <IconLogs size={12} />;
+    case "nodes":
+      return <IconActivityHeartbeat size={12} />;
     case "new":
       return <IconPlus size={12} />;
     default:
@@ -577,6 +635,67 @@ function tabIcon(tab: PaneTab): React.ReactNode {
 /** Turns a missing `PaneKind` branch into a compile error at the call site. */
 function unhandledKind(kind: never): never {
   throw new Error(`unhandled pane kind: ${String(kind)}`);
+}
+
+/**
+ * The scrolling part of a tab strip, with fades that say which way it can go.
+ *
+ * A strip that scrolls with no scrollbar (there is no room for one in 30px) has a
+ * hidden state: tabs to the left of the first visible one are invisible, and
+ * nothing says they exist. So each edge carries a fade that appears only while
+ * there is something past it — the signal a scrollbar would give, in the space
+ * available.
+ *
+ * The edges are measured rather than guessed, because "can it scroll" has three
+ * inputs that change independently: the tab count, the dock's width (the splitter
+ * drags), and the scroll position. A `ResizeObserver` covers the first two, the
+ * scroll event the third.
+ */
+function TabScroller(props: {
+  children: React.ReactNode;
+  /** The tab ids, joined. The effect's dependency — see below. */
+  tabKey: string;
+}) {
+  const box = useRef<HTMLDivElement>(null);
+  const [edges, setEdges] = useState({ left: false, right: false });
+
+  useEffect(() => {
+    const el = box.current;
+    if (!el) return;
+    const measure = () => {
+      // 1px of slack: a fractional scroll offset (a trackpad, a zoomed page) would
+      // otherwise leave a fade on at the very end of the strip.
+      const left = el.scrollLeft > 1;
+      const right = el.scrollLeft + el.clientWidth < el.scrollWidth - 1;
+      setEdges((prev) => (prev.left === left && prev.right === right ? prev : { left, right }));
+    };
+    measure();
+    el.addEventListener("scroll", measure, { passive: true });
+    const ro = new ResizeObserver(measure);
+    // The box for the dock's width, its children for the tab count — a tab opening
+    // or closing changes the scrollable width without resizing the box.
+    ro.observe(el);
+    for (const child of Array.from(el.children)) ro.observe(child);
+    return () => {
+      el.removeEventListener("scroll", measure);
+      ro.disconnect();
+    };
+    // `tabKey`, not `children`: the children are a fresh array on every render, so
+    // depending on them tore down and rebuilt the observer and the listener on
+    // every 5s poll and every keystroke in the palette, per dock.
+  }, [props.tabKey]);
+
+  return (
+    <div className="pane-tab-strip">
+      <div className="pane-tab-scroll" role="tablist" aria-label="Panes" ref={box}>
+        {props.children}
+      </div>
+      {/* Decorative and un-clickable: what it says is "there is more that way",
+          which the tablist already conveys to a screen reader. */}
+      <span className={`tab-fade left${edges.left ? " on" : ""}`} aria-hidden />
+      <span className={`tab-fade right${edges.right ? " on" : ""}`} aria-hidden />
+    </div>
+  );
 }
 
 /**
@@ -605,6 +724,14 @@ function TabButton(props: {
   onDragEndTab: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
+  const box = useRef<HTMLSpanElement>(null);
+
+  // A strip full of tabs scrolls, and a tab can become the active one without
+  // being clicked — ⌘K, a drop, or closing its neighbour. Reveal it, or the
+  // selection is somewhere off screen with nothing to say so.
+  useEffect(() => {
+    if (props.selected) box.current?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [props.selected]);
 
   /** Which half of the tab the pointer is over — the drop goes to that side. */
   const isAfter = (e: React.DragEvent<HTMLElement>) => {
@@ -614,6 +741,10 @@ function TabButton(props: {
 
   return (
     <span
+      ref={box}
+      // Presentational: the accessible tab is the button inside, so this wrapper
+      // must not sit between the tablist and it as an unlabelled group.
+      role="presentation"
       className={[
         "pane-tab",
         props.selected ? "sel" : "",
@@ -656,16 +787,19 @@ function TabButton(props: {
           if (e.button === 1) props.onClose();
         }}
         onDoubleClick={() => props.canMove && props.onMove()}
+        // The label leads, because it is clamped in CSS (a page title can be a
+        // sentence) and the tooltip is then the only place the whole thing is
+        // readable — the drag hints follow it rather than replacing it.
         title={
           props.canMove
-            ? "Drag to reorder or move · double-click to send to the other pane · right-click for more"
-            : "Drag to move to the other pane · right-click for more"
+            ? `${props.label}\nDrag to reorder or move · double-click to send to the other pane · right-click for more`
+            : `${props.label}\nDrag to move to the other pane · right-click for more`
         }
       >
         <span className="pane-tab-icon" aria-hidden>
           {props.icon}
         </span>
-        {props.label}
+        <span className="pane-tab-text">{props.label}</span>
       </button>
       <button
         type="button"

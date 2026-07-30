@@ -20,11 +20,16 @@ interface Entry {
 }
 
 /**
- * Per-run log viewer (v1 logs tab): run picker over history, node filter
- * (client-side), source filter (server-side), search with ±N context lines
- * and <mark> highlighting, auto-scroll that disables when the user scrolls
- * up and re-arms near the bottom. The component stays mounted while its tab
- * is hidden so filters/scroll/cache survive tab switches.
+ * Per-run log viewer: run picker over history, node filter (client-side),
+ * source filter (server-side), search with ±N context lines and <mark>
+ * highlighting, auto-scroll that disables when the user scrolls up and re-arms
+ * near the bottom.
+ *
+ * Two hosts, one implementation: an environment card's Logs tab in runs mode
+ * (`fill` off — a fixed-height area inside a scrolling card, kept mounted while
+ * hidden so filters and scroll survive a tab switch) and a `logs` pane in IDE
+ * mode (`fill` on — it takes the whole dock body and is unmounted when its tab
+ * is not the active one, like every other pane).
  */
 export function LogsPanel(props: {
   /** Project-scoped run address — a bare name is ambiguous across repos. */
@@ -33,6 +38,8 @@ export function LogsPanel(props: {
   /** Card's history selection — scopes the default run picker option. */
   histSel: string | null;
   visible: boolean;
+  /** Fill the parent (a pane) instead of sitting at a fixed height in a card. */
+  fill?: boolean;
 }) {
   const [runFilter, setRunFilter] = useState<string>("");
   const [nodeFilter, setNodeFilter] = useState<string>("");
@@ -162,7 +169,12 @@ export function LogsPanel(props: {
   };
 
   return (
-    <div style={{ display: props.visible ? "block" : "none" }}>
+    // Display comes from the class so the two hosts can lay out differently
+    // (block in a card, a flex column in a pane); the inline rule only hides.
+    <div
+      className={props.fill ? "logs-fill" : "logs-card"}
+      style={props.visible ? undefined : { display: "none" }}
+    >
       <Group gap="xs" px={10} py={6} wrap="wrap">
         <NativeSelect
           size="xs"
@@ -238,7 +250,11 @@ export function LogsPanel(props: {
           Auto-scroll {autoScroll ? "ON" : "OFF"}
         </Button>
       </Group>
-      <div className="log-area" ref={areaRef} onScroll={onScroll}>
+      <div
+        className={`log-area${props.fill ? " fill" : ""}`}
+        ref={areaRef}
+        onScroll={onScroll}
+      >
         {data === null && <div className="log-empty">Loading logs…</div>}
         {data !== null && rows.length === 0 && (
           <div className="log-empty">{term ? "No matching lines" : "No log output yet"}</div>
