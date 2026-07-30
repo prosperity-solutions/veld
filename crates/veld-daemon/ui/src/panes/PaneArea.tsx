@@ -3,12 +3,25 @@
  * split. See `model.ts` for why this replaced the fixed columns.
  *
  * Run diagnostics (#167 batch 4) is meant to land as a tab here rather than as a
- * new column — as the embedded browser did. Adding a content type touches
- * exactly four places: `PANE_KINDS` in `model.ts` (which is also what validates
- * a restored layout), the `active?.kind === …` branches in `DockView`'s body
- * below, the `+` menu beside them, and — if it needs one — a label rule in
- * `paneTabLabel`. Note what is *not* a kind: the run's URLs, which are a launcher
- * shown inside a pane rather than a pane of their own (`VeldLinks.tsx`).
+ * new column — as the embedded browser did. Adding a content type means:
+ *
+ * 1. `PANE_KINDS` in `model.ts` — also what validates a restored layout, so a
+ *    kind missing from it works until the first reload and then vanishes.
+ * 2. `paneTabLabel` in `model.ts` — returns `string`, so a missing case is a
+ *    compile error. This is the one the compiler catches for you.
+ * 3. `tabIcon` below — its `default` exists to make a missing case a compile
+ *    error too, because `React.ReactNode` includes `undefined` and tsc would
+ *    otherwise let a new kind render with no glyph.
+ * 4. The `active?.kind === …` branches in `DockView`'s body.
+ * 5. The `+` menu beside them, if the kind should be openable.
+ * 6. `tabMenu` in this file — right-click actions branch on `tab.kind`, a
+ *    different variable from (4), so grepping for one pattern misses the other.
+ * 7. The ⌘K palette in `App.tsx` — `focused?.kind === …` gates the per-kind
+ *    commands. Additive, so skipping it breaks nothing; it just leaves the kind
+ *    unreachable from the keyboard.
+ *
+ * Only 1-3 are enforced. Note what is *not* a kind: the run's URLs, which are a
+ * launcher shown inside a pane rather than a pane of their own (`VeldLinks.tsx`).
  */
 
 import { ActionIcon, Menu } from "@mantine/core";
@@ -550,7 +563,20 @@ function tabIcon(tab: PaneTab): React.ReactNode {
     }
     case "new":
       return <IconPlus size={12} />;
+    default:
+      // Makes a new `PaneKind` a compile error here. Without it this switch is
+      // the one kind-conditional the typechecker cannot see: `React.ReactNode`
+      // includes `undefined`, so falling off the end is legal — unlike
+      // `paneTabLabel`, which returns `string` and so fails TS2366 on a missing
+      // case. A new kind would otherwise render with no glyph and pass every
+      // check in the pre-pass.
+      return unhandledKind(tab.kind);
   }
+}
+
+/** Turns a missing `PaneKind` branch into a compile error at the call site. */
+function unhandledKind(kind: never): never {
+  throw new Error(`unhandled pane kind: ${String(kind)}`);
 }
 
 /**
