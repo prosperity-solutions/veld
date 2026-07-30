@@ -23,7 +23,7 @@
 // content cannot reach this IPC surface in the first place; the keying and the
 // frame check are what keep that true if one ever gains a preload.
 
-const { WebContentsView, ipcMain, session } = require("electron");
+const { WebContentsView, ipcMain, screen, session } = require("electron");
 // The trust boundary lives in its own tested module — see src/validate.js.
 const {
   isProfileName,
@@ -54,7 +54,7 @@ const MAX_VIEWS_PER_WINDOW = 16;
  * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
  *            scale: number, radius: number, touchActive: boolean,
- *            frameReady: boolean, emulated: boolean}} Entry
+ *            frameReady: boolean, emulated: boolean, dragging: boolean}} Entry
  */
 
 /** window.id → (viewId → Entry) */
@@ -420,6 +420,39 @@ function attachListeners(window, viewId, entry) {
     send(window, "veld:browser:accelerator", { viewId, accelerator: "palette" });
   });
 
+  // While the pane's screen is being resized by dragging its edge, forward the
+  // pointer to the page.
+  //
+  // This is what lets the *real* view resize live instead of being hidden for the
+  // gesture. A `WebContentsView` is an OS-level widget with its own WebContents, so
+  // a mouse event over it belongs to the guest and the /ide document never sees it —
+  // a drag whose pointer crosses the view therefore loses both its moves and its
+  // `mouseup`, leaving a gesture that can never end. Forwarding closes that hole at
+  // the source instead of with a timeout heuristic (and a heuristic would have to
+  // guess between "the pointer is over the page" and "the user is holding still").
+  //
+  // The **position comes from the cursor, not from the event**: `input-event`'s
+  // `x`/`y` are documented without saying which space they are in, and a
+  // half-window offset in a drag is not a bug worth shipping to discover.
+  // `getCursorScreenPoint` minus the window's content origin is unambiguous, and
+  // dividing by the zoom factor is the exact inverse of the CSS→DIP conversion the
+  // bounds handler does — so the page receives the coordinates its own
+  // `pointermove` would have carried.
+  wc.on("input-event", (_e, input) => {
+    if (!entry.dragging) return;
+    if (input.type !== "mouseMove" && input.type !== "mouseUp") return;
+    if (window.isDestroyed() || window.webContents.isDestroyed()) return;
+    const cursor = screen.getCursorScreenPoint();
+    const content = window.getContentBounds();
+    const zoom = window.webContents.getZoomFactor() || 1;
+    send(window, "veld:browser:pointer", {
+      viewId,
+      type: input.type,
+      x: (cursor.x - content.x) / zoom,
+      y: (cursor.y - content.y) / zoom,
+    });
+  });
+
   // The first committed navigation is what makes the emulation calls safe to make
   // at all (rule 2), and every later one is what keeps zoom and touch in force.
   //
@@ -629,6 +662,9 @@ function registerBrowserViewIpc(resolveWindow) {
       // rule 2. The first `did-navigate` flips this and applies them.
       frameReady: false,
       emulated: false,
+      // Set only while the page is dragging this screen's edge; see the
+      // `input-event` listener for what it turns on and why.
+      dragging: false,
     };
     entries.set(viewId, entry);
     window.contentView.addChildView(view);
@@ -710,6 +746,19 @@ function registerBrowserViewIpc(resolveWindow) {
     // would report a navigation the pane never made.
     if (emulationNeedsReload(prev, next) && wc.getURL()) wc.reload();
     pushState(window, args.viewId, entry);
+  });
+
+  /**
+   * Start or stop forwarding this view's pointer events to the page.
+   *
+   * On only for the duration of a resize drag: it is one IPC message per mouse move
+   * *while the cursor is over the pane's own page*, which is a cost worth paying to
+   * keep a gesture alive and not worth paying at any other time.
+   */
+  ipcMain.handle("veld:browser:drag", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    found.entry.dragging = args?.dragging === true;
   });
 
   /** Page zoom for one pane. Chromium stores zoom per origin, so this is

@@ -337,20 +337,47 @@ requests at runtime — branding rule.
   table and still mean something: `custom` (a hand-entered size) and `responsive`,
   which `sanitizeEmulation` therefore has to know about or a dragged pane would
   silently demote itself on reload.
-- **The screen is draggable, and the native view goes away while it is.** A fixed
-  list cannot contain the width a layout actually breaks at, so any emulated screen
-  can be resized from handles on its right edge, bottom edge and corner — the
+- **The screen is draggable, and the page reflows live while it is.** A fixed list
+  cannot contain the width a layout actually breaks at, so any emulated screen can
+  be resized from handles on its right edge, bottom edge and corner — the
   `Responsive` entry is that with nothing else claimed, starting at the pane's own
-  size. The handles are reachable only because an emulated screen is *inset* from
-  the pane: under Electron the view covers its own rect exactly and the guest gets
-  every pointer event inside it. For the same reason the view is **hidden for the
-  duration of the drag** (`setBrowserResizing`) — otherwise the moment the cursor
-  crossed onto it this document would stop seeing moves *and* never see
-  `pointerup`, stranding the drag. While it is hidden the pane draws a dashed
-  outline at the size being dragged to; no frozen still, because a still is a
-  picture of the old size and stretching it to follow the drag is the one thing
-  that would make the new size unreadable. The emulation is applied on release:
-  each apply is an `enableDeviceEmulation`, which relayouts the guest page.
+  size. Dragging a preset lands on `custom` and keeps its flags; dragging the
+  responsive viewport stays responsive. The screen grows about its **centre**
+  (`deviceLayout` again — one placement rule, not a second one for drags), so the
+  edge under the cursor moves half of what the size does, and the pointer delta is
+  doubled to keep the edge glued to the cursor.
+- **The pointer is the hard part of that, in both backends, for one reason: the
+  thing being resized owns the events that land on it.** A `WebContentsView` is an
+  OS-level sibling, so a mouse event inside its rect belongs to the guest and the
+  /ide document never sees it; a cross-origin iframe consumes the ones on it too.
+  Either way a drag whose pointer crossed the page would lose its moves *and* never
+  see `pointerup` — a gesture that cannot end. The handles being *outside* the
+  screen (in the inset) is what makes the common case work; the rest is:
+  - under Electron, the shell forwards the view's own mouse events while a drag is
+    live (`webContents.on('input-event')` → `veld:browser:pointer`), which is what
+    lets the view stay **visible**. The coordinates come from
+    `screen.getCursorScreenPoint()` minus the window's content origin, divided by the
+    zoom factor — deliberately *not* from the event's own `x`/`y`, whose coordinate
+    space the docs never state. That makes them the exact inverse of the CSS→DIP
+    conversion the bounds handler does, so the page receives what its own
+    `pointermove` would have carried;
+  - the iframe backend has no such channel, so its frame goes `pointer-events: none`
+    for the gesture. It cannot be hidden — there the frame *is* the thing being
+    resized.
+  An earlier version hid the native view for the whole drag instead. That was
+  reliable and it was worse: you were resizing a rectangle rather than watching a
+  layout reflow, which is the entire point of doing this in a pane.
+- **Applied sizes are coalesced to one animation frame.** Each one is an
+  `enableDeviceEmulation`, which relayouts *the user's page* and fires its `resize`
+  handlers; a mouse emits several moves per painted frame, and there is no sense
+  relayouting someone's app twice for one frame. The layout write happens once, on
+  release. `syncGeometry` also stands down while a drag is live — it draws from the
+  applied emulation on a 400 ms tick, so it was a second writer of the one element
+  the drag owns, and it won whenever the pointer went still.
+- **No DOM readout over the screen.** The size being dragged to goes in the chrome's
+  chip, where the emulated size lives anyway. A label over the screen would be
+  painted over by the native view in the desktop app and visible in a browser tab,
+  which is the worst of both.
 - **`scale` is computed in the main process.** Fitting a 1440-wide viewport into a
   600px pane is the entire argument for doing this inside the dock, and the number
   it needs is the view's box in **device-independent pixels** — which only the shell

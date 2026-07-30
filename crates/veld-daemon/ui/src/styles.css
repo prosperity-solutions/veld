@@ -993,7 +993,11 @@ select:focus {
   border: 1px solid transparent;
   border-radius: 7px;
   background: none;
-  color: var(--faint);
+  /* The same ink as the `ActionIcon`s either side of it. It used to be `--faint`,
+     which put an enabled control at the weight this app uses for *disabled* ones —
+     the session button beside it reads as available and this one did not, which is a
+     difference in state, not in kind. */
+  color: var(--muted);
 }
 .browser-device:hover {
   border-color: var(--border);
@@ -1004,10 +1008,23 @@ select:focus {
   color: var(--text);
 }
 
+/* Anchor for a tooltip on a control that cannot hold one itself — a menu target,
+   whose ref Mantine's Popover claims. Purely a hover surface: it must not change the
+   bar's layout. */
+.bar-tip {
+  display: inline-flex;
+  align-items: center;
+}
+
 .browser-chip {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 10.5px;
   white-space: nowrap;
+}
+/* The size under the pointer during a drag — the one number that is changing, so it
+   takes the accent while it changes. */
+.browser-chip[data-live="true"] {
+  color: var(--accent);
 }
 
 /* The device/zoom menu: two columns for its two concerns — *which* device on the
@@ -1099,25 +1116,10 @@ select:focus {
   cursor: nwse-resize;
 }
 
-/* The size being dragged to, centred on the screen that is following the drag.
-   No border and no fill: the white screen is already the outline, and a second
-   rectangle over it is two edges to read instead of one. */
-.device-readout {
-  position: absolute;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: none;
-}
-.device-readout span {
-  padding: 2px 7px;
-  border-radius: 6px;
-  background: var(--elev);
-  color: var(--text);
-  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
-  font-size: 11px;
-}
+/* No outline and no readout over the screen: the page is live while you drag, and a
+   native view paints over DOM — anything here would be invisible in the desktop app
+   and visible in a browser tab. The size lives in the chrome's chip, which is where
+   it lives the rest of the time too. */
 
 /* A row of fields inside a menu — the custom size and the zoom stepper. Not
    Menu.Items: a click in a field must not close the menu it lives in. */

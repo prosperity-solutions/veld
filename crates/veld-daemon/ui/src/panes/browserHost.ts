@@ -139,6 +139,7 @@ interface DesktopBrowserApi {
   emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
   setZoom(viewId: string, zoom: number): Promise<void>;
   devTools(viewId: string, action: "toggle" | "open" | "close"): Promise<void>;
+  drag(viewId: string, dragging: boolean): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
   clearSession(profile: BrowserProfile): Promise<void>;
@@ -148,6 +149,9 @@ interface DesktopBrowserApi {
     fn: (payload: { viewId: string; url: string; profile: BrowserProfile }) => void,
   ): () => void;
   onAccelerator(fn: (payload: { accelerator: string }) => void): () => void;
+  onPointer(
+    fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
+  ): () => void;
 }
 
 declare global {
@@ -245,6 +249,11 @@ interface View {
    *  changes neither costs no re-emulation — which relayouts the guest page. */
   scale: number;
   radius: number;
+  /** The size a drag is currently at, and the frame it will be applied on.
+   *  Coalesced because a mouse produces several moves per painted frame and each
+   *  applied size relayouts the user's page. */
+  pending: { width: number; height: number } | null;
+  pendingFrame: number;
 }
 
 const views = new Map<string, View>();
@@ -388,9 +397,11 @@ export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
   return !state.loaded && state.loading;
 }
 
-/** Whether a mounted view should currently be on screen. */
+/** Whether a mounted view should currently be on screen. A resize drag no longer
+ *  hides it — the shell forwards the pointer instead, so the page can reflow under
+ *  the cursor (see [`setBrowserResizing`]). */
 function shouldShow(v: View): boolean {
-  return v.mounted && suspendDepth === 0 && !covered(v) && !v.state.resizing;
+  return v.mounted && suspendDepth === 0 && !covered(v);
 }
 
 /**
@@ -615,6 +626,8 @@ function ensure(id: string, options: BrowserViewOptions): View {
     zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
     scale: 1,
     radius: 0,
+    pending: null,
+    pendingFrame: 0,
   };
   views.set(id, v);
   const waiting = pending.get(id);
@@ -797,30 +810,37 @@ export function setBrowserEmulation(id: string, emulation: PaneEmulation | null)
 /**
  * Enter or leave a resize drag.
  *
- * The native view has to go for the duration, and not for looks: a
- * `WebContentsView` is an OS-level sibling of the page, so while the pointer is
- * over it the *guest* receives the events and this document sees nothing — not the
- * moves, and not the `pointerup` either, which would leave the drag stuck on
- * whatever the cursor last crossed. With the view hidden the pane is all DOM: the
- * backdrop, and the outline the pane draws at the size being dragged.
+ * The page stays live and reflows as you drag — which needs one thing arranged
+ * first, in each backend, for the same reason: **the thing being resized owns the
+ * pointer events that land on it.** A `WebContentsView` is an OS-level sibling, so
+ * a mouse event inside its rect belongs to the guest; a cross-origin iframe
+ * consumes the ones that land on it too. Either way the drag would lose its moves
+ * and never see its `pointerup`, which is a gesture that cannot end.
  *
- * No frozen still while dragging, deliberately — the still is a picture of the
- * *old* size, and stretching it to follow the drag is the one thing that would
- * make the new size unreadable.
+ * Under Electron the shell forwards the view's own pointer instead
+ * (`onBrowserPointer`), which is what lets the view stay visible. The iframe
+ * backend has no such channel, so its frame goes pointer-transparent for the
+ * gesture — it keeps painting, and it is the thing being resized, so hiding it was
+ * never an option there.
  */
 export function setBrowserResizing(id: string, resizing: boolean): void {
   const v = views.get(id);
   if (!v) return;
   patch(v, { resizing });
-  applyVisibility(v);
-  // The iframe backend has the same problem for a different reason: a cross-origin
-  // frame consumes the pointer events that land on it, so the drag would die the
-  // moment the cursor crossed the page — no `pointermove`, and no `pointerup`
-  // either. It cannot be *hidden* though, because there the frame is the thing
-  // being resized and watching it reflow is the whole point.
   if (v.iframe) v.iframe.style.pointerEvents = resizing ? "none" : "";
-  // Back to the applied emulation, undoing whatever the last preview drew.
-  if (!resizing) syncGeometry(v);
+  if (desktop && v.shellHasView) void desktop.drag(id, resizing).catch(() => {});
+  if (resizing) return;
+  // Drop a frame that has not fired yet, or it would repaint the drag's last size
+  // after the applied one has already been drawn.
+  if (v.pendingFrame !== 0) cancelAnimationFrame(v.pendingFrame);
+  v.pendingFrame = 0;
+  v.pending = null;
+  // Re-assert the applied emulation, which the drag has been overwriting in the
+  // shell. Matters most when the gesture was *cancelled*: the layout still holds the
+  // pre-drag device, and without this the view would keep the size the pointer
+  // happened to be at when the drag was interrupted.
+  if (desktop && v.shellHasView) void desktop.emulate(id, v.emulation).catch(reportFailure(v));
+  syncGeometry(v);
 }
 
 /** Page zoom for one pane. Stored live for the same recreation reason as the
@@ -992,24 +1012,59 @@ function paintScreen(
 }
 
 /**
- * Redraw the screen at the size a drag is currently at, without applying it.
+ * Resize the screen — for real — to the size a drag is currently at.
  *
- * The white screen *is* the feedback — an outline beside a stale box reads as two
- * disagreeing rectangles — so the frame follows the pointer while the emulation
- * itself is only written on release. Centred, because it goes through the same
- * `deviceLayout` as everything else: the screen grows and shrinks about its middle
- * rather than trailing off to the bottom right.
+ * The page reflows live, so a drag is a responsive test rather than a preview of
+ * one: that is the whole reason to have this inside the pane. Centred, because it
+ * goes through the same `deviceLayout` as everything else.
  *
- * Nothing is sent to the shell: the native view is hidden for the duration of the
- * drag, and `enableDeviceEmulation` per pointer move would relayout the guest page
- * dozens of times for frames nobody sees.
+ * Coalesced to one frame. Every applied size is an `enableDeviceEmulation`, which
+ * relayouts the *user's* page and fires its `resize` handlers — a mouse can produce
+ * several moves per frame, and there is no point relayouting an app twice for one
+ * painted frame. The emulation is written to the layout only on release.
  */
 export function previewBrowserResize(id: string, width: number, height: number): void {
   const v = views.get(id);
-  if (!v || !v.emulation || !v.mounted || !v.container.isConnected) return;
-  const box = v.container.getBoundingClientRect();
-  if (box.width < 1 || box.height < 1) return;
-  paintScreen(v, { ...v.emulation, width, height }, box);
+  if (!v || !v.emulation) return;
+  v.pending = { width, height };
+  if (v.pendingFrame !== 0) return;
+  v.pendingFrame = requestAnimationFrame(() => {
+    v.pendingFrame = 0;
+    const size = v.pending;
+    if (!size || !v.emulation || !v.mounted || !v.container.isConnected) return;
+    const box = v.container.getBoundingClientRect();
+    if (box.width < 1 || box.height < 1) return;
+    const preview = { ...v.emulation, width: size.width, height: size.height };
+    const { layout, radius } = paintScreen(v, preview, box);
+    if (!desktop || !v.shellHasView) return;
+    // Emulation before bounds: the shell's bounds handler re-applies the metrics
+    // when the scale moves, so the other order would apply the *new* scale to the
+    // old viewport for one call. Both land in the same tick, so nothing paints in
+    // between either way — it is the ordering that is correct, not the timing.
+    void desktop.emulate(id, preview).catch(reportFailure(v));
+    pushGeometry(
+      v,
+      { x: box.left + layout.x, y: box.top + layout.y, width: layout.width, height: layout.height },
+      layout.scale,
+      radius,
+    );
+  });
+}
+
+/**
+ * Mouse events the *pane's page* saw, forwarded by the shell during a drag.
+ *
+ * The gesture's second source of pointer data, and the thing that makes a live
+ * resize possible at all: a `WebContentsView` owns every mouse event inside its own
+ * rect, so a drag whose pointer crosses the page would otherwise lose its moves and
+ * never see its `mouseup`. Coordinates are already in this window's CSS pixels (the
+ * shell derives them from the cursor position, not from the event), so a consumer
+ * can treat them exactly like a `pointermove`.
+ */
+export function onBrowserPointer(
+  fn: (event: { viewId: string; type: string; x: number; y: number }) => void,
+): () => void {
+  return desktop ? desktop.onPointer(fn) : () => {};
 }
 
 /** Back to the stylesheet's own 100%/100%, rather than to a computed size: the

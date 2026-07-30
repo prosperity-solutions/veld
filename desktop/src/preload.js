@@ -45,6 +45,13 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  inspector and the renderer's bounds mirroring fight over the view's box. */
     devTools: (viewId, action) =>
       ipcRenderer.invoke("veld:browser:devtools", { viewId, action }),
+    /** Ask the shell to forward this view's pointer while the page drags the
+     *  screen's edge. Without it a drag dies the moment the cursor crosses the
+     *  view, which owns every mouse event inside its own rect. */
+    drag: (viewId, dragging) => ipcRenderer.invoke("veld:browser:drag", { viewId, dragging }),
+    /** Mouse moves and the mouse-up seen *by the pane's page*, in the window's CSS
+     *  pixels — only while `drag` is on. */
+    onPointer: (fn) => on("veld:browser:pointer", fn),
     destroy: (viewId) => ipcRenderer.invoke("veld:browser:destroy", { viewId }),
     /** Clear one session slot's cookies and storage, pane or no pane. */
     clearSession: (profile) => ipcRenderer.invoke("veld:browser:clear-session", { profile }),
