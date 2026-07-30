@@ -172,13 +172,14 @@ def render(
                     # Into mark space.
                     ux = (x - ox) / scale
                     uy = (y - oy) / scale
-                    # `elif`: the two glyph shapes are disjoint in this mark (the V
-                    # spans x 13–18 where the dot sits at 22–27), so a sample belongs
-                    # to at most one. If a future mark overlaps them, this and the
-                    # sequential compositing below under-report coverage — a pixel
-                    # split 8/8 would come out at alpha 0.75 rather than 1.0. Fix it
-                    # there by accumulating glyph coverage once, not by adding a
-                    # branch here.
+                    # `elif`: the two glyph shapes are disjoint in this mark, so a
+                    # sample belongs to at most one. The V is wide overall (x 4–27.5)
+                    # but converges towards its foot, and by the dot's y-band (24–29)
+                    # its strokes are down to x≈13–18 — measured, not eyeballed. If a
+                    # future mark overlaps them, this and the sequential compositing
+                    # below under-report coverage: a pixel split 8/8 between the two
+                    # comes out at alpha 0.75 rather than 1.0. Fix that by
+                    # accumulating glyph coverage once, not by adding a branch here.
                     if in_polygon(ux, uy, V_POLYGON):
                         v_hits += 1
                     elif (ux - dcx) ** 2 + (uy - dcy) ** 2 <= DOT_RADIUS**2:

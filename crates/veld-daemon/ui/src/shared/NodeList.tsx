@@ -137,9 +137,11 @@ function NodeStatsLine(props: { stats?: NodeStats }) {
 
 /** What is wrong with this node, if anything. */
 function healthNote(n: NodeRow): string | null {
+  // Label-colon form, as the old table had it: count-agnostic, so a single
+  // failure does not read as "1 consecutive failures".
   const parts = [
-    n.consecutive_failures > 0 ? `${n.consecutive_failures} consecutive failures` : null,
-    n.recovery_count > 0 ? `${n.recovery_count} recoveries` : null,
+    n.consecutive_failures > 0 ? `failures: ${n.consecutive_failures}` : null,
+    n.recovery_count > 0 ? `recoveries: ${n.recovery_count}` : null,
     n.last_liveness_error,
   ].filter(Boolean);
   return parts.length > 0 ? parts.join(" · ") : null;
@@ -180,7 +182,12 @@ function NodeCard(props: {
           style={{ background: bucketColor(bucket), animation: "none" }}
           aria-hidden
         />
-        <span className="node-name">{n.name}</span>
+        {/* `title`, because the card ellipsises a long name where the old table
+            cell just widened — a truncated name with no way to read it is a fact
+            lost, not a fact compressed. */}
+        <span className="node-name" title={n.name}>
+          {n.name}
+        </span>
         {/* The variant qualifies the name (`web:local`), so it travels with it
             rather than living in a field of its own. */}
         <span className="node-variant">{n.variant}</span>
