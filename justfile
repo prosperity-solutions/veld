@@ -327,8 +327,9 @@ ui-deps:
     # Presence is not enough — npm records the tree it installed in
     # node_modules/.package-lock.json, so a checkout that predates a *new*
     # dependency has a complete-looking node_modules that is missing it, and the
-    # failure is a cryptic "Cannot find package". Same rule as
-    # crates/veld-daemon/build.rs.
+    # failure is a cryptic "Cannot find package". `-nt` is also true when the
+    # marker is absent, which is the interrupted-install case (`npm ci` removes
+    # node_modules first). Same rule as crates/veld-daemon/build.rs.
     if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
         npm install
     fi

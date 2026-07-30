@@ -157,16 +157,18 @@ export function ShareControls(props: {
             void act("share", "Start sharing", async () => {
               const r = await api.startShare(props.run);
               if (!r?.join_url) return;
-              // Reported separately, and never as a failure of the share: the
-              // share is live by this point, and a refused clipboard write
-              // (no permission, a non-secure origin) that surfaced as
-              // "Start sharing failed" would send the user to undo something
-              // that worked.
+              // Never reported as a failure of the *share*: it is live by this
+              // point, and "Start sharing failed" would send the user to undo
+              // something that worked. Not reported as an error at all, either —
+              // WebKit only allows a clipboard write in the same task as the
+              // gesture, and this one follows an awaited round-trip, so in the
+              // browser build the refusal is the norm rather than a fault. The
+              // strip that just appeared carries a Copy link button; say that.
               try {
                 await navigator.clipboard.writeText(r.join_url);
                 notifyDone("Sharing — join link copied to the clipboard");
-              } catch (e) {
-                notifyError("Copy the join link", e);
+              } catch {
+                notifyDone("Sharing — use Copy link to get the invite");
               }
             })
           }
@@ -309,6 +311,17 @@ export function RunSharePanel(props: {
   /** The share list could not be read, so `shares` says nothing about reality. */
   unknown?: boolean;
   /**
+   * Live shares belonging to *another* run of the same worktree.
+   *
+   * They exist for two reasons the panel cannot fix by itself: a worktree can hold
+   * more than one environment (`diagnosticsRun` picks one), and a crashed run's
+   * shares outlive it until the GC pass releases them. Either way a public URL may
+   * still be serving, so the panel shows them rather than offering to start a
+   * second share of the same thing — the same problem runs mode solves with
+   * `unattachedShareIds`.
+   */
+  otherRuns?: ShareInfo[];
+  /**
    * Why there is nothing to share — the host knows, this doesn't. Distinct from
    * the diagnostics panes' hint on purpose: "start the run and its logs appear
    * here" is the wrong sentence under a Sharing control.
@@ -354,7 +367,38 @@ export function RunSharePanel(props: {
       {web.map((w) => (
         <WebShareStrip key={w.id} share={w} onChanged={props.onChanged} />
       ))}
+      {(props.otherRuns ?? []).map((s) => (
+        <OtherRunShare key={s.id} share={s} onChanged={props.onChanged} />
+      ))}
     </div>
+  );
+}
+
+/** A share of another of this worktree's runs — named, and stoppable. */
+function OtherRunShare(props: { share: ShareInfo; onChanged: () => void }) {
+  const { busy, act } = useShareAction(props.onChanged);
+  const s = props.share;
+  const web = s.public_urls.length > 0;
+  return (
+    <Group gap={6} px={12} pb={6} wrap="wrap" className="share-strip">
+      <span className="dot partial" style={{ animation: "none" }} />
+      <Text size="xs">
+        {web ? "Public web" : "Sharing"} · run <b>{s.run || s.id}</b>
+      </Text>
+      <Text size="xs" c="dimmed">
+        not the run shown here
+      </Text>
+      <div style={{ flex: 1 }} />
+      <Button
+        size="compact-xs"
+        color="red"
+        variant="light"
+        loading={busy === "stop-other"}
+        onClick={() => void act("stop-other", "Stop that share", () => api.stopShare(s.id))}
+      >
+        Stop
+      </Button>
+    </Group>
   );
 }
 

@@ -202,8 +202,13 @@ jobs:
       - name: Icons match the generator
         run: |
           python3 scripts/make-icons.py
-          git diff --exit-code -- assets \
-            || { echo "::error::desktop/assets is out of date — run 'just desktop-icons' and commit"; exit 1; }
+          # `git status`, not `git diff`: a generator that grows an output writes an
+          # *untracked* file, which a diff ignores by definition.
+          if [ -n "$(git status --porcelain -- assets)" ]; then
+            git status --porcelain -- assets
+            echo "::error::desktop/assets is out of date — run 'just desktop-icons' and commit"
+            exit 1
+          fi
       # The shell's own trust boundary: what the page is allowed to hand the main
       # process (view ids, session slot names, URLs). Pure and Electron-free on
       # purpose, so it is testable without a Chromium binary.

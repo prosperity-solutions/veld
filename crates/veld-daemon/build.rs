@@ -14,6 +14,7 @@ use std::process::Command;
 /// idempotent, so a false positive costs one reinstall.
 fn ensure_node_modules(dir: &Path) {
     let modules = dir.join("node_modules");
+    let marker = modules.join(".package-lock.json");
     // npm's own staleness signal: it writes `node_modules/.package-lock.json`
     // after installing, so a `package-lock.json` newer than that marker means the
     // tree on disk was built from a different lockfile. Mtimes rather than a JSON
@@ -21,20 +22,29 @@ fn ensure_node_modules(dir: &Path) {
     // name/version header), and because this runs on every build — the cost of a
     // false positive is one idempotent `npm ci`, the cost of a false negative is
     // the cryptic "Cannot find package" this function exists to prevent.
-    let stale = match (
-        dir.join("package-lock.json")
-            .metadata()
-            .and_then(|m| m.modified()),
-        modules
-            .join(".package-lock.json")
-            .metadata()
-            .and_then(|m| m.modified()),
-    ) {
-        (Ok(lock), Ok(installed)) => lock > installed,
-        // No marker (or no lockfile to compare): fall back to presence alone.
-        _ => !modules.exists(),
+    let stale = if !modules.exists() || !marker.exists() {
+        // No marker with a directory present is a tree npm did not finish writing:
+        // `npm ci` deletes node_modules *first*, so a Ctrl-C mid-install leaves
+        // exactly that — a partial tree which presence alone reads as fine.
+        true
+    } else {
+        match (
+            dir.join("package-lock.json")
+                .metadata()
+                .and_then(|m| m.modified()),
+            marker.metadata().and_then(|m| m.modified()),
+        ) {
+            // Two seconds of slack, because npm writes both files in the same
+            // breath: measured, the lockfile lands ~9ms *before* the marker, and a
+            // bare `>` on a machine where that order inverts would reinstall every
+            // package on every build, clippy run and rust-analyzer save-check. A
+            // pull that really changes the lockfile moves it by minutes.
+            (Ok(lock), Ok(installed)) => lock > installed + std::time::Duration::from_secs(2),
+            // Unreadable metadata: reinstall rather than risk the cryptic failure.
+            _ => true,
+        }
     };
-    if modules.exists() && !stale {
+    if !stale {
         return;
     }
     let install = Command::new("npm")

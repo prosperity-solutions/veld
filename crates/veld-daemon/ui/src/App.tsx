@@ -575,7 +575,19 @@ function AppInner(props: {
   const runShares = diagRun
     ? sharesForRun(shares?.shares ?? [], diagRun.run_id)
     : { peer: null, web: [] };
-  const sharingActive = !!runShares.peer || runShares.web.length > 0;
+  /**
+   * Shares of this worktree's *other* runs.
+   *
+   * A worktree can hold several environments, and a crashed run's shares outlive it
+   * until the GC pass releases them — so scoping the Sharing surface to `diagRun`
+   * alone hid live shares (possibly a public URL still serving) behind a button
+   * that offered to start another one.
+   */
+  const worktreeShares = (shares?.shares ?? []).filter(
+    (s) => s.run_id && runs.some((r) => r.run_id === s.run_id),
+  );
+  const otherRunShares = worktreeShares.filter((s) => s.run_id !== diagRun?.run_id);
+  const sharingActive = worktreeShares.length > 0;
   /**
    * A share mutation fired from the palette.
    *
@@ -1030,11 +1042,10 @@ function AppInner(props: {
                 // Not awaited into the share's own error path — see ShareControls:
                 // the share is already live, so a refused clipboard write must not
                 // report that sharing failed.
-                if (r?.join_url) {
-                  void navigator.clipboard
-                    .writeText(r.join_url)
-                    .catch((e) => notifyError("Copy the join link", e));
-                }
+                // Not an error when it is refused: WebKit only allows a write in
+                // the same task as the gesture, and this follows a round-trip. The
+                // Sharing surface's Copy link button is the fallback.
+                if (r?.join_url) void navigator.clipboard.writeText(r.join_url).catch(() => {});
               }),
           });
         }
@@ -1306,6 +1317,7 @@ function AppInner(props: {
             running={diagRun?.status === "running"}
             shares={shares?.shares ?? []}
             unknown={shares === null || sharesStale}
+            otherRuns={otherRunShares}
             emptyHint={shareEmptyHint}
             onChanged={() => void refresh()}
           />

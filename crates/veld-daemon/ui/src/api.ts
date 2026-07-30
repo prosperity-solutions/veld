@@ -317,9 +317,13 @@ export async function errorMessage(res: Response): Promise<string> {
   } catch {
     // Not JSON: the plain-text shape below.
   }
-  // Long enough for the daemon's multi-sentence refusals, capped so a runaway
-  // body can't become the whole toast.
-  return raw.length > 600 ? `${raw.slice(0, 600)}…` : raw;
+  // Long enough for the daemon's multi-sentence refusals, capped so a runaway body
+  // can't become the whole toast. Backs off a code unit when the cut lands between
+  // a surrogate pair — the daemon quotes paths and worktree aliases, and those can
+  // hold an emoji, which would otherwise render as U+FFFD.
+  if (raw.length <= 600) return raw;
+  const cut = /[\uD800-\uDBFF]$/.test(raw.slice(0, 600)) ? 599 : 600;
+  return `${raw.slice(0, cut)}…`;
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
