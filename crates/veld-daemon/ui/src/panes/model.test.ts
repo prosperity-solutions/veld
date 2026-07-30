@@ -677,6 +677,7 @@ describe("browser tabs", () => {
       touch: true,
       ua: "Mozilla/5.0 (iPhone) Safari/604.1",
       fit: true,
+      radius: 48,
     };
     const restored = restore({ id: "a", kind: "browser", title: "t", emulation, zoom: 1.25 });
     expect(restored?.emulation).toEqual(emulation);

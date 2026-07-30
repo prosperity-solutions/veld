@@ -75,6 +75,10 @@ const MAX_DEVICE_PX = 4096;
 const MAX_UA_LEN = 512;
 const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 3;
+/** A screen scaled below this is a few pixels of page; treat it as the floor
+ *  rather than rendering into nothing. */
+const MIN_SCALE = 0.02;
+const MAX_DEVICE_RADIUS = 64;
 
 /**
  * A user-agent string the shell is willing to put in a request header, or `null`.
@@ -137,25 +141,26 @@ function safeZoom(raw) {
 }
 
 /**
- * How far an emulated viewport has to shrink to fit the view's box, never above 1.
+ * The factor an emulated viewport is rendered at inside the view's box, clamped.
  *
- * The "larger screen than the pane" case, which is the reason emulation is worth
- * having *inside* a dock: a 1440-wide layout is readable in a 600px pane at 40%,
- * and unreachable in one at 100%.
- *
- * Both dimensions, because the emulated screen **is** the view — a viewport
- * scaled to the box's width but taller than it is clipped, and the missing part
- * has nothing to scroll it into sight.
- *
- * The box is in device-independent pixels, which is why this lives here and not
- * beside the renderer's copy (`fitScale` in `panes/devices.ts`): page zoom scales
- * the CSS pixels the renderer measures and not the bounds a native view is given,
- * so only the main process knows the number this needs.
+ * Computed by the renderer, which owns the pane's geometry (`deviceLayout` in
+ * `panes/devices.ts`) — the shell only has to make sure the number it applies is
+ * usable. Never above 1: emulation shrinks a screen to fit a pane, and magnifying
+ * one is what page zoom is for. Never at zero either, which would render the page
+ * into nothing and look identical to a broken view.
  */
-function fitScale(emulation, box) {
-  if (!emulation || !emulation.fit) return 1;
-  if (!box || !(box.width > 0) || !(box.height > 0)) return 1;
-  return Math.min(1, box.width / emulation.width, box.height / emulation.height);
+function safeScale(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Math.min(1, Math.max(MIN_SCALE, n));
+}
+
+/** The screen's corner radius, in the pixels the view is actually drawn at.
+ *  Already scaled by the renderer, so this only bounds it. */
+function safeRadius(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return 0;
+  return Math.min(MAX_DEVICE_RADIUS, Math.round(n));
 }
 
 module.exports = {
@@ -168,5 +173,6 @@ module.exports = {
   safeUserAgent,
   safeEmulation,
   safeZoom,
-  fitScale,
+  safeScale,
+  safeRadius,
 };

@@ -24,8 +24,12 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Create (or adopt) the view for `viewId`; resolves to its state. */
     create: (viewId, options) =>
       ipcRenderer.invoke("veld:browser:create", { viewId, ...options }),
-    /** Mirror the pane's rect, in CSS pixels relative to the window. */
-    setBounds: (viewId, rect) => ipcRenderer.invoke("veld:browser:bounds", { viewId, rect }),
+    /** Mirror the emulated screen's rect, in CSS pixels relative to the window,
+     *  with the factor its viewport is rendered at inside it and the screen's
+     *  corner radius. One call because they are one calculation: the page owns the
+     *  geometry, the shell applies it. */
+    setBounds: (viewId, rect, scale, radius) =>
+      ipcRenderer.invoke("veld:browser:bounds", { viewId, rect, scale, radius }),
     setVisible: (viewId, visible) =>
       ipcRenderer.invoke("veld:browser:visible", { viewId, visible }),
     navigate: (viewId, url) => ipcRenderer.invoke("veld:browser:navigate", { viewId, url }),

@@ -63,6 +63,7 @@ import {
   formatPercent,
   formatZoom,
   isLandscape,
+  orientationLabel,
   rotateEmulation,
   zoomStep,
 } from "./devices";
@@ -512,153 +513,189 @@ export function BrowserPane(props: {
               )}
             </button>
           </Menu.Target>
-          <Menu.Dropdown>
-            <Menu.Label>
-              {iframeBackend
-                ? "Sizes work in a browser tab; user agent, touch and zoom need the desktop app"
-                : "Emulated viewport, scaled to fit the pane"}
-            </Menu.Label>
-            <Menu.Item
-              fw={emulation ? undefined : 700}
-              leftSection={emulation ? undefined : <IconCheck size={14} />}
-              onClick={() => applyEmulation(null)}
-            >
-              Pane size
-            </Menu.Item>
-            {DEVICE_GROUPS.map((group) => (
-              <div key={group}>
-                <Menu.Label>{group}</Menu.Label>
-                {DEVICE_PRESETS.filter((p) => p.group === group).map((preset) => (
-                  <Menu.Item
-                    key={preset.id}
-                    fw={emulation?.device === preset.id ? 700 : undefined}
-                    leftSection={
-                      emulation?.device === preset.id ? <IconCheck size={14} /> : undefined
-                    }
-                    // Keeps the current orientation when swapping devices: having
-                    // rotated one phone, the next one you compare it against
-                    // should arrive the same way round.
-                    onClick={() =>
-                      applyEmulation(
-                        emulationForPreset(preset, {
-                          landscape: emulation ? isLandscape(emulation) : false,
-                          chrome: HOST_CHROME,
-                          fit: emulation?.fit ?? true,
-                        }),
-                      )
-                    }
-                    rightSection={
-                      <span className="menu-size faint">
-                        {preset.width} × {preset.height}
-                      </span>
-                    }
-                  >
-                    {preset.label}
-                  </Menu.Item>
+          {/* Two columns, because this menu answers two questions — *which* device,
+              and *how* it is shown — and one list of both was taller than the
+              window it opened in. The device list scrolls on its own so growing the
+              preset table can never push the zoom controls off screen again, and
+              the dropdown is capped to the viewport as a second guard for a short
+              window. */}
+          <Menu.Dropdown className="device-menu">
+            <div className="device-menu-cols">
+              <div className="device-menu-col devices">
+                <Menu.Label>Device</Menu.Label>
+                <Menu.Item
+                  fw={emulation ? undefined : 700}
+                  leftSection={emulation ? undefined : <IconCheck size={14} />}
+                  onClick={() => applyEmulation(null)}
+                >
+                  Pane size
+                </Menu.Item>
+                {DEVICE_GROUPS.map((group) => (
+                  <div key={group}>
+                    <Menu.Label>{group}</Menu.Label>
+                    {DEVICE_PRESETS.filter((p) => p.group === group).map((preset) => (
+                      <Menu.Item
+                        key={preset.id}
+                        fw={emulation?.device === preset.id ? 700 : undefined}
+                        leftSection={
+                          emulation?.device === preset.id ? <IconCheck size={14} /> : undefined
+                        }
+                        // Keeps the current orientation when swapping devices:
+                        // having rotated one phone, the next one you compare it
+                        // against should arrive the same way round.
+                        onClick={() =>
+                          applyEmulation(
+                            emulationForPreset(preset, {
+                              landscape: emulation ? isLandscape(emulation) : false,
+                              chrome: HOST_CHROME,
+                              fit: emulation?.fit ?? true,
+                            }),
+                          )
+                        }
+                        rightSection={
+                          <span className="menu-size faint">
+                            {preset.width} × {preset.height}
+                          </span>
+                        }
+                      >
+                        {preset.label}
+                      </Menu.Item>
+                    ))}
+                  </div>
                 ))}
               </div>
-            ))}
-            <Menu.Divider />
-            {/* Everything below acts on the current device, so it is all inert
-                without one — disabled rather than hidden, because a menu whose
-                length changes is a menu you have to re-read. */}
-            <Menu.Item
-              leftSection={<IconRotateClockwise size={14} />}
-              disabled={!emulation}
-              onClick={() => emulation && applyEmulation(rotateEmulation(emulation))}
-            >
-              Rotate
-            </Menu.Item>
-            <Menu.Item
-              closeMenuOnClick={false}
-              leftSection={emulation?.fit ? <IconCheck size={14} /> : undefined}
-              disabled={!emulation}
-              onClick={() => emulation && applyEmulation({ ...emulation, fit: !emulation.fit })}
-            >
-              Fit to pane
-            </Menu.Item>
-            <Menu.Item
-              closeMenuOnClick={false}
-              leftSection={emulation?.touch ? <IconCheck size={14} /> : undefined}
-              disabled={!emulation || iframeBackend}
-              onClick={() => emulation && applyEmulation({ ...emulation, touch: !emulation.touch })}
-            >
-              Touch events
-            </Menu.Item>
-            {/* Touch needs Chromium's debugger session, which something else can
-                hold — DevTools does on some Electron versions, though not this
-                one. Reported from what the shell actually achieved rather than
-                from a guess about the cause. */}
-            {touchSuspended && (
-              <Menu.Label>Touch is paused — Chromium's debugger is in use elsewhere</Menu.Label>
-            )}
-            <Menu.Divider />
-            <Menu.Label>Custom size</Menu.Label>
-            {/* Not a Menu.Item: these are fields, and a click in one must not
-                close the menu it lives in. */}
-            <div className="menu-fields">
-              <input
-                type="number"
-                aria-label="Custom width"
-                min={MIN_DEVICE_PX}
-                max={MAX_DEVICE_PX}
-                placeholder={String(emulation?.width ?? 1280)}
-                value={customW}
-                onChange={(e) => setCustomW(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === "Enter" && applyCustom()}
-              />
-              <span className="faint">×</span>
-              <input
-                type="number"
-                aria-label="Custom height"
-                min={MIN_DEVICE_PX}
-                max={MAX_DEVICE_PX}
-                placeholder={String(emulation?.height ?? 800)}
-                value={customH}
-                onChange={(e) => setCustomH(e.currentTarget.value)}
-                onKeyDown={(e) => e.key === "Enter" && applyCustom()}
-              />
-              <button className="btn" onClick={applyCustom}>
-                Apply
-              </button>
-            </div>
-            <Menu.Divider />
-            <Menu.Label>
-              {iframeBackend ? "Page zoom needs the desktop app" : "Page zoom"}
-            </Menu.Label>
-            {/* A 1440-wide layout is readable in a 600px pane at 60%, which is
-                useful well before any device preset is — and it is the same
-                "state lives in the layout, re-asserted when the view is
-                recreated" problem, so it belongs in the same menu. */}
-            <div className="menu-fields">
-              <ActionIcon
-                size="sm"
-                variant="subtle"
-                color="gray"
-                aria-label="Zoom out"
-                disabled={iframeBackend}
-                onClick={() => applyZoom(zoomStep(zoom, -1))}
-              >
-                <IconMinus size={14} />
-              </ActionIcon>
-              <span className="menu-value">{formatZoom(zoom)}</span>
-              <ActionIcon
-                size="sm"
-                variant="subtle"
-                color="gray"
-                aria-label="Zoom in"
-                disabled={iframeBackend}
-                onClick={() => applyZoom(zoomStep(zoom, 1))}
-              >
-                <IconPlus size={14} />
-              </ActionIcon>
-              <button
-                className="btn"
-                disabled={iframeBackend || zoom === DEFAULT_ZOOM}
-                onClick={() => applyZoom(DEFAULT_ZOOM)}
-              >
-                Reset
-              </button>
+
+              <div className="device-menu-col">
+                {/* What is set right now, at the top of the column that changes it:
+                    the size alone does not say which device it came from, and a
+                    rotated preset is the same two numbers as a smaller one. */}
+                <Menu.Label>
+                  {emulation
+                    ? `${emulationLabel(emulation)} · ${emulationSize(emulation)}`
+                    : "No device — the page is the pane"}
+                </Menu.Label>
+                {/* Everything here acts on the current device, so it is all inert
+                    without one — disabled rather than hidden, because a menu whose
+                    length changes is a menu you have to re-read. */}
+                <Menu.Item
+                  leftSection={<IconRotateClockwise size={14} />}
+                  disabled={!emulation}
+                  onClick={() => emulation && applyEmulation(rotateEmulation(emulation))}
+                  rightSection={
+                    <span className="menu-size faint">
+                      {emulation ? orientationLabel(emulation) : ""}
+                    </span>
+                  }
+                >
+                  Rotate
+                </Menu.Item>
+                <Menu.Item
+                  closeMenuOnClick={false}
+                  leftSection={emulation?.fit ? <IconCheck size={14} /> : undefined}
+                  disabled={!emulation}
+                  onClick={() => emulation && applyEmulation({ ...emulation, fit: !emulation.fit })}
+                  rightSection={
+                    <span className="menu-size faint">
+                      {fitted ? formatPercent(state.emulationScale) : ""}
+                    </span>
+                  }
+                >
+                  Fit to pane
+                </Menu.Item>
+                <Menu.Item
+                  closeMenuOnClick={false}
+                  leftSection={emulation?.touch ? <IconCheck size={14} /> : undefined}
+                  disabled={!emulation || iframeBackend}
+                  onClick={() =>
+                    emulation && applyEmulation({ ...emulation, touch: !emulation.touch })
+                  }
+                >
+                  Touch events
+                </Menu.Item>
+                {/* Touch needs Chromium's debugger session, which something else
+                    can hold — DevTools does on some Electron versions, though not
+                    this one. Reported from what the shell actually achieved rather
+                    than from a guess about the cause. */}
+                {touchSuspended && (
+                  <Menu.Label>Touch is paused — Chromium's debugger is in use elsewhere</Menu.Label>
+                )}
+
+                <Menu.Divider />
+                <Menu.Label>Custom size</Menu.Label>
+                {/* Not a Menu.Item: these are fields, and a click in one must not
+                    close the menu it lives in. */}
+                <div className="menu-fields">
+                  <input
+                    type="number"
+                    aria-label="Custom width"
+                    min={MIN_DEVICE_PX}
+                    max={MAX_DEVICE_PX}
+                    placeholder={String(emulation?.width ?? 1280)}
+                    value={customW}
+                    onChange={(e) => setCustomW(e.currentTarget.value)}
+                    onKeyDown={(e) => e.key === "Enter" && applyCustom()}
+                  />
+                  <span className="faint">×</span>
+                  <input
+                    type="number"
+                    aria-label="Custom height"
+                    min={MIN_DEVICE_PX}
+                    max={MAX_DEVICE_PX}
+                    placeholder={String(emulation?.height ?? 800)}
+                    value={customH}
+                    onChange={(e) => setCustomH(e.currentTarget.value)}
+                    onKeyDown={(e) => e.key === "Enter" && applyCustom()}
+                  />
+                  <button className="btn" onClick={applyCustom}>
+                    Apply
+                  </button>
+                </div>
+
+                <Menu.Divider />
+                <Menu.Label>
+                  {iframeBackend ? "Page zoom needs the desktop app" : "Page zoom"}
+                </Menu.Label>
+                {/* A 1440-wide layout is readable in a 600px pane at 60%, which is
+                    useful well before any device preset is — and it is the same
+                    "state lives in the layout, re-asserted when the view is
+                    recreated" problem, so it belongs in the same menu. */}
+                <div className="menu-fields">
+                  <ActionIcon
+                    size="sm"
+                    variant="subtle"
+                    color="gray"
+                    aria-label="Zoom out"
+                    disabled={iframeBackend}
+                    onClick={() => applyZoom(zoomStep(zoom, -1))}
+                  >
+                    <IconMinus size={14} />
+                  </ActionIcon>
+                  <span className="menu-value">{formatZoom(zoom)}</span>
+                  <ActionIcon
+                    size="sm"
+                    variant="subtle"
+                    color="gray"
+                    aria-label="Zoom in"
+                    disabled={iframeBackend}
+                    onClick={() => applyZoom(zoomStep(zoom, 1))}
+                  >
+                    <IconPlus size={14} />
+                  </ActionIcon>
+                  <button
+                    className="btn"
+                    disabled={iframeBackend || zoom === DEFAULT_ZOOM}
+                    onClick={() => applyZoom(DEFAULT_ZOOM)}
+                  >
+                    Reset
+                  </button>
+                </div>
+
+                {iframeBackend && (
+                  <Menu.Label>
+                    Sizes work in a browser tab; user agent, touch and zoom need the desktop app
+                  </Menu.Label>
+                )}
+              </div>
             </div>
           </Menu.Dropdown>
         </Menu>

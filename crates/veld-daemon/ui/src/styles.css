@@ -914,11 +914,44 @@ select:focus {
   border: 0;
 }
 
-/* An emulated frame is a device-sized box scaled to fit, which is routinely
-   *larger* than the pane before the transform is applied. Clipped here so it can
-   never paint outside the slot. */
+/* An emulated screen is a device-sized box scaled to fit, which before the
+   transform is routinely *larger* than the pane. Clipped here so it can never
+   paint outside the slot. */
 .browser-host {
   overflow: hidden;
+}
+
+/* The backdrop an emulated screen sits on: a dotted drafting-paper field, so the
+   pane reads as "a device on a surface" rather than as a page with odd margins.
+   Only while a device is set — without one the page fills the pane and there is
+   no surface to see. Set by `syncGeometry` in panes/browserHost.ts. */
+.browser-host[data-emulated="true"] {
+  background-color: var(--panel2);
+  background-image: radial-gradient(var(--border2) 1px, transparent 1px);
+  background-size: 12px 12px;
+  background-position: -1px -1px;
+}
+
+/* The emulated screen itself: positioned, sized and rounded by `syncGeometry`,
+   which owns the geometry for both backends. With no device it fills the host and
+   is invisible — one element always means "where the page is".
+
+   The border and the shadow are **outside** the box on purpose (`box-shadow`
+   spread rather than `border`): under Electron the native view covers this
+   element's own rect exactly, so anything painted inside it would be hidden, while
+   a shadow that spreads outward is not. The page is clipped to the same corners by
+   Electron's `setBorderRadius`, and by `overflow: hidden` in the browser build. */
+.browser-device-frame {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+
+.browser-host[data-emulated="true"] .browser-device-frame {
+  background: #fff;
+  box-shadow:
+    0 0 0 1px var(--border2),
+    0 10px 30px rgb(0 0 0 / 28%);
 }
 
 .browser-frame {
@@ -930,7 +963,7 @@ select:focus {
    `transform: scale()` shrinks the rendered result to fit. `inset: 0` would
    otherwise fight the inline width/height — an absolutely positioned box with
    left+right+width set is over-constrained — so the emulated frame is anchored
-   top-left and sized instead. Set by `applyIframeEmulation` in browserHost.ts. */
+   top-left and sized instead. Set by `syncGeometry` in browserHost.ts. */
 .browser-frame[data-emulated="true"] {
   inset: 0 auto auto 0;
 }
@@ -961,6 +994,33 @@ select:focus {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 10.5px;
   white-space: nowrap;
+}
+
+/* The device/zoom menu: two columns for its two concerns — *which* device on the
+   left, *how* it is shown on the right. One list of both was taller than the
+   window it opened in (a pane's chrome sits near the top, so the dropdown has the
+   whole window height to overflow). */
+.device-menu {
+  /* Capped to the viewport, with the whole dropdown scrollable as the last
+     resort — a short window must never hide the zoom controls. */
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+}
+.device-menu-cols {
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+}
+.device-menu-col {
+  min-width: 190px;
+}
+/* The device list scrolls on its own, so adding presets can never push the
+   controls beside it off screen again. */
+.device-menu-col.devices {
+  max-height: min(58vh, 420px);
+  overflow-y: auto;
+  border-right: 1px solid var(--border);
+  padding-right: 4px;
 }
 
 /* A row of fields inside a menu — the custom size and the zoom stepper. Not

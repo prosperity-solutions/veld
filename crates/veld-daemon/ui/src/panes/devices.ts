@@ -45,6 +45,22 @@ export const MAX_DEVICE_PX = 4096;
  */
 export const MAX_UA_LEN = 512;
 
+/** Ceiling on a screen radius, and what a hand-entered size gets. Custom sizes
+ *  are barely rounded on purpose: nobody said that viewport was a phone. */
+export const MAX_DEVICE_RADIUS = 64;
+export const CUSTOM_RADIUS = 8;
+
+/**
+ * Gap between the emulated screen and the pane's edge, in CSS pixels.
+ *
+ * Not decoration: without it an emulated 1440-wide viewport scaled to fit reaches
+ * every edge of the pane and is indistinguishable from the pane simply *being*
+ * that page. The gap plus the backdrop behind it are what make "this is a device
+ * inside a pane" readable at a glance, and they are also what gives the screen's
+ * rounded corners something to be round against.
+ */
+export const DEVICE_PADDING = 14;
+
 export interface DevicePreset {
   id: string;
   label: string;
@@ -70,6 +86,16 @@ export interface DevicePreset {
   mobile: boolean;
   /** Whether picking this preset also turns touch emulation on. */
   touch: boolean;
+  /**
+   * Corner radius of the device's screen, in the device's own pixels.
+   *
+   * Part of what makes an emulated pane readable as a *device* rather than as a
+   * small window: a phone's screen is visibly round-cornered, a monitor's is
+   * nearly square. Scaled with the viewport when the pane shrinks it, so a phone
+   * at 40% keeps its proportions instead of looking like a rounded rectangle
+   * someone forgot to scale.
+   */
+  radius: number;
   /**
    * UA template, or `null` to keep the shell's own.
    *
@@ -102,6 +128,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 375,
     height: 667,
     deviceScaleFactor: 2,
+    radius: 40,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -113,6 +140,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 393,
     height: 852,
     deviceScaleFactor: 3,
+    radius: 48,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -124,6 +152,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 412,
     height: 915,
     deviceScaleFactor: 3,
+    radius: 40,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
@@ -135,6 +164,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 360,
     height: 780,
     deviceScaleFactor: 3,
+    radius: 36,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (Linux; Android 14; SM-S911B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Mobile Safari/537.36",
@@ -146,6 +176,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 744,
     height: 1133,
     deviceScaleFactor: 2,
+    radius: 22,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -157,6 +188,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 834,
     height: 1194,
     deviceScaleFactor: 2,
+    radius: 22,
     mobile: true,
     touch: true,
     ua: "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
@@ -168,6 +200,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 1280,
     height: 800,
     deviceScaleFactor: 2,
+    radius: 10,
     mobile: false,
     touch: false,
     ua: null,
@@ -179,6 +212,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 1440,
     height: 900,
     deviceScaleFactor: 1,
+    radius: 8,
     mobile: false,
     touch: false,
     ua: null,
@@ -190,6 +224,7 @@ export const DEVICE_PRESETS: readonly DevicePreset[] = [
     width: 1920,
     height: 1080,
     deviceScaleFactor: 1,
+    radius: 8,
     mobile: false,
     touch: false,
     ua: null,
@@ -232,6 +267,8 @@ export interface PaneEmulation {
   ua: string | null;
   /** Scale the emulated viewport down so all of it fits in the pane. */
   fit: boolean;
+  /** Screen corner radius in the device's own pixels; see `DevicePreset.radius`. */
+  radius: number;
 }
 
 /** An emulation from a preset. `chrome` fills the UA template's `{chrome}`. */
@@ -249,6 +286,7 @@ export function emulationForPreset(
     touch: preset.touch,
     ua: preset.ua === null ? null : resolveUserAgent(preset.ua, opts.chrome),
     fit: opts.fit ?? true,
+    radius: preset.radius,
   };
 }
 
@@ -273,6 +311,9 @@ export function customEmulation(
     touch: base?.touch ?? false,
     ua: base?.ua ?? null,
     fit: base?.fit ?? true,
+    // A hand-entered size is a *window* unless it inherited a device's shape:
+    // rounding a viewport nobody claimed is a phone would be decoration.
+    radius: base?.radius ?? CUSTOM_RADIUS,
   };
 }
 
@@ -313,24 +354,74 @@ export function emulationLabel(e: PaneEmulation): string {
   return rotated ? `${preset.label} · landscape` : preset.label;
 }
 
+/** Where the emulated screen sits inside a pane, and how far it is scaled. All
+ *  CSS pixels, relative to the pane's own box. */
+export interface DeviceLayout {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  /** Factor the emulated viewport is rendered at; 1 when it fits, or when
+   *  fitting is off (where an oversized device is cropped instead). */
+  scale: number;
+}
+
 /**
- * How far the emulated viewport has to shrink to fit a box, never above 1.
+ * Place the emulated screen in the pane: centred, inset by [`DEVICE_PADDING`],
+ * scaled to fit if asked.
  *
- * Both dimensions, not just width: a viewport scaled to the pane's width but
- * taller than the pane is *clipped*, and there is nothing to scroll — the
- * emulated screen is the pane, so the missing part is unreachable rather than
- * below the fold.
+ * **The single owner of this arithmetic**, for both backends and both processes.
+ * The shell used to compute the scale itself, from the native view's bounds in
+ * device-independent pixels — the only number a renderer cannot derive, since page
+ * zoom scales its CSS pixels and not a native view's bounds. That put the box in
+ * one place and the scale in another, which is a drift waiting to be a
+ * half-off-screen device; now the renderer computes both and the shell applies
+ * what it is given.
  *
- * The shell has its own copy of this (`fitScale` in `desktop/src/validate.js`)
- * and needs one: the native view's box is in device-independent pixels, which
- * only the main process knows, since page zoom scales the renderer's CSS pixels
- * and not the view's bounds. This copy serves the iframe backend, where the box
- * and the frame are both CSS pixels in the same document.
+ * Fitting considers **both** dimensions: the emulated screen *is* the view, so a
+ * viewport scaled to the pane's width but taller than the pane is clipped with
+ * nothing to scroll it into sight.
+ *
+ * With fitting **off** an oversized device is cropped rather than allowed to
+ * overflow, and anchored top-left rather than centred — under Electron the view is
+ * a native sibling that the pane's box does not clip, so an oversized rect would
+ * paint over the neighbouring pane; and when only part of a page is visible, the
+ * part worth showing is the top of it.
  */
-export function fitScale(e: PaneEmulation, box: { width: number; height: number }): number {
-  if (!e.fit) return 1;
-  if (!(box.width > 0) || !(box.height > 0)) return 1;
-  return Math.min(1, box.width / e.width, box.height / e.height);
+export function deviceLayout(
+  e: PaneEmulation,
+  box: { width: number; height: number },
+  padding: number = DEVICE_PADDING,
+): DeviceLayout {
+  const availWidth = box.width - padding * 2;
+  const availHeight = box.height - padding * 2;
+  // A pane too small to inset (mid-layout, or a sliver): fill it rather than
+  // computing a negative box.
+  if (!(availWidth >= 1) || !(availHeight >= 1)) {
+    return { x: 0, y: 0, width: Math.max(0, box.width), height: Math.max(0, box.height), scale: 1 };
+  }
+  const scale = e.fit ? Math.min(1, availWidth / e.width, availHeight / e.height) : 1;
+  const width = Math.min(e.width * scale, availWidth);
+  const height = Math.min(e.height * scale, availHeight);
+  return {
+    x: padding + Math.max(0, (availWidth - width) / 2),
+    y: padding + Math.max(0, (availHeight - height) / 2),
+    width,
+    height,
+    scale,
+  };
+}
+
+/** The screen's corner radius at the scale it is being shown at, so a phone at
+ *  40% keeps its shape instead of its pixel count. */
+export function scaledRadius(e: PaneEmulation, scale: number): number {
+  return Math.round(Math.min(MAX_DEVICE_RADIUS, Math.max(0, e.radius)) * scale);
+}
+
+/** `Portrait` / `Landscape` — the state the Rotate control is currently in, which
+ *  is otherwise only inferable by reading the two numbers. */
+export function orientationLabel(e: PaneEmulation): string {
+  return isLandscape(e) ? "Landscape" : "Portrait";
 }
 
 /**
@@ -462,6 +553,11 @@ export function sanitizeEmulation(raw: unknown): PaneEmulation | null {
     mobile: e.mobile === true,
     touch: e.touch === true,
     ua: safeUserAgentText(e.ua),
+    // Absent means a square-ish screen, which is what an emulation written before
+    // devices had a shape was being shown as anyway.
+    radius: Number.isFinite(Number(e.radius))
+      ? Math.min(MAX_DEVICE_RADIUS, Math.max(0, Math.round(Number(e.radius))))
+      : 0,
     // Absent means fitting, which is what every emulation this build writes does
     // and the only setting under which a screen preset is usable in a pane.
     fit: e.fit !== false,

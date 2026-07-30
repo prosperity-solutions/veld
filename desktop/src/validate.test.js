@@ -3,11 +3,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  fitScale,
   isProfileName,
   isViewId,
   partitionFor,
   safeEmulation,
+  safeRadius,
+  safeScale,
   safeUrl,
   safeUserAgent,
   safeZoom,
@@ -185,18 +186,29 @@ test("safeZoom stays inside Chromium's own range", () => {
   }
 });
 
-test("fitScale shrinks to the smaller dimension and never magnifies", () => {
-  const desktop = { width: 1440, height: 900, fit: true };
-  // The case the whole feature exists for: a desktop layout in a narrow pane.
-  assert.equal(fitScale(desktop, { width: 720, height: 900 }), 0.5);
-  // Height binds too — the emulated screen *is* the view, so a viewport scaled to
-  // the width but taller than the box is clipped with nothing to scroll it.
-  assert.equal(fitScale(desktop, { width: 1440, height: 450 }), 0.5);
-  // Fits already: never scaled up, or a phone would be blown up to pane size.
-  assert.equal(fitScale({ width: 390, height: 800, fit: true }, { width: 900, height: 900 }), 1);
-  // Off, or nothing to measure against yet (bounds arrive after `create`).
-  assert.equal(fitScale({ width: 1440, height: 900, fit: false }, { width: 100, height: 100 }), 1);
-  assert.equal(fitScale(desktop, null), 1);
-  assert.equal(fitScale(desktop, { width: 0, height: 0 }), 1);
-  assert.equal(fitScale(null, { width: 100, height: 100 }), 1);
+test("safeScale bounds what the renderer asks for", () => {
+  // The fit calculation itself lives in the renderer (`deviceLayout`), which is
+  // the side that knows the pane's padding and where the screen is centred. This
+  // only has to keep the number applicable.
+  assert.equal(safeScale(0.5), 0.5);
+  assert.equal(safeScale(1), 1);
+  // Never magnified — emulation shrinks a screen to fit a pane, and enlarging one
+  // is what page zoom is for.
+  assert.equal(safeScale(4), 1);
+  // Never zero: a page rendered into nothing looks exactly like a broken view.
+  assert.equal(safeScale(0), 1);
+  assert.equal(safeScale(0.0001), 0.02);
+  for (const junk of [-1, NaN, Infinity, "half", null, undefined, {}]) {
+    assert.equal(safeScale(junk), 1, JSON.stringify(junk));
+  }
+});
+
+test("safeRadius bounds the screen's corners", () => {
+  assert.equal(safeRadius(48), 48);
+  assert.equal(safeRadius(12.4), 12);
+  assert.equal(safeRadius(9999), 64);
+  // A square screen is the honest answer for anything unusable.
+  for (const none of [0, -8, NaN, "round", null, undefined, {}]) {
+    assert.equal(safeRadius(none), 0, JSON.stringify(none));
+  }
 });

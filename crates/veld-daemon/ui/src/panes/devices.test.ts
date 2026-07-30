@@ -1,27 +1,33 @@
 import { describe, expect, it } from "vitest";
 import {
+  type DevicePreset,
   CUSTOM_DEVICE,
+  CUSTOM_RADIUS,
   DEVICE_GROUPS,
+  DEVICE_PADDING,
   DEVICE_PRESETS,
   MAX_DEVICE_PX,
+  MAX_DEVICE_RADIUS,
   MIN_DEVICE_PX,
   ZOOM_STEPS,
   chromeVersionFrom,
   clampZoom,
   customEmulation,
+  deviceLayout,
   emulationForPreset,
   emulationLabel,
   emulationSize,
-  fitScale,
   formatPercent,
   formatZoom,
   isLandscape,
+  orientationLabel,
   presetById,
   resolveUserAgent,
   rotateEmulation,
   safeUserAgentText,
   sanitizeEmulation,
   sanitizeZoom,
+  scaledRadius,
   zoomStep,
 } from "./devices";
 
@@ -41,11 +47,23 @@ describe("the preset table", () => {
       expect(preset.height).toBeLessThanOrEqual(MAX_DEVICE_PX);
       // Electron types `deviceScaleFactor` Integer.
       expect(Number.isInteger(preset.deviceScaleFactor)).toBe(true);
+      // A shape, within what the shell will apply.
+      expect(preset.radius).toBeGreaterThanOrEqual(0);
+      expect(preset.radius).toBeLessThanOrEqual(MAX_DEVICE_RADIUS);
       // A UA is a header value — the same rule the shell enforces.
       if (preset.ua !== null) {
         expect(safeUserAgentText(resolveUserAgent(preset.ua, "143.0.0.0"))).not.toBeNull();
       }
     }
+  });
+
+  it("gives a phone a rounder screen than a monitor", () => {
+    // The shape is how an emulated pane reads as a *device* at a glance, so the
+    // ordering is the point rather than the exact numbers.
+    const radiusOf = (group: DevicePreset["group"]) =>
+      DEVICE_PRESETS.filter((p) => p.group === group).map((p) => p.radius);
+    expect(Math.min(...radiusOf("Phones"))).toBeGreaterThan(Math.max(...radiusOf("Tablets")));
+    expect(Math.min(...radiusOf("Tablets"))).toBeGreaterThan(Math.max(...radiusOf("Screens")));
   });
 
   it("keeps the screen presets as desktop, UA and all", () => {
@@ -98,6 +116,10 @@ describe("rotate and label", () => {
     expect(emulationLabel(rotateEmulation(desktop()))).toBe("Desktop · landscape");
     // Twice is a round trip.
     expect(rotateEmulation(sideways)).toEqual(e);
+    // The state the Rotate control is in, which is otherwise only inferable by
+    // reading the two numbers off the chip.
+    expect(orientationLabel(e)).toBe("Portrait");
+    expect(orientationLabel(sideways)).toBe("Landscape");
   });
 
   it("calls an emulation with no matching preset what it is", () => {
@@ -135,28 +157,90 @@ describe("customEmulation", () => {
       ua: null,
       deviceScaleFactor: 0,
       fit: true,
+      // Barely rounded: nobody said this viewport was a phone.
+      radius: CUSTOM_RADIUS,
     });
+    // ...but a size derived *from* a phone keeps the phone's shape.
+    expect(customEmulation(360, 800, phone()).radius).toBe(phone().radius);
     expect(customEmulation(Number.NaN, 800).width).toBe(MIN_DEVICE_PX);
   });
 });
 
-describe("fitScale", () => {
-  it("is the reason emulation belongs in a pane at all", () => {
-    // A 1440-wide layout in a 600px pane: the case a real browser window cannot
-    // give you without a second monitor.
-    expect(fitScale(desktop(), { width: 720, height: 900 })).toBe(0.5);
-    // Height binds too — the emulated screen *is* the pane, so a viewport scaled
-    // to the width but taller than the box is clipped with nothing to scroll it.
-    expect(fitScale(desktop(), { width: 1440, height: 450 })).toBe(0.5);
-    // Never magnified: a phone in a wide pane stays phone-sized.
-    expect(fitScale(phone(), { width: 1200, height: 1200 })).toBe(1);
+describe("deviceLayout", () => {
+  // The pane's box, plus the inset on both sides, so a test can say "a pane with
+  // exactly this much room for a screen".
+  const pane = (width: number, height: number) => ({
+    width: width + DEVICE_PADDING * 2,
+    height: height + DEVICE_PADDING * 2,
   });
 
-  it("is 1 with fitting off, or with nothing to measure", () => {
-    expect(fitScale({ ...desktop(), fit: false }, { width: 100, height: 100 })).toBe(1);
-    // A container mid-layout reports zero, and a pane that has not been laid out
-    // yet must not scale to nothing.
-    expect(fitScale(desktop(), { width: 0, height: 0 })).toBe(1);
+  it("is the reason emulation belongs in a pane at all", () => {
+    // A 1440-wide layout in a 720px-wide pane: the case a real browser window
+    // cannot give you without a second monitor.
+    const l = deviceLayout(desktop(), pane(720, 900));
+    expect(l.scale).toBe(0.5);
+    expect(l.width).toBe(720);
+    expect(l.height).toBe(450);
+    // Height binds too — the emulated screen *is* the pane, so a viewport scaled
+    // to the width but taller than the box is clipped with nothing to scroll it.
+    expect(deviceLayout(desktop(), pane(1440, 450)).scale).toBe(0.5);
+    // Never magnified: a phone in a wide pane stays phone-sized.
+    expect(deviceLayout(phone(), pane(1200, 1200)).scale).toBe(1);
+  });
+
+  it("centres the screen and always leaves the inset", () => {
+    // The gap is what makes "a device inside a pane" readable rather than the pane
+    // simply being that page, and the centring is what makes it look placed.
+    const l = deviceLayout(phone(), pane(1000, 1000));
+    expect(l.x).toBe(DEVICE_PADDING + (1000 - 393) / 2);
+    expect(l.y).toBe(DEVICE_PADDING + (1000 - 852) / 2);
+    // A screen scaled to exactly fit is inset on all four sides, never flush.
+    const tight = deviceLayout(desktop(), pane(720, 450));
+    expect(tight.x).toBe(DEVICE_PADDING);
+    expect(tight.y).toBe(DEVICE_PADDING);
+    expect(tight.width).toBe(720);
+    expect(tight.height).toBe(450);
+  });
+
+  it("crops an unfitted oversized device instead of overflowing the pane", () => {
+    // Under Electron the view is a native sibling that the pane's box does not
+    // clip, so a rect larger than the pane would paint over its neighbour. And the
+    // part of a page worth showing is the top of it, so this anchors rather than
+    // centres.
+    const l = deviceLayout({ ...desktop(), fit: false }, pane(400, 300));
+    expect(l.scale).toBe(1);
+    expect(l.width).toBe(400);
+    expect(l.height).toBe(300);
+    expect(l.x).toBe(DEVICE_PADDING);
+    expect(l.y).toBe(DEVICE_PADDING);
+    // Unfitted but small enough: no cropping, and centred like any other.
+    const fits = deviceLayout({ ...phone(), fit: false }, pane(1000, 1000));
+    expect(fits.width).toBe(393);
+    expect(fits.x).toBe(DEVICE_PADDING + (1000 - 393) / 2);
+  });
+
+  it("fills a pane too small to inset rather than computing a negative box", () => {
+    // A container mid-layout, or a dock dragged to a sliver.
+    const l = deviceLayout(desktop(), { width: 10, height: 10 });
+    expect(l).toEqual({ x: 0, y: 0, width: 10, height: 10, scale: 1 });
+    expect(deviceLayout(desktop(), { width: 0, height: 0 })).toEqual({
+      x: 0,
+      y: 0,
+      width: 0,
+      height: 0,
+      scale: 1,
+    });
+  });
+
+  it("scales the corner radius with the screen", () => {
+    // A phone at 40% that kept a 48px radius would read as a rounded rectangle
+    // someone forgot to scale.
+    expect(scaledRadius(phone(), 1)).toBe(48);
+    expect(scaledRadius(phone(), 0.5)).toBe(24);
+    expect(scaledRadius(desktop(), 1)).toBe(8);
+    // Bounded and non-negative whatever storage held.
+    expect(scaledRadius({ ...phone(), radius: 9999 }, 1)).toBe(MAX_DEVICE_RADIUS);
+    expect(scaledRadius({ ...phone(), radius: -5 }, 1)).toBe(0);
   });
 });
 
@@ -241,6 +325,7 @@ describe("restore", () => {
       touch: 1,
       ua: "UA/1.0\r\nX-Injected: 1",
       fit: false,
+      radius: 9999,
     });
     expect(stored).toEqual({
       device: "iphone-pro",
@@ -254,6 +339,7 @@ describe("restore", () => {
       // A hostile UA drops the UA, not the emulation — the size is still fine.
       ua: null,
       fit: false,
+      radius: MAX_DEVICE_RADIUS,
     });
   });
 
@@ -271,6 +357,9 @@ describe("restore", () => {
     // `fit` defaults on: an emulation written before the toggle existed must
     // still fit, or a 1920-wide device is unusable in a pane.
     expect(sanitizeEmulation({ width: 400, height: 800 })?.fit).toBe(true);
+    // No shape recorded means a square-ish screen, which is what an emulation
+    // written before devices had one was being shown as anyway.
+    expect(sanitizeEmulation({ width: 400, height: 800 })?.radius).toBe(0);
   });
 
   it("treats 100% zoom as nothing to store", () => {

@@ -26,11 +26,12 @@
 const { WebContentsView, ipcMain, session } = require("electron");
 // The trust boundary lives in its own tested module — see src/validate.js.
 const {
-  fitScale,
   isProfileName,
   isViewId,
   partitionFor,
   safeEmulation,
+  safeRadius,
+  safeScale,
   safeUrl,
   safeZoom,
 } = require("./validate");
@@ -52,9 +53,8 @@ const MAX_VIEWS_PER_WINDOW = 16;
 /**
  * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
- *            bounds: {x: number, y: number, width: number, height: number}|null,
- *            scale: number, touchActive: boolean, frameReady: boolean,
- *            emulated: boolean}} Entry
+ *            scale: number, radius: number, touchActive: boolean,
+ *            frameReady: boolean, emulated: boolean}} Entry
  */
 
 /** window.id → (viewId → Entry) */
@@ -92,7 +92,6 @@ function stateOf(viewId, entry, error) {
       canGoBack: false,
       canGoForward: false,
       profile: entry.profile,
-      emulationScale: 1,
       touchActive: false,
       devToolsOpen: false,
       ...(error === undefined ? {} : { error }),
@@ -106,13 +105,12 @@ function stateOf(viewId, entry, error) {
     canGoBack: wc.navigationHistory.canGoBack(),
     canGoForward: wc.navigationHistory.canGoForward(),
     profile: entry.profile,
-    // The three things the pane cannot work out for itself. It knows what it
-    // *asked* for — the emulation and the zoom live in its layout — but not how
-    // far a fitted viewport ended up scaled, nor whether touch is actually in
-    // force, which DevTools takes away (see [`applyTouch`]). Flat primitives on
-    // purpose: the renderer's `patch` compares values with `!==`, so a nested
-    // object would count as changed on every event and re-render every pane.
-    emulationScale: entry.scale,
+    // The two things the pane cannot work out for itself: whether touch is
+    // actually in force (something else can hold Chromium's debugger — see
+    // [`applyTouch`]) and whether the inspector is open. The emulated size, the
+    // zoom and the scale are all the renderer's own. Flat primitives on purpose:
+    // the renderer's `patch` compares values with `!==`, so a nested object would
+    // count as changed on every event and re-render every pane.
     touchActive: entry.touchActive,
     devToolsOpen: wc.isDevToolsOpened(),
     ...(error === undefined ? {} : { error }),
@@ -170,12 +168,12 @@ function pushState(window, viewId, entry) {
 /**
  * Push the emulated viewport onto the view.
  *
- * `scale` is computed here rather than sent by the renderer because it is a
- * function of the view's box in **device-independent pixels**, and only this
- * process knows that number: page zoom scales the CSS pixels the renderer
- * measures and not the bounds a native view is given. Which is also why this
- * runs again from the bounds handler — a fitted viewport's scale is a function of
- * the pane's size, so resizing the dock has to recompute it.
+ * `entry.scale` arrives **with the bounds**, from the renderer: the screen's box,
+ * the factor its viewport is rendered at and the corner radius are one calculation
+ * (`deviceLayout` in `panes/devices.ts`), and the renderer is the side that knows
+ * the pane's padding and where the screen is centred. Deriving the factor here
+ * from the box meant one number with two owners, which is a drift waiting to be a
+ * half-off-screen device.
  */
 function applyMetrics(entry) {
   const wc = entry.view.webContents;
@@ -189,13 +187,11 @@ function applyMetrics(entry) {
   // on a view that never had it on, which is a call with nothing to undo.
   if (!entry.frameReady) return;
   if (!emulation) {
-    entry.scale = 1;
     if (!entry.emulated) return;
     entry.emulated = false;
     wc.disableDeviceEmulation();
     return;
   }
-  entry.scale = fitScale(emulation, entry.bounds);
   entry.emulated = true;
   wc.enableDeviceEmulation({
     // `mobile` is Chromium's own word for viewport-meta handling, overlay
@@ -626,8 +622,8 @@ function registerBrowserViewIpc(resolveWindow) {
       // The session's own UA, captured before anything overrides it — what
       // "no emulated device" has to restore.
       defaultUserAgent: view.webContents.getUserAgent(),
-      bounds: null,
       scale: 1,
+      radius: 0,
       touchActive: false,
       // Nothing has navigated yet, so the emulation calls are not safe to make —
       // rule 2. The first `did-navigate` flips this and applies them.
@@ -671,17 +667,23 @@ function registerBrowserViewIpc(resolveWindow) {
     // the last good bounds and let visibility do the hiding, so returning to
     // the tab doesn't flash a 1px view.
     if (rect.width < 1 || rect.height < 1) return;
-    found.entry.view.setBounds(rect);
-    found.entry.bounds = rect;
-    // A fitted viewport's scale is a function of the pane's size, so resizing the
-    // dock has to recompute it — and only when it actually moves, because the
-    // renderer coalesces a splitter drag to one push per frame and re-emulating
-    // on each one would relayout the page per frame. The scale also goes back to
-    // the pane, which is what lets the chrome show "1440 × 900 at 42%".
-    if (found.entry.emulation?.fit) {
-      const before = found.entry.scale;
-      applyMetrics(found.entry);
-      if (found.entry.scale !== before) pushState(found.window, args.viewId, found.entry);
+    const { entry } = found;
+    entry.view.setBounds(rect);
+    // The screen's shape travels with its box. `setBorderRadius` clips the *page*
+    // to the device's corners; the frame the renderer draws around it is what makes
+    // them visible, since a native view paints over any DOM inside its own rect.
+    const radius = safeRadius(args?.radius);
+    if (radius !== entry.radius) {
+      entry.radius = radius;
+      entry.view.setBorderRadius(radius);
+    }
+    // Re-emulate only when the factor actually moves: the renderer coalesces a
+    // splitter drag to one push per frame, and `enableDeviceEmulation` relayouts
+    // the guest page, so re-sending an unchanged scale would do that per frame.
+    const scale = safeScale(args?.scale);
+    if (entry.emulation && scale !== entry.scale) {
+      entry.scale = scale;
+      applyMetrics(entry);
     }
   });
 
