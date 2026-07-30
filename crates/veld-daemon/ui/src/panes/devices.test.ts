@@ -276,7 +276,7 @@ describe("the handles fit the gap", () => {
 });
 
 describe("the emulation's field set", () => {
-  it("is exactly this, so a new field cannot be forgotten at the trust boundary", () => {
+  it("is exactly these required fields, so none can be forgotten at the boundary", () => {
     // This pins *this* side's shape only — be precise about that, because the earlier
     // version of this test claimed to gate the shell's validator and did not.
     // `safeEmulation` in `desktop/src/validate.js` whitelists what it forwards to
@@ -289,6 +289,12 @@ describe("the emulation's field set", () => {
     // *its* key-set test (`validate.test.js`, "forwards exactly the fields Electron
     // applies") in the same breath, then update this list. The two tests are the pair —
     // this one catches a field appearing here, that one catches a field vanishing there.
+    //
+    // Bounded honestly: this reads the real constructor's output, so it sees every
+    // *required* field (all nine are, and `emulationForPreset` is the one construction
+    // site). An **optional** field populated only by `customEmulation` or
+    // `responsiveEmulation` would slip both gates — closing that needs a type-level
+    // trick worth more than it buys.
     expect(Object.keys(phone()).sort()).toEqual([
       "device",
       "deviceScaleFactor",

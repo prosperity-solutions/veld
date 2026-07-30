@@ -956,6 +956,10 @@ function syncGeometry(v: View): void {
     // one element meaning "where the page is" in both modes.
     v.frame.style.inset = "0";
     v.painted = null;
+    // The still was captured at the *screen's* size; the frame is about to become the
+    // whole pane, which would stretch it. Picking "Pane size" from the open device menu
+    // is exactly that path, with views suspended and a still up.
+    if (v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
     v.frame.style.removeProperty("width");
     v.frame.style.removeProperty("height");
     v.frame.style.removeProperty("border-radius");
@@ -1005,9 +1009,11 @@ function paintScreen(
   });
   v.container.dataset.emulated = "true";
   // A still is a picture of the screen at its *previous* size, so a geometry change
-  // invalidates it — "Fit to pane" and the zoom stepper both keep their menu open, so
-  // views are suspended and a still is up while they change it, and it would otherwise
-  // stay on screen stretched until the thaw 250ms after the menu closed.
+  // invalidates it — "Fit to pane" keeps its menu open, so views are suspended and a
+  // still is up while it changes the layout, and the still would otherwise stay on
+  // screen stretched until the thaw 250ms after the menu closed. (The zoom stepper is
+  // *not* such a case: page zoom moves no geometry, so `moved` stays false and the pane
+  // rightly keeps its still.)
   //
   // Only on an actual change, because this also runs from the 400ms geometry tick, which
   // fires *while* views are suspended and recomputes the layout it already drew.

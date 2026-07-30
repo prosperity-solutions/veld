@@ -615,17 +615,15 @@ export function dragSize(
   delta: { x: number; y: number },
   axis: "x" | "y" | "both",
   scale: number,
-  clamped: { width: boolean; height: boolean } = { width: false, height: false },
+  pinned: { width: boolean; height: boolean } = { width: false, height: false },
 ): { width: number; height: number } {
   // A zero or nonsense scale would divide the pointer into infinity; 1 is the only
   // safe reading of "we do not know how far this is scaled".
   const safe = Number.isFinite(scale) && scale > 0 ? scale : 1;
-  const step = (clampedOnAxis: boolean) => (clampedOnAxis ? 1 : 2) / safe;
+  const step = (pinnedOnAxis: boolean) => (pinnedOnAxis ? 1 : 2) / safe;
   return {
-    width:
-      axis === "y" ? from.width : clampDevicePx(from.width + delta.x * step(clamped.width)),
-    height:
-      axis === "x" ? from.height : clampDevicePx(from.height + delta.y * step(clamped.height)),
+    width: axis === "y" ? from.width : clampDevicePx(from.width + delta.x * step(pinned.width)),
+    height: axis === "x" ? from.height : clampDevicePx(from.height + delta.y * step(pinned.height)),
   };
 }
 

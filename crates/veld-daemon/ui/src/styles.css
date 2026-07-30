@@ -1073,11 +1073,17 @@ select:focus {
 }
 /* A hit area larger than the mark, extending *away* from the screen — the pixels
    on the screen's side belong to the native view and are dead to the DOM anyway,
-   so there is nothing to lose there and nothing to gain by growing into it. */
+   so there is nothing to lose there and nothing to gain by growing into it.
+
+   The distance comes from `--handle-bleed`, set inline from `HANDLE_HIT_BLEED` /
+   `HANDLE_CORNER_HIT_BLEED` in panes/devices.ts — the same constants
+   `MIN_DEVICE_PADDING` is computed from. One owner rather than two: a literal here
+   could be edited to reach past the gap into the OS window-resize grip while the
+   constant that documents the floor went on claiming otherwise. */
 .device-handle::before {
   content: "";
   position: absolute;
-  inset: -7px;
+  inset: calc(-1 * var(--handle-bleed));
 }
 .device-handle.east {
   width: 6px;
@@ -1085,7 +1091,9 @@ select:focus {
   cursor: ew-resize;
 }
 .device-handle.east::before {
-  inset: -9px -7px;
+  /* Wider along the handle's *length* axis, which is centred on the screen and cannot
+     reach the padding; the padding axis keeps the shared bleed. */
+  inset: calc(-1 * var(--handle-bleed) - 2px) calc(-1 * var(--handle-bleed));
 }
 .device-handle.south {
   width: 44px;
@@ -1093,7 +1101,7 @@ select:focus {
   cursor: ns-resize;
 }
 .device-handle.south::before {
-  inset: -7px -9px;
+  inset: calc(-1 * var(--handle-bleed)) calc(-1 * var(--handle-bleed) - 2px);
 }
 .device-handle.corner {
   width: 12px;
@@ -1103,13 +1111,9 @@ select:focus {
   border-radius: 3px;
   cursor: nwse-resize;
 }
-/* A smaller bleed than the edge handles get (`HANDLE_CORNER_HIT_BLEED` in
-   panes/devices.ts, which the padding floor is computed from): this is the handle
-   anchored diagonally into the corner, so its hit area is the one that would otherwise
-   reach the window's own resize grip. */
-.device-handle.corner::before {
-  inset: -3px;
-}
+/* The corner's bleed is set inline too, from `HANDLE_CORNER_HIT_BLEED` — smaller than
+   the edge handles', because this is the handle anchored diagonally into the corner and
+   so the one whose hit area would otherwise reach the window's own resize grip. */
 
 /* No outline and no readout over the screen: the page is live while you drag, and a
    native view paints over DOM — anything here would be invisible in the desktop app

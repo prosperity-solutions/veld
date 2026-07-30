@@ -54,7 +54,9 @@ import {
   DEVICE_PADDING,
   DEVICE_PRESETS,
   HANDLE_CORNER_GAP,
+  HANDLE_CORNER_HIT_BLEED,
   HANDLE_EDGE_GAP,
+  HANDLE_HIT_BLEED,
   HANDLE_LENGTH,
   MAX_DEVICE_PX,
   MIN_DEVICE_PX,
@@ -143,6 +145,19 @@ const ERROR_ICONS: Record<BrowserErrorKind, React.ReactNode> = {
   crash: <IconBug size={26} />,
   generic: <IconAlertTriangle size={26} />,
 };
+
+/**
+ * A resize handle's hit-area reach, as the custom property the stylesheet computes its
+ * `inset` from.
+ *
+ * Inline rather than a literal in CSS so the number has **one** owner: it is the same
+ * constant `MIN_DEVICE_PADDING` is computed from, and a literal in the stylesheet could
+ * be edited to reach past the gap into the OS window-resize grip while the constant that
+ * documents the floor went on claiming otherwise.
+ */
+function bleed(px: number): React.CSSProperties {
+  return { "--handle-bleed": `${px}px` } as React.CSSProperties;
+}
 
 /** One coloured session pip. */
 function SessionDot(props: { color: string | null; size?: number }) {
@@ -1132,6 +1147,7 @@ export function BrowserPane(props: {
               style={{
                 left: screen.x + screen.width + HANDLE_EDGE_GAP,
                 top: screen.y + screen.height / 2 - HANDLE_LENGTH / 2,
+                ...bleed(HANDLE_HIT_BLEED),
               }}
               onPointerDown={(e) => startResize(e, "x")}
             />
@@ -1144,6 +1160,7 @@ export function BrowserPane(props: {
               style={{
                 left: screen.x + screen.width / 2 - HANDLE_LENGTH / 2,
                 top: screen.y + screen.height + HANDLE_EDGE_GAP,
+                ...bleed(HANDLE_HIT_BLEED),
               }}
               onPointerDown={(e) => startResize(e, "y")}
             />
@@ -1156,6 +1173,7 @@ export function BrowserPane(props: {
               style={{
                 left: screen.x + screen.width + HANDLE_CORNER_GAP,
                 top: screen.y + screen.height + HANDLE_CORNER_GAP,
+                ...bleed(HANDLE_CORNER_HIT_BLEED),
               }}
               onPointerDown={(e) => startResize(e, "both")}
             />
