@@ -35,6 +35,11 @@ export interface RunViewTarget {
   stats?: Record<string, NodeStats>;
   /** Re-poll after an action landed. */
   onChanged: () => void;
+  /**
+   * Open a URL in a browser pane. Only IDE mode passes it — runs mode has no
+   * panes, and a control that says "open here" with no here is worse than none.
+   */
+  onOpenPane?: (name: string, url: string) => void;
 }
 
 interface HostProps {
@@ -137,6 +142,9 @@ export function NodesView(props: { target: RunViewTarget } & HostProps) {
         stats={selected ? undefined : props.target.stats}
         canAct={!selected && run.status === "running"}
         onChanged={props.target.onChanged}
+        // Not while reading a past run: its URLs are gone, so there is nothing to
+        // open (`nodeRows` nulls them).
+        onOpenPane={selected ? undefined : props.target.onOpenPane}
       />
     </div>
   );

@@ -554,6 +554,11 @@ function AppInner(props: {
     stats: diagStats,
     emptyHint: runEmptyHint,
     onChanged: () => void refresh(),
+    // A node's URL, opened beside the terminal instead of in another application.
+    // The same action ⌘K and the URL launcher offer, so all three land a pane in
+    // the focused dock rather than each inventing a placement.
+    onOpenPane: (name, url) =>
+      setLayout((prev) => addTabToFocused(prev, browserTab({ url, title: name }))),
   };
 
   // ---- sharing ------------------------------------------------------------

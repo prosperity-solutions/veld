@@ -31,12 +31,20 @@ export interface RunPaneContext {
   emptyHint: string;
   /** Re-poll after an action landed. */
   onChanged: () => void;
+  /** Open a URL in a browser pane in this worktree's layout. */
+  onOpenPane: (name: string, url: string) => void;
 }
 
 /** The context as a view target, or null when there is nothing to show. */
 function target(ctx: RunPaneContext): RunViewTarget | null {
   if (!ctx.ref || !ctx.run) return null;
-  return { ref: ctx.ref, run: ctx.run, stats: ctx.stats, onChanged: ctx.onChanged };
+  return {
+    ref: ctx.ref,
+    run: ctx.run,
+    stats: ctx.stats,
+    onChanged: ctx.onChanged,
+    onOpenPane: ctx.onOpenPane,
+  };
 }
 
 export function LogsPane(props: { ctx: RunPaneContext }) {

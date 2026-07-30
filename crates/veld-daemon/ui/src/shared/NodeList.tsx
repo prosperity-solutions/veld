@@ -25,7 +25,7 @@
  */
 
 import { ActionIcon, Button, Text, Tooltip } from "@mantine/core";
-import { IconCheck, IconCopy, IconExternalLink } from "@tabler/icons-react";
+import { IconCheck, IconCopy, IconExternalLink, IconWorld } from "@tabler/icons-react";
 import { useState } from "react";
 import {
   api,
@@ -151,6 +151,8 @@ function NodeCard(props: {
   stats?: NodeStats;
   canAct: boolean;
   onChanged: () => void;
+  /** Open this node's URL in a browser pane. Absent where there are no panes. */
+  onOpenPane?: (name: string, url: string) => void;
 }) {
   const n = props.node;
   const [busy, setBusy] = useState<string | null>(null);
@@ -200,6 +202,23 @@ function NodeCard(props: {
           <a href={n.url} target="_blank" rel="noreferrer" className="node-url" title={n.url}>
             {shortUrl(n.url)}
           </a>
+          {/* First of the three, because in a window that *has* panes this is the
+              one you want: the service opens beside the terminal rather than in
+              another application. Absent in runs mode, which has nowhere to put
+              it — the same reason the URL launcher takes this as a prop. */}
+          {props.onOpenPane && (
+            <Tooltip label="Open in a browser pane" openDelay={250}>
+              <ActionIcon
+                size="sm"
+                variant="subtle"
+                color="gray"
+                aria-label={`Open ${n.name} in a browser pane`}
+                onClick={() => props.onOpenPane?.(n.name, n.url!)}
+              >
+                <IconWorld size={13} />
+              </ActionIcon>
+            </Tooltip>
+          )}
           <Tooltip label={flash === "url" ? "Copied" : "Copy the URL"} openDelay={250}>
             <ActionIcon
               size="sm"
@@ -262,6 +281,8 @@ export function NodeList(props: {
   /** Whether node actions may fire — a stopped run has nothing to act on. */
   canAct: boolean;
   onChanged: () => void;
+  /** Open a node's URL in a browser pane, where the host has panes. */
+  onOpenPane?: (name: string, url: string) => void;
 }) {
   if (props.nodes.length === 0) {
     return (
@@ -282,6 +303,7 @@ export function NodeList(props: {
           stats={props.stats?.[`${n.name}:${n.variant}`]}
           canAct={props.canAct}
           onChanged={props.onChanged}
+          onOpenPane={props.onOpenPane}
         />
       ))}
     </ul>

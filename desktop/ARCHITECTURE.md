@@ -221,6 +221,13 @@ requests at runtime — branding rule.
   resources sit on the opposite edge of the first line, because that is the column
   people scan *down*. With no header row to carry meaning, units travel with the
   values (`pid 21672`, an `aria-label` of "Memory 212 MB").
+- **Opening a node's URL in a pane is a prop, not a capability check.** The card
+  shows that button when the host passes `onOpenPane`, which only IDE mode does —
+  runs mode has no panes, and a control saying "open here" with no *here* is worse
+  than no control. It is deliberately not gated on Electron: a pane is a pane in
+  the browser build too (an iframe there), and all three entry points — this
+  button, the URL launcher and ⌘K — go through the same `addTabToFocused`, so none
+  of them invents its own placement.
 - **Tabs shrink before the strip scrolls.** Only the tabs are in the scroll box, so
   the `+` follows the last tab while there is room and pins to the end of the strip
   once there is not — one layout, not a second mode. Labels are clamped (a browser
