@@ -418,13 +418,22 @@ function createTray() {
  * to check for updates, and on Linux there is no tray to put that anywhere else.
  * The standard roles are kept verbatim (an app with no Edit menu has no ⌘C), so
  * this template is the default plus a Veld section.
+ *
+ * Rebuilt whenever the version skew changes, since the skew row lives in it: the
+ * tray is macOS-only, and Linux is the platform whose app *can* update itself
+ * and therefore the one most likely to end up ahead of its daemon.
  */
 function buildAppMenu() {
   const isMac = process.platform === "darwin";
-  const updateItem = {
+  const veldItems = [
+    { label: `Veld Desktop ${app.getVersion()}`, enabled: false },
+  ];
+  const skew = skewMenuItem();
+  if (skew) veldItems.push(skew);
+  veldItems.push({
     label: "Check for Updates…",
     click: () => void checkForUpdates({ manual: true }),
-  };
+  });
   /** @type {Electron.MenuItemConstructorOptions[]} */
   const template = [
     ...(isMac
@@ -434,7 +443,7 @@ function buildAppMenu() {
             submenu: [
               { role: "about" },
               { type: "separator" },
-              updateItem,
+              ...veldItems,
               { type: "separator" },
               { role: "services" },
               { type: "separator" },
@@ -451,7 +460,7 @@ function buildAppMenu() {
       label: "File",
       submenu: isMac
         ? [{ role: "close" }]
-        : [updateItem, { type: "separator" }, { role: "about" }, { role: "quit" }],
+        : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }],
     },
     {
       label: "Edit",
@@ -512,7 +521,12 @@ app.whenReady().then(() => {
     applicationVersion: app.getVersion(),
     copyright: "Prosperity Solutions",
   });
-  initUpdater({ onSkewChange: () => void refreshTray?.() });
+  initUpdater({
+    onSkewChange: () => {
+      buildAppMenu();
+      void refreshTray?.();
+    },
+  });
   setInterval(() => void daemonReachable(), VERSION_POLL_MS);
   // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which
   // makes a dev window indistinguishable from any other Electron app. A packaged

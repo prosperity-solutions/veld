@@ -551,9 +551,11 @@ dmg/zip because most PRs here never touch `desktop/` and that runner is billed a
 
 ### Installing an unsigned macOS build
 
-Gatekeeper quarantines it. First launch is right-click → **Open** (or System
-Settings → Privacy & Security → *Open Anyway*); `xattr -dr
-com.apple.quarantine /Applications/Veld.app` is the scriptable equivalent. This
+Gatekeeper quarantines it. First launch: let the warning appear, then **System
+Settings → Privacy & Security → *Open Anyway***; `xattr -dr
+com.apple.quarantine /Applications/Veld.app` is the scriptable equivalent.
+Right-click → *Open* is the instruction everyone remembers and it is no longer
+true — macOS 15 removed that bypass for apps that aren't notarized. This
 goes away with a Developer ID + notarization (issue #167 §10), which is also what
 turns macOS self-updates on.
 
@@ -566,7 +568,9 @@ Two different mismatches, deliberately reported differently:
   this session. A user-initiated *Check for Updates…* (tray on macOS, application
   menu everywhere) reports every outcome including "up to date".
 - **The app and the daemon disagree.** A notification once per session, plus a
-  tray row while it lasts. `/api/health` carries the daemon's version and the
+  row in the application menu (and in the tray, which is macOS-only — Linux is
+  the platform whose app can update itself and so the likelier one to drift, so
+  the row cannot live only there). `/api/health` carries the daemon's version and the
   shell already polls it, so this costs one field; it is polled on a minute so a
   `veld update` performed while the app is open both raises and clears the
   notice.

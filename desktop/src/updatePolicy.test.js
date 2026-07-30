@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   compareVersions,
+  downloadOnlyReason,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -33,6 +34,15 @@ test("only an AppImage can install in place on Linux", () => {
   // A .deb install: the files belong to dpkg, and there is no APPIMAGE.
   assert.equal(updateMode({ platform: "linux", isPackaged: true, env: {} }), "download");
   assert.equal(updateMode({ platform: "linux", isPackaged: true }), "download");
+});
+
+test("download-only says why, per platform", () => {
+  // The two platforms are download-only for unrelated reasons; one string
+  // covering both is wrong on whichever it wasn't written for.
+  assert.match(downloadOnlyReason({ platform: "darwin" }), /code-signed/);
+  assert.match(downloadOnlyReason({ platform: "linux" }), /package manager/);
+  assert.doesNotMatch(downloadOnlyReason({ platform: "linux" }), /code-signed/);
+  assert.ok(downloadOnlyReason({ platform: "freebsd" }).length > 0);
 });
 
 test("compareVersions orders major, minor and patch", () => {

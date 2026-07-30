@@ -21,6 +21,7 @@ const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
 const {
+  downloadOnlyReason,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -37,6 +38,10 @@ const offered = new Set();
 /** Daemon versions already reported as skewed, same reason. */
 const skewReported = new Set();
 let checking = false;
+/** Set across `quitAndInstall` — see the error listener in `initUpdater`. */
+let installing = false;
+/** Version being installed, for the failure dialog's download link. */
+let installingVersion = null;
 /** @type {{behind: "daemon" | "app", appVersion: string, daemonVersion: string} | null} */
 let currentSkew = null;
 /** @type {(() => void) | null} */
@@ -62,6 +67,22 @@ function initUpdater(opts = {}) {
   // something to interrupt unannounced.
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
+
+  // Not optional, and not only for reporting: electron-updater routes every
+  // failure through `dispatchError` (`AppUpdater.js` → `emit("error")`), and an
+  // EventEmitter with no `error` listener *throws* the error instead of
+  // delivering it. `checkForUpdates()` and `downloadUpdate()` also reject, so
+  // their callers below report those in context — but `quitAndInstall()` is
+  // synchronous and returns void, so on that path the throw escapes into a
+  // floating promise and the user is told nothing at all. That is the worst
+  // possible place for it: `AppImageUpdater.doInstall` unlinks the running
+  // AppImage *before* the move that can fail, so a silent failure there is an
+  // app that deleted itself and then said nothing.
+  autoUpdater.on("error", (err) => {
+    if (!installing) return; // the awaiting caller reports it with context
+    installing = false;
+    void reportInstallFailure(err);
+  });
 
   autoUpdater.on("update-downloaded", (info) => {
     void promptRestart(info?.version);
@@ -136,7 +157,7 @@ async function offerUpdate(version) {
     message: `Veld Desktop ${version} is available.`,
     detail: canInstall
       ? `You're on ${app.getVersion()}. Downloading takes a moment; the app restarts to apply it.`
-      : `You're on ${app.getVersion()}. Veld Desktop isn't code-signed yet, so it can't replace itself — the release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`,
+      : `You're on ${app.getVersion()}. ${downloadOnlyReason({ platform: process.platform })} The release page has the download.\n\nUpdate the veld CLI separately with \`veld update\`.`,
     buttons: canInstall
       ? ["Download and Install", "Later"]
       : ["Open Release Page", "Later"],
@@ -178,7 +199,30 @@ async function promptRestart(version) {
   });
   if (response !== 0) return;
   // `isSilent: true`, `isForceRunAfter: true` — the user is standing right here.
+  // Anything that goes wrong from here surfaces through the `error` listener,
+  // which is the only path that reaches it: this call is synchronous and its
+  // failures are emitted, not thrown to us.
+  installing = true;
+  installingVersion = version ?? null;
   autoUpdater.quitAndInstall(true, true);
+}
+
+/**
+ * The install failed after the app was already committed to it. On Linux that
+ * can mean the running AppImage is gone (electron-updater unlinks it before the
+ * replacement is moved into place), so this offers the download rather than only
+ * apologising — for some users it is the only way back to a working app.
+ */
+async function reportInstallFailure(err) {
+  const { response } = await dialog.showMessageBox({
+    type: "error",
+    message: "The update could not be installed.",
+    detail: `${String(err?.message ?? err)}\n\nDownload it from the release page instead — on Linux the previous AppImage may already have been removed.`,
+    buttons: ["Open Release Page", "Close"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response === 0) await shell.openExternal(releasePageUrl(installingVersion));
 }
 
 /**

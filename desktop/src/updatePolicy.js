@@ -36,6 +36,25 @@ function updateMode({ platform, isPackaged, env = {} }) {
 }
 
 /**
+ * Why this build cannot apply an update itself — the sentence a `"download"`
+ * mode has to justify itself with. Split out from `updateMode` because the two
+ * platforms are download-only for unrelated reasons and one string covering both
+ * is a falsehood on whichever platform it was not written for.
+ *
+ * @param {{platform: string}} ctx
+ * @returns {string}
+ */
+function downloadOnlyReason({ platform }) {
+  if (platform === "darwin") {
+    return "Veld Desktop isn't code-signed yet, so macOS won't let it replace itself.";
+  }
+  if (platform === "linux") {
+    return "This is a .deb install, so its files belong to your package manager.";
+  }
+  return "This build can't replace itself.";
+}
+
+/**
  * Compare two `major.minor.patch` strings. Missing or non-numeric components
  * count as 0, matching `veld_core::setup::is_newer` — the CLI's own comparison,
  * against the same GitHub releases, so "is there an update" cannot answer
@@ -100,6 +119,7 @@ function releasePageUrl(version) {
 module.exports = {
   GITHUB_REPO,
   compareVersions,
+  downloadOnlyReason,
   releasePageUrl,
   updateMode,
   versionSkew,

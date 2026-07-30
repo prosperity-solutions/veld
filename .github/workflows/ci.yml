@@ -225,10 +225,15 @@ jobs:
   # PRs here never touch desktop/:
   #
   #   Linux  — the full installers (AppImage + deb), on a standard runner.
-  #   macOS  — `--dir` only: it exercises everything up to and including the
-  #            ad-hoc signing hook (the mac-specific risk) without spending ~8
-  #            minutes of a 10×-billed runner on dmg/zip compression, which the
-  #            release build does anyway.
+  #   macOS  — both arches, but `--dir`: it exercises everything up to and
+  #            including the ad-hoc signing hook (the mac-specific risk) without
+  #            spending ~8 minutes of a 10×-billed runner on dmg/zip
+  #            compression.
+  #
+  # Residual gap, stated rather than implied: dmg/zip creation and the
+  # `latest-mac.yml` the updater feeds on are produced only by the release build.
+  # A change that breaks those (a dmg layout, a publish block) still fails at
+  # release time and still blocks the tag.
   desktop-package:
     name: Desktop Packaging (${{ matrix.name }})
     needs: desktop
@@ -241,7 +246,7 @@ jobs:
             args: --linux
           - name: macos
             os: macos-latest
-            args: --mac --arm64 --dir
+            args: --mac --arm64 --x64 --dir
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -261,9 +266,13 @@ jobs:
       # The signature is the part that decides whether a downloaded build opens
       # at all on Apple Silicon, and it comes from our own afterPack hook rather
       # than from electron-builder — so assert it instead of trusting the log.
+      # Both arches: electron-builder writes x64 to dist/mac and arm64 to
+      # dist/mac-arm64, and the hook runs once per arch.
       - name: Verify the ad-hoc signature
         if: matrix.name == 'macos'
-        run: codesign --verify --deep --strict dist/mac-arm64/Veld.app
+        run: |
+          codesign --verify --deep --strict dist/mac-arm64/Veld.app
+          codesign --verify --deep --strict dist/mac/Veld.app
       - name: List artifacts
         run: ls -la dist
 
