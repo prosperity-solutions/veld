@@ -889,7 +889,8 @@ export function BrowserPane(props: {
               data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen horizontally"
-              style={{ left: screen.x + screen.width + 4, top: screen.y + screen.height / 2 - 17 }}
+              title="Drag to change the emulated width"
+              style={{ left: screen.x + screen.width + 6, top: screen.y + screen.height / 2 - 22 }}
               onPointerDown={(e) => startResize(e, "x")}
             />
             <div
@@ -897,7 +898,8 @@ export function BrowserPane(props: {
               data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen vertically"
-              style={{ left: screen.x + screen.width / 2 - 17, top: screen.y + screen.height + 4 }}
+              title="Drag to change the emulated height"
+              style={{ left: screen.x + screen.width / 2 - 22, top: screen.y + screen.height + 6 }}
               onPointerDown={(e) => startResize(e, "y")}
             />
             <div
@@ -905,7 +907,8 @@ export function BrowserPane(props: {
               data-dragging={drag ? "true" : undefined}
               role="separator"
               aria-label="Resize the emulated screen"
-              style={{ left: screen.x + screen.width + 3, top: screen.y + screen.height + 3 }}
+              title="Drag to change the emulated size"
+              style={{ left: screen.x + screen.width + 4, top: screen.y + screen.height + 4 }}
               onPointerDown={(e) => startResize(e, "both")}
             />
           </>

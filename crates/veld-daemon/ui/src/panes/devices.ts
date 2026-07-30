@@ -68,13 +68,18 @@ export const CUSTOM_RADIUS = 8;
 /**
  * Gap between the emulated screen and the pane's edge, in CSS pixels.
  *
- * Not decoration: without it an emulated 1440-wide viewport scaled to fit reaches
- * every edge of the pane and is indistinguishable from the pane simply *being*
- * that page. The gap plus the backdrop behind it are what make "this is a device
- * inside a pane" readable at a glance, and they are also what gives the screen's
- * rounded corners something to be round against.
+ * Not decoration, and it carries three jobs. Without it an emulated viewport
+ * scaled to fit reaches every edge of the pane and is indistinguishable from the
+ * pane simply *being* that page; it is what gives the screen's rounded corners
+ * something to be round against; and it is the only place the resize handles can
+ * live, since under Electron the native view covers the screen's own rect and
+ * takes every pointer event inside it.
+ *
+ * That last job is why it is this wide rather than the 14 it started at: a handle
+ * a few pixels from the pane's corner sits in the *window's* own resize zone, and
+ * a user reaching for it drags the whole app window instead.
  */
-export const DEVICE_PADDING = 14;
+export const DEVICE_PADDING = 20;
 
 export interface DevicePreset {
   id: string;

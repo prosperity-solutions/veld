@@ -1053,31 +1053,49 @@ select:focus {
   position: absolute;
   z-index: 2;
   border-radius: 999px;
-  background: var(--border2);
-  opacity: 0;
+  /* Accent-tinted and **always visible** while a device is emulated, not revealed
+     on hover: a handle you cannot see is a handle you reach for by guessing, and
+     the wrong guess near a pane's corner is the *window's* resize edge — you drag
+     the whole app instead of the screen. Reading as veld's own green also
+     distinguishes it from the OS chrome it sits near. */
+  background: var(--accent);
+  opacity: 0.5;
   transition: opacity 90ms ease;
-}
-.browser-slot:hover .device-handle,
-.device-handle[data-dragging="true"] {
-  opacity: 1;
 }
 .device-handle:hover,
 .device-handle[data-dragging="true"] {
-  background: var(--accent);
+  opacity: 1;
+}
+/* A hit area larger than the mark, extending *away* from the screen — the pixels
+   on the screen's side belong to the native view and are dead to the DOM anyway,
+   so there is nothing to lose there and nothing to gain by growing into it. */
+.device-handle::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
 }
 .device-handle.east {
-  width: 5px;
-  height: 34px;
+  width: 6px;
+  height: 44px;
   cursor: ew-resize;
 }
+.device-handle.east::before {
+  inset: -9px -7px;
+}
 .device-handle.south {
-  width: 34px;
-  height: 5px;
+  width: 44px;
+  height: 6px;
   cursor: ns-resize;
 }
+.device-handle.south::before {
+  inset: -7px -9px;
+}
 .device-handle.corner {
-  width: 9px;
-  height: 9px;
+  width: 12px;
+  height: 12px;
+  /* Square-ish rather than a pill, so the corner reads as a corner grip and not as
+     a stray dot beside two bars. */
+  border-radius: 3px;
   cursor: nwse-resize;
 }
 
