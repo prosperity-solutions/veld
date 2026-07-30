@@ -2,11 +2,39 @@ use std::env;
 use std::path::Path;
 use std::process::Command;
 
-/// Ensure a package's npm deps are present. Fresh checkouts have no
-/// node_modules, which would make the build step fail with a cryptic
-/// "Cannot find package". Install them once if missing.
+/// Ensure a package's npm deps are present **and match its lockfile**.
+///
+/// Fresh checkouts have no node_modules, which would make the build step fail
+/// with a cryptic "Cannot find package". Presence alone is not enough, though:
+/// npm records the tree it installed in `node_modules/.package-lock.json`, and a
+/// checkout that predates a *new dependency* has a complete-looking node_modules
+/// that is missing it — so `git pull && cargo build` failed with the same cryptic
+/// error, on the branch that added the dependency, for everyone who already had
+/// the directory. Comparing the two lockfiles catches that; `npm ci` is
+/// idempotent, so a false positive costs one reinstall.
 fn ensure_node_modules(dir: &Path) {
-    if dir.join("node_modules").exists() {
+    let modules = dir.join("node_modules");
+    // npm's own staleness signal: it writes `node_modules/.package-lock.json`
+    // after installing, so a `package-lock.json` newer than that marker means the
+    // tree on disk was built from a different lockfile. Mtimes rather than a JSON
+    // diff because the two documents differ by design (the marker has no
+    // name/version header), and because this runs on every build — the cost of a
+    // false positive is one idempotent `npm ci`, the cost of a false negative is
+    // the cryptic "Cannot find package" this function exists to prevent.
+    let stale = match (
+        dir.join("package-lock.json")
+            .metadata()
+            .and_then(|m| m.modified()),
+        modules
+            .join(".package-lock.json")
+            .metadata()
+            .and_then(|m| m.modified()),
+    ) {
+        (Ok(lock), Ok(installed)) => lock > installed,
+        // No marker (or no lockfile to compare): fall back to presence alone.
+        _ => !modules.exists(),
+    };
+    if modules.exists() && !stale {
         return;
     }
     let install = Command::new("npm")

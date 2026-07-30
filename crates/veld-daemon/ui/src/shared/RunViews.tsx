@@ -116,7 +116,11 @@ export function NodesView(props: { target: RunViewTarget } & HostProps) {
               size="xs"
               title="Which run's nodes"
               aria-label="Run"
-              value={ownSel}
+              // Falls back to the current run when the stored id belongs to a run
+              // this worktree no longer has: the pane survives a worktree switch,
+              // and a `NativeSelect` whose value matches no option renders blank
+              // while the rows below show the live run.
+              value={history.some((h) => h.run_id === ownSel) ? ownSel : ""}
               onChange={(e) => setOwnSel(e.currentTarget.value)}
               data={historyOptions(run)}
             />
@@ -162,10 +166,17 @@ export function LogsView(props: { target: RunViewTarget } & HostProps) {
   const selected = props.selected ?? null;
   return (
     <LogsPanel
-      // Keyed by run instance: the filters and the accumulated node list belong to
-      // the run being read, so a worktree switch — or a restart minting a new run —
-      // must not carry another run's node filter in.
-      key={`${ref.projectRoot}::${ref.name}::${run.run_id}`}
+      // Keyed by run *instance* only in a pane, where a worktree switch re-points
+      // the view and another run's node filter would come along. A card is bound to
+      // one environment for its lifetime, and keying it by instance would have
+      // silently changed runs-mode behaviour: `veld restart` mints a new run id, so
+      // the panel would remount and drop the search, filters and scroll position
+      // that used to survive it.
+      key={
+        props.fill
+          ? `${ref.projectRoot}::${ref.name}::${run.run_id}`
+          : `${ref.projectRoot}::${ref.name}`
+      }
       run={ref}
       history={run.history ?? []}
       histSel={selected?.run_id ?? null}

@@ -375,9 +375,12 @@ function DockView(props: {
         onDrop={(e) => dropTab(e)}
       >
         {/* Only the tabs scroll. The `+` sits outside this box so it survives a
-            strip full of tabs — and `role="tablist"` lives on the scroller rather
-            than on the row, because a tablist's tabs have to be its own children. */}
-        <TabScroller>
+            strip full of tabs, and `role="tablist"` lives on the scroller rather
+            than on this row — a tablist whose children include a menu button and a
+            drop spacer is not one. The wrapper each tab needs (label and close as
+            siblings) is `role="presentation"`, so the `role="tab"` button inside it
+            is the tablist's effective child. */}
+        <TabScroller tabKey={dock.tabs.map((t) => t.id).join(",")}>
         {dock.tabs.map((tab, at) => (
           <TabButton
             key={tab.id}
@@ -636,7 +639,11 @@ function unhandledKind(kind: never): never {
  * drags), and the scroll position. A `ResizeObserver` covers the first two, the
  * scroll event the third.
  */
-function TabScroller(props: { children: React.ReactNode }) {
+function TabScroller(props: {
+  children: React.ReactNode;
+  /** The tab ids, joined. The effect's dependency — see below. */
+  tabKey: string;
+}) {
   const box = useRef<HTMLDivElement>(null);
   const [edges, setEdges] = useState({ left: false, right: false });
 
@@ -661,8 +668,10 @@ function TabScroller(props: { children: React.ReactNode }) {
       el.removeEventListener("scroll", measure);
       ro.disconnect();
     };
-    // Re-run when the tab set changes, so the observer follows the new children.
-  }, [props.children]);
+    // `tabKey`, not `children`: the children are a fresh array on every render, so
+    // depending on them tore down and rebuilt the observer and the listener on
+    // every 5s poll and every keystroke in the palette, per dock.
+  }, [props.tabKey]);
 
   return (
     <div className="pane-tab-strip">
@@ -721,6 +730,9 @@ function TabButton(props: {
   return (
     <span
       ref={box}
+      // Presentational: the accessible tab is the button inside, so this wrapper
+      // must not sit between the tablist and it as an unlabelled group.
+      role="presentation"
       className={[
         "pane-tab",
         props.selected ? "sel" : "",

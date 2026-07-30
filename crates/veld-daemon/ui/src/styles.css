@@ -1329,6 +1329,13 @@ select:focus {
   flex-direction: column;
   gap: 6px;
   padding: 8px 14px;
+  /* Bounded and scrollable, because the number of rows is not ours to choose: a
+     join link posted in a channel can produce many pending requests at once (each
+     lives ~60s and is refreshable by reconnecting), and IDE mode's frame does not
+     scroll — an unbounded banner squeezed the panes towards zero height, which
+     also strands the native browser views at stale bounds. */
+  max-height: 40vh;
+  overflow-y: auto;
 }
 
 /* ---- run diagnostics panes ------------------------------------------------- */

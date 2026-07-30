@@ -316,6 +316,8 @@ function AppInner(props: {
   const [repoList, setRepoList] = useState<RepoList | null>(null);
   const [envs, setEnvs] = useState<EnvironmentList | null>(null);
   const [shares, setShares] = useState<SharesList | null>(null);
+  /** Whether the last `/api/shares` read failed — see `refresh`. */
+  const [sharesStale, setSharesStale] = useState(false);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [offline, setOffline] = useState(false);
   // Runs mode does its own polling on its own cadence, so the diagnostics reads
@@ -353,6 +355,10 @@ function AppInner(props: {
     if (!extras) return;
     const [sharesResult, statsResult] = await extras;
     if (sharesResult.status === "fulfilled") setShares(sharesResult.value);
+    // Tracked, unlike stats: shares drive a *control* surface, and a panel that
+    // says "nothing shared" from a read that never landed invites the user to
+    // start a second share of a run that already has one.
+    setSharesStale(sharesResult.status !== "fulfilled");
     if (statsResult.status === "fulfilled") setStats(statsResult.value);
   }, [wantRunState]);
 
@@ -575,8 +581,8 @@ function AppInner(props: {
    *
    * Not tracked as a pending marker: those watch the *run* signature
    * (`PendingAction`), which a share never moves — a marker for one would stay
-   * stuck until its TTL. The 5s poll is what confirms it, and a failure lands in
-   * the same banner as a run action's.
+   * stuck until its TTL. The 5s poll is what confirms it, and a failure surfaces
+   * as a toast, like every other action's.
    */
   const shareAction = (label: string, fn: () => Promise<unknown>) => {
     void (async () => {
@@ -1021,7 +1027,14 @@ function AppInner(props: {
             run: () =>
               shareAction("share", async () => {
                 const r = await api.startShare(ref);
-                if (r?.join_url) await navigator.clipboard.writeText(r.join_url);
+                // Not awaited into the share's own error path — see ShareControls:
+                // the share is already live, so a refused clipboard write must not
+                // report that sharing failed.
+                if (r?.join_url) {
+                  void navigator.clipboard
+                    .writeText(r.join_url)
+                    .catch((e) => notifyError("Copy the join link", e));
+                }
               }),
           });
         }
@@ -1258,8 +1271,18 @@ function AppInner(props: {
    * portalled, so `overlayGuard` hides the embedded browser panes while it is
    * open without this having to say so.
    */
+  const shareEmptyHint = !worktree
+    ? "Select a worktree."
+    : !worktree.has_veld_config
+      ? "This worktree has no veld.json, so it has no run to share."
+      : !diagRun
+        ? "Start the run to share it."
+        : "This run has nothing shared yet.";
+  // Shown while the worktree *could* run something, and also whenever a share is
+  // live: a repo whose directory has gone missing still has a share to stop, and
+  // gating on startability was the one path that hid the only control that ends it.
   const sharingSurface =
-    worktree && canRunWorktreeNow(worktree) ? (
+    worktree && (canRunWorktreeNow(worktree) || sharingActive) ? (
       <Popover position="bottom-end" width={430} shadow="md" withinPortal>
         <Popover.Target>
           <Button
@@ -1282,7 +1305,8 @@ function AppInner(props: {
             runId={diagRun?.run_id ?? null}
             running={diagRun?.status === "running"}
             shares={shares?.shares ?? []}
-            emptyHint={runEmptyHint}
+            unknown={shares === null || sharesStale}
+            emptyHint={shareEmptyHint}
             onChanged={() => void refresh()}
           />
         </Popover.Dropdown>

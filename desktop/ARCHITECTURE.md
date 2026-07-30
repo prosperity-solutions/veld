@@ -181,7 +181,7 @@ requests at runtime — branding rule.
 #### Run diagnostics and sharing (`ui/src/shared/`, `panes/RunPanes.tsx`)
 
 - **`ui/src/shared/` is what both modes render.** `RunViews.tsx` is the unit of
-  reuse — `NodesView` and `LogsView`, over `NodeTable`/`nodeRows` and `LogsPanel` —
+  reuse — `NodesView` and `LogsView`, over `NodeList`/`nodeRows` and `LogsPanel` —
   with the sharing pieces (`ShareControls`, `PeerShareStrip`, `WebShareStrip`,
   `JoinRequestRow`, `RunSharePanel`) and the formatting helpers beside them. Runs
   mode is now *only* a head, run controls and a Nodes|Logs switcher over those
@@ -262,7 +262,7 @@ requests at runtime — branding rule.
 - **A share action is not a `PendingAction`.** Those markers clear when the
   *run signature* moves, which a share never touches; one taken out for a share
   would sit spinning until its 60s TTL. The poll is what confirms a share, and a
-  failure lands in the same banner a run action's does.
+  failure surfaces as a toast, like every other action's.
 
 #### Browser panes (`ui/src/panes/browserHost.ts`, `BrowserPane.tsx`)
 

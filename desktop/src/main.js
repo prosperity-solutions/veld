@@ -21,7 +21,7 @@ const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
 
 /**
  * Brand assets, generated from the repo's canonical sources by
- * `scripts/make-icons.sh` (see that file for what comes from where).
+ * `scripts/make-icons.py` (see that file for what comes from where).
  *
  * `icon.png` is the app icon — the same rounded-tile mark the favicon shows in a
  * browser tab. `trayTemplate.png` is the menu-bar icon and carries the mark the

@@ -19,7 +19,23 @@ import { api, type PendingInfo, type RunRef, type ShareInfo } from "../api";
 import { useCopyFlash } from "./copy";
 import { notifyDone, notifyError } from "./notify";
 
-/** This run's shares: the peer share (at most one) and any public web shares. */
+/**
+ * This run's shares: the peer share (at most one) and any public web shares.
+ *
+ * A share is attached by `run_id`, never by name (see the module comment), and the
+ * peer/web split is "has no public URLs" — the same rule runs mode has always used.
+ *
+ * **Known ambiguity, and the wire cannot resolve it.** `POST /api/shares?web`
+ * inserts the share and *then* registers it with the gateway
+ * (`crates/veld-daemon/src/share/api.rs`), and every field that would give a web
+ * share away — `public_urls`, `web_password`, and even `ticket`/`join_url` — is
+ * derived from that registration (`share/manager.rs`). So between the two, a
+ * pending web share is byte-identical to a peer share and is classified as one:
+ * the Share button hides and "Stop sharing" points at it. The window is one HTTP
+ * round-trip, it closes by itself, and the fix belongs daemon-side (register before
+ * inserting, or mark the record) — tracked as a follow-up. `sharing.test.ts` pins
+ * the current behaviour as a canary.
+ */
 export function sharesForRun(
   shares: ShareInfo[],
   runId: string,
@@ -140,9 +156,17 @@ export function ShareControls(props: {
           onClick={() =>
             void act("share", "Start sharing", async () => {
               const r = await api.startShare(props.run);
-              if (r?.join_url) {
+              if (!r?.join_url) return;
+              // Reported separately, and never as a failure of the share: the
+              // share is live by this point, and a refused clipboard write
+              // (no permission, a non-secure origin) that surfaced as
+              // "Start sharing failed" would send the user to undo something
+              // that worked.
+              try {
                 await navigator.clipboard.writeText(r.join_url);
                 notifyDone("Sharing — join link copied to the clipboard");
+              } catch (e) {
+                notifyError("Copy the join link", e);
               }
             })
           }
@@ -282,7 +306,13 @@ export function RunSharePanel(props: {
   runId: string | null;
   running: boolean;
   shares: ShareInfo[];
-  /** Why there is nothing to share — only the host knows (no run, no config). */
+  /** The share list could not be read, so `shares` says nothing about reality. */
+  unknown?: boolean;
+  /**
+   * Why there is nothing to share — the host knows, this doesn't. Distinct from
+   * the diagnostics panes' hint on purpose: "start the run and its logs appear
+   * here" is the wrong sentence under a Sharing control.
+   */
   emptyHint: string;
   onChanged: () => void;
 }) {
@@ -312,7 +342,9 @@ export function RunSharePanel(props: {
         )}
         {idle && props.running && (
           <Text size="xs" c="dimmed">
-            Not shared.
+            {props.unknown
+              ? "Can't read the share list right now — retrying."
+              : "This run has nothing shared yet."}
           </Text>
         )}
       </Group>

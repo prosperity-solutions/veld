@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { notifyError } from "./notify";
 
 /**
  * Copy-to-clipboard with a per-target "Copied" flash.
@@ -13,10 +14,18 @@ export function useCopyFlash(): { flash: string | null; copy: (text: string, tag
   const timer = useRef(0);
   useEffect(() => () => window.clearTimeout(timer.current), []);
   const copy = (text: string, tag: string) => {
-    void navigator.clipboard.writeText(text);
-    setFlash(tag);
-    window.clearTimeout(timer.current);
-    timer.current = window.setTimeout(() => setFlash(null), 1500);
+    // Awaited, because the write can be refused (no permission, a non-secure
+    // origin) and some of what this copies is not re-derivable from the screen —
+    // a web share's password, a join ticket. Flashing "Copied" over a write that
+    // never happened is the worst of the two failures.
+    void navigator.clipboard.writeText(text).then(
+      () => {
+        setFlash(tag);
+        window.clearTimeout(timer.current);
+        timer.current = window.setTimeout(() => setFlash(null), 1500);
+      },
+      (e) => notifyError("Copy to the clipboard", e),
+    );
   };
   return { flash, copy };
 }

@@ -324,7 +324,14 @@ ui-deps:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}/crates/veld-daemon/ui"
-    [ -d node_modules ] || npm install
+    # Presence is not enough — npm records the tree it installed in
+    # node_modules/.package-lock.json, so a checkout that predates a *new*
+    # dependency has a complete-looking node_modules that is missing it, and the
+    # failure is a cryptic "Cannot find package". Same rule as
+    # crates/veld-daemon/build.rs.
+    if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+        npm install
+    fi
 
 # The same for desktop/, plus the Electron binary.
 #
@@ -339,7 +346,9 @@ desktop-deps:
     #!/usr/bin/env bash
     set -euo pipefail
     cd "{{justfile_directory()}}/desktop"
-    [ -d node_modules ] || npm install
+    if [ ! -d node_modules ] || [ package-lock.json -nt node_modules/.package-lock.json ]; then
+        npm install
+    fi
     if [ ! -f node_modules/electron/path.txt ]; then
         echo "Fetching the Electron binary (npm deferred its install script)…"
         ./node_modules/.bin/install-electron
