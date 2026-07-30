@@ -66,7 +66,6 @@ import {
   emulationSize,
   formatPercent,
   formatZoom,
-  isLandscape,
   orientationLabel,
   resizeEmulation,
   responsiveEmulation,
@@ -776,15 +775,18 @@ export function BrowserPane(props: {
                                   <IconCheck size={14} />
                                 ) : undefined
                               }
-                              // Keeps the current orientation when swapping devices:
-                              // having rotated one phone, the next one you compare it
-                              // against should arrive the same way round.
+                              // A preset arrives the way that device is held, so
+                              // rotation resets: picking one is choosing a device,
+                              // not adjusting the current one. It used to carry the
+                              // orientation over, on the theory that you were
+                              // comparing two phones sideways — but then picking
+                              // "Small phone" could hand you a 780×360 strip with
+                              // nothing on screen saying why. `fit` does carry over,
+                              // because that is a preference about the *pane* rather
+                              // than a property of the device.
                               onClick={() =>
                                 applyEmulation(
                                   emulationForPreset(preset, {
-                                    landscape: emulation
-                                      ? isLandscape(emulation)
-                                      : false,
                                     chrome: HOST_CHROME,
                                     fit: emulation?.fit ?? true,
                                   }),
