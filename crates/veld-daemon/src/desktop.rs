@@ -955,7 +955,7 @@ async fn start_worktree_run(
         args.push(preset.clone());
     }
 
-    let code = spawn_veld(&wt_path, &args);
+    let code = spawn_veld(&wt_path, &args).await;
     if code == StatusCode::ACCEPTED {
         Ok(StatusCode::ACCEPTED)
     } else {

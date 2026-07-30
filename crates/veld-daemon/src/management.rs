@@ -15,6 +15,7 @@ use tracing::warn;
 use veld_core::config;
 use veld_core::db::{Db, LogFilter, LogStream};
 use veld_core::state::{GlobalRegistry, NodeState, NodeStatus, RunStatus};
+use veld_core::user_path::resolve_user_path;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/management-ui.html");
 
@@ -785,7 +786,7 @@ async fn stop_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&scope, &run_name, "stop")
+    run_veld_command(&scope, &run_name, "stop").await
 }
 
 async fn restart_environment(
@@ -799,7 +800,7 @@ async fn restart_environment(
     if let Err(s) = validate_run_name(&run_name) {
         return s;
     }
-    run_veld_command(&scope, &run_name, "restart")
+    run_veld_command(&scope, &run_name, "restart").await
 }
 
 #[derive(Deserialize)]
@@ -876,14 +877,14 @@ async fn run_action(
         args.push("--node".to_owned());
         args.push(node.clone());
     }
-    spawn_veld(&project_root, &args)
+    spawn_veld(&project_root, &args).await
 }
 
 /// Stop / restart helper: spawn `veld <action> --name <run>` in the project
 /// the caller scoped the run to. The `--name` argument stays name-based (that
 /// is the CLI's own contract); it is the *working directory* that disambiguates
 /// which project's `main` gets stopped.
-fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCode {
+async fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCode {
     let registry = match open_db().and_then(|db| {
         db.registry().map_err(|e| {
             warn!("failed to load registry for {action}: {e}");
@@ -901,6 +902,7 @@ fn run_veld_command(scope: &RunScope, run_name: &str, action: &str) -> StatusCod
         &project_root,
         &[action.to_owned(), "--name".to_owned(), run_name.to_owned()],
     )
+    .await
 }
 
 /// Longest stderr tail kept from a failed spawned command. A `veld start`
@@ -1021,30 +1023,52 @@ fn stderr_tail(path: &std::path::Path) -> String {
     String::from_utf8_lossy(&buf).trim().to_owned()
 }
 
-/// Spawn `veld <args...>` in the project directory via a login shell. The
-/// project_root is looked up from the GlobalRegistry (never supplied by the
-/// client) to prevent directory traversal; every argument is shell-escaped.
-pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
-    let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
+/// Spawn `veld <args...>` in the project directory with the user's login-shell
+/// `PATH`. The project_root is looked up from the GlobalRegistry (never
+/// supplied by the client) to prevent directory traversal.
+pub(super) async fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> StatusCode {
     // Resolve the veld binary as THIS daemon's sibling (current_exe), by
-    // absolute path — a bare `veld` in the login shell resolves via PATH to
-    // the INSTALLED binary, which would then operate a dev instance's
-    // DB/daemon (inherited env) and fail closed on a schema-ahead dev DB.
-    // The login shell stays: veld's own children need the user's full PATH.
+    // absolute path — a bare `veld` would resolve via PATH to the INSTALLED
+    // binary, which would then operate a dev instance's DB/daemon (inherited
+    // env) and fail closed on a schema-ahead dev DB.
     let veld_bin = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("veld")))
         .filter(|p| p.exists())
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|| "veld".to_owned());
-    let cmd = format!(
-        "cd {} && {} {}",
-        shell_escape(&project_root.to_string_lossy()),
-        shell_escape(&veld_bin),
-        escaped_args.join(" "),
-    );
+    // AGENTS.md: a daemon-spawned command must inherit the user's login-shell
+    // PATH, and `veld start` runs every command a node declares. This used to
+    // rely on `$SHELL -l -c`, which does not get there: a login shell sources
+    // `.zprofile` but NOT `.zshrc`, and `.zshrc` is where version managers
+    // (nvm, fnm, rbenv) and `brew shellenv` put their bin directories on most
+    // machines. Under launchd the daemon's own PATH is the bare service one,
+    // so a UI- or Desktop-initiated `veld start` resolved node commands
+    // against `/usr/bin:/bin:/usr/sbin:/sbin` plus whatever `.zprofile` added
+    // and reported `sh: npx: command not found` for a config that works in the
+    // user's terminal.
+    //
+    // The login shell is gone rather than kept alongside the injection: on
+    // Debian `/etc/profile` *overwrites* PATH unconditionally, so a login
+    // shell would discard the injected value and leave this broken on Linux,
+    // and `export PATH=…` inside the command string is not fish syntax. Only
+    // PATH is inherited, never the rest of the login environment — the same
+    // contract the monitor's liveness probes and `SecretSource::Command` hold.
+    // Dropping the shell also drops the shell-escaping of a client-supplied
+    // run name; arguments now reach the binary as argv.
+    let path_env = resolve_user_path().await;
+    spawn_veld_in(&veld_bin, &path_env, project_root, args)
+}
 
+/// The spawn itself, with every ambient input (the veld binary, the resolved
+/// `PATH`) passed in so a test can supply its own. Separate from
+/// [`spawn_veld`] only for that reason.
+fn spawn_veld_in(
+    veld_bin: &str,
+    path_env: &str,
+    project_root: &std::path::Path,
+    args: &[String],
+) -> StatusCode {
     // tokio::process (NOT std): `veld stop` can call back into THIS daemon's
     // HTTP API (share teardown) — a synchronous child.wait() here parks a
     // core runtime worker until the child exits, and with the child waiting
@@ -1057,7 +1081,7 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
     // trace anywhere and the UI would just never show a run.
     //
     // Captured to a FILE, not a pipe. A pipe would have to be drained to keep
-    // from blocking the child, would not reach EOF when the shell exits
+    // from blocking the child, would not reach EOF when the CLI exits
     // (`veld action` inherits stderr, so anything it backgrounds holds the
     // write end open — `process::run_command` now captures both of a step's own
     // pipes, but the CLI's stderr, which this file is, is still inherited by
@@ -1069,8 +1093,10 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
         Some((file, path)) => (std::process::Stdio::from(file), Some(path)),
         None => (std::process::Stdio::null(), None),
     };
-    match tokio::process::Command::new(&shell)
-        .args(["-l", "-c", &cmd])
+    match tokio::process::Command::new(veld_bin)
+        .args(args)
+        .current_dir(project_root)
+        .env("PATH", path_env)
         .stdout(std::process::Stdio::null())
         .stderr(stderr_sink)
         .spawn()
@@ -1116,17 +1142,14 @@ pub(super) fn spawn_veld(project_root: &std::path::Path, args: &[String]) -> Sta
 }
 
 /// Allow only conservative identifier characters for action/node names that
-/// originate from the browser, as defence in depth on top of shell escaping.
+/// originate from the browser. Kept as defence in depth now that arguments
+/// reach the CLI as argv rather than through a shell string: it also bounds
+/// what can be passed as a flag-shaped value.
 pub(super) fn is_safe_identifier(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
         && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
-}
-
-/// Simple single-quote shell escaping.
-fn shell_escape(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
@@ -1281,5 +1304,75 @@ mod tests {
             resolve_run_project(&reg, "", "main"),
             Err(StatusCode::NOT_FOUND)
         );
+    }
+
+    /// Pins the load-bearing `.env("PATH", path_env)` in `spawn_veld_in`, the
+    /// whole point of this spawn path: a stand-in `veld` records the PATH and
+    /// cwd it was invoked with, and both must be the injected ones — not the
+    /// daemon's own (bare, under launchd) environment, which is what produced
+    /// `sh: npx: command not found` for node commands. The binary path and PATH
+    /// are arguments rather than process env so the test never touches
+    /// `set_var` (an env data race under multithreaded `cargo test`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawned_veld_gets_the_injected_path_and_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let bin_dir = tempfile::tempdir().unwrap();
+        let project = tempfile::tempdir().unwrap();
+        let receipt = bin_dir.path().join("receipt");
+
+        let fake_veld = bin_dir.path().join("veld");
+        std::fs::write(
+            &fake_veld,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n%s\\n%s' \"$PATH\" \"$(pwd)\" \"$*\" > {}\n",
+                receipt.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_veld, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let injected = format!("{}:/usr/bin:/bin", bin_dir.path().display());
+        assert_eq!(
+            spawn_veld_in(
+                &fake_veld.to_string_lossy(),
+                &injected,
+                project.path(),
+                &["stop".to_owned(), "--name".to_owned(), "main".to_owned()],
+            ),
+            StatusCode::ACCEPTED
+        );
+
+        // Fire-and-forget: the handler returns before the child runs, so poll
+        // for the receipt rather than assuming it is already there.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let recorded = loop {
+            match std::fs::read_to_string(&receipt) {
+                Ok(s) if s.lines().count() >= 3 => break s,
+                _ => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "spawned veld never wrote its receipt"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        };
+        let mut lines = recorded.lines();
+        assert_eq!(
+            lines.next().unwrap(),
+            injected,
+            "child PATH is not injected"
+        );
+        // macOS hands out /var symlinks for temp dirs; `pwd` in the child
+        // reports the resolved path, so compare canonicalised.
+        assert_eq!(
+            std::fs::canonicalize(lines.next().unwrap()).unwrap(),
+            std::fs::canonicalize(project.path()).unwrap(),
+            "child cwd is not the project root"
+        );
+        // Arguments reach the CLI as argv, unquoted — no shell in between.
+        assert_eq!(lines.next().unwrap(), "stop --name main");
     }
 }
