@@ -1350,13 +1350,6 @@ mod tests {
         );
     }
 
-    /// Pins the load-bearing `.env("PATH", path_env)` in `spawn_veld_in`, the
-    /// whole point of this spawn path: a stand-in `veld` records the PATH and
-    /// cwd it was invoked with, and both must be the injected ones — not the
-    /// daemon's own (bare, under launchd) environment, which is what produced
-    /// `sh: npx: command not found` for node commands. The binary path and PATH
-    /// are arguments rather than process env so the test never touches
-    /// `set_var` (an env data race under multithreaded `cargo test`).
     /// Serialises the two tests that spawn through `spawn_veld_in`. They share
     /// one real directory (`~/.veld/spawn-logs`) and identify their own capture
     /// file by set difference, which only holds if no sibling is creating one
@@ -1385,6 +1378,13 @@ mod tests {
             .unwrap_or_default()
     }
 
+    /// Pins the load-bearing `.env("PATH", path_env)` in `spawn_veld_in`, the
+    /// whole point of this spawn path: a stand-in `veld` records the PATH and
+    /// cwd it was invoked with, and both must be the injected ones — not the
+    /// daemon's own (bare, under launchd) environment, which is what produced
+    /// `sh: npx: command not found` for node commands. The binary path and PATH
+    /// are arguments rather than process env so the test never touches
+    /// `set_var` (an env data race under multithreaded `cargo test`).
     #[cfg(unix)]
     #[tokio::test]
     async fn spawned_veld_gets_the_injected_path_and_cwd() {
@@ -1416,6 +1416,18 @@ mod tests {
                 &["stop".to_owned(), "--name".to_owned(), "main".to_owned()],
             ),
             StatusCode::ACCEPTED
+        );
+
+        // Exactly one capture file appeared, checked before any `.await` so the
+        // reaper (a `tokio::spawn` on this current-thread runtime) cannot yet
+        // have removed it. Without this, both capture-file tests would pass
+        // vacuously on a host where `spawn_stderr_file` never creates one (no
+        // HOME, unwritable `~/.veld`) — `own_capture_files` reports empty either
+        // way, and the leak assertion in the sibling test would guard nothing.
+        assert_eq!(
+            own_capture_files().difference(&before).count(),
+            1,
+            "no stderr capture file was created for the spawn"
         );
 
         // Fire-and-forget: the handler returns before the child runs, so poll
