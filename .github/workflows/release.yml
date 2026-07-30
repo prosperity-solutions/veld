@@ -195,10 +195,13 @@ jobs:
         include:
           - name: macos
             os: macos-latest
-            args: --mac --arm64 --x64
+            run: npx electron-builder --mac --arm64 --x64 --publish never
+          # Two invocations, not one — see the target block in
+          # electron-builder.yml for why the .deb must not share an output
+          # directory with the AppImage.
           - name: linux
             os: ubuntu-24.04
-            args: --linux
+            run: npm run package:linux
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -221,11 +224,16 @@ jobs:
       - run: npm ci
 
       - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: ${{ matrix.run }}
 
       # The .yml files are electron-updater's feed and the blockmaps are how it
       # downloads a delta instead of 120 MB — both belong on the release beside
       # the installers, not just in the build's dist/.
+      #
+      # `dist-deb/` contributes the .deb and *nothing else*: its build writes a
+      # `latest-linux.yml` of its own describing the .deb, and publishing that
+      # would overwrite the AppImage's feed once the artifacts are merged —
+      # pointing the one self-updating Linux build at a package it cannot install.
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -234,7 +242,7 @@ jobs:
             desktop/dist/*.dmg
             desktop/dist/*.zip
             desktop/dist/*.AppImage
-            desktop/dist/*.deb
+            desktop/dist-deb/*.deb
             desktop/dist/*.blockmap
             desktop/dist/latest*.yml
           if-no-files-found: error

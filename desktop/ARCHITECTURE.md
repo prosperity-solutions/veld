@@ -45,6 +45,7 @@ have since shipped — see below.)
 | Packaging | **electron-builder**, macOS + Linux, riding the CLI's release pipeline | The app is packaged in the same workflow run that builds the CLI binaries, before the tag is created, and its artifacts are attached to the same GitHub release. A parallel pipeline would have been less plumbing exactly once and a version-skew source forever. No Windows target: the UI is served by the daemon, so a plain browser already covers that platform and a Windows build would be an installer around a page you can already open. |
 | Versioning | **One version, one tag** — the app's `package.json` version is the CLI's `Cargo.toml` version | The shell renders the daemon's UI, so the two halves are one product with one compatibility surface (the preload IPC a newer UI expects from an older shell). Release CI writes the version into `package.json` before packaging and semantic-release commits the same bump, which is exactly what it already does to `Cargo.toml`. The app reports skew (`updatePolicy.js` → `versionSkew`) rather than blocking on it: the fix is `veld update` in one direction and an app update in the other, and neither is something to refuse to start over. |
 | Auto-update | electron-updater against the same GitHub releases, **install-in-place only where it can actually work** | The check is uniform; applying it is not. macOS is download-only because Squirrel.Mac verifies that the replacement carries the running app's code signature and there is no Developer ID yet (see the row below) — a downloaded-then-rejected update is worse than no button. A Linux `.deb` is download-only because its files belong to dpkg. The AppImage self-installs, being a single file the running process may swap; `APPIMAGE` in the environment is how it knows it is one. `updateMode()` is one pure function so the macOS half flips by deleting a line. Every download is offered in a dialog first, including where it could be silent: applying an update restarts the app, and a dock full of terminal panes is not something to interrupt unannounced. |
+| Linux artifact naming | `executableName: veld-desktop`, set explicitly | electron-builder derives the Linux executable name from the npm package name, and `@veld/desktop` becomes `@velddesktop`, which its own path validation then rejects — *every* Linux build fails, which (because `release` needs the desktop job) takes the CLI's release with it. The scoped name stays: it is what keeps this npm project unpublishable by accident. Caught by CI's Linux packaging job, not by a local macOS build — which is the argument for that job existing. |
 | macOS signing | **Ad-hoc signed** (`scripts/adhoc-sign.js`), not unsigned, until a Developer ID exists | An ad-hoc signature is not a trust signal and Gatekeeper still quarantines the download. What it buys is launchability: on Apple Silicon every executable needs *some* valid signature, repacking Electron invalidates the one the prebuilt binaries shipped with, and the failure mode is "Veld is damaged and can't be opened" — which reads as a corrupt download and has no in-UI way out, unlike the "unidentified developer" prompt an ad-hoc build gets. electron-builder's own signing is explicitly disabled (`identity: null`) rather than left to auto-discovery, so the artifacts do not depend on which certificates happen to be in the building machine's keychain. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
@@ -510,7 +511,15 @@ Minimal by design. Main process only does:
 ## Packaging and updates
 
 Config: `desktop/electron-builder.yml`. Local build: `just desktop-package`
-(output in `desktop/dist/`, gitignored).
+(output in `desktop/dist/`, and `desktop/dist-deb/` on Linux — both gitignored).
+
+Linux takes **two electron-builder invocations**, into separate output
+directories. `FpmTarget` writes a `package-type` file naming its format into
+`<out>/linux-unpacked/resources`, which is the same directory the AppImage packs
+from, and the two targets run concurrently — so a single invocation can produce
+an AppImage that claims to be a .deb. electron-updater dispatches on exactly that
+file, so the one self-updating Linux build would download a .deb and run
+`dpkg -i` while never replacing itself. CI asserts the marker is absent.
 
 ### Artifacts
 

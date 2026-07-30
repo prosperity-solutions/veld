@@ -116,26 +116,15 @@ async function checkForUpdates({ manual }) {
     }
     return;
   }
+  // Guards the network check only, never the dialogs that follow it: held
+  // across those, a second *Check for Updates…* while one is open would return
+  // in silence — from the one path that promises to report every outcome.
   if (checking) return;
   checking = true;
+  /** @type {import("electron-updater").UpdateCheckResult | null} */
+  let result = null;
   try {
-    const result = await autoUpdater.checkForUpdates();
-    const version = result?.updateInfo?.version;
-    if (!result?.isUpdateAvailable || !version) {
-      if (manual) {
-        await dialog.showMessageBox({
-          type: "info",
-          message: `Veld Desktop ${app.getVersion()} is up to date.`,
-          buttons: ["OK"],
-        });
-      }
-      return;
-    }
-    // A manual check re-offers a version already declined — asking is the whole
-    // point of clicking the item — while the periodic one stays quiet.
-    if (!manual && offered.has(version)) return;
-    offered.add(version);
-    await offerUpdate(version);
+    result = await autoUpdater.checkForUpdates();
   } catch (err) {
     if (manual) {
       await dialog.showMessageBox({
@@ -145,9 +134,27 @@ async function checkForUpdates({ manual }) {
         buttons: ["OK"],
       });
     }
+    return;
   } finally {
     checking = false;
   }
+
+  const version = result?.updateInfo?.version;
+  if (!result?.isUpdateAvailable || !version) {
+    if (manual) {
+      await dialog.showMessageBox({
+        type: "info",
+        message: `Veld Desktop ${app.getVersion()} is up to date.`,
+        buttons: ["OK"],
+      });
+    }
+    return;
+  }
+  // A manual check re-offers a version already declined — asking is the whole
+  // point of clicking the item — while the periodic one stays quiet.
+  if (!manual && offered.has(version)) return;
+  offered.add(version);
+  await offerUpdate(version);
 }
 
 async function offerUpdate(version) {
@@ -204,6 +211,13 @@ async function promptRestart(version) {
   // failures are emitted, not thrown to us.
   installing = true;
   installingVersion = version ?? null;
+  // Released first: `AppImageUpdater` spawns the replacement *before* this
+  // process quits (`BaseUpdater.quitAndInstall` schedules the quit on
+  // `setImmediate`), and the new instance takes the single-instance lock in
+  // `main.js` on startup. Holding it here means a slow teardown leaves the user
+  // with the successor quitting itself and nothing running — on the one platform
+  // that self-installs.
+  app.releaseSingleInstanceLock();
   autoUpdater.quitAndInstall(true, true);
 }
 

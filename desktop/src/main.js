@@ -122,10 +122,18 @@ async function daemonReachable() {
   try {
     const res = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(2000) });
     if (!res.ok) return false;
-    // A daemon old enough to have no version field is still reachable; the skew
-    // check treats the unknown as "nothing to say".
-    const body = await res.json().catch(() => null);
-    noteDaemonVersion(body?.version);
+    // Reachability is decided by the status line alone, as it was before the
+    // version read was added here: a daemon that answers 200 and is slow to
+    // flush its body would otherwise trip the same 2s signal and bounce a
+    // perfectly healthy app back to the waiting screen. A daemon old enough to
+    // have no version field is still reachable, and the skew check treats an
+    // unknown version as "nothing to say".
+    try {
+      const body = await res.json();
+      noteDaemonVersion(body?.version);
+    } catch {
+      // no version this round
+    }
     return true;
   } catch {
     return false;

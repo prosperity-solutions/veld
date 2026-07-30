@@ -64,19 +64,31 @@ linux:
   icon: assets/icon.png
   maintainer: Prosperity Solutions <veld@life.li>
   synopsis: Local development environment orchestrator
+  # Required: without it electron-builder derives the executable name from
+  # package.json's `@veld/desktop`, and its own path validation then rejects the
+  # `@` — every Linux build fails. The scoped package name is not going away
+  # (it is what makes this npm project unpublishable by accident), so the
+  # executable is named here.
+  executableName: veld-desktop
+  # AppImage ONLY. The .deb is built by a second, separate invocation
+  # (`npm run package:linux`) into its own output directory, and that separation
+  # is load-bearing rather than tidiness: `FpmTarget` writes a `package-type`
+  # file naming its format into `<out>/linux-unpacked/resources` — the same
+  # directory the AppImage packs from — and the two targets run concurrently.
+  # If the deb's write wins the race, the AppImage ships `package-type: deb`,
+  # electron-updater instantiates `DebUpdater` instead of `AppImageUpdater`
+  # (`electron-updater/out/main.js:52`), and "Download and Install" fetches a
+  # .deb and runs `dpkg -i` while the running AppImage is never replaced.
+  # Building into separate directories is what makes that unreachable.
   target:
-    # AppImage first: it is the only Linux format electron-updater can install
-    # in place, so it is the one that gets self-updates. The .deb is for people
-    # who want it in their package manager and updates through the same download
-    # -a-new-one path macOS is on today.
     - target: AppImage
       arch: [x64]
-    - target: deb
-      arch: [x64]
 
-# `${arch}` is electron's spelling (x64), not the release tarballs' (amd64).
-# Left as-is: renaming it here would make the file name disagree with the update
-# feed electron-builder writes beside it, which is the thing that has to match.
+# Each target expands `${arch}` its own way — `arm64`/`x64` for macOS,
+# `x86_64` for the AppImage, `amd64` for the .deb — so these names do not all
+# match the release tarballs' `macos-amd64` spelling. Left alone deliberately:
+# the name that has to agree is the one in the update feed electron-builder
+# writes beside the file, and that is generated from this same pattern.
 artifactName: Veld-${version}-${os}-${arch}.${ext}
 
 afterPack: scripts/adhoc-sign.js

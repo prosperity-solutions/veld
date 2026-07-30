@@ -220,11 +220,17 @@ jobs:
 
   # Packaging is verified here rather than only at release time: the release
   # workflow builds the app *before* it tags, so a broken electron-builder config
-  # blocks every release until someone notices, and the change that broke it
-  # merged green. Deliberately asymmetric to keep the cost proportional — most
-  # PRs here never touch desktop/:
+  # blocks the CLI's release too, and the change that broke it merged green. That
+  # is not hypothetical — the Linux leg of this job is what caught
+  # `executableName` rejecting the scoped package name, which a macOS-only local
+  # build could not have.
   #
-  #   Linux  — the full installers (AppImage + deb), on a standard runner.
+  # It runs on every PR, including Rust-only ones: `ci.yml` has no path filters
+  # anywhere and a partial gate here would be the first. The split is about what
+  # each platform costs, not about how often it is needed:
+  #
+  #   Linux  — the full installers (AppImage + deb, two invocations), on a
+  #            standard runner.
   #   macOS  — both arches, but `--dir`: it exercises everything up to and
   #            including the ad-hoc signing hook (the mac-specific risk) without
   #            spending ~8 minutes of a 10×-billed runner on dmg/zip
@@ -248,10 +254,10 @@ jobs:
         include:
           - name: linux
             os: ubuntu-24.04
-            args: --linux
+            run: npm run package:linux
           - name: macos
             os: macos-latest
-            args: --mac --arm64 --x64 --dir
+            run: npx electron-builder --mac --arm64 --x64 --dir --publish never
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -267,7 +273,18 @@ jobs:
       # needs the real dist.
       - run: npm ci
       - name: Package
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        run: ${{ matrix.run }}
+      # The AppImage must not carry a `package-type` file: it is what
+      # electron-updater dispatches on, and a `deb` there would send the one
+      # self-updating Linux build down the dpkg path. The separate output
+      # directories are what prevent it; this is the assertion that they did.
+      - name: The AppImage was not packed with a package manager's marker
+        if: matrix.name == 'linux'
+        run: |
+          if [ -e dist/linux-unpacked/resources/package-type ]; then
+            echo "::error::dist/linux-unpacked/resources/package-type exists — the deb build leaked into the AppImage's staging dir"
+            exit 1
+          fi
       # The signature is the part that decides whether a downloaded build opens
       # at all on Apple Silicon, and it comes from our own afterPack hook rather
       # than from electron-builder — so assert it instead of trusting the log.
@@ -279,7 +296,7 @@ jobs:
           codesign --verify --deep --strict dist/mac-arm64/Veld.app
           codesign --verify --deep --strict dist/mac/Veld.app
       - name: List artifacts
-        run: ls -la dist
+        run: ls -la dist dist-deb 2>/dev/null || ls -la dist
 
   integration:
     name: Integration Tests (macOS)

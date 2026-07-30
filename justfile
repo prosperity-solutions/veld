@@ -386,12 +386,14 @@ desktop-icons:
 
 # Package Veld Desktop for this machine's OS into desktop/dist/ (electron-builder).
 #
-# The same command release CI runs, minus the version injection — a local build
+# The same commands release CI runs, minus the version injection — a local build
 # is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
 # artifacts are ad-hoc signed only (no Developer ID yet), so a build handed to
-# someone else needs `xattr -dr com.apple.quarantine` on the other end.
+# someone else needs `xattr -dr com.apple.quarantine` on the other end. On Linux
+# the .deb lands in desktop/dist-deb/, built separately on purpose (see
+# desktop/electron-builder.yml).
 desktop-package: desktop-deps
-    cd desktop && npm run package
+    cd desktop && npm run package:{{ if os() == "macos" { "mac" } else { "linux" } }}
 
 # Vite dev server for the /ide UI (HMR). Proxies /api — including the terminal
 # WebSocket upgrade — to the DEV daemon (port {{dev_daemon_port}}); start
