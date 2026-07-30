@@ -47,14 +47,15 @@ const MAX_VIEWS_PER_WINDOW = 16;
 
 /**
  * @typedef {{width: number, height: number, deviceScaleFactor: number, mobile: boolean,
- *            touch: boolean, userAgent: string|null, fit: boolean}} Emulation
+ *            touch: boolean, userAgent: string|null}} Emulation
  */
 
 /**
  * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
  *            scale: number, radius: number, touchActive: boolean,
- *            frameReady: boolean, emulated: boolean, dragging: boolean}} Entry
+ *            frameReady: boolean, emulated: boolean, dragging: boolean,
+ *            touchQueue: Promise<void>|undefined}} Entry
  */
 
 /** window.id → (viewId → Entry) */
@@ -239,8 +240,23 @@ function applyZoom(entry) {
  * built-in DevTools is — so a failure here is a normal state, not an error worth
  * raising on the pane. It is reported as `touchActive: false` and retried when
  * DevTools closes.
+ *
+ * **Serialised per view.** Every branch here awaits a CDP round trip, so two runs
+ * can interleave — and toggling the menu's Touch item twice inside one round trip
+ * does exactly that, since the item deliberately keeps the menu open. An off-run
+ * resuming after an on-run detached the debugger while `emulation.touch` was still
+ * true, leaving the pane claiming touch was paused by something else, which was a
+ * lie with nothing to retry it until DevTools closed or the page navigated. Chaining
+ * makes the last caller win, which is what a toggle means.
  */
-async function applyTouch(window, viewId, entry) {
+function applyTouch(window, viewId, entry) {
+  entry.touchQueue = (entry.touchQueue ?? Promise.resolve())
+    .then(() => applyTouchNow(window, viewId, entry))
+    .catch(() => {});
+  return entry.touchQueue;
+}
+
+async function applyTouchNow(window, viewId, entry) {
   const wc = entry.view.webContents;
   if (wc.isDestroyed()) return;
   const wanted = entry.emulation?.touch === true;
@@ -474,12 +490,19 @@ function attachListeners(window, viewId, entry) {
     // has just gone from "asked for" to "in force".
     if (first) push();
   };
+  // **`did-navigate` only**, deliberately. A `did-fail-load` listener used to open
+  // this gate too, on the reasoning that a failed load still commits an error page
+  // and setting a device from the pane's error screen has to work. That reasoning is
+  // false for the one code that matters: `ERR_ABORTED` (-3) commits *nothing* — it is
+  // what Stop on a first load reports, and what a navigation superseded by another
+  // one reports — so the gate opened on a view with no frame, and the next
+  // `applyMetrics` then made exactly the `enableDeviceEmulation` call rule 2 says
+  // takes the whole app down with it. Nothing is lost: a committed error page fires
+  // `did-navigate` as well, which is the case that listener was added for, and while
+  // a load has failed the pane is showing its own error screen with the view hidden
+  // anyway (`paneCovers`). Note that this file already knows -3 is not a fault — see
+  // the `did-fail-load` handler above, which filters it for the same reason.
   wc.on("did-navigate", ready);
-  // A load that failed still commits an error page, and setting a device on the
-  // pane's error screen has to work — it is a normal place to be.
-  wc.on("did-fail-load", (_e, _code, _desc, _url, isMainFrame) => {
-    if (isMainFrame) ready();
-  });
   // A dead renderer has no frame to emulate against, which is the state rule 2 is
   // about. The next navigation makes it safe again.
   wc.on("render-process-gone", () => {
@@ -716,11 +739,15 @@ function registerBrowserViewIpc(resolveWindow) {
     // Re-emulate only when the factor actually moves: the renderer coalesces a
     // splitter drag to one push per frame, and `enableDeviceEmulation` relayouts
     // the guest page, so re-sending an unchanged scale would do that per frame.
+    //
+    // The factor is recorded whether or not a device is set. Recording it only while
+    // emulating meant a pane that spent a while at "Pane size" kept the *previous*
+    // device's factor, and the next `emulate` applied metrics with it — corrected
+    // only by luck, when the rect happened to change in the same breath.
     const scale = safeScale(args?.scale);
-    if (entry.emulation && scale !== entry.scale) {
-      entry.scale = scale;
-      applyMetrics(entry);
-    }
+    const moved = scale !== entry.scale;
+    entry.scale = scale;
+    if (entry.emulation && moved) applyMetrics(entry);
   });
 
   /**
@@ -758,7 +785,19 @@ function registerBrowserViewIpc(resolveWindow) {
   ipcMain.handle("veld:browser:drag", (event, args) => {
     const found = lookup(event, args?.viewId);
     if (!found) return;
-    found.entry.dragging = args?.dragging === true;
+    const dragging = args?.dragging === true;
+    // **Every view in the window, not just the dragged one.** A pointer released
+    // over a *sibling* pane's view reaches neither this document's `pointerup` (that
+    // view owns its own rect) nor the forwarded channel if only the dragged view is
+    // forwarding — so the gesture could never end: `resizing` stayed true, which
+    // disables geometry sync for that view for the life of the page, and the
+    // renderer's window listeners kept resizing the guest to a button-less cursor.
+    // Two browser panes side by side is the documented layout, so this is a
+    // straight-line path, not a corner. The coordinates are window-relative and come
+    // from the cursor, so an event forwarded by any view is equally usable.
+    for (const entry of byWindow.get(found.window.id)?.values() ?? []) {
+      entry.dragging = dragging;
+    }
   });
 
   /** Page zoom for one pane. Chromium stores zoom per origin, so this is

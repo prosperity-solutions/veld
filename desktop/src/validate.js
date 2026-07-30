@@ -128,7 +128,11 @@ function safeEmulation(raw) {
     mobile: raw.mobile === true,
     touch: raw.touch === true,
     userAgent: safeUserAgent(raw.ua),
-    fit: raw.fit !== false,
+    // No `fit`. It reaches this process on the wire and is deliberately dropped
+    // here: fitting is a question about the *pane*, answered by `deviceLayout` in
+    // the renderer, which then sends the resulting factor with the bounds. A
+    // validated field with no reader is an invitation to make the shell re-derive
+    // the scale, which is the two-owners drift that split ended.
   };
 }
 

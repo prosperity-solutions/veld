@@ -58,9 +58,9 @@ import {
   type PaneEmulation,
   RESPONSIVE_DEVICE,
   chromeVersionFrom,
-  clampDevicePx,
   clampZoom,
   customEmulation,
+  dragSize,
   emulationForPreset,
   emulationLabel,
   emulationSize,
@@ -345,13 +345,6 @@ export function BrowserPane(props: {
     const originX = event.clientX;
     const originY = event.clientY;
     const from = { width: emulation.width, height: emulation.height };
-    // Two conversions in one number. The screen is drawn at `scale`, so a pointer
-    // moved 100px changes a viewport shown at 50% by 200 of its own pixels — and the
-    // screen grows about its **centre**, so the edge under the cursor only travels
-    // half of whatever the size changes by. Doubling puts it back: the edge stays
-    // glued to the pointer while both edges move outward evenly.
-    const factor =
-      (state.emulationScale > 0 ? 1 / state.emulationScale : 1) * 2;
     let latest = from;
     setDrag(from);
     setBrowserResizing(id, true);
@@ -359,23 +352,35 @@ export function BrowserPane(props: {
     // One core for both pointer sources, so a cursor crossing onto the page cannot
     // change how the drag behaves — only where its events arrive from.
     const to = (clientX: number, clientY: number) => {
-      const width =
-        axis === "y"
-          ? from.width
-          : clampDevicePx(from.width + (clientX - originX) * factor);
-      const height =
-        axis === "x"
-          ? from.height
-          : clampDevicePx(from.height + (clientY - originY) * factor);
-      latest = { width, height };
+      // Read live rather than captured at gesture start: the scale changes *during* a
+      // drag as fitting starts and stops binding, and whether the dragged axis is
+      // clamped is what decides whether the centre-growth doubling applies at all — a
+      // screen already clamped to the pane has no edge left to track the cursor with
+      // (see `dragSize`).
+      const live = browserStatus(id);
+      const clamped = {
+        width: live.deviceWidth < latest.width * live.emulationScale - 0.5,
+        height: live.deviceHeight < latest.height * live.emulationScale - 0.5,
+      };
+      latest = dragSize(
+        from,
+        { x: clientX - originX, y: clientY - originY },
+        axis,
+        live.emulationScale,
+        clamped,
+      );
       setDrag(latest);
       // The page itself resizes and reflows, which is the point: a drag is a
       // responsive test rather than a preview of one.
-      previewBrowserResize(id, width, height);
+      previewBrowserResize(id, latest.width, latest.height);
     };
     const move = (e: PointerEvent) => to(e.clientX, e.clientY);
+    // Any view's forwarded pointer, not just this pane's: a sideways drag ends over
+    // the *neighbouring* pane as often as not, and that view owns its own mouse-up.
+    // The coordinates are window-relative and taken from the cursor, so whichever view
+    // reports them they mean the same thing. Only one pointer exists, so only one drag
+    // can be live in this document — there is nothing to disambiguate.
     const forwarded = onBrowserPointer((e) => {
-      if (e.viewId !== id) return;
       if (e.type === "mouseUp") finish();
       else to(e.x, e.y);
     });
@@ -383,6 +388,7 @@ export function BrowserPane(props: {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", finish);
       window.removeEventListener("pointercancel", finish);
+      window.removeEventListener("pointerdown", finish);
       forwarded();
       setDrag(null);
       // Apply *before* leaving resize mode, not after: leaving it redraws the screen
@@ -407,6 +413,9 @@ export function BrowserPane(props: {
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", finish);
     window.addEventListener("pointercancel", finish);
+    // Backstop: if a release is lost despite all of the above, the next press
+    // anywhere ends the gesture rather than leaving it resizing a button-less cursor.
+    window.addEventListener("pointerdown", finish);
   };
 
   /**
@@ -890,6 +899,20 @@ export function BrowserPane(props: {
                     >
                       Mobile user agent
                     </Menu.Item>
+                    {/* Stated rather than implied: `setUserAgent` sets the *string*
+                    only and Electron exposes no metadata argument, so
+                    `navigator.userAgentData` and the `Sec-CH-UA*` request headers keep
+                    reporting this desktop. A stack that branches on client hints
+                    instead of the UA string therefore still serves its desktop bundle.
+                    Doing it properly means `Emulation.setUserAgentOverride` with
+                    `userAgentMetadata` over CDP, which would put the user agent behind
+                    a debugger attach that DevTools can take away — a trade worth its
+                    own increment rather than a quiet half-fix. */}
+                    {emulation?.ua && !iframeBackend && (
+                      <Menu.Label>
+                        UA string only — client hints still report desktop
+                      </Menu.Label>
+                    )}
                     {/* Touch needs Chromium's debugger session, which something else
                     can hold — DevTools does on some Electron versions, though not
                     this one. Reported from what the shell actually achieved rather

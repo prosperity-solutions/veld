@@ -15,6 +15,7 @@ import {
   clampZoom,
   customEmulation,
   deviceLayout,
+  dragSize,
   emulationForPreset,
   emulationLabel,
   emulationSize,
@@ -240,13 +241,61 @@ describe("the resizable viewport", () => {
     // this width" is a different question from "does my layout survive it".
     const narrow = withMobileUserAgent(responsiveEmulation(420, 800), true, "143.0.0.0");
     expect(narrow.ua).toContain("Mobile Safari");
-    expect(narrow.mobile).toBe(true);
     // Above the phone widths it sends the tablet string, since dropping `Mobile` is
     // how a server tells the two apart.
     const wide = withMobileUserAgent(responsiveEmulation(900, 1200), true, "143.0.0.0");
     expect(wide.ua).not.toContain("Mobile");
     expect(withMobileUserAgent(narrow, false).ua).toBeNull();
-    expect(withMobileUserAgent(narrow, false).mobile).toBe(false);
+    // ...and *only* the user agent, in both directions. Clearing `mobile` here — the
+    // Chromium screen position the preset owns — turned a Phone into a desktop-layout
+    // viewport when you unticked a menu item that said "user agent", with nothing able
+    // to put it back.
+    const phoneNoUa = withMobileUserAgent(phone(), false);
+    expect(phoneNoUa.mobile).toBe(true);
+    expect(phoneNoUa.ua).toBeNull();
+    expect(withMobileUserAgent(customEmulation(400, 800), true, "143").mobile).toBe(false);
+  });
+});
+
+describe("dragSize", () => {
+  const from = { width: 400, height: 800 };
+
+  it("moves the edge with the cursor while the screen has room to grow", () => {
+    // Scale *and* centre-growth: at 50% a 100px pull is 200 viewport pixels, and the
+    // edge only travels half of what the size changes by, so it lands under the
+    // pointer.
+    expect(dragSize(from, { x: 100, y: 0 }, "x", 0.5)).toEqual({ width: 800, height: 800 });
+    expect(dragSize(from, { x: 0, y: 50 }, "y", 1)).toEqual({ width: 400, height: 900 });
+    expect(dragSize(from, { x: 25, y: 25 }, "both", 1)).toEqual({ width: 450, height: 850 });
+    // The axis you are not dragging does not move.
+    expect(dragSize(from, { x: 100, y: 100 }, "x", 1).height).toBe(800);
+    expect(dragSize(from, { x: 100, y: 100 }, "y", 1).width).toBe(400);
+  });
+
+  it("stops doubling once the dragged axis is clamped to the pane", () => {
+    // With the screen already filling the pane there is no edge left to track, so the
+    // doubling would only double how fast the number runs away from the pointer — at
+    // 30% that was nearly 7 device pixels per pixel of travel, in exactly the
+    // big-screen-in-a-small-pane case this feature is for.
+    const clamped = { width: true, height: false };
+    expect(dragSize(from, { x: 100, y: 0 }, "x", 0.5, clamped).width).toBe(600);
+    // The unclamped axis of the same gesture still doubles.
+    expect(dragSize(from, { x: 0, y: 100 }, "both", 0.5, clamped).height).toBe(1200);
+  });
+
+  it("clamps at both ends and survives a nonsense scale", () => {
+    expect(dragSize(from, { x: -9999, y: -9999 }, "both", 1)).toEqual({
+      width: MIN_DEVICE_PX,
+      height: MIN_DEVICE_PX,
+    });
+    expect(dragSize(from, { x: 99999, y: 99999 }, "both", 1)).toEqual({
+      width: MAX_DEVICE_PX,
+      height: MAX_DEVICE_PX,
+    });
+    // A scale of 0 would divide the pointer into infinity; 1 is the only safe reading
+    // of "we do not know how far this is scaled".
+    expect(dragSize(from, { x: 10, y: 0 }, "x", 0)).toEqual({ width: 420, height: 800 });
+    expect(dragSize(from, { x: 10, y: 0 }, "x", Number.NaN).width).toBe(420);
   });
 });
 

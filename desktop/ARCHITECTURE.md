@@ -378,14 +378,29 @@ requests at runtime — branding rule.
   chip, where the emulated size lives anyway. A label over the screen would be
   painted over by the native view in the desktop app and visible in a browser tab,
   which is the worst of both.
-- **`scale` is computed in the main process.** Fitting a 1440-wide viewport into a
-  600px pane is the entire argument for doing this inside the dock, and the number
-  it needs is the view's box in **device-independent pixels** — which only the shell
-  knows, since page zoom scales the CSS pixels the renderer measures and not the
-  bounds a native view is given. So the renderer sends `fit: true` and the shell
-  re-derives the scale, including on every bounds change. Both dimensions bind: the
-  emulated screen *is* the view, so a viewport scaled to the width but taller than
-  the box is clipped with nothing to scroll it into sight.
+- **The renderer computes `scale`; the shell only clamps it.** Fitting a 1920-wide
+  viewport into a 600px pane is the entire argument for doing this inside the dock,
+  and the arithmetic lives in `deviceLayout` (`panes/devices.ts`) with the rest of
+  the placement — where the screen sits, how far it is scaled and what radius that
+  leaves are one calculation, and they are pushed together with the bounds. The shell
+  applies what it is handed (`safeScale`, `safeRadius`) and deliberately re-derives
+  nothing: an earlier version had the shell compute the factor from the box it was
+  given, which is one number with two owners and a half-off-screen device waiting to
+  happen. Both dimensions bind: the emulated screen *is* the view, so a viewport
+  scaled to the width but taller than the box is clipped with nothing to scroll it
+  into sight. Note the one thing the renderer cannot see — a native view's bounds are
+  device-independent pixels while the renderer measures CSS pixels — which is why the
+  *bounds* are converted in the shell (`rect * getZoomFactor()`) even though the
+  factor is not.
+- **The mobile user agent is the string only.** `setUserAgent` takes a string and
+  Electron exposes no metadata argument, so `navigator.userAgentData` and the
+  `Sec-CH-UA*` request headers keep reporting the host desktop while
+  `navigator.userAgent` claims a phone — a stack that branches on client hints still
+  serves its desktop bundle. The pane's device menu says so, in the same spirit as the
+  iframe backend's gaps. Closing it properly means `Emulation.setUserAgentOverride`
+  with `userAgentMetadata` over CDP, which would put the user agent behind a debugger
+  attach that DevTools can take away; that is a trade worth its own increment rather
+  than a quiet half-fix.
 - **Zoom is re-asserted after every navigation.** Chromium's zoom policy is
   per *origin*, not per view: navigating adopts whatever that origin was last
   viewed at — including a level set by a different pane on the same session — so a

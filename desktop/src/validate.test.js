@@ -138,7 +138,8 @@ test("safeEmulation clamps every number and keeps only what Electron consumes", 
       mobile: true,
       touch: true,
       userAgent: "UA/1.0",
-      fit: true,
+      // No `fit`: it arrives on the wire and is dropped here, because fitting is a
+      // question about the pane that `deviceLayout` answers in the renderer.
     },
   );
 
@@ -154,14 +155,12 @@ test("safeEmulation clamps every number and keeps only what Electron consumes", 
   assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: 99 }).deviceScaleFactor, 4);
   assert.equal(safeEmulation({ width: 400, height: 800, deviceScaleFactor: "x" }).deviceScaleFactor, 0);
 
-  // Flags default to off, `fit` defaults to on: an emulation from an older build
-  // that predates the toggle must still fit, or a 1920-wide device is unusable in
-  // a pane.
+  // Flags default to off. `fit` is not part of this shape at all — see above.
   const bare = safeEmulation({ width: 400, height: 800 });
   assert.equal(bare.mobile, false);
   assert.equal(bare.touch, false);
   assert.equal(bare.userAgent, null);
-  assert.equal(bare.fit, true);
+  assert.equal(bare.fit, undefined);
   assert.equal(safeEmulation({ width: 400, height: 800, mobile: "yes" }).mobile, false);
 
   // A hostile user agent drops the UA, not the emulation: the size is still a

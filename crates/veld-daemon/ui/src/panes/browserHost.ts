@@ -989,6 +989,11 @@ function paintScreen(
     emulationScale: layout.scale,
   });
   v.container.dataset.emulated = "true";
+  // A still is a picture of the screen at its *previous* size, so any geometry change
+  // invalidates it. Both the "Fit to pane" toggle and the zoom stepper keep their menu
+  // open — views suspended, still up — so without this they showed a stretched stale
+  // capture until the thaw 250ms after the menu closed.
+  if (v.frame.style.backgroundImage) v.frame.style.backgroundImage = "";
   v.frame.style.inset = `${layout.y}px auto auto ${layout.x}px`;
   v.frame.style.width = `${layout.width}px`;
   v.frame.style.height = `${layout.height}px`;

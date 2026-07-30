@@ -430,9 +430,15 @@ export function withMobileUserAgent(
   on: boolean,
   chrome?: string,
 ): PaneEmulation {
-  if (!on) return { ...e, ua: null, mobile: false };
+  // Only the user agent, both ways. It used to set and clear `mobile` alongside —
+  // Chromium's `screenPosition`, which governs viewport-meta handling, overlay
+  // scrollbars and text autosizing, and which the preset owns. So unticking a menu
+  // item labelled "Mobile user agent" on a Phone silently converted it to a
+  // desktop-layout viewport, with no control able to put it back. The label is
+  // exactly what this changes.
+  if (!on) return { ...e, ua: null };
   const template = e.width > 600 ? TABLET_UA : MOBILE_UA;
-  return { ...e, ua: resolveUserAgent(template, chrome), mobile: true };
+  return { ...e, ua: resolveUserAgent(template, chrome) };
 }
 
 /** Swap width and height. The preset id is kept: it is still that device, held
@@ -531,6 +537,45 @@ export function deviceLayout(
   };
 }
 
+/**
+ * The emulated size a drag has reached, from the pointer's travel.
+ *
+ * Here rather than inline in the component because it is arithmetic with two
+ * corrections in it, and arithmetic with corrections is the kind that needs a test:
+ *
+ * 1. **Scale.** The screen is drawn at `layout.scale`, so a pointer moved 100px over
+ *    a viewport shown at 50% has moved 200 of that viewport's own pixels.
+ * 2. **Centre growth.** The screen grows about its middle, so the edge under the
+ *    cursor travels only half of whatever the size changes by — doubling puts the
+ *    edge back under the pointer.
+ *
+ * The second correction only applies while the screen has room to grow. Once fitting
+ * clamps it to the pane (`deviceLayout`), the drawn edge cannot move at all, and
+ * doubling then only doubles how fast the number runs away from the pointer — at 30%
+ * that is nearly 7 device pixels per pixel of travel, in exactly the
+ * big-screen-in-a-small-pane case this feature exists for. So the caller says whether
+ * the dragged axis is currently clamped, and it is read per move rather than once at
+ * gesture start, because fitting starts and stops binding *during* a drag.
+ */
+export function dragSize(
+  from: { width: number; height: number },
+  delta: { x: number; y: number },
+  axis: "x" | "y" | "both",
+  scale: number,
+  clamped: { width: boolean; height: boolean } = { width: false, height: false },
+): { width: number; height: number } {
+  // A zero or nonsense scale would divide the pointer into infinity; 1 is the only
+  // safe reading of "we do not know how far this is scaled".
+  const safe = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const step = (clampedOnAxis: boolean) => (clampedOnAxis ? 1 : 2) / safe;
+  return {
+    width:
+      axis === "y" ? from.width : clampDevicePx(from.width + delta.x * step(clamped.width)),
+    height:
+      axis === "x" ? from.height : clampDevicePx(from.height + delta.y * step(clamped.height)),
+  };
+}
+
 /** The screen's corner radius at the scale it is being shown at, so a phone at
  *  40% keeps its shape instead of its pixel count. */
 export function scaledRadius(e: PaneEmulation, scale: number): number {
@@ -601,8 +646,9 @@ export const MIN_ZOOM = 0.25;
 export const MAX_ZOOM = 3;
 export const DEFAULT_ZOOM = 1;
 
-/** The steps ⌘+/⌘− walk. Chrome's own ladder, which is uneven on purpose: the
- *  small end needs finer steps than the large one. */
+/** The steps the device menu's − and + walk. Chrome's own ladder, uneven on purpose:
+ *  the small end needs finer steps than the large one. (No keyboard accelerator is
+ *  wired for these — the only one the shell forwards is the command palette's.) */
 export const ZOOM_STEPS: readonly number[] = [
   0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3,
 ];
