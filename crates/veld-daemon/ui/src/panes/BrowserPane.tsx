@@ -13,7 +13,7 @@
  * below it, and overlays that would cover it are handled by `overlayGuard`.
  */
 
-import { ActionIcon, Loader, Menu, Tooltip } from "@mantine/core";
+import { ActionIcon, Button, Loader, Menu, Tooltip } from "@mantine/core";
 import {
   IconAlertTriangle,
   IconArrowLeft,
@@ -663,9 +663,20 @@ export function BrowserPane(props: {
           <span className="bar-tip">
             <Menu position="bottom-end" withinPortal>
               <Menu.Target>
-                <button
+                {/* A Mantine `Button` rather than a bare one, purely so its ink is
+                    Mantine's: the `ActionIcon`s either side of it take their colour
+                    from a variant resolver that runs in JS (`--ai-color`), so no
+                    token this stylesheet could name is guaranteed to match, and
+                    guessing one is what made an available control look disabled.
+                    `subtle` when nothing is set, so it is the same button as its
+                    neighbours; `default` once a device or a zoom is, where the
+                    border is the "something is set here" marker. */}
+                <Button
                   className="browser-device"
-                  data-active={emulation ? "true" : undefined}
+                  variant={emulation || zoom !== DEFAULT_ZOOM ? "default" : "subtle"}
+                  color="gray"
+                  size="compact-xs"
+                  px={5}
                   aria-label={`Device and zoom: ${
                     emulation ? emulationLabel(emulation) : "pane size"
                   }, zoom ${formatZoom(zoom)}`}
@@ -699,7 +710,7 @@ export function BrowserPane(props: {
                   {!iframeBackend && zoom !== DEFAULT_ZOOM && (
                     <span className="browser-chip">{formatZoom(zoom)}</span>
                   )}
-                </button>
+                </Button>
               </Menu.Target>
               {/* Two columns, because this menu answers two questions — *which* device,
               and *how* it is shown — and one list of both was taller than the

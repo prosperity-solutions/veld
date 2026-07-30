@@ -984,28 +984,16 @@ select:focus {
 
 /* The device/zoom control. A chip that only carries text when there is something
    to say: an emulated size, and a zoom that isn't 100%. */
+/* Layout only. The colour is Mantine's — this is a `Button variant="subtle"`, the
+   same component and variant the `ActionIcon`s beside it are, because their ink
+   comes from a variant resolver that runs in JS and no token here can be relied on
+   to match it. Naming one is what made an enabled control look disabled. */
 .browser-device {
-  display: inline-flex;
-  align-items: center;
   gap: 4px;
   height: 24px;
-  padding: 0 5px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  background: none;
-  /* The same ink as the `ActionIcon`s either side of it. It used to be `--faint`,
-     which put an enabled control at the weight this app uses for *disabled* ones —
-     the session button beside it reads as available and this one did not, which is a
-     difference in state, not in kind. */
-  color: var(--muted);
 }
-.browser-device:hover {
-  border-color: var(--border);
-  color: var(--text);
-}
-.browser-device[data-active="true"] {
-  border-color: var(--border);
-  color: var(--text);
+.browser-device .mantine-Button-label {
+  gap: 4px;
 }
 
 /* Anchor for a tooltip on a control that cannot hold one itself — a menu target,
