@@ -521,6 +521,14 @@ an AppImage that claims to be a .deb. electron-updater dispatches on exactly tha
 file, so the one self-updating Linux build would download a .deb and run
 `dpkg -i` while never replacing itself. CI asserts the marker is absent.
 
+The .deb is then **moved into `dist/`**, so everything published comes from one
+directory (`upload-artifact` roots an artifact at the least common ancestor of
+its patterns, and a second directory silently nests every file a level deeper).
+What stays behind in `dist-deb/` is that invocation's own `latest-linux.yml`,
+describing the .deb — publishing it would overwrite the AppImage's feed and point
+the one self-updating Linux build at a package it cannot install. Only `dist/`'s
+feed is ever uploaded, and both workflows assert it exists.
+
 ### Artifacts
 
 | Platform | Targets | Self-updates? |

@@ -171,8 +171,12 @@ jobs:
           path: veld-*.tar.gz
 
   # ── Veld Desktop: the Electron app, from the same tag ──────────────
-  # Rides this pipeline rather than a parallel one, so the app and the CLI can
-  # never be two versions of the same release (issue #167 §9). The version is
+  # Rides this pipeline rather than a parallel one, so the app and the CLI ship
+  # from one tag with one version (issue #167 §9) — both stamped from `plan`'s
+  # output, exactly as the CLI's own `build` job already does. That is one
+  # version *per run*; nothing here serializes runs, so two overlapping releases
+  # are the pre-existing hole, and one this diff widens to a second manifest
+  # rather than opens. The version is
   # written into package.json here for the same reason Cargo.toml's is: this all
   # runs *before* semantic-release commits the bump, so the checkout is still on
   # the previous version.

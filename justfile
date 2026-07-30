@@ -390,8 +390,9 @@ desktop-icons:
 # is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
 # artifacts are ad-hoc signed only (no Developer ID yet), so a build handed to
 # someone else needs `xattr -dr com.apple.quarantine` on the other end. On Linux
-# the .deb lands in desktop/dist-deb/, built separately on purpose (see
-# desktop/electron-builder.yml).
+# everything lands in desktop/dist/, including the .deb — which is built by a
+# second invocation into desktop/dist-deb/ and moved, for the reason in
+# desktop/electron-builder.yml.
 desktop-package: desktop-deps
     cd desktop && npm run package:{{ if os() == "macos" { "mac" } else { "linux" } }}
 

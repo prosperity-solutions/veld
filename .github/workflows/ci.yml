@@ -298,11 +298,13 @@ jobs:
       # Same reason the release job checks it: a missing feed is invisible until
       # an installed app asks for an update. The macOS leg is `--dir`, which
       # produces no feed by design.
+      # The listing comes first so a failed assertion still leaves the one piece
+      # of output that says what *was* produced.
+      - name: List artifacts
+        run: ls -la dist
       - name: The update feed was written
         if: matrix.name == 'linux'
         run: test -f dist/latest-linux.yml
-      - name: List artifacts
-        run: ls -la dist
 
   integration:
     name: Integration Tests (macOS)
