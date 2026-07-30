@@ -142,6 +142,20 @@ function safeEmulation(raw) {
   };
 }
 
+/**
+ * A CSS hex colour the shell is willing to hand to `setBackgroundColor`, or `null`.
+ *
+ * The page sends its own theme's surface colour so a view does not flash white in a dark
+ * app before the guest paints. Hex only, and matched whole: Chromium accepts a broad
+ * colour syntax, and there is no reason for this to be a place where a page-supplied
+ * string is parsed liberally.
+ */
+function safeColor(raw) {
+  if (typeof raw !== "string") return null;
+  const text = raw.trim();
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(text) ? text : null;
+}
+
 /** A page zoom factor within Chromium's own range, or `null`. `setZoomFactor`
  *  throws on a non-positive one, and the pane is not a trusted caller. */
 function safeZoom(raw) {
@@ -183,6 +197,7 @@ module.exports = {
   safeUserAgent,
   safeEmulation,
   safeZoom,
+  safeColor,
   safeScale,
   safeRadius,
 };

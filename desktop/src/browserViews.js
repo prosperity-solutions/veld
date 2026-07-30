@@ -28,6 +28,7 @@ const { WebContentsView, ipcMain, screen, session } = require("electron");
 const {
   isProfileName,
   isViewId,
+  safeColor,
   partitionFor,
   safeEmulation,
   safeRadius,
@@ -666,7 +667,11 @@ function registerBrowserViewIpc(resolveWindow) {
         webviewTag: false,
       },
     });
-    view.setBackgroundColor("#ffffff");
+    // The page's own theme surface, not white: this is what shows before the guest paints
+    // and at the screen's rounded corners, and a white flash in a dark app is exactly
+    // where an embedded view stops looking embedded. Falls back to white, which is what
+    // every browser does with no better answer.
+    view.setBackgroundColor(safeColor(args?.background) ?? "#ffffff");
     // Created **visible**, and only hidden when the renderer says so. A hidden
     // WebContents is background-throttled by Chromium, and a view created hidden
     // and loaded in the same tick sometimes never rendered its first page — blank
@@ -809,6 +814,23 @@ function registerBrowserViewIpc(resolveWindow) {
     // from the cursor, so an event forwarded by any view is equally usable.
     for (const entry of byWindow.get(window.id)?.values() ?? []) {
       entry.dragging = dragging;
+    }
+  });
+
+  /**
+   * Repaint every view in the window on the page's theme surface.
+   *
+   * Window-wide and view-less, like `drag`: a theme switch is one event for the whole
+   * app, and addressing it per view would mean the renderer walking its own registry to
+   * say the same thing sixteen times.
+   */
+  ipcMain.handle("veld:browser:background", (event, args) => {
+    const window = senderWindow(event);
+    if (!window) return;
+    const color = safeColor(args?.background);
+    if (!color) return;
+    for (const entry of byWindow.get(window.id)?.values() ?? []) {
+      if (!entry.view.webContents.isDestroyed()) entry.view.setBackgroundColor(color);
     }
   });
 

@@ -368,6 +368,16 @@ describe("edgePinned", () => {
     expect(edgePinned(desktop(), pane(1920, 300))).toEqual({ width: false, height: true });
   });
 
+  it("pins nothing when the screen is exactly the available box", () => {
+    // A responsive viewport starts here, and this is the case that was wrong: its drawn
+    // size equals the available size, so a cap test alone called it pinned and the first
+    // drag ran at half gain — the edge moved half as far as the cursor, while every
+    // subsequent drag (starting from a smaller size) tracked it exactly. Nothing is being
+    // shrunk at equality, and the edge can still move inward.
+    const exact = responsiveEmulation(600, 400);
+    expect(edgePinned(exact, pane(600, 400))).toEqual({ width: false, height: false });
+  });
+
   it("pins nothing when the screen fits", () => {
     expect(edgePinned(phone(), pane(1200, 1200))).toEqual({ width: false, height: false });
   });

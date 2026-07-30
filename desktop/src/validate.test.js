@@ -6,6 +6,7 @@ const {
   isProfileName,
   isViewId,
   partitionFor,
+  safeColor,
   safeEmulation,
   safeRadius,
   safeScale,
@@ -188,6 +189,29 @@ test("safeEmulation forwards exactly the fields Electron applies", () => {
     Object.keys(safeEmulation({ width: 400, height: 800, ua: "UA/1.0" })).sort(),
     ["deviceScaleFactor", "height", "mobile", "touch", "userAgent", "width"],
   );
+});
+
+test("safeColor takes hex and nothing else", () => {
+  // The page sends its theme's surface so a view does not flash white in a dark app.
+  assert.equal(safeColor("#0d0e10"), "#0d0e10");
+  assert.equal(safeColor("  #FFF  "), "#FFF");
+  assert.equal(safeColor("#0d0e10ff"), "#0d0e10ff");
+  // Chromium accepts a broad colour syntax; there is no reason for a page-supplied string
+  // to be parsed liberally here, and a partial match is how a validator becomes a hole.
+  for (const bad of [
+    "red",
+    "rgb(0,0,0)",
+    "#0d0e1",
+    "#0d0e10; background: url(x)",
+    "javascript:alert(1)",
+    "",
+    null,
+    undefined,
+    0x0d0e10,
+    {},
+  ]) {
+    assert.equal(safeColor(bad), null, JSON.stringify(bad));
+  }
 });
 
 test("safeZoom stays inside Chromium's own range", () => {

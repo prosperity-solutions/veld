@@ -656,11 +656,25 @@ export function edgePinned(
   const availHeight = box.height - padding * 2;
   if (!(availWidth >= 1) || !(availHeight >= 1)) return { width: false, height: false };
   const layout = deviceLayout(e, box, padding);
+  // Being *at* the cap is not the same as being held there, and the difference is the
+  // whole point. A responsive viewport starts at exactly the available box: its drawn
+  // width equals the available width, so a cap test alone called it pinned — and the
+  // first drag then ran at half gain, so the edge moved half as far as the cursor while
+  // every later drag tracked it exactly. Nothing was being shrunk at that instant, and
+  // the edge could still move inward.
+  //
+  // Held means one of two things: fitting is actively scaling the screen down
+  // (`scale < 1`, so growing the number cannot move the edge — it only buys more
+  // shrinking), or fitting is off and the screen is genuinely larger than the pane, where
+  // it is cropped. Equality with nothing shrinking it is neither.
+  const shrinking = layout.scale < 1 - 1e-6;
   return {
-    // A half-pixel of slack: these are floats out of a division, and "equal" here
+    // A half-pixel of slack on the cap: these are floats out of a division, and "equal"
     // means "the layout hit the cap", not "the two doubles agree bit for bit".
-    width: layout.width >= availWidth - 0.5,
-    height: layout.height >= availHeight - 0.5,
+    width:
+      layout.width >= availWidth - 0.5 && (shrinking || (!e.fit && e.width > availWidth + 0.5)),
+    height:
+      layout.height >= availHeight - 0.5 && (shrinking || (!e.fit && e.height > availHeight + 0.5)),
   };
 }
 

@@ -119,6 +119,9 @@ interface DesktopBrowserApi {
        *  as the page laying out at pane size and then jumping. */
       emulation: PaneEmulation | null;
       zoom: number;
+      /** The theme's content surface, so a view does not flash white in a dark app
+       *  before the guest paints. */
+      background: string;
     },
   ): Promise<unknown>;
   setBounds(
@@ -142,6 +145,8 @@ interface DesktopBrowserApi {
   /** Window-wide: the shell resolves the window from the sender, so a disarm lands
    *  even when the view that started the gesture is already gone. */
   drag(dragging: boolean): Promise<void>;
+  /** Window-wide: the surface a view shows before its guest paints. */
+  setBackground(background: string): Promise<void>;
   reset(): Promise<void>;
   destroy(viewId: string): Promise<void>;
   clearSession(profile: BrowserProfile): Promise<void>;
@@ -309,6 +314,7 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
         profile: v.profile,
         emulation: v.emulation,
         zoom: v.zoom,
+        background: paneSurface(),
       }))
     ) {
       throw new Error("the desktop shell refused this pane");
@@ -335,6 +341,26 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
     applyVisibility(v);
     return false;
   }
+}
+
+/**
+ * The theme's content surface, as a hex colour for the shell.
+ *
+ * A `WebContentsView` paints its own background until the guest does, and Electron's
+ * default is white — which in a dark app is a white rectangle flashing on every create,
+ * every navigation to a slow page, and at the emulated screen's rounded corners. Read
+ * from the same `--term-bg` token the terminal uses, so the two content surfaces agree
+ * and neither has to know about the other's theme.
+ *
+ * Read live rather than cached: it is one `getComputedStyle` on a theme switch and on a
+ * view create, and caching it means the first pane after a switch keeps the old one.
+ */
+function paneSurface(): string {
+  if (typeof document === "undefined") return "#ffffff";
+  const token = getComputedStyle(document.body).getPropertyValue("--term-bg").trim();
+  // Hex only — the shell validates the same way, and a token that has been themed into
+  // something exotic should fall back rather than be half-applied.
+  return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(token) ? token : "#ffffff";
 }
 
 /** A failure raised on this side of the bridge, in the same shape as one the
@@ -1242,6 +1268,20 @@ if (desktop) {
     // its own screen to show, and the view has to be out of the way for it.
     applyVisibility(v);
   });
+}
+
+/**
+ * Repaint every native view when the app's theme changes.
+ *
+ * The theme lives on `body[data-theme]`, which is the fact itself rather than a second
+ * signal that could drift from it. Without this a view keeps the surface it was created
+ * with, so switching to dark leaves every already-open pane flashing white on its next
+ * navigation.
+ */
+if (desktop && typeof document !== "undefined") {
+  new MutationObserver(() => {
+    void desktop.setBackground(paneSurface()).catch(() => {});
+  }).observe(document.body, { attributes: true, attributeFilter: ["data-theme"] });
 }
 
 /**

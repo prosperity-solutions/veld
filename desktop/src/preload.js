@@ -39,6 +39,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Emulate a device, or `null` to show the pane at pane size. */
     emulate: (viewId, emulation) =>
       ipcRenderer.invoke("veld:browser:emulate", { viewId, emulation }),
+    /** Repaint every pane view on the page's theme surface — what shows before a guest
+     *  paints. Window-wide: a theme switch is one event for the whole app. */
+    setBackground: (background) =>
+      ipcRenderer.invoke("veld:browser:background", { background }),
     /** Page zoom factor for this pane (1 = 100%). */
     setZoom: (viewId, zoom) => ipcRenderer.invoke("veld:browser:zoom", { viewId, zoom }),
     /** One of "toggle" | "open" | "close". Always opens detached — a docked

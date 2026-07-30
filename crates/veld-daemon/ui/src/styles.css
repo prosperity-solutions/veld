@@ -961,15 +961,22 @@ select:focus {
   /* `background-color`, never the `background` shorthand: the shorthand resets
      `background-size` to `auto`, and this rule wins over the one above — which is
      how the freeze still ended up drawn at image scale (i.e. zoomed into its
-     top-left corner) even after that was supposedly fixed. */
-  background-color: #fff;
+     top-left corner) even after that was supposedly fixed.
+
+     `--term-bg` rather than white: this is what shows through before a page paints and
+     at the screen's rounded corners, and a white flash in a dark app is the one place
+     this feature was visibly not part of it. Same token the terminal uses for "content
+     surface", so the two agree. */
+  background-color: var(--term-bg);
   box-shadow:
     0 0 0 1px var(--border2),
     0 10px 30px rgb(0 0 0 / 28%);
 }
 
 .browser-frame {
-  background: #fff;
+  /* Theme-aware for the same reason as the frame above — this is the iframe backend's
+     surface, visible until the page paints. */
+  background: var(--term-bg);
 }
 
 /* Device emulation under the iframe backend: the frame keeps the emulated
