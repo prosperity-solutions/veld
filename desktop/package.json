@@ -5,7 +5,8 @@
   "description": "Veld Desktop — Electron shell around the veld management UI (/ide)",
   "main": "src/main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --test src/*.test.js"
   },
   "devDependencies": {
     "electron": "^43.1.1"

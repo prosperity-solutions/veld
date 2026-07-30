@@ -21,8 +21,20 @@
  * be validated against the same set (`parseTab` below). A second hardcoded list
  * there would let a new kind work perfectly until the first reload, then vanish
  * silently — `parseLayouts` discards anything it doesn't recognise by design.
+ *
+ * `new` is a pane that has not decided yet: the `+` button opens one, and picking
+ * a kind inside it *replaces* the tab in place. That way the choice happens where
+ * the content will be, at content size, instead of in a menu the size of a
+ * cursor — and an empty dock and a fresh tab are then the same screen.
+ *
+ * There is deliberately no `services` kind. The run's URLs are a *launcher*, not
+ * a peer of a terminal and a page, and a launcher belongs wherever you are about
+ * to need it: a `new` pane and a browser pane with no URL both show them
+ * (`panes/VeldLinks.tsx`). Having a kind for it meant a singleton tab id, a
+ * "does it already exist" check at every call site that could open one, and a
+ * second place to render the same rows.
  */
-export const PANE_KINDS = ["services", "terminal"] as const;
+export const PANE_KINDS = ["terminal", "browser", "new"] as const;
 
 export type PaneKind = (typeof PANE_KINDS)[number];
 
@@ -30,12 +42,91 @@ function isPaneKind(v: unknown): v is PaneKind {
   return typeof v === "string" && (PANE_KINDS as readonly string[]).includes(v);
 }
 
+/**
+ * Cookie jars a browser pane can run in.
+ *
+ * The *allowed* set, not the menu: the name becomes an Electron session
+ * partition, so it is an identifier the main process has to validate anyway
+ * (`PROFILE_RE` in `desktop/src/browserViews.js`), and a restored layout has to
+ * be checked against the same list. Which slots actually **exist** is a set the
+ * user builds up — see [`SESSIONS_STORAGE_KEY`].
+ *
+ * `default` is what a pane gets when nobody chose; it stays uncoloured so the
+ * common case has no marker to read. Eight slots above it, because that is how
+ * many colours stay tellable apart at the size of a tab dot — and the colour is
+ * the whole point: it answers "which session is this pane?" without a menu.
+ *
+ * The slots are **named after animals, not numbered**. A number implies a
+ * sequence, so removing "Session 2" and being left with "Default, Session 3"
+ * reads as something broken rather than as a set with one item taken out.
+ * A name has no successor to be missing. (The worktree rail's emoji set is the
+ * same idea, for the same reason.) The name is also the Electron partition
+ * (`persist:veld-browser-otter`), so the identifier says what it is.
+ *
+ * *Naming* a slot is what would need persistence both Veld Desktop and a browser
+ * tab agree on, which is the settings store in #167 batch 5 — deliberately not
+ * invented here. Clearing a session's data is offered per slot in the pane's
+ * session menu.
+ */
+export const BROWSER_PROFILES = [
+  "default",
+  "otter",
+  "wombat",
+  "gecko",
+  "badger",
+  "puffin",
+  "lemur",
+  "quokka",
+  "narwhal",
+] as const;
+
+export type BrowserProfile = (typeof BROWSER_PROFILES)[number];
+
+/** How many sessions can exist alongside the default one. */
+export const MAX_EXTRA_SESSIONS = BROWSER_PROFILES.length - 1;
+
+/**
+ * A slot's colour, or `null` for the default one.
+ *
+ * Literal hexes, not theme tokens: these are identity markers that must mean the
+ * same thing in both themes — a session that changes colour when you switch
+ * theme identifies nothing. The hues are eight that stay distinct at dot size,
+ * mostly borrowed from the terminal's ANSI palette so the app has one set.
+ */
+export const BROWSER_PROFILE_COLORS: Record<BrowserProfile, string | null> = {
+  default: null,
+  otter: "#5aa2e0",
+  wombat: "#e6b43c",
+  gecko: "#3fbf7f",
+  badger: "#b98ce0",
+  puffin: "#4fbfc0",
+  lemur: "#f2792b",
+  quokka: "#ec6fa9",
+  narwhal: "#e05a50",
+};
+
+/** Display name for a slot: "Default", "Otter", "Wombat"… */
+export function browserProfileLabel(profile: BrowserProfile): string {
+  return profile.charAt(0).toUpperCase() + profile.slice(1);
+}
+
+function isBrowserProfile(v: unknown): v is BrowserProfile {
+  return typeof v === "string" && (BROWSER_PROFILES as readonly string[]).includes(v);
+}
+
 export interface PaneTab {
   /** Stable across re-renders and worktree switches — it keys the live
-   *  terminal in `terminalHost`, so reusing an id reuses a shell. */
+   *  terminal in `terminalHost` (so reusing an id reuses a shell) and the live
+   *  view in `browserHost`. */
   id: string;
   kind: PaneKind;
   title: string;
+  /** `browser` only: where the pane opens, and where it returns after a
+   *  reload. Kept in the layout rather than in `browserHost` because it is the
+   *  one piece of a pane worth restoring — the page itself is re-fetchable. */
+  url?: string;
+  /** `browser` only; defaults to `default`. */
+  profile?: BrowserProfile;
 }
 
 export interface Dock {
@@ -46,6 +137,16 @@ export interface Dock {
 
 /** Which of the two docks: 0 is the left/primary. */
 export type DockIndex = 0 | 1;
+
+/**
+ * What a layout setter accepts.
+ *
+ * The updater form exists because two panes can report a change in the same
+ * commit — two browser panes side by side both finishing a navigation, say. A
+ * plain value is computed from the `layout` of the render it was written in, so
+ * the second write would silently discard the first.
+ */
+export type PaneLayoutUpdate = PaneLayout | ((prev: PaneLayout) => PaneLayout);
 
 export interface PaneLayout {
   docks: [Dock, Dock];
@@ -62,7 +163,23 @@ export const MIN_RATIO = 0.15;
 export const MAX_RATIO = 0.85;
 export const DEFAULT_RATIO = 0.5;
 
-export const SERVICES_TAB_ID = "services";
+/**
+ * Keep the one visible dock as the *left* one.
+ *
+ * With a single pane on screen there is no left or right, so a layout that is
+ * empty on the left and full on the right is a distinction with no visible
+ * meaning — and it leaks into the UI as a context menu offering "Move to the
+ * left pane" when there is nothing to the left of anything. Emptying the left
+ * dock therefore slides the right one over.
+ *
+ * Returns the same object when there is nothing to do, so this is safe to run on
+ * every mutation.
+ */
+function normalizeDocks(layout: PaneLayout): PaneLayout {
+  const [left, right] = layout.docks;
+  if (left.tabs.length > 0 || right.tabs.length === 0) return layout;
+  return { ...layout, docks: [right, { tabs: [], activeId: null }], focused: 0 };
+}
 
 export function clampRatio(r: number): number {
   if (!Number.isFinite(r)) return DEFAULT_RATIO;
@@ -70,17 +187,20 @@ export function clampRatio(r: number): number {
 }
 
 /**
- * The layout a worktree starts with: a terminal on the left, the service
- * launcher on the right. Mirrors the old fixed columns so the change of
- * mechanism isn't also a change of what people see on open.
+ * The layout a worktree starts with: a terminal on the left, an empty browser
+ * pane on the right.
+ *
+ * The right-hand pane shows the run's URLs until it is pointed somewhere, so this
+ * opens on the same information the old fixed columns did — except the list now
+ * lives in the thing that can act on it, one click from being the page itself.
  */
 export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
-  const terminal: PaneTab = { id: newTerminalId(), kind: "terminal", title: "terminal" };
-  const services: PaneTab = { id: SERVICES_TAB_ID, kind: "services", title: "services" };
+  const terminal: PaneTab = { id: newTabId(), kind: "terminal", title: "Terminal" };
+  const browser = browserTab({});
   return {
     docks: [
       { tabs: [terminal], activeId: terminal.id },
-      { tabs: [services], activeId: services.id },
+      { tabs: [browser], activeId: browser.id },
     ],
     ratio: clampRatio(ratio),
     focused: 0,
@@ -88,17 +208,18 @@ export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
 }
 
 /**
- * A terminal tab's id is also its **daemon session id** — the name the page
- * uses to ask for the same shell back after a reload (see
+ * A tab id, which for a terminal tab is also its **daemon session id** — the
+ * name the page uses to ask for the same shell back after a reload (see
  * `crates/veld-daemon/src/pty.rs`).
  *
  * So it must be unique for longer than the page: reusing one adopts whatever
  * shell still answers to it. It is an identifier, not a credential — an attach
  * is authorised by the CSRF-gated ticket and the `Origin` allowlist, not by
  * knowing this string — so the non-crypto fallback below is not a weakness,
- * just a less collision-proof name. The daemon accepts `[A-Za-z0-9_-]{1,64}`.
+ * just a less collision-proof name. The daemon accepts `[A-Za-z0-9_-]{1,64}`,
+ * and so does the desktop shell for a browser view id.
  */
-export function newTerminalId(): string {
+export function newTabId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
@@ -173,7 +294,7 @@ export function closeTab(layout: PaneLayout, id: string): PaneLayout {
     const other = (focused === 0 ? 1 : 0) as DockIndex;
     if (docks[other].tabs.length > 0) focused = other;
   }
-  return { ...layout, docks, focused };
+  return normalizeDocks({ ...layout, docks, focused });
 }
 
 /** Make a tab active in its own dock, and focus that dock. */
@@ -245,7 +366,9 @@ export function moveTab(
     };
     docks[dock] = { tabs: inserted, activeId: id };
   }
-  return { ...layout, docks, focused: dock };
+  // Dragging the left dock's only tab to the right is a no-op once normalised,
+  // which is right: with one pane on screen the sides mean nothing.
+  return normalizeDocks({ ...layout, docks, focused: dock });
 }
 
 export function setRatio(layout: PaneLayout, ratio: number): PaneLayout {
@@ -273,6 +396,293 @@ export function terminalIds(layout: PaneLayout): string[] {
   return allTabs(layout)
     .filter((t) => t.kind === "terminal")
     .map((t) => t.id);
+}
+
+/**
+ * The last browser pane with nothing loaded in it, if there is one.
+ *
+ * *Last*, so repeatedly asking for the run's URLs lands on the same pane rather
+ * than cycling through however many blank ones happen to be open. A pane counts as
+ * blank by having no URL, which is exactly the condition under which it shows the
+ * URL list — so this asks "is one already showing what I want?".
+ */
+export function lastBlankBrowserId(layout: PaneLayout): string | null {
+  const blanks = allTabs(layout).filter((t) => t.kind === "browser" && !t.url);
+  return blanks.length > 0 ? blanks[blanks.length - 1].id : null;
+}
+
+/** The same, for `browserHost`. */
+export function browserIds(layout: PaneLayout): string[] {
+  return allTabs(layout)
+    .filter((t) => t.kind === "browser")
+    .map((t) => t.id);
+}
+
+/**
+ * Which session slots are occupied — the set of sessions that *exist*.
+ *
+ * Computed across **every** worktree's layout, not just the visible one: a
+ * session is a cookie jar shared by the whole page, so a pane in a worktree you
+ * have since switched away from still holds its slot. Scoping this to one layout
+ * would offer a "new session" that quietly adopted another pane's jar.
+ */
+export function sessionsInUse(layouts: Iterable<PaneLayout>): Set<BrowserProfile> {
+  const used = new Set<BrowserProfile>();
+  for (const layout of layouts) {
+    for (const tab of allTabs(layout)) {
+      if (tab.kind === "browser") used.add(tab.profile ?? "default");
+    }
+  }
+  return used;
+}
+
+/**
+ * The lowest slot not in `taken`, or `null` when all of them are.
+ *
+ * *Lowest*, not next-after-the-highest, so removing session 3 frees that slot
+ * and its colour for reuse instead of marching towards the cap.
+ */
+export function nextFreeProfile(taken: Set<BrowserProfile>): BrowserProfile | null {
+  for (const p of BROWSER_PROFILES) {
+    if (p !== "default" && !taken.has(p)) return p;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Session sets
+// ---------------------------------------------------------------------------
+
+/**
+ * Which sessions exist, per worktree.
+ *
+ * This is an **explicit set**, not something derived from which slots panes
+ * currently occupy. Deriving it was the first attempt and it was wrong in the
+ * most confusing way possible: moving a pane onto a new session vacated its old
+ * slot, so adding a session appeared to delete the previous one. A session is a
+ * cookie jar that outlives the pane that made it — you build a set of them up.
+ *
+ * `localStorage`, not the daemon: a session only means anything under Electron
+ * (the browser build's iframe backend has no cookie jars of its own), so there
+ * is no second client for the list to disagree with. That is what makes this
+ * *not* the settings store #167 batch 5 needs — it is one client's preference
+ * about its own capability. It is also `localStorage` rather than
+ * `sessionStorage` on purpose: unlike a layout, this names no live resource, so
+ * two windows sharing it is correct rather than a conflict.
+ *
+ * Partitions themselves stay global (`persist:veld-browser-<slot>`), so two
+ * worktrees whose sets both hold the same slot share that jar. That keeps the slot
+ * name a plain identifier rather than a composite, at a cost worth stating
+ * honestly: cookies scoped to the *project* rather than the run are shared (the
+ * default template is `{service}.{run}.{project}.localhost`, so only the run
+ * differs between worktrees), and a third-party origin — a login provider on its
+ * own domain — is shared unconditionally. Keying the partition by worktree as well
+ * is the fix if that ever bites.
+ */
+export const SESSIONS_STORAGE_KEY = "veld.browserSessions.v1";
+
+/**
+ * Put a session set in canonical shape: the default slot always present,
+ * duplicates dropped, slot order rather than insertion order.
+ *
+ * Slot order matters for more than tidiness — the menu is read top to bottom and
+ * a session's colour is tied to its slot, so a list that reordered itself as
+ * sessions came and went would make the colours look arbitrary.
+ */
+export function normalizeSessionSet(
+  slots: Iterable<BrowserProfile>,
+  ...extra: Array<Iterable<BrowserProfile>>
+): BrowserProfile[] {
+  const present = new Set<BrowserProfile>(["default", ...slots]);
+  for (const more of extra) for (const p of more) present.add(p);
+  return BROWSER_PROFILES.filter((p) => present.has(p));
+}
+
+/** Read the stored sets, tolerating anything that isn't the shape we wrote. */
+export function parseSessionSets(raw: string | null): Record<number, BrowserProfile[]> {
+  if (!raw) return {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return {};
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return {};
+
+  const out: Record<number, BrowserProfile[]> = {};
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const id = Number(key);
+    if (!Number.isInteger(id) || !Array.isArray(value)) continue;
+    // Unknown slot names are dropped rather than carried: the name becomes an
+    // Electron partition, and the shell would refuse it anyway.
+    out[id] = normalizeSessionSet(value.filter(isBrowserProfile));
+  }
+  return out;
+}
+
+export function serializeSessionSets(sets: Record<number, BrowserProfile[]>): string {
+  return JSON.stringify(sets);
+}
+
+/**
+ * A worktree's sessions: what was stored, plus any slot its panes are actually
+ * on.
+ *
+ * The union matters on restore — a layout can name a session the stored set has
+ * lost (storage cleared, an older build, a hand-edit), and a pane whose own
+ * session is missing from its own menu is worse than an extra entry.
+ */
+export function sessionSetFor(
+  sets: Record<number, BrowserProfile[]>,
+  worktreeId: number,
+  layout?: PaneLayout,
+): BrowserProfile[] {
+  return normalizeSessionSet(
+    sets[worktreeId] ?? [],
+    layout ? sessionsInUse([layout]) : [],
+  );
+}
+
+/**
+ * Accept a URL for a browser pane, or reject it.
+ *
+ * Only `http(s)`: a pane is a preview of a dev server, and every other scheme
+ * a URL parser accepts turns one into something else — `file:` into a local
+ * file reader, `javascript:` into script in the pane's own origin. The desktop
+ * shell enforces the same rule (`safeUrl` in `desktop/src/browserViews.js`),
+ * because a renderer is not a trust boundary; this copy is what gives the user
+ * an error in the address bar instead of a silently ignored Enter.
+ *
+ * A bare `host:port` or `host/path` is completed to `https://` — typing
+ * `localhost:3000` into an address bar is the normal way to use one. That is
+ * also the reason the scheme test below is not just "is there a colon":
+ * `localhost:3000` parses as a URL with the scheme `localhost:`, so a naive
+ * check refuses the most common thing anyone types.
+ */
+export function normalizeBrowserUrl(raw: string): string | null {
+  const text = raw.trim();
+  if (text === "") return null;
+
+  const explicitScheme = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(text);
+  // `host:port[/path]` — a colon followed by digits is a port, not a scheme.
+  const hostPort = /^[^\s/?#:]+:\d+(?:[/?#].*)?$/.test(text);
+  if (!explicitScheme && !hostPort && /^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(text)) {
+    // A scheme with no authority: `javascript:`, `data:`, `mailto:`, `about:`.
+    return null;
+  }
+
+  let u: URL;
+  try {
+    u = new URL(explicitScheme ? text : `https://${text}`);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  if (u.hostname === "") return null;
+  return u.toString();
+}
+
+/** Short, stable label for a browser tab opened without a name of its own. A
+ *  hostname stays as it is — that is what a hostname looks like — but the
+ *  fallback is a word in a tab strip, so it is capitalised like the others. */
+export function urlLabel(url: string | undefined): string {
+  if (!url) return "Browser";
+  try {
+    return new URL(url).host || "Browser";
+  } catch {
+    return "Browser";
+  }
+}
+
+/** A new browser tab. `url` is normalised here so no caller can seed a pane
+ *  with a scheme the view would refuse. */
+export function browserTab(opts: {
+  url?: string;
+  title?: string;
+  profile?: BrowserProfile;
+}): PaneTab {
+  const url = opts.url ? (normalizeBrowserUrl(opts.url) ?? undefined) : undefined;
+  return {
+    id: newTabId(),
+    kind: "browser",
+    title: opts.title || urlLabel(url),
+    ...(url ? { url } : {}),
+    profile: opts.profile ?? "default",
+  };
+}
+
+/** A pane that has not chosen its content yet. */
+export function newPaneTab(): PaneTab {
+  return { id: newTabId(), kind: "new", title: "New pane" };
+}
+
+/**
+ * Swap a tab's content, keeping its position and its active/focused state.
+ *
+ * The replacement carries a **new id**, which is the point: a terminal's id is
+ * its daemon session and a browser view is keyed by id, so converting a `new`
+ * pane must mint a fresh one rather than reuse the placeholder's.
+ */
+export function replaceTab(layout: PaneLayout, id: string, tab: PaneTab): PaneLayout {
+  const index = dockOf(layout, id);
+  if (index === null) return layout;
+  // The replacement already existing elsewhere would put one id in two docks.
+  if (hasTab(layout, tab.id) && tab.id !== id) return activateTab(layout, tab.id);
+  const docks: [Dock, Dock] = [layout.docks[0], layout.docks[1]];
+  const dock = docks[index];
+  docks[index] = {
+    tabs: dock.tabs.map((t) => (t.id === id ? tab : t)),
+    activeId: dock.activeId === id ? tab.id : dock.activeId,
+  };
+  return { ...layout, docks, focused: index };
+}
+
+/**
+ * Patch a tab in place.
+ *
+ * What a browser pane navigates to has to end up in the layout, or a reload
+ * returns to wherever the pane was *opened* rather than where it was left. The
+ * same object is returned when nothing changes, so a `did-navigate` that only
+ * re-reports the current URL doesn't re-render the dock.
+ */
+export function updateTab(
+  layout: PaneLayout,
+  id: string,
+  patch: Partial<Omit<PaneTab, "id" | "kind">>,
+): PaneLayout {
+  const index = dockOf(layout, id);
+  if (index === null) return layout;
+  const current = layout.docks[index].tabs.find((t) => t.id === id);
+  if (!current) return layout;
+  const next = { ...current, ...patch };
+  if ((Object.keys(patch) as Array<keyof PaneTab>).every((k) => current[k] === next[k])) {
+    return layout;
+  }
+  const docks: [Dock, Dock] = [layout.docks[0], layout.docks[1]];
+  docks[index] = {
+    ...docks[index],
+    tabs: docks[index].tabs.map((t) => (t.id === id ? next : t)),
+  };
+  return { ...layout, docks };
+}
+
+/**
+ * A tab's label.
+ *
+ * Derived from the kind rather than read from `tab.title` for everything except a
+ * browser pane, whose title is the page's own. That keeps renaming a kind from
+ * depending on what an older build wrote into storage, and it is the one place
+ * tab naming lives.
+ */
+export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
+  switch (tab.kind) {
+    case "terminal":
+      return terminalLabel(layout, tab.id);
+    case "new":
+      return "New pane";
+    case "browser":
+      return tab.title || urlLabel(tab.url);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,11 +751,20 @@ function parseTab(value: unknown): PaneTab | null {
   // The id doubles as the daemon session id, which has a charset.
   if (!/^[A-Za-z0-9_-]{1,64}$/.test(t.id)) return null;
   if (!isPaneKind(t.kind)) return null;
-  return {
+  const tab: PaneTab = {
     id: t.id,
     kind: t.kind,
     title: typeof t.title === "string" && t.title !== "" ? t.title : t.kind,
   };
+  if (t.kind === "browser") {
+    // Re-validated on the way in, not only on the way out: storage is where a
+    // stale build's — or a hand-edited — `javascript:` URL would sit waiting to
+    // be handed to a view on restore.
+    const url = typeof t.url === "string" ? normalizeBrowserUrl(t.url) : null;
+    if (url) tab.url = url;
+    tab.profile = isBrowserProfile(t.profile) ? t.profile : "default";
+  }
+  return tab;
 }
 
 function parseDock(value: unknown): Dock {
@@ -384,7 +803,9 @@ function parseLayout(value: unknown): PaneLayout | null {
   // Focus must land on a dock that is actually rendered.
   if (docks[focused].tabs.length === 0) focused = focused === 0 ? 1 : 0;
 
-  return { docks, ratio: clampRatio(Number(l.ratio)), focused };
+  // Also normalised on restore: a layout written before this rule existed, or by
+  // an older build, can be left-empty.
+  return normalizeDocks({ docks, ratio: clampRatio(Number(l.ratio)), focused });
 }
 
 /** Sequentially numbered within the layout, so titles read "terminal 2" and
@@ -393,6 +814,6 @@ function parseLayout(value: unknown): PaneLayout | null {
 export function terminalLabel(layout: PaneLayout, id: string): string {
   const ids = terminalIds(layout);
   const n = ids.indexOf(id);
-  if (n < 0) return "terminal";
-  return ids.length > 1 ? `terminal ${n + 1}` : "terminal";
+  if (n < 0) return "Terminal";
+  return ids.length > 1 ? `Terminal ${n + 1}` : "Terminal";
 }
