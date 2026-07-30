@@ -367,8 +367,6 @@ function DockView(props: {
     >
       <div
         className="pane-tabs"
-        role="tablist"
-        aria-label="Panes"
         // Dropping on the empty part of the strip appends to this dock, which
         // is the only way to move a tab into a dock that has none.
         onDragOver={(e) => {
@@ -376,6 +374,10 @@ function DockView(props: {
         }}
         onDrop={(e) => dropTab(e)}
       >
+        {/* Only the tabs scroll. The `+` sits outside this box so it survives a
+            strip full of tabs — and `role="tablist"` lives here rather than on the
+            row, because a tablist's tabs have to be its own children. */}
+        <div className="pane-tab-scroll" role="tablist" aria-label="Panes">
         {dock.tabs.map((tab, at) => (
           <TabButton
             key={tab.id}
@@ -403,6 +405,7 @@ function DockView(props: {
             onDragEndTab={() => setDropAt(null)}
           />
         ))}
+        </div>
         {/* Immediately after the last tab, not pinned to the right: it is the
             end of the strip, and a control 600px from the thing it extends reads
             as unrelated to it.
@@ -645,6 +648,14 @@ function TabButton(props: {
   onDragEndTab: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
+  const box = useRef<HTMLSpanElement>(null);
+
+  // A strip full of tabs scrolls, and a tab can become the active one without
+  // being clicked — ⌘K, a drop, or closing its neighbour. Reveal it, or the
+  // selection is somewhere off screen with nothing to say so.
+  useEffect(() => {
+    if (props.selected) box.current?.scrollIntoView({ inline: "nearest", block: "nearest" });
+  }, [props.selected]);
 
   /** Which half of the tab the pointer is over — the drop goes to that side. */
   const isAfter = (e: React.DragEvent<HTMLElement>) => {
@@ -654,6 +665,7 @@ function TabButton(props: {
 
   return (
     <span
+      ref={box}
       className={[
         "pane-tab",
         props.selected ? "sel" : "",

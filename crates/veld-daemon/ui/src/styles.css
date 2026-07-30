@@ -429,6 +429,27 @@ select:focus {
   font-weight: 600;
 }
 
+/* Only the tabs scroll, and only once they have run out of room to shrink into.
+   `flex: 0 1 auto` is what keeps the `+` immediately after the last tab while
+   there is space and pinned to the end of the strip once there is not — the
+   Chrome behaviour, without a second layout mode. The scrollbar is hidden
+   because a 30px strip has no room for one; a trackpad, a wheel over the strip,
+   and focusing a tab (which scrolls it into view) all still reach the ends. */
+.pane-tab-scroll {
+  display: flex;
+  align-items: stretch;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.pane-tab-scroll::-webkit-scrollbar {
+  height: 0;
+  width: 0;
+}
+
 /* The `+` sits immediately after the last tab, so it reads as the end of the
    strip rather than as an unrelated control on the far right. */
 .pane-add-btn {
@@ -444,6 +465,11 @@ select:focus {
   display: inline-flex;
   align-items: center;
   align-self: stretch;
+  /* Tabs share the strip: they shrink together as more open, down to a floor that
+     still shows the kind glyph, a few characters and the close button. Past that
+     the strip scrolls rather than shrinking tabs into unreadable slivers. */
+  flex: 0 1 auto;
+  min-width: 92px;
   border-radius: 0;
   background: transparent;
   color: var(--muted);
@@ -519,6 +545,7 @@ select:focus {
 .pane-tab-label {
   display: inline-flex;
   align-items: center;
+  flex: 1 1 auto;
   /* A browser pane's label is the *page's* title, which can be a sentence — one
      of those wrapped to two lines and pushed the whole strip (and the `+`
      button) out of shape. Clamp it and ellipsize; the full title is in the tab's
@@ -1079,77 +1106,135 @@ select:focus {
   border-color: var(--warn);
 }
 
-/* The node table sizes itself against its own width, not the viewport's: the same
-   table lives in a 400px pane and in a 1080px card, and a media query cannot tell
-   those apart. */
-.node-table-wrap {
-  container-type: inline-size;
-  width: 100%;
-}
+/* ---- node list ------------------------------------------------------------- */
 
-.node-table {
-  font-size: 12px;
-  width: 100%;
-}
-
-/* Quiet headers: they label the columns without competing with the rows, which
-   are the content. */
-.node-table thead th {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--faint);
-  white-space: nowrap;
-}
-
-/* The URL column absorbs the slack. Without this, an auto-layout table spreads six
-   short cells evenly across a wide pane and the row reads as six unrelated things
-   floating in a line. */
-.node-table .col-url {
-  width: 100%;
+/* A card per node instead of a table: this list lives in a 300px pane and in a
+   1080px card, and columns are what cannot survive that range — they either
+   squeeze every cell to two characters or get dropped, losing a fact exactly when
+   someone needed it. Nothing here has a fixed width; width only decides where
+   lines wrap. */
+.node-list {
+  list-style: none;
+  margin: 0;
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   min-width: 0;
 }
 
-.node-table .col-node,
-.node-table .col-actions,
-.node-table .col-variant,
-.node-table .col-pid,
-.node-table .col-res {
-  width: 1%;
+.node-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  background: var(--bg);
+  min-width: 0;
+}
+
+/* Identity and state on the left, resources on the right — the one thing you scan
+   down a list for stays on the same edge in every card. `wrap` is what makes the
+   layout width-proof: the stats drop to their own line rather than crushing the
+   name. */
+.node-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+.node-head-gap {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.node-name {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+  /* Shrinks before it truncates, and truncates before it pushes anything out. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Shown only while their columns are hidden — see the queries below. */
-.node-compact-meta,
-.node-compact-url {
-  display: none;
+/* The variant qualifies the name, so it reads as attached to it. */
+.node-variant {
+  flex: none;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--muted);
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0 4px;
 }
 
-/* Narrow: variant and PID lose their columns and move under the node's name. */
-@container (max-width: 620px) {
-  .node-table .col-variant,
-  .node-table .col-pid {
-    display: none;
-  }
-  .node-compact-meta {
-    display: block;
-  }
+.node-status {
+  flex: none;
+  font-size: 11px;
+  color: var(--muted);
+}
+.node-status.green {
+  color: var(--live);
+}
+.node-status.red {
+  color: var(--danger);
+}
+.node-status.yellow {
+  color: var(--warn);
 }
 
-/* Narrower still: the URL joins them, and the sparkline goes — the memory and CPU
-   numbers beside it say the same thing in less room. Copy and Open stay, so the
-   URL is still reachable at any width. */
-@container (max-width: 460px) {
-  .node-table .col-url {
-    display: none;
-  }
-  .node-compact-url {
-    display: block;
-  }
-  .node-table .spark {
-    display: none;
-  }
+.node-pid {
+  flex: none;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+
+.node-stats {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* The URL gets a whole line, because it is the longest thing in the card and the
+   only one worth truncating. */
+.node-url-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.node-url-row .node-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.node-health {
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.node-health.bad {
+  color: var(--danger);
+}
+
+.node-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding-top: 2px;
 }
 
 .node-url {
@@ -1208,7 +1293,7 @@ select:focus {
 
 /* The rows scroll, the view's header (which run, what state, which past run) does
    not — it is the answer to "what am I looking at" and must not scroll away. */
-.run-view.fill .node-table-wrap {
+.run-view.fill .node-list {
   flex: 1;
   min-height: 0;
   overflow: auto;

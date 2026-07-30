@@ -40,7 +40,7 @@ have since shipped — see below.)
 | Orphan views are dropped by the *page*, not by a navigation event | `reset()` at module load, before any `create` | A reload replaces the page's registry of views, so the old ones are orphans painting over the new document. Disposing them from the shell's own `did-navigate` is a race against the renderer's first `create` — and losing it destroyed the view the new page had just asked for, which is why the first browser pane after a hard reload came up blank with reload as the only escape. Driving it from the renderer makes the ordering a queue. |
 | Views start visible | `create` no longer hides the view and then shows it | Chromium background-throttles a hidden `WebContents`, and a view created hidden and loaded in the same tick sometimes never rendered its first page — blank until you pressed Reload. The renderer sends its own visibility immediately, so starting visible costs nothing and removes the race. The spinner's 8-second "taking a while" reload is the backstop, since a genuinely slow dev server must not be called an error. |
 | Browser pane lifetime | Re-created on reload, unlike a terminal | A page is re-creatable state: the URL is persisted in the layout and re-navigated to, so a reload is allowed to drop the views and rebuild them. The page asks for that itself (`reset()`, see the row above) rather than the shell inferring it from a navigation event. A shell is the opposite — see the terminal row above. |
-| Icons | One mark, two assets, generated from the repo's canonical sources (`desktop/scripts/make-icons.sh`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. Rasterising is QuickLook (WebKit), so the generator is macOS-only — acceptable because the outputs are committed and only change when the brand does. ImageMagick's own SVG renderer was the first try and its curves are visibly blobby at 18px. |
+| Icons | One mark, two assets, drawn by a stdlib-only rasteriser (`desktop/scripts/make-icons.py`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. The generator draws the mark analytically — it is a polygon and a circle, since every segment of `logo.svg`'s V is a straight line — so there is nothing to install and the bytes are identical on every machine. Both tools tried first were wrong in the same direction: `qlmanage` (QuickLook) composites thumbnails on an **opaque white background** and pads below its minimum size, which shipped a menu-bar icon that was a white tile with a dark V (a template image is alpha, so an opaque render is a solid blob — and invisible as a bug in any light-background preview), and ImageMagick's SVG renderer is blobby at icon sizes *and* its resize dropped the alpha channel to grayscale. The app icon is inset in a transparent margin, because macOS draws its own shadow into one and a full-bleed tile reads as a bigger, blockier icon than everything beside it in the dock. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -210,13 +210,25 @@ requests at runtime — branding rule.
   read only the first, so sharing's refusals — the ones that tell you exactly what
   to add to `veld.json` — surfaced as `400 Bad Request`, which reads as a bug in
   Veld rather than as a config that has not opted in. `errorMessage` handles both.
-- **The node table sizes itself against its own width**, not the viewport's: the
-  same table lives in a 400px pane and a 1080px card, which a media query cannot
-  tell apart. A container query drops variant and PID, then the URL column and the
-  sparkline, and what they said moves into a sub-line under the node's name — each
-  half hidden while its own column is on screen, so nothing is ever shown twice.
-  Column widths are declared, because an auto-layout table spreads six short cells
-  evenly across a wide pane and the row reads as six unrelated things in a line.
+- **The nodes view is a card per node, not a table.** The same view renders in a
+  300px pane and in a 1080px card, and columns cannot survive that range: they
+  either squeeze every cell to two characters or get dropped as the width shrinks,
+  which loses a fact (the pid, the URL) exactly when someone needed it. Container
+  queries doing the dropping was the first attempt and it is the wrong shape. A card
+  has nothing to lose — the long values get their own line, and width only decides
+  where things wrap. Ordered by how often each part is read: identity and state,
+  then the URL with its actions, then what is wrong, then what you can do about it;
+  resources sit on the opposite edge of the first line, because that is the column
+  people scan *down*. With no header row to carry meaning, units travel with the
+  values (`pid 21672`, an `aria-label` of "Memory 212 MB").
+- **Tabs shrink before the strip scrolls.** Only the tabs are in the scroll box, so
+  the `+` follows the last tab while there is room and pins to the end of the strip
+  once there is not — one layout, not a second mode. Labels are clamped (a browser
+  pane's label is the *page title*, which can be a sentence, and one wrapped to two
+  lines deformed the whole strip), tabs shrink to a floor that still shows the kind
+  glyph and the close button, and past that the strip scrolls. The active tab
+  scrolls itself into view, because a tab can become active without being clicked —
+  ⌘K, a drop, or closing its neighbour.
 - **`LogsPanel` has two shapes, one implementation.** In a card it is a
   fixed-height area that stays mounted while its tab is hidden (filters and scroll
   survive); in a pane (`fill`) it is the whole dock body, with the toolbar fixed
@@ -291,7 +303,11 @@ npm projects beat one franken-config.
 Minimal by design. Main process only does:
 
 1. Create a frameless `BrowserWindow` (`titleBarStyle: 'hiddenInset'`) and load
-   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/ide?shell=electron`.
+   `${VELD_DESKTOP_URL ?? http://127.0.0.1:19899}/ide?shell=electron`. The window
+   is titled by the app and `page-title-updated` is cancelled — the UI arrives over
+   HTTP, so otherwise the window takes whatever `<title>` that bundle carries, and
+   a reload could rename it. `app.setName("Veld")` for the same reason: an
+   unpackaged run would call itself "Electron" in the macOS application menu.
 2. If the daemon isn't reachable, show a local retry page (embedded data URL —
    install/start instructions) and poll until it appears.
 3. macOS tray (template icon): shows running-run count, per-run stop/restart

@@ -23,7 +23,7 @@ import { IconActivityHeartbeat, IconLogs } from "@tabler/icons-react";
 import { useState } from "react";
 import type { HistoryEntry, NodeStats, RunInfo, RunRef } from "../api";
 import { LogsPanel } from "./LogsPanel";
-import { NodeTable, nodeRows } from "./NodeTable";
+import { NodeList, nodeRows } from "./NodeList";
 import { fmtWhen, statusBucket } from "./util";
 
 /** Everything a run view needs about the run it is showing. */
@@ -131,7 +131,7 @@ export function NodesView(props: { target: RunViewTarget } & HostProps) {
           )}
         </Group>
       )}
-      <NodeTable
+      <NodeList
         run={ref}
         nodes={nodeRows(run, selected)}
         stats={selected ? undefined : props.target.stats}

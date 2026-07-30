@@ -368,11 +368,11 @@ setup-ui:
     # installer knows that version is now the wrong one.
     ./node_modules/.bin/install-electron
 
-# Regenerate desktop/assets/ (app icon + menu-bar icon) from the canonical brand
-# sources. macOS-only (QuickLook does the rasterising) and rarely needed — the
-# assets are committed; run it when the brand changes.
+# Regenerate desktop/assets/ (app icon + menu-bar icon) from the Veld mark.
+# Pure stdlib Python — nothing to install, same bytes on every machine. Rarely
+# needed: the assets are committed, so run it when the brand changes.
 desktop-icons:
-    ./desktop/scripts/make-icons.sh
+    python3 desktop/scripts/make-icons.py
 
 # Vite dev server for the /ide UI (HMR). Proxies /api — including the terminal
 # WebSocket upgrade — to the DEV daemon (port {{dev_daemon_port}}); start

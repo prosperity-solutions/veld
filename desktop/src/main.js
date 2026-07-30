@@ -36,6 +36,11 @@ const TRAY_ICON = path.join(ASSETS, "trayTemplate.png");
 // Dev override: point the shell at the vite dev server
 // (VELD_DESKTOP_URL=http://localhost:5199). Default: the daemon directly —
 // no Caddy/helper needed.
+// The app's own name, which macOS uses for the application menu and the About
+// item. A packaged build gets this from the bundle; an unpackaged `npm start`
+// would otherwise call itself "Electron".
+app.setName("Veld");
+
 const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
 const APP_URL = `${BASE_URL}/ide?shell=electron`;
 const HEALTH_URL = `${BASE_URL}/api/health`;
@@ -102,6 +107,10 @@ async function loadAppWhenReady(window) {
 
 function createWindow() {
   win = new BrowserWindow({
+    // The window is titled by the app, not by the page: the UI is served from a
+    // URL, so without this the title bar (and the macOS window menu, and Mission
+    // Control) show whatever `<title>` the daemon's bundle happens to carry.
+    title: "Veld",
     width: 1280,
     height: 800,
     minWidth: 900,
@@ -155,6 +164,11 @@ function createWindow() {
   // Before `closed`: the window's `contentView` must still exist to detach the
   // browser panes from, and a view outliving its window keeps a renderer
   // process alive with nothing to paint into.
+  // …and the page must not take it back. Electron adopts `document.title` on every
+  // navigation unless the event is cancelled, which is how a hard reload renamed
+  // the window.
+  win.on("page-title-updated", (e) => e.preventDefault());
+
   win.on("close", () => {
     if (win) disposeWindow(win);
   });
