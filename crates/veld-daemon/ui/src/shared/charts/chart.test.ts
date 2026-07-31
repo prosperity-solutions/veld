@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { axisMax, contiguousRuns } from "./TimeSeriesChart";
-import { STACK_METRICS, bucketValue, fmtCpuTime } from "../ResourcePanel";
+import { STACK_METRICS, bucketValue, fmtCpuTime, fmtPercent } from "../ResourcePanel";
 import type { StatsBucket } from "../../api";
 
 function bucket(over: Partial<StatsBucket> = {}): StatsBucket {
@@ -106,5 +106,20 @@ describe("fmtCpuTime", () => {
     expect(fmtCpuTime(125)).toBe("2m05s");
     expect(fmtCpuTime(3600)).toBe("1h00m");
     expect(fmtCpuTime(7860)).toBe("2h11m");
+  });
+});
+
+describe("fmtPercent", () => {
+  it("keeps a decimal below 10% and rounds above", () => {
+    // A dev server idling at 0.4% and one at 0% are different facts; rounding
+    // both to "0%" loses the only signal there.
+    expect(fmtPercent(0)).toBe("0.0%");
+    expect(fmtPercent(0.42)).toBe("0.4%");
+    expect(fmtPercent(9.96)).toBe("10.0%");
+    expect(fmtPercent(37.4)).toBe("37%");
+  });
+
+  it("does not clamp above 100 — a multi-threaded tree really does exceed one core", () => {
+    expect(fmtPercent(340)).toBe("340%");
   });
 });

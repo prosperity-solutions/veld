@@ -40,6 +40,10 @@ pub struct StatsArgs {
     #[arg(long)]
     pub history: bool,
 
+    /// Graph CPU instead of memory in --history.
+    #[arg(long)]
+    pub cpu: bool,
+
     /// History window: a duration (`30s`, `15m`, `2h`) or plain seconds.
     #[arg(long, default_value = "15m")]
     pub window: String,
@@ -57,6 +61,40 @@ pub struct StatsArgs {
     /// Output as JSON.
     #[arg(long)]
     pub json: bool,
+}
+
+/// What `--history` plots. Memory and CPU are different units, so they are
+/// different graphs rather than two lines sharing one axis.
+#[derive(Debug, Clone, Copy)]
+enum Dimension {
+    Memory(MemoryMetric),
+    Cpu,
+}
+
+impl Dimension {
+    fn label(&self) -> String {
+        match self {
+            Dimension::Memory(m) => m.as_str().to_owned(),
+            Dimension::Cpu => "cpu".to_owned(),
+        }
+    }
+
+    /// This dimension's value for one bucket, `None` where the platform doesn't
+    /// report it (memory page classes only — CPU is always available).
+    fn read(&self, b: &StatsBucket) -> Option<f64> {
+        match self {
+            Dimension::Memory(m) => m.read(b.memory_bytes, &b.memory).map(|v| v as f64),
+            Dimension::Cpu => Some(b.cpu_percent as f64),
+        }
+    }
+
+    /// Format a value in this dimension's own unit.
+    fn format(&self, v: f64) -> String {
+        match self {
+            Dimension::Memory(_) => output::fmt_bytes(v as u64),
+            Dimension::Cpu => output::fmt_cpu(v as f32),
+        }
+    }
 }
 
 /// One node's data, assembled once and then rendered by whichever formatter.
@@ -180,9 +218,14 @@ pub async fn run(args: StatsArgs) -> i32 {
         }
     }
     if args.history {
+        let dim = if args.cpu {
+            Dimension::Cpu
+        } else {
+            Dimension::Memory(metric)
+        };
         print_history(
             &rows,
-            metric,
+            dim,
             window,
             args.processes,
             &db,
@@ -370,7 +413,7 @@ fn print_process_tree(row: &NodeStatsRow, metric: MemoryMetric) {
 #[allow(clippy::too_many_arguments)]
 fn print_history(
     rows: &[NodeStatsRow],
-    metric: MemoryMetric,
+    dim: Dimension,
     window: StatsWindow,
     per_process: bool,
     db: &veld_core::db::Db,
@@ -380,7 +423,7 @@ fn print_history(
     println!();
     println!(
         "{} {}",
-        output::bold(&format!("History — {}", metric.as_str())),
+        output::bold(&format!("History — {}", dim.label())),
         output::dim(&format!(
             "({}s window, {}s buckets)",
             (window.end - window.start).num_seconds(),
@@ -388,7 +431,7 @@ fn print_history(
         ))
     );
     for row in rows {
-        print_series_line(&row.key, &row.history, metric);
+        print_series_line(&row.key, &row.history, dim);
         if !per_process {
             continue;
         }
@@ -396,14 +439,14 @@ fn print_history(
             .process_stats_buckets(project_root, run_name, &row.key, window)
             .unwrap_or_default();
         for s in &series {
-            print_series_line(&format!("  {} ({})", s.name, s.pid), &s.buckets, metric);
+            print_series_line(&format!("  {} ({})", s.name, s.pid), &s.buckets, dim);
         }
     }
 }
 
 /// One label + sparkline + range line. A window with no samples says so rather
 /// than drawing an empty axis.
-fn print_series_line(label: &str, buckets: &[StatsBucket], metric: MemoryMetric) {
+fn print_series_line(label: &str, buckets: &[StatsBucket], dim: Dimension) {
     if buckets.is_empty() {
         println!("  {label:<28} {}", output::dim("no samples in window"));
         return;
@@ -420,7 +463,7 @@ fn print_series_line(label: &str, buckets: &[StatsBucket], metric: MemoryMetric)
     for b in buckets {
         let idx = ((b.bucket_start - first).num_seconds() / window_step(buckets)) as usize;
         if idx < slots {
-            values[idx] = metric.read(b.memory_bytes, &b.memory).map(|v| v as f64);
+            values[idx] = dim.read(b);
         }
     }
     let present: Vec<f64> = values.iter().flatten().copied().collect();
@@ -436,11 +479,7 @@ fn print_series_line(label: &str, buckets: &[StatsBucket], metric: MemoryMetric)
     println!(
         "  {label:<28} {}  {}",
         output::sparkline(&values),
-        output::dim(&format!(
-            "{} – {}",
-            output::fmt_bytes(min as u64),
-            output::fmt_bytes(max as u64)
-        ))
+        output::dim(&format!("{} – {}", dim.format(min), dim.format(max)))
     );
 }
 
@@ -538,6 +577,50 @@ mod tests {
         assert!(matches_node_filter("web:local", Some("web:local")));
         assert!(!matches_node_filter("web:local", Some("web:prod")));
         assert!(!matches_node_filter("web:local", Some("api")));
+    }
+
+    fn test_bucket(footprint: u64, cpu: f32) -> StatsBucket {
+        StatsBucket {
+            bucket_start: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+            samples: 1,
+            cpu_percent: cpu,
+            cpu_peak: cpu,
+            process_count: 1.0,
+            memory_bytes: footprint * 2,
+            memory: veld_core::stats::MemoryBreakdown {
+                footprint,
+                virtual_bytes: footprint * 10,
+                private_dirty: Some(footprint / 2),
+                ..Default::default()
+            },
+            footprint_peak: footprint,
+        }
+    }
+
+    #[test]
+    fn dimension_reads_and_formats_in_its_own_unit() {
+        let b = test_bucket(2048, 37.4);
+        let mem = Dimension::Memory(MemoryMetric::Footprint);
+        assert_eq!(mem.read(&b), Some(2048.0));
+        assert_eq!(mem.format(2048.0), "2 KB");
+        assert_eq!(mem.label(), "footprint");
+
+        let cpu = Dimension::Cpu;
+        // CPU is stored as f32 and widened to f64 for the plot, so compare with
+        // slack rather than for equality.
+        assert!((cpu.read(&b).unwrap() - 37.4).abs() < 1e-4);
+        assert_eq!(cpu.format(37.4), "37%");
+        assert_eq!(cpu.label(), "cpu");
+    }
+
+    #[test]
+    fn cpu_is_always_readable_but_a_page_class_may_not_be() {
+        // The reason `read` returns Option at all: a metric the platform cannot
+        // measure must render as a gap, not as zero. CPU has no such case.
+        let mut b = test_bucket(1024, 5.0);
+        b.memory.private_dirty = None;
+        assert_eq!(Dimension::Memory(MemoryMetric::PrivateDirty).read(&b), None);
+        assert_eq!(Dimension::Cpu.read(&b), Some(5.0));
     }
 
     #[test]

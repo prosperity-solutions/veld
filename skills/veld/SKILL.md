@@ -412,6 +412,7 @@ which is the only memory figure that sums correctly over a tree.
 veld stats --json --name my-feature                      # breakdown per node
 veld stats --processes --json --name my-feature           # + one row per subprocess
 veld stats --history --window 1h --json --name my-feature # + bucketed history
+veld stats --history --cpu --window 1h --name my-feature   # CPU instead of memory
 veld stats --node web --memory private_dirty --processes  # is *this* node leaking?
 ```
 
@@ -429,6 +430,10 @@ pre-order — indent by `depth`, since the parent may be absent (the sampler
 records at most 64 processes per node, keeping the heaviest). `--history` adds
 `history` buckets averaged server-side; a bucket with no samples is **omitted,
 not zero-filled**, so consecutive entries are not necessarily adjacent in time.
+Each bucket carries `cpu_percent` and `cpu_peak` as well as the memory fields, so
+one request answers both dimensions — `--cpu` only changes which one the terminal
+sparkline draws. Use `cpu_peak`/`footprint_peak` when `samples > 1`: a mean over a
+wide bucket hides the spike a 5s sample caught.
 
 Which memory number answers which question:
 
@@ -439,6 +444,7 @@ Which memory number answers which question:
 | why does `top` say 4 GB? | `virtual` / `resident` |
 | is it thrashing? | `swap` climbing while `resident` is flat |
 | which subprocess is it? | `--processes` |
+| is it burning CPU, and in bursts? | `cpu_percent` vs `cpu_peak` (`--cpu` to graph it) |
 
 Retention: node totals 24h, per-process rows 2h. Set
 `VELD_STATS_MEMORY_DETAIL=off` in the daemon's environment to fall back to

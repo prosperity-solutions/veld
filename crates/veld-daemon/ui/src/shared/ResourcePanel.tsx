@@ -2,13 +2,23 @@
  * The expanded resource view for one node: a scrubbable chart with a metric
  * picker, three split modes, and the live process table.
  *
+ * Two dimensions, **memory** and **CPU**, on their own axes in their own units —
+ * never together. Bytes and percent on one plot needs two y-scales, and a
+ * dual-axis chart lets the author decide which line looks higher, so the reader
+ * cannot. The toggle is the honest version of that request.
+ *
  * Split modes are the reason this exists rather than one more sparkline:
  *
- * - **total** — one line for the chosen metric. "Is it growing?"
+ * - **total** — one line for the chosen metric. "Is it growing?" Wide buckets
+ *   also get a peak line, because a mean over a 6-minute bucket hides the spike
+ *   that a 5s sample caught.
  * - **by type** — the page classes stacked. "Is that growth private dirty pages
  *   (a leak) or shared clean ones (mapped binaries)?" Hidden where the platform
- *   cannot split them, rather than drawn as an empty stack.
- * - **by process** — one band per subprocess. "Which child is it?"
+ *   cannot split them, rather than drawn as an empty stack. Memory only: CPU has
+ *   no page classes.
+ * - **by process** — one band per subprocess. "Which child is it?" Stacked in
+ *   both dimensions, because per-process CPU and per-process memory both sum to
+ *   the tree's own figure.
  *
  * History is fetched from `/api/stats/history`, which buckets server-side, so
  * changing the window changes the resolution rather than the payload size. The
@@ -25,6 +35,9 @@ import { fmtBytes } from "./util";
 import { ChartSeries, TimeSeriesChart } from "./charts/TimeSeriesChart";
 
 type SplitMode = "total" | "type" | "process";
+
+/** Which resource the chart plots. Separate charts, never one with two axes. */
+type Dimension = "memory" | "cpu";
 
 /** Window presets, in seconds. Capped at the daemon's 24h stats retention —
  * offering "7 days" would return four hours of data and look like a bug. */
@@ -88,6 +101,12 @@ const CLASS_SLOT: Record<string, number> = {
   wired: 6,
 };
 
+/** CPU as a percentage of one core. Can exceed 100% on a multi-threaded tree,
+ * which is correct — clamping it would hide the most interesting case. */
+export function fmtPercent(v: number): string {
+  return `${v < 10 ? v.toFixed(1) : Math.round(v)}%`;
+}
+
 /** Read a metric off a bucket. Mirrors Rust's `MemoryMetric::read`. */
 export function bucketValue(b: StatsHistory["buckets"][number], m: MemoryMetric): number | null {
   switch (m) {
@@ -104,6 +123,7 @@ export function bucketValue(b: StatsHistory["buckets"][number], m: MemoryMetric)
 
 export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
   const [windowSecs, setWindowSecs] = useState("900");
+  const [dimension, setDimension] = useState<Dimension>("memory");
   const [metric, setMetric] = useState<MemoryMetric>("footprint");
   const [split, setSplit] = useState<SplitMode>("total");
   const [data, setData] = useState<StatsHistory | null>(null);
@@ -150,7 +170,20 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
   }, [props.run.projectRoot, props.run.name, props.nodeKey, secs, wantProcesses]);
 
   const available = data?.available_metrics ?? ["footprint", "resident", "virtual"];
-  const canSplitByType = STACK_METRICS.some((m) => available.includes(m));
+  // CPU has no page classes, so "by type" belongs to the memory dimension only.
+  const canSplitByType =
+    dimension === "memory" && STACK_METRICS.some((m) => available.includes(m));
+  const isCpu = dimension === "cpu";
+
+  /**
+   * Whether a bucket covers more than one raw sample. When it doesn't — a 5m
+   * window at 1s resolution — the mean and the peak are the same number, and
+   * plotting both would draw one line twice and pad the legend with a duplicate.
+   */
+  const bucketsAggregate = useMemo(
+    () => (data?.buckets ?? []).some((b) => b.samples > 1),
+    [data],
+  );
 
   // A metric that stops being available (window scrolled past a platform change)
   // must not leave the picker pointing at nothing.
@@ -161,6 +194,15 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
   useEffect(() => {
     if (split === "type" && !canSplitByType) setSplit("total");
   }, [split, canSplitByType]);
+
+  /** The value this dimension plots, per bucket. */
+  const readBucket = useMemo(
+    () =>
+      isCpu
+        ? (b: StatsHistory["buckets"][number]) => b.cpu
+        : (b: StatsHistory["buckets"][number]) => bucketValue(b, metric),
+    [isCpu, metric],
+  );
 
   const times = useMemo(() => (data?.buckets ?? []).map((b) => b.t), [data]);
 
@@ -178,7 +220,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
       // Bucket times differ per process (a process that started late has fewer
       // buckets), so index each series into the node's own time axis by `t`.
       return data.processes.map((p, i) => {
-        const byTime = new Map(p.buckets.map((b) => [b.t, bucketValue(b, metric)]));
+        const byTime = new Map(p.buckets.map((b) => [b.t, readBucket(b)]));
         return {
           key: String(p.pid),
           label: `${p.name} (${p.pid})`,
@@ -188,21 +230,43 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
         };
       });
     }
-    return [
-      {
-        key: metric,
-        label: METRIC_LABELS[metric],
-        slot: 1,
-        points: data.buckets.map((b) => bucketValue(b, metric)),
-      },
-    ];
-  }, [data, split, metric, available, times]);
+    const mean: ChartSeries = {
+      key: isCpu ? "cpu" : metric,
+      label: isCpu ? "CPU" : METRIC_LABELS[metric],
+      slot: 1,
+      points: data.buckets.map(readBucket),
+    };
+    // The peak within each bucket, where a bucket actually spans several
+    // samples. Same unit and same axis as the mean, so this is one measure at
+    // two statistics — not a second scale.
+    const peak: ChartSeries | null =
+      !bucketsAggregate || (!isCpu && metric !== "footprint")
+        ? null
+        : {
+            key: isCpu ? "cpu_peak" : "footprint_peak",
+            label: isCpu ? "CPU (peak)" : "Footprint (peak)",
+            slot: 2,
+            points: data.buckets.map((b) => (isCpu ? b.cpu_peak : b.footprint_peak)),
+          };
+    // Peak first so the mean draws over it rather than under.
+    return peak ? [peak, mean] : [mean];
+  }, [data, split, metric, available, times, isCpu, readBucket, bucketsAggregate]);
 
   const noData = !loading && times.length === 0;
 
   return (
     <div className="res-panel">
       <div className="res-controls">
+        <SegmentedControl
+          size="xs"
+          value={dimension}
+          onChange={(v) => setDimension(v as Dimension)}
+          data={[
+            { value: "memory", label: "Memory" },
+            { value: "cpu", label: "CPU" },
+          ]}
+          aria-label="Resource"
+        />
         <SegmentedControl
           size="xs"
           value={split}
@@ -216,10 +280,14 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
               label: canSplitByType ? "By type" : "By type (n/a)",
               disabled: !canSplitByType,
             },
+            // `disabled` above covers both reasons it can be off — CPU has no
+            // page classes, and macOS cannot measure them — which the note under
+            // the controls tells apart.
+
             { value: "process", label: "By process" },
           ]}
         />
-        {split !== "type" && (
+        {split !== "type" && !isCpu && (
           <Tooltip label={METRIC_HELP[metric]} multiline w={280} openDelay={300}>
             <Select
               size="xs"
@@ -247,11 +315,19 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
         )}
       </div>
 
-      {!canSplitByType && split !== "process" && (
+      {isCpu ? (
         <Text size="xs" c="dimmed">
-          This platform reports totals only — the private/shared page split needs
-          Linux&apos;s <code>smaps_rollup</code>.
+          CPU is a percentage of one core, so a multi-threaded tree legitimately
+          exceeds 100%.
         </Text>
+      ) : (
+        !canSplitByType &&
+        split !== "process" && (
+          <Text size="xs" c="dimmed">
+            This platform reports totals only — the private/shared page split
+            needs Linux&apos;s <code>smaps_rollup</code>.
+          </Text>
+        )
       )}
 
       {noData ? (
@@ -264,15 +340,15 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           times={times}
           series={series}
           mode={split === "total" ? "line" : "stacked"}
-          format={fmtBytes}
+          format={isCpu ? fmtPercent : fmtBytes}
           windowStart={data?.start ?? Date.now() - secs * 1000}
           windowEnd={data?.end ?? Date.now()}
           ariaLabel={
             split === "type"
               ? "Memory by page class over time"
               : split === "process"
-                ? `${METRIC_LABELS[metric]} by process over time`
-                : `${METRIC_LABELS[metric]} over time`
+                ? `${isCpu ? "CPU" : METRIC_LABELS[metric]} by process over time`
+                : `${isCpu ? "CPU" : METRIC_LABELS[metric]} over time`
           }
         />
       )}
@@ -280,12 +356,17 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
       {split === "process" && data && data.processes_omitted > 0 && (
         <Text size="xs" c="dimmed">
           {data.processes_omitted} more process
-          {data.processes_omitted === 1 ? "" : "es"} not charted — the heaviest are
-          shown.
+          {data.processes_omitted === 1 ? "" : "es"} not charted — the ones with the
+          largest memory footprint are shown, which on the CPU view may not be the
+          busiest.
         </Text>
       )}
 
-      {data && data.tree.length > 0 && <ProcessTable data={data} metric={metric} />}
+      {data && data.tree.length > 0 && (
+        // On the CPU view the memory-metric picker is hidden, so its last value
+        // would be an extra column nobody chose — pass null and drop it.
+        <ProcessTable data={data} classMetric={isCpu ? null : metric} />
+      )}
     </div>
   );
 }
@@ -294,9 +375,10 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
  * The live process tree. Also the table view the chart's accessibility story
  * leans on: every number on screen is readable here without colour.
  */
-function ProcessTable(props: { data: StatsHistory; metric: MemoryMetric }) {
-  const { data, metric } = props;
-  const showClass = metric !== "footprint" && metric !== "resident" && metric !== "virtual";
+function ProcessTable(props: { data: StatsHistory; classMetric: MemoryMetric | null }) {
+  const { data, classMetric: metric } = props;
+  const showClass =
+    metric != null && metric !== "footprint" && metric !== "resident" && metric !== "virtual";
   return (
     <div className="res-table-wrap">
       <table className="res-table">
@@ -307,7 +389,7 @@ function ProcessTable(props: { data: StatsHistory; metric: MemoryMetric }) {
             <th className="num">CPU</th>
             <th className="num">Footprint</th>
             <th className="num">RSS</th>
-            {showClass && <th className="num">{METRIC_LABELS[metric]}</th>}
+            {showClass && <th className="num">{METRIC_LABELS[metric!]}</th>}
             <th className="num">CPU time</th>
           </tr>
         </thead>
@@ -324,7 +406,9 @@ function ProcessTable(props: { data: StatsHistory; metric: MemoryMetric }) {
               <td className="num">{fmtBytes(p.footprint)}</td>
               <td className="num">{fmtBytes(p.resident)}</td>
               {showClass && (
-                <td className="num">{p[metric] == null ? "—" : fmtBytes(p[metric] as number)}</td>
+                <td className="num">
+                  {p[metric!] == null ? "—" : fmtBytes(p[metric!] as number)}
+                </td>
               )}
               <td className="num">{fmtCpuTime(p.cpu_seconds)}</td>
             </tr>
