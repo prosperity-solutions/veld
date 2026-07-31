@@ -72,7 +72,6 @@ import {
 import {
   type BrowserProfile,
   DEFAULT_RATIO,
-  LAYOUT_STORAGE_KEY,
   type PaneLayout,
   type PaneLayoutUpdate,
   SESSIONS_STORAGE_KEY,
@@ -92,7 +91,7 @@ import {
   newTabId,
   nextFreeProfile,
   parseSessionSets,
-  serializeLayouts,
+  saveLayouts,
   serializeSessionSets,
   sessionSetFor,
   terminalIds,
@@ -130,7 +129,7 @@ import {
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
-import { topbarClass } from "./shell";
+import { layoutSlot, topbarClass } from "./shell";
 
 const POLL_MS = 5000;
 
@@ -739,21 +738,20 @@ function AppInner(props: {
   }, []);
 
   // ---- Panes -------------------------------------------------------------
-  // One layout per worktree, restored from sessionStorage so a reload comes
-  // back to the same tabs — and, because a terminal tab's id is its daemon
-  // session id, to the same running shells. Read with a lazy initialiser
-  // rather than in an effect: an empty first render would prune every restored
-  // session before the restore landed.
-  const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(loadLayouts);
+  // One layout per worktree, restored so a reload comes back to the same tabs —
+  // and, because a terminal tab's id is its daemon session id, to the same
+  // running shells. In Veld Desktop the layout also survives the app itself
+  // restarting (see `layoutSlotKey`), which is the half that makes surviving
+  // shells reachable after an app update rather than merely alive. Read with a
+  // lazy initialiser rather than in an effect: an empty first render would prune
+  // every restored session before the restore landed.
+  const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
+    loadLayouts(layoutSlot),
+  );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
   useEffect(() => {
-    try {
-      sessionStorage.setItem(LAYOUT_STORAGE_KEY, serializeLayouts(layouts));
-    } catch {
-      // Storage disabled or full: the app keeps working, only the reload
-      // continuity is lost, and there is nothing useful to tell the user.
-    }
+    saveLayouts(layoutSlot, layouts);
   }, [layouts]);
 
   // Give a newly selected worktree a layout. New worktrees inherit the split

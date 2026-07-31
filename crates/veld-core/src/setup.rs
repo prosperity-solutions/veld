@@ -673,8 +673,16 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             std::fs::create_dir_all(&unit_dir).context("failed to create systemd user unit dir")?;
 
             let unit_path = unit_dir.join("veld-daemon.service");
+            // KillMode=process, for the same reason the helper's unit has it: on
+            // stop/restart, kill only the daemon, not its whole cgroup. The
+            // daemon's children include one holder process per open terminal,
+            // whose entire purpose is to outlive it — under the default
+            // control-group mode systemd SIGKILLs every one of them on
+            // `systemctl restart`, which is exactly the `veld update` failure the
+            // holders exist to prevent. It also stops a restart from taking down
+            // runs the daemon started on the user's behalf.
             let unit = format!(
-                "[Unit]\nDescription=Veld Daemon\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+                "[Unit]\nDescription=Veld Daemon\n\n[Service]\nExecStart={}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
                 veld_daemon_bin.display()
             );
             std::fs::write(&unit_path, unit).context("failed to write daemon systemd unit")?;

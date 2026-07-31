@@ -58,12 +58,31 @@
 //! CORS layer is added to the daemon, gate 2 weakens if a client is ever
 //! legitimately allowed to connect without an `Origin`. Removing one because
 //! "the other covers it" removes the margin, not redundancy.
+//!
+//! # The PTY is not in this process
+//!
+//! A session's PTY master, its shell and its scrollback belong to a **holder
+//! process** — one per session, `veld-daemon --pty-holder` — which the daemon
+//! talks to over a unix socket. That is what makes a shell survive `veld
+//! update`: the master descriptor is not the daemon's to lose. See
+//! [`holder`] for why it is per-session and what must not regress.
+//!
+//! What this module keeps is everything a *client* can observe: the tickets, the
+//! origin gate, the takeover epoch, the one-writer rule, the replay bracket, the
+//! detach grace and the session cap. The scrollback here is a **mirror**, fed by
+//! [`pump_holder`] exactly as it was once fed by the PTY read loop — which is
+//! why [`serve_socket`]'s subscribe-and-snapshot-under-one-lock argument is
+//! unchanged. The holder's own copy is read once, when a freshly started daemon
+//! adopts a session it did not spawn ([`adopt_existing_sessions`]).
+
+#[path = "pty/holder.rs"]
+pub mod holder;
+
+#[path = "pty/wire.rs"]
+mod wire;
 
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
-use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path as FsPath, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -76,13 +95,15 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
+use portable_pty::PtySize;
 use serde::{Deserialize, Serialize};
-use tokio::io::unix::AsyncFd;
-use tokio::sync::{broadcast, watch};
+use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::{broadcast, mpsc, watch};
 use tracing::{debug, info, warn};
 
 use super::management::{check_csrf, open_db};
+use wire::HolderConfig;
 
 /// How long a minted ticket stays redeemable. Long enough to survive a slow
 /// render and a wedged event loop, short enough that a leaked one (a shared
@@ -138,9 +159,27 @@ const EXIT_DRAIN: Duration = Duration::from_millis(250);
 /// Grace between hanging up the terminal's process group and killing it.
 const KILL_GRACE: Duration = Duration::from_secs(2);
 
-/// How long daemon shutdown waits for each session's pump to deliver its
-/// hangup. Short: this is on the path of every `veld update`.
-const SHUTDOWN_HANGUP_GRACE: Duration = Duration::from_millis(500);
+/// How long a holder gets to start, bind its socket and answer.
+///
+/// Generous relative to what it costs (a fork/exec, a bind and a connect —
+/// milliseconds), because the alternative to waiting is reporting "could not
+/// start a shell" on a loaded machine.
+const HOLDER_START_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// How often the daemon retries connecting to a holder it has just spawned.
+const HOLDER_CONNECT_INTERVAL: Duration = Duration::from_millis(5);
+
+/// How long a holder gets to send its `Hello` once connected.
+///
+/// Separate from [`HOLDER_START_TIMEOUT`] because it bounds a different failure:
+/// a socket that accepts but never speaks. Without it, one wedged holder would
+/// stall daemon startup while every session behind it waited to be adopted.
+const HOLDER_HELLO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Frames queued towards a holder. Keystrokes and resizes only, so this is
+/// deliberately small; the hangup does not queue behind them (see
+/// [`pump_to_holder`]).
+const HOLDER_INPUT_CHANNEL: usize = 64;
 
 /// Upper bound on a resize request, so a hostile or buggy client cannot ask
 /// the kernel for an absurd winsize. Comfortably past any real display.
@@ -240,15 +279,19 @@ impl Scrollback {
 // ---------------------------------------------------------------------------
 
 /// A running shell, independent of whether anything is looking at it.
+///
+/// The shell itself lives in a holder process; this is the daemon's handle on
+/// it. Everything here is either a client-facing invariant (the epochs, the
+/// detach clock, the cap slot) or a mirror of holder state (the scrollback, the
+/// exit code).
 struct Session {
     id: String,
     /// Which worktree this belongs to. Checked on reattach so a session cannot
     /// be adopted from another worktree's pane.
     worktree_id: i64,
     label: String,
-    /// Resize handle. A `std` mutex because `resize` is a non-blocking ioctl.
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    write_fd: AsyncFd<File>,
+    /// Frames towards the holder: keystrokes and resizes.
+    to_holder: mpsc::Sender<(u8, Vec<u8>)>,
     /// Live output to the attached socket, if any.
     output: broadcast::Sender<Bytes>,
     scrollback: Mutex<Scrollback>,
@@ -273,12 +316,17 @@ struct Session {
     detached_since: Mutex<Option<Instant>>,
     /// Set when the session is being ended deliberately.
     ///
-    /// The hangup and the SIGKILL escalation then happen inside `pump_output`,
-    /// which is the only place still holding the **unreaped** child. Escalating
-    /// from [`end_session`] instead would race `child.wait()`: the moment the
-    /// child is reaped its pid is free for reuse, and a `killpg` fired after
-    /// that could signal an unrelated process group.
+    /// [`pump_to_holder`] turns this into a [`wire::HANGUP`] frame, which is the
+    /// only way the daemon ends a shell. It never signals the process itself:
+    /// the holder owns the **unreaped** child, so only the holder can signal the
+    /// group without racing `wait()` — the moment a child is reaped its pid is
+    /// free for reuse, and a late `killpg` could hit an unrelated group.
+    ///
+    /// A `watch` rather than a queued frame so the hangup cannot sit behind a
+    /// backlog of keystrokes: the writer polls it first.
     closing: watch::Sender<bool>,
+    /// The shell's pid, for log lines only — it is a pid in *another* process's
+    /// child list, and nothing here may signal it.
     pid: i32,
     /// Held for the session's lifetime so the [`MAX_SESSIONS`] budget is
     /// released exactly when the session is dropped.
@@ -338,20 +386,20 @@ fn valid_session_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-/// End a session: take it out of the registry and tell its pump to hang the
+/// End a session: take it out of the registry and ask its holder to hang the
 /// shell up.
 ///
-/// The signalling deliberately happens in `pump_output` rather than here — see
-/// [`Session::closing`]. This function must not signal the pid itself.
+/// The signalling happens in the holder, not here — see [`Session::closing`].
+/// This function must not signal the pid itself.
 async fn end_session(id: &str, reason: &str) -> bool {
     let session = SESSIONS.lock().await.remove(id);
     let Some(session) = session else {
         return false;
     };
     info!(session = %session.id, worktree = %session.label, reason, "terminal session ended");
-    // `send_replace`, not `send`: the pump is the only receiver and may already
-    // have finished (a shell that exited on its own), in which case `send`
-    // would drop the flag and there is nothing left to hang up anyway.
+    // `send_replace`, not `send`: the writer task is the only receiver and may
+    // already have finished (a shell that exited on its own), in which case
+    // `send` would drop the flag and there is nothing left to hang up anyway.
     session.closing.send_replace(true);
     true
 }
@@ -396,26 +444,288 @@ fn is_reapable(detached_since: Option<Instant>, now: Instant, grace: Duration) -
     })
 }
 
-/// Hang up every live session. Called on daemon shutdown: the shells are our
-/// children but live in their own sessions, so without this a restart (`veld
-/// update` hard-restarts the daemon) leaves them orphaned — and any grandchild
-/// that escaped the terminal's process group outlives even the kernel's
-/// hangup-on-master-close.
+/// Leave every live session running, and say so.
+///
+/// This function used to hang up every shell, because it had to: the PTY masters
+/// were this process's descriptors and died with it, so the choice was between a
+/// deliberate SIGHUP and the kernel's hangup half a second later with orphaned
+/// grandchildren. Now the masters belong to holder processes, so a daemon
+/// shutdown is invisible to the shells — and `veld update` stops being something
+/// to schedule around, which is the entire point of the holder split.
+///
+/// What still ends a shell: an explicit `DELETE /api/pty/sessions/{id}` (the
+/// user closed the tab), the detach reaper, and the holder's own orphan grace if
+/// no daemon ever comes back. Dropping the registry here closes each holder
+/// connection, which is what starts that last clock.
 pub async fn shutdown_sessions() {
-    let ids: Vec<String> = SESSIONS.lock().await.keys().cloned().collect();
-    if ids.is_empty() {
+    let count = SESSIONS.lock().await.len();
+    if count == 0 {
         return;
     }
-    let count = ids.len();
-    for id in ids {
-        end_session(&id, "daemon shutting down").await;
+    info!(
+        count,
+        "leaving terminal sessions running for the next daemon"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Holders
+// ---------------------------------------------------------------------------
+
+/// Where this instance's holder sockets live.
+///
+/// Keyed by daemon port, not just by the socket directory: a dev instance must
+/// never adopt the installed instance's sessions, whose `worktree_id`s come from
+/// a different database entirely.
+#[cfg(not(test))]
+fn pty_dir() -> PathBuf {
+    if let Some(dir) = std::env::var("VELD_PTY_DIR").ok().filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
     }
-    // `end_session` only raises the `closing` flag; the SIGHUP itself happens in
-    // each session's `pump_output`, which is a separate task. Without yielding
-    // to them the process would exit first and the flag would never be acted on,
-    // so the shells we are trying not to orphan would be orphaned anyway.
-    info!(count, "hanging up terminal sessions");
-    tokio::time::sleep(SHUTDOWN_HANGUP_GRACE).await;
+    let socket = veld_core::instance::daemon_socket();
+    let base = socket
+        .parent()
+        .map(FsPath::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(format!("pty-{}", veld_core::instance::daemon_port()))
+}
+
+/// Under test, holders run in-process (see [`start_holder`]) but still bind real
+/// sockets, so they need a directory of their own. Derived from the pid rather
+/// than an env var because mutating the environment races every other test in
+/// the binary.
+#[cfg(test)]
+fn pty_dir() -> PathBuf {
+    std::env::temp_dir().join(format!("veld-pty-test-{}", std::process::id()))
+}
+
+/// The socket path for a session.
+///
+/// Named by a digest of the session id rather than the id itself, because a unix
+/// socket path is capped by `sockaddr_un::sun_path` — 104 bytes on macOS, 108 on
+/// Linux — and a session id may be up to 64 characters
+/// ([`valid_session_id`]). `/Users/<name>/.veld/pty-19899/` plus a 64-character
+/// id plus `.sock` overruns that on an ordinary Mac, and the failure surfaces as
+/// an unexplained "could not start a shell". A fixed 16-hex name keeps every
+/// path comfortably short whatever the client names its terminals.
+///
+/// Nothing needs to invert this: a holder announces its own session id in its
+/// [`wire::Hello`], and adoption checks that `socket_for` of *that* id is the
+/// path it was found at — which is a stronger check than a filename comparison,
+/// since it also catches a digest collision.
+fn socket_for(session_id: &str) -> PathBuf {
+    pty_dir().join(format!("{:016x}.sock", session_digest(session_id)))
+}
+
+/// FNV-1a over the session id. A hash, not a hash *function* in the security
+/// sense — nothing here depends on it being hard to invert, only on distinct ids
+/// landing on distinct names, which a collision would turn into a refused spawn
+/// (the second holder finds a live socket and declines) rather than a crossed
+/// wire.
+fn session_digest(session_id: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in session_id.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash
+}
+
+/// A holder that has answered: its greeting, its scrollback, and the connection.
+struct Attached {
+    hello: wire::Hello,
+    scrollback: Vec<u8>,
+    stream: UnixStream,
+}
+
+/// Connect to a holder and complete the handshake.
+///
+/// The first two frames are fixed — `Hello` then `Scrollback` — so that a caller
+/// has everything it needs to build a [`Session`] before any live output can
+/// arrive. A protocol version this build does not speak is refused *and* told to
+/// hang up: leaving it would strand a shell no daemon can ever reach, since
+/// every daemon would refuse it identically.
+async fn connect_holder(path: &FsPath) -> anyhow::Result<Attached> {
+    let mut stream = UnixStream::connect(path).await?;
+    let handshake = async {
+        let hello = match wire::read_frame(&mut stream).await? {
+            Some(frame) if frame.kind == wire::HELLO => {
+                serde_json::from_slice::<wire::Hello>(&frame.payload)?
+            }
+            Some(frame) => anyhow::bail!("expected a hello frame, got {:#x}", frame.kind),
+            None => anyhow::bail!("holder closed before greeting"),
+        };
+        if hello.protocol != wire::PROTOCOL {
+            // The one frame every version understands. See `wire`'s module docs.
+            let _ = wire::write_frame(&mut stream, wire::HANGUP, b"").await;
+            anyhow::bail!(
+                "holder speaks protocol {}, this daemon speaks {}",
+                hello.protocol,
+                wire::PROTOCOL
+            );
+        }
+        let scrollback = match wire::read_frame(&mut stream).await? {
+            Some(frame) if frame.kind == wire::SCROLLBACK => frame.payload,
+            Some(frame) => anyhow::bail!("expected a scrollback frame, got {:#x}", frame.kind),
+            None => anyhow::bail!("holder closed before sending its scrollback"),
+        };
+        Ok::<_, anyhow::Error>((hello, scrollback))
+    };
+    let (hello, scrollback) = tokio::time::timeout(HOLDER_HELLO_TIMEOUT, handshake)
+        .await
+        .map_err(|_| anyhow::anyhow!("holder did not complete the handshake in time"))??;
+    Ok(Attached {
+        hello,
+        scrollback,
+        stream,
+    })
+}
+
+/// Start a holder for `cfg` and connect to it.
+///
+/// In the real daemon this spawns `veld-daemon --pty-holder`, deliberately in its
+/// own process group: launchd's `bootout` and systemd's default
+/// `KillMode=control-group` would otherwise take the holder down with the daemon
+/// — the exact failure this design exists to prevent. (`veld_core::setup` gives
+/// the daemon's unit `KillMode=process` for the same reason the helper's has it.)
+#[cfg(not(test))]
+async fn start_holder(cfg: &HolderConfig) -> anyhow::Result<Attached> {
+    // Imported here rather than at module scope: every use of it is in this
+    // function, which the test build replaces wholesale.
+    use anyhow::Context;
+
+    let exe = std::env::current_exe().context("could not find the daemon binary")?;
+    let mut child = tokio::process::Command::new(exe)
+        .arg("--pty-holder")
+        .stdin(std::process::Stdio::piped())
+        // stdout is nulled and stderr inherited: the holder's tracing lines
+        // belong in the daemon's log, and a *pipe* nobody drains would block it
+        // the first time it filled.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::inherit())
+        .process_group(0)
+        .spawn()
+        .context("could not spawn a terminal holder")?;
+
+    {
+        use tokio::io::AsyncWriteExt;
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("holder stdin was not piped"))?;
+        stdin
+            .write_all(serde_json::to_string(cfg)?.as_bytes())
+            .await
+            .context("could not send the holder its configuration")?;
+        // Dropping stdin is the holder's signal that the configuration is
+        // complete; it reads to end of stream.
+    }
+    // The child is deliberately not waited on: it must outlive this process.
+    // Nothing here reaps it, and nothing needs to — once the daemon exits, the
+    // holder is reparented to init.
+    std::mem::forget(child);
+
+    await_holder(&cfg.socket).await
+}
+
+/// Under test, the holder runs as a task in this process: `current_exe()` is the
+/// test binary, which has no `--pty-holder` mode. It still binds a real socket
+/// and speaks the real protocol, so everything except the process boundary is
+/// exercised; the boundary itself — and survival across a daemon restart — is
+/// covered by `tests/pty_recovery.rs`, which drives the real binary.
+#[cfg(test)]
+async fn start_holder(cfg: &HolderConfig) -> anyhow::Result<Attached> {
+    let owned = cfg.clone();
+    tokio::spawn(async move {
+        if let Err(e) = holder::run(owned).await {
+            warn!("in-process test holder failed: {e}");
+        }
+    });
+    await_holder(&cfg.socket).await
+}
+
+/// Poll-connect until the holder is listening, or give up.
+///
+/// Polling rather than passing a pre-bound listener descriptor to the child: fd
+/// inheritance means `pre_exec` and manual `dup2`, and this loop costs a couple
+/// of 5 ms sleeps on a normal spawn.
+async fn await_holder(socket: &FsPath) -> anyhow::Result<Attached> {
+    let deadline = Instant::now() + HOLDER_START_TIMEOUT;
+    let mut last: Option<anyhow::Error> = None;
+    while Instant::now() < deadline {
+        match connect_holder(socket).await {
+            Ok(attached) => return Ok(attached),
+            Err(e) => last = Some(e),
+        }
+        tokio::time::sleep(HOLDER_CONNECT_INTERVAL).await;
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("holder did not start in time")))
+}
+
+/// Tell a holder we do not want it after all, and let it clean itself up.
+///
+/// Used when two attaches race and one loses: its holder has a real shell in it,
+/// and dropping the connection alone would leave that shell running until the
+/// holder's orphan grace.
+async fn discard_holder(attached: Attached, reason: &str) {
+    let mut stream = attached.stream;
+    debug!(session = %attached.hello.session_id, reason, "discarding a holder");
+    let _ = wire::write_frame(&mut stream, wire::HANGUP, b"").await;
+}
+
+/// Forward frames to the holder, with the hangup jumping the queue.
+///
+/// `biased`, unlike the socket loop: here the priority order is the point. A
+/// hangup must not wait behind a backlog of keystrokes, and it cannot starve the
+/// other branches because the watch fires once and this task returns
+/// immediately after acting on it.
+async fn pump_to_holder(
+    mut writer: OwnedWriteHalf,
+    mut rx: mpsc::Receiver<(u8, Vec<u8>)>,
+    mut closing: watch::Receiver<bool>,
+    mut exit: watch::Receiver<Option<u32>>,
+) {
+    // Seeded from the current values, not defaults: `subscribe()` marks what is
+    // already there as seen, so a `DELETE` that lands between registration and
+    // this task's first poll would set the flag, never fire `changed()`, and
+    // leave the shell running with nothing left to hang it up.
+    if *closing.borrow_and_update() {
+        let _ = wire::write_frame(&mut writer, wire::HANGUP, b"").await;
+        return;
+    }
+    if exit.borrow_and_update().is_some() {
+        return;
+    }
+    loop {
+        tokio::select! {
+            biased;
+
+            Ok(()) = closing.changed() => {
+                if *closing.borrow_and_update() {
+                    let _ = wire::write_frame(&mut writer, wire::HANGUP, b"").await;
+                    return;
+                }
+            }
+
+            // The shell is gone, so nothing more can be written to it. Closing
+            // the connection here is what lets the holder exit promptly instead
+            // of lingering with a dead shell.
+            Ok(()) = exit.changed() => {
+                if exit.borrow_and_update().is_some() {
+                    return;
+                }
+            }
+
+            frame = rx.recv() => match frame {
+                Some((kind, payload)) => {
+                    if wire::write_frame(&mut writer, kind, &payload).await.is_err() {
+                        return;
+                    }
+                }
+                None => return,
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -716,42 +1026,88 @@ enum SessionError {
     Spawn(anyhow::Error),
 }
 
-/// The live session for a ticket, starting one if the named session is gone.
+/// The live session for a ticket, starting a holder if the named session is
+/// gone.
 ///
-/// Holds the registry lock across the spawn so two attaches racing on the same
-/// id cannot both create a shell; spawning is a handful of syscalls, not I/O
-/// worth yielding for.
+/// The registry lock is released across the holder start, then re-taken to
+/// check for a racing attach. Holding it across a `fork`/`exec` and a
+/// poll-connect would serialise every other pane's attach behind this one; the
+/// loser of the race hands its brand-new holder a hangup rather than leaving a
+/// shell nobody will ever look at.
 async fn obtain_session(
     ticket: &Ticket,
     size: PtySize,
 ) -> Result<(Arc<Session>, bool), SessionError> {
-    let mut sessions = SESSIONS.lock().await;
-    if let Some(existing) = sessions.get(&ticket.session_id) {
+    if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
         return Ok((existing.clone(), true));
     }
 
     let slot = SessionSlot::claim().ok_or(SessionError::AtCapacity)?;
-    let spawned = spawn_shell(&ticket.cwd, size).map_err(SessionError::Spawn)?;
-    let Spawned {
-        master,
-        child,
-        pid,
-        read_fd,
-        write_fd,
-    } = spawned;
-
-    let (output, _) = broadcast::channel(OUTPUT_CHANNEL);
-    let (exit, _) = watch::channel(None);
-    let (attach_epoch, _) = watch::channel(0u64);
-    let (closing, _) = watch::channel(false);
-    let session = Arc::new(Session {
-        id: ticket.session_id.clone(),
+    let cfg = HolderConfig {
+        session_id: ticket.session_id.clone(),
         worktree_id: ticket.worktree_id,
         label: ticket.label.clone(),
-        master: Mutex::new(master),
-        write_fd,
+        cwd: ticket.cwd.clone(),
+        cols: size.cols,
+        rows: size.rows,
+        socket: socket_for(&ticket.session_id),
+        orphan_grace_secs: DETACH_GRACE.as_secs(),
+    };
+    let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
+
+    let mut sessions = SESSIONS.lock().await;
+    if let Some(existing) = sessions.get(&ticket.session_id) {
+        discard_holder(attached, "another attach won the race").await;
+        return Ok((existing.clone(), true));
+    }
+    let session = register(&mut sessions, attached, slot);
+    info!(
+        session = %session.id,
+        worktree = %ticket.label,
+        pid = session.pid,
+        "terminal session started"
+    );
+    Ok((session, false))
+}
+
+/// Put an attached holder in the registry and start its two pumps.
+///
+/// Takes the already-held registry guard so that inserting and spawning cannot
+/// be interleaved with another attach observing a half-registered session.
+fn register(
+    sessions: &mut HashMap<String, Arc<Session>>,
+    attached: Attached,
+    slot: SessionSlot,
+) -> Arc<Session> {
+    let Attached {
+        hello,
+        scrollback,
+        stream,
+    } = attached;
+    let (reader, writer) = stream.into_split();
+
+    let (output, _) = broadcast::channel(OUTPUT_CHANNEL);
+    // Seeded with the holder's answer, so a session adopted after its shell
+    // already finished reports the exit instead of presenting a dead prompt as a
+    // live one.
+    let (exit, _) = watch::channel(hello.exited);
+    let (attach_epoch, _) = watch::channel(0u64);
+    let (closing, _) = watch::channel(false);
+    let (to_holder, holder_rx) = mpsc::channel(HOLDER_INPUT_CHANNEL);
+
+    // The mirror starts as the holder's copy: for a session this daemon just
+    // started that is empty, and for an adopted one it is everything the
+    // previous daemon (or no daemon at all) saw.
+    let mut mirror = Scrollback::new();
+    mirror.push(&scrollback);
+
+    let session = Arc::new(Session {
+        id: hello.session_id.clone(),
+        worktree_id: hello.worktree_id,
+        label: hello.label.clone(),
+        to_holder,
         output,
-        scrollback: Mutex::new(Scrollback::new()),
+        scrollback: Mutex::new(mirror),
         exit,
         attach_seq: std::sync::atomic::AtomicU64::new(0),
         attach_epoch,
@@ -759,152 +1115,212 @@ async fn obtain_session(
         // never arrives the reaper must still be able to collect it.
         detached_since: Mutex::new(Some(Instant::now())),
         closing,
-        pid,
+        pid: hello.pid,
         _slot: slot,
     });
     sessions.insert(session.id.clone(), session.clone());
 
-    info!(session = %session.id, worktree = %ticket.label, pid, "terminal session started");
-    // Draining the PTY is the session's job, not the socket's: output produced
-    // while nothing is attached still has to land in the scrollback, or a
-    // reload would come back to a screen missing everything that happened
-    // while the page was gone.
-    tokio::spawn(pump_output(session.clone(), read_fd, child));
-    Ok((session, false))
+    tokio::spawn(pump_to_holder(
+        writer,
+        holder_rx,
+        session.closing.subscribe(),
+        session.exit.subscribe(),
+    ));
+    // Draining the holder is the session's job, not the socket's: output
+    // produced while nothing is attached still has to land in the mirror, or a
+    // reload would come back to a screen missing everything that happened while
+    // the page was gone.
+    tokio::spawn(pump_holder(session.clone(), reader));
+    session
 }
 
-/// Drain the PTY for the session's whole life, feeding the scrollback and any
-/// attached socket, then record the shell's exit status.
-async fn pump_output(
-    session: Arc<Session>,
-    read_fd: AsyncFd<File>,
-    mut child: Box<dyn portable_pty::Child + Send + Sync>,
-) {
-    let pid = session.pid;
-    // `child.wait()` is blocking; on the pool it both reaps the zombie and
-    // gives us the status.
-    let mut waiter = tokio::task::spawn_blocking(move || child.wait());
-
-    let mut buf = [0u8; READ_BUF];
-    let mut exit_code: Option<u32> = None;
-    // Placeholder deadline. The branch below is disabled until the shell
-    // exits and the timer is reset at that moment, so this initial duration
-    // is never the one that fires.
-    let drain = tokio::time::sleep(Duration::from_secs(3600));
-    tokio::pin!(drain);
-    let mut closing = session.closing.subscribe();
-    // Seeded from the current value, not `false`: `subscribe()` marks whatever
-    // is already there as seen, so a `DELETE` that lands between the session
-    // being registered and this task's first poll would set the flag, never fire
-    // `changed()`, and leave the shell running with nothing left to hang it up.
-    let mut asked_to_close = *closing.borrow_and_update();
-    if asked_to_close {
-        hangup(pid);
-    }
-
-    loop {
-        tokio::select! {
-            // Prefer draining output: on a tie with the exit branch, the last
-            // bytes the shell wrote should reach the client first.
-            biased;
-
-            r = pty_read(&read_fd, &mut buf) => match r {
-                // EOF: every descriptor on the slave side is closed.
-                Ok(0) => break,
-                Ok(n) => {
-                    let chunk = Bytes::copy_from_slice(&buf[..n]);
-                    // Recorded and broadcast under ONE lock. Released in
-                    // between, a chunk could land in the scrollback, be picked
-                    // up by an attach snapshotting it, and then also arrive live
-                    // on that attach's subscription — rendered twice, possibly
-                    // splitting an escape sequence. `serve_socket` takes the
-                    // same lock across subscribe+snapshot, so the two are
-                    // ordered against each other.
-                    let mut sb = session.scrollback.lock().expect("scrollback poisoned");
-                    sb.push(&chunk);
-                    // Errors here mean nothing is attached, which is normal.
-                    let _ = session.output.send(chunk);
-                    drop(sb);
-                }
-                // Linux reports the same hangup as EIO rather than EOF.
-                Err(e) if e.raw_os_error() == Some(libc::EIO) => break,
-                Err(e) => {
-                    warn!("terminal read failed (pid {pid}): {e}");
-                    break;
-                }
-            },
-
-            status = &mut waiter, if exit_code.is_none() => {
-                exit_code = Some(match status {
-                    Ok(Ok(s)) => s.exit_code(),
-                    Ok(Err(e)) => {
-                        warn!("waiting on terminal shell (pid {pid}) failed: {e}");
-                        1
-                    }
-                    Err(e) => {
-                        warn!("terminal wait task for pid {pid} failed: {e}");
-                        1
-                    }
-                });
-                // The shell is gone, but a grandchild it left behind can still
-                // hold the slave open, in which case EOF never arrives. Bound
-                // the wait for it.
-                drain.as_mut().reset(tokio::time::Instant::now() + EXIT_DRAIN);
-            },
-
-            _ = &mut drain, if exit_code.is_some() => break,
-
-            // `end_session` asked for this shell to go away. Hanging up here
-            // rather than there is what keeps the escalation safe: this task
-            // owns the unreaped child, so the pid cannot have been recycled
-            // under us. See Session::closing.
-            Ok(()) = closing.changed(), if !asked_to_close => {
-                if *closing.borrow_and_update() {
-                    asked_to_close = true;
-                    hangup(pid);
-                }
-            },
-        }
-    }
-
-    let code = match exit_code {
-        Some(c) => c,
-        None => {
-            // The read loop ended without the shell exiting: it was closed out
-            // from under us, or a descriptor error broke the loop. Hang up (idem-
-            // potent if `closing` already did) and escalate if it holds out.
-            hangup(pid);
-            match tokio::time::timeout(KILL_GRACE, &mut waiter).await {
-                Ok(Ok(Ok(s))) => s.exit_code(),
-                Ok(_) => 1,
-                Err(_) => {
-                    kill(pid);
-                    let _ = waiter.await;
-                    1
-                }
-            }
+/// Re-adopt the sessions of holders that outlived a previous daemon.
+///
+/// Called once at startup, before the reaper. Every socket in the directory is a
+/// candidate: one that answers becomes a session again — with its scrollback, its
+/// shell and whatever is running in it — and one that does not is a leftover file
+/// from a holder that is gone, which is removed so it is not probed again on
+/// every boot.
+///
+/// Concurrent rather than sequential because a socket that accepts but never
+/// speaks costs [`HOLDER_HELLO_TIMEOUT`], and one wedged holder must not add that
+/// to the startup of every session behind it.
+pub async fn adopt_existing_sessions() {
+    let dir = pty_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        // No directory means no holders, which is the common case.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            warn!("could not read the terminal holder directory {dir:?}: {e}");
+            return;
         }
     };
 
-    // The notice goes out before the exit code, and to both the scrollback and
-    // the live stream: the socket drains pending output when it sees the code,
-    // so publishing the code first would race the notice past it, and a
-    // scrollback-only notice would be invisible to the client watching now.
-    let notice = format!("\r\n\x1b[2m[veld] shell exited ({code})\x1b[0m\r\n");
-    let notice = Bytes::from(notice.into_bytes());
-    session
-        .scrollback
-        .lock()
-        .expect("scrollback poisoned")
-        .push(&notice);
-    let _ = session.output.send(notice);
+    let mut candidates = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Anything else in the directory is not ours to reason about, and is
+        // left alone rather than deleted.
+        if path.extension().and_then(|e| e.to_str()) == Some("sock") {
+            candidates.push(path);
+        }
+    }
+    if candidates.is_empty() {
+        return;
+    }
 
-    // Publishing the code is what lets an attached socket report the exit and
-    // a later attach show it instead of a live prompt. `send_replace`, not
-    // `send`: a shell that exits while nothing is attached has no receivers,
-    // and `send` would drop the code on the floor.
-    session.exit.send_replace(Some(code));
-    debug!(session = %session.id, pid, code, "terminal shell exited");
+    let adopted = futures_util::future::join_all(
+        candidates
+            .into_iter()
+            .map(|path| async move { adopt_one(&path).await }),
+    )
+    .await
+    .into_iter()
+    .filter(|ok| *ok)
+    .count();
+    if adopted > 0 {
+        info!(adopted, "adopted terminal sessions from a previous daemon");
+    }
+}
+
+/// Adopt one holder, or clean up after it. `true` if it became a session.
+async fn adopt_one(path: &FsPath) -> bool {
+    let attached = match connect_holder(path).await {
+        Ok(attached) => attached,
+        Err(e) => {
+            debug!("removing unusable holder socket {path:?}: {e}");
+            let _ = std::fs::remove_file(path);
+            return false;
+        }
+    };
+    let id = attached.hello.session_id.clone();
+    // The id becomes a registry key and a log field, so it is validated even
+    // though it arrived from a process of ours: the holder was told this id by a
+    // *previous* daemon, and this one has no other record of it.
+    //
+    // The path check is what pins the id to the socket it was found at. Without
+    // it the registry could be keyed by one id while the holder answers for
+    // another, and a later attach to the real id would start a second shell in
+    // the same directory.
+    if !valid_session_id(&id) || socket_for(&id) != path {
+        warn!("holder at {path:?} claims session {id:?}, which does not belong there");
+        discard_holder(attached, "session id does not match its socket").await;
+        let _ = std::fs::remove_file(path);
+        return false;
+    }
+
+    let Some(slot) = SessionSlot::claim() else {
+        // Over the cap: leave the holder alone rather than killing a shell the
+        // user may still want. Its own orphan grace bounds it, and the next
+        // daemon boot (or a freed slot) can adopt it.
+        warn!("not adopting {id}: already at {MAX_SESSIONS} sessions");
+        return false;
+    };
+
+    let mut sessions = SESSIONS.lock().await;
+    if sessions.contains_key(&id) {
+        // Adoption runs before the router serves traffic, so this is a
+        // duplicate socket rather than a race — but registering twice would
+        // orphan the first holder's pumps.
+        discard_holder(attached, "session id is already registered").await;
+        return false;
+    }
+    let session = register(&mut sessions, attached, slot);
+    info!(
+        session = %session.id,
+        worktree = %session.label,
+        pid = session.pid,
+        exited = ?session.exited(),
+        "adopted a terminal session"
+    );
+    true
+}
+
+/// Drain the holder connection for the session's whole life, feeding the mirror
+/// and any attached socket, then record the shell's exit status.
+async fn pump_holder(session: Arc<Session>, mut reader: OwnedReadHalf) {
+    let pid = session.pid;
+    loop {
+        let frame = match wire::read_frame(&mut reader).await {
+            Ok(Some(frame)) => frame,
+            // The holder closed, or died. Either way there is nothing left to
+            // read; whether that was orderly is decided below by whether an
+            // exit code arrived first.
+            Ok(None) => break,
+            Err(e) => {
+                warn!(session = %session.id, "holder connection failed: {e}");
+                break;
+            }
+        };
+        match frame.kind {
+            wire::OUTPUT => {
+                let chunk = Bytes::from(frame.payload);
+                // Recorded and broadcast under ONE lock. Released in between, a
+                // chunk could land in the mirror, be picked up by an attach
+                // snapshotting it, and then also arrive live on that attach's
+                // subscription — rendered twice, possibly splitting an escape
+                // sequence. `serve_socket` takes the same lock across
+                // subscribe+snapshot, so the two are ordered against each other.
+                let mut sb = session.scrollback.lock().expect("scrollback poisoned");
+                sb.push(&chunk);
+                // Errors here mean nothing is attached, which is normal.
+                let _ = session.output.send(chunk);
+                drop(sb);
+            }
+            wire::EXIT => {
+                let Some(code) = wire::decode_exit(&frame.payload) else {
+                    warn!(session = %session.id, "ignoring a malformed exit frame");
+                    continue;
+                };
+                // The holder sends its exit notice as output before this, so the
+                // ordering the client depends on is already on the wire.
+                //
+                // `send_replace`, not `send`: a shell that exits while nothing is
+                // attached has no receivers, and `send` would drop the code on
+                // the floor — leaving a reattach to present a dead shell as a
+                // live prompt and the reaper to apply the wrong grace.
+                session.exit.send_replace(Some(code));
+                debug!(session = %session.id, pid, code, "terminal shell exited");
+                return;
+            }
+            other if frame.is_ignorable() => {
+                debug!(session = %session.id, "ignoring holder frame {other:#x}");
+            }
+            other => {
+                warn!(session = %session.id, "holder sent an unexpected frame {other:#x}");
+                break;
+            }
+        }
+    }
+
+    if session.exited().is_none() {
+        if *session.closing.borrow() {
+            // The connection ended because *we* asked the holder to hang up, and
+            // the writer closed behind the request. Nothing went wrong and there
+            // is nobody to tell — the session left the registry before the
+            // hangup was sent — but the exit is still published so any socket
+            // still attached stops presenting a dead shell as a live prompt.
+            debug!(session = %session.id, pid, "holder closed after a hangup");
+            session.exit.send_replace(Some(1));
+            return;
+        }
+        // The holder went away with the shell still running: it was killed, or
+        // it crashed. The shell is gone with it (the master died with the
+        // holder), so this is an exit like any other — reported, rather than
+        // left as a live-looking prompt that swallows keystrokes.
+        let notice = Bytes::from(
+            "\r\n\x1b[2m[veld] the terminal's holder process went away\x1b[0m\r\n"
+                .as_bytes()
+                .to_vec(),
+        );
+        let mut sb = session.scrollback.lock().expect("scrollback poisoned");
+        sb.push(&notice);
+        let _ = session.output.send(notice);
+        drop(sb);
+        warn!(session = %session.id, pid, "terminal holder disappeared");
+        session.exit.send_replace(Some(1));
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1000,7 +1416,7 @@ async fn serve_socket(socket: WebSocket, session: Arc<Session>, size: PtySize, r
 
     // A reattaching client's terminal is whatever size it is now, which is not
     // necessarily the size the shell last knew.
-    resize_session(&session, size.cols, size.rows);
+    resize_session(&session, size.cols, size.rows).await;
 
     if !replay.is_empty() {
         // Bracketed so the client can gate its terminal's replies — see
@@ -1128,20 +1544,23 @@ fn mark_detached(session: &Session, epoch: u64) {
     debug!(session = %session.id, "terminal socket detached");
 }
 
-fn resize_session(session: &Session, cols: u16, rows: u16) {
-    let size = PtySize {
-        cols: clamp_dimension(Some(cols), 80),
-        rows: clamp_dimension(Some(rows), 24),
-        pixel_width: 0,
-        pixel_height: 0,
-    };
-    if let Err(e) = session
-        .master
-        .lock()
-        .expect("pty master poisoned")
-        .resize(size)
+/// Ask the holder to resize the PTY.
+///
+/// Clamped here as well as in the holder: this is the edge a client's numbers
+/// arrive at, and the holder must be able to trust its own peer no more than the
+/// daemon trusts a browser.
+async fn resize_session(session: &Session, cols: u16, rows: u16) {
+    let payload = wire::encode_size(
+        clamp_dimension(Some(cols), 80),
+        clamp_dimension(Some(rows), 24),
+    );
+    if session
+        .to_holder
+        .send((wire::RESIZE, payload.to_vec()))
+        .await
+        .is_err()
     {
-        debug!("terminal resize failed: {e}");
+        debug!(session = %session.id, "resize dropped: the holder is gone");
     }
 }
 
@@ -1163,12 +1582,22 @@ async fn pump_input(
         }
         match msg {
             Message::Binary(data) => {
-                if pty_write(&session.write_fd, &data).await.is_err() {
+                // Awaiting the queue is the backpressure that used to come from
+                // waiting on the PTY's writability: a shell that stops reading
+                // must slow this socket down, not buffer without bound.
+                if session
+                    .to_holder
+                    .send((wire::INPUT, data.to_vec()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
             Message::Text(text) => match serde_json::from_str::<ClientControl>(&text) {
-                Ok(ClientControl::Resize { cols, rows }) => resize_session(&session, cols, rows),
+                Ok(ClientControl::Resize { cols, rows }) => {
+                    resize_session(&session, cols, rows).await
+                }
                 Err(e) => debug!("ignoring unparseable terminal control frame: {e}"),
             },
             Message::Close(_) => return,
@@ -1185,178 +1614,6 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
     match v {
         Some(n) if n > 0 => n.min(MAX_DIMENSION),
         _ => default,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Spawning
-// ---------------------------------------------------------------------------
-
-struct Spawned {
-    master: Box<dyn MasterPty + Send>,
-    child: Box<dyn portable_pty::Child + Send + Sync>,
-    pid: i32,
-    read_fd: AsyncFd<File>,
-    write_fd: AsyncFd<File>,
-}
-
-/// Open a PTY and start the user's login shell in `cwd`.
-fn spawn_shell(cwd: &std::path::Path, size: PtySize) -> anyhow::Result<Spawned> {
-    let PtyPair { master, slave } = native_pty_system().openpty(size)?;
-
-    let shell = login_shell();
-    let mut cmd = CommandBuilder::new(&shell);
-    // A *login* shell, which is also what makes this an exception to the
-    // AGENTS.md "resolve the user's PATH with `resolve_user_path()`" rule.
-    // That helper exists because a daemon running `sh -c '<config command>'`
-    // inherits launchd's bare PATH; it gets the real one by spawning
-    // `$SHELL -l -i -c 'command env'` and scraping it. Here the thing being
-    // spawned *is* that login shell, so it computes the same PATH itself —
-    // calling the helper first would spawn a second shell and add its startup
-    // cost (up to its 10s timeout on a wedged rc file) to every terminal, to
-    // arrive at the value this shell is about to compute anyway.
-    cmd.arg("-l");
-    cmd.cwd(cwd);
-    // xterm.js speaks xterm-256color; without TERM the shell assumes "dumb"
-    // and disables colour and line editing.
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("COLORTERM", "truecolor");
-
-    let child = slave.spawn_command(cmd)?;
-    // Close our copy of the slave. While the daemon holds it, the master
-    // never reaches EOF after the shell exits, and the session would hang
-    // until its drain timer instead of ending cleanly.
-    drop(slave);
-
-    let pid = child.process_id().unwrap_or(0) as i32;
-    let raw = master
-        .as_raw_fd()
-        .ok_or_else(|| anyhow::anyhow!("pty master has no file descriptor"))?;
-
-    // Two independent descriptors so the read and write loops cannot block
-    // each other. They share one open file description, so O_NONBLOCK set on
-    // either applies to both — which is what we want, and why the writer is
-    // also driven through AsyncFd rather than blocking on the shared flag.
-    let read_fd = async_dup(raw)?;
-    let write_fd = async_dup(raw)?;
-
-    Ok(Spawned {
-        master,
-        child,
-        pid,
-        read_fd,
-        write_fd,
-    })
-}
-
-/// The user's shell, falling back to a POSIX shell that is present on every
-/// supported platform. `SHELL` comes from the daemon's own environment
-/// (launchd/systemd propagate the user's), never from the client.
-fn login_shell() -> String {
-    std::env::var("SHELL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "/bin/sh".to_owned())
-}
-
-/// Duplicate a descriptor, mark it non-blocking, and hand it to tokio's
-/// readiness machinery.
-///
-/// A duplicate rather than the master's own descriptor because `AsyncFd`
-/// wants ownership, while `master` must stay alive to serve resizes.
-fn async_dup(raw: RawFd) -> anyhow::Result<AsyncFd<File>> {
-    // SAFETY: `raw` is owned by the live `MasterPty` for the duration of this
-    // call; F_DUPFD_CLOEXEC returns a new descriptor we own outright, and
-    // close-on-exec keeps it out of any process spawned from another thread
-    // between here and the `OwnedFd`.
-    let dup = unsafe { libc::fcntl(raw, libc::F_DUPFD_CLOEXEC, 0) };
-    if dup < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    // SAFETY: `dup` is a fresh descriptor with no other owner.
-    let owned = unsafe { OwnedFd::from_raw_fd(dup) };
-
-    // SAFETY: `owned` keeps the descriptor alive across both calls.
-    let flags = unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-    if unsafe { libc::fcntl(owned.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
-
-    Ok(AsyncFd::new(File::from(owned))?)
-}
-
-/// Read PTY output, waiting for readiness. `Ok(0)` means hangup.
-async fn pty_read(fd: &AsyncFd<File>, buf: &mut [u8]) -> std::io::Result<usize> {
-    loop {
-        let mut guard = fd.readable().await?;
-        match guard.try_io(|inner| {
-            let mut file = inner.get_ref();
-            file.read(buf)
-        }) {
-            Ok(result) => return result,
-            // Readiness was stale; wait for it again.
-            Err(_would_block) => continue,
-        }
-    }
-}
-
-/// Write all of `data` to the PTY, waiting for writability between partial
-/// writes.
-async fn pty_write(fd: &AsyncFd<File>, data: &[u8]) -> std::io::Result<()> {
-    let mut rest = data;
-    while !rest.is_empty() {
-        let mut guard = fd.writable().await?;
-        match guard.try_io(|inner| {
-            let mut file = inner.get_ref();
-            file.write(rest)
-        }) {
-            // A pty master accepts zero bytes only if it is gone; looping on
-            // it would spin forever.
-            Ok(Ok(0)) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Ok(Ok(n)) => rest = &rest[n..],
-            Ok(Err(e)) => return Err(e),
-            Err(_would_block) => continue,
-        }
-    }
-    Ok(())
-}
-
-/// Hang up the terminal's process group, the way closing a real terminal
-/// does.
-///
-/// `portable-pty` puts the shell in its own session (`setsid`) with the PTY as
-/// its controlling terminal, so its process-group id equals its pid and
-/// `killpg` reaches the shell together with whatever job is in the foreground.
-/// A shell that honours SIGHUP hangs up its background jobs on the way out —
-/// which is why this is preferable to signalling the shell alone
-/// (`ChildKiller::kill`, which sends SIGHUP to the pid only).
-fn hangup(pid: i32) {
-    signal_group(pid, libc::SIGHUP);
-}
-
-/// Kill the terminal's process group outright.
-fn kill(pid: i32) {
-    signal_group(pid, libc::SIGKILL);
-}
-
-fn signal_group(pid: i32, sig: i32) {
-    // A non-positive pid would be catastrophic here: `killpg(0, …)` signals
-    // *the daemon's own* process group. `process_id()` returning None lands
-    // on 0, so this guard is load-bearing, not defensive dressing.
-    if pid <= 0 {
-        warn!("refusing to signal terminal process group {pid}");
-        return;
-    }
-    // SAFETY: `killpg` is async-signal-safe and takes no pointers; a pid that
-    // has already been reaped simply yields ESRCH, which we ignore.
-    if unsafe { libc::killpg(pid, sig) } != 0 {
-        let e = std::io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::ESRCH) {
-            debug!("killpg({pid}, {sig}) failed: {e}");
-        }
     }
 }
 

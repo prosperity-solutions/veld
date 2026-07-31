@@ -1341,8 +1341,15 @@ mod characterization_tests {
     /// only fail at runtime.
     #[test]
     fn detached_wrapper_shape_is_pinned() {
+        // A directory of its own, not a fixed name in `temp_dir()`. That path is
+        // shared by every checkout on the machine, so a second worktree whose
+        // branch adds a migration leaves a database this branch reads as
+        // `NewerSchema { found: 7, supported: 6 }` — a failure with nothing to do
+        // with the test, in a suite that is green in CI (where the temp dir is
+        // always fresh) and red locally.
+        let dir = tempfile::tempdir().unwrap();
         let target = LogTarget {
-            db: Db::open_at(&std::env::temp_dir().join("veld-wrapper-test.db")).unwrap(),
+            db: Db::open_at(&dir.path().join("wrapper.db")).unwrap(),
             project_root: PathBuf::from("/pro ject"),
             run_name: "dev".into(),
             run_id: "rid".into(),
