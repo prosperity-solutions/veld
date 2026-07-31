@@ -415,6 +415,96 @@ export function moveTab(
   return normalizeDocks({ ...layout, docks, focused: dock });
 }
 
+/**
+ * Put a tab on one side of the split, creating the second dock if there is only
+ * one on screen.
+ *
+ * This is what dropping a tab on a pane's left or right *edge* means, and it is
+ * the half `moveTab` cannot express. With both docks visible the two coincide —
+ * "the right-hand side" is dock 1 either way. With one dock they do not: making
+ * the dragged tab the *left* pane means everything else has to become the right
+ * one, and there is no dock index that says so.
+ *
+ * A dock's only tab dropped on its own side is a no-op, not an empty pane: with
+ * one pane on screen the sides mean nothing, which is the rule `normalizeDocks`
+ * already enforces everywhere else.
+ */
+export function splitWithTab(layout: PaneLayout, id: string, side: DockIndex): PaneLayout {
+  const from = dockOf(layout, id);
+  if (from === null) return layout;
+  if (dockVisible(layout, 0) && dockVisible(layout, 1)) return moveTab(layout, id, side);
+
+  // One dock on screen, which `normalizeDocks` guarantees is dock 0.
+  const tab = layout.docks[0].tabs.find((t) => t.id === id);
+  if (!tab) return layout;
+  const rest = layout.docks[0].tabs.filter((t) => t.id !== id);
+  if (rest.length === 0) return layout;
+  if (side === 1) return moveTab(layout, id, 1);
+
+  const restActive =
+    layout.docks[0].activeId === id
+      ? (rest[layout.docks[0].tabs.findIndex((t) => t.id === id)] ?? rest[rest.length - 1]).id
+      : layout.docks[0].activeId;
+  return normalizeDocks({
+    ...layout,
+    docks: [
+      { tabs: [tab], activeId: tab.id },
+      { tabs: rest, activeId: restActive },
+    ],
+    focused: 0,
+  });
+}
+
+/**
+ * Take in tabs handed back by a detached window that just closed.
+ *
+ * Appended to the focused dock rather than restored to where they were: the
+ * layout has moved on since the detach, and a remembered index is a position in
+ * a strip that no longer looks like that. Ids already present are skipped —
+ * two tabs with one id would fight over one shell, and the window handing them
+ * back has already stopped rendering them either way.
+ *
+ * `undefined` for a worktree this window has never opened: the tabs are the
+ * whole layout then, which is right — they are the only thing known about it.
+ */
+export function adoptTabs(layout: PaneLayout | undefined, tabs: PaneTab[]): PaneLayout | null {
+  const fresh = tabs.filter((t) => !layout || !hasTab(layout, t.id));
+  if (fresh.length === 0) return null;
+  if (!layout) {
+    return {
+      docks: [
+        { tabs: fresh, activeId: fresh[0].id },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+  }
+  return fresh.reduce((acc, tab) => addTab(acc, acc.focused, tab), layout);
+}
+
+/**
+ * Validate a list of tabs arriving from another window.
+ *
+ * The same gate a restored layout goes through (`parseTab`), for the same
+ * reason: this data has been out of the page — through the shell's main process
+ * and a second renderer — and a `javascript:` URL or an unbounded user-agent
+ * string reaching a view from *here* is no better than one reaching it from
+ * storage.
+ */
+export function parseTransferTabs(value: unknown): PaneTab[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: PaneTab[] = [];
+  for (const entry of value) {
+    const tab = parseTab(entry);
+    if (!tab || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    out.push(tab);
+  }
+  return out;
+}
+
 export function setRatio(layout: PaneLayout, ratio: number): PaneLayout {
   return { ...layout, ratio: clampRatio(ratio) };
 }
@@ -814,11 +904,19 @@ export function readLayouts(
   session: LayoutStorage | null,
   durable: LayoutStorage | null,
   slot: string | null,
+  seed: string | null = null,
 ): Record<number, PaneLayout> {
   const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
   if (Object.keys(own).length > 0) return own;
-  if (!durable || !slot) return own;
-  return parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null);
+  const stored =
+    durable && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
+  if (Object.keys(stored).length > 0) return stored;
+  // Last, not first: the seed is what a *detach* handed this window at the
+  // moment it was created, so it is only ever right on the very first render of
+  // a brand-new window. Once that render has saved, both stores hold something
+  // and the seed is never consulted again — which is what keeps a reload of a
+  // detached window from resurrecting the tab set it opened with.
+  return parseLayouts(seed);
 }
 
 /** Persist to both stores. The session copy is what a reload reads; the slot
@@ -856,10 +954,13 @@ function storages(): { session: LayoutStorage | null; durable: LayoutStorage | n
 }
 
 /** Read the stored layouts, tolerating storage being unavailable. */
-export function loadLayouts(slot: string | null): Record<number, PaneLayout> {
+export function loadLayouts(
+  slot: string | null,
+  seed: string | null = null,
+): Record<number, PaneLayout> {
   try {
     const { session, durable } = storages();
-    return readLayouts(session, durable, slot);
+    return readLayouts(session, durable, slot, seed);
   } catch {
     return {};
   }

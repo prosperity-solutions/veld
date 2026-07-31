@@ -15,6 +15,7 @@ import {
   activeTab,
   addTab,
   addTabToFocused,
+  adoptTabs,
   allTabs,
   browserIds,
   browserProfileLabel,
@@ -39,9 +40,11 @@ import {
   parseLayouts,
   paneTabLabel,
   parseSessionSets,
+  parseTransferTabs,
   replaceTab,
   readLayouts,
   serializeLayouts,
+  splitWithTab,
   serializeSessionSets,
   sessionSetFor,
   sessionsInUse,
@@ -1126,5 +1129,181 @@ describe("layout slots", () => {
   it("degrades to no saved layout on a corrupt slot store", () => {
     const durable = fake({ [layoutSlotKey("main")]: "{not json" });
     expect(readLayouts(fake(), durable, "main")).toEqual({});
+  });
+
+  describe("the detach seed", () => {
+    const seeded = { 4: defaultLayout(0.25) };
+    const seed = serializeLayouts(seeded);
+
+    it("is what a brand-new detached window boots with", () => {
+      // Neither store has anything: this window did not exist a moment ago, and
+      // the tabs it is meant to hold were handed to it on its command line.
+      expect(readLayouts(fake(), fake(), "main-w2", seed)).toEqual(seeded);
+    });
+
+    it("loses to both stores, so a reload does not resurrect it", () => {
+      const mine = { 4: defaultLayout(0.8) };
+      expect(readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed))
+        .toEqual(mine);
+      // And to the slot store, which is what an app restart reads: by then the
+      // detached window has a history of its own and the seed is a snapshot of
+      // the moment it was created.
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(mine) });
+      expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(mine);
+    });
+
+    it("goes through the same validation a restored layout does", () => {
+      // The seed has been out of the page and through the main process. A
+      // `javascript:` URL reaching a view from here is no better than one
+      // reaching it from storage.
+      const hostile = JSON.stringify({
+        4: {
+          docks: [
+            { tabs: [{ id: "v1", kind: "browser", url: "javascript:alert(1)" }], activeId: "v1" },
+            { tabs: [], activeId: null },
+          ],
+          ratio: 0.5,
+          focused: 0,
+        },
+      });
+      const restored = readLayouts(fake(), fake(), "main-w2", hostile);
+      expect(restored[4].docks[0].tabs[0].url).toBeUndefined();
+    });
+
+    it("is absent by default, so nothing changes for a window that has none", () => {
+      expect(readLayouts(fake(), fake(), "main")).toEqual({});
+      expect(readLayouts(fake(), fake(), "main", null)).toEqual({});
+      expect(readLayouts(fake(), fake(), "main", "{not json")).toEqual({});
+    });
+  });
+});
+
+describe("splitWithTab", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "new", title: id });
+
+  function oneDock(...ids: string[]): PaneLayout {
+    return {
+      docks: [
+        { tabs: ids.map(tab), activeId: ids[0] ?? null },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+  }
+
+  it("creates the second dock on the right", () => {
+    const next = splitWithTab(oneDock("a", "b"), "b", 1);
+    expect(next.docks[0].tabs.map((t) => t.id)).toEqual(["a"]);
+    expect(next.docks[1].tabs.map((t) => t.id)).toEqual(["b"]);
+    expect(next.focused).toBe(1);
+  });
+
+  it("creates the second dock on the left, moving everything else right", () => {
+    // The half `moveTab` cannot express: there is no dock index that means
+    // "become the left pane and push the current one to the right".
+    const next = splitWithTab(oneDock("a", "b", "c"), "c", 0);
+    expect(next.docks[0].tabs.map((t) => t.id)).toEqual(["c"]);
+    expect(next.docks[1].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(next.docks[0].activeId).toBe("c");
+    expect(next.focused).toBe(0);
+  });
+
+  it("keeps an active tab on the side it did not move to", () => {
+    const layout = oneDock("a", "b", "c");
+    // `a` is active and stays behind; the successor rule applies to the dock it
+    // was left in, not to the one being created.
+    const next = splitWithTab(layout, "c", 0);
+    expect(next.docks[1].activeId).toBe("a");
+  });
+
+  it("is a no-op for a dock's only tab", () => {
+    // With one pane on screen the sides mean nothing — the same rule
+    // `normalizeDocks` enforces everywhere else.
+    const layout = oneDock("a");
+    expect(splitWithTab(layout, "a", 0)).toBe(layout);
+    expect(splitWithTab(layout, "a", 1)).toBe(layout);
+  });
+
+  it("is a plain move once both docks are on screen", () => {
+    const layout = splitWithTab(oneDock("a", "b"), "b", 1);
+    const back = splitWithTab(layout, "b", 0);
+    expect(back.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    // Emptying the right dock slides nothing: it was the right one.
+    expect(back.docks[1].tabs).toEqual([]);
+  });
+
+  it("ignores an id that is not in the layout", () => {
+    const layout = oneDock("a", "b");
+    expect(splitWithTab(layout, "ghost", 1)).toBe(layout);
+  });
+});
+
+describe("adoptTabs", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "terminal", title: id });
+
+  it("builds a layout for a worktree this window has never opened", () => {
+    const next = adoptTabs(undefined, [tab("a"), tab("b")]);
+    expect(next?.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(next?.docks[0].activeId).toBe("a");
+    expect(next?.docks[1].tabs).toEqual([]);
+  });
+
+  it("appends to the focused dock of an existing layout", () => {
+    const base = splitWithTab(
+      {
+        docks: [
+          { tabs: [tab("a"), tab("b")], activeId: "a" },
+          { tabs: [], activeId: null },
+        ],
+        ratio: DEFAULT_RATIO,
+        focused: 0,
+      },
+      "b",
+      1,
+    );
+    expect(base.focused).toBe(1);
+    const next = adoptTabs(base, [tab("c")]);
+    expect(next?.docks[1].tabs.map((t) => t.id)).toEqual(["b", "c"]);
+  });
+
+  it("skips ids the layout already holds", () => {
+    const base = adoptTabs(undefined, [tab("a")]);
+    // Two tabs on one id would fight over one shell. A hand-back racing a
+    // detach that was never committed is exactly how that would arise.
+    expect(adoptTabs(base ?? undefined, [tab("a")])).toBeNull();
+    const mixed = adoptTabs(base ?? undefined, [tab("a"), tab("b")]);
+    expect(mixed?.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+
+  it("returns null rather than an unchanged layout for nothing to adopt", () => {
+    expect(adoptTabs(undefined, [])).toBeNull();
+  });
+});
+
+describe("parseTransferTabs", () => {
+  it("applies the same gate a restored layout goes through", () => {
+    const tabs = parseTransferTabs([
+      { id: "sh1", kind: "terminal", title: "Terminal" },
+      // A URL that has been out of the page and back is exactly as untrusted as
+      // one read out of storage.
+      { id: "v1", kind: "browser", title: "Bad", url: "javascript:alert(1)" },
+      { id: "bad id", kind: "terminal" },
+      { id: "k1", kind: "wormhole" },
+      null,
+    ]);
+    expect(tabs.map((t) => t.id)).toEqual(["sh1", "v1"]);
+    expect(tabs[1].url).toBeUndefined();
+  });
+
+  it("deduplicates and tolerates a non-list", () => {
+    expect(
+      parseTransferTabs([
+        { id: "a", kind: "new", title: "one" },
+        { id: "a", kind: "new", title: "two" },
+      ]).length,
+    ).toBe(1);
+    expect(parseTransferTabs("nope")).toEqual([]);
+    expect(parseTransferTabs(undefined)).toEqual([]);
   });
 });

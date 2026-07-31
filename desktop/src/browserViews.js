@@ -969,16 +969,24 @@ function registerBrowserViewIpc(resolveWindow) {
    * A profile is one partition, so this affects every pane using it. All of them
    * are reloaded, not just the one that asked: leaving a sibling pane rendering a
    * logged-in page whose session no longer exists is a lie about the state.
+   *
+   * **Every window's panes, not the sender's.** A partition is process-wide —
+   * `session.fromPartition` is not scoped to a window — so the clear already
+   * reached them all; scoping only the *repair* to one window left the others
+   * showing a signed-in page backed by a jar that no longer exists. That was
+   * unreachable while the app had one window and became reachable the moment it
+   * could have several.
    */
   ipcMain.handle("veld:browser:clear-session", async (event, args) => {
-    const window = senderWindow(event);
-    if (!window) return;
+    if (!senderWindow(event)) return;
     const profile = typeof args?.profile === "string" ? args.profile : "";
     if (!isProfileName(profile)) throw new Error("invalid profile name");
     await session.fromPartition(partitionFor(profile)).clearStorageData();
-    for (const entry of byWindow.get(window.id)?.values() ?? []) {
-      if (entry.profile !== profile) continue;
-      if (!entry.view.webContents.isDestroyed()) entry.view.webContents.reload();
+    for (const entries of byWindow.values()) {
+      for (const entry of entries.values()) {
+        if (entry.profile !== profile) continue;
+        if (!entry.view.webContents.isDestroyed()) entry.view.webContents.reload();
+      }
     }
   });
 }

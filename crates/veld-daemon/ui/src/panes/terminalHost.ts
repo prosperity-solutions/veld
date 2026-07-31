@@ -17,7 +17,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { layoutSlot } from "../shell";
+import { layoutSlot, windowSeed } from "../shell";
 import { loadLayouts, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
@@ -38,7 +38,11 @@ import { handleKeyEvent } from "./terminalKeys";
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    return new Set(Object.values(loadLayouts(layoutSlot)).flatMap(terminalIds));
+    // `windowSeed` for the same reason: a window opened by detaching a terminal
+    // has neither store yet, so without it every transferred shell would be
+    // "brand new" — and a transfer that arrived to find its shell gone would say
+    // nothing at all, which is the one case this set exists to catch.
+    return new Set(Object.values(loadLayouts(layoutSlot, windowSeed)).flatMap(terminalIds));
   } catch {
     return new Set<string>();
   }
@@ -598,6 +602,32 @@ function requestFit(s: Session): void {
  * one of the daemon's session slots) until the detach grace expires.
  */
 export function disposeTerminal(id: string): void {
+  releaseTerminal(id);
+  // Fire-and-forget: a failure here (daemon already gone) leaves the session
+  // to the daemon's reaper, and there is no UI left to report it to.
+  void api.closePtySession(id).catch(() => {});
+}
+
+/**
+ * Let go of a terminal **without ending its shell.**
+ *
+ * The handover half of `disposeTerminal`: everything this page owns of a session
+ * is torn down — the socket, the xterm, the element — and the shell keeps
+ * running, because another window is about to attach to it by id.
+ *
+ * This exists as its own export because the alternative shape is a trap. Every
+ * terminal is collected by `pruneTerminals`, which reads the layouts and ends
+ * anything not named in them, so *removing a tab from the layout is what kills a
+ * shell* — intent has nothing to do with it. A detach that simply moved the tab
+ * record to another window would therefore hang up the very shell it was moving,
+ * one commit later. Calling this first is what makes the tab's disappearance a
+ * transfer instead: by the time the prune effect runs, the id is not a session
+ * this page has, so there is nothing for it to collect.
+ *
+ * The shell then sits in the daemon's detach grace for the seconds it takes the
+ * new window to boot and attach — the same path a reload already takes.
+ */
+export function releaseTerminal(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
   // Bump first, so the close handler doesn't report "connection lost" for a
@@ -609,9 +639,6 @@ export function disposeTerminal(id: string): void {
   s.term.dispose();
   s.listeners.clear();
   sessions.delete(id);
-  // Fire-and-forget: a failure here (daemon already gone) leaves the session
-  // to the daemon's reaper, and there is no UI left to report it to.
-  void api.closePtySession(id).catch(() => {});
 }
 
 /**

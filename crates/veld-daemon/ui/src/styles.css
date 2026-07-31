@@ -267,6 +267,18 @@ select:focus {
   min-height: 0;
 }
 
+/* A detached window: the dock and nothing above it. `min-height: 0` for the same
+   reason `.workspace` carries it — a flex child's default `min-height: auto`
+   lets the panes' content push the region past the window instead of scrolling
+   inside it, which for a terminal means the strip walks off the bottom. */
+.frame.chromeless {
+  min-height: 0;
+}
+
+.frame.chromeless > .dock-area {
+  min-height: 0;
+}
+
 .rail {
   flex: none;
   background: var(--panel2);
@@ -694,6 +706,31 @@ select:focus {
   flex: 1;
   display: flex;
   min-width: 0;
+  /* The containing block for the drop preview below, which is positioned from
+     the split ratio rather than measured. */
+  position: relative;
+}
+
+/* Where a dragged tab would land. A filled region rather than an insertion line:
+   the drop moves a whole pane's worth of content, and a 2px line (which is the
+   right signal *inside* a tab strip, and is still used there) says "between
+   these two things" — the wrong sentence for "this half of the screen".
+
+   `pointer-events: none` is load-bearing: the element sits over the very drop
+   target that is tracking the drag, and intercepting the pointer would stop
+   every `dragover` after the first, freezing the preview where it appeared. */
+.dock-drop-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 5;
+  background: color-mix(in oklab, var(--accent) 12%, transparent);
+  border: 2px solid var(--accent);
+  border-radius: 8px;
+  transition:
+    left 90ms ease,
+    width 90ms ease;
 }
 
 .dock {

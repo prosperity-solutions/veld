@@ -187,9 +187,148 @@ function safeRadius(raw) {
   return Math.min(MAX_DEVICE_RADIUS, Math.round(n));
 }
 
+// ---------------------------------------------------------------------------
+// Window transfers (detach / hand-back)
+// ---------------------------------------------------------------------------
+//
+// A tab record travels renderer → main → *another* renderer: out of the window
+// it is being pulled from, through `additionalArguments` (detach) or an IPC push
+// (hand-back on close), and into the layout of the window that receives it.
+//
+// The **semantic** gate for one of these is `parseTab` in
+// `crates/veld-daemon/ui/src/panes/model.ts`, which every restored layout
+// already goes through — it re-validates the URL, the emulation and the zoom on
+// the way in, and it is the copy with the tests. Restating it here would be a
+// second owner of a shape that has already drifted once, so this side checks
+// only what the *shell* is exposed to and the renderer cannot check for itself:
+// that the payload is structurally a tab, and that it is small enough to put on
+// a command line.
+
+/** Pane kinds, mirroring `PANE_KINDS` in `panes/model.ts`. A kind missing here
+ *  is a tab that cannot be detached; a stale extra one is inert, because the
+ *  receiving renderer validates the kind again. */
+const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "new"];
+
+/**
+ * Ceiling on a serialized seed, in characters.
+ *
+ * The seed rides `additionalArguments`, i.e. the new process's command line.
+ * Every platform this app targets allows far more than this, but "far more" is
+ * not a number the shell should discover at spawn time — an over-long argv fails
+ * the *launch*, so the window never appears and the tabs are simply gone. A
+ * detach carries one tab; 64 KB is three orders of magnitude of headroom.
+ */
+const MAX_SEED_CHARS = 65536;
+
+/** How many tabs one transfer may carry. Two docks of a window that has hit its
+ *  view budget, with room to spare. */
+const MAX_TRANSFER_TABS = 64;
+
+/** Titles are shown in a native title bar and nowhere else; bound them and strip
+ *  the control characters a title bar would render as boxes. */
+const MAX_TITLE_LEN = 200;
+
+function safeTitle(raw) {
+  if (typeof raw !== "string") return null;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
+  const text = raw.replace(/[ -]/g, " ").trim();
+  return text === "" ? null : text.slice(0, MAX_TITLE_LEN);
+}
+
+/** A worktree id, which is a SQLite rowid on the daemon side. */
+function safeWorktreeId(raw) {
+  const n = Number(raw);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+/**
+ * A repository root, which the shell only ever puts in the `?repo=` parameter of
+ * a URL it builds itself.
+ *
+ * Not checked against the filesystem: the shell has no opinion about which
+ * checkouts exist, the daemon does, and a `?repo=` that resolves to nothing
+ * already falls back to the first repo in the UI. Bounded and control-character
+ * free so it cannot bloat or split the URL it lands in.
+ */
+function safeRepoRoot(raw) {
+  if (typeof raw !== "string") return null;
+  if (raw === "" || raw.length > 4096) return null;
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point.
+  if (/[ -]/.test(raw)) return null;
+  return raw;
+}
+
+/**
+ * One transferred tab, structurally, or `null`.
+ *
+ * Unknown fields are carried through rather than dropped — the receiving
+ * renderer's `parseTab` is what decides which of them mean anything, and a shell
+ * that silently ate a field added on the renderer side would produce exactly the
+ * "works in a browser tab, missing in the app" failure `safeEmulation`'s comment
+ * warns about. What it may not carry is a value that is not JSON data.
+ */
+function safeTransferTab(raw) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return null;
+  if (!isViewId(raw.id)) return null;
+  if (!PANE_KINDS.includes(raw.kind)) return null;
+  let round;
+  try {
+    round = JSON.parse(JSON.stringify(raw));
+  } catch {
+    // Cyclic or otherwise unserializable — it could not have crossed IPC, but
+    // the seed path stringifies again and a throw there loses the window.
+    return null;
+  }
+  return round;
+}
+
+/** A transfer's tabs, deduplicated by id and bounded. Two tabs sharing an id
+ *  would fight over one shell in the window that receives them. */
+function safeTransferTabs(raw) {
+  if (!Array.isArray(raw)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const entry of raw) {
+    const tab = safeTransferTab(entry);
+    if (!tab || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    out.push(tab);
+    if (out.length >= MAX_TRANSFER_TABS) break;
+  }
+  return out;
+}
+
+/**
+ * The layout a detached window boots with, serialized for `additionalArguments`,
+ * or `null` when there is nothing to seed.
+ *
+ * Built here rather than forwarded from the page: the seed is the one payload
+ * the shell puts on a command line, so the shell decides its shape and its size.
+ * The result is read by `parseLayouts` in the new renderer, which is what makes
+ * it a *layout* rather than a blob.
+ */
+function buildSeedLayout(worktreeId, tabs, ratio) {
+  if (tabs.length === 0) return null;
+  const r = Number(ratio);
+  const seed = JSON.stringify({
+    [worktreeId]: {
+      docks: [
+        { tabs, activeId: tabs[0].id },
+        { tabs: [], activeId: null },
+      ],
+      ratio: Number.isFinite(r) ? r : 0.5,
+      focused: 0,
+    },
+  });
+  return seed.length > MAX_SEED_CHARS ? null : seed;
+}
+
 module.exports = {
   ID_RE,
   PROFILE_RE,
+  PANE_KINDS,
+  MAX_SEED_CHARS,
+  MAX_TRANSFER_TABS,
   safeUrl,
   isViewId,
   isProfileName,
@@ -200,4 +339,10 @@ module.exports = {
   safeColor,
   safeScale,
   safeRadius,
+  safeTitle,
+  safeWorktreeId,
+  safeRepoRoot,
+  safeTransferTab,
+  safeTransferTabs,
+  buildSeedLayout,
 };

@@ -39,6 +39,7 @@ import { ActionIcon, Menu } from "@mantine/core";
 import {
   IconActivityHeartbeat,
   IconArrowsExchange,
+  IconExternalLink,
   IconLayoutColumns,
   IconLogs,
   IconPlus,
@@ -79,8 +80,11 @@ import {
   paneTabLabel,
   replaceTab,
   setRatio,
+  splitWithTab,
   updateTab,
 } from "./model";
+import { notifyError } from "../shared/notify";
+import { desktopWindow } from "../shell";
 
 /**
  * Drag payload type for a pane tab.
@@ -94,17 +98,107 @@ import {
   focusTerminal,
   mountTerminal,
   reconnectTerminal,
+  releaseTerminal,
   restartTerminal,
   subscribeTerminal,
   terminalStatus,
   unmountTerminal,
 } from "./terminalHost";
 
+/**
+ * Where a dragged tab would land: one drop model for both gestures.
+ *
+ * `into` is the dock under the cursor — the tab joins its strip. `left`/`right`
+ * are the *pane area's* outer edges and mean "be that side of the split",
+ * creating the second dock when there is only one. Reading the edges off the
+ * whole area rather than off each dock is what keeps the two cases one rule:
+ * with one pane the outer edges are its own, with two they are the outer edges
+ * of the pair, and in both the gesture means the same thing.
+ */
+// Three members with *unit* discriminants, not two with `"left" | "right"`:
+// a discriminant property has to be a literal type for TypeScript to narrow the
+// union on it, and a member typed `{where: "left" | "right"}` silently opts the
+// whole union out of that — every read of `.dock` then fails to compile.
+type DropZone = { where: "into"; dock: DockIndex } | { where: "left" } | { where: "right" };
+
+/** How much of the pane area's width each edge zone takes. Capped in pixels so a
+ *  wide window does not turn a third of the screen into "split", and floored so
+ *  a narrow one still has an edge to aim at. */
+function edgeWidth(areaWidth: number): number {
+  return Math.max(28, Math.min(96, areaWidth * 0.16));
+}
+
+function zoneAt(area: DOMRect, clientX: number, dock: DockIndex): DropZone {
+  const edge = edgeWidth(area.width);
+  if (clientX <= area.left + edge) return { where: "left" };
+  if (clientX >= area.right - edge) return { where: "right" };
+  return { where: "into", dock };
+}
+
+function sameZone(a: DropZone | null, b: DropZone | null): boolean {
+  if (a === null || b === null) return a === b;
+  if (a.where !== b.where) return false;
+  return a.where !== "into" || b.where !== "into" || a.dock === b.dock;
+}
+
+/**
+ * One embedded-browser suspend for the whole tab-drag gesture.
+ *
+ * Under Electron a browser pane is a native view that owns every event inside
+ * its own rect, so a drop target *behind* one never sees `dragover` — the pane
+ * body is exactly where the new edge zones live, and without this dropping a tab
+ * onto a preview would silently do nothing. The splitter drag has the same
+ * problem and the same fix (`onSplitterDown`); this is that pattern for a
+ * gesture whose start and end are on different elements.
+ *
+ * Module scope, not component state, because a drag *moves* tabs between docks:
+ * the element that started it can be unmounted by the drop's own re-render
+ * before `dragend` reaches it. Every path that ends a drag — our drops, the
+ * detach, `dragend` — calls `endTabDrag`, and it is idempotent so the first one
+ * to arrive wins.
+ */
+let tabDragSuspended = false;
+function beginTabDrag(): void {
+  if (tabDragSuspended) return;
+  tabDragSuspended = true;
+  pushBrowserSuspend();
+}
+function endTabDrag(): void {
+  if (!tabDragSuspended) return;
+  tabDragSuspended = false;
+  popBrowserSuspend();
+}
+
+/**
+ * Whether a `dragend` landed outside this window, which is what dragging a tab
+ * out to detach it looks like.
+ *
+ * `dropEffect === "none"` alone is not enough: it also describes a drop on any
+ * non-target *inside* the window, and detaching then would make every fumbled
+ * drag open a window. The screen-coordinate test is the other half.
+ */
+function droppedOutsideWindow(e: React.DragEvent): boolean {
+  if (e.dataTransfer.dropEffect !== "none") return false;
+  const { screenX, screenY } = e;
+  // A drag released over a menu bar or an OS panel reports 0,0 on some
+  // platforms; treat the degenerate point as "inside" rather than detaching.
+  if (screenX === 0 && screenY === 0) return false;
+  return (
+    screenX < window.screenX ||
+    screenY < window.screenY ||
+    screenX > window.screenX + window.outerWidth ||
+    screenY > window.screenY + window.outerHeight
+  );
+}
+
 export function PaneArea(props: {
   layout: PaneLayout;
   onLayout: (next: PaneLayoutUpdate) => void;
   /** Which worktree's terminals these are. */
   worktreeId: number;
+  /** The worktree's repository root — what a detached window needs in its
+   *  `?repo=` so it resolves the same selection this one is showing. */
+  repoRoot: string;
   /** The run's live URLs, offered by every pane that has nothing in it yet. */
   serviceUrls: Array<[string, string]>;
   /** Why there are none — only the app knows (no run, or no veld.json). */
@@ -120,6 +214,95 @@ export function PaneArea(props: {
   const { layout, onLayout } = props;
   const areaRef = useRef<HTMLDivElement>(null);
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
+  /** Where the tab currently being dragged would land, or `null`. */
+  const [dropZone, setDropZone] = useState<DropZone | null>(null);
+
+  /**
+   * Move tabs into a window of their own.
+   *
+   * Order is the whole correctness argument. The shell opens the window
+   * **first**, and only once it has confirms do we let go here: a refused detach
+   * (the window cap) then leaves the tabs exactly where they were, rather than
+   * having already removed them from the only layout that names them. The window
+   * that briefly exists alongside them is safe — an attach to a live PTY session
+   * *takes it over*, which is the same mechanism a reload uses.
+   *
+   * Then `releaseTerminal` before `closeTab`, because the layouts are what
+   * `pruneTerminals` collects against: remove the tab first and the effect that
+   * runs on the next commit ends the shell we are in the middle of moving.
+   */
+  const detachTabs = async (tabs: PaneTab[]) => {
+    if (!desktopWindow || tabs.length === 0) return;
+    try {
+      const result = await desktopWindow.detach({
+        worktreeId: props.worktreeId,
+        repoRoot: props.repoRoot,
+        ratio: layout.ratio,
+        tabs,
+      });
+      if (!result?.opened) {
+        notifyError(
+          "Couldn't open a new window",
+          result?.reason === "cap"
+            ? "Veld Desktop is at its window limit — close one and try again."
+            : "The desktop shell refused the request.",
+        );
+        return;
+      }
+    } catch (err) {
+      notifyError("Couldn't open a new window", err);
+      return;
+    }
+    for (const tab of tabs) {
+      if (tab.kind === "terminal") releaseTerminal(tab.id);
+    }
+    onLayout((prev) => tabs.reduce((acc, tab) => closeTab(acc, tab.id), prev));
+  };
+
+  const onBodyDragOver = (e: React.DragEvent, dock: DockIndex) => {
+    if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+    // Without preventDefault the browser refuses the drop entirely.
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const area = areaRef.current?.getBoundingClientRect();
+    if (!area) return;
+    const next = zoneAt(area, e.clientX, dock);
+    setDropZone((prev) => (sameZone(prev, next) ? prev : next));
+  };
+
+  const onBodyDrop = (e: React.DragEvent, dock: DockIndex) => {
+    const id = e.dataTransfer.getData(TAB_MIME);
+    const area = areaRef.current?.getBoundingClientRect();
+    setDropZone(null);
+    endTabDrag();
+    if (!id || !area) return;
+    e.preventDefault();
+    const zone = zoneAt(area, e.clientX, dock);
+    onLayout(
+      zone.where === "into"
+        ? moveTab(layout, id, zone.dock)
+        : splitWithTab(layout, id, zone.where === "left" ? 0 : 1),
+    );
+  };
+
+  /**
+   * The insertion preview: the region the tab would occupy, drawn over it.
+   *
+   * Derived from the ratio rather than measured, because the docks *are* laid
+   * out from the ratio — a measurement would be the same numbers a frame later,
+   * and a `getBoundingClientRect` per `dragover` is a read per pointer move.
+   */
+  const dropPreview = (): React.CSSProperties | null => {
+    if (!dropZone) return null;
+    const pct = (n: number) => `${n * 100}%`;
+    if (dropZone.where === "left") return { left: 0, width: "50%" };
+    if (dropZone.where === "right") return { left: "50%", width: "50%" };
+    if (!bothVisible) return { left: 0, width: "100%" };
+    return dropZone.dock === 0
+      ? { left: 0, width: pct(layout.ratio) }
+      : { left: pct(layout.ratio), width: pct(1 - layout.ratio) };
+  };
+  const previewStyle = dropPreview();
 
   /**
    * Whether a splitter drag currently holds a suspend.
@@ -138,6 +321,10 @@ export function PaneArea(props: {
         dragSuspended.current = false;
         popBrowserSuspend();
       }
+      // The tab-drag suspend has the same failure mode from further away: its
+      // `dragend` is on a tab element, and a worktree switch unmounts the whole
+      // region mid-drag.
+      endTabDrag();
     },
     [],
   );
@@ -256,10 +443,18 @@ export function PaneArea(props: {
               onAddSession={props.onAddSession}
               onRemoveSession={props.onRemoveSession}
               runCtx={props.runCtx}
+              onDetach={desktopWindow ? detachTabs : undefined}
+              onBodyDragOver={onBodyDragOver}
+              onBodyDrop={onBodyDrop}
+              onClearZone={() => setDropZone(null)}
             />
           </Fragment>
         );
       })}
+      {/* Above the docks and un-hittable: the drop it previews is being handled
+          by the body underneath it, and a target that intercepts its own
+          pointer events would swallow every `dragover` after the first. */}
+      {previewStyle && <div className="dock-drop-zone" style={previewStyle} aria-hidden />}
     </div>
   );
 }
@@ -276,6 +471,12 @@ function DockView(props: {
   onAddSession: ((tabId: string) => void) | undefined;
   onRemoveSession: (profile: BrowserProfile) => void;
   runCtx: RunPaneContext;
+  /** Pull tabs out into a window of their own. Absent outside Electron, which
+   *  has no window manager to pull them into. */
+  onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
+  onBodyDragOver: (e: React.DragEvent, dock: DockIndex) => void;
+  onBodyDrop: (e: React.DragEvent, dock: DockIndex) => void;
+  onClearZone: () => void;
 }) {
   const { index, layout, onLayout } = props;
   const dock = layout.docks[index];
@@ -301,6 +502,10 @@ function DockView(props: {
   const dropTab = (e: React.DragEvent, at?: number) => {
     const id = e.dataTransfer.getData(TAB_MIME);
     setDropAt(null);
+    props.onClearZone();
+    // Here as well as in `onDragEnd`: a drop that moves a tab to another dock
+    // unmounts the element the drag started on, and `dragend` never reaches it.
+    endTabDrag();
     if (!id) return;
     e.preventDefault();
     onLayout(moveTab(layout, id, index, at));
@@ -325,6 +530,25 @@ function DockView(props: {
         disabled: dock.tabs.length < 2,
         onClick: () => onLayout(moveTabToOtherDock(layout, tab.id)),
       },
+      ...(props.onDetach
+        ? [
+            {
+              key: "detach",
+              icon: <IconExternalLink size={14} />,
+              // The reload is named rather than discovered. A `WebContentsView`
+              // belongs to a window, so moving a browser pane between two is a
+              // destroy-and-recreate: the URL survives, the scroll position and
+              // anything typed into the page do not. A terminal has no such
+              // problem — the shell is the daemon's, and the new window attaches
+              // to the same session.
+              title:
+                tab.kind === "browser"
+                  ? "Open in a new window (reloads the page)"
+                  : "Open in a new window",
+              onClick: () => void props.onDetach?.([tab]),
+            },
+          ]
+        : []),
       ...(tab.kind === "terminal"
         ? [
             {
@@ -382,7 +606,12 @@ function DockView(props: {
         // Dropping on the empty part of the strip appends to this dock, which
         // is the only way to move a tab into a dock that has none.
         onDragOver={(e) => {
-          if (e.dataTransfer.types.includes(TAB_MIME)) e.preventDefault();
+          if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+          e.preventDefault();
+          // The strip and the body are two halves of one drop model, so entering
+          // the strip has to retract the body's preview — otherwise a drag that
+          // crossed the body leaves a highlighted region behind it.
+          props.onClearZone();
         }}
         onDrop={(e) => dropTab(e)}
       >
@@ -406,7 +635,12 @@ function DockView(props: {
             onMove={() => onLayout(moveTabToOtherDock(layout, tab.id))}
             onMenu={(e) => tabMenu(tab)(e)}
             canMove={dock.tabs.length > 1}
-            onDragOverTab={(after) => setDropAt({ id: tab.id, after })}
+            canDetach={props.onDetach !== undefined}
+            onDragStartTab={beginTabDrag}
+            onDragOverTab={(after) => {
+              props.onClearZone();
+              setDropAt({ id: tab.id, after });
+            }}
             onDropTab={(e, after) => {
               // The index is read in the destination's post-removal terms,
               // which is what `moveTab` documents and what the indicator drawn
@@ -417,7 +651,16 @@ function DockView(props: {
                 sameDock && dock.tabs.findIndex((t) => t.id === dragged) < at;
               dropTab(e, at + (after ? 1 : 0) - (removedBefore ? 1 : 0));
             }}
-            onDragEndTab={() => setDropAt(null)}
+            onDragEndTab={(e) => {
+              setDropAt(null);
+              props.onClearZone();
+              endTabDrag();
+              // Released outside the window: the same gesture as the context
+              // menu's "Open in a new window", which is the point — a tab pulled
+              // out of the strip and a tab dropped on a pane edge are one drop
+              // model with two destinations, not two features.
+              if (props.onDetach && droppedOutsideWindow(e)) void props.onDetach([tab]);
+            }}
           />
         ))}
         </TabScroller>
@@ -499,7 +742,15 @@ function DockView(props: {
         <div style={{ flex: 1 }} />
       </div>
 
-      <div className="dock-body">
+      {/* The body is a drop target as well as the strip. Dropping a tab where
+          its content will be is the gesture people try first, and until now it
+          did nothing at all — `dragover` without `preventDefault` is a refusal.
+          The edge zones live here too; see `zoneAt`. */}
+      <div
+        className="dock-body"
+        onDragOver={(e) => props.onBodyDragOver(e, index)}
+        onDrop={(e) => props.onBodyDrop(e, index)}
+      >
         {(active === null || active.kind === "new") && (
           <PaneChooser
             serviceUrls={props.serviceUrls}
@@ -719,9 +970,12 @@ function TabButton(props: {
   onMove: () => void;
   onMenu: (e: React.MouseEvent) => void;
   canMove: boolean;
+  /** Whether dragging this tab out of the window does anything — Electron only. */
+  canDetach: boolean;
+  onDragStartTab: () => void;
   onDragOverTab: (after: boolean) => void;
   onDropTab: (e: React.DragEvent, after: boolean) => void;
-  onDragEndTab: () => void;
+  onDragEndTab: (e: React.DragEvent) => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const box = useRef<HTMLSpanElement>(null);
@@ -758,10 +1012,11 @@ function TabButton(props: {
         e.dataTransfer.setData(TAB_MIME, props.tab.id);
         e.dataTransfer.effectAllowed = "move";
         setDragging(true);
+        props.onDragStartTab();
       }}
-      onDragEnd={() => {
+      onDragEnd={(e) => {
         setDragging(false);
-        props.onDragEndTab();
+        props.onDragEndTab(e);
       }}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes(TAB_MIME)) return;
@@ -790,11 +1045,14 @@ function TabButton(props: {
         // The label leads, because it is clamped in CSS (a page title can be a
         // sentence) and the tooltip is then the only place the whole thing is
         // readable — the drag hints follow it rather than replacing it.
-        title={
+        title={[
+          props.label,
           props.canMove
-            ? `${props.label}\nDrag to reorder or move · double-click to send to the other pane · right-click for more`
-            : `${props.label}\nDrag to move to the other pane · right-click for more`
-        }
+            ? "Drag to reorder, to a pane edge to split · double-click to send to the other pane"
+            : "Drag to a pane edge to split",
+          ...(props.canDetach ? ["Drag out of the window to open it in its own"] : []),
+          "Right-click for more",
+        ].join("\n")}
       >
         <span className="pane-tab-icon" aria-hidden>
           {props.icon}

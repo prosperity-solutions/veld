@@ -79,6 +79,7 @@ import {
   activeTab,
   addTab,
   addTabToFocused,
+  adoptTabs,
   allTabs,
   browserIds,
   browserTab,
@@ -90,7 +91,9 @@ import {
   loadLayouts,
   newTabId,
   nextFreeProfile,
+  paneTabLabel,
   parseSessionSets,
+  parseTransferTabs,
   saveLayouts,
   serializeSessionSets,
   sessionSetFor,
@@ -129,7 +132,7 @@ import {
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
-import { layoutSlot, topbarClass } from "./shell";
+import { chromeless, desktopWindow, layoutSlot, topbarClass, windowSeed } from "./shell";
 
 const POLL_MS = 5000;
 
@@ -746,7 +749,7 @@ function AppInner(props: {
   // lazy initialiser rather than in an effect: an empty first render would prune
   // every restored session before the restore landed.
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
-    loadLayouts(layoutSlot),
+    loadLayouts(layoutSlot, windowSeed),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
@@ -827,6 +830,75 @@ function AppInner(props: {
         : Object.fromEntries(kept);
     });
   }, [repos]);
+
+  // ---- multi-window --------------------------------------------------------
+  //
+  // Two windows are two documents: separate module instances, separate
+  // registries, separate layout slots. Nothing is shared between them except the
+  // daemon, so a tab moving between windows is a *transfer* — see
+  // `desktop/src/windows.js`. These three effects are this window's half of it.
+
+  /**
+   * Tabs handed back by a detached window that just closed.
+   *
+   * Parsed here rather than trusted: they have been out of the page, through the
+   * main process and another renderer, so they go through the same gate a
+   * restored layout does.
+   */
+  useEffect(
+    () =>
+      desktopWindow?.onAdopt(({ worktreeId, tabs }) => {
+        const parsed = parseTransferTabs(tabs);
+        if (parsed.length === 0) return;
+        setLayouts((prev) => {
+          const next = adoptTabs(prev[worktreeId], parsed);
+          return next ? { ...prev, [worktreeId]: next } : prev;
+        });
+      }),
+    [],
+  );
+
+  /**
+   * Keep the shell's copy of what this window holds current.
+   *
+   * Only a detached window has anything to hand back, and only it can be closed
+   * with tabs still in it that belong somewhere else. Pushed on every layout
+   * change because `close` is not a moment a renderer can be asked anything —
+   * the answer has to already be in the main process when it fires.
+   */
+  useEffect(() => {
+    if (!chromeless || !desktopWindow || !worktree) return;
+    void desktopWindow
+      .snapshot({ worktreeId: worktree.id, tabs: layout ? allTabs(layout) : [] })
+      .catch(() => {
+        // The window can still be used; only the hand-back is lost, and the
+        // shells it names outlive it either way under the detach grace.
+      });
+  }, [chromeless, worktree?.id, layout]);
+
+  /**
+   * A detached window's title bar and its lifetime.
+   *
+   * It has no top bar to say what it holds, so the OS title bar does — and it
+   * has no rail, no `+` outside its docks and no empty state worth showing, so a
+   * detached window whose last tab was closed closes itself. Guarded on having
+   * held something first: the layout is empty for the render or two before the
+   * repo list resolves, and closing there would make a detached window flash
+   * open and vanish.
+   */
+  const heldTabs = useRef(false);
+  useEffect(() => {
+    if (!chromeless || !desktopWindow) return;
+    if (layout && allTabs(layout).length > 0) {
+      heldTabs.current = true;
+      const active = activeTab(layout, layout.focused);
+      const label = active ? paneTabLabel(layout, active) : "Veld";
+      const title = worktree ? `${label} — ${worktree.alias}` : label;
+      void desktopWindow.setTitle(title).catch(() => {});
+      return;
+    }
+    if (heldTabs.current) void desktopWindow.close().catch(() => {});
+  }, [chromeless, layout, worktree?.alias]);
 
   // Terminals live outside React (see panes/terminalHost.ts), so nothing
   // unmounts them. The layouts are the whole record of which should exist;
@@ -1323,6 +1395,40 @@ function AppInner(props: {
       </Popover>
     ) : null;
 
+  /**
+   * A detached window: the dock and nothing else.
+   *
+   * Same component, same data, no chrome — a rail and a worktree switcher in a
+   * window holding one terminal would be the app's furniture around a single
+   * pane. The selection still comes from `?repo=&wt=` (the shell puts the origin
+   * window's there when it opens this one), so everything below the top bar
+   * resolves exactly as it does in a full window.
+   */
+  if (chromeless) {
+    return (
+      <div className="frame chromeless">
+        {worktree && layout && (
+          <PaneArea
+            layout={layout}
+            onLayout={setLayout}
+            worktreeId={worktree.id}
+            repoRoot={worktree.repo_root}
+            serviceUrls={urls}
+            urlsEmptyHint={
+              worktree.has_veld_config
+                ? "Start the run and its services appear here."
+                : "This worktree has no veld.json, so there is nothing to run."
+            }
+            sessions={sessions}
+            onAddSession={nextSession ? addSession : undefined}
+            onRemoveSession={removeSession}
+            runCtx={runCtx}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="frame">
       <TopBar
@@ -1422,6 +1528,7 @@ function AppInner(props: {
               layout={layout}
               onLayout={setLayout}
               worktreeId={worktree.id}
+              repoRoot={worktree.repo_root}
               serviceUrls={urls}
               urlsEmptyHint={
                 worktree.has_veld_config

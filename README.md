@@ -348,7 +348,7 @@ Open it with `veld ui` or visit the URL directly.
 
 An experimental second-generation management UI is served at `/ide` (worktree mode: import git repositories, manage `git worktree` checkouts with aliases, and drive veld runs per worktree). It is also the web core of **Veld Desktop**, an Electron shell in `desktop/` — see [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md).
 
-It has **terminal panes**: real shells in the selected worktree's directory, in a dock of two tab strips you can split, reorder and drag tabs between. The shell runs in the daemon and reaches the browser over a WebSocket, so terminals work in a plain browser and not only in the Electron app.
+It has **terminal panes**: real shells in the selected worktree's directory, in a dock of two tab strips you can split, reorder and drag tabs between. Dragging a tab onto a pane's **left or right edge** splits there, and dropping it anywhere else in a pane moves it into that pane — the same gesture, with the target read off where you let go. The shell runs in the daemon and reaches the browser over a WebSocket, so terminals work in a plain browser and not only in the Electron app.
 
 Sessions outlive the page. Reloading (or Electron reloading its window) reattaches to the same shells with their scrollback intact, and output produced while you were away is replayed — a build keeps running and keeps logging. `Shift+Enter` inserts a newline instead of submitting, which is what Claude Code and other coding agents read as a line break in their input box.
 
@@ -371,6 +371,8 @@ Because a terminal is a shell on your machine, `/api/pty/attach` is gated more t
 ### Veld Desktop
 
 The same `/ide` UI as a desktop app: a native window with a menu-bar icon, real Chromium browser panes (working history, page titles, isolated cookie jars, and pages that refuse to be framed), device emulation and per-pane DevTools. Everything else works identically in a browser — the app is a shell around the daemon, not a second implementation.
+
+**Windows.** `⌘N` opens another full window, with its own worktree selection and its own layout — one repository per monitor, rather than switching back and forth in one. And a pane can leave its window entirely: right-click a tab → *Open in a new window*, or drag it out of the window and drop it, and it opens as a bare dock you can put on a second screen. That window can be split and hold tabs of its own, and closing it **returns** its tabs to the window they came from rather than ending them — closing a *pane* is still what ends a shell. Detaching a browser pane reloads its page (a Chromium view belongs to one window, so moving it is a rebuild); the URL, session, device and zoom all survive. Every window remembers its own panes, so quitting and reopening brings all of them back attached to the same shells. Up to eight windows.
 
 **It needs the veld CLI**, which it does not ship. On a machine that has never had veld the app shows the two commands that get you there — the installer and `veld setup unprivileged` — and waits for the daemon to appear.
 
