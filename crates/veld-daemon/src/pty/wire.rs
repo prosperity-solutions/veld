@@ -33,6 +33,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// payload layout, or a changed meaning for an existing kind. Adding a frame
 /// kind that a peer can safely *ignore* does not need a bump; see
 /// [`Frame::is_ignorable`].
+///
+/// **A bump costs every open terminal, once.** The daemon compares with `!=`, so
+/// the update that ships a new version meets holders speaking the old one,
+/// refuses them and hangs their shells up — the pre-holder behaviour, for exactly
+/// that one update. That is the deliberate trade (a wrong guess about the framing
+/// is worse than a lost shell), so bumping this is a user-visible decision, not
+/// housekeeping. If a change ever has to preserve sessions across it, add a
+/// `MIN_SUPPORTED` and keep the old decode path rather than widening the
+/// comparison.
 pub const PROTOCOL: u32 = 1;
 
 // Holder → daemon.
@@ -112,6 +121,18 @@ pub struct Hello {
     pub pid: i32,
     /// `Some(code)` if the shell has already exited.
     pub exited: Option<u32>,
+    /// Seconds since a daemon was last connected, or `None` if one is connected
+    /// right now (which is the case when a *newly spawned* holder greets the
+    /// daemon that spawned it).
+    ///
+    /// Without this, adoption restarted the detach clock at zero on every daemon
+    /// start: the 30-minute bound on "a shell nobody will ever come back to"
+    /// (`DETACH_GRACE`) then never elapsed for a daemon that restarts more often
+    /// than that — a crash-looping one under `Restart=always` kept abandoned
+    /// shells alive indefinitely. The daemon seeds its own clock from this so the
+    /// grace measures what it claims to measure: time since anyone looked.
+    #[serde(default)]
+    pub detached_secs: Option<u64>,
 }
 
 /// The holder's whole configuration, handed to it on stdin as one JSON line.

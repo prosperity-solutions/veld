@@ -1575,6 +1575,14 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // Remove ~/.veld directory — use real user's home when running under sudo.
     if let Some(home) = resolve_real_user_home() {
         let veld_dir = home.join(".veld");
+        // Hang up terminal holders first. Their PTYs are deliberately not the
+        // daemon's children, so booting the daemon out leaves them running — and
+        // removing the directory takes away the only way to reach them, so the
+        // shells (and whatever is running in them) would survive an uninstall
+        // that promises to remove everything, unreachable, until their orphan
+        // grace expired. Best-effort by design: a holder that has already gone is
+        // a connection refused, which is the normal case.
+        hang_up_terminal_holders(&veld_dir);
         if veld_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&veld_dir) {
                 tracing::warn!(path = %veld_dir.display(), error = %e, "failed to remove .veld dir");
@@ -2041,5 +2049,42 @@ mod tests {
     fn systemd_main_pid_garbage_is_none() {
         assert_eq!(parse_systemd_main_pid(""), None);
         assert_eq!(parse_systemd_main_pid("not-a-pid"), None);
+    }
+}
+
+/// Ask every terminal holder under `veld_dir` to end its shell and exit.
+///
+/// Writes the one frame the wire protocol pins forever: kind `0x83`, empty
+/// payload (`crates/veld-daemon/src/pty/wire.rs`). Hand-written rather than shared
+/// through a crate, because that stability is the point — any process, of any
+/// version, can always tell a holder to stop, and this is the second
+/// implementation that relies on it (a refused protocol version is the first).
+fn hang_up_terminal_holders(veld_dir: &Path) {
+    use std::io::Write;
+
+    let Ok(entries) = std::fs::read_dir(veld_dir) else {
+        return;
+    };
+    for dir in entries.flatten() {
+        // `pty-<port>/`, one directory per daemon instance.
+        if !dir.file_name().to_string_lossy().starts_with("pty-") {
+            continue;
+        }
+        let Ok(sockets) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for socket in sockets.flatten() {
+            let path = socket.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
+                let mut frame = vec![0x83u8];
+                frame.extend_from_slice(&0u32.to_be_bytes());
+                let _ = stream.write_all(&frame);
+                let _ = stream.flush();
+                tracing::info!(socket = %path.display(), "asked a terminal holder to hang up");
+            }
+        }
     }
 }

@@ -387,6 +387,23 @@ else
     fi
   fi
   if [ -z "$SWITCHING_TO_USER_PATHS" ]; then
+    # Ensure KillMode=process before the restart below, on units written by an
+    # older veld. Terminal sessions now live in holder processes that are children
+    # of the daemon (`veld-daemon --pty-holder`), and systemd's default
+    # KillMode=control-group SIGKILLs every one of them on `systemctl restart` —
+    # i.e. an update would end the shells the holders exist to keep alive. Only
+    # `veld setup` writes the unit, and an update deliberately does not run setup,
+    # so without this an existing install never gets the setting.
+    DAEMON_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/veld-daemon.service"
+    if [ -f "$DAEMON_UNIT" ] && ! grep -q '^KillMode=' "$DAEMON_UNIT"; then
+      echo "Updating veld-daemon service (KillMode=process)..."
+      # Inserted under [Service]: appending would land in [Install], where
+      # systemd ignores it.
+      if sed -i.veld-bak 's/^\[Service\]$/[Service]\nKillMode=process/' "$DAEMON_UNIT" 2>/dev/null; then
+        rm -f "$DAEMON_UNIT.veld-bak"
+        systemctl --user daemon-reload 2>/dev/null || true
+      fi
+    fi
     if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then
       echo "Restarting veld-daemon service..."
       systemctl --user restart veld-daemon 2>/dev/null || true

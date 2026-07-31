@@ -7,6 +7,13 @@
 // not list. See desktop/src/browserViews.js for what the other side enforces.
 const { contextBridge, ipcRenderer } = require("electron");
 
+/** The layout slot the main process assigned this window, or null. */
+function layoutSlotFromArgv() {
+  const flag = "--veld-layout-slot=";
+  const arg = process.argv.find((a) => a.startsWith(flag));
+  return arg ? arg.slice(flag.length) : null;
+}
+
 /** Subscribe to a main→renderer channel, returning an unsubscribe. */
 function on(channel, fn) {
   const listener = (_event, payload) => fn(payload);
@@ -17,6 +24,15 @@ function on(channel, fn) {
 contextBridge.exposeInMainWorld("veldDesktop", {
   shell: "electron",
   version: process.versions.electron,
+  /**
+   * Which persisted pane layout this window owns (`main`, `dev`, …).
+   *
+   * On the bridge rather than in the URL because the renderer keys durable state
+   * naming **live PTY sessions** off it: a query parameter can be forged by any
+   * link, and a browser tab that claimed `main` would restore the desktop app's
+   * terminals and fight it for them. Only a preload script can put this here.
+   */
+  layoutSlot: layoutSlotFromArgv(),
   browser: {
     /** Drop views left behind by a previous page. Called once, before any
      *  `create`, so the ordering is a queue rather than a race. */

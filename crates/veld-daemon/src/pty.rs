@@ -115,13 +115,16 @@ const TICKET_TTL: Duration = Duration::from_secs(30);
 /// a scripted client (or a UI bug in a render loop) forks until the machine
 /// gives up.
 ///
-/// Sized for how the UI actually allocates: selecting a worktree opens a
-/// terminal in its default layout, and that shell stays alive while the page
-/// does — so *browsing* the worktree rail spends this budget, one shell per
-/// worktree visited, not just deliberately opening terminals. Hitting the cap
-/// is therefore an ordinary outcome rather than an attack, which is why
-/// [`mint_ticket`] reports it as a readable error instead of leaving the client
-/// to infer it from a failed handshake.
+/// Hitting it is an ordinary outcome rather than an attack — a session outlives
+/// the page that opened it, and now the daemon that spawned it, so a long day of
+/// opening panes reaches the cap without anything being wrong. That is why
+/// [`mint_ticket`] reports it as a readable error instead of leaving the client to
+/// infer it from a failed handshake.
+///
+/// It used to be spent by *browsing*: a worktree's default layout seeded a
+/// terminal, so every worktree merely selected started a shell. It no longer does
+/// (`defaultLayout` in `ui/src/panes/model.ts` seeds a `new` pane), which is what
+/// makes this bound comfortable rather than tight.
 const MAX_SESSIONS: usize = 48;
 
 /// How long a session with nobody attached keeps running.
@@ -517,6 +520,23 @@ fn socket_for(session_id: &str) -> PathBuf {
     pty_dir().join(format!("{:016x}.sock", session_digest(session_id)))
 }
 
+/// Whether a path has the exact shape [`socket_for`] produces.
+///
+/// The gate on anything destructive in [`adopt_existing_sessions`]. It is a
+/// name check, not a claim about the contents — the greeting is what proves a
+/// socket is the session it should be.
+fn is_holder_socket_name(path: &FsPath) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_suffix(".sock"))
+        .is_some_and(|stem| {
+            stem.len() == 16
+                && stem
+                    .chars()
+                    .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        })
+}
+
 /// FNV-1a over the session id. A hash, not a hash *function* in the security
 /// sense — nothing here depends on it being hard to invert, only on distinct ids
 /// landing on distinct names, which a collision would turn into a refused spawn
@@ -581,6 +601,28 @@ async fn connect_holder(path: &FsPath) -> anyhow::Result<Attached> {
     })
 }
 
+/// Whether a failed [`connect_holder`] means "nothing is listening here".
+///
+/// The distinction is load-bearing in [`adopt_one`], which deletes the path for
+/// exactly this case and must not for any other. Matched on `errno` rather than
+/// `io::ErrorKind`, because the three cases do not share one kind — measured, not
+/// assumed:
+///
+/// - `ECONNREFUSED` — a socket file whose listener is gone. The common case.
+/// - `ENOENT` — the file vanished under us, e.g. a holder exiting mid-scan.
+/// - `ENOTSOCK` — the path is not a socket at all (a plain file left behind).
+///   `ErrorKind` has no stable variant for this one, which is how the first
+///   version of this function let a stale file survive every boot.
+///
+/// Everything else — a handshake timeout, `EMFILE`, `EACCES`, a refused protocol
+/// version — can happen to a holder that is alive and serving a shell, and must
+/// leave its socket alone.
+fn is_unanswered(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<std::io::Error>()
+        .and_then(|io| io.raw_os_error())
+        .is_some_and(|errno| matches!(errno, libc::ECONNREFUSED | libc::ENOENT | libc::ENOTSOCK))
+}
+
 /// Start a holder for `cfg` and connect to it.
 ///
 /// In the real daemon this spawns `veld-daemon --pty-holder`, deliberately in its
@@ -620,12 +662,57 @@ async fn start_holder(cfg: &HolderConfig) -> anyhow::Result<Attached> {
         // Dropping stdin is the holder's signal that the configuration is
         // complete; it reads to end of stream.
     }
-    // The child is deliberately not waited on: it must outlive this process.
-    // Nothing here reaps it, and nothing needs to — once the daemon exits, the
-    // holder is reparented to init.
-    std::mem::forget(child);
+    // Dropped, not `forget`ten, and not awaited. Tokio's `Child` drop does not
+    // kill a child that was spawned without `kill_on_drop` — it hands it to the
+    // runtime's orphan queue, which reaps it on SIGCHLD
+    // (`tokio/src/process/unix/reap.rs`). So dropping is exactly the pair of
+    // properties needed here: the holder outlives us, *and* its pid is collected
+    // when it eventually exits. `forget` kept the first half and lost the second,
+    // which left one zombie per closed terminal pane in a daemon that runs for
+    // weeks — and unbounded by `MAX_SESSIONS`, which caps live sessions and not
+    // churn.
+    drop(child);
 
-    await_holder(&cfg.socket).await
+    let attached = await_holder(&cfg.socket).await?;
+    // The holder that answered must be the one this call started. It is not
+    // enough that *something* is listening at `cfg.socket`: if our child failed
+    // to bind (another holder already owns that path), the poll-connect below
+    // lands on the incumbent instead, and the caller would then be handed a
+    // session belonging to someone else — see `verify_identity`.
+    verify_identity(&attached, cfg)?;
+    Ok(attached)
+}
+
+/// Reject a holder whose greeting does not match what we asked for.
+///
+/// Two things make this load-bearing rather than defensive:
+///
+/// - **The socket path is derived, not unique.** `socket_for` digests the
+///   client-chosen session id, so a collision — or a stale holder for the same id
+///   that adoption skipped — puts a *different* live session behind the path this
+///   spawn expects. `register` keys the registry off the greeting, so without this
+///   check that session's entry would be replaced and its pump would report a
+///   bogus exit.
+/// - **`worktree_id` comes from the greeting too**, and `mint_ticket`'s
+///   cross-worktree guard compares the *registry's* value. A greeting accepted
+///   unchecked therefore walks straight past that guard.
+///
+/// Deliberately no hangup on failure: the holder that answered is somebody else's
+/// and may have a live shell in it. `adopt_one` has the same rule for the same
+/// reason.
+fn verify_identity(attached: &Attached, cfg: &HolderConfig) -> anyhow::Result<()> {
+    let hello = &attached.hello;
+    if hello.session_id != cfg.session_id || hello.worktree_id != cfg.worktree_id {
+        anyhow::bail!(
+            "holder at {} answers for session {:?} of worktree {}, not {:?} of {}",
+            cfg.socket.display(),
+            hello.session_id,
+            hello.worktree_id,
+            cfg.session_id,
+            cfg.worktree_id
+        );
+    }
+    Ok(())
 }
 
 /// Under test, the holder runs as a task in this process: `current_exe()` is the
@@ -641,7 +728,9 @@ async fn start_holder(cfg: &HolderConfig) -> anyhow::Result<Attached> {
             warn!("in-process test holder failed: {e}");
         }
     });
-    await_holder(&cfg.socket).await
+    let attached = await_holder(&cfg.socket).await?;
+    verify_identity(&attached, cfg)?;
+    Ok(attached)
 }
 
 /// Poll-connect until the holder is listening, or give up.
@@ -664,9 +753,11 @@ async fn await_holder(socket: &FsPath) -> anyhow::Result<Attached> {
 
 /// Tell a holder we do not want it after all, and let it clean itself up.
 ///
-/// Used when two attaches race and one loses: its holder has a real shell in it,
-/// and dropping the connection alone would leave that shell running until the
-/// holder's orphan grace.
+/// Only ever called on a holder this daemon started (or adopted) and then decided
+/// against: dropping the connection alone would leave its shell running until the
+/// orphan grace. **Never call it on a holder that failed
+/// [`verify_identity`]** — that one belongs to another session and may have a live
+/// shell in it.
 async fn discard_holder(attached: Attached, reason: &str) {
     let mut stream = attached.stream;
     debug!(session = %attached.hello.session_id, reason, "discarding a holder");
@@ -1009,6 +1100,21 @@ async fn attach(
             )
                 .into_response();
         }
+        Err(SessionError::Starting) => {
+            // Two sockets attaching the same session id at once, with no shell
+            // there yet. The other one is milliseconds from registering it, and
+            // this client's own reconnect will then resume it — which is a better
+            // answer than starting a second shell for a tab that wanted one.
+            debug!(
+                session = %ticket.session_id,
+                "refusing a second concurrent start for one session"
+            );
+            return (
+                StatusCode::CONFLICT,
+                "that terminal is already starting — reconnecting will attach to it",
+            )
+                .into_response();
+        }
     };
 
     // Terminal traffic is keystrokes and screen updates. The default ceiling is
@@ -1024,20 +1130,71 @@ async fn attach(
 enum SessionError {
     AtCapacity,
     Spawn(anyhow::Error),
+    /// Another attach for the same session id is mid-spawn. The caller cannot
+    /// usefully wait, because the shell it would get is about to exist under an
+    /// id it already knows — it retries.
+    Starting,
+}
+
+/// Session ids currently being spawned, so exactly one holder is ever started
+/// per id.
+///
+/// The registry alone cannot express this: it holds *finished* sessions, and the
+/// window that matters is between the spawn and the insert. Two attaches for one
+/// id inside that window used to both spawn a holder at the same socket path,
+/// which is a path with no room for two — the second holder refuses to bind and
+/// exits, so the second *daemon task* poll-connects onto the first holder and
+/// then, believing it owned it, told it to hang up. That killed a live shell.
+/// [`verify_identity`] would now catch it, but not starting the second spawn at
+/// all is what makes the whole class impossible.
+static STARTING: LazyLock<Mutex<std::collections::HashSet<String>>> =
+    LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
+
+/// Marks a session id as mid-spawn, clearing it on drop.
+///
+/// A guard rather than a pair of calls: every error path out of the spawn — a
+/// failed `fork`, a refused bind, an identity mismatch, a `?` anywhere — must
+/// release the id, and a leaked entry would make that session permanently
+/// unopenable for the life of the daemon.
+struct StartGuard(String);
+
+impl StartGuard {
+    fn claim(id: &str) -> Option<Self> {
+        let mut starting = STARTING.lock().expect("starting set poisoned");
+        starting
+            .insert(id.to_owned())
+            .then(|| StartGuard(id.to_owned()))
+    }
+}
+
+impl Drop for StartGuard {
+    fn drop(&mut self) {
+        STARTING
+            .lock()
+            .expect("starting set poisoned")
+            .remove(&self.0);
+    }
 }
 
 /// The live session for a ticket, starting a holder if the named session is
 /// gone.
 ///
-/// The registry lock is released across the holder start, then re-taken to
-/// check for a racing attach. Holding it across a `fork`/`exec` and a
-/// poll-connect would serialise every other pane's attach behind this one; the
-/// loser of the race hands its brand-new holder a hangup rather than leaving a
-/// shell nobody will ever look at.
+/// The registry lock is released across the holder start — holding it across a
+/// `fork`/`exec` and a poll-connect would serialise every other pane's attach
+/// behind this one — and [`STARTING`] is what keeps that safe for two
+/// attaches naming the *same* session.
 async fn obtain_session(
     ticket: &Ticket,
     size: PtySize,
 ) -> Result<(Arc<Session>, bool), SessionError> {
+    if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
+        return Ok((existing.clone(), true));
+    }
+
+    // Claimed before the capacity check so a retry cannot spend a slot.
+    let _starting = StartGuard::claim(&ticket.session_id).ok_or(SessionError::Starting)?;
+    // Re-check: the spawn we were waiting behind may have finished between the
+    // read above and this claim.
     if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
         return Ok((existing.clone(), true));
     }
@@ -1113,7 +1270,19 @@ fn register(
         attach_epoch,
         // Starts detached: `serve_socket` marks it attached, and if the socket
         // never arrives the reaper must still be able to collect it.
-        detached_since: Mutex::new(Some(Instant::now())),
+        //
+        // Backdated by however long the holder has been without a daemon, so an
+        // adopted session inherits the clock it was already on. Restarting the
+        // clock here instead meant `DETACH_GRACE` never elapsed for a daemon that
+        // restarts more often than the grace, which is the one leak it exists to
+        // bound. `checked_sub`: a holder reporting an absurd elapsed time must not
+        // panic, and the worst honest answer is "reapable now".
+        detached_since: Mutex::new(Some(
+            hello
+                .detached_secs
+                .and_then(|secs| Instant::now().checked_sub(Duration::from_secs(secs)))
+                .unwrap_or_else(Instant::now),
+        )),
         closing,
         pid: hello.pid,
         _slot: slot,
@@ -1160,9 +1329,11 @@ pub async fn adopt_existing_sessions() {
     let mut candidates = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        // Anything else in the directory is not ours to reason about, and is
-        // left alone rather than deleted.
-        if path.extension().and_then(|e| e.to_str()) == Some("sock") {
+        // Only names this daemon could have written, because a failed handshake
+        // ends in `remove_file`: `VELD_PTY_DIR` is a plain env var, and pointed
+        // one level up at `~/.veld` a boot would otherwise delete `daemon.sock`.
+        // Anything else in the directory is not ours to reason about.
+        if is_holder_socket_name(&path) {
             candidates.push(path);
         }
     }
@@ -1186,11 +1357,31 @@ pub async fn adopt_existing_sessions() {
 
 /// Adopt one holder, or clean up after it. `true` if it became a session.
 async fn adopt_one(path: &FsPath) -> bool {
+    // The slot is claimed *before* connecting, not after. Connecting first meant
+    // an over-cap holder got a connection that was immediately dropped, and a
+    // dropped connection restarts its orphan clock — so a daemon restarting more
+    // often than the grace kept a 49th shell alive forever.
+    let Some(slot) = SessionSlot::claim() else {
+        warn!("not adopting {path:?}: already at {MAX_SESSIONS} sessions");
+        return false;
+    };
+
     let attached = match connect_holder(path).await {
         Ok(attached) => attached,
         Err(e) => {
-            debug!("removing unusable holder socket {path:?}: {e}");
-            let _ = std::fs::remove_file(path);
+            // Remove the door **only** when nobody is behind it. Every other
+            // failure — the handshake timing out, `EMFILE`, a protocol version
+            // this build refuses — can happen to a holder that is alive and
+            // serving a shell, and unlinking its socket would strand that shell
+            // permanently: the listener keeps the removed inode, so no later
+            // daemon can ever reach it again. Left in place, the next boot (or the
+            // next build) can.
+            if is_unanswered(&e) {
+                debug!("removing stale holder socket {path:?}: {e}");
+                let _ = std::fs::remove_file(path);
+            } else {
+                warn!("leaving holder socket {path:?} in place: {e}");
+            }
             return false;
         }
     };
@@ -1204,19 +1395,14 @@ async fn adopt_one(path: &FsPath) -> bool {
     // another, and a later attach to the real id would start a second shell in
     // the same directory.
     if !valid_session_id(&id) || socket_for(&id) != path {
-        warn!("holder at {path:?} claims session {id:?}, which does not belong there");
-        discard_holder(attached, "session id does not match its socket").await;
-        let _ = std::fs::remove_file(path);
+        // Not hung up and not unlinked: a holder answering for another session is
+        // one we know nothing about, and it may have a live shell in it. Loud,
+        // because it means either a digest collision or a hand-planted socket.
+        warn!(
+            "ignoring holder at {path:?}: it answers for session {id:?}, which does not belong there"
+        );
         return false;
     }
-
-    let Some(slot) = SessionSlot::claim() else {
-        // Over the cap: leave the holder alone rather than killing a shell the
-        // user may still want. Its own orphan grace bounds it, and the next
-        // daemon boot (or a freed slot) can adopt it.
-        warn!("not adopting {id}: already at {MAX_SESSIONS} sessions");
-        return false;
-    };
 
     let mut sessions = SESSIONS.lock().await;
     if sessions.contains_key(&id) {
@@ -1620,6 +1806,133 @@ fn clamp_dimension(v: Option<u16>, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A holder speaking a version this build does not know must be refused —
+    /// **and** told to hang up, or its shell would outlive every daemon that will
+    /// ever refuse it identically.
+    ///
+    /// The fake holder here is hand-written on purpose: it is the only test that
+    /// speaks the wire without going through our own encoder, which is what makes
+    /// it a check of the *contract* rather than of a round-trip. It also documents
+    /// that `HANGUP` is five bytes any implementation can produce.
+    #[tokio::test]
+    async fn a_holder_from_an_unknown_protocol_is_refused_and_hung_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("0000000000000001.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+
+        let served = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let hello = serde_json::json!({
+                "protocol": wire::PROTOCOL + 41,
+                "session_id": "fromthefuture",
+                "worktree_id": 1,
+                "label": "future",
+                "cwd": "/tmp",
+                "pid": 1,
+                "exited": null,
+            });
+            wire::write_frame(
+                &mut stream,
+                wire::HELLO,
+                &serde_json::to_vec(&hello).unwrap(),
+            )
+            .await
+            .unwrap();
+            // Whatever the daemon says next is what this test is about.
+            wire::read_frame(&mut stream).await.unwrap()
+        });
+
+        let err = match connect_holder(&socket).await {
+            Ok(_) => panic!("a future protocol must not be accepted"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("protocol"),
+            "the log line must name the reason: {err}"
+        );
+        // Not "unanswered": there is a live holder here, so `adopt_one` must leave
+        // its socket in place for a later build that can speak to it.
+        assert!(!is_unanswered(&err));
+
+        let reply = served.await.unwrap().expect("the daemon must answer");
+        assert_eq!(
+            reply.kind,
+            wire::HANGUP,
+            "a refused holder must be told to end its shell"
+        );
+        assert!(reply.payload.is_empty(), "HANGUP carries no payload");
+    }
+
+    #[test]
+    fn only_names_this_daemon_could_have_written_are_adoption_candidates() {
+        // The gate on a destructive path: `adopt_one` removes a socket nobody
+        // answers, and `VELD_PTY_DIR` is a plain env var — pointed one level up at
+        // `~/.veld`, an ungated boot would delete `daemon.sock`.
+        assert!(is_holder_socket_name(FsPath::new(
+            "/x/0123456789abcdef.sock"
+        )));
+        assert!(!is_holder_socket_name(FsPath::new("/x/daemon.sock")));
+        assert!(!is_holder_socket_name(FsPath::new(
+            "/x/0123456789abcde.sock"
+        )));
+        assert!(!is_holder_socket_name(FsPath::new(
+            "/x/0123456789abcdef0.sock"
+        )));
+        // Uppercase is not what `{:016x}` emits, so it is not ours.
+        assert!(!is_holder_socket_name(FsPath::new(
+            "/x/0123456789ABCDEF.sock"
+        )));
+        assert!(!is_holder_socket_name(FsPath::new("/x/0123456789abcdef")));
+        assert!(!is_holder_socket_name(FsPath::new(
+            "/x/0123456789abcdefg.sock"
+        )));
+        // The real thing must pass the gate it is checked against.
+        assert!(is_holder_socket_name(&socket_for("some-session-id")));
+    }
+
+    #[tokio::test]
+    async fn only_an_unanswered_path_is_treated_as_stale() {
+        /// `expect_err` would need `Debug` on `Attached`, and a derived one would
+        /// print a scrollback full of terminal output — the hazard `Frame`'s hand
+        /// written `Debug` exists to avoid.
+        async fn connect_err(path: &FsPath) -> anyhow::Error {
+            match connect_holder(path).await {
+                Ok(_) => panic!("expected {path:?} to fail"),
+                Err(e) => e,
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+
+        // A path that does not exist.
+        let missing = dir.path().join("missing.sock");
+        assert!(is_unanswered(&connect_err(&missing).await));
+
+        // A plain file: not a socket at all. `io::ErrorKind` has no variant for
+        // this, which is why the check is on `errno`.
+        let plain = dir.path().join("plain.sock");
+        std::fs::write(&plain, b"").unwrap();
+        assert!(is_unanswered(&connect_err(&plain).await));
+
+        // A socket file whose listener is gone.
+        let dead = dir.path().join("dead.sock");
+        drop(std::os::unix::net::UnixListener::bind(&dead).unwrap());
+        assert!(is_unanswered(&connect_err(&dead).await));
+
+        // A listener that accepts and then says nothing: alive, and its socket
+        // must NOT be removed — unlinking it would strand a live shell forever.
+        let mute = dir.path().join("mute.sock");
+        let listener = tokio::net::UnixListener::bind(&mute).unwrap();
+        let _accepting = tokio::spawn(async move {
+            let _held = listener.accept().await;
+            std::future::pending::<()>().await;
+        });
+        let e = connect_err(&mute).await;
+        assert!(
+            !is_unanswered(&e),
+            "a holder that accepts but does not greet is alive: {e}"
+        );
+    }
 
     #[test]
     fn clamps_dimensions() {

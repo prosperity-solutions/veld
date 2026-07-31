@@ -70,8 +70,13 @@ const OUT_CHANNEL: usize = 512;
 /// Commands buffered from the connection reader and the acceptor.
 const CMD_CHANNEL: usize = 64;
 
-/// How often the orphan clock is checked.
-const ORPHAN_TICK: Duration = Duration::from_secs(30);
+/// How long a connected daemon gets to accept one output frame before the
+/// connection is treated as dead.
+///
+/// Generous — the peer is a local process whose only job on this socket is to
+/// drain it — because the cost of being wrong is a dropped connection, and the
+/// cost of having no bound at all is a holder that cannot be hung up.
+const OUTPUT_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the holder waits, after handing a daemon the exit code, for that
 /// daemon to close the connection.
@@ -124,9 +129,16 @@ pub async fn run(cfg: HolderConfig) -> anyhow::Result<()> {
 fn bind(path: &std::path::Path) -> anyhow::Result<UnixListener> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("failed to create the holder socket directory")?;
-        // 0700: the directory listing is the session inventory, and every
-        // socket in it is a shell.
-        let _ = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700));
+        // 0700, and a failure here is fatal rather than ignored: the **directory**
+        // is what keeps another local account away from a socket that hands out a
+        // shell. `bind` below creates the socket itself at the process umask
+        // (0755 with the usual one) and only then chmods it, so for a moment the
+        // socket's own mode is not restrictive — which is fine inside a 0700
+        // directory and not fine outside one. If this cannot be enforced (a
+        // foreign-owned `VELD_PTY_DIR`, say), refuse to serve rather than serving
+        // from an open directory.
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("could not restrict {}", parent.display()))?;
     }
     let listener = match UnixListener::bind(path) {
         Ok(l) => l,
@@ -144,8 +156,8 @@ fn bind(path: &std::path::Path) -> anyhow::Result<UnixListener> {
         }
         Err(e) => return Err(e).context("failed to bind the holder socket"),
     };
-    // 0600 on the socket as well as the directory: defence in depth if the
-    // directory is ever made group-readable by something else.
+    // 0600 on the socket too. Defence in depth only — see the directory above for
+    // why the directory is the real gate.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .context("failed to restrict the holder socket")?;
     Ok(listener)
@@ -211,8 +223,35 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     // timer is reset at that moment, so this duration never fires.
     let drain = tokio::time::sleep(Duration::from_secs(3600));
     tokio::pin!(drain);
-    let mut orphan_tick = tokio::time::interval(ORPHAN_TICK);
+    // Armed only while nothing is connected, using the same pattern as `drain`
+    // above: an `interval` would wake every holder every 30 seconds for the whole
+    // life of the terminal, including the normal case where a daemon is attached
+    // and there is nothing to check — a dozen open panes then means a steady
+    // trickle of pointless wakeups on a laptop.
+    // Armed at boot because nothing is connected yet; re-armed on every
+    // disconnect by `mark_disconnected!`.
+    let orphan_deadline = tokio::time::sleep(orphan_grace);
+    tokio::pin!(orphan_deadline);
     let mut asked_to_hang_up = false;
+
+    /// Record that no daemon is connected, and re-arm the orphan deadline.
+    ///
+    /// The two must happen together. A `sleep` elapses on its own schedule
+    /// whether or not its branch is being polled, so a holder that spent longer
+    /// than the grace *with a daemon attached* would find the deadline already
+    /// expired the instant it lost that daemon — and would hang up the shell
+    /// immediately on the next `veld update`, which is exactly the failure this
+    /// module exists to prevent. Every disconnect therefore resets it.
+    macro_rules! mark_disconnected {
+        () => {{
+            if disconnected_since.is_none() {
+                disconnected_since = Some(Instant::now());
+            }
+            orphan_deadline
+                .as_mut()
+                .reset(tokio::time::Instant::now() + orphan_grace);
+        }};
+    }
 
     loop {
         // Deliberately NOT `biased`. With the PTY branch first, a shell
@@ -226,18 +265,42 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                 Ok(n) => {
                     scrollback.push(&buf[..n]);
                     if let Some(c) = &conn {
-                        // Awaited, not `try_send`: this hop is a local socket
-                        // with a daemon that does nothing but drain it, so
-                        // losing bytes here would be a corrupt screen for no
-                        // gain. Backpressure to the shell is what a real
-                        // terminal does. The *lossy* hop is the daemon's
-                        // broadcast to a slow browser, which reports itself
-                        // with a `lagged` frame.
-                        if c.out.send((wire::OUTPUT, buf[..n].to_vec())).await.is_err() {
-                            // The writer is gone; the reader will report the
-                            // disconnect.
+                        // Awaited rather than `try_send`, because this hop is a
+                        // local socket with a daemon that does nothing but drain
+                        // it: dropping bytes on a momentarily full queue would
+                        // corrupt the screen for no gain, and backpressure to the
+                        // shell is what a real terminal does.
+                        //
+                        // Bounded, though. The await is inside this branch, so
+                        // until it returns the loop is not polling the hangup, the
+                        // orphan deadline or the exit — and a wedged daemon (this
+                        // module has had one) would otherwise park the holder's
+                        // whole control path indefinitely. On timeout the
+                        // connection is treated as dead; nothing is lost, because
+                        // the scrollback still holds these bytes and the next
+                        // attach replays them.
+                        let queued = tokio::time::timeout(
+                            OUTPUT_SEND_TIMEOUT,
+                            c.out.send((wire::OUTPUT, buf[..n].to_vec())),
+                        )
+                        .await;
+                        let dead = match queued {
+                            Ok(Ok(())) => false,
+                            // The writer task is gone; its reader reports the
+                            // disconnect too, and this is idempotent.
+                            Ok(Err(_)) => true,
+                            Err(_) => {
+                                warn!(
+                                    session = %cfg.session_id,
+                                    "daemon stopped reading for {}s — dropping the connection",
+                                    OUTPUT_SEND_TIMEOUT.as_secs()
+                                );
+                                true
+                            }
+                        };
+                        if dead {
                             conn = None;
-                            disconnected_since = Some(Instant::now());
+                            mark_disconnected!();
                         }
                     }
                 }
@@ -260,10 +323,14 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         pid,
                         exit_code,
                         &scrollback,
+                        disconnected_since,
                     )
                     .await;
                     if conn.is_some() {
                         disconnected_since = None;
+                    } else {
+                        // The greeting failed, so nothing is attached after all.
+                        mark_disconnected!();
                     }
                 }
                 Cmd::Frame(seq, frame) => {
@@ -284,7 +351,16 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                             wire::HANGUP => {
                                 info!(session = %cfg.session_id, "holder asked to hang up");
                                 asked_to_hang_up = true;
-                                hangup(pid);
+                                // Only while the child is still ours to signal.
+                                // `waiter` reaps it, and this loop keeps running
+                                // for up to EXIT_DRAIN afterwards — a hangup
+                                // landing in that window would `killpg` a pid that
+                                // has been freed for reuse, which is the exact
+                                // hazard this module's ownership rule exists to
+                                // remove.
+                                if exit_code.is_none() {
+                                    hangup(pid);
+                                }
                             }
                             other if frame.is_ignorable() => {
                                 debug!("ignoring holder-numbered frame {other:#x}");
@@ -292,7 +368,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                             other => {
                                 warn!("dropping connection: unsupported frame {other:#x}");
                                 conn = None;
-                                disconnected_since = Some(Instant::now());
+                                mark_disconnected!();
                             }
                         }
                     }
@@ -301,7 +377,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     if conn.as_ref().is_some_and(|c| c.generation == seq) {
                         debug!(session = %cfg.session_id, "daemon disconnected");
                         conn = None;
-                        disconnected_since = Some(Instant::now());
+                        mark_disconnected!();
                     }
                 }
             },
@@ -326,23 +402,20 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
 
             _ = &mut drain, if exit_code.is_some() => break,
 
-            _ = orphan_tick.tick() => {
+            _ = &mut orphan_deadline, if disconnected_since.is_some() => {
                 // The leak bound: a daemon that never comes back (uninstalled,
-                // crash-looping, the machine's user logged out) must not leave a
-                // shell running for the uptime of the box. The clock only runs
-                // while nothing is connected, which is not the normal state.
-                if let Some(since) = disconnected_since {
-                    if !asked_to_hang_up
-                        && Instant::now().saturating_duration_since(since) > orphan_grace
-                    {
-                        info!(
-                            session = %cfg.session_id,
-                            "no daemon for {}s — hanging up the shell",
-                            orphan_grace.as_secs()
-                        );
-                        asked_to_hang_up = true;
-                        hangup(pid);
-                    }
+                // crash-looping, the user logged out) must not leave a shell
+                // running for the uptime of the box. `exit_code.is_none()` for
+                // the same reason the hangup frame checks it — past that point
+                // the pid may already have been reaped and reused.
+                if !asked_to_hang_up && exit_code.is_none() {
+                    info!(
+                        session = %cfg.session_id,
+                        "no daemon for {}s — hanging up the shell",
+                        orphan_grace.as_secs()
+                    );
+                    asked_to_hang_up = true;
+                    hangup(pid);
                 }
             },
         }
@@ -469,6 +542,7 @@ async fn deliver_exit(
                         pid,
                         Some(code),
                         scrollback,
+                        disconnected_since,
                     )
                     .await
                     {
@@ -526,6 +600,7 @@ async fn acceptor(listener: UnixListener, tx: mpsc::Sender<Cmd>) {
 /// Returns `None` if the greeting could not be delivered, in which case the
 /// connection is dropped rather than half-established — a daemon that never got
 /// the `Hello` cannot make sense of anything that follows it.
+#[allow(clippy::too_many_arguments)]
 async fn attach(
     stream: UnixStream,
     generation: u64,
@@ -534,6 +609,7 @@ async fn attach(
     pid: i32,
     exited: Option<u32>,
     scrollback: &Scrollback,
+    disconnected_since: Option<Instant>,
 ) -> Option<Conn> {
     let (reader, mut writer) = stream.into_split();
 
@@ -545,6 +621,10 @@ async fn attach(
         cwd: cfg.cwd.display().to_string(),
         pid,
         exited,
+        // Measured from *this* holder's clock, not the daemon's: the daemon that
+        // is connecting may never have seen this session before.
+        detached_secs: disconnected_since
+            .map(|since| Instant::now().saturating_duration_since(since).as_secs()),
     };
     let encoded = serde_json::to_vec(&hello).ok()?;
     wire::write_frame(&mut writer, wire::HELLO, &encoded)
@@ -794,6 +874,70 @@ fn signal_group(pid: i32, sig: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Losing a daemon after the orphan grace has *already elapsed while
+    /// attached* must start a fresh grace, not hang up immediately.
+    ///
+    /// This is a regression test for a fix, not for the feature: an armed
+    /// `sleep(grace)` created once at startup elapses on its own schedule whether
+    /// or not its `select!` branch is being polled, so the naive version killed
+    /// the shell the instant a long-lived terminal lost its daemon — i.e. on
+    /// every `veld update` of a terminal older than the grace, which is the exact
+    /// thing this module exists to prevent. The shell survives here only if
+    /// disconnecting re-arms the deadline.
+    #[tokio::test]
+    async fn a_disconnect_after_the_grace_has_elapsed_starts_a_new_grace() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("s.sock");
+        let grace = 1;
+        let cfg = HolderConfig {
+            session_id: "graceprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            orphan_grace_secs: grace,
+        };
+        tokio::spawn(run(cfg));
+
+        // Connect, and stay connected well past the grace.
+        let mut stream = loop {
+            match tokio::net::UnixStream::connect(&socket).await {
+                Ok(s) => break s,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        };
+        let hello = wire::read_frame(&mut stream).await.unwrap().unwrap();
+        assert_eq!(hello.kind, wire::HELLO);
+        let pid = serde_json::from_slice::<wire::Hello>(&hello.payload)
+            .unwrap()
+            .pid;
+        tokio::time::sleep(Duration::from_secs(grace) * 3).await;
+
+        // Now lose the daemon. The shell must still be there afterwards: the
+        // clock starts *now*.
+        drop(stream);
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        // SAFETY: signal 0 performs the permission/existence check only.
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the shell must survive a disconnect that happens after the grace \
+             already elapsed while a daemon was attached"
+        );
+
+        // And the grace must still be enforced from that disconnect.
+        let deadline = Instant::now() + Duration::from_secs(grace) + Duration::from_secs(20);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} outlived its re-armed orphan grace"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
 
     #[test]
     fn the_exit_notice_is_a_complete_line() {

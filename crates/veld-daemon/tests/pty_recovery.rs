@@ -34,6 +34,37 @@ struct Instance {
     port: u16,
 }
 
+/// Ends every holder this instance started, whatever happened to the test.
+///
+/// Needed because a panicking test skips its own cleanup by definition, and the
+/// thing left behind is a **real login shell** kept alive for the daemon's
+/// 30-minute orphan grace — observed once during development, holding a `zsh`
+/// long after the run that created it was gone.
+///
+/// The frame is hand-written: kind `0x83`, empty payload, the one thing
+/// `pty/wire.rs` pins across every protocol version. A test that writes it by hand
+/// is also a check that the contract is usable without our own encoder.
+impl Drop for Instance {
+    fn drop(&mut self) {
+        use std::io::Write;
+        let Ok(entries) = std::fs::read_dir(self.pty_dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
+                let mut frame = vec![0x83u8];
+                frame.extend_from_slice(&0u32.to_be_bytes());
+                let _ = stream.write_all(&frame);
+                let _ = stream.flush();
+            }
+        }
+    }
+}
+
 impl Instance {
     fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");

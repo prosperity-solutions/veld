@@ -17,7 +17,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { LAYOUT_STORAGE_KEY, parseLayouts, terminalIds } from "./model";
+import { layoutSlot } from "../shell";
+import { loadLayouts, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
 /**
@@ -26,13 +27,18 @@ import { handleKeyEvent } from "./terminalKeys";
  * Read here rather than threaded down from the app so the knowledge lives beside
  * the code that needs it. It answers a question the daemon's `resumed: false`
  * cannot: was this a brand-new terminal, or one whose shell we expected to still
- * be there? Without it, a daemon restart (`veld update`) silently replaces a
- * running build with an empty prompt.
+ * be there? Without it, a lost shell is silently replaced by an empty prompt.
+ *
+ * Read through `loadLayouts`, i.e. the *same* source the app restores from —
+ * including the durable per-slot store. Reading `sessionStorage` directly meant
+ * the set was always empty in the case that matters most: after Veld Desktop
+ * restarts there is no `sessionStorage`, so every tab was treated as brand new
+ * and a reboot (or an expired grace, or a refused protocol version) handed the
+ * user fresh prompts in "restored" tabs without a word.
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    const layouts = parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
-    return new Set(Object.values(layouts).flatMap(terminalIds));
+    return new Set(Object.values(loadLayouts(layoutSlot)).flatMap(terminalIds));
   } catch {
     return new Set<string>();
   }
