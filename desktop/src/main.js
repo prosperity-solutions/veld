@@ -81,6 +81,81 @@ let refreshTray = null;
 const isPrimaryInstance = !app.isPackaged || app.requestSingleInstanceLock();
 if (!isPrimaryInstance) app.quit();
 
+/**
+ * Which persisted pane layout this window owns.
+ *
+ * The layout names live PTY session ids, and a second attach to a session *takes
+ * it over* rather than mirroring it — so two windows restoring one layout would
+ * trade every shell back and forth indefinitely. The slot is what keeps them
+ * apart, and it must therefore be stable for one app and different between two.
+ *
+ * Derived from `isPackaged`, deliberately **not** from the single-instance lock.
+ * Asking for the lock unpackaged looked like a free way to tell a first instance
+ * from a second, and it was not: the lock is per appId and first-caller-wins, so a
+ * dev instance holding it made the *packaged* app quit on launch, and whichever
+ * happened to start first got the durable slot — a dev run inheriting the
+ * installed app's terminals, the exact opposite of the intent.
+ *
+ * Two concurrent dev instances (a normal thing to want, per the comment above) do
+ * share `dev`, and would fight over a shell if both restored the same layout.
+ * `claimSlot` is what prevents that: the second one finds the first's live pid in
+ * the slot's lockfile and takes a slot of its own.
+ *
+ * Batch 6 (detachable panes) will need a slot per *window* rather than per
+ * process; this is the seam for it.
+ */
+const LAYOUT_SLOT = claimSlot(app.isPackaged ? "main" : "dev");
+
+/**
+ * Claim `preferred`, or fall back to a slot of our own if a live process holds it.
+ *
+ * A lockfile with a pid, rather than a timestamp or a heartbeat: liveness is a
+ * question the OS can answer exactly (`kill(pid, 0)`), while a timestamp cannot
+ * tell "quit five seconds ago" from "still running" — and the five-seconds-ago
+ * case is a user relaunching the app, which is precisely when the layout must be
+ * restored rather than abandoned.
+ */
+function claimSlot(preferred) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  // An instance that is about to quit must not touch the lock: it would overwrite
+  // the live primary's pid with its own and then exit, leaving a stale lock that
+  // sends the *next* launch to a fresh slot — and to no restored terminals.
+  if (!isPrimaryInstance) return preferred;
+  try {
+    const dir = path.join(app.getPath("userData"), "layout-slots");
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, `${preferred}.lock`);
+    // Scoped to the read alone. Wrapping the write in the same `try` meant the
+    // very first launch — when the file does not exist yet — threw ENOENT on this
+    // line and skipped straight past the write, so the lock was never created on
+    // any launch and this function always returned `preferred`: a no-op that
+    // looked like protection.
+    let held = Number.NaN;
+    try {
+      held = Number.parseInt(fs.readFileSync(lock, "utf8"), 10);
+    } catch {
+      // No lock yet, or unreadable: treat the slot as free and claim it below.
+    }
+    if (Number.isInteger(held) && held !== process.pid) {
+      try {
+        // Signal 0 is the existence/permission check only.
+        process.kill(held, 0);
+        // Somebody is using this slot; take one nobody can be using.
+        return `${preferred}-${process.pid}`;
+      } catch {
+        // Stale lock: the process that wrote it is gone, so the slot is ours —
+        // and so are the shells its layout names, which is the whole point.
+      }
+    }
+    fs.writeFileSync(lock, String(process.pid));
+  } catch {
+    // No userData, an unwritable directory: fall through to the preferred slot.
+    // Worst case is two windows sharing one, which is where this started.
+  }
+  return preferred;
+}
+
 // Shown while the daemon is unreachable; self-contained and branded
 // (dark tokens + wordmark dot styling from the design handoff).
 //
@@ -183,6 +258,10 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       preload: require("node:path").join(__dirname, "preload.js"),
+      // How the preload learns which layout slot this window owns. Not a query
+      // parameter: the renderer keys durable state naming live PTY sessions off
+      // it, and a link can forge a URL but not a preload argument.
+      additionalArguments: [`--veld-layout-slot=${LAYOUT_SLOT}`],
     },
   });
 

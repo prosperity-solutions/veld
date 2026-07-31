@@ -35,10 +35,12 @@ import {
   nextFreeProfile,
   normalizeBrowserUrl,
   normalizeSessionSet,
+  layoutSlotKey,
   parseLayouts,
   paneTabLabel,
   parseSessionSets,
   replaceTab,
+  readLayouts,
   serializeLayouts,
   serializeSessionSets,
   sessionSetFor,
@@ -46,6 +48,7 @@ import {
   setRatio,
   terminalIds,
   terminalLabel,
+  writeLayouts,
   updateTab,
   urlLabel,
 } from "./model";
@@ -64,13 +67,18 @@ const ids = (layout: PaneLayout, dock: DockIndex) =>
 const rightId = (layout: PaneLayout) => layout.docks[1].tabs[0].id;
 
 describe("defaultLayout", () => {
-  it("opens a terminal beside an empty browser pane", () => {
+  it("opens a chooser beside an empty browser pane, and starts no shell", () => {
     // The right-hand pane shows the run's URLs until it is pointed somewhere, so
     // this is the same information the old services column carried — in the thing
     // that can act on it.
+    //
+    // The left one is a `new` pane, deliberately: a terminal tab's id is a daemon
+    // session id, so seeding one made merely *selecting* a worktree start a real
+    // shell (and now a holder process to own it), against a cap of 48.
     const l = defaultLayout();
     expect(l.docks[0].tabs).toHaveLength(1);
-    expect(l.docks[0].tabs[0].kind).toBe("terminal");
+    expect(l.docks[0].tabs[0].kind).toBe("new");
+    expect(terminalIds(l)).toEqual([]);
     expect(l.docks[1].tabs).toHaveLength(1);
     expect(l.docks[1].tabs[0].kind).toBe("browser");
     expect(l.docks[1].tabs[0].url).toBeUndefined();
@@ -390,10 +398,14 @@ describe("terminal bookkeeping", () => {
   it("terminalIds lists only terminals, across both docks", () => {
     let l = defaultLayout();
     const svc = rightId(l);
+    const a = term();
     const b = term();
+    l = addTab(l, 0, a);
     l = addTab(l, 1, b);
-    expect(terminalIds(l)).toEqual([l.docks[0].tabs[0].id, b.id]);
+    expect(terminalIds(l)).toEqual([a.id, b.id]);
     expect(terminalIds(l)).not.toContain(svc);
+    // The seeded chooser is not a terminal and must never be counted as one.
+    expect(terminalIds(l)).not.toContain(l.docks[0].tabs[0].id);
   });
 
   it("hasTab sees both docks", () => {
@@ -406,7 +418,8 @@ describe("terminal bookkeeping", () => {
 
   it("numbers terminals only once there is more than one", () => {
     let l = defaultLayout();
-    const a = l.docks[0].tabs[0];
+    const a = term();
+    l = addTab(l, 0, a);
     expect(terminalLabel(l, a.id)).toBe("Terminal");
 
     const b = term();
@@ -945,8 +958,9 @@ describe("paneTabLabel", () => {
     // A layout written by an older build carries whatever title that build used,
     // so reading `tab.title` would leave a renamed kind mislabelled after a
     // reload. Only a browser pane's title is its own (the page's).
-    const l = defaultLayout();
-    const terminal = l.docks[0].tabs[0];
+    let l = defaultLayout();
+    const terminal = term();
+    l = addTab(l, 0, terminal);
     expect(paneTabLabel(l, terminal)).toBe("Terminal");
     expect(paneTabLabel(l, { ...terminal, title: "stale" })).toBe("Terminal");
 
@@ -1033,5 +1047,84 @@ describe("restoring a layout from the pre-branch build", () => {
       },
     });
     expect(parseLayouts(legacy)).toEqual({});
+  });
+});
+
+describe("layout slots", () => {
+  /** A `LayoutStorage` backed by a plain map. */
+  function fake(initial: Record<string, string> = {}) {
+    const map = new Map(Object.entries(initial));
+    return {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        map.set(k, v);
+      },
+      map,
+    };
+  }
+
+  const layout = defaultLayout(DEFAULT_RATIO);
+  const layouts = { 7: layout };
+
+  it("writes both stores when the window owns a slot", () => {
+    const session = fake();
+    const durable = fake();
+    writeLayouts(session, durable, "main", layouts);
+    expect(session.map.get("veld.panes.v1")).toBe(serializeLayouts(layouts));
+    // The durable copy is what the *next launch of the app* reads.
+    expect(durable.map.get(layoutSlotKey("main"))).toBe(serializeLayouts(layouts));
+  });
+
+  it("writes only the session store without a slot", () => {
+    const session = fake();
+    const durable = fake();
+    writeLayouts(session, durable, null, layouts);
+    expect(session.map.size).toBe(1);
+    // A browser tab must not leave a layout behind that another tab could
+    // restore — both would attach to the same shells and take them from each
+    // other on every reattach.
+    expect(durable.map.size).toBe(0);
+  });
+
+  it("restores from the slot store when the session store is empty", () => {
+    // The app restarted: a new window, so a new sessionStorage, but the holder
+    // processes kept the shells running and their ids are in here.
+    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, "main")).toEqual(layouts);
+  });
+
+  it("prefers the session store, which is this window's own state", () => {
+    const mine = { 9: defaultLayout(0.3) };
+    const stale = { 7: layout };
+    const session = fake({ "veld.panes.v1": serializeLayouts(mine) });
+    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(stale) });
+    // A reload must not resurrect a layout from before the last change.
+    expect(readLayouts(session, durable, "main")).toEqual(mine);
+  });
+
+  it("ignores the slot store without a slot", () => {
+    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, null)).toEqual({});
+  });
+
+  it("keeps slots apart", () => {
+    const durable = fake();
+    writeLayouts(fake(), durable, "main", layouts);
+    // A second window (a dev instance, or a detached window later) must start
+    // with its own panes rather than adopt the first window's session ids.
+    expect(readLayouts(fake(), durable, "alt-123")).toEqual({});
+    expect(layoutSlotKey("main")).not.toBe(layoutSlotKey("alt-123"));
+  });
+
+  it("survives storage being unavailable", () => {
+    // Storage access throws outright in some privacy configurations, and this
+    // runs in a useState initialiser where a throw white-screens the app.
+    expect(readLayouts(null, null, "main")).toEqual({});
+    expect(() => writeLayouts(null, null, "main", layouts)).not.toThrow();
+  });
+
+  it("degrades to no saved layout on a corrupt slot store", () => {
+    const durable = fake({ [layoutSlotKey("main")]: "{not json" });
+    expect(readLayouts(fake(), durable, "main")).toEqual({});
   });
 });

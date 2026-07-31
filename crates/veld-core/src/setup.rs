@@ -667,14 +667,30 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             }
         }
         "linux" => {
-            let unit_dir = dirs::home_dir()
-                .context("could not determine home directory")?
-                .join(".config/systemd/user");
+            // `XDG_CONFIG_HOME` when set, because that is where systemd itself
+            // looks for user units — and because `install.sh` resolves the same
+            // path when it patches an existing unit. Hardcoding `~/.config` made
+            // the two disagree for anyone who sets it, which silently turned that
+            // patch into a no-op.
+            let unit_dir = match std::env::var("XDG_CONFIG_HOME") {
+                Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("systemd/user"),
+                _ => dirs::home_dir()
+                    .context("could not determine home directory")?
+                    .join(".config/systemd/user"),
+            };
             std::fs::create_dir_all(&unit_dir).context("failed to create systemd user unit dir")?;
 
             let unit_path = unit_dir.join("veld-daemon.service");
+            // KillMode=process, for the same reason the helper's unit has it: on
+            // stop/restart, kill only the daemon, not its whole cgroup. The
+            // daemon's children include one holder process per open terminal,
+            // whose entire purpose is to outlive it — under the default
+            // control-group mode systemd SIGKILLs every one of them on
+            // `systemctl restart`, which is exactly the `veld update` failure the
+            // holders exist to prevent. It also stops a restart from taking down
+            // runs the daemon started on the user's behalf.
             let unit = format!(
-                "[Unit]\nDescription=Veld Daemon\n\n[Service]\nExecStart={}\nRestart=always\n\n[Install]\nWantedBy=default.target\n",
+                "[Unit]\nDescription=Veld Daemon\n\n[Service]\nExecStart={}\nRestart=always\nKillMode=process\n\n[Install]\nWantedBy=default.target\n",
                 veld_daemon_bin.display()
             );
             std::fs::write(&unit_path, unit).context("failed to write daemon systemd unit")?;
@@ -1567,6 +1583,14 @@ pub async fn uninstall() -> Result<(), anyhow::Error> {
     // Remove ~/.veld directory — use real user's home when running under sudo.
     if let Some(home) = resolve_real_user_home() {
         let veld_dir = home.join(".veld");
+        // Hang up terminal holders first. Their PTYs are deliberately not the
+        // daemon's children, so booting the daemon out leaves them running — and
+        // removing the directory takes away the only way to reach them, so the
+        // shells (and whatever is running in them) would survive an uninstall
+        // that promises to remove everything, unreachable, until their orphan
+        // grace expired. Best-effort by design: a holder that has already gone is
+        // a connection refused, which is the normal case.
+        hang_up_terminal_holders(&veld_dir);
         if veld_dir.exists() {
             if let Err(e) = std::fs::remove_dir_all(&veld_dir) {
                 tracing::warn!(path = %veld_dir.display(), error = %e, "failed to remove .veld dir");
@@ -1983,6 +2007,49 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
         }
     }
     Ok(())
+}
+
+/// Ask every terminal holder under `veld_dir` to end its shell and exit.
+///
+/// Writes the one frame the wire protocol pins forever: kind `0x83`, empty
+/// payload (`crates/veld-daemon/src/pty/wire.rs`). Hand-written rather than shared
+/// through a crate, because that stability is the point — any process, of any
+/// version, can always tell a holder to stop, and this is the second
+/// implementation that relies on it (a refused protocol version is the first).
+fn hang_up_terminal_holders(veld_dir: &Path) {
+    use std::io::Write;
+
+    let Ok(entries) = std::fs::read_dir(veld_dir) else {
+        return;
+    };
+    for dir in entries.flatten() {
+        // One directory per daemon instance, so *every* instance's holders are
+        // swept rather than only the current one's — an uninstall removes all of
+        // veld.
+        if !dir
+            .file_name()
+            .to_string_lossy()
+            .starts_with(crate::instance::PTY_DIR_PREFIX)
+        {
+            continue;
+        }
+        let Ok(sockets) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for socket in sockets.flatten() {
+            let path = socket.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
+                let mut frame = vec![0x83u8];
+                frame.extend_from_slice(&0u32.to_be_bytes());
+                let _ = stream.write_all(&frame);
+                let _ = stream.flush();
+                tracing::info!(socket = %path.display(), "asked a terminal holder to hang up");
+            }
+        }
+    }
 }
 
 #[cfg(test)]

@@ -35,6 +35,15 @@ import { type PaneEmulation, sanitizeEmulation, sanitizeZoom } from "./devices";
  * below — because they are content you sit in front of and arrange beside a
  * terminal, not a way to get somewhere else.
  *
+ * **Adding a kind that owns live state?** A terminal is the worked example, and it
+ * needs three things beyond a renderer: a module-level registry outside React (so
+ * a tab switch cannot destroy it — `panes/terminalHost.ts`), a durable home for
+ * the ids naming that state (`layoutSlotKey` below, because a Veld Desktop restart
+ * empties `sessionStorage`), and a way to notice that the state it named is *gone*
+ * (`EXPECTED_RESUMES` in `terminalHost.ts`, which must read through `loadLayouts`
+ * or it is empty in exactly the case that matters). `panes/browserHost.ts` is the
+ * second example and needs none of the durability, because a page is re-creatable.
+ *
  * There is deliberately no `services` kind. The run's URLs are a *launcher*, not
  * a peer of a terminal and a page, and a launcher belongs wherever you are about
  * to need it: a `new` pane and a browser pane with no URL both show them
@@ -221,11 +230,20 @@ export function clampRatio(r: number): number {
  * lives in the thing that can act on it, one click from being the page itself.
  */
 export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
-  const terminal: PaneTab = { id: newTabId(), kind: "terminal", title: "Terminal" };
+  // A `new` pane, not a terminal: selecting a worktree must not start a shell.
+  //
+  // A terminal tab's id *is* a daemon session id, so seeding one here meant
+  // browsing the worktree rail spent the daemon's session budget — one real
+  // shell process per worktree merely looked at, against a cap of 48 — and, now
+  // that shells outlive the daemon, one holder process each to go with it. The
+  // chooser this renders has a Terminal button as its first item, so asking for
+  // one is a single click; nothing is hidden, only deferred to the point where
+  // the user actually wants a shell.
+  const chooser = newPaneTab();
   const browser = browserTab({});
   return {
     docks: [
-      { tabs: [terminal], activeId: terminal.id },
+      { tabs: [chooser], activeId: chooser.id },
       { tabs: [browser], activeId: browser.id },
     ],
     ratio: clampRatio(ratio),
@@ -752,20 +770,109 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
  */
 export const LAYOUT_STORAGE_KEY = "veld.panes.v1";
 
+/**
+ * Where a Veld Desktop window's layout is *also* kept, so it survives the app
+ * restarting.
+ *
+ * `sessionStorage` covers a reload, which is all a browser tab needs — a tab is
+ * a session, and closing it is the user saying they are done. An app is not: a
+ * Veld Desktop update replaces the window, and a new window is a new
+ * `sessionStorage`, so the layout — and with it every terminal's session id —
+ * was gone even though the holder processes had kept the shells running. This
+ * key is the durable half, and it is deliberately **per window slot**: two
+ * windows restoring one layout would both attach to one shell, and an attach
+ * takes over, so they would ping-pong it between them forever.
+ *
+ * Only the Electron shell has slots (it assigns one per window and passes it in
+ * the URL). A plain browser has no slot and keeps `sessionStorage`-only
+ * behaviour, which is the correct semantics there rather than a limitation.
+ */
+export function layoutSlotKey(slot: string): string {
+  return `veld.panes.slot.${slot}.v1`;
+}
+
 export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
   return JSON.stringify(layouts);
 }
 
-/** Read the stored layouts, tolerating storage being unavailable.
+/** The two `getItem`/`setItem` calls this module needs, so tests can pass fakes
+ *  and the real `Storage` objects satisfy it structurally. */
+export interface LayoutStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/**
+ * Restore layouts, preferring what this very window last wrote.
  *
- *  `sessionStorage` *access* throws outright in some privacy configurations —
- *  not just `setItem` — and this runs in a `useState` initialiser, where an
+ * Order matters. `sessionStorage` is *this window's* state and is therefore both
+ * more recent and unambiguously ours; the slot store is what a previous run of
+ * the app left behind. Reading the slot store first would let a stale layout
+ * (written before a reload that changed things) win over the live one.
+ */
+export function readLayouts(
+  session: LayoutStorage | null,
+  durable: LayoutStorage | null,
+  slot: string | null,
+): Record<number, PaneLayout> {
+  const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
+  if (Object.keys(own).length > 0) return own;
+  if (!durable || !slot) return own;
+  return parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null);
+}
+
+/** Persist to both stores. The session copy is what a reload reads; the slot
+ *  copy is what the next launch of the app reads. */
+export function writeLayouts(
+  session: LayoutStorage | null,
+  durable: LayoutStorage | null,
+  slot: string | null,
+  layouts: Record<number, PaneLayout>,
+): void {
+  const serialized = serializeLayouts(layouts);
+  session?.setItem(LAYOUT_STORAGE_KEY, serialized);
+  if (durable && slot) durable.setItem(layoutSlotKey(slot), serialized);
+}
+
+/** The real storages, or `null` where they are unusable.
+ *
+ *  Storage *access* throws outright in some privacy configurations — not just
+ *  `setItem` — and `loadLayouts` runs in a `useState` initialiser, where an
  *  exception white-screens the whole app before anything renders. */
-export function loadLayouts(): Record<number, PaneLayout> {
+function storages(): { session: LayoutStorage | null; durable: LayoutStorage | null } {
+  let session: LayoutStorage | null = null;
+  let durable: LayoutStorage | null = null;
   try {
-    return parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
+    session = sessionStorage;
+  } catch {
+    // Leave it null.
+  }
+  try {
+    durable = localStorage;
+  } catch {
+    // Leave it null.
+  }
+  return { session, durable };
+}
+
+/** Read the stored layouts, tolerating storage being unavailable. */
+export function loadLayouts(slot: string | null): Record<number, PaneLayout> {
+  try {
+    const { session, durable } = storages();
+    return readLayouts(session, durable, slot);
   } catch {
     return {};
+  }
+}
+
+/** Save the layouts, tolerating storage being unavailable or full. */
+export function saveLayouts(slot: string | null, layouts: Record<number, PaneLayout>): void {
+  try {
+    const { session, durable } = storages();
+    writeLayouts(session, durable, slot, layouts);
+  } catch {
+    // The app keeps working; only the restore continuity is lost, and there is
+    // nothing useful to tell the user.
   }
 }
 

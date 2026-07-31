@@ -17,7 +17,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { LAYOUT_STORAGE_KEY, parseLayouts, terminalIds } from "./model";
+import { layoutSlot } from "../shell";
+import { loadLayouts, terminalIds } from "./model";
+import { handleKeyEvent } from "./terminalKeys";
 
 /**
  * Terminal ids this page expects to *resume*, captured once at module load.
@@ -25,13 +27,18 @@ import { LAYOUT_STORAGE_KEY, parseLayouts, terminalIds } from "./model";
  * Read here rather than threaded down from the app so the knowledge lives beside
  * the code that needs it. It answers a question the daemon's `resumed: false`
  * cannot: was this a brand-new terminal, or one whose shell we expected to still
- * be there? Without it, a daemon restart (`veld update`) silently replaces a
- * running build with an empty prompt.
+ * be there? Without it, a lost shell is silently replaced by an empty prompt.
+ *
+ * Read through `loadLayouts`, i.e. the *same* source the app restores from —
+ * including the durable per-slot store. Reading `sessionStorage` directly meant
+ * the set was always empty in the case that matters most: after Veld Desktop
+ * restarts there is no `sessionStorage`, so every tab was treated as brand new
+ * and a reboot (or an expired grace, or a refused protocol version) handed the
+ * user fresh prompts in "restored" tabs without a word.
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    const layouts = parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
-    return new Set(Object.values(layouts).flatMap(terminalIds));
+    return new Set(Object.values(loadLayouts(layoutSlot)).flatMap(terminalIds));
   } catch {
     return new Set<string>();
   }
@@ -253,17 +260,7 @@ function ensure(id: string, worktreeId: number): Session {
   const fit = new FitAddon();
   term.loadAddon(fit);
 
-  // Let the command palette's second accelerator through to the app.
-  //
-  // xterm consumes the keys it handles (preventDefault + stopPropagation on its
-  // own textarea), so a focused terminal would otherwise swallow anything the
-  // app binds. Returning false here makes xterm ignore the event *before* it
-  // cancels, so it keeps propagating to the window listener in App.tsx.
-  // Ctrl/⌘+Shift+P specifically, and not Ctrl+K: that one is readline's
-  // kill-to-end-of-line and belongs to the shell.
-  term.attachCustomKeyEventHandler(
-    (e) => !(e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === "KeyP"),
-  );
+  // Attached below, once the session object the handler sends through exists.
 
   const container = document.createElement("div");
   container.className = "term-host";
@@ -300,9 +297,14 @@ function ensure(id: string, worktreeId: number): Session {
   // sends can't be mangled by UTF-8 validation; the daemon reserves text
   // frames for control messages.
   const encoder = new TextEncoder();
-  term.onData((data) => {
+  const send = (data: string) => {
     if (canSend()) s.ws!.send(encoder.encode(data));
-  });
+  };
+  term.onData(send);
+  // Keys that must be answered before xterm sees them: the palette accelerator
+  // and Shift+Enter. Sending goes through the same `canSend` gate as ordinary
+  // typing, so a replay in progress cannot be interrupted by a keystroke.
+  term.attachCustomKeyEventHandler((e) => handleKeyEvent(e, send));
   // `onBinary` carries already-8-bit payloads (mouse reports), one byte per
   // char code — encoding those as UTF-8 would corrupt them.
   term.onBinary((data) => {
