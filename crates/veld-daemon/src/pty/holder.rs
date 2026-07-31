@@ -287,10 +287,19 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                         // until it returns the loop is not polling the hangup, the
                         // orphan deadline or the exit — and a wedged daemon (this
                         // module has had one) would otherwise park the holder's
-                        // whole control path indefinitely. On timeout the
-                        // connection is treated as dead; nothing is lost, because
-                        // the scrollback still holds these bytes and the next
-                        // attach replays them.
+                        // whole control path indefinitely.
+                        //
+                        // A timeout **discards this chunk and keeps the
+                        // connection**. Dropping the connection instead was the
+                        // first version and it was worse than the problem: the
+                        // daemon reads its end of this socket in a task that does
+                        // nothing else, so a stall means a wedged runtime — and
+                        // closing on it made the daemon declare the session exited
+                        // (code 1) while the shell was alive and well in here. A
+                        // discarded chunk is the *existing* lossy behaviour of the
+                        // hop in front of it, which reports itself to the client as
+                        // `lagged`; the bytes also stay in the scrollback, so the
+                        // next attach replays them.
                         let queued = tokio::time::timeout(
                             OUTPUT_SEND_TIMEOUT,
                             c.out.send((wire::OUTPUT, buf[..n].to_vec())),
@@ -304,10 +313,11 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                             Err(_) => {
                                 warn!(
                                     session = %cfg.session_id,
-                                    "daemon stopped reading for {}s — dropping the connection",
+                                    bytes = n,
+                                    "daemon has not read for {}s — dropping this output",
                                     OUTPUT_SEND_TIMEOUT.as_secs()
                                 );
-                                true
+                                false
                             }
                         };
                         if dead {
