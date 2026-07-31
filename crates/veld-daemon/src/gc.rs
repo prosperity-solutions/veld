@@ -5,6 +5,10 @@ use uuid::Uuid;
 use veld_core::db::Db;
 use veld_core::helper::HelperClient;
 use veld_core::state::{RunState, RunStatus};
+// Stats retention lives in `veld_core::stats` because three components have to
+// agree on it: this GC, the history API's window clamp, and the UI's window
+// presets. See `NODE_STATS_RETENTION_SECS` for why it is not a local constant.
+use veld_core::stats::{NODE_STATS_RETENTION_SECS, PROCESS_STATS_RETENTION_SECS};
 
 use crate::share::manager::ShareManager;
 
@@ -32,23 +36,6 @@ const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 /// straggler sweep. Past this, PID recycling makes re-killing more dangerous
 /// than the leak — the PID is cleared with a warning instead.
 const STRAGGLER_SWEEP_MAX_AGE_SECS: i64 = 3600;
-
-/// Maximum age for node-aggregate stats samples before pruning (hours).
-///
-/// One row per node every 5s — ~17k rows per node per day, which SQLite does
-/// not notice. Sized to cover a working day so the scrubbable resource graphs
-/// can answer "what was this node doing this morning", which was the whole
-/// reason for keeping history rather than a live ring buffer.
-const MAX_STATS_AGE_HOURS: i64 = 24;
-
-/// Maximum age for **per-process** stats samples before pruning (hours).
-///
-/// Deliberately shorter than [`MAX_STATS_AGE_HOURS`]: these rows outnumber the
-/// aggregates by the size of each node's process tree, and a per-subprocess
-/// breakdown answers "what is happening right now" — nobody scrubs to yesterday
-/// to see which `esbuild` child was busy. The two horizons are why the pruning
-/// is two calls rather than one.
-const MAX_PROCESS_STATS_AGE_HOURS: i64 = 2;
 
 /// Run the garbage-collection scheduler. This function loops forever and
 /// performs GC on the configured interval.
@@ -279,9 +266,9 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
     let _ = db.prune_orphaned_feedback(log_cutoff);
-    let stats_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_STATS_AGE_HOURS);
+    let stats_cutoff = chrono::Utc::now() - chrono::Duration::seconds(NODE_STATS_RETENTION_SECS);
     summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
-    let proc_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_PROCESS_STATS_AGE_HOURS);
+    let proc_cutoff = chrono::Utc::now() - chrono::Duration::seconds(PROCESS_STATS_RETENTION_SECS);
     summary.process_stats_pruned = db
         .prune_node_process_stats_older_than(proc_cutoff)
         .unwrap_or(0);

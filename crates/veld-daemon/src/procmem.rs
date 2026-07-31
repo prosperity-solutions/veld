@@ -98,10 +98,15 @@ mod platform {
     }
 
     pub(super) fn probe(pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
+        let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+            .ok()
+            .and_then(|text| parse_smaps_rollup(&text, virtual_bytes));
+        let cpu = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|text| parse_stat_cpu_seconds(&text, clock_ticks()));
         ProcProbe {
-            memory: smaps_rollup(pid, virtual_bytes)
-                .unwrap_or_else(|| MemoryBreakdown::basic(resident, virtual_bytes)),
-            cpu_seconds: proc_stat_cpu_seconds(pid),
+            memory: rollup.unwrap_or_else(|| MemoryBreakdown::basic(resident, virtual_bytes)),
+            cpu_seconds: cpu,
         }
     }
 
@@ -112,8 +117,7 @@ mod platform {
     /// `None` when the file is absent (kernels before 4.14), unreadable, or the
     /// process exited mid-read. Absent-but-readable is impossible to distinguish
     /// from "no mappings", so an empty parse also returns `None`.
-    fn smaps_rollup(pid: u32, virtual_bytes: u64) -> Option<MemoryBreakdown> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
+    fn parse_smaps_rollup(text: &str, virtual_bytes: u64) -> Option<MemoryBreakdown> {
         let mut pss = None;
         let mut private_clean = None;
         let mut private_dirty = None;
@@ -174,46 +178,134 @@ mod platform {
     /// after it are only findable by splitting at the **last** `)`. Splitting on
     /// whitespace from the left is the classic bug here and it silently reads a
     /// number out of the wrong column.
-    fn proc_stat_cpu_seconds(pid: u32) -> Option<f64> {
-        let text = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    fn parse_stat_cpu_seconds(text: &str, ticks: f64) -> Option<f64> {
         let tail = &text[text.rfind(')')? + 1..];
         let fields: Vec<&str> = tail.split_whitespace().collect();
         // `tail` starts at field 3 (`state`), so utime (field 14) is index 11
         // and stime (15) is index 12.
         let utime: u64 = fields.get(11)?.parse().ok()?;
         let stime: u64 = fields.get(12)?.parse().ok()?;
-        Some((utime + stime) as f64 / clock_ticks())
+        Some((utime + stime) as f64 / ticks)
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
 
+        /// A real `smaps_rollup`, trimmed. Note `Pss_Dirty` and `SwapPss`: both
+        /// are siblings whose names *begin with* a key this parser wants, which
+        /// is why the match is on the exact key. A `starts_with` would read
+        /// `Pss_Dirty` as `Pss` and `SwapPss` as `Swap`, silently reporting the
+        /// wrong footprint — and both platforms' live tests would still pass.
+        const ROLLUP: &str = "\
+55a4c0000000-7ffd8f7ff000 ---p 00000000 00:00 0                          [rollup]
+Rss:              102400 kB
+Pss:               51200 kB
+Pss_Dirty:         40960 kB
+Pss_Anon:          30720 kB
+Shared_Clean:      20480 kB
+Shared_Dirty:       1024 kB
+Private_Clean:      4096 kB
+Private_Dirty:     76800 kB
+Referenced:        98304 kB
+Anonymous:         71680 kB
+Swap:                512 kB
+SwapPss:             256 kB
+Locked:              128 kB
+";
+
         #[test]
-        fn reads_own_rollup() {
-            // Every Linux CI runner has this file for its own pid; if the kernel
-            // is too old the probe degrades and there is nothing to assert.
-            let pid = std::process::id();
-            if let Some(m) = smaps_rollup(pid, 4096) {
-                assert_eq!(m.virtual_bytes, 4096, "virtual comes from the caller");
-                assert!(m.footprint > 0, "our own Pss cannot be zero");
-                assert!(m.private_dirty.is_some(), "rollup carries page classes");
-                assert!(m.has_page_classes());
+        fn parses_the_documented_keys_exactly() {
+            let m = parse_smaps_rollup(ROLLUP, 4096).expect("Pss present");
+            // kB in the file means KiB.
+            assert_eq!(m.footprint, 51200 * 1024, "Pss, not Pss_Dirty or Pss_Anon");
+            assert_eq!(m.private_dirty, Some(76800 * 1024));
+            assert_eq!(m.private_clean, Some(4096 * 1024));
+            assert_eq!(m.shared_dirty, Some(1024 * 1024));
+            assert_eq!(m.shared_clean, Some(20480 * 1024));
+            assert_eq!(m.swap, Some(512 * 1024), "Swap, not SwapPss");
+            assert_eq!(m.wired, Some(128 * 1024));
+            assert_eq!(m.virtual_bytes, 4096, "virtual comes from the caller");
+            assert!(m.has_page_classes());
+        }
+
+        #[test]
+        fn no_pss_means_no_detail_at_all() {
+            // Without Pss there is no honest footprint, so the whole breakdown is
+            // refused rather than reporting one whose headline came from RSS
+            // while its classes came from the file.
+            let without_pss = ROLLUP
+                .lines()
+                .filter(|l| !l.starts_with("Pss:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(parse_smaps_rollup(&without_pss, 0).is_none());
+            assert!(parse_smaps_rollup("", 0).is_none());
+        }
+
+        #[test]
+        fn stat_cpu_survives_a_comm_containing_spaces_and_parens() {
+            // The classic /proc/<pid>/stat bug: `comm` is arbitrary and wrapped
+            // in parens, so fields are only findable from the LAST ')'.
+            // Splitting from the left reads a number out of the wrong column.
+            // Fields after comm: state(3) ppid(4) pgrp(5) session(6) tty(7)
+            // tpgid(8) flags(9) minflt(10) cminflt(11) majflt(12) cmajflt(13)
+            // utime(14) stime(15) → utime is index 11 of the tail.
+            let tail = "S 1 2 3 4 5 6 7 8 9 10 400 100 0 0 20 0 1 0 100 0";
+            for comm in ["node", "sh) -c (weird", "(nested)", "a b c", ")("] {
+                let line = format!("1234 ({comm}) {tail}");
+                let secs = parse_stat_cpu_seconds(&line, 100.0)
+                    .unwrap_or_else(|| panic!("failed to parse comm {comm:?}"));
+                // (utime 400 + stime 100) / 100 ticks = 5.0s.
+                assert!(
+                    (secs - 5.0).abs() < 1e-9,
+                    "comm {comm:?} gave {secs}, expected 5.0 — a shifted field index \
+                     would pick minflt/cminflt, which land in a plausible range"
+                );
             }
         }
 
         #[test]
-        fn reads_own_cpu_seconds() {
-            let secs = proc_stat_cpu_seconds(std::process::id())
-                .expect("/proc/self/stat is readable on linux");
+        fn stat_cpu_scales_by_the_clock_tick() {
+            let line = "1 (x) S 1 2 3 4 5 6 7 8 9 10 400 100 0 0 20 0 1 0 100 0";
+            assert!((parse_stat_cpu_seconds(line, 1000.0).unwrap() - 0.5).abs() < 1e-9);
+        }
+
+        #[test]
+        fn malformed_stat_lines_degrade_instead_of_panicking() {
+            for bad in ["", "no parens here", "1 (x)", "1 (x) S", "1 (x) S a b c"] {
+                assert!(parse_stat_cpu_seconds(bad, 100.0).is_none(), "{bad:?}");
+            }
+        }
+
+        #[test]
+        fn reads_this_process_for_real() {
+            // The live path, asserted rather than conditionally skipped: this is
+            // the only Linux execution the page-class path gets, so wrapping it
+            // in `if let Some(...)` would let it pass having checked nothing.
+            // `smaps_rollup` has existed since kernel 4.14 (2017).
+            let pid = std::process::id();
+            let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+                .expect("/proc/self/smaps_rollup is readable on linux (kernel >= 4.14)");
+            let m = parse_smaps_rollup(&text, 4096).expect("our own Pss cannot be missing");
+            assert!(m.footprint > 0);
+            assert!(
+                m.has_page_classes(),
+                "the 'by type' UI mode depends on this"
+            );
+
+            let stat =
+                std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("/proc/self/stat");
+            let secs = parse_stat_cpu_seconds(&stat, clock_ticks()).expect("own cpu time");
             assert!(secs >= 0.0 && secs < 86_400.0, "implausible: {secs}");
         }
 
         #[test]
         fn missing_pid_degrades_instead_of_panicking() {
             // PID 0 is never a real process in /proc.
-            assert!(smaps_rollup(0, 0).is_none());
-            assert!(proc_stat_cpu_seconds(0).is_none());
+            let p = probe(0, 4096, 8192);
+            assert_eq!(p.memory.footprint, 4096, "falls back to the caller's RSS");
+            assert!(p.cpu_seconds.is_none());
         }
     }
 }

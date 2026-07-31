@@ -55,7 +55,22 @@ export function axisMax(raw: number): number {
   return 10 * pow;
 }
 
-/** Split indices into runs where every listed series has a value. */
+/**
+ * How a stack decides an index is drawable — and it genuinely differs by what
+ * the bands mean, which is why it is a parameter and not a constant.
+ *
+ * - `"all"` — every band must have a value. For **page classes**: an absent
+ *   class is *unmeasurable*, not zero, so a partial stack would draw a total
+ *   that is silently too small. Same rule as `MemoryBreakdown::add` in Rust.
+ * - `"any"` — one band with a value is enough, and an absent band contributes
+ *   zero. For **processes**: an absent PID did not exist at that instant, so the
+ *   sum over the processes that did exist *is* the tree's figure. Requiring all
+ *   of them would blank the whole chart wherever any child was missing — and
+ *   children come and go constantly, so that is most of a real window.
+ */
+export type StackPresence = "all" | "any";
+
+/** Split indices into runs where `present` holds. */
 export function contiguousRuns(length: number, present: (i: number) => boolean): number[][] {
   const runs: number[][] = [];
   let run: number[] = [];
@@ -69,6 +84,71 @@ export function contiguousRuns(length: number, present: (i: number) => boolean):
   }
   if (run.length) runs.push(run);
   return runs;
+}
+
+/**
+ * Build the stacked band geometry: one SVG path per series, laid on a running
+ * baseline, broken into contiguous runs.
+ *
+ * Extracted from the component (and pure) because this is the only chart
+ * geometry that can be wrong *silently* — a baseline accumulated over the wrong
+ * index set makes bands overlap or float off the axis, which renders as a
+ * plausible chart rather than as an error.
+ *
+ * `x`/`y` are the scales; `presence` is the policy above.
+ */
+export function stackBands(
+  series: ChartSeries[],
+  length: number,
+  presence: StackPresence,
+  x: (i: number) => number,
+  y: (v: number) => number,
+): { key: string; slot: number; d: string }[] {
+  const present =
+    presence === "all"
+      ? (i: number) => series.every((s) => s.points[i] != null)
+      : (i: number) => series.some((s) => s.points[i] != null);
+  const runs = contiguousRuns(length, present);
+  const baselines = new Array(length).fill(0);
+  const out: { key: string; slot: number; d: string }[] = [];
+  for (const s of series) {
+    const parts: string[] = [];
+    for (const run of runs) {
+      if (run.length === 1) {
+        // A single-point run has no area to fill; a 1px-wide sliver would be
+        // invisible anyway, so draw a short tick instead of dropping it.
+        const i = run[0];
+        const x0 = x(i);
+        parts.push(
+          `M${x0.toFixed(1)},${y(baselines[i]).toFixed(1)} L${x0.toFixed(1)},${y(
+            baselines[i] + (s.points[i] ?? 0),
+          ).toFixed(1)}`,
+        );
+        continue;
+      }
+      const top = run.map(
+        (i) => `${x(i).toFixed(1)},${y(baselines[i] + (s.points[i] ?? 0)).toFixed(1)}`,
+      );
+      const bottom = [...run].reverse().map((i) => `${x(i).toFixed(1)},${y(baselines[i]).toFixed(1)}`);
+      parts.push(`M${top.join(" L")} L${bottom.join(" L")} Z`);
+    }
+    out.push({ key: s.key, slot: s.slot, d: parts.join(" ") });
+    // Accumulate over the drawn indices only — accumulating everywhere would
+    // raise the baseline under gaps and float the next band off the axis.
+    for (const i of runs.flat()) baselines[i] += s.points[i] ?? 0;
+  }
+  return out;
+}
+
+/** Per-index stack tops, for the y-axis maximum. */
+export function stackedMax(series: ChartSeries[], length: number): number {
+  let m = 0;
+  for (let i = 0; i < length; i++) {
+    let sum = 0;
+    for (const s of series) sum += s.points[i] ?? 0;
+    m = Math.max(m, sum);
+  }
+  return m;
 }
 
 export function TimeSeriesChart(props: {
@@ -85,8 +165,12 @@ export function TimeSeriesChart(props: {
   windowEnd: number;
   /** Describes the chart for screen readers; the legend carries the values. */
   ariaLabel: string;
+  /** Stacked-mode presence policy (see [`StackPresence`]). Defaults to `"all"`,
+   * the conservative choice: it can only ever draw less than the truth. */
+  stackPresence?: StackPresence;
 }) {
   const { times, series, mode, format, windowStart, windowEnd } = props;
+  const stackPresence = props.stackPresence ?? "all";
   const height = props.height ?? 150;
   // Fixed viewBox with `preserveAspectRatio="none"` would distort the strokes,
   // so the SVG scales via CSS width and a measured box instead.
@@ -111,17 +195,10 @@ export function TimeSeriesChart(props: {
 
   /** Per-index stack tops (stacked mode) or the max single value (line mode). */
   const max = useMemo(() => {
+    if (mode === "stacked") return axisMax(stackedMax(series, times.length));
     let m = 0;
-    if (mode === "stacked") {
-      for (let i = 0; i < times.length; i++) {
-        let sum = 0;
-        for (const s of series) sum += s.points[i] ?? 0;
-        m = Math.max(m, sum);
-      }
-    } else {
-      for (const s of series) {
-        for (const v of s.points) if (v != null) m = Math.max(m, v);
-      }
+    for (const s of series) {
+      for (const v of s.points) if (v != null) m = Math.max(m, v);
     }
     return axisMax(m);
   }, [series, times.length, mode]);
@@ -130,44 +207,11 @@ export function TimeSeriesChart(props: {
   const x = (i: number) => PAD.left + ((times[i] - windowStart) / span) * plotW;
   const y = (v: number) => PAD.top + plotH - (v / max) * plotH;
 
-  /** Cumulative baseline per index, mutated as stacked series are laid down. */
-  const baselines = useMemo(() => new Array(times.length).fill(0), [times.length]);
-  if (mode === "stacked") baselines.fill(0);
-
-  const bands: { key: string; slot: number; d: string }[] = [];
+  const bands =
+    mode === "stacked" ? stackBands(series, times.length, stackPresence, x, y) : [];
   const lines: { key: string; slot: number; d: string }[] = [];
 
-  if (mode === "stacked") {
-    // A stacked total is only meaningful where every band has a value, so the
-    // whole stack shares one presence test.
-    const present = (i: number) => series.every((s) => s.points[i] != null);
-    const runs = contiguousRuns(times.length, present);
-    for (const s of series) {
-      const parts: string[] = [];
-      for (const run of runs) {
-        if (run.length === 1) {
-          // A single-point run has no area to fill; a 1px-wide sliver would be
-          // invisible anyway, so draw a short tick instead of dropping it.
-          const i = run[0];
-          const v = s.points[i] ?? 0;
-          const x0 = x(i);
-          parts.push(
-            `M${x0.toFixed(1)},${y(baselines[i]).toFixed(1)} L${x0.toFixed(1)},${y(
-              baselines[i] + v,
-            ).toFixed(1)}`,
-          );
-          continue;
-        }
-        const top = run.map((i) => `${x(i).toFixed(1)},${y(baselines[i] + (s.points[i] ?? 0)).toFixed(1)}`);
-        const bottom = [...run]
-          .reverse()
-          .map((i) => `${x(i).toFixed(1)},${y(baselines[i]).toFixed(1)}`);
-        parts.push(`M${top.join(" L")} L${bottom.join(" L")} Z`);
-      }
-      bands.push({ key: s.key, slot: s.slot, d: parts.join(" ") });
-      for (const i of runs.flat()) baselines[i] += s.points[i] ?? 0;
-    }
-  } else {
+  if (mode !== "stacked") {
     for (const s of series) {
       const runs = contiguousRuns(times.length, (i) => s.points[i] != null);
       const parts = runs.map((run) => {

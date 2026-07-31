@@ -693,6 +693,89 @@ mod tests {
         );
     }
 
+    /// A row written by a **pre-v7** binary: only the columns that existed then.
+    ///
+    /// Migration 7's own doc names this as the reason its columns are nullable,
+    /// and nothing read it back before. Changing `.unwrap_or(memory_bytes)` in
+    /// `stats_from_row`, or dropping the `COALESCE(footprint, memory_bytes)` from
+    /// `BUCKET_AGGS_TAIL`, would make every sample a user recorded before
+    /// upgrading plot as a flat zero — with the whole suite green.
+    #[test]
+    fn pre_v7_rows_fall_back_to_rss_rather_than_zero() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/projPreV7");
+        db.save_run(root, "proj", &RunState::new("dev", "proj"))
+            .unwrap();
+        let run_row: i64 = db
+            .lock()
+            .query_row("SELECT id FROM runs ORDER BY id DESC LIMIT 1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        // Exactly the columns a pre-v7 INSERT named — every v7 column stays NULL.
+        db.lock()
+            .execute(
+                "INSERT INTO node_stats
+                    (run_row, node_key, cpu_percent, memory_bytes, process_count, sampled_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    run_row,
+                    "web:local",
+                    12.5_f64,
+                    4096_i64,
+                    2,
+                    ts_to_str(at(100))
+                ],
+            )
+            .unwrap();
+
+        let latest = db.latest_node_stats(root, "dev").unwrap();
+        let s = &latest["web:local"];
+        assert_eq!(
+            s.memory.footprint, 4096,
+            "footprint falls back to RSS, not to 0"
+        );
+        assert_eq!(s.memory_bytes, 4096);
+        assert_eq!(
+            s.cpu_seconds, 0.0,
+            "no stored cpu_seconds reads as 0, not NULL"
+        );
+        // Page classes stay absent — a pre-v7 row genuinely never measured them,
+        // and `None` is how a reader tells that from a real zero.
+        assert_eq!(s.memory.private_dirty, None);
+        assert_eq!(s.memory.swap, None);
+        assert_eq!(
+            s.memory_metric(MemoryMetric::PrivateDirty),
+            None,
+            "an unmeasured class must not surface as a number"
+        );
+        // A virtual size of 0 is impossible for a live process, so it reports as
+        // absent rather than as a measured zero.
+        assert_eq!(s.memory_metric(MemoryMetric::Virtual), None);
+        assert_eq!(s.memory_metric(MemoryMetric::Footprint), Some(4096));
+
+        // And the same through the bucketed reader the charts use — this is the
+        // SQL `COALESCE` half of the fallback.
+        let buckets = db
+            .node_stats_buckets(
+                root,
+                "dev",
+                "web:local",
+                StatsWindow {
+                    start: at(0),
+                    end: at(200),
+                    bucket_secs: 200,
+                },
+            )
+            .unwrap();
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(
+            buckets[0].memory.footprint, 4096,
+            "SQL COALESCE(footprint, memory_bytes) matches the Rust fallback"
+        );
+        assert_eq!(buckets[0].memory.private_dirty, None);
+    }
+
     #[test]
     fn breakdown_round_trips() {
         let root = Path::new("/tmp/projBreakdown");

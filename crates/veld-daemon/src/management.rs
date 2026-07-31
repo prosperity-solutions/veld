@@ -471,10 +471,13 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
 // Stats history API — the scrubbable graphs
 // ---------------------------------------------------------------------------
 
-/// Longest history window a client may request (seconds). Matches the GC's
-/// `MAX_STATS_AGE_HOURS`: asking for more can only return the same rows, so the
-/// clamp keeps a client from believing it got a week of data.
-const MAX_HISTORY_WINDOW_SECS: i64 = 24 * 3600;
+/// Longest history window a client may request (seconds).
+///
+/// Taken from `veld_core::stats::NODE_STATS_RETENTION_SECS` rather than restated:
+/// asking for more than the GC keeps can only return the same rows, and a local
+/// copy of the number would let the two drift until the API promised a day of
+/// data it no longer had.
+const MAX_HISTORY_WINDOW_SECS: i64 = veld_core::stats::NODE_STATS_RETENTION_SECS;
 
 /// Default window when the client doesn't ask (15 minutes).
 const DEFAULT_HISTORY_WINDOW_SECS: i64 = 900;
@@ -493,6 +496,56 @@ const DEFAULT_HISTORY_POINTS: u32 = 240;
 /// legend is longer than the graph; the omitted tail is reported in
 /// `processes_omitted` so the UI can say so rather than silently truncating.
 const MAX_PROCESS_SERIES: usize = 12;
+
+/// Clamp a requested window to what retention can actually answer.
+///
+/// Pure and separate from the handler so the clamp has a test: the handler's DB
+/// access is what made this untestable before.
+fn clamp_window_secs(requested: Option<i64>) -> i64 {
+    requested
+        .unwrap_or(DEFAULT_HISTORY_WINDOW_SECS)
+        .clamp(1, MAX_HISTORY_WINDOW_SECS)
+}
+
+/// Which memory metrics these buckets actually carry, in picker order.
+///
+/// **Unions over every bucket, not just the newest.** Reading only the last
+/// bucket looked like it bought picker stability and did the opposite: one
+/// process failing its `smaps_rollup` read poisons that whole sample's page
+/// classes (`MemoryBreakdown::add`, and the SQL `CASE WHEN COUNT(x)=COUNT(*)`),
+/// and a short-lived child exiting mid-scan is routine — so a single transient
+/// failure in the newest bucket dropped every page class from the picker, which
+/// made the UI reset the reader's chosen metric and kick them out of the
+/// by-type view. A class present anywhere in the window is offerable; the
+/// buckets where it is absent render as gaps, which the chart already does.
+fn derive_available_metrics(buckets: &[veld_core::stats::StatsBucket]) -> Vec<&'static str> {
+    use veld_core::stats::MemoryMetric;
+    let mut out = vec![
+        MemoryMetric::Footprint.as_str(),
+        MemoryMetric::Resident.as_str(),
+        MemoryMetric::Virtual.as_str(),
+    ];
+    for m in MemoryMetric::ALL {
+        if !out.contains(&m.as_str())
+            && buckets
+                .iter()
+                .any(|b| m.read(b.memory_bytes, &b.memory).is_some())
+        {
+            out.push(m.as_str());
+        }
+    }
+    out
+}
+
+/// Truncate per-process series to [`MAX_PROCESS_SERIES`], returning how many
+/// were dropped. Counting before truncating is the whole content of this
+/// function — swap the two and `processes_omitted` is always 0 and the UI's
+/// "N more processes not charted" note silently disappears.
+fn cap_series<T>(series: &mut Vec<T>) -> usize {
+    let omitted = series.len().saturating_sub(MAX_PROCESS_SERIES);
+    series.truncate(MAX_PROCESS_SERIES);
+    omitted
+}
 
 #[derive(Deserialize)]
 struct HistoryQuery {
@@ -606,14 +659,24 @@ struct StatsHistoryResponse {
     processes: Vec<ProcessSeriesDto>,
     /// How many series were dropped by [`MAX_PROCESS_SERIES`].
     processes_omitted: usize,
-    /// The most recent process tree, empty unless `processes=true`.
+    /// The most recent process tree. Served whenever the node has rows —
+    /// unlike `processes`, this is one query for the latest sample, and the UI
+    /// shows the table under every split mode.
     tree: Vec<ProcessRowDto>,
+    /// Retention horizon for node aggregates (seconds). Served so the UI builds
+    /// its window presets from what the daemon actually keeps instead of a
+    /// hardcoded copy that can silently drift out of agreement with the GC.
+    retention_secs: i64,
+    /// Retention horizon for per-process rows (seconds) — shorter than
+    /// `retention_secs`. A by-process chart over a longer window is legitimately
+    /// empty before this boundary, and the UI says so rather than looking broken.
+    process_retention_secs: i64,
 }
 
 async fn get_stats_history(
     Query(q): Query<HistoryQuery>,
 ) -> Result<Json<StatsHistoryResponse>, StatusCode> {
-    use veld_core::stats::{MemoryMetric, StatsWindow};
+    use veld_core::stats::StatsWindow;
 
     validate_run_name(&q.run)?;
     let db = open_db()?;
@@ -626,10 +689,7 @@ async fn get_stats_history(
     let project_root = resolve_run_project(&registry, &q.project_root, &q.run)?;
 
     let end = chrono::Utc::now();
-    let window_secs = q
-        .window
-        .unwrap_or(DEFAULT_HISTORY_WINDOW_SECS)
-        .clamp(1, MAX_HISTORY_WINDOW_SECS);
+    let window_secs = clamp_window_secs(q.window);
     let start = end - chrono::Duration::seconds(window_secs);
     let points = q.points.unwrap_or(DEFAULT_HISTORY_POINTS);
     let window = StatsWindow::for_points(start, end, points.min(MAX_HISTORY_POINTS));
@@ -641,26 +701,17 @@ async fn get_stats_history(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Which metrics to offer: every total, plus the page classes the newest
-    // bucket actually carries. Reading the newest rather than merging all of
-    // them keeps the picker stable while a window scrolls over an old sample
-    // that predates the detail.
-    let mut available_metrics = vec![
-        MemoryMetric::Footprint.as_str(),
-        MemoryMetric::Resident.as_str(),
-        MemoryMetric::Virtual.as_str(),
-    ];
-    if let Some(last) = buckets.last() {
-        for m in MemoryMetric::ALL {
-            if !available_metrics.contains(&m.as_str())
-                && m.read(last.memory_bytes, &last.memory).is_some()
-            {
-                available_metrics.push(m.as_str());
-            }
-        }
-    }
+    let available_metrics = derive_available_metrics(&buckets);
 
-    let (processes, processes_omitted, tree) = if q.processes {
+    // The tree is one query for the latest sample, so it is served for every
+    // split mode — the UI's process table sits under all of them. Only the
+    // per-process *series* (one grouped query over the whole window) is gated
+    // on `processes`.
+    let tree = db
+        .latest_process_tree(&project_root, &q.run, &q.node)
+        .unwrap_or_default();
+
+    let (processes, processes_omitted) = if q.processes {
         let mut series = db
             .process_stats_buckets(&project_root, &q.run, &q.node, window)
             .map_err(|e| {
@@ -669,14 +720,10 @@ async fn get_stats_history(
             })?;
         // Already sorted heaviest-first by the query, so truncation drops the
         // tail rather than an arbitrary slice.
-        let omitted = series.len().saturating_sub(MAX_PROCESS_SERIES);
-        series.truncate(MAX_PROCESS_SERIES);
-        let tree = db
-            .latest_process_tree(&project_root, &q.run, &q.node)
-            .unwrap_or_default();
-        (series, omitted, tree)
+        let omitted = cap_series(&mut series);
+        (series, omitted)
     } else {
-        (Vec::new(), 0, Vec::new())
+        (Vec::new(), 0)
     };
 
     Ok(Json(StatsHistoryResponse {
@@ -695,6 +742,8 @@ async fn get_stats_history(
             })
             .collect(),
         processes_omitted,
+        retention_secs: veld_core::stats::NODE_STATS_RETENTION_SECS,
+        process_retention_secs: veld_core::stats::PROCESS_STATS_RETENTION_SECS,
         tree: tree
             .into_iter()
             .map(|p| ProcessRowDto {
@@ -1651,6 +1700,114 @@ mod tests {
                 .await,
                 StatusCode::BAD_REQUEST
             );
+        }
+    }
+
+    /// The pure parts of `/api/stats/history`. The handler itself needs a DB, so
+    /// these three were extracted precisely so the rules could be pinned.
+    mod stats_history {
+        use super::super::*;
+        use veld_core::stats::{MemoryBreakdown, StatsBucket};
+
+        fn bucket(memory: MemoryBreakdown) -> StatsBucket {
+            StatsBucket {
+                bucket_start: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                samples: 1,
+                cpu_percent: 1.0,
+                cpu_peak: 1.0,
+                process_count: 1.0,
+                memory_bytes: 1000,
+                memory,
+                footprint_peak: 500,
+            }
+        }
+
+        fn detailed() -> MemoryBreakdown {
+            MemoryBreakdown {
+                footprint: 500,
+                virtual_bytes: 5000,
+                private_clean: Some(1),
+                private_dirty: Some(2),
+                shared_clean: Some(3),
+                shared_dirty: Some(4),
+                swap: Some(5),
+                wired: Some(6),
+            }
+        }
+
+        #[test]
+        fn window_clamps_to_retention_and_defaults() {
+            assert_eq!(clamp_window_secs(None), DEFAULT_HISTORY_WINDOW_SECS);
+            assert_eq!(clamp_window_secs(Some(300)), 300);
+            // Asking for a week can only return what retention kept.
+            assert_eq!(
+                clamp_window_secs(Some(7 * 24 * 3600)),
+                MAX_HISTORY_WINDOW_SECS
+            );
+            // Zero and negative would make an empty or inverted range.
+            assert_eq!(clamp_window_secs(Some(0)), 1);
+            assert_eq!(clamp_window_secs(Some(-60)), 1);
+        }
+
+        #[test]
+        fn the_window_clamp_tracks_gc_retention() {
+            // The two used to be independent literals whose doc comments merely
+            // claimed to agree. Now one defines the other — assert it, so a
+            // future edit that reintroduces a local copy fails here.
+            assert_eq!(
+                MAX_HISTORY_WINDOW_SECS,
+                veld_core::stats::NODE_STATS_RETENTION_SECS
+            );
+            assert!(
+                veld_core::stats::PROCESS_STATS_RETENTION_SECS
+                    < veld_core::stats::NODE_STATS_RETENTION_SECS,
+                "per-process rows are the bulky ones and must not outlive the aggregates"
+            );
+        }
+
+        #[test]
+        fn available_metrics_always_offers_the_three_totals() {
+            // Even with no data at all — the picker must never be empty.
+            let m = derive_available_metrics(&[]);
+            assert_eq!(m, vec!["footprint", "resident", "virtual"]);
+        }
+
+        #[test]
+        fn a_class_present_in_any_bucket_stays_offerable() {
+            // The regression this replaced: one transient probe failure in the
+            // NEWEST bucket used to drop every page class from the picker, which
+            // reset the reader's metric and closed the by-type view.
+            let buckets = vec![
+                bucket(detailed()),
+                bucket(MemoryBreakdown::basic(1000, 5000)), // newest: probe failed
+            ];
+            let m = derive_available_metrics(&buckets);
+            assert!(
+                m.contains(&"private_dirty"),
+                "a class measured earlier in the window is still offerable, got {m:?}"
+            );
+            assert!(m.contains(&"swap"));
+        }
+
+        #[test]
+        fn a_class_no_bucket_carries_is_not_offered() {
+            // macOS: totals only. The picker must not list what it cannot plot.
+            let buckets = vec![bucket(MemoryBreakdown::basic(1000, 5000))];
+            let m = derive_available_metrics(&buckets);
+            assert_eq!(m, vec!["footprint", "resident", "virtual"]);
+        }
+
+        #[test]
+        fn cap_series_counts_before_truncating() {
+            let mut few: Vec<u32> = (0..3).collect();
+            assert_eq!(cap_series(&mut few), 0);
+            assert_eq!(few.len(), 3);
+
+            let mut many: Vec<u32> = (0..MAX_PROCESS_SERIES as u32 + 5).collect();
+            assert_eq!(cap_series(&mut many), 5, "omitted count is pre-truncation");
+            assert_eq!(many.len(), MAX_PROCESS_SERIES);
+            // Heaviest-first ordering means truncation keeps the head.
+            assert_eq!(many[0], 0);
         }
     }
 

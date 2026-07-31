@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { axisMax, contiguousRuns } from "./TimeSeriesChart";
+import { axisMax, contiguousRuns, stackBands, stackedMax } from "./TimeSeriesChart";
+import type { ChartSeries } from "./TimeSeriesChart";
 import { STACK_METRICS, bucketValue, fmtCpuTime, fmtPercent } from "../ResourcePanel";
 import type { StatsBucket } from "../../api";
 
@@ -121,5 +122,112 @@ describe("fmtPercent", () => {
 
   it("does not clamp above 100 — a multi-threaded tree really does exceed one core", () => {
     expect(fmtPercent(340)).toBe("340%");
+  });
+});
+
+describe("stack presence (F1 regression)", () => {
+  // Two processes; the second only exists for the last two of five buckets —
+  // a child that restarted mid-window, which is routine for `npm run dev`.
+  const nodeProc = [10, 10, 10, 10, 10];
+  const lateChild = [null, null, null, 5, 5];
+
+  it("all-or-nothing presence blanks the whole stack where any series is absent", () => {
+    // This is the OLD behaviour and the bug: every bucket before the child
+    // appeared is dropped for BOTH processes, so the chart goes empty even
+    // though the parent has data throughout.
+    const every = (i: number) => [nodeProc, lateChild].every((p) => p[i] != null);
+    expect(contiguousRuns(5, every)).toEqual([[3, 4]]);
+  });
+
+  it("per-series presence keeps every bucket a live process reported", () => {
+    // The fix: absence of a process means it did not exist, which contributes
+    // zero — the sum of the live processes still IS the tree's figure.
+    const some = (i: number) => [nodeProc, lateChild].some((p) => p[i] != null);
+    expect(contiguousRuns(5, some)).toEqual([[0, 1, 2, 3, 4]]);
+  });
+
+  it("page classes still need all-or-nothing", () => {
+    // An unmeasurable class is not zero, so a partial stack would understate
+    // the total — the opposite policy from processes, deliberately.
+    const priv = [1, 1, null, 1, 1];
+    const shared = [2, 2, 2, 2, 2];
+    const every = (i: number) => [priv, shared].every((p) => p[i] != null);
+    expect(contiguousRuns(5, every)).toEqual([
+      [0, 1],
+      [3, 4],
+    ]);
+  });
+});
+
+describe("stackBands", () => {
+  // Identity scales so the assertions read as values, not pixels.
+  const x = (i: number) => i;
+  const y = (v: number) => v;
+  const series = (key: string, points: (number | null)[]): ChartSeries => ({
+    key,
+    label: key,
+    slot: 1,
+    points,
+  });
+
+  it("lays each band on the sum of the ones below it", () => {
+    const bands = stackBands(
+      [series("a", [1, 1, 1]), series("b", [2, 2, 2])],
+      3,
+      "all",
+      x,
+      y,
+    );
+    // `a` runs along the baseline: top edge at 1, bottom edge back at 0.
+    expect(bands[0].d).toBe("M0.0,1.0 L1.0,1.0 L2.0,1.0 L2.0,0.0 L1.0,0.0 L0.0,0.0 Z");
+    // `b` sits ON `a`: top edge at 3, bottom edge at 1 — not at 0.
+    expect(bands[1].d).toBe("M0.0,3.0 L1.0,3.0 L2.0,3.0 L2.0,1.0 L1.0,1.0 L0.0,1.0 Z");
+  });
+
+  it('"any" keeps drawing where one band is absent, treating it as zero', () => {
+    // The F1 case: `b` is a child that only existed at the last index.
+    const bands = stackBands(
+      [series("a", [1, 1, 1]), series("b", [null, null, 2])],
+      3,
+      "any",
+      x,
+      y,
+    );
+    // `a` spans all three indices — it is not blanked by `b`'s absence.
+    expect(bands[0].d).toBe("M0.0,1.0 L1.0,1.0 L2.0,1.0 L2.0,0.0 L1.0,0.0 L0.0,0.0 Z");
+    // `b` contributes 0 where absent, so its band hugs `a`'s top until index 2.
+    expect(bands[1].d).toBe("M0.0,1.0 L1.0,1.0 L2.0,3.0 L2.0,1.0 L1.0,1.0 L0.0,1.0 Z");
+  });
+
+  it('"all" drops the index entirely where any band is absent', () => {
+    const bands = stackBands(
+      [series("a", [1, 1, 1]), series("b", [2, null, 2])],
+      3,
+      "all",
+      x,
+      y,
+    );
+    // Index 1 is gone, so each band is two single-point runs (drawn as ticks).
+    expect(bands[0].d).toBe("M0.0,0.0 L0.0,1.0 M2.0,0.0 L2.0,1.0");
+  });
+
+  it("does not raise the baseline under a gap", () => {
+    // The silent-failure mode: if the baseline accumulated at every index rather
+    // than only the drawn ones, `b`'s run after the gap would start too high.
+    const bands = stackBands(
+      [series("a", [5, null, 5]), series("b", [1, 1, 1])],
+      3,
+      "all",
+      x,
+      y,
+    );
+    // Index 1 is dropped for both (policy "all"), and index 2's baseline is 5 —
+    // `a`'s value there — not 10 (the sum of both of `a`'s values).
+    expect(bands[1].d).toContain("2.0,6.0");
+    expect(bands[1].d).not.toContain("2.0,11.0");
+  });
+
+  it("stackedMax sums per index and ignores absences", () => {
+    expect(stackedMax([series("a", [1, 4]), series("b", [2, null])], 2)).toBe(4);
   });
 });

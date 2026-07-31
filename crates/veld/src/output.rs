@@ -268,7 +268,7 @@ pub fn print_info(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::one_line;
+    use super::{fmt_bytes, fmt_cpu_time, one_line, sparkline};
 
     /// A preset's `label`/`when_to_use`/`group` is free prose from a config file,
     /// and `skills/veld/SKILL.md` pipes `veld presets` output into a coding agent's
@@ -298,6 +298,65 @@ mod tests {
 
     /// Bidi overrides are the same defect as an escape sequence — rendered text
     /// that does not match the bytes.
+    #[test]
+    fn fmt_bytes_uses_1024_steps() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1 KB");
+        assert_eq!(fmt_bytes(1024 * 1024), "1 MB");
+        assert_eq!(fmt_bytes(1536 * 1024 * 1024), "1.5 GB");
+    }
+
+    /// Mirrors `fmtCpuTime` in the management UI, which asserts it "matches the
+    /// CLI's units" — that test pinned only the TypeScript half until now.
+    #[test]
+    fn fmt_cpu_time_matches_the_ui() {
+        assert_eq!(fmt_cpu_time(0.0), "0.0s");
+        assert_eq!(fmt_cpu_time(3.14), "3.1s");
+        assert_eq!(fmt_cpu_time(59.9), "59.9s");
+        assert_eq!(fmt_cpu_time(60.0), "1m00s");
+        assert_eq!(fmt_cpu_time(125.0), "2m05s");
+        assert_eq!(fmt_cpu_time(3600.0), "1h00m");
+        assert_eq!(fmt_cpu_time(7860.0), "2h11m");
+    }
+
+    #[test]
+    fn sparkline_never_renders_a_small_value_as_a_gap() {
+        // The load-bearing rule: `ceil` into a 1..=8 band, so any non-zero value
+        // gets at least the shortest block. With `round` instead, a tiny value
+        // would land on index 0 and be indistinguishable from `None` — "absent"
+        // and "nearly zero" would become the same character, in every
+        // `veld stats --history`.
+        let s = sparkline(&[None, Some(0.0001), Some(100.0)]);
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(chars.len(), 3);
+        assert_eq!(chars[0], ' ', "an absent sample is a space");
+        assert_ne!(chars[1], ' ', "a tiny non-zero value must still be visible");
+        assert_eq!(chars[2], '\u{2588}', "the max is the full block");
+    }
+
+    #[test]
+    fn sparkline_scales_from_zero_not_from_the_minimum() {
+        // A series wandering between 400 and 402 must read as flat. Min-max
+        // scaling would draw it as a mountain range.
+        let s = sparkline(&[Some(400.0), Some(401.0), Some(402.0)]);
+        assert_eq!(s.chars().collect::<Vec<_>>().len(), 3);
+        let distinct: std::collections::HashSet<char> = s.chars().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "a 0.5% spread must not span the band: {s:?}"
+        );
+    }
+
+    #[test]
+    fn sparkline_handles_all_absent_and_all_zero() {
+        assert_eq!(sparkline(&[None, None]), "  ");
+        // All-zero has no maximum to scale against; it must not divide by zero.
+        assert_eq!(sparkline(&[Some(0.0), Some(0.0)]).chars().count(), 2);
+        assert_eq!(sparkline(&[]), "");
+    }
+
     #[test]
     fn one_line_strips_bidi_overrides() {
         let safe = one_line(&format!("start{rlo}dne", rlo = '\u{202E}'));

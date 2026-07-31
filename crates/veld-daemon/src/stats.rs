@@ -48,6 +48,34 @@ const SAMPLE_INTERVAL_SECS: u64 = 5;
 /// the real argv.
 const CMD_MAX_CHARS: usize = 160;
 
+/// Whether to record each process's full argv. Off via `VELD_STATS_CMDLINE=off`
+/// (also `0`/`false`/`no`); the process *name* is always recorded.
+///
+/// The switch exists because argv is a genuinely new data class here, not just
+/// more of the same. veld's own config rules forbid putting a secret on a command
+/// line *because the OS process table is world-readable* — but that premise is
+/// platform-specific: on macOS `KERN_PROCARGS2` restricts argv to the owning uid,
+/// so a node's arguments are not readable by another local user today. Recording
+/// them puts them in the database (0600) for the per-process retention window and
+/// serves them from the daemon's unauthenticated localhost API, which is reachable
+/// from the app under development's own origin. That opens no boundary the
+/// pre-existing `/api/logs` endpoint doesn't already cross, and a command line is
+/// usually the only way to tell two `node` children apart — so it stays on by
+/// default and gains an off switch, rather than the reverse.
+///
+/// Cached: the sampler asks once per process per 5s and the answer cannot change
+/// within a daemon's life.
+fn cmdline_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| match std::env::var("VELD_STATS_CMDLINE") {
+        Ok(v) => !matches!(
+            v.trim().to_ascii_lowercase().as_str(),
+            "off" | "0" | "false" | "no"
+        ),
+        Err(_) => true,
+    })
+}
+
 /// Hard ceiling on processes recorded per node per sample.
 ///
 /// A runaway `make -j` or a container-in-a-container can put hundreds of
@@ -243,7 +271,7 @@ struct ProcessReading {
 /// UTF-8 (a project path with an umlaut is enough), and slicing bytes would
 /// panic mid-codepoint.
 fn join_cmd(argv: &[std::ffi::OsString]) -> Option<String> {
-    if argv.is_empty() {
+    if argv.is_empty() || !cmdline_enabled() {
         return None;
     }
     let full = argv
@@ -340,18 +368,32 @@ fn cap_processes(mut processes: Vec<ProcessSample>) -> Vec<ProcessSample> {
     if processes.len() <= MAX_PROCESSES_PER_NODE {
         return processes;
     }
-    // Rank by footprint to find the cut-off, then filter the original order by
-    // the surviving PIDs so pre-order survives.
+    // The root is kept unconditionally, before any ranking. It is often the
+    // *cheapest* process in the tree — a `sh -c "npm run dev"` wrapper holds
+    // almost nothing — so ranking by footprint alone would evict exactly the
+    // process the tree is named after, leaving a table with no depth-0 row where
+    // every remaining row indents against an absent parent.
+    let mut keep: HashSet<u32> = processes
+        .iter()
+        .find(|p| p.depth == 0)
+        .map(|p| p.pid)
+        .into_iter()
+        .collect();
+    // Then fill the remaining slots by weight, so what survives is the root plus
+    // the heaviest — which is what a reader opened the breakdown for.
     let mut by_weight: Vec<(u64, u32)> = processes
         .iter()
+        .filter(|p| !keep.contains(&p.pid))
         .map(|p| (p.memory.footprint, p.pid))
         .collect();
     by_weight.sort_unstable_by(|a, b| b.cmp(a));
-    let keep: HashSet<u32> = by_weight
-        .into_iter()
-        .take(MAX_PROCESSES_PER_NODE)
-        .map(|(_, pid)| pid)
-        .collect();
+    keep.extend(
+        by_weight
+            .into_iter()
+            .take(MAX_PROCESSES_PER_NODE - keep.len())
+            .map(|(_, pid)| pid),
+    );
+    // Filter the original order so pre-order survives.
     processes.retain(|p| keep.contains(&p.pid));
     processes
 }
@@ -496,6 +538,30 @@ mod tests {
         assert_eq!(pids, sorted, "kept processes stay in pre-order");
         assert_eq!(*pids.last().unwrap(), 200, "the heaviest survived");
         assert!(!pids.contains(&2), "the lightest was dropped");
+    }
+
+    #[test]
+    fn cap_never_evicts_the_root_however_cheap_it_is() {
+        // The realistic shape: a `sh -c` wrapper holding almost nothing, parent
+        // to a swarm of heavier children. Ranking by footprint alone would drop
+        // the one process the node is tracked by.
+        let kids: Vec<Pid> = (2..=200u32).map(p).collect();
+        let children: HashMap<Pid, Vec<Pid>> = [(p(1), kids)].into();
+        let t = aggregate_tree(p(1), &children, now(), |pid| {
+            // Root is the cheapest thing in the tree.
+            let mem = if pid.as_u32() == 1 {
+                1
+            } else {
+                pid.as_u32() as u64 * 1000
+            };
+            Some(reading(0.0, mem))
+        })
+        .unwrap();
+        assert_eq!(t.processes.len(), MAX_PROCESSES_PER_NODE);
+        assert_eq!(t.processes[0].pid, 1, "the root is present and still first");
+        assert_eq!(t.processes[0].depth, 0);
+        // And the rest of the budget went to the heaviest children.
+        assert!(t.processes.iter().any(|x| x.pid == 200));
     }
 
     /// End-to-end against the real platform: sample this test process's own

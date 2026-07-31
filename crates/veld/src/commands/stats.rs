@@ -194,7 +194,14 @@ pub async fn run(args: StatsArgs) -> i32 {
     rows.sort_by(|a, b| a.key.cmp(&b.key));
 
     if json {
-        print_json(&rows, &run_name, metric, window, args.history);
+        print_json(
+            &rows,
+            &run_name,
+            metric,
+            window,
+            args.history,
+            args.processes,
+        );
         return 0;
     }
 
@@ -209,6 +216,13 @@ pub async fn run(args: StatsArgs) -> i32 {
             ));
         }
         return 0;
+    }
+
+    if args.cpu && !args.history {
+        // The flag only selects which dimension --history graphs, so on its own
+        // it does nothing. Say so rather than printing a memory table that looks
+        // like it honoured the request.
+        output::print_info("--cpu selects the dimension for --history; add --history to graph it.");
     }
 
     print_human(&rows, metric, args.all_metrics, window);
@@ -502,6 +516,7 @@ fn print_json(
     metric: MemoryMetric,
     window: StatsWindow,
     include_history: bool,
+    include_processes: bool,
 ) {
     let nodes: Vec<serde_json::Value> = rows
         .iter()
@@ -521,7 +536,12 @@ fn print_json(
                 "memory": r.stats.memory,
                 "sampled_at": r.stats.sampled_at.timestamp_millis(),
             });
-            if !r.processes.is_empty() {
+            if include_processes {
+                // Always an array once `--processes` was passed, even when empty:
+                // the agent-facing contract in skills/veld/SKILL.md says the key
+                // is there, and a node whose per-process rows aged out of the
+                // shorter retention window would otherwise make
+                // `node.processes.length` throw rather than read 0.
                 v["processes"] = serde_json::to_value(&r.processes).unwrap_or_default();
             }
             if include_history {

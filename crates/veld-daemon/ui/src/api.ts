@@ -335,6 +335,14 @@ export interface StatsHistory {
   processes: ProcessSeries[];
   processes_omitted: number;
   tree: ProcessRow[];
+  /** How long the daemon keeps node aggregates (seconds). Build window presets
+   * from this rather than a local copy — a hardcoded cap silently stops matching
+   * the daemon's GC. */
+  retention_secs: number;
+  /** How long per-process rows are kept (seconds) — shorter than
+   * `retention_secs`, so a by-process chart over a longer window is legitimately
+   * empty before that boundary. */
+  process_retention_secs: number;
 }
 
 /** One-shot credential for opening a terminal WebSocket. */

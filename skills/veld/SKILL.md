@@ -446,10 +446,17 @@ Which memory number answers which question:
 | which subprocess is it? | `--processes` |
 | is it burning CPU, and in bursts? | `cpu_percent` vs `cpu_peak` (`--cpu` to graph it) |
 
-Retention: node totals 24h, per-process rows 2h. Set
-`VELD_STATS_MEMORY_DETAIL=off` in the daemon's environment to fall back to
-RSS-only sampling (the escape hatch for a process with a pathological number of
-memory mappings, where reading `smaps_rollup` is not cheap).
+Retention: node totals 24h, per-process rows 2h — the API reports both
+(`retention_secs`, `process_retention_secs`) so a client never has to hardcode
+them. A by-process view over a window longer than the per-process horizon is
+legitimately empty for the older part of the range.
+
+Two daemon-environment escape hatches:
+
+| variable | effect |
+|---|---|
+| `VELD_STATS_MEMORY_DETAIL=off` | Fall back to RSS-only sampling. For a process with a pathological number of memory mappings, where reading `smaps_rollup` is not cheap. `footprint` then equals RSS and every page class reports `null`. |
+| `VELD_STATS_CMDLINE=off` | Stop recording each process's argv. The process *name* is still recorded. veld's own rules forbid secrets on a command line because the process table is world-readable — but on macOS argv is restricted to the owning uid, so recording it does move that data into the database and the daemon's localhost API. On by default (a command line is often the only way to tell two `node` children apart); this turns it off. |
 
 `veld status --json` additionally carries `live` (whether the environment
 occupies the live run slot), `end_reason`/`end_detail` (populated once the run

@@ -41,6 +41,28 @@ use serde::{Deserialize, Serialize};
 /// absorbs a skipped tick without flapping.
 pub const STALE_AFTER_SECS: i64 = 15;
 
+/// How long node-aggregate samples are kept, in seconds.
+///
+/// **One definition, three consumers**: the daemon's GC prunes to it, the
+/// history API clamps requested windows to it, and the management UI builds its
+/// window presets from what the API reports. It lived as three unrelated
+/// literals first — a GC constant, a `MAX_HISTORY_WINDOW_SECS` whose doc comment
+/// *claimed* to match it, and an `86400` in the UI — so halving retention would
+/// have left the API promising a day of data it no longer had and the window
+/// picker offering a range that returns nothing, with no test failing. Keep the
+/// single definition; don't re-derive it anywhere.
+pub const NODE_STATS_RETENTION_SECS: i64 = 24 * 3600;
+
+/// How long per-process samples are kept, in seconds.
+///
+/// Deliberately shorter than [`NODE_STATS_RETENTION_SECS`]: these rows outnumber
+/// the aggregates by the size of each node's process tree, and a per-subprocess
+/// breakdown answers "what is happening now", not "what happened yesterday".
+/// Readers must surface the difference — a by-process chart over a 24h window is
+/// legitimately empty for its first 22 hours, and that needs saying rather than
+/// looking like a bug.
+pub const PROCESS_STATS_RETENTION_SECS: i64 = 2 * 3600;
+
 /// The memory figures a platform can report for one process, beyond plain RSS.
 ///
 /// Every field except [`footprint`](Self::footprint) and
@@ -257,7 +279,15 @@ impl MemoryMetric {
         match self {
             MemoryMetric::Footprint => Some(m.footprint),
             MemoryMetric::Resident => Some(resident),
-            MemoryMetric::Virtual => Some(m.virtual_bytes),
+            // A live process cannot occupy zero bytes of address space, so `0`
+            // here means "not recorded" — the case of a sample written before
+            // the breakdown columns existed, which `stats_from_row` defaults to
+            // 0 because the field is not itself optional. Reporting it as absent
+            // keeps the promise the rest of this type makes: an unmeasured
+            // metric renders as a gap, never as a number that looks measured.
+            // (`0` is a legitimate value for every *page class*, which is
+            // exactly why those are `Option` instead of relying on a sentinel.)
+            MemoryMetric::Virtual => (m.virtual_bytes > 0).then_some(m.virtual_bytes),
             MemoryMetric::PrivateClean => m.private_clean,
             MemoryMetric::PrivateDirty => m.private_dirty,
             MemoryMetric::SharedClean => m.shared_clean,

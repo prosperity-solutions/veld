@@ -39,15 +39,27 @@ type SplitMode = "total" | "type" | "process";
 /** Which resource the chart plots. Separate charts, never one with two axes. */
 type Dimension = "memory" | "cpu";
 
-/** Window presets, in seconds. Capped at the daemon's 24h stats retention —
- * offering "7 days" would return four hours of data and look like a bug. */
-const WINDOWS = [
+/** Candidate window presets, in seconds. Filtered against the retention the
+ * daemon actually reports (`retention_secs`) — offering a range that returns
+ * nothing looks like a bug, and a hardcoded cap here silently stops matching the
+ * GC the first time retention is retuned. */
+const WINDOW_CHOICES = [
   { value: "300", label: "5m" },
   { value: "900", label: "15m" },
   { value: "3600", label: "1h" },
   { value: "21600", label: "6h" },
   { value: "86400", label: "24h" },
 ];
+
+/** Retention assumed before the first response arrives. Only ever narrows the
+ * picker for one poll, and the server clamps regardless. */
+const ASSUMED_RETENTION_SECS = 86400;
+
+function windowPresets(retentionSecs: number) {
+  const usable = WINDOW_CHOICES.filter((w) => Number(w.value) <= retentionSecs);
+  // Never present an empty picker, however short retention gets.
+  return usable.length > 0 ? usable : [WINDOW_CHOICES[0]];
+}
 
 /** Buckets requested. Roughly one per 3px of a wide panel. */
 const POINTS = 240;
@@ -195,6 +207,23 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
     if (split === "type" && !canSplitByType) setSplit("total");
   }, [split, canSplitByType]);
 
+  /**
+   * First-seen PID → colour slot, stable for as long as the panel is open.
+   *
+   * A ref rather than state on purpose: assigning a slot must not re-render, and
+   * the map must survive every poll. Slots wrap at 8 (the palette's fixed size),
+   * so a node with more than eight charted processes reuses a hue — better than
+   * inventing one, per the palette's own rule.
+   */
+  const slots = useRef(new Map<number, number>());
+  const slotForPid = (pid: number): number => {
+    const existing = slots.current.get(pid);
+    if (existing != null) return existing;
+    const slot = (slots.current.size % 8) + 1;
+    slots.current.set(pid, slot);
+    return slot;
+  };
+
   /** The value this dimension plots, per bucket. */
   const readBucket = useMemo(
     () =>
@@ -219,13 +248,16 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
     if (split === "process") {
       // Bucket times differ per process (a process that started late has fewer
       // buckets), so index each series into the node's own time axis by `t`.
-      return data.processes.map((p, i) => {
+      return data.processes.map((p) => {
         const byTime = new Map(p.buckets.map((b) => [b.t, readBucket(b)]));
         return {
           key: String(p.pid),
           label: `${p.name} (${p.pid})`,
-          // Slot by position in the (stably ordered) series list, folded into 8.
-          slot: (i % 8) + 1,
+          // Colour follows the PID for the life of this panel, NOT its position
+          // in the list: the server ranks series by peak footprint over the
+          // requested window, so two children whose peaks cross would otherwise
+          // swap colours between 5s polls.
+          slot: slotForPid(p.pid),
           points: times.map((t) => byTime.get(t) ?? null),
         };
       });
@@ -304,7 +336,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           size="xs"
           value={windowSecs}
           onChange={setWindowSecs}
-          data={WINDOWS}
+          data={windowPresets(data?.retention_secs ?? ASSUMED_RETENTION_SECS)}
           aria-label="History window"
         />
         {loading && <Loader size="xs" />}
@@ -333,13 +365,20 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
       {noData ? (
         <Text size="xs" c="dimmed">
           No samples in this window. The daemon samples every 5s while a run is
-          up; per-process history is kept for 2h and totals for 24h.
+          up; totals are kept for{" "}
+          {formatDuration(data?.retention_secs ?? ASSUMED_RETENTION_SECS)} and
+          per-process detail for{" "}
+          {formatDuration(data?.process_retention_secs ?? 7200)}.
         </Text>
       ) : (
         <TimeSeriesChart
           times={times}
           series={series}
           mode={split === "total" ? "line" : "stacked"}
+          // Processes: an absent PID did not exist then, so it contributes zero
+          // and the rest of the stack still draws. Page classes: an absent class
+          // is unmeasurable, so a partial stack would understate the total.
+          stackPresence={split === "process" ? "any" : "all"}
           format={isCpu ? fmtPercent : fmtBytes}
           windowStart={data?.start ?? Date.now() - secs * 1000}
           windowEnd={data?.end ?? Date.now()}
@@ -352,6 +391,31 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           }
         />
       )}
+
+      {/* The by-process view is legitimately empty before the per-process
+          horizon, which is shorter than the aggregate one. Saying so beats
+          leaving most of the axis blank with no explanation. */}
+      {split === "process" && data && secs > data.process_retention_secs && (
+        <Text size="xs" c="dimmed">
+          Per-process history covers the last{" "}
+          {formatDuration(data.process_retention_secs)} — the rest of this{" "}
+          {formatDuration(secs)} window has node totals only.
+        </Text>
+      )}
+
+      {/* F7: peaks exist for footprint and CPU only, so on another metric with
+          wide buckets the mean is all there is — and the spike-hiding the peak
+          line exists to counter still applies. */}
+      {split === "total" &&
+        bucketsAggregate &&
+        !isCpu &&
+        metric !== "footprint" && (
+          <Text size="xs" c="dimmed">
+            Buckets average {data?.bucket_secs}s of samples here; peaks are
+            recorded for footprint and CPU only, so a brief spike in{" "}
+            {METRIC_LABELS[metric]} may not show.
+          </Text>
+        )}
 
       {split === "process" && data && data.processes_omitted > 0 && (
         <Text size="xs" c="dimmed">
@@ -417,6 +481,13 @@ function ProcessTable(props: { data: StatsHistory; classMetric: MemoryMetric | n
       </table>
     </div>
   );
+}
+
+/** A retention/window length as a human phrase ("2h", "24h", "15m"). */
+function formatDuration(secs: number): string {
+  if (secs % 3600 === 0) return `${secs / 3600}h`;
+  if (secs % 60 === 0) return `${secs / 60}m`;
+  return `${secs}s`;
 }
 
 /** Cumulative CPU time. Mirrors the CLI's `output::fmt_cpu_time`. */
