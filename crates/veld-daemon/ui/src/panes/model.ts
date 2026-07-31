@@ -35,6 +35,15 @@ import { type PaneEmulation, sanitizeEmulation, sanitizeZoom } from "./devices";
  * below — because they are content you sit in front of and arrange beside a
  * terminal, not a way to get somewhere else.
  *
+ * **Adding a kind that owns live state?** A terminal is the worked example, and it
+ * needs three things beyond a renderer: a module-level registry outside React (so
+ * a tab switch cannot destroy it — `panes/terminalHost.ts`), a durable home for
+ * the ids naming that state (`layoutSlotKey` below, because a Veld Desktop restart
+ * empties `sessionStorage`), and a way to notice that the state it named is *gone*
+ * (`EXPECTED_RESUMES` in `terminalHost.ts`, which must read through `loadLayouts`
+ * or it is empty in exactly the case that matters). `panes/browserHost.ts` is the
+ * second example and needs none of the durability, because a page is re-creatable.
+ *
  * There is deliberately no `services` kind. The run's URLs are a *launcher*, not
  * a peer of a terminal and a page, and a launcher belongs wherever you are about
  * to need it: a `new` pane and a browser pane with no URL both show them

@@ -262,10 +262,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Hang up terminal shells before anything else. They are the only children
-    // that outlive us on their own (own session, own controlling terminal), so a
-    // restart would otherwise leave orphans no client can ever reattach to.
-    // Ordered before the aborts because it needs the runtime to still be turning.
+    // Terminal shells are deliberately **left running**. Their PTYs belong to
+    // holder processes rather than to this one, so a shutdown is invisible to them
+    // and the next daemon adopts them — which is what makes `veld update` safe to
+    // run with terminals open. This call only records how many were left; what
+    // still ends a shell is an explicit `DELETE`, the detach reaper, or the
+    // holder's own orphan grace. Ordered before the aborts because it needs the
+    // runtime to still be turning.
     feedback_server::shutdown_terminal_sessions().await;
 
     // Abort background tasks.

@@ -63,6 +63,32 @@ pub fn daemon_socket() -> PathBuf {
         .join("daemon.sock")
 }
 
+/// Where this instance's terminal holder sockets live.
+///
+/// One owner for the name, because three crates need it: the daemon binds and
+/// scans it, `veld doctor` reports it, and `veld uninstall` sweeps it.
+///
+/// Keyed by daemon **port**, not just by the socket directory: a dev instance must
+/// never adopt the installed instance's terminal sessions, whose `worktree_id`s
+/// come from a different database entirely. `VELD_PTY_DIR` overrides it outright,
+/// which is how the daemon's own recovery test points a child at a temp dir.
+pub fn pty_dir() -> PathBuf {
+    if let Some(dir) = env_nonempty("VELD_PTY_DIR") {
+        return PathBuf::from(dir);
+    }
+    let socket = daemon_socket();
+    let base = socket
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join(format!("pty-{}", daemon_port()))
+}
+
+/// The prefix every [`pty_dir`] shares, for code that must find the holder
+/// directories of **every** instance rather than only this one — `veld uninstall`,
+/// which has to stop them all.
+pub const PTY_DIR_PREFIX: &str = "pty-";
+
 /// Management hostname this daemon should self-register with the helper
 /// (e.g. `veld-dev.localhost`). `None` for the installed instance — its
 /// `veld.localhost` route is part of the helper's base Caddy config.

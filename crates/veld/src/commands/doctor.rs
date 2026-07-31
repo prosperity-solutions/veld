@@ -536,6 +536,56 @@ impl Diagnostics {
                 }
             }
         }
+
+        // 9. Terminal holder processes.
+        //
+        // Each open terminal in `/ide` has a process of its own holding its PTY,
+        // which is what lets a shell survive `veld update`. They are invisible to
+        // every other check here — not the daemon, not a run — so "my terminal
+        // died after an update" had nowhere to look. This names the directory and
+        // counts what is in it; a socket nobody answers is a holder that is gone
+        // and gets swept at the next daemon start.
+        self.checks.push(self.terminal_holders_check());
+    }
+
+    /// Count holder sockets, and how many of them answer.
+    fn terminal_holders_check(&self) -> Check {
+        let dir = veld_core::instance::pty_dir();
+        let shown = tilde_path(&dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            // No directory is the ordinary state: it appears with the first
+            // terminal and nothing prunes it.
+            return Check {
+                pass: true,
+                label: format!("No terminal holders ({shown})"),
+            };
+        };
+        let (mut live, mut stale) = (0usize, 0usize);
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            match std::os::unix::net::UnixStream::connect(&path) {
+                Ok(_) => live += 1,
+                Err(_) => stale += 1,
+            }
+        }
+        if live == 0 && stale == 0 {
+            return Check {
+                pass: true,
+                label: format!("No terminal holders ({shown})"),
+            };
+        }
+        Check {
+            // Not a failure: a stale socket is swept at the next daemon start.
+            pass: true,
+            label: if stale == 0 {
+                format!("{live} terminal holder(s) running ({shown})")
+            } else {
+                format!("{live} terminal holder(s) running, {stale} stale socket(s) ({shown})")
+            },
+        }
     }
 
     // -- Tip -----------------------------------------------------------------

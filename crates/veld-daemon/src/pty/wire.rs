@@ -20,6 +20,14 @@
 //! exit. Never reuse the byte `0x83` for anything else, and never give it a
 //! payload that matters — a holder from a future version must be able to obey it
 //! without understanding anything else on the wire.
+//!
+//! Concretely, the contract a hangup-only caller relies on is: **connect, write
+//! the five bytes, and you may close immediately.** The holder spawns its frame
+//! reader before it writes its own greeting precisely so that this works — three
+//! callers depend on it (`veld uninstall`'s sweep, the recovery test's cleanup
+//! guard, and the daemon refusing an unrecognised version), and greeting-first
+//! made all three silently ineffective: the peer had already gone, the greeting
+//! failed EPIPE, and the hangup was never read while the shell kept running.
 
 use std::path::PathBuf;
 
@@ -42,6 +50,15 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// housekeeping. If a change ever has to preserve sessions across it, add a
 /// `MIN_SUPPORTED` and keep the old decode path rather than widening the
 /// comparison.
+///
+/// **The exception, and the reason this diff added a [`Hello`] field without
+/// bumping:** a new JSON field carrying `#[serde(default)]` costs nothing in
+/// either direction, because serde ignores unknown fields and defaults missing
+/// ones. So *optional additive* fields are free; renames, removals and any field
+/// without a default are not — a missing required field fails deserialization,
+/// which is not even reported as a version problem (the daemon cannot read the
+/// greeting at all, so it cannot tell what version sent it). Either add the
+/// default or bump this.
 pub const PROTOCOL: u32 = 1;
 
 // Holder → daemon.
@@ -121,9 +138,10 @@ pub struct Hello {
     pub pid: i32,
     /// `Some(code)` if the shell has already exited.
     pub exited: Option<u32>,
-    /// Seconds since a daemon was last connected, or `None` if one is connected
-    /// right now (which is the case when a *newly spawned* holder greets the
-    /// daemon that spawned it).
+    /// Seconds since a daemon was last connected, or `None` if one is attached
+    /// right now — which means a **takeover**, not a fresh spawn: a newly started
+    /// holder has never had a daemon, so its clock is already running and it
+    /// reports `Some(~0)`.
     ///
     /// Without this, adoption restarted the detach clock at zero on every daemon
     /// start: the 30-minute bound on "a shell nobody will ever come back to"
@@ -347,6 +365,38 @@ mod tests {
                 }
                 .is_ignorable(),
                 "{kind:#x} should be ignorable"
+            );
+        }
+    }
+
+    #[test]
+    fn every_frame_kind_has_its_own_byte() {
+        // Reusing a byte compiles and passes every other test, while putting one
+        // side's frame into the other's state machine. The module doc's "never
+        // reuse 0x83" was comment-only until this test.
+        let kinds = [
+            ("HELLO", HELLO),
+            ("SCROLLBACK", SCROLLBACK),
+            ("OUTPUT", OUTPUT),
+            ("EXIT", EXIT),
+            ("INPUT", INPUT),
+            ("RESIZE", RESIZE),
+            ("HANGUP", HANGUP),
+        ];
+        let unique: std::collections::HashSet<u8> = kinds.iter().map(|(_, k)| *k).collect();
+        assert_eq!(
+            unique.len(),
+            kinds.len(),
+            "two frame kinds share a byte: {kinds:?}"
+        );
+        // And the direction split `is_ignorable` keys on must hold: holder-sent
+        // kinds below 0x80, daemon-sent kinds at or above it.
+        for (name, kind) in kinds {
+            let holder_sent = matches!(name, "HELLO" | "SCROLLBACK" | "OUTPUT" | "EXIT");
+            assert_eq!(
+                kind < 0x80,
+                holder_sent,
+                "{name} is on the wrong side of the 0x80 split"
             );
         }
     }

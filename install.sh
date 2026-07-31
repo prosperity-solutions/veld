@@ -399,9 +399,19 @@ else
       echo "Updating veld-daemon service (KillMode=process)..."
       # Inserted under [Service]: appending would land in [Install], where
       # systemd ignores it.
-      if sed -i.veld-bak 's/^\[Service\]$/[Service]\nKillMode=process/' "$DAEMON_UNIT" 2>/dev/null; then
-        rm -f "$DAEMON_UNIT.veld-bak"
+      sed -i.veld-bak 's/^\[Service\]$/[Service]\nKillMode=process/' "$DAEMON_UNIT" 2>/dev/null || true
+      rm -f "$DAEMON_UNIT.veld-bak"
+      # sed exits 0 when it substitutes nothing, so verify rather than trust: a
+      # [Service] line with trailing whitespace, a CRLF unit or a hand-edited
+      # header would otherwise leave the file untouched while this script had
+      # already announced success and was about to restart the daemon — SIGKILLing
+      # every holder it was trying to protect.
+      if grep -q '^KillMode=process$' "$DAEMON_UNIT"; then
         systemctl --user daemon-reload 2>/dev/null || true
+      else
+        echo "  Warning: could not add KillMode=process to $DAEMON_UNIT."
+        echo "           Open terminals in Veld Desktop will not survive this restart."
+        echo "           Run 'veld setup' to rewrite the service file."
       fi
     fi
     if systemctl --user is-active --quiet veld-daemon 2>/dev/null; then

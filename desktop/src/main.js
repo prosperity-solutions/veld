@@ -118,11 +118,25 @@ const LAYOUT_SLOT = claimSlot(app.isPackaged ? "main" : "dev");
 function claimSlot(preferred) {
   const fs = require("node:fs");
   const path = require("node:path");
+  // An instance that is about to quit must not touch the lock: it would overwrite
+  // the live primary's pid with its own and then exit, leaving a stale lock that
+  // sends the *next* launch to a fresh slot — and to no restored terminals.
+  if (!isPrimaryInstance) return preferred;
   try {
     const dir = path.join(app.getPath("userData"), "layout-slots");
     fs.mkdirSync(dir, { recursive: true });
     const lock = path.join(dir, `${preferred}.lock`);
-    const held = Number.parseInt(fs.readFileSync(lock, "utf8"), 10);
+    // Scoped to the read alone. Wrapping the write in the same `try` meant the
+    // very first launch — when the file does not exist yet — threw ENOENT on this
+    // line and skipped straight past the write, so the lock was never created on
+    // any launch and this function always returned `preferred`: a no-op that
+    // looked like protection.
+    let held = Number.NaN;
+    try {
+      held = Number.parseInt(fs.readFileSync(lock, "utf8"), 10);
+    } catch {
+      // No lock yet, or unreadable: treat the slot as free and claim it below.
+    }
     if (Number.isInteger(held) && held !== process.pid) {
       try {
         // Signal 0 is the existence/permission check only.
@@ -136,8 +150,8 @@ function claimSlot(preferred) {
     }
     fs.writeFileSync(lock, String(process.pid));
   } catch {
-    // No userData, an unreadable directory: fall through to the preferred slot.
-    // Worst case is the pre-existing behaviour of two windows sharing one.
+    // No userData, an unwritable directory: fall through to the preferred slot.
+    // Worst case is two windows sharing one, which is where this started.
   }
   return preferred;
 }

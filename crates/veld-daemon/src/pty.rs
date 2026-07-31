@@ -477,20 +477,12 @@ pub async fn shutdown_sessions() {
 
 /// Where this instance's holder sockets live.
 ///
-/// Keyed by daemon port, not just by the socket directory: a dev instance must
-/// never adopt the installed instance's sessions, whose `worktree_id`s come from
-/// a different database entirely.
+/// The name belongs to `veld_core::instance::pty_dir`, because it has three
+/// readers: this module binds and scans the directory, `veld doctor` reports it,
+/// and `veld uninstall` sweeps it.
 #[cfg(not(test))]
 fn pty_dir() -> PathBuf {
-    if let Some(dir) = std::env::var("VELD_PTY_DIR").ok().filter(|v| !v.is_empty()) {
-        return PathBuf::from(dir);
-    }
-    let socket = veld_core::instance::daemon_socket();
-    let base = socket
-        .parent()
-        .map(FsPath::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(format!("pty-{}", veld_core::instance::daemon_port()))
+    veld_core::instance::pty_dir()
 }
 
 /// Under test, holders run in-process (see [`start_holder`]) but still bind real
@@ -1105,9 +1097,12 @@ async fn attach(
             // there yet. The other one is milliseconds from registering it, and
             // this client's own reconnect will then resume it — which is a better
             // answer than starting a second shell for a tab that wanted one.
-            debug!(
+            // `warn`, not `debug`: reaching this means a spawn outlived its whole
+            // timeout, and the client cannot tell the user anything more specific
+            // than "connection lost".
+            warn!(
                 session = %ticket.session_id,
-                "refusing a second concurrent start for one session"
+                "a concurrent start for this session never finished"
             );
             return (
                 StatusCode::CONFLICT,
@@ -1192,7 +1187,27 @@ async fn obtain_session(
     }
 
     // Claimed before the capacity check so a retry cannot spend a slot.
-    let _starting = StartGuard::claim(&ticket.session_id).ok_or(SessionError::Starting)?;
+    let _starting = match StartGuard::claim(&ticket.session_id) {
+        Some(guard) => guard,
+        // Another socket is starting this very session. Wait for it rather than
+        // failing: the client has no retry — `ws.onclose` puts the pane in an error
+        // state — so answering with a status here left a dead pane needing a second
+        // manual reconnect. Bounded by the same timeout the spawn itself gets, and
+        // what it waits for is a registry entry, which is exactly what a resumed
+        // attach reads.
+        None => {
+            let deadline = Instant::now() + HOLDER_START_TIMEOUT;
+            loop {
+                tokio::time::sleep(HOLDER_CONNECT_INTERVAL).await;
+                if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
+                    return Ok((existing.clone(), true));
+                }
+                if Instant::now() >= deadline {
+                    return Err(SessionError::Starting);
+                }
+            }
+        }
+    };
     // Re-check: the spawn we were waiting behind may have finished between the
     // read above and this claim.
     if let Some(existing) = SESSIONS.lock().await.get(&ticket.session_id) {
@@ -1275,8 +1290,11 @@ fn register(
         // adopted session inherits the clock it was already on. Restarting the
         // clock here instead meant `DETACH_GRACE` never elapsed for a daemon that
         // restarts more often than the grace, which is the one leak it exists to
-        // bound. `checked_sub`: a holder reporting an absurd elapsed time must not
-        // panic, and the worst honest answer is "reapable now".
+        // bound. `checked_sub` because a holder reporting an elapsed time larger
+        // than this process's uptime must not panic; that falls back to a *full*
+        // fresh grace, which is the generous answer rather than the strict one —
+        // it is only reachable from a corrupt greeting, and refusing to hold a
+        // live shell open is worse than holding one 30 minutes too long.
         detached_since: Mutex::new(Some(
             hello
                 .detached_secs
@@ -1815,6 +1833,13 @@ mod tests {
     /// speaks the wire without going through our own encoder, which is what makes
     /// it a check of the *contract* rather than of a round-trip. It also documents
     /// that `HANGUP` is five bytes any implementation can produce.
+    ///
+    /// It covers the daemon's half only — that the refusal is *sent*. A real holder
+    /// cannot be made to speak another version (the constant is compiled in), so
+    /// the other half is
+    /// `holder::tests::a_hangup_written_by_a_peer_that_closes_still_ends_the_shell`,
+    /// which pins that a holder acts on a hangup from a peer that never reads its
+    /// greeting. The two compose into the guarantee; neither alone is it.
     #[tokio::test]
     async fn a_holder_from_an_unknown_protocol_is_refused_and_hung_up() {
         let dir = tempfile::tempdir().unwrap();
@@ -1839,6 +1864,13 @@ mod tests {
             )
             .await
             .unwrap();
+            // A scrollback larger than the socket buffer (~8 KiB on macOS), which
+            // is what a real holder sends and what the first version of this test
+            // omitted. Without it the refusal path looked correct: the daemon wrote
+            // HANGUP and closed while a real holder would still have been blocked
+            // writing *this*, so the hangup went unread and the shell lived on. A
+            // session's ring is 256 KiB, so anything smaller here re-hides it.
+            let _ = wire::write_frame(&mut stream, wire::SCROLLBACK, &vec![b'x'; 64 * 1024]).await;
             // Whatever the daemon says next is what this test is about.
             wire::read_frame(&mut stream).await.unwrap()
         });

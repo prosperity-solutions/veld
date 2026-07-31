@@ -667,9 +667,17 @@ pub async fn install_daemon() -> Result<StepResult, anyhow::Error> {
             }
         }
         "linux" => {
-            let unit_dir = dirs::home_dir()
-                .context("could not determine home directory")?
-                .join(".config/systemd/user");
+            // `XDG_CONFIG_HOME` when set, because that is where systemd itself
+            // looks for user units — and because `install.sh` resolves the same
+            // path when it patches an existing unit. Hardcoding `~/.config` made
+            // the two disagree for anyone who sets it, which silently turned that
+            // patch into a no-op.
+            let unit_dir = match std::env::var("XDG_CONFIG_HOME") {
+                Ok(dir) if !dir.is_empty() => PathBuf::from(dir).join("systemd/user"),
+                _ => dirs::home_dir()
+                    .context("could not determine home directory")?
+                    .join(".config/systemd/user"),
+            };
             std::fs::create_dir_all(&unit_dir).context("failed to create systemd user unit dir")?;
 
             let unit_path = unit_dir.join("veld-daemon.service");
@@ -2001,6 +2009,49 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Ask every terminal holder under `veld_dir` to end its shell and exit.
+///
+/// Writes the one frame the wire protocol pins forever: kind `0x83`, empty
+/// payload (`crates/veld-daemon/src/pty/wire.rs`). Hand-written rather than shared
+/// through a crate, because that stability is the point — any process, of any
+/// version, can always tell a holder to stop, and this is the second
+/// implementation that relies on it (a refused protocol version is the first).
+fn hang_up_terminal_holders(veld_dir: &Path) {
+    use std::io::Write;
+
+    let Ok(entries) = std::fs::read_dir(veld_dir) else {
+        return;
+    };
+    for dir in entries.flatten() {
+        // One directory per daemon instance, so *every* instance's holders are
+        // swept rather than only the current one's — an uninstall removes all of
+        // veld.
+        if !dir
+            .file_name()
+            .to_string_lossy()
+            .starts_with(crate::instance::PTY_DIR_PREFIX)
+        {
+            continue;
+        }
+        let Ok(sockets) = std::fs::read_dir(dir.path()) else {
+            continue;
+        };
+        for socket in sockets.flatten() {
+            let path = socket.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
+                continue;
+            }
+            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
+                let mut frame = vec![0x83u8];
+                frame.extend_from_slice(&0u32.to_be_bytes());
+                let _ = stream.write_all(&frame);
+                let _ = stream.flush();
+                tracing::info!(socket = %path.display(), "asked a terminal holder to hang up");
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_launchctl_pid, parse_systemd_main_pid};
@@ -2049,42 +2100,5 @@ mod tests {
     fn systemd_main_pid_garbage_is_none() {
         assert_eq!(parse_systemd_main_pid(""), None);
         assert_eq!(parse_systemd_main_pid("not-a-pid"), None);
-    }
-}
-
-/// Ask every terminal holder under `veld_dir` to end its shell and exit.
-///
-/// Writes the one frame the wire protocol pins forever: kind `0x83`, empty
-/// payload (`crates/veld-daemon/src/pty/wire.rs`). Hand-written rather than shared
-/// through a crate, because that stability is the point — any process, of any
-/// version, can always tell a holder to stop, and this is the second
-/// implementation that relies on it (a refused protocol version is the first).
-fn hang_up_terminal_holders(veld_dir: &Path) {
-    use std::io::Write;
-
-    let Ok(entries) = std::fs::read_dir(veld_dir) else {
-        return;
-    };
-    for dir in entries.flatten() {
-        // `pty-<port>/`, one directory per daemon instance.
-        if !dir.file_name().to_string_lossy().starts_with("pty-") {
-            continue;
-        }
-        let Ok(sockets) = std::fs::read_dir(dir.path()) else {
-            continue;
-        };
-        for socket in sockets.flatten() {
-            let path = socket.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("sock") {
-                continue;
-            }
-            if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) {
-                let mut frame = vec![0x83u8];
-                frame.extend_from_slice(&0u32.to_be_bytes());
-                let _ = stream.write_all(&frame);
-                let _ = stream.flush();
-                tracing::info!(socket = %path.display(), "asked a terminal holder to hang up");
-            }
-        }
     }
 }

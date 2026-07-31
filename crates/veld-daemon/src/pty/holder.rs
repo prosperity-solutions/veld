@@ -70,6 +70,14 @@ const OUT_CHANNEL: usize = 512;
 /// Commands buffered from the connection reader and the acceptor.
 const CMD_CHANNEL: usize = 64;
 
+/// How long a peer gets to accept the greeting before the connection is
+/// abandoned.
+///
+/// Separate from [`OUTPUT_SEND_TIMEOUT`] because it bounds a different thing: the
+/// greeting is written from the main loop, so a peer that connects and never reads
+/// parks everything else this holder has to do.
+const GREETING_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// How long a connected daemon gets to accept one output frame before the
 /// connection is treated as dead.
 ///
@@ -233,6 +241,9 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
     let orphan_deadline = tokio::time::sleep(orphan_grace);
     tokio::pin!(orphan_deadline);
     let mut asked_to_hang_up = false;
+    // Set once the orphan path has done everything it can (hung up, then killed),
+    // which disables its branch — see the guard on it below.
+    let mut orphan_handled = false;
 
     /// Record that no daemon is connected, and re-arm the orphan deadline.
     ///
@@ -250,6 +261,7 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
             orphan_deadline
                 .as_mut()
                 .reset(tokio::time::Instant::now() + orphan_grace);
+            orphan_handled = false;
         }};
     }
 
@@ -334,10 +346,25 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                     }
                 }
                 Cmd::Frame(seq, frame) => {
-                    // A frame from a displaced connection is not acted on: it
-                    // would be a second writer on one input stream, which is
-                    // the rule the whole session model rests on.
-                    if conn.as_ref().is_some_and(|c| c.generation == seq) {
+                    // `HANGUP` is honoured whatever the generation, and even when
+                    // no connection is established at all. It is the one frame
+                    // whose entire purpose is to work in degraded conditions — a
+                    // peer that could not be greeted, an unknown protocol version,
+                    // `veld uninstall` — and gating it on being the current writer
+                    // is what made those callers silently ineffective. It ends a
+                    // session rather than writing to it, so the one-writer rule
+                    // does not apply.
+                    if frame.kind == wire::HANGUP {
+                        info!(session = %cfg.session_id, "holder asked to hang up");
+                        asked_to_hang_up = true;
+                        if exit_code.is_none() {
+                            hangup(pid);
+                        }
+                    }
+                    // Everything else: a frame from a displaced connection is not
+                    // acted on, because it would be a second writer on one input
+                    // stream — the rule the whole session model rests on.
+                    else if conn.as_ref().is_some_and(|c| c.generation == seq) {
                         match frame.kind {
                             wire::INPUT => {
                                 if pty_write(&write_fd, &frame.payload).await.is_err() {
@@ -348,20 +375,6 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
                                 Some((cols, rows)) => resize(master.as_ref(), cols, rows),
                                 None => warn!("ignoring a malformed resize frame"),
                             },
-                            wire::HANGUP => {
-                                info!(session = %cfg.session_id, "holder asked to hang up");
-                                asked_to_hang_up = true;
-                                // Only while the child is still ours to signal.
-                                // `waiter` reaps it, and this loop keeps running
-                                // for up to EXIT_DRAIN afterwards — a hangup
-                                // landing in that window would `killpg` a pid that
-                                // has been freed for reuse, which is the exact
-                                // hazard this module's ownership rule exists to
-                                // remove.
-                                if exit_code.is_none() {
-                                    hangup(pid);
-                                }
-                            }
                             other if frame.is_ignorable() => {
                                 debug!("ignoring holder-numbered frame {other:#x}");
                             }
@@ -402,20 +415,44 @@ async fn serve(cfg: &HolderConfig, listener: UnixListener) -> anyhow::Result<()>
 
             _ = &mut drain, if exit_code.is_some() => break,
 
-            _ = &mut orphan_deadline, if disconnected_since.is_some() => {
+            // Guarded on `!orphan_handled` as well as being disconnected: a
+            // `Sleep` that has elapsed returns `Ready` on **every** subsequent
+            // poll, so without this the branch is selected on every iteration of
+            // the loop. A shell that ignores SIGHUP then pegged a core forever —
+            // a busy spin introduced by the fix that made this a deadline instead
+            // of an interval.
+            _ = &mut orphan_deadline, if disconnected_since.is_some() && !orphan_handled => {
                 // The leak bound: a daemon that never comes back (uninstalled,
                 // crash-looping, the user logged out) must not leave a shell
                 // running for the uptime of the box. `exit_code.is_none()` for
                 // the same reason the hangup frame checks it — past that point
                 // the pid may already have been reaped and reused.
-                if !asked_to_hang_up && exit_code.is_none() {
-                    info!(
-                        session = %cfg.session_id,
-                        "no daemon for {}s — hanging up the shell",
-                        orphan_grace.as_secs()
-                    );
-                    asked_to_hang_up = true;
-                    hangup(pid);
+                if exit_code.is_none() {
+                    if !asked_to_hang_up {
+                        info!(
+                            session = %cfg.session_id,
+                            "no daemon for {}s — hanging up the shell",
+                            orphan_grace.as_secs()
+                        );
+                        asked_to_hang_up = true;
+                        hangup(pid);
+                        // Give SIGHUP its grace, then come back once to escalate.
+                        // The loop only *exits* on the pty closing, so a shell
+                        // that ignores the hangup and holds the pty open would
+                        // otherwise never be collected at all.
+                        orphan_deadline
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + KILL_GRACE);
+                    } else {
+                        warn!(
+                            session = %cfg.session_id,
+                            "shell ignored the orphan hangup — killing it"
+                        );
+                        kill(pid);
+                        orphan_handled = true;
+                    }
+                } else {
+                    orphan_handled = true;
                 }
             },
         }
@@ -613,6 +650,20 @@ async fn attach(
 ) -> Option<Conn> {
     let (reader, mut writer) = stream.into_split();
 
+    // The reader starts **before** the greeting is written, and this ordering is
+    // load-bearing rather than tidy.
+    //
+    // A peer is allowed to connect, write `HANGUP`, and close — that is the whole
+    // point of pinning one frame across every protocol version, and three callers
+    // now do exactly it (`veld uninstall`'s sweep, the recovery test's cleanup
+    // guard, and the daemon refusing an unknown protocol version). Greeting first
+    // made every one of them silently ineffective: the peer had already closed, so
+    // our `HELLO` write failed EPIPE, this function returned before spawning a
+    // reader, and the `HANGUP` sat unread in the receive buffer while the shell
+    // kept running — with a log line claiming it had been asked to stop.
+    let (out, rx) = mpsc::channel::<(u8, Vec<u8>)>(OUT_CHANNEL);
+    tokio::spawn(pump_reader(reader, generation, cmd_tx));
+
     let hello = wire::Hello {
         protocol: wire::PROTOCOL,
         session_id: cfg.session_id.clone(),
@@ -627,23 +678,41 @@ async fn attach(
             .map(|since| Instant::now().saturating_duration_since(since).as_secs()),
     };
     let encoded = serde_json::to_vec(&hello).ok()?;
-    wire::write_frame(&mut writer, wire::HELLO, &encoded)
-        .await
-        .ok()?;
-    wire::write_frame(&mut writer, wire::SCROLLBACK, &scrollback.snapshot())
-        .await
-        .ok()?;
-    if let Some(code) = exited {
-        // A daemon adopting an already-finished session must be able to report
-        // the exit instead of presenting a dead prompt as a live one.
-        wire::write_frame(&mut writer, wire::EXIT, &code.to_be_bytes())
-            .await
-            .ok()?;
+    // Bounded, because `attach` is awaited from the main loop: a scrollback can be
+    // a quarter of a megabyte against an ~8 KB socket buffer, so a peer that does
+    // not read would otherwise park the loop — and with it the very `HANGUP` that
+    // peer may have just sent — until it went away on its own.
+    let greeted = tokio::time::timeout(GREETING_TIMEOUT, async {
+        wire::write_frame(&mut writer, wire::HELLO, &encoded).await?;
+        wire::write_frame(&mut writer, wire::SCROLLBACK, &scrollback.snapshot()).await?;
+        if let Some(code) = exited {
+            // A daemon adopting an already-finished session must be able to report
+            // the exit instead of presenting a dead prompt as a live one.
+            wire::write_frame(&mut writer, wire::EXIT, &code.to_be_bytes()).await?;
+        }
+        Ok::<(), std::io::Error>(())
+    })
+    .await;
+    match greeted {
+        Ok(Ok(())) => {}
+        // Either way there is no usable connection. The reader spawned above is
+        // still running, so anything the peer sent — a `HANGUP` in particular — is
+        // delivered before it reports the disconnect.
+        Ok(Err(e)) => {
+            debug!(session = %cfg.session_id, "greeting failed: {e}");
+            return None;
+        }
+        Err(_) => {
+            warn!(
+                session = %cfg.session_id,
+                "greeting timed out after {}s — the peer is not reading",
+                GREETING_TIMEOUT.as_secs()
+            );
+            return None;
+        }
     }
 
-    let (out, rx) = mpsc::channel::<(u8, Vec<u8>)>(OUT_CHANNEL);
     tokio::spawn(pump_writer(writer, rx));
-    tokio::spawn(pump_reader(reader, generation, cmd_tx));
     debug!(session = %cfg.session_id, generation, "daemon attached to holder");
     Some(Conn { generation, out })
 }
@@ -934,6 +1003,69 @@ mod tests {
             assert!(
                 Instant::now() < deadline,
                 "pid {pid} outlived its re-armed orphan grace"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// A peer may connect, write the five bytes of `HANGUP`, and close
+    /// immediately — the contract `veld uninstall`'s sweep, the recovery test's
+    /// cleanup guard and the version-refusal path all rely on.
+    ///
+    /// It did not work: the holder wrote its greeting first, that write failed
+    /// EPIPE against a peer that had already gone, and the function returned
+    /// before spawning the reader that would have seen the hangup. All three
+    /// callers logged success while the shell kept running. The frame is written by
+    /// hand here for the same reason those callers write it by hand — it is
+    /// supposed to need nothing but five bytes.
+    #[tokio::test]
+    async fn a_hangup_written_by_a_peer_that_closes_still_ends_the_shell() {
+        use std::io::Write;
+
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("h.sock");
+        let cfg = HolderConfig {
+            session_id: "hangupprobe".to_owned(),
+            worktree_id: 1,
+            label: "test".to_owned(),
+            cwd: dir.path().to_path_buf(),
+            cols: 80,
+            rows: 24,
+            socket: socket.clone(),
+            // Long, so nothing but the hangup can be what ends this shell.
+            orphan_grace_secs: 3600,
+        };
+        tokio::spawn(run(cfg));
+
+        // Learn the pid from a first, well-behaved connection, then drop it.
+        let pid = {
+            let mut stream = loop {
+                match tokio::net::UnixStream::connect(&socket).await {
+                    Ok(s) => break s,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+                }
+            };
+            let hello = wire::read_frame(&mut stream).await.unwrap().unwrap();
+            serde_json::from_slice::<wire::Hello>(&hello.payload)
+                .unwrap()
+                .pid
+        };
+
+        // The hangup-only peer: connect, write, close. It never reads a byte.
+        {
+            let mut blunt = std::os::unix::net::UnixStream::connect(&socket).unwrap();
+            let mut frame = vec![0x83u8];
+            frame.extend_from_slice(&0u32.to_be_bytes());
+            blunt.write_all(&frame).unwrap();
+            blunt.flush().unwrap();
+        }
+
+        let deadline = Instant::now() + KILL_GRACE + Duration::from_secs(20);
+        // SAFETY: signal 0 performs the permission/existence check only.
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "pid {pid} ignored a hangup from a peer that closed immediately"
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
