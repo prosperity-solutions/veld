@@ -15,6 +15,7 @@ pub mod runs;
 pub mod setup;
 pub mod share;
 pub mod start;
+pub mod stats;
 pub mod status;
 pub mod stop;
 pub mod ui;

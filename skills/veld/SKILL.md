@@ -392,10 +392,94 @@ veld status --outputs --json --name my-feature  # machine-readable
 `veld status` also reports per-node resource usage (CPU % and memory, summed
 over each node's whole process tree) — a `CPU`/`MEM` column in the table, and a
 top-level `stats` map (`"node:variant"` → `{ cpu_percent, memory_bytes,
-process_count, sampled_at }`) in `--json`. Values are sampled by the daemon
-every ~5s, so they're absent (`–` / omitted) until the first sample lands, and
-go absent again shortly after a node dies or the daemon stops. The management UI
-shows the same figures live with a memory sparkline.
+process_count, cpu_seconds, memory: { ... }, sampled_at }`) in `--json`. Values
+are sampled by the daemon every ~5s, so they're absent (`–` / omitted) until the
+first sample lands, and go absent again shortly after a node dies or the daemon
+stops. The management UI shows the same figures live with a sparkline.
+
+### Detailed resources: `veld stats`
+
+`veld status`'s `MEM` column is the tree's **footprint**, not RSS. This matters
+when reading the numbers: `memory_bytes` in `--json` is RSS summed over the
+tree, which counts every page shared *inside* the tree once per process — a
+five-process `npm run dev` reports far more than it occupies. Use
+`memory.footprint` (proportional set size on Linux, `phys_footprint` on macOS),
+which is the only memory figure that sums correctly over a tree.
+
+`veld stats` is the detailed view:
+
+```sh
+veld stats --json --name my-feature                      # breakdown per node
+veld stats --processes --json --name my-feature           # + one row per subprocess
+veld stats --history --window 1h --json --name my-feature # + bucketed history
+veld stats --history --cpu --window 1h --name my-feature   # CPU instead of memory
+# Is this node leaking, and which child? A leak is a TREND, so --history is
+# what answers it — a single reading only tells you the value is large.
+veld stats --node web --memory private_dirty --processes --history --window 1h
+```
+
+`--json` gives, per node: `cpu_percent`, `cpu_seconds` (cumulative),
+`process_count`, `resident`, and a `memory` object with `footprint`,
+`virtual_bytes`, and the page classes `private_clean`/`private_dirty`/
+`shared_clean`/`shared_dirty`/`swap`/`wired`. A page class is `null` where the
+platform can't measure it — **`null` means "not measurable here", never zero**,
+so don't sum or chart it as 0. Linux reports the full split
+(`/proc/<pid>/smaps_rollup`); macOS reports totals plus `wired` only. The
+top-level `available_metrics` tells you which are usable without probing each
+node. `--processes` adds a `processes` array (`pid`, `parent_pid`, `depth`,
+`name`, `cmd`, `cpu_percent`, `cpu_seconds`, `memory_bytes`, `memory`) in
+pre-order — indent by `depth`, since the parent may be absent (the sampler
+records at most 64 processes per node, keeping the heaviest). `--history` adds
+`history` buckets averaged server-side; a bucket with no samples is **omitted,
+not zero-filled**, so consecutive entries are not necessarily adjacent in time.
+Each bucket carries `cpu_percent` and `cpu_peak` as well as the memory fields, so
+one request answers both dimensions — `--cpu` only changes which one the terminal
+sparkline draws. Use `cpu_peak`/`footprint_peak` when `samples > 1`: a mean over a
+wide bucket hides the spike a 5s sample caught.
+
+Which memory number answers which question:
+
+| question | metric |
+|---|---|
+| what does this node cost the machine? | `footprint` |
+| is it leaking? | `private_dirty` **with `--history`** — one reading shows size, only a rising trend shows a leak |
+| why does `top` say 4 GB? | `virtual` / `resident` |
+| is it thrashing? | `swap` climbing while `resident` is flat |
+| which subprocess is it? | `--processes` |
+| is it burning CPU, and in bursts? | `cpu_percent` vs `cpu_peak` (`--cpu` to graph it) |
+
+Retention: node totals 24h, per-process rows 2h — the API reports both
+(`retention_secs`, `process_retention_secs`) so a client never has to hardcode
+them. A by-process view over a window longer than the per-process horizon is
+legitimately empty for the older part of the range.
+
+Two escape hatches, read from **the daemon's** environment:
+
+> A plain `export VELD_STATS_CMDLINE=off` in your shell does **not** reach them.
+> The sampler runs inside the user daemon, which is a launchd LaunchAgent (macOS)
+> or a `systemd --user` unit (Linux); neither inherits an interactive shell's
+> environment — the same reason veld has to inject `PATH` into daemon-spawned
+> commands. Set them where the service can see them, then restart the daemon
+> (the values are read once per daemon lifetime):
+>
+> ```sh
+> # macOS — set it for the session, then restart the agent so it picks it up
+> launchctl setenv VELD_STATS_CMDLINE off
+> launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon"
+>
+> # Linux
+> systemctl --user set-environment VELD_STATS_CMDLINE=off
+> systemctl --user restart veld-daemon
+> ```
+>
+> Verify it took effect with `veld stats --processes --json`: with argv capture
+> off, every process's `cmd` is `null` while `name` still reports.
+
+
+| variable | effect |
+|---|---|
+| `VELD_STATS_MEMORY_DETAIL=off` | Fall back to RSS-only sampling. For a process with a pathological number of memory mappings, where reading `smaps_rollup` is not cheap. `footprint` then equals RSS and every page class reports `null`. |
+| `VELD_STATS_CMDLINE=off` | Stop recording each process's argv. The process *name* is still recorded. veld's own rules forbid secrets on a command line because the process table is world-readable — but on macOS argv is restricted to the owning uid, so recording it does move that data into the database and the daemon's localhost API. On by default (a command line is often the only way to tell two `node` children apart); this turns it off. |
 
 `veld status --json` additionally carries `live` (whether the environment
 occupies the live run slot), `end_reason`/`end_detail` (populated once the run

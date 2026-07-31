@@ -112,6 +112,92 @@ pub fn pad_right(s: &str, width: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Resource formatting
+// ---------------------------------------------------------------------------
+
+/// Human-readable byte size: 1024-based, with the conventional short KB/MB/GB
+/// labels.
+///
+/// **Not** digit-identical to the management UI's `fmtBytes`
+/// (`ui/src/shared/util.ts`), which prints one more decimal at MB and two at GB —
+/// so the same footprint reads `512 MB` / `1.5 GB` here and `512.0 MB` /
+/// `1.50 GB` there. Both predate this module; the tests below pin what this one
+/// actually does rather than the parity an older comment claimed.
+pub fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.0} KB", b / KIB)
+    } else if b < KIB * KIB * KIB {
+        format!("{:.0} MB", b / (KIB * KIB))
+    } else {
+        format!("{:.1} GB", b / (KIB * KIB * KIB))
+    }
+}
+
+/// CPU usage as a whole-percent-of-one-core figure. Can exceed 100% for a
+/// multi-threaded process tree, which is correct and not a bug to clamp.
+pub fn fmt_cpu(percent: f32) -> String {
+    format!("{percent:.0}%")
+}
+
+/// Cumulative CPU time, in the largest unit that keeps it readable. Sub-minute
+/// values keep one decimal: the difference between 0.2s and 3.0s of CPU is the
+/// interesting part of a just-started node.
+pub fn fmt_cpu_time(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else if seconds < 3600.0 {
+        format!(
+            "{}m{:02}s",
+            (seconds / 60.0) as u64,
+            (seconds % 60.0) as u64
+        )
+    } else {
+        format!(
+            "{}h{:02}m",
+            (seconds / 3600.0) as u64,
+            ((seconds % 3600.0) / 60.0) as u64
+        )
+    }
+}
+
+/// A unicode-block sparkline of `values`, `None` for a gap in the series.
+///
+/// Scaled from 0 to the maximum rather than min-to-max: a memory series that
+/// wanders between 400 and 402 MB should read as flat, and a min-max scale would
+/// draw it as a mountain range. A gap renders as a space — an absent sample must
+/// not look like a low one.
+pub fn sparkline(values: &[Option<f64>]) -> String {
+    const BLOCKS: [char; 8] = [
+        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
+    ];
+    let max = values
+        .iter()
+        .flatten()
+        .copied()
+        .fold(0.0f64, |a, b| a.max(b));
+    values
+        .iter()
+        .map(|v| match v {
+            None => ' ',
+            Some(_) if max <= 0.0 => BLOCKS[0],
+            Some(v) => {
+                let frac = (v / max).clamp(0.0, 1.0);
+                // Ceil into a 1..=8 band so any non-zero value shows at least
+                // the shortest block — "small" and "absent" must not be the
+                // same glyph.
+                let idx = ((frac * BLOCKS.len() as f64).ceil() as usize).clamp(1, BLOCKS.len());
+                BLOCKS[idx - 1]
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Table helpers
 // ---------------------------------------------------------------------------
 
@@ -188,7 +274,7 @@ pub fn print_info(msg: &str) {
 
 #[cfg(test)]
 mod tests {
-    use super::one_line;
+    use super::{fmt_bytes, fmt_cpu_time, one_line, sparkline};
 
     /// A preset's `label`/`when_to_use`/`group` is free prose from a config file,
     /// and `skills/veld/SKILL.md` pipes `veld presets` output into a coding agent's
@@ -214,6 +300,65 @@ mod tests {
         assert_eq!(safe.lines().count(), 1);
         // One space per control character, so nothing closes up to disguise the seam.
         assert_eq!(safe.chars().count(), payload.chars().count());
+    }
+
+    #[test]
+    fn fmt_bytes_uses_1024_steps() {
+        assert_eq!(fmt_bytes(0), "0 B");
+        assert_eq!(fmt_bytes(512), "512 B");
+        assert_eq!(fmt_bytes(1024), "1 KB");
+        assert_eq!(fmt_bytes(1024 * 1024), "1 MB");
+        assert_eq!(fmt_bytes(1536 * 1024 * 1024), "1.5 GB");
+    }
+
+    /// Mirrors `fmtCpuTime` in the management UI, which asserts it "matches the
+    /// CLI's units" — that test pinned only the TypeScript half until now.
+    #[test]
+    fn fmt_cpu_time_matches_the_ui() {
+        assert_eq!(fmt_cpu_time(0.0), "0.0s");
+        assert_eq!(fmt_cpu_time(3.45), "3.5s");
+        assert_eq!(fmt_cpu_time(59.9), "59.9s");
+        assert_eq!(fmt_cpu_time(60.0), "1m00s");
+        assert_eq!(fmt_cpu_time(125.0), "2m05s");
+        assert_eq!(fmt_cpu_time(3600.0), "1h00m");
+        assert_eq!(fmt_cpu_time(7860.0), "2h11m");
+    }
+
+    #[test]
+    fn sparkline_never_renders_a_small_value_as_a_gap() {
+        // The load-bearing rule: `ceil` into a 1..=8 band, so any non-zero value
+        // gets at least the shortest block. With `round` instead, a tiny value
+        // would land on index 0 and be indistinguishable from `None` — "absent"
+        // and "nearly zero" would become the same character, in every
+        // `veld stats --history`.
+        let s = sparkline(&[None, Some(0.0001), Some(100.0)]);
+        let chars: Vec<char> = s.chars().collect();
+        assert_eq!(chars.len(), 3);
+        assert_eq!(chars[0], ' ', "an absent sample is a space");
+        assert_ne!(chars[1], ' ', "a tiny non-zero value must still be visible");
+        assert_eq!(chars[2], '\u{2588}', "the max is the full block");
+    }
+
+    #[test]
+    fn sparkline_scales_from_zero_not_from_the_minimum() {
+        // A series wandering between 400 and 402 must read as flat. Min-max
+        // scaling would draw it as a mountain range.
+        let s = sparkline(&[Some(400.0), Some(401.0), Some(402.0)]);
+        assert_eq!(s.chars().collect::<Vec<_>>().len(), 3);
+        let distinct: std::collections::HashSet<char> = s.chars().collect();
+        assert_eq!(
+            distinct.len(),
+            1,
+            "a 0.5% spread must not span the band: {s:?}"
+        );
+    }
+
+    #[test]
+    fn sparkline_handles_all_absent_and_all_zero() {
+        assert_eq!(sparkline(&[None, None]), "  ");
+        // All-zero has no maximum to scale against; it must not divide by zero.
+        assert_eq!(sparkline(&[Some(0.0), Some(0.0)]).chars().count(), 2);
+        assert_eq!(sparkline(&[]), "");
     }
 
     /// Bidi overrides are the same defect as an escape sequence — rendered text

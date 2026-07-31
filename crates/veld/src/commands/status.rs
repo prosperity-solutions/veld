@@ -150,7 +150,13 @@ pub async fn run(name: Option<String>, show_outputs: bool, json: bool) -> i32 {
                 format_node_status(&ns.status)
             };
             let (cpu_str, mem_str) = match node_stats.get(key.as_str()) {
-                Some(s) => (fmt_cpu(s.cpu_percent), fmt_bytes(s.memory_bytes)),
+                // Footprint, not RSS: summing RSS over a process tree counts every
+                // page shared inside the tree once per process. `veld stats` breaks
+                // the same number down further.
+                Some(s) => (
+                    output::fmt_cpu(s.cpu_percent),
+                    output::fmt_bytes(s.memory.footprint),
+                ),
                 None => (output::dim("-"), output::dim("-")),
             };
             let mut row = vec![
@@ -274,27 +280,6 @@ fn compute_effective_statuses(
         result.insert(key.as_str(), effective);
     }
     result
-}
-
-/// Human-readable byte size: 1024-based, with the conventional short KB/MB/GB
-/// labels (kept identical to the dashboard's `fmtBytes` so the two agree).
-fn fmt_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    let b = bytes as f64;
-    if b < KIB {
-        format!("{bytes} B")
-    } else if b < KIB * KIB {
-        format!("{:.0} KB", b / KIB)
-    } else if b < KIB * KIB * KIB {
-        format!("{:.0} MB", b / (KIB * KIB))
-    } else {
-        format!("{:.1} GB", b / (KIB * KIB * KIB))
-    }
-}
-
-/// CPU usage as a whole-percent-of-one-core figure.
-fn fmt_cpu(percent: f32) -> String {
-    format!("{percent:.0}%")
 }
 
 fn format_run_status(status: &RunStatus) -> String {

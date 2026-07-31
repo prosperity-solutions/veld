@@ -80,6 +80,8 @@ Follow this workflow for every feature or fix:
 5. **Wait for CI** — All checks must be green. Never assume checks are missing just because they haven't started yet.
 6. **Ask before merging** — Ask the maintainer for explicit approval before merging. Only merge with admin bypass if the maintainer explicitly says so upfront at task start.
 
+**Hand the maintainer the running software before the PR.** For any change with a UI or a new CLI surface, the house style is *checkpointed autonomy*: stop after implementing so they can drive it themselves, run the review loop unattended, then stop once more after the review fixes — because fixes that touch rendering, wire shapes, or CLI output regress exactly what was hand-verified the first time. A review subagent cannot see that a graph renders wrong. `/ship` captures this in its kickoff questionnaire; the two stops are planned, not escalations.
+
 ## Documentation Checklist
 
 When a change introduces new config fields, CLI flags, subcommands, or user-visible behavior, update **all** of the following:

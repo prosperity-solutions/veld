@@ -314,6 +314,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "worktree-emoji",
         apply: migrate_v6_worktree_emoji,
     },
+    Migration {
+        version: 7,
+        name: "detailed-process-stats",
+        apply: migrate_v7_detailed_process_stats,
+    },
 ];
 
 fn migrate_v1_initial(conn: &Connection) -> rusqlite::Result<()> {
@@ -646,6 +651,70 @@ fn migrate_v5_desktop_worktrees(conn: &Connection) -> rusqlite::Result<()> {
 /// an empty string means "not assigned yet".
 fn migrate_v6_worktree_emoji(conn: &Connection) -> rusqlite::Result<()> {
     conn.execute_batch("ALTER TABLE worktrees ADD COLUMN emoji TEXT NOT NULL DEFAULT '';")
+}
+
+/// v7: detailed memory breakdown on the node aggregate, plus a per-process
+/// table so a node's subprocesses can be graphed individually.
+///
+/// The new `node_stats` columns are all nullable with no default, and that is
+/// deliberate: a row written before this migration genuinely has no footprint
+/// reading, and `NULL` is how a reader tells that from a real zero. `footprint`
+/// falls back to `memory_bytes` at read time (see `stats_from_row`), so old
+/// samples keep plotting on the default metric instead of collapsing to a flat
+/// zero line halfway through a graph.
+///
+/// Note this ALTERs the table that **v3 rebuilt** (`node_stats_v3`, renamed to
+/// `node_stats`) — not the one v2 created. v2's body must stay untouched.
+///
+/// `node_process_stats` is a separate table rather than a JSON blob on
+/// `node_stats` because the point of storing it is per-PID time series: "graph
+/// this one subprocess over the last hour" has to be a `WHERE pid = ?` with an
+/// index behind it, not a scan that deserializes every tree in the window. It
+/// uses `AUTOINCREMENT` for the same reason `log_lines` does — ids stay strictly
+/// monotonic across pruning, so nothing that watermarks on id can go backwards.
+fn migrate_v7_detailed_process_stats(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(
+        r#"
+        ALTER TABLE node_stats ADD COLUMN cpu_seconds REAL;
+        ALTER TABLE node_stats ADD COLUMN footprint INTEGER;
+        ALTER TABLE node_stats ADD COLUMN virtual_bytes INTEGER;
+        ALTER TABLE node_stats ADD COLUMN private_clean INTEGER;
+        ALTER TABLE node_stats ADD COLUMN private_dirty INTEGER;
+        ALTER TABLE node_stats ADD COLUMN shared_clean INTEGER;
+        ALTER TABLE node_stats ADD COLUMN shared_dirty INTEGER;
+        ALTER TABLE node_stats ADD COLUMN swap INTEGER;
+        ALTER TABLE node_stats ADD COLUMN wired INTEGER;
+
+        CREATE TABLE node_process_stats (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_row INTEGER NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+            node_key TEXT NOT NULL,
+            sampled_at TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            parent_pid INTEGER,
+            depth INTEGER NOT NULL,
+            name TEXT NOT NULL,
+            cmd TEXT,
+            cpu_percent REAL NOT NULL,
+            cpu_seconds REAL NOT NULL,
+            memory_bytes INTEGER NOT NULL,
+            footprint INTEGER NOT NULL,
+            virtual_bytes INTEGER NOT NULL,
+            private_clean INTEGER,
+            private_dirty INTEGER,
+            shared_clean INTEGER,
+            shared_dirty INTEGER,
+            swap INTEGER,
+            wired INTEGER,
+            started_at TEXT
+        );
+        -- The window query: one node's processes over a time range.
+        CREATE INDEX idx_node_process_stats_lookup
+            ON node_process_stats(run_row, node_key, sampled_at);
+        -- The GC query: age-based pruning across every run.
+        CREATE INDEX idx_node_process_stats_sampled ON node_process_stats(sampled_at);
+        "#,
+    )
 }
 
 // ---------------------------------------------------------------------------

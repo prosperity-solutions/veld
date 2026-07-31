@@ -5,6 +5,10 @@ use uuid::Uuid;
 use veld_core::db::Db;
 use veld_core::helper::HelperClient;
 use veld_core::state::{RunState, RunStatus};
+// Stats retention lives in `veld_core::stats` because three components have to
+// agree on it: this GC, the history API's window clamp, and the UI's window
+// presets. See `NODE_STATS_RETENTION_SECS` for why it is not a local constant.
+use veld_core::stats::{NODE_STATS_RETENTION_SECS, PROCESS_STATS_RETENTION_SECS};
 
 use crate::share::manager::ShareManager;
 
@@ -33,11 +37,6 @@ const MAX_LOG_AGE_HOURS: i64 = 168; // 7 days
 /// than the leak — the PID is cleared with a warning instead.
 const STRAGGLER_SWEEP_MAX_AGE_SECS: i64 = 3600;
 
-/// Maximum age for process-stats samples before pruning (hours). Short: the
-/// samples are high-frequency (one row per node every 5s) and only feed the
-/// live UI/CLI views, which never look back more than a few minutes.
-const MAX_STATS_AGE_HOURS: i64 = 6;
-
 /// Run the garbage-collection scheduler. This function loops forever and
 /// performs GC on the configured interval.
 pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
@@ -53,11 +52,12 @@ pub async fn run_gc_scheduler(share_manager: Arc<ShareManager>) {
         match run_gc().await {
             Ok(summary) => {
                 info!(
-                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned, {} routes cleaned",
+                    "gc complete: {} stale removed, {} orphans killed, {} logs pruned, {} stats pruned ({} per-process), {} routes cleaned",
                     summary.stale_removed,
                     summary.orphans_killed,
                     summary.logs_pruned,
                     summary.stats_pruned,
+                    summary.process_stats_pruned,
                     summary.routes_cleaned
                 );
                 // Stop any shares whose run just died so they don't outlive the
@@ -81,10 +81,29 @@ pub struct GcSummary {
     pub orphans_killed: usize,
     pub logs_pruned: usize,
     pub stats_pruned: usize,
+    /// Per-process rows pruned — counted separately from `stats_pruned` because
+    /// the two tables are pruned on different horizons.
+    pub process_stats_pruned: usize,
     pub routes_cleaned: usize,
     /// Run ids whose processes were found dead this pass — their P2P shares
     /// should be stopped.
     pub orphaned_runs: Vec<Uuid>,
+}
+
+/// The two stats-pruning cutoffs, as `(node_aggregates, per_process)`.
+///
+/// Extracted and returned as a pair so the *wiring* is testable: both cutoffs are
+/// `DateTime<Utc>`, so passing them to the wrong prune call compiles happily and
+/// would silently prune node totals on the 2h horizon and per-process rows on the
+/// 24h one — the exact inverse of the documented split, with nothing failing.
+/// `now` is a parameter rather than read inside so a test can pin the arithmetic.
+fn retention_cutoffs(
+    now: chrono::DateTime<chrono::Utc>,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    (
+        now - chrono::Duration::seconds(NODE_STATS_RETENTION_SECS),
+        now - chrono::Duration::seconds(PROCESS_STATS_RETENTION_SECS),
+    )
 }
 
 /// Perform a single garbage-collection pass.
@@ -263,8 +282,11 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
     let _ = db.prune_orphaned_feedback(log_cutoff);
-    let stats_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_STATS_AGE_HOURS);
+    let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
     summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
+    summary.process_stats_pruned = db
+        .prune_node_process_stats_older_than(proc_cutoff)
+        .unwrap_or(0);
     let _ = db.vacuum();
 
     // Phase 3: Prune leftover pre-SQLite log files from each project's
@@ -358,3 +380,33 @@ fn is_process_alive(pid: u32) -> bool {
 // escalates SIGTERM → bounded wait → SIGKILL for the whole process group —
 // the daemon reapers are exactly the paths that must not depend on a target
 // honoring SIGTERM.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_cutoffs_map_each_horizon_to_its_own_table() {
+        let now = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::days(10);
+        let (stats, proc_) = retention_cutoffs(now);
+
+        // Aggregates keep the longer history...
+        assert_eq!(
+            (now - stats).num_seconds(),
+            NODE_STATS_RETENTION_SECS,
+            "node aggregates must use NODE_STATS_RETENTION_SECS"
+        );
+        // ...per-process rows the shorter one. Swapping the pair at the call site
+        // compiles, so this is the only thing standing between a typo and an
+        // inverted retention policy.
+        assert_eq!(
+            (now - proc_).num_seconds(),
+            PROCESS_STATS_RETENTION_SECS,
+            "per-process rows must use PROCESS_STATS_RETENTION_SECS"
+        );
+        assert!(
+            proc_ > stats,
+            "the per-process cutoff is more recent, i.e. prunes more aggressively"
+        );
+    }
+}

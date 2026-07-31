@@ -24,8 +24,15 @@
  * reliably forgets.
  */
 
-import { ActionIcon, Button, Text, Tooltip } from "@mantine/core";
-import { IconCheck, IconCopy, IconExternalLink, IconWorld } from "@tabler/icons-react";
+import { ActionIcon, Button, Text, Tooltip, UnstyledButton } from "@mantine/core";
+import {
+  IconCheck,
+  IconChevronDown,
+  IconChevronRight,
+  IconCopy,
+  IconExternalLink,
+  IconWorld,
+} from "@tabler/icons-react";
 import { useState } from "react";
 import {
   api,
@@ -37,6 +44,7 @@ import {
 } from "../api";
 import { useCopyFlash } from "./copy";
 import { notifyError } from "./notify";
+import { ResourcePanel, fmtCpuTime } from "./ResourcePanel";
 import { bucketColor, fmtBytes, shortUrl, statusBucket } from "./util";
 
 /** One card's worth of node state, live or historical. */
@@ -106,8 +114,16 @@ function Spark(props: { points: number[] }) {
   );
 }
 
-/** Memory, CPU and the memory trend. */
-function NodeStatsLine(props: { stats?: NodeStats }) {
+/**
+ * Memory, CPU and the memory trend — and the handle that expands the full
+ * resource view.
+ *
+ * The memory figure is the **footprint**, not RSS: summing RSS over a process
+ * tree counts every page shared inside it once per process, so a five-process
+ * `npm run dev` reported far more than it occupied. The sparkline plots the same
+ * quantity, so the collapsed line and the expanded chart never disagree.
+ */
+function NodeStatsLine(props: { stats?: NodeStats; expanded: boolean; onToggle?: () => void }) {
   const s = props.stats;
   if (!s) {
     return (
@@ -118,20 +134,36 @@ function NodeStatsLine(props: { stats?: NodeStats }) {
       </span>
     );
   }
-  return (
-    <span className="node-stats">
-      <Tooltip label="Resident memory (whole process tree)">
-        <Text size="xs" ff="monospace" aria-label={`Memory ${fmtBytes(s.mem)}`}>
-          {fmtBytes(s.mem)}
+  const body = (
+    <>
+      <Tooltip label="Memory footprint of the whole process tree (PSS / phys_footprint). Click for the breakdown.">
+        <Text size="xs" ff="monospace" aria-label={`Memory ${fmtBytes(s.footprint)}`}>
+          {fmtBytes(s.footprint)}
         </Text>
       </Tooltip>
-      <Tooltip label="CPU, % of one core (whole process tree)">
+      <Tooltip
+        label={`CPU, % of one core (whole process tree) · ${fmtCpuTime(s.cpu_seconds)} total`}
+      >
         <Text size="xs" ff="monospace" c="dimmed" aria-label={`CPU ${Math.round(s.cpu)} percent`}>
           {Math.round(s.cpu)}%
         </Text>
       </Tooltip>
       <Spark points={s.spark} />
-    </span>
+    </>
+  );
+  // Historical runs pass no toggle — there is no live node to graph — so the
+  // stats stay plain text rather than becoming a button that does nothing.
+  if (!props.onToggle) return <span className="node-stats">{body}</span>;
+  return (
+    <UnstyledButton
+      className="node-stats node-stats-toggle"
+      onClick={props.onToggle}
+      aria-expanded={props.expanded}
+      aria-label={`${props.expanded ? "Hide" : "Show"} resource detail`}
+    >
+      {body}
+      {props.expanded ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}
+    </UnstyledButton>
   );
 }
 
@@ -158,6 +190,7 @@ function NodeCard(props: {
 }) {
   const n = props.node;
   const [busy, setBusy] = useState<string | null>(null);
+  const [expanded, setExpanded] = useState(false);
   const { flash, copy } = useCopyFlash();
   const note = healthNote(n);
   const bucket = statusBucket(n.status);
@@ -201,8 +234,18 @@ function NodeCard(props: {
             wrap to their own line instead of squeezing the name when there is no
             room for both. */}
         <span className="node-head-gap" />
-        <NodeStatsLine stats={props.stats} />
+        <NodeStatsLine
+          stats={props.stats}
+          expanded={expanded}
+          // Only a live, sampled node can be graphed: a historical run has no
+          // per-process rows and its aggregates are already pruned or ending.
+          onToggle={props.stats ? () => setExpanded((e) => !e) : undefined}
+        />
       </div>
+
+      {expanded && props.stats && (
+        <ResourcePanel run={props.run} nodeKey={`${n.name}:${n.variant}`} />
+      )}
 
       {n.url && (
         <div className="node-url-row">
