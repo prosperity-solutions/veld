@@ -453,7 +453,28 @@ Retention: node totals 24h, per-process rows 2h — the API reports both
 them. A by-process view over a window longer than the per-process horizon is
 legitimately empty for the older part of the range.
 
-Two daemon-environment escape hatches:
+Two escape hatches, read from **the daemon's** environment:
+
+> A plain `export VELD_STATS_CMDLINE=off` in your shell does **not** reach them.
+> The sampler runs inside the user daemon, which is a launchd LaunchAgent (macOS)
+> or a `systemd --user` unit (Linux); neither inherits an interactive shell's
+> environment — the same reason veld has to inject `PATH` into daemon-spawned
+> commands. Set them where the service can see them, then restart the daemon
+> (the values are read once per daemon lifetime):
+>
+> ```sh
+> # macOS — set it for the session, then restart the agent so it picks it up
+> launchctl setenv VELD_STATS_CMDLINE off
+> launchctl kickstart -k "gui/$(id -u)/dev.veld.daemon"
+>
+> # Linux
+> systemctl --user set-environment VELD_STATS_CMDLINE=off
+> systemctl --user restart veld-daemon
+> ```
+>
+> Verify it took effect with `veld stats --processes --json`: with argv capture
+> off, every process's `cmd` is `null` while `name` still reports.
+
 
 | variable | effect |
 |---|---|

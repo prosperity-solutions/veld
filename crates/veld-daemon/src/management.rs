@@ -1758,11 +1758,8 @@ mod tests {
                 MAX_HISTORY_WINDOW_SECS,
                 veld_core::stats::NODE_STATS_RETENTION_SECS
             );
-            assert!(
-                veld_core::stats::PROCESS_STATS_RETENTION_SECS
-                    < veld_core::stats::NODE_STATS_RETENTION_SECS,
-                "per-process rows are the bulky ones and must not outlive the aggregates"
-            );
+            // (The ordering of the two horizons is guarded by a `const` assert
+            // at their definition in `veld_core::stats`.)
         }
 
         #[test]

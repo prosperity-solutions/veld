@@ -70,13 +70,21 @@ fn detail_enabled() -> bool {
 /// are used as the fallback, so this never returns less than the portable
 /// baseline.
 pub fn probe(pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
-    if !detail_enabled() {
-        return ProcProbe {
-            memory: MemoryBreakdown::basic(resident, virtual_bytes),
-            cpu_seconds: None,
-        };
+    let probe = platform::probe(pid, resident, virtual_bytes);
+    if detail_enabled() {
+        return probe;
     }
-    platform::probe(pid, resident, virtual_bytes)
+    // The switch is about the *memory* detail — the expensive part on Linux is
+    // walking the VMA list for `smaps_rollup`. Cumulative CPU time comes from
+    // `/proc/<pid>/stat` (one cheap read) or, on macOS, from the same
+    // `proc_pid_rusage` call that would have been made anyway, so it is kept.
+    // Discarding it here made the documented memory escape hatch silently zero
+    // the CPU TIME column too — and `cpu_seconds` is not optional, so a real
+    // zero and a withheld one were indistinguishable.
+    ProcProbe {
+        memory: MemoryBreakdown::basic(resident, virtual_bytes),
+        cpu_seconds: probe.cpu_seconds,
+    }
 }
 
 #[cfg(target_os = "linux")]

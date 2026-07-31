@@ -116,7 +116,13 @@ pub fn pad_right(s: &str, width: usize) -> String {
 // ---------------------------------------------------------------------------
 
 /// Human-readable byte size: 1024-based, with the conventional short KB/MB/GB
-/// labels (kept identical to the management UI's `fmtBytes` so the two agree).
+/// labels.
+///
+/// **Not** digit-identical to the management UI's `fmtBytes`
+/// (`ui/src/shared/util.ts`), which prints one more decimal at MB and two at GB —
+/// so the same footprint reads `512 MB` / `1.5 GB` here and `512.0 MB` /
+/// `1.50 GB` there. Both predate this module; the tests below pin what this one
+/// actually does rather than the parity an older comment claimed.
 pub fn fmt_bytes(bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     let b = bytes as f64;
@@ -312,7 +318,7 @@ mod tests {
     #[test]
     fn fmt_cpu_time_matches_the_ui() {
         assert_eq!(fmt_cpu_time(0.0), "0.0s");
-        assert_eq!(fmt_cpu_time(3.14), "3.1s");
+        assert_eq!(fmt_cpu_time(3.45), "3.5s");
         assert_eq!(fmt_cpu_time(59.9), "59.9s");
         assert_eq!(fmt_cpu_time(60.0), "1m00s");
         assert_eq!(fmt_cpu_time(125.0), "2m05s");

@@ -277,7 +277,16 @@ fn parse_window(raw: &str) -> Result<i64, String> {
     if n <= 0 {
         return Err(format!("--window must be positive, got '{raw}'"));
     }
-    Ok(n * mult)
+    // `checked_mul` and then a clamp to retention. Unchecked, `--window 9999…h`
+    // overflowed the multiply, and even a valid i64 large enough to survive it
+    // made `chrono::Duration::seconds` panic on its own bound — a backtrace where
+    // every other bad `--window` gets a one-line error. Clamping rather than
+    // erroring mirrors the history API's `clamp_window_secs`: asking for more than
+    // retention keeps is answered with what there is.
+    let secs = n
+        .checked_mul(mult)
+        .ok_or_else(|| format!("--window '{raw}' is too large"))?;
+    Ok(secs.min(veld_core::stats::NODE_STATS_RETENTION_SECS))
 }
 
 /// Whether a node key matches a `--node` filter. The filter may name the node
@@ -362,7 +371,16 @@ fn print_human(
     let header_refs: Vec<&str> = headers.iter().map(|h| h.as_str()).collect();
     output::print_table(&header_refs, &table);
 
-    if !all_metrics && !available_metrics(rows).iter().any(|m| m.is_page_class()) {
+    // Test STACK membership, not `is_page_class()`: macOS always reports `wired`
+    // (it comes free with `proc_pid_rusage`), and `wired` IS a page class — so the
+    // `is_page_class` form was satisfied on macOS and this hint never printed on
+    // the one platform it exists for, leaving `private_dirty` showing `-` with no
+    // explanation. `STACK` is the private/shared split proper. The UI's
+    // `canSplitByType` already tested the right set.
+    let has_split = available_metrics(rows)
+        .iter()
+        .any(|m| MemoryMetric::STACK.contains(m));
+    if !all_metrics && !has_split {
         // Saying so beats leaving the reader to wonder whether their node really
         // has no private memory.
         output::print_info(
@@ -448,7 +466,7 @@ fn print_history(
         ))
     );
     for row in rows {
-        print_series_line(&row.key, &row.history, dim);
+        print_series_line(&row.key, &row.history, dim, window);
         if !per_process {
             continue;
         }
@@ -456,29 +474,44 @@ fn print_history(
             .process_stats_buckets(project_root, run_name, &row.key, window)
             .unwrap_or_default();
         for s in &series {
-            print_series_line(&format!("  {} ({})", s.name, s.pid), &s.buckets, dim);
+            print_series_line(
+                &format!("  {} ({})", s.name, s.pid),
+                &s.buckets,
+                dim,
+                window,
+            );
         }
     }
 }
 
 /// One label + sparkline + range line. A window with no samples says so rather
 /// than drawing an empty axis.
-fn print_series_line(label: &str, buckets: &[StatsBucket], dim: Dimension) {
+fn print_series_line(label: &str, buckets: &[StatsBucket], dim: Dimension, window: StatsWindow) {
     if buckets.is_empty() {
         println!("  {label:<28} {}", output::dim("no samples in window"));
         return;
     }
-    // Buckets are omitted where nothing was sampled, so lay them out on the
-    // bucket ordinal: a gap must render as a gap, not as the series closing up.
-    let first = buckets[0].bucket_start;
-    let slots = buckets
-        .last()
-        .map(|b| ((b.bucket_start - first).num_seconds() / window_step(buckets)) as usize + 1)
-        .unwrap_or(0)
-        .min(HISTORY_POINTS as usize);
+    // Lay the values out on the WINDOW's own bucket grid, not on the spacing
+    // observed between the buckets that came back.
+    //
+    // Both halves of that matter. Deriving the step from the smallest observed
+    // gap closed up every gap when no two buckets were adjacent — a run the
+    // daemon sampled intermittently, or a window it was down for part of, drew as
+    // continuous history, which is the "a gap must render as a gap" rule broken
+    // in the one place it is hardest to notice. And sizing the row from the last
+    // bucket dropped the newest sample whenever its index reached the point
+    // budget, since `for_points` ceils the bucket width — so the freshest reading
+    // periodically vanished from the sparkline while the table showed it.
+    let step = window.bucket_secs.max(1);
+    let span = (window.end - window.start).num_seconds().max(0);
+    let slots = ((span / step) as usize + 1).min(HISTORY_POINTS as usize + 1);
     let mut values: Vec<Option<f64>> = vec![None; slots];
     for b in buckets {
-        let idx = ((b.bucket_start - first).num_seconds() / window_step(buckets)) as usize;
+        let offset = (b.bucket_start - window.start).num_seconds();
+        if offset < 0 {
+            continue;
+        }
+        let idx = (offset / step) as usize;
         if idx < slots {
             values[idx] = dim.read(b);
         }
@@ -498,19 +531,6 @@ fn print_series_line(label: &str, buckets: &[StatsBucket], dim: Dimension) {
         output::sparkline(&values),
         output::dim(&format!("{} – {}", dim.format(min), dim.format(max)))
     );
-}
-
-/// The spacing between consecutive buckets, in seconds. Derived from the data
-/// rather than passed in so this helper works for the per-process series too,
-/// which share the node window's bucket width.
-fn window_step(buckets: &[StatsBucket]) -> i64 {
-    buckets
-        .windows(2)
-        .map(|w| (w[1].bucket_start - w[0].bucket_start).num_seconds())
-        .filter(|s| *s > 0)
-        .min()
-        // A single bucket has no spacing; any positive step lays it out at 0.
-        .unwrap_or(1)
 }
 
 fn print_json(

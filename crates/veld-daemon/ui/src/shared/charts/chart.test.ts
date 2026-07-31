@@ -108,7 +108,7 @@ describe("STACK_METRICS", () => {
 describe("fmtCpuTime", () => {
   it("matches the CLI's units", () => {
     expect(fmtCpuTime(0)).toBe("0.0s");
-    expect(fmtCpuTime(3.14)).toBe("3.1s");
+    expect(fmtCpuTime(3.45)).toBe("3.5s");
     expect(fmtCpuTime(59.9)).toBe("59.9s");
     expect(fmtCpuTime(60)).toBe("1m00s");
     expect(fmtCpuTime(125)).toBe("2m05s");

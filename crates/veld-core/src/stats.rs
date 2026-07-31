@@ -63,6 +63,16 @@ pub const NODE_STATS_RETENTION_SECS: i64 = 24 * 3600;
 /// looking like a bug.
 pub const PROCESS_STATS_RETENTION_SECS: i64 = 2 * 3600;
 
+// Guarded at the definition site rather than in a test: per-process rows
+// outnumber the aggregates by the size of each node's process tree, so letting
+// them outlive the aggregates would grow the database without bound in the one
+// direction nobody watches. A compile error is the right failure for a pair of
+// constants.
+const _: () = assert!(
+    PROCESS_STATS_RETENTION_SECS < NODE_STATS_RETENTION_SECS,
+    "per-process stats must not be kept longer than the node aggregates"
+);
+
 /// The memory figures a platform can report for one process, beyond plain RSS.
 ///
 /// Every field except [`footprint`](Self::footprint) and

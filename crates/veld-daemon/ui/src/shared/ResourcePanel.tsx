@@ -135,7 +135,17 @@ export function fmtPercent(v: number): string {
   return `${v < 10 ? v.toFixed(1) : Math.round(v)}%`;
 }
 
-/** Read a metric off a bucket. Mirrors Rust's `MemoryMetric::read`. */
+/**
+ * Read a metric off a bucket. Mirrors Rust's `MemoryMetric::read` — including its
+ * absence gate on `virtual`, which is the whole reason this is a function and not
+ * `b[m]`.
+ *
+ * A live process cannot occupy zero bytes of address space, so `virtual: 0` means
+ * "not recorded" — a bucket built from rows written before the breakdown columns
+ * existed. Rust reports that as absent; without the same gate here the chart drew
+ * a real line down to zero for exactly the samples `veld stats` printed as `-`,
+ * two readers of one artifact disagreeing about absent-vs-zero.
+ */
 export function bucketValue(b: StatsHistory["buckets"][number], m: MemoryMetric): number | null {
   switch (m) {
     case "footprint":
@@ -143,7 +153,7 @@ export function bucketValue(b: StatsHistory["buckets"][number], m: MemoryMetric)
     case "resident":
       return b.resident;
     case "virtual":
-      return b.virtual;
+      return b.virtual > 0 ? b.virtual : null;
     default:
       return b[m];
   }
