@@ -5,12 +5,19 @@
 //! managers) are not found when a config-declared command is executed — even
 //! though the same command works in the user's terminal. Every place veld
 //! executes a user-supplied command string on a daemon must therefore inherit
-//! the user's login-shell `PATH` via [`resolve_user_path`]: liveness probes
-//! (the daemon's health monitor), `SecretSource::Command` token resolution
-//! (`veld-share`'s `endpoint::resolve_secret`), and any future daemon-side
-//! command-execution surface. (Commands spawned by the `veld` CLI itself —
-//! orchestrator steps, actions — already inherit the terminal's `PATH` and do
-//! not need this.)
+//! the user's login-shell `PATH`.
+//!
+//! Two entry points. [`cached_user_path`] is the one anything running **inside
+//! a daemon** wants — request handlers (`spawn_veld`, the desktop picker and
+//! git plumbing, `SecretSource::Command` token resolution reached from
+//! `POST /api/shares`), the health monitor's liveness probes, and any future
+//! daemon-side command-execution surface — because resolution spawns a login
+//! shell and a stalled rc file must cost one resolution, not one per call.
+//! [`resolve_user_path`] is the uncached primitive, for a one-shot context that
+//! resolves once and exits — today only a CLI run's lazy var sources
+//! (`values.rs`), since `endpoint::resolve_secret` is shared with the daemon.
+//! (Commands spawned by the `veld` CLI itself — orchestrator steps, actions —
+//! already inherit the terminal's `PATH` and need neither.)
 //!
 //! Only `PATH` is inherited — not the rest of the login shell's environment
 //! (exported variables, aliases, functions). On a headless host with no user
@@ -41,23 +48,183 @@ const PATH_RESOLVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// lines don't start with `PATH=` — the environment variable itself is
 /// colon-delimited regardless of shell.
 ///
-/// Not cached: callers resolve at most a handful of times per operation
-/// (a share's relay/gateway tokens, a gateway boot), and the health monitor
-/// keeps its own 60s refresh. A healthy login shell answers in well under a
-/// second; only a hung rc file costs the full timeout, and then the fallback
-/// applies.
+/// Not cached — this is the primitive. A healthy login shell answers in well
+/// under a second; only a hung rc file costs the full timeout, and then the
+/// fallback applies. Fine for a one-shot context that resolves once and exits
+/// — today only a CLI run's lazy var sources (`values.rs`). Anything running
+/// inside a daemon — a request handler, a periodic scan — wants
+/// [`cached_user_path`] instead, so a stalled rc file costs one resolution
+/// rather than one per call. Note that a caller shared between the two, like
+/// `endpoint::resolve_secret`, counts as daemon-side and uses the cache.
 pub async fn resolve_user_path() -> String {
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
     if let Some(path) = login_shell_path(&shell).await {
         info!(path = %path, "resolved user PATH from login shell");
         return path;
     }
+    process_path_fallback()
+}
+
+/// The value used when the login shell can't be consulted: this process's own
+/// `PATH`. On a daemon that is the bare service `PATH` — the value that made
+/// user CLIs unfindable in the first place — so it is a floor, not an answer,
+/// and [`cached_user_path`] deliberately does not treat it as one.
+fn process_path_fallback() -> String {
     match std::env::var("PATH") {
         Ok(p) if !p.is_empty() => p,
         // Never return "" — `.env("PATH", "")` would disable lookup entirely,
         // reintroducing the "command not found" failure this helper exists to
         // prevent.
         _ => "/usr/local/bin:/usr/bin:/bin".to_owned(),
+    }
+}
+
+/// How often [`refresh_user_path_cache`] re-resolves on a live daemon. The
+/// published value is therefore at most this old, which is what lets a request
+/// handler read it and never wait on a login shell.
+const PATH_WARM_INTERVAL: Duration = Duration::from_secs(20);
+
+/// The most recently published `PATH`. `None` until the first resolution.
+///
+/// One writer ([`refresh_user_path_cache`], driven by
+/// [`warm_user_path_cache`]) and many readers, so there is no ordering rule to
+/// get wrong: no TTL, no which-of-two-resolutions-wins, no lock held across an
+/// await. An earlier revision of this cache had all three and each one grew a
+/// bug — a stalled resolution reinstating the bare service `PATH` over a good
+/// value, a warm task that only refreshed *after* expiry, a fallback cached as
+/// though it were an answer. What replaced them is the invariant in
+/// [`publish_value`].
+fn cell() -> &'static std::sync::Mutex<Option<String>> {
+    static CELL: std::sync::OnceLock<std::sync::Mutex<Option<String>>> = std::sync::OnceLock::new();
+    CELL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// What to store given the currently published value and a fresh resolution
+/// result — `None` meaning "leave what is there".
+///
+/// **A resolution that learned nothing never displaces one that did.** This is
+/// the whole correctness argument. `login_shell_path` returns `None` on a stall,
+/// a spawn failure or a non-zero exit, and can also succeed while contributing
+/// nothing (an answer byte-identical to this process's `PATH`: `SHELL` unset so
+/// `sh` ran, or an rc file whose version-manager block is gated on a terminal
+/// that resolution deliberately does not provide). On a daemon that unhelpful
+/// value *is* the bug — the bare launchd `PATH` that cannot find `npx` — so it
+/// may seed an empty cell, but it must never overwrite a real answer, however
+/// old that answer is. A real answer always wins; the warm loop keeps it
+/// current.
+fn publish_value(current: Option<&str>, resolved: Option<String>) -> Option<String> {
+    let fallback = process_path_fallback();
+    match (resolved.filter(|p| *p != fallback), current) {
+        (Some(helpful), _) => Some(helpful),
+        (None, Some(_)) => None,
+        (None, None) => Some(fallback),
+    }
+}
+
+/// The user's login-shell `PATH`, read from the cache — the entry point for
+/// anything running inside a daemon.
+///
+/// Resolution spawns an interactive login shell: sub-second normally, but up to
+/// [`PATH_RESOLVE_TIMEOUT`] when an rc file stalls, and the machines with the
+/// slowest `.zshrc` are exactly the ones (nvm, rbenv, `brew shellenv`) that need
+/// the resolved PATH in the first place. Doing that per request would put it on
+/// every click of the management UI's stop/restart/action buttons and Veld
+/// Desktop's start button, whose `fetch` calls carry no timeout.
+///
+/// So this only ever reads the published value. It resolves inline in exactly
+/// one case: nothing has been published yet, which on a daemon means the warm
+/// task's first resolution has not finished, and in a short-lived CLI or gateway
+/// process means this is the first call.
+pub async fn cached_user_path() -> String {
+    if let Some(published) = cell().lock().ok().and_then(|g| g.clone()) {
+        return published;
+    }
+    // Cold. Two callers racing here both resolve and both publish a real
+    // answer, which is harmless — there is no wrong winner between two truthful
+    // resolutions, and single-flighting it would reintroduce a lock to hold
+    // across an await.
+    refresh_user_path_cache().await;
+    cell()
+        .lock()
+        .ok()
+        .and_then(|g| g.clone())
+        .unwrap_or_else(process_path_fallback)
+}
+
+/// Re-resolve and publish per [`publish_value`].
+async fn refresh_user_path_cache() {
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_owned());
+    let resolved = login_shell_path(&shell).await;
+    if let Some(path) = &resolved {
+        info!(path = %path, "resolved user PATH from login shell");
+    }
+
+    // Poisoned mutex: nothing to publish into and nothing to serve from, so the
+    // caller falls back. Never panics the warm loop.
+    let Ok(mut guard) = cell().lock() else {
+        return;
+    };
+    let decided = publish_value(guard.as_deref(), resolved);
+    // Warn only when the cell is *left* holding an unhelpful value — i.e. this
+    // resolution seeded the fallback, or it learned nothing and there was
+    // nothing better already there. Rate-limited, because the warm loop retries
+    // forever and a permanently broken shell would otherwise log every 20s.
+    let unhelpful = guard
+        .as_deref()
+        .is_none_or(|p| p == process_path_fallback())
+        && decided
+            .as_deref()
+            .is_none_or(|p| p == process_path_fallback());
+    if unhelpful {
+        warn_unhelpful_path();
+    }
+    if let Some(path) = decided {
+        *guard = Some(path);
+    }
+}
+
+/// At most one "PATH resolution learned nothing" warning per
+/// [`UNHELPFUL_WARN_INTERVAL`], with the first one immediate.
+///
+/// Once-per-process would be worse than it sounds: a daemon runs for weeks, so a
+/// shell that breaks at hour 300 — or was broken from the start — would leave
+/// nothing in the recent log for whoever is debugging "npx: command not found".
+fn warn_unhelpful_path() {
+    const UNHELPFUL_WARN_INTERVAL: Duration = Duration::from_secs(600);
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+    let Ok(mut last) = LAST.lock() else {
+        return;
+    };
+    let now = std::time::Instant::now();
+    let due = last.is_none_or(|t| now.saturating_duration_since(t) >= UNHELPFUL_WARN_INTERVAL);
+    if !due {
+        debug!("user PATH resolution still contributing nothing (warning suppressed)");
+        return;
+    }
+    *last = Some(now);
+    warn!(
+        "user PATH resolution contributed nothing over this process's own PATH — \
+         user-installed CLIs may not be found"
+    );
+}
+
+/// Keep the published `PATH` current, so no request handler pays for a
+/// resolution.
+///
+/// A dedicated task rather than a piggyback on the health monitor's scan: that
+/// loop awaits per-node liveness probes (30s each) and `veld restart` recovery
+/// (up to 300s), so it cannot be relied on to refresh anything on a cadence.
+/// Spawn once at daemon start; never returns. The first tick fires immediately,
+/// so the cell is populated within one resolution of boot.
+pub async fn warm_user_path_cache() {
+    let mut interval = tokio::time::interval(PATH_WARM_INTERVAL);
+    // A daemon host that slept overnight must not wake to a queue of missed
+    // ticks, each spawning a login shell.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        refresh_user_path_cache().await;
     }
 }
 
@@ -176,5 +343,67 @@ mod tests {
     async fn resolves_to_a_non_empty_path() {
         let path = resolve_user_path().await;
         assert!(!path.is_empty());
+    }
+
+    /// Serialises the tests that touch the process-wide published value, so one
+    /// test's publish can't be read as another's.
+    fn cache_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    // Same non-empty guarantee through the cached entry point, which resolves by
+    // a different route (`login_shell_path` directly, so it can tell a real
+    // answer from the fallback). Cleared first so this exercises the cold path
+    // rather than reading whatever a sibling published.
+    #[tokio::test]
+    async fn cached_resolves_to_a_non_empty_path() {
+        let _serialised = cache_test_lock().lock().await;
+        *cell().lock().expect("cell mutex") = None;
+        assert!(!cached_user_path().await.is_empty());
+    }
+
+    // The correctness argument of the whole cache: a resolution that learned
+    // nothing must never displace one that did. `None` here means "leave what is
+    // there" — see `publish_value`.
+    #[test]
+    fn an_unhelpful_resolution_never_displaces_a_real_one() {
+        let good = "/opt/homebrew/bin:/usr/bin:/bin";
+        let bare = process_path_fallback();
+
+        // A stall (or spawn failure, or non-zero exit) keeps the good value…
+        assert_eq!(publish_value(Some(good), None), None);
+        // …and so does a shell that answers with nothing better than this
+        // process's own PATH, which on a daemon is the bug being fixed.
+        assert_eq!(publish_value(Some(good), Some(bare.clone())), None);
+        // A real answer always wins, including over a previously seeded fallback.
+        assert_eq!(
+            publish_value(Some(&bare), Some(good.to_owned())),
+            Some(good.to_owned())
+        );
+        assert_eq!(
+            publish_value(Some(good), Some(good.to_owned())),
+            Some(good.to_owned())
+        );
+    }
+
+    // An empty cell is the one case where the fallback is worth publishing:
+    // something must be served, and it is what the process would have used
+    // anyway. This is also what keeps a headless host (no user shell config)
+    // from resolving on every single read.
+    #[test]
+    fn an_empty_cell_is_seeded_with_the_process_path() {
+        let bare = process_path_fallback();
+        assert_eq!(publish_value(None, None), Some(bare.clone()));
+        assert_eq!(publish_value(None, Some(bare.clone())), Some(bare));
+    }
+
+    // A published value is read back without resolving — the property that keeps
+    // a stalled `.zshrc` off the request path.
+    #[tokio::test]
+    async fn a_published_value_is_read_without_resolving() {
+        let _serialised = cache_test_lock().lock().await;
+        *cell().lock().expect("cell mutex") = Some("/published/only".to_owned());
+        assert_eq!(cached_user_path().await, "/published/only");
     }
 }

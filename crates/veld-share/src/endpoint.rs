@@ -597,7 +597,12 @@ pub async fn resolve_secret(source: &SecretSource) -> Result<String> {
             // read …`) would otherwise fail with "command not found". Same
             // precedent as the daemon's liveness probes. Resolved outside the
             // timeout below — PATH resolution carries its own bound.
-            let user_path = veld_core::user_path::resolve_user_path().await;
+            //
+            // Cached: this is reached from a request handler
+            // (`POST /api/shares` → `start_web_share` → `GatewayClient::resolve`)
+            // as well as from a gateway boot, and a login shell that stalls
+            // would otherwise add its own 10s to the share-start round trip.
+            let user_path = veld_core::user_path::cached_user_path().await;
             run_token_command(&spec, &user_path).await?
         }
     };

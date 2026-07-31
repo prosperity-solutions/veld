@@ -19,7 +19,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use veld_core::db::{Db, DiscoveredWorktree, RepoRecord, WorktreeRecord, default_alias};
-use veld_core::user_path::resolve_user_path;
+use veld_core::user_path::cached_user_path;
 
 use super::management::{check_csrf, is_safe_identifier, open_db, spawn_veld, validate_run_name};
 
@@ -87,7 +87,7 @@ enum Pick {
 async fn run_picker(cmd: &str, args: &[&str]) -> Pick {
     let out = tokio::process::Command::new(cmd)
         .args(args)
-        .env("PATH", resolve_user_path().await)
+        .env("PATH", cached_user_path().await)
         // If the request is abandoned (timeout, client gone) the dialog
         // process must not linger on the user's screen.
         .kill_on_drop(true)
@@ -274,7 +274,7 @@ fn open_desktop_db() -> Result<Db, ApiError> {
 /// Run `git -C <dir> <args…>` with the user's login-shell PATH. Returns
 /// trimmed stdout, or the trimmed stderr as the error message.
 async fn git(dir: &FsPath, args: &[&str]) -> Result<String, String> {
-    let path_env = resolve_user_path().await;
+    let path_env = cached_user_path().await;
     let output = tokio::process::Command::new("git")
         .arg("-C")
         .arg(dir)
@@ -955,7 +955,7 @@ async fn start_worktree_run(
         args.push(preset.clone());
     }
 
-    let code = spawn_veld(&wt_path, &args);
+    let code = spawn_veld(&wt_path, &args).await;
     if code == StatusCode::ACCEPTED {
         Ok(StatusCode::ACCEPTED)
     } else {
