@@ -302,8 +302,6 @@ mod tests {
         assert_eq!(safe.chars().count(), payload.chars().count());
     }
 
-    /// Bidi overrides are the same defect as an escape sequence — rendered text
-    /// that does not match the bytes.
     #[test]
     fn fmt_bytes_uses_1024_steps() {
         assert_eq!(fmt_bytes(0), "0 B");
@@ -363,6 +361,8 @@ mod tests {
         assert_eq!(sparkline(&[]), "");
     }
 
+    /// Bidi overrides are the same defect as an escape sequence — rendered text
+    /// that does not match the bytes.
     #[test]
     fn one_line_strips_bidi_overrides() {
         let safe = one_line(&format!("start{rlo}dne", rlo = '\u{202E}'));

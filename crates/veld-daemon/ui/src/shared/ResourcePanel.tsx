@@ -114,19 +114,22 @@ export type StackMetric = (typeof STACK_METRICS)[number];
  * absent on this platform leaves a hole in the palette rather than shifting the
  * colours of the ones that remain.
  *
- * Keyed by the narrow [`StackMetric`] union, NOT by `string`: with a `string` key
+ * Keyed by exactly [`StackMetric`] — the stack's own membership, so there is no
+ * entry for a class that is never stacked (`wired` is reported but not stacked,
+ * since it overlaps the private/shared split).
+ *
+ * Narrow, NOT `string`: with a `string` key
  * an engineer who adds a page class and follows the compiler through
  * `METRIC_LABELS`/`METRIC_HELP` (which do force every key) would find this one
  * compiles clean while `CLASS_SLOT[m]` returns `undefined`, yielding
  * `var(--series-undefined)` — a series silently missing from the chart with no
  * compile or runtime error. */
-const CLASS_SLOT: Record<StackMetric | "wired", number> = {
+const CLASS_SLOT: Record<StackMetric, number> = {
   private_dirty: 1,
   private_clean: 2,
   shared_dirty: 3,
   shared_clean: 4,
   swap: 5,
-  wired: 6,
 };
 
 /** CPU as a percentage of one core. Can exceed 100% on a multi-threaded tree,

@@ -70,21 +70,17 @@ fn detail_enabled() -> bool {
 /// are used as the fallback, so this never returns less than the portable
 /// baseline.
 pub fn probe(pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
-    let probe = platform::probe(pid, resident, virtual_bytes);
-    if detail_enabled() {
-        return probe;
-    }
-    // The switch is about the *memory* detail — the expensive part on Linux is
-    // walking the VMA list for `smaps_rollup`. Cumulative CPU time comes from
-    // `/proc/<pid>/stat` (one cheap read) or, on macOS, from the same
-    // `proc_pid_rusage` call that would have been made anyway, so it is kept.
-    // Discarding it here made the documented memory escape hatch silently zero
-    // the CPU TIME column too — and `cpu_seconds` is not optional, so a real
-    // zero and a withheld one were indistinguishable.
-    ProcProbe {
-        memory: MemoryBreakdown::basic(resident, virtual_bytes),
-        cpu_seconds: probe.cpu_seconds,
-    }
+    // The flag is passed DOWN rather than applied to the result, because it has
+    // to suppress the expensive *read*, not just the value. Gating the return
+    // value would leave `smaps_rollup` — the VMA walk this switch exists to
+    // avoid — running for every process on every tick with its result discarded,
+    // turning a performance escape hatch into a display-only one.
+    //
+    // It suppresses only the memory detail. Cumulative CPU time comes from a
+    // separate cheap `/proc/<pid>/stat` read on Linux, and on macOS from the
+    // same `proc_pid_rusage` call that answers both — so it survives either way,
+    // and the memory switch never silently zeroes the CPU TIME column.
+    platform::probe(pid, resident, virtual_bytes, detail_enabled())
 }
 
 #[cfg(target_os = "linux")]
@@ -105,10 +101,23 @@ mod platform {
         })
     }
 
-    pub(super) fn probe(pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
-        let rollup = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
-            .ok()
-            .and_then(|text| parse_smaps_rollup(&text, virtual_bytes));
+    pub(super) fn probe(
+        pid: u32,
+        resident: u64,
+        virtual_bytes: u64,
+        memory_detail: bool,
+    ) -> ProcProbe {
+        // Skipped entirely when the switch is off — this read is the cost the
+        // switch exists to remove.
+        let rollup = if memory_detail {
+            std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+                .ok()
+                .and_then(|text| parse_smaps_rollup(&text, virtual_bytes))
+        } else {
+            None
+        };
+        // Always read: one small file, and it is the only source of cumulative
+        // CPU time on this platform.
         let cpu = std::fs::read_to_string(format!("/proc/{pid}/stat"))
             .ok()
             .and_then(|text| parse_stat_cpu_seconds(&text, clock_ticks()));
@@ -311,7 +320,7 @@ Locked:              128 kB
         #[test]
         fn missing_pid_degrades_instead_of_panicking() {
             // PID 0 is never a real process in /proc.
-            let p = probe(0, 4096, 8192);
+            let p = probe(0, 4096, 8192, true);
             assert_eq!(p.memory.footprint, 4096, "falls back to the caller's RSS");
             assert!(p.cpu_seconds.is_none());
         }
@@ -323,8 +332,20 @@ mod platform {
     use super::ProcProbe;
     use veld_core::stats::MemoryBreakdown;
 
-    pub(super) fn probe(pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
+    pub(super) fn probe(
+        pid: u32,
+        resident: u64,
+        virtual_bytes: u64,
+        memory_detail: bool,
+    ) -> ProcProbe {
+        // One syscall answers both memory and CPU time here, so it is made
+        // regardless; `memory_detail` only decides whether its memory fields are
+        // used. There is no separate cost to skip.
         match rusage(pid) {
+            Some(ri) if !memory_detail => ProcProbe {
+                memory: MemoryBreakdown::basic(resident, virtual_bytes),
+                cpu_seconds: Some((ri.ri_user_time.saturating_add(ri.ri_system_time)) as f64 / 1e9),
+            },
             Some(ri) => ProcProbe {
                 memory: MemoryBreakdown {
                     // phys_footprint is the figure macOS itself reports as a
@@ -383,7 +404,7 @@ mod platform {
         fn reads_own_footprint() {
             let ri = rusage(std::process::id()).expect("own rusage is readable");
             assert!(ri.ri_phys_footprint > 0, "our own footprint cannot be zero");
-            let p = probe(std::process::id(), 1, 2);
+            let p = probe(std::process::id(), 1, 2, true);
             assert_eq!(p.memory.virtual_bytes, 2, "virtual comes from the caller");
             assert!(p.memory.footprint > 0);
             assert!(!p.memory.has_page_classes(), "macOS reports no page split");
@@ -393,7 +414,7 @@ mod platform {
         #[test]
         fn missing_pid_degrades_to_basic() {
             // PID 0 is the kernel task; rusage on it is not permitted.
-            let p = probe(0, 4096, 8192);
+            let p = probe(0, 4096, 8192, true);
             assert_eq!(p.memory.footprint, 4096, "falls back to the caller's RSS");
             assert!(p.cpu_seconds.is_none());
         }
@@ -408,7 +429,12 @@ mod platform {
     /// veld ships for macOS and Linux only (see the release matrix in
     /// `.github/workflows/release.yml`). This arm keeps the crate compiling for
     /// anyone building elsewhere: no detail, RSS as the footprint.
-    pub(super) fn probe(_pid: u32, resident: u64, virtual_bytes: u64) -> ProcProbe {
+    pub(super) fn probe(
+        _pid: u32,
+        resident: u64,
+        virtual_bytes: u64,
+        _memory_detail: bool,
+    ) -> ProcProbe {
         ProcProbe {
             memory: MemoryBreakdown::basic(resident, virtual_bytes),
             cpu_seconds: None,
@@ -419,6 +445,44 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The switch must suppress the detailed *source*, not just its value.
+    ///
+    /// This is a regression guard with history: an earlier fix, made to stop the
+    /// memory switch from also zeroing CPU time, applied the flag to
+    /// `platform::probe`'s *result* — which kept `smaps_rollup` running for every
+    /// process on every tick and threw the answer away, quietly turning a
+    /// performance escape hatch into a display-only one. Passing the flag down is
+    /// the whole point, so assert both halves of the contract.
+    #[test]
+    fn memory_detail_off_drops_the_breakdown_but_keeps_cpu_time() {
+        let pid = std::process::id();
+        let off = platform::probe(pid, 4096, 8192, false);
+        assert_eq!(
+            off.memory,
+            MemoryBreakdown::basic(4096, 8192),
+            "with the switch off the breakdown is the portable baseline only"
+        );
+        assert!(
+            !off.memory.has_page_classes(),
+            "no page classes when the detailed read is skipped"
+        );
+        // The point of the earlier fix, still holding: CPU time comes from a
+        // different source and must survive.
+        assert!(
+            off.cpu_seconds.is_some(),
+            "cumulative CPU time is not part of what this switch turns off"
+        );
+
+        let on = platform::probe(pid, 4096, 8192, true);
+        assert!(on.cpu_seconds.is_some());
+        // On Linux the detailed read adds the page classes; on macOS it adds
+        // phys_footprint and wired. Either way `on` must carry more than `off`.
+        #[cfg(target_os = "linux")]
+        assert!(on.memory.has_page_classes());
+        #[cfg(target_os = "macos")]
+        assert!(on.memory.wired.is_some());
+    }
 
     #[test]
     fn probe_never_reports_less_than_the_baseline() {

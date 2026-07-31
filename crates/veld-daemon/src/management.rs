@@ -520,10 +520,13 @@ fn clamp_window_secs(requested: Option<i64>) -> i64 {
 /// buckets where it is absent render as gaps, which the chart already does.
 fn derive_available_metrics(buckets: &[veld_core::stats::StatsBucket]) -> Vec<&'static str> {
     use veld_core::stats::MemoryMetric;
+    // Footprint and resident always have a value (footprint falls back to RSS).
+    // `virtual` does NOT: a pre-v7 row never recorded it, and `MemoryMetric::read`
+    // reports 0 as absent — so offering it unconditionally listed a metric that
+    // renders as an unexplained blank chart on a window of old samples.
     let mut out = vec![
         MemoryMetric::Footprint.as_str(),
         MemoryMetric::Resident.as_str(),
-        MemoryMetric::Virtual.as_str(),
     ];
     for m in MemoryMetric::ALL {
         if !out.contains(&m.as_str())
@@ -1763,10 +1766,29 @@ mod tests {
         }
 
         #[test]
-        fn available_metrics_always_offers_the_three_totals() {
+        fn available_metrics_always_offers_the_two_unconditional_totals() {
             // Even with no data at all — the picker must never be empty.
+            // `virtual` is deliberately NOT here: a pre-v7 row never recorded it
+            // and `MemoryMetric::read` reports 0 as absent, so offering it
+            // unconditionally would list a metric that plots as a blank chart.
             let m = derive_available_metrics(&[]);
-            assert_eq!(m, vec!["footprint", "resident", "virtual"]);
+            assert_eq!(m, vec!["footprint", "resident"]);
+        }
+
+        #[test]
+        fn virtual_is_offered_only_when_the_data_carries_it() {
+            let mut b = bucket(detailed());
+            assert!(
+                derive_available_metrics(&[b]).contains(&"virtual"),
+                "a real virtual size is offerable"
+            );
+            // A bucket built from pre-v7 rows: `virtual_bytes` averaged to
+            // nothing and surfaced as 0, which means "not recorded".
+            b.memory.virtual_bytes = 0;
+            assert!(
+                !derive_available_metrics(&[b]).contains(&"virtual"),
+                "an unrecorded virtual size must not be offered"
+            );
         }
 
         #[test]
@@ -1792,6 +1814,7 @@ mod tests {
             let buckets = vec![bucket(MemoryBreakdown::basic(1000, 5000))];
             let m = derive_available_metrics(&buckets);
             assert_eq!(m, vec!["footprint", "resident", "virtual"]);
+            assert!(!m.contains(&"private_dirty"));
         }
 
         #[test]

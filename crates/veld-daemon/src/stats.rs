@@ -297,7 +297,14 @@ fn aggregate_tree(
     sampled_at: DateTime<Utc>,
     lookup: impl Fn(Pid) -> Option<ProcessReading>,
 ) -> Option<TreeSample> {
-    lookup(root)?; // root gone → no sample
+    // Probe the root ONCE and carry the reading into the walk. It used to be
+    // looked up here purely as a liveness pre-check and then again inside the
+    // loop, which was free when a lookup was a map get — but a lookup is now a
+    // `smaps_rollup` + `/proc/<pid>/stat` read (Linux) or a `proc_pid_rusage`
+    // syscall (macOS), so discarding the first answer doubled the cost for every
+    // node on every tick.
+    let root_reading = lookup(root)?; // root gone → no sample
+    let mut root_reading = Some(root_reading);
 
     let mut cpu_percent = 0.0f32;
     let mut memory_bytes = 0u64;
@@ -315,7 +322,13 @@ fn aggregate_tree(
         if !visited.insert(pid) {
             continue;
         }
-        if let Some(r) = lookup(pid) {
+        // The root's reading is already in hand; everything else is probed here.
+        let reading = if pid == root {
+            root_reading.take()
+        } else {
+            lookup(pid)
+        };
+        if let Some(r) = reading {
             cpu_percent += r.cpu_percent;
             memory_bytes += r.memory_bytes;
             cpu_seconds += r.cpu_seconds;

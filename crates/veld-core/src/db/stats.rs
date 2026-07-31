@@ -108,7 +108,9 @@ fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessSample> 
 /// The aggregate expressions shared by both bucket queries, in the order
 /// [`bucket_from_row`] reads them (after `bucket` and `samples`).
 ///
-/// `CASE WHEN COUNT(x) = COUNT(*) THEN AVG(x) END` rather than a plain `AVG(x)`:
+/// `CASE WHEN COUNT(x) = COUNT(*) THEN AVG(x) END` rather than a plain `AVG(x)`
+/// — for `virtual_bytes` too, which is nullable on a pre-v7 row and so is
+/// subject to exactly the same rule despite not being a page class:
 /// SQL's `AVG` skips NULLs, so a bucket where only some samples carried a page
 /// class would average the ones that did and present the result as the whole
 /// bucket's figure. An absent field must stay absent (the same rule
@@ -117,7 +119,7 @@ fn process_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProcessSample> 
 /// `VELD_STATS_MEMORY_DETAIL=off` toggle.
 const BUCKET_AGGS_TAIL: &str = "AVG(memory_bytes), \
      AVG(COALESCE(footprint, memory_bytes)), MAX(COALESCE(footprint, memory_bytes)), \
-     AVG(virtual_bytes), \
+     CASE WHEN COUNT(virtual_bytes) = COUNT(*) THEN AVG(virtual_bytes) END, \
      CASE WHEN COUNT(private_clean) = COUNT(*) THEN AVG(private_clean) END, \
      CASE WHEN COUNT(private_dirty) = COUNT(*) THEN AVG(private_dirty) END, \
      CASE WHEN COUNT(shared_clean) = COUNT(*) THEN AVG(shared_clean) END, \
@@ -137,8 +139,9 @@ fn bucket_aggs(process_count_expr: &str) -> String {
     format!("AVG(cpu_percent), MAX(cpu_percent), {process_count_expr}, {BUCKET_AGGS_TAIL}")
 }
 
-/// Read one aggregated bucket. `idx0` is the column index of the bucket ordinal;
-/// `samples` follows it, then [`BUCKET_AGGS`] in order.
+/// Read one aggregated bucket. Column 0 is the bucket ordinal, 1 is `samples`,
+/// then the aggregates in the order [`bucket_aggs`] emits them (its three
+/// leading expressions, then [`BUCKET_AGGS_TAIL`]).
 fn bucket_from_row(
     row: &rusqlite::Row<'_>,
     window_start: DateTime<Utc>,
@@ -500,7 +503,9 @@ impl Db {
                     end_ts,
                 ],
                 |row| {
-                    // `pid` is appended after BUCKET_AGGS (2 leading + 13 aggs).
+                    // `pid` is appended after the aggregates: 2 leading columns
+                    // (bucket, samples) + 13 from `bucket_aggs` (3 literals plus
+                    // the 10 in BUCKET_AGGS_TAIL) puts it at index 15.
                     let pid: u32 = row.get(15)?;
                     Ok((pid, bucket_from_row(row, window.start, window.bucket_secs)?))
                 },
@@ -551,8 +556,8 @@ impl Db {
 
     /// Delete per-process samples older than `cutoff`. Returns rows removed.
     ///
-    /// Pruned on a shorter horizon than the aggregates (see the GC's
-    /// `MAX_PROCESS_STATS_AGE_HOURS`): these rows outnumber them by the tree
+    /// Pruned on a shorter horizon than the aggregates (see
+    /// [`crate::stats::PROCESS_STATS_RETENTION_SECS`]): these rows outnumber them by the tree
     /// size, and a per-subprocess breakdown answers "what is happening" rather
     /// than "what happened yesterday".
     pub fn prune_node_process_stats_older_than(
