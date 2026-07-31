@@ -112,6 +112,86 @@ pub fn pad_right(s: &str, width: usize) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Resource formatting
+// ---------------------------------------------------------------------------
+
+/// Human-readable byte size: 1024-based, with the conventional short KB/MB/GB
+/// labels (kept identical to the management UI's `fmtBytes` so the two agree).
+pub fn fmt_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    let b = bytes as f64;
+    if b < KIB {
+        format!("{bytes} B")
+    } else if b < KIB * KIB {
+        format!("{:.0} KB", b / KIB)
+    } else if b < KIB * KIB * KIB {
+        format!("{:.0} MB", b / (KIB * KIB))
+    } else {
+        format!("{:.1} GB", b / (KIB * KIB * KIB))
+    }
+}
+
+/// CPU usage as a whole-percent-of-one-core figure. Can exceed 100% for a
+/// multi-threaded process tree, which is correct and not a bug to clamp.
+pub fn fmt_cpu(percent: f32) -> String {
+    format!("{percent:.0}%")
+}
+
+/// Cumulative CPU time, in the largest unit that keeps it readable. Sub-minute
+/// values keep one decimal: the difference between 0.2s and 3.0s of CPU is the
+/// interesting part of a just-started node.
+pub fn fmt_cpu_time(seconds: f64) -> String {
+    if seconds < 60.0 {
+        format!("{seconds:.1}s")
+    } else if seconds < 3600.0 {
+        format!(
+            "{}m{:02}s",
+            (seconds / 60.0) as u64,
+            (seconds % 60.0) as u64
+        )
+    } else {
+        format!(
+            "{}h{:02}m",
+            (seconds / 3600.0) as u64,
+            ((seconds % 3600.0) / 60.0) as u64
+        )
+    }
+}
+
+/// A unicode-block sparkline of `values`, `None` for a gap in the series.
+///
+/// Scaled from 0 to the maximum rather than min-to-max: a memory series that
+/// wanders between 400 and 402 MB should read as flat, and a min-max scale would
+/// draw it as a mountain range. A gap renders as a space — an absent sample must
+/// not look like a low one.
+pub fn sparkline(values: &[Option<f64>]) -> String {
+    const BLOCKS: [char; 8] = [
+        '\u{2581}', '\u{2582}', '\u{2583}', '\u{2584}', '\u{2585}', '\u{2586}', '\u{2587}',
+        '\u{2588}',
+    ];
+    let max = values
+        .iter()
+        .flatten()
+        .copied()
+        .fold(0.0f64, |a, b| a.max(b));
+    values
+        .iter()
+        .map(|v| match v {
+            None => ' ',
+            Some(_) if max <= 0.0 => BLOCKS[0],
+            Some(v) => {
+                let frac = (v / max).clamp(0.0, 1.0);
+                // Ceil into a 1..=8 band so any non-zero value shows at least
+                // the shortest block — "small" and "absent" must not be the
+                // same glyph.
+                let idx = ((frac * BLOCKS.len() as f64).ceil() as usize).clamp(1, BLOCKS.len());
+                BLOCKS[idx - 1]
+            }
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
 // Table helpers
 // ---------------------------------------------------------------------------
 

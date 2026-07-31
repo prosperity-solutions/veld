@@ -4,8 +4,8 @@ description: >
   Carry a change to the veld repo from empty diff to merged PR the way this
   project expects — autonomous implementation, adversarial review rounds, draft
   PR, wait for green CI, and (when authorized) bypass-merge. Opens with a short
-  kickoff questionnaire that sets review depth and merge policy for the rest of
-  the run. Use when the maintainer says "ship this", "build and merge X",
+  kickoff questionnaire that sets review depth, merge policy, and hands-on test
+  checkpoints for the rest of the run. Use when the maintainer says "ship this", "build and merge X",
   "implement and open a PR", "take this to merge", or hands over a feature/fix to
   carry all the way to main. Not for one-off edits with no PR.
 metadata:
@@ -61,11 +61,49 @@ in their request):
    - *Bypass-merge on green* — merge with admin bypass the moment CI is green.
    - *Open PR, stop for human* — push the draft PR, report, do not merge.
    - *Human PR review* — push, request review, wait for approval, then merge.
-3. **Docs & tests** (only if ambiguous) — confirm whether the change adds
+3. **Hands-on test checkpoints** — orthogonal to the merge policy: does the
+   maintainer want to drive the change themselves before it moves on? This is the
+   house style for anything with a UI or a new CLI surface, because a review
+   subagent cannot see that a graph renders wrong.
+   - *Two checkpoints (recommended for user-visible change)* — see
+     **Checkpointed autonomy** below.
+   - *One checkpoint, after review* — implement and review unattended, then hand
+     over once before the PR.
+   - *None* — fully unattended from kickoff to the merge policy's endpoint.
+4. **Docs & tests** (only if ambiguous) — confirm whether the change adds
    user-visible surface (triggers the AGENTS.md docs checklist) or is purely
    internal.
 
 Record the answers and follow them for the rest of the run. Do not re-ask.
+
+### Checkpointed autonomy
+
+The default working mode for a user-visible change in this repo. Autonomy is not
+all-or-nothing: the maintainer tests the running software, twice, and everything
+between and after those two points is unattended.
+
+```
+implement  →  ⏸ HAND OVER (maintainer drives it)  →  review loop  →
+⏸ HAND OVER AGAIN (regression pass on the review fixes)  →  PR  →  green CI  →  merge policy
+```
+
+Rules that make it work:
+
+- **A checkpoint is a full stop, not a status ping.** Build first, confirm it
+  runs, then report what to exercise and what you changed since they last looked.
+  Do not start the next step "while they check".
+- **Name the exercise.** Concrete commands and concrete screens, not "please
+  test". The maintainer should not have to reconstruct your feature's surface.
+- **The second checkpoint exists because review fixes are code too.** A review
+  round that touches rendering, wire shapes, or CLI output can regress what was
+  hand-verified at checkpoint one. Say explicitly which review fixes are
+  behaviour-visible and therefore worth re-driving.
+- **Resume without re-asking.** Their "looks good" / "continue" is the signal to
+  run the rest of the chosen policy to completion, including a bypass merge if
+  that's what they picked. Feedback instead of approval means fix it and
+  re-present the same checkpoint — a checkpoint can repeat.
+- **Never launch the desktop app yourself** — build it and hand over (see
+  `desktop/ARCHITECTURE.md`).
 
 ## Step 1 — Understand before touching code
 
@@ -86,6 +124,9 @@ Record the answers and follow them for the rest of the run. Do not re-ask.
 - Build, then `rustup update stable` (CI uses floating stable — drift blocks it),
   `cargo clippy --workspace --all-targets`, `cargo fmt --all`, and run the tests
   as you go.
+- If Step 0 chose two checkpoints: this is **checkpoint one**. Finish the whole
+  feature (including the docs audit in Step 3), leave it building and runnable,
+  then hand over per **Checkpointed autonomy** and wait.
 
 ## Step 3 — Docs audit
 
@@ -133,6 +174,10 @@ deadlock halts the run and comes back to the maintainer; a `DECISION-REQUIRED`
 finding does not halt the loop but must appear in the final report and, if it
 gates the PR, in the PR body.
 
+If Step 0 chose a post-review checkpoint, the review report is **checkpoint two**:
+present it, call out which fixes changed observable behaviour, and wait before
+opening the PR.
+
 ## Step 5 — PR
 
 - Branch if on `main` (never commit to main directly; if `main` is checked out
@@ -164,6 +209,8 @@ Stay autonomous. Only stop to ask when one of these holds:
   choice sets a precedent.
 - **Merge policy says so** — the maintainer chose "stop for human" or "human PR
   review" in Step 0.
+- **A test checkpoint is due** — Step 0 chose checkpointed autonomy. These are
+  planned stops, not failures; hand over and wait.
 - **Blocked** — a genuinely irreversible or destructive action with no safe
   default, or missing access/credentials you can't obtain.
 

@@ -33,6 +33,28 @@
   /* Terminal surface. Separate from --bg so the light theme can go near-white
      for legible monospace contrast without lightening the whole app chrome. */
   --term-bg: #0d0e10;
+
+  /* Categorical chart palette — eight hues in a FIXED slot order. The order is
+     the colourblind-safety mechanism, not a style choice: it was validated
+     against this theme's chart surface (--panel #141619) for the OKLCH
+     lightness band, a chroma floor, adjacent-pair separation under simulated
+     protanopia/deuteranopia, and 3:1 contrast. Re-ordering or re-stepping a
+     slot invalidates that, so do not "tidy" these. Assign a slot to an entity
+     (a memory class, a pid), never to its rank — a filter that changes the
+     series count must not repaint the survivors. A ninth series folds into
+     "Other"; there is deliberately no generated hue. */
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --series-3: #199e70;
+  --series-4: #c98500;
+  --series-5: #d55181;
+  --series-6: #008300;
+  --series-7: #9085e9;
+  --series-8: #e66767;
+  /* Chart chrome: recessive by design — the data is the only thing meant to
+     carry weight. */
+  --chart-grid: #23262b;
+  --chart-axis: #363b43;
 }
 
 body[data-theme="light"] {
@@ -59,6 +81,22 @@ body[data-theme="light"] {
   --tab-active: #ffffff;
   --tab-idle-edge: #a4abb4;
   --term-bg: #ffffff;
+
+  /* The same eight hues, re-stepped for the light chart surface (--panel #fff)
+     and validated as a set against it — not an automatic flip of the dark
+     steps. Three of them (aqua, yellow, magenta) sit below 3:1 on white by
+     design; the mitigation is that every chart here ships visible values in its
+     legend and a process table, so no value is ever carried by colour alone. */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --series-5: #e87ba4;
+  --series-6: #008300;
+  --series-7: #4a3aa7;
+  --series-8: #e34948;
+  --chart-grid: #e9ebee;
+  --chart-axis: #d5d8dc;
 }
 
 * {
@@ -1554,6 +1592,169 @@ select:focus {
 .spark {
   flex: none;
   opacity: 0.9;
+}
+
+/* ---------------------------------------------------------------------------
+   Expanded resource view (ResourcePanel + TimeSeriesChart)
+   --------------------------------------------------------------------------- */
+
+/* The stats line becomes the disclosure handle when the node is live. Kept
+   visually identical to the static version — it is the same information, and a
+   button that looks like a button here would put a second call-to-action on
+   every card. */
+.node-stats-toggle {
+  border-radius: 6px;
+  padding: 1px 3px;
+  color: var(--text);
+}
+.node-stats-toggle:hover {
+  background: var(--elev);
+}
+.node-stats-toggle svg {
+  color: var(--faint);
+}
+
+.res-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0 2px;
+  border-top: 1px solid var(--border);
+  margin-top: 4px;
+  min-width: 0;
+}
+
+/* Filters in one row above the chart, wrapping rather than shrinking — a
+   segmented control squeezed to 40px is unreadable. */
+.res-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.res-resolution {
+  margin-left: auto;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+.chart {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  border-radius: 6px;
+  /* The stacked bands are stroked in --panel to separate them, so the chart
+     surface must actually be --panel. */
+  background: var(--panel);
+  outline: none;
+  touch-action: none;
+}
+.chart-svg:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.chart-grid {
+  stroke: var(--chart-grid);
+  stroke-width: 1;
+}
+.chart-axis {
+  stroke: var(--chart-axis);
+  stroke-width: 1;
+}
+.chart-tick {
+  fill: var(--faint);
+  font-size: 9.5px;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+.chart-cursor {
+  stroke: var(--muted);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+}
+.chart-cursor.pinned {
+  stroke: var(--accent);
+  stroke-dasharray: none;
+}
+
+/* Legend and readout in one row. Present whenever there is more than one series
+   and always carrying the value, so identity never rests on colour. */
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+  font-size: 10.5px;
+  color: var(--muted);
+}
+.chart-legend-when {
+  color: var(--faint);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+.chart-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chart-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: none;
+}
+.chart-legend-value {
+  color: var(--text);
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+
+/* The process table is also the chart's table view, so it must stay readable at
+   any pane width — it scrolls inside itself rather than widening the card. */
+.res-table-wrap {
+  overflow-x: auto;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.res-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10.5px;
+}
+.res-table th,
+.res-table td {
+  padding: 3px 8px;
+  text-align: left;
+  white-space: nowrap;
+}
+.res-table th {
+  position: sticky;
+  top: 0;
+  background: var(--panel2);
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--border);
+}
+.res-table td {
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+.res-table tbody tr:last-child td {
+  border-bottom: none;
+}
+.res-table .num {
+  text-align: right;
+  /* Columns that must line up vertically get tabular figures; the rest keep the
+     proportional defaults. */
+  font-variant-numeric: tabular-nums;
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
+}
+.res-table .mono {
+  font-family: "JetBrains Mono Variable", ui-monospace, monospace;
 }
 
 /* Sharing popover (IDE mode's top-level surface). The strips inside carry the

@@ -47,6 +47,10 @@ pub fn routes() -> Router {
         .route("/api/health", get(health))
         .route("/api/environments", get(list_environments))
         .route("/api/stats", get(get_stats))
+        // Scrubbable history for one node. Project-scoped like every
+        // run-addressed route, but via required query fields rather than a path
+        // segment — the node key (`"node:variant"`) is not URL-path-safe.
+        .route("/api/stats/history", get(get_stats_history))
         // Every route below that takes a `{run}` segment MUST also take the
         // project scope — a run name alone is ambiguous across projects. See
         // [`RunScope`]; `handler_guards` pins that each one 400s without it.
@@ -354,12 +358,52 @@ struct StatsResponse {
 struct NodeStats {
     /// CPU percentage of a single core, summed across the process tree.
     cpu: f32,
-    /// Resident memory in bytes, summed across the process tree.
+    /// Resident memory in bytes, summed across the process tree. Double-counts
+    /// pages shared inside the tree — `footprint` is the figure to show.
     mem: u64,
     /// Number of live processes in the tree.
     procs: u32,
-    /// Recent memory samples (bytes), oldest-first, for the sparkline.
+    /// Recent **footprint** samples (bytes), oldest-first, for the sparkline.
+    /// Footprint rather than RSS so the collapsed sparkline and the expanded
+    /// chart plot the same quantity — two charts of one node that disagree are
+    /// worse than one chart.
     spark: Vec<u64>,
+    /// The honest tree total: summed PSS (Linux) / phys_footprint (macOS).
+    footprint: u64,
+    /// Virtual address space, summed.
+    virt: u64,
+    /// Cumulative CPU seconds burned by the tree.
+    cpu_seconds: f64,
+    /// Page-class split, when the platform reports one (Linux). `null` on macOS
+    /// and on samples taken with `VELD_STATS_MEMORY_DETAIL=off`; the UI hides
+    /// the "split by type" view rather than drawing an empty stack.
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+/// The optional page-class fields, flattened into [`NodeStats`] and
+/// [`StatsBucketDto`] so both wire shapes name them identically.
+#[derive(Serialize, Default)]
+struct MemoryClasses {
+    private_clean: Option<u64>,
+    private_dirty: Option<u64>,
+    shared_clean: Option<u64>,
+    shared_dirty: Option<u64>,
+    swap: Option<u64>,
+    wired: Option<u64>,
+}
+
+impl From<&veld_core::stats::MemoryBreakdown> for MemoryClasses {
+    fn from(m: &veld_core::stats::MemoryBreakdown) -> Self {
+        Self {
+            private_clean: m.private_clean,
+            private_dirty: m.private_dirty,
+            shared_clean: m.shared_clean,
+            shared_dirty: m.shared_dirty,
+            swap: m.swap,
+            wired: m.wired,
+        }
+    }
 }
 
 async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
@@ -394,7 +438,7 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
                     .node_stats_history(&entry.project_root, run_name, &node_key, SPARK_POINTS)
                     .unwrap_or_default()
                     .iter()
-                    .map(|h| h.memory_bytes)
+                    .map(|h| h.memory.footprint)
                     .collect();
                 nodes.insert(
                     node_key,
@@ -403,6 +447,10 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
                         mem: s.memory_bytes,
                         procs: s.process_count,
                         spark,
+                        footprint: s.memory.footprint,
+                        virt: s.memory.virtual_bytes,
+                        cpu_seconds: s.cpu_seconds,
+                        classes: (&s.memory).into(),
                     },
                 );
             }
@@ -417,6 +465,254 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
     }
 
     Ok(Json(StatsResponse { projects }))
+}
+
+// ---------------------------------------------------------------------------
+// Stats history API — the scrubbable graphs
+// ---------------------------------------------------------------------------
+
+/// Longest history window a client may request (seconds). Matches the GC's
+/// `MAX_STATS_AGE_HOURS`: asking for more can only return the same rows, so the
+/// clamp keeps a client from believing it got a week of data.
+const MAX_HISTORY_WINDOW_SECS: i64 = 24 * 3600;
+
+/// Default window when the client doesn't ask (15 minutes).
+const DEFAULT_HISTORY_WINDOW_SECS: i64 = 900;
+
+/// Ceiling on returned buckets. The bucket width is derived from
+/// `window / points`, so this — not the window — is what bounds the payload and
+/// the render cost. 2000 points is already finer than any plausible chart pixel
+/// width.
+const MAX_HISTORY_POINTS: u32 = 2000;
+
+/// Default bucket count: enough to fill a wide chart at one point per few
+/// pixels without asking the browser to draw more than it can show.
+const DEFAULT_HISTORY_POINTS: u32 = 240;
+
+/// Cap on per-process series returned. Past this the chart is unreadable and the
+/// legend is longer than the graph; the omitted tail is reported in
+/// `processes_omitted` so the UI can say so rather than silently truncating.
+const MAX_PROCESS_SERIES: usize = 12;
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    /// Required, like every run-addressed route — a bare run name is ambiguous
+    /// across projects.
+    project_root: String,
+    run: String,
+    /// Node key, `"node:variant"`.
+    node: String,
+    /// Window length in seconds, ending now. Clamped to
+    /// [`MAX_HISTORY_WINDOW_SECS`].
+    #[serde(default)]
+    window: Option<i64>,
+    /// Requested bucket count, clamped to [`MAX_HISTORY_POINTS`].
+    #[serde(default)]
+    points: Option<u32>,
+    /// Include the per-process series and the latest process tree. Off by
+    /// default: it is several times the query cost and the collapsed UI never
+    /// needs it.
+    #[serde(default)]
+    processes: bool,
+}
+
+/// One aggregated bucket on the wire. A flatter shape than
+/// [`veld_core::stats::StatsBucket`] — the page classes are hoisted to the top
+/// level so a chart can index a metric by its wire name (`"private_dirty"`)
+/// without knowing whether it lives in a nested object.
+#[derive(Serialize)]
+struct StatsBucketDto {
+    /// Bucket start, epoch milliseconds.
+    t: i64,
+    /// Raw samples averaged into this bucket. Never 0 — empty buckets are
+    /// omitted, so a gap in `t` means "no data", not "zero usage".
+    samples: u32,
+    cpu: f32,
+    cpu_peak: f32,
+    procs: f32,
+    /// RSS (`resident`), averaged.
+    resident: u64,
+    footprint: u64,
+    footprint_peak: u64,
+    #[serde(rename = "virtual")]
+    virtual_bytes: u64,
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+impl From<&veld_core::stats::StatsBucket> for StatsBucketDto {
+    fn from(b: &veld_core::stats::StatsBucket) -> Self {
+        Self {
+            t: b.bucket_start.timestamp_millis(),
+            samples: b.samples,
+            cpu: b.cpu_percent,
+            cpu_peak: b.cpu_peak,
+            procs: b.process_count,
+            resident: b.memory_bytes,
+            footprint: b.memory.footprint,
+            footprint_peak: b.footprint_peak,
+            virtual_bytes: b.memory.virtual_bytes,
+            classes: (&b.memory).into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ProcessSeriesDto {
+    pid: u32,
+    name: String,
+    cmd: Option<String>,
+    buckets: Vec<StatsBucketDto>,
+}
+
+/// One process in the latest tree snapshot, for the process table.
+#[derive(Serialize)]
+struct ProcessRowDto {
+    pid: u32,
+    parent_pid: Option<u32>,
+    /// Depth below the node's root process. A row's parent may be absent from
+    /// this list (the sampler caps how many processes it records per sample), so
+    /// indent by `depth` rather than by looking the parent up.
+    depth: u32,
+    name: String,
+    cmd: Option<String>,
+    cpu: f32,
+    cpu_seconds: f64,
+    resident: u64,
+    footprint: u64,
+    #[serde(rename = "virtual")]
+    virtual_bytes: u64,
+    /// Epoch milliseconds, when the platform reported a start time.
+    started_at: Option<i64>,
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+#[derive(Serialize)]
+struct StatsHistoryResponse {
+    /// Window actually served, in epoch milliseconds — the clamps mean this can
+    /// be narrower than requested, and a chart's axis must follow what was
+    /// served, not what was asked for.
+    start: i64,
+    end: i64,
+    bucket_secs: i64,
+    /// Memory metrics this node's samples actually carry, in the order a picker
+    /// should offer them. Derived from the data rather than from the daemon's
+    /// platform, so a window spanning a `VELD_STATS_MEMORY_DETAIL` change
+    /// reports honestly.
+    available_metrics: Vec<&'static str>,
+    buckets: Vec<StatsBucketDto>,
+    /// Per-process series, empty unless `processes=true`.
+    processes: Vec<ProcessSeriesDto>,
+    /// How many series were dropped by [`MAX_PROCESS_SERIES`].
+    processes_omitted: usize,
+    /// The most recent process tree, empty unless `processes=true`.
+    tree: Vec<ProcessRowDto>,
+}
+
+async fn get_stats_history(
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<StatsHistoryResponse>, StatusCode> {
+    use veld_core::stats::{MemoryMetric, StatsWindow};
+
+    validate_run_name(&q.run)?;
+    let db = open_db()?;
+    let registry = db.registry().map_err(|e| {
+        warn!("failed to load registry for stats history: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    // Resolves to the registry's own path, and 404s a project the daemon does
+    // not track — the same gate every run-addressed route uses.
+    let project_root = resolve_run_project(&registry, &q.project_root, &q.run)?;
+
+    let end = chrono::Utc::now();
+    let window_secs = q
+        .window
+        .unwrap_or(DEFAULT_HISTORY_WINDOW_SECS)
+        .clamp(1, MAX_HISTORY_WINDOW_SECS);
+    let start = end - chrono::Duration::seconds(window_secs);
+    let points = q.points.unwrap_or(DEFAULT_HISTORY_POINTS);
+    let window = StatsWindow::for_points(start, end, points.min(MAX_HISTORY_POINTS));
+
+    let buckets = db
+        .node_stats_buckets(&project_root, &q.run, &q.node, window)
+        .map_err(|e| {
+            warn!("failed to load stats history for '{}': {e}", q.node);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Which metrics to offer: every total, plus the page classes the newest
+    // bucket actually carries. Reading the newest rather than merging all of
+    // them keeps the picker stable while a window scrolls over an old sample
+    // that predates the detail.
+    let mut available_metrics = vec![
+        MemoryMetric::Footprint.as_str(),
+        MemoryMetric::Resident.as_str(),
+        MemoryMetric::Virtual.as_str(),
+    ];
+    if let Some(last) = buckets.last() {
+        for m in MemoryMetric::ALL {
+            if !available_metrics.contains(&m.as_str())
+                && m.read(last.memory_bytes, &last.memory).is_some()
+            {
+                available_metrics.push(m.as_str());
+            }
+        }
+    }
+
+    let (processes, processes_omitted, tree) = if q.processes {
+        let mut series = db
+            .process_stats_buckets(&project_root, &q.run, &q.node, window)
+            .map_err(|e| {
+                warn!("failed to load process history for '{}': {e}", q.node);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        // Already sorted heaviest-first by the query, so truncation drops the
+        // tail rather than an arbitrary slice.
+        let omitted = series.len().saturating_sub(MAX_PROCESS_SERIES);
+        series.truncate(MAX_PROCESS_SERIES);
+        let tree = db
+            .latest_process_tree(&project_root, &q.run, &q.node)
+            .unwrap_or_default();
+        (series, omitted, tree)
+    } else {
+        (Vec::new(), 0, Vec::new())
+    };
+
+    Ok(Json(StatsHistoryResponse {
+        start: start.timestamp_millis(),
+        end: end.timestamp_millis(),
+        bucket_secs: window.bucket_secs,
+        available_metrics,
+        buckets: buckets.iter().map(StatsBucketDto::from).collect(),
+        processes: processes
+            .into_iter()
+            .map(|s| ProcessSeriesDto {
+                pid: s.pid,
+                name: s.name,
+                cmd: s.cmd,
+                buckets: s.buckets.iter().map(StatsBucketDto::from).collect(),
+            })
+            .collect(),
+        processes_omitted,
+        tree: tree
+            .into_iter()
+            .map(|p| ProcessRowDto {
+                pid: p.pid,
+                parent_pid: p.parent_pid,
+                depth: p.depth,
+                name: p.name,
+                cmd: p.cmd,
+                cpu: p.cpu_percent,
+                cpu_seconds: p.cpu_seconds,
+                resident: p.memory_bytes,
+                footprint: p.memory.footprint,
+                virtual_bytes: p.memory.virtual_bytes,
+                started_at: p.started_at.map(|t| t.timestamp_millis()),
+                classes: (&p.memory).into(),
+            })
+            .collect(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1591,35 @@ mod tests {
                 status(get("/api/logs/main?lines=500")).await,
                 StatusCode::BAD_REQUEST
             );
+            // Stats history addresses a run through required query fields rather
+            // than a path segment (a node key like `web:local` is not
+            // path-safe), so the same rule has to hold there: no project scope,
+            // no answer. Rejected during extraction, before any DB access.
+            assert_eq!(
+                status(get("/api/stats/history?run=main&node=web:local")).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                status(get(
+                    "/api/stats/history?project_root=/repos/alpha&node=web:local"
+                ))
+                .await,
+                StatusCode::BAD_REQUEST,
+                "a scope without a run name is not addressable either"
+            );
+        }
+
+        #[tokio::test]
+        async fn stats_history_validates_its_numeric_query_fields() {
+            // `window`/`points` are typed, so a garbage value must 400 rather
+            // than silently falling back to a default window — a client asking
+            // for the wrong range should be told, not quietly answered.
+            for uri in [
+                "/api/stats/history?project_root=/repos/alpha&run=main&node=web:local&window=soon",
+                "/api/stats/history?project_root=/repos/alpha&run=main&node=web:local&points=lots",
+            ] {
+                assert_eq!(status(get(uri)).await, StatusCode::BAD_REQUEST, "{uri}");
+            }
         }
 
         #[tokio::test]

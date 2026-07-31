@@ -233,16 +233,108 @@ export interface LogResponse {
   nodes: NodeLogs[];
 }
 
-export interface NodeStats {
+/**
+ * The page classes a platform may report, `null` where it cannot.
+ *
+ * `null` means "not measurable here", never zero — Linux reads them from
+ * `smaps_rollup`, macOS has no unprivileged equivalent. Render an absent class
+ * as unavailable; a 0-height bar claims the node holds no private memory.
+ */
+export interface MemoryClasses {
+  private_clean: number | null;
+  private_dirty: number | null;
+  shared_clean: number | null;
+  shared_dirty: number | null;
+  swap: number | null;
+  wired: number | null;
+}
+
+export interface NodeStats extends MemoryClasses {
   cpu: number;
+  /** RSS, summed over the tree — double-counts pages shared inside it. */
   mem: number;
   procs: number;
+  /** Recent footprint samples, oldest-first. */
   spark: number[];
+  /** Summed PSS (Linux) / phys_footprint (macOS) — the figure to display. */
+  footprint: number;
+  virt: number;
+  cpu_seconds: number;
 }
 
 /** project_root → run name → "node:variant" → stats */
 export interface StatsResponse {
   projects: Record<string, Record<string, Record<string, NodeStats>>>;
+}
+
+/** Every memory metric the wire can name. Matches Rust's `MemoryMetric`. */
+export type MemoryMetric =
+  | "footprint"
+  | "resident"
+  | "virtual"
+  | "private_clean"
+  | "private_dirty"
+  | "shared_clean"
+  | "shared_dirty"
+  | "swap"
+  | "wired";
+
+/**
+ * One aggregated bucket of history.
+ *
+ * Buckets with no samples are **omitted**, so consecutive entries are not
+ * necessarily adjacent in time — a chart must lay them out by `t` and break the
+ * line across a gap. Joining them up would invent data.
+ */
+export interface StatsBucket extends MemoryClasses {
+  /** Bucket start, epoch milliseconds. */
+  t: number;
+  /** Raw samples averaged into this bucket; always ≥ 1. */
+  samples: number;
+  cpu: number;
+  cpu_peak: number;
+  procs: number;
+  resident: number;
+  footprint: number;
+  footprint_peak: number;
+  virtual: number;
+}
+
+export interface ProcessSeries {
+  pid: number;
+  name: string;
+  cmd: string | null;
+  buckets: StatsBucket[];
+}
+
+export interface ProcessRow extends MemoryClasses {
+  pid: number;
+  parent_pid: number | null;
+  /** Depth below the node's root process. Indent by this — the parent may be
+   * absent from the list, since the sampler caps processes recorded per sample. */
+  depth: number;
+  name: string;
+  cmd: string | null;
+  cpu: number;
+  cpu_seconds: number;
+  resident: number;
+  footprint: number;
+  virtual: number;
+  started_at: number | null;
+}
+
+export interface StatsHistory {
+  /** Window actually served (epoch ms) — the server clamps, so trust this over
+   * whatever was requested. */
+  start: number;
+  end: number;
+  bucket_secs: number;
+  /** Metrics these samples carry, in picker order. */
+  available_metrics: MemoryMetric[];
+  buckets: StatsBucket[];
+  processes: ProcessSeries[];
+  processes_omitted: number;
+  tree: ProcessRow[];
 }
 
 /** One-shot credential for opening a terminal WebSocket. */
@@ -460,6 +552,26 @@ export const api = {
       method: "DELETE",
     }),
   stats: () => request<StatsResponse>("/api/stats"),
+  /**
+   * Bucketed history for one node. `windowSecs` is clamped server-side to the
+   * retention horizon, and `points` bounds the returned bucket count — so the
+   * payload stays the same size whether the window is a minute or a day.
+   */
+  statsHistory: (
+    run: RunRef,
+    nodeKey: string,
+    opts: { windowSecs: number; points?: number; processes?: boolean },
+  ) => {
+    const q = new URLSearchParams({
+      project_root: run.projectRoot,
+      run: run.name,
+      node: nodeKey,
+      window: String(opts.windowSecs),
+    });
+    if (opts.points) q.set("points", String(opts.points));
+    if (opts.processes) q.set("processes", "true");
+    return request<StatsHistory>(`/api/stats/history?${q.toString()}`);
+  },
   logs: (run: RunRef, opts: { source?: string; runId?: string } = {}) => {
     const q = new URLSearchParams({ lines: "500" });
     q.set("project_root", run.projectRoot);

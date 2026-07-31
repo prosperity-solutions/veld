@@ -134,6 +134,9 @@ enum Command {
         json: bool,
     },
 
+    /// Show detailed CPU/memory stats, per subprocess and over time.
+    Stats(commands::stats::StatsArgs),
+
     /// Show URLs of a running environment.
     Urls {
         /// Name of the run to inspect.
@@ -539,6 +542,7 @@ async fn main() {
             | Command::Stop { .. }
             | Command::Restart { .. }
             | Command::Status { .. }
+            | Command::Stats(_)
             | Command::Urls { .. }
             | Command::Action { .. }
             | Command::Logs { .. }
@@ -602,6 +606,8 @@ async fn main() {
             outputs,
             json,
         } => commands::status::run(name, outputs, json).await,
+
+        Command::Stats(args) => commands::stats::run(args).await,
 
         Command::Urls { name, json } => commands::urls::run(name, json).await,
 
