@@ -21,9 +21,10 @@
  *
  * Series take `--series-1..8` in fixed slot order, keyed to the entity (a memory
  * class, a PID) rather than to its rank, so filtering or reordering never
- * repaints the survivors. The palette is validated for both themes in
- * `styles.css`; slots past 8 are folded into "Other" by the caller rather than
- * generated here.
+ * repaints the survivors — see [`assignSlots`], which is also what keeps two
+ * bands from sharing a hue at the same time. The palette is validated for both
+ * themes in `styles.css`; a ninth series is folded into "Other" by the caller
+ * (see `ResourcePanel`) rather than given a generated hue.
  */
 import { useCallback, useMemo, useRef, useState } from "react";
 
@@ -136,6 +137,48 @@ export function stackBands(
     // Accumulate over the drawn indices only — accumulating everywhere would
     // raise the baseline under gaps and float the next band off the axis.
     for (const i of runs.flat()) baselines[i] += s.points[i] ?? 0;
+  }
+  return out;
+}
+
+/** Categorical palette size. Fixed — a 9th hue is never generated. */
+export const PALETTE_SLOTS = 8;
+
+/**
+ * Assign colour slots to a set of series keys, stable across renders and free of
+ * simultaneous collisions.
+ *
+ * Both properties are needed and they pull against each other. Assigning by
+ * position repaints every survivor when the server reorders (it ranks by peak,
+ * which moves). Assigning `size % 8` on first sight is stable but *collides*
+ * once more than eight keys have ever been seen — two bands in the same chart,
+ * same colour, at the same time.
+ *
+ * So: honour a key's previous slot when it is still free, then fill the rest with
+ * the lowest free slot. Keys that stop being charted release their slots. The
+ * caller must pass at most [`PALETTE_SLOTS`] keys — fold the tail into an
+ * "Other" series rather than asking for a ninth hue.
+ */
+export function assignSlots(
+  keys: number[],
+  previous: Map<number, number>,
+): Map<number, number> {
+  const out = new Map<number, number>();
+  const used = new Set<number>();
+  for (const k of keys) {
+    const prev = previous.get(k);
+    if (prev != null && prev >= 1 && prev <= PALETTE_SLOTS && !used.has(prev)) {
+      out.set(k, prev);
+      used.add(prev);
+    }
+  }
+  let next = 1;
+  for (const k of keys) {
+    if (out.has(k)) continue;
+    while (next <= PALETTE_SLOTS && used.has(next)) next++;
+    if (next > PALETTE_SLOTS) break;
+    out.set(k, next);
+    used.add(next);
   }
   return out;
 }

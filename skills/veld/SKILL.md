@@ -413,7 +413,9 @@ veld stats --json --name my-feature                      # breakdown per node
 veld stats --processes --json --name my-feature           # + one row per subprocess
 veld stats --history --window 1h --json --name my-feature # + bucketed history
 veld stats --history --cpu --window 1h --name my-feature   # CPU instead of memory
-veld stats --node web --memory private_dirty --processes  # is *this* node leaking?
+# Is this node leaking, and which child? A leak is a TREND, so --history is
+# what answers it — a single reading only tells you the value is large.
+veld stats --node web --memory private_dirty --processes --history --window 1h
 ```
 
 `--json` gives, per node: `cpu_percent`, `cpu_seconds` (cumulative),
@@ -440,7 +442,7 @@ Which memory number answers which question:
 | question | metric |
 |---|---|
 | what does this node cost the machine? | `footprint` |
-| is it leaking? | `private_dirty` |
+| is it leaking? | `private_dirty` **with `--history`** — one reading shows size, only a rising trend shows a leak |
 | why does `top` say 4 GB? | `virtual` / `resident` |
 | is it thrashing? | `swap` climbing while `resident` is flat |
 | which subprocess is it? | `--processes` |

@@ -36,7 +36,8 @@ pub struct StatsArgs {
     #[arg(long)]
     pub processes: bool,
 
-    /// Show a history sparkline over --window.
+    /// Show a history sparkline over --window. Needed to see a trend: a single
+    /// reading shows how big a figure is, not whether it is growing.
     #[arg(long)]
     pub history: bool,
 
@@ -48,9 +49,11 @@ pub struct StatsArgs {
     #[arg(long, default_value = "15m")]
     pub window: String,
 
-    /// Which memory figure the MEM column and history show. One of: footprint,
-    /// resident, private_dirty, private_clean, shared_dirty, shared_clean,
-    /// swap, wired, virtual.
+    /// Which memory figure to show. `footprint` (default) is the only one that
+    /// sums correctly over a process tree; `private_dirty` is the heap, so a
+    /// rising `private_dirty --history` is what a leak looks like; `resident` is
+    /// RSS. Also: private_clean, shared_dirty, shared_clean, swap, wired,
+    /// virtual.
     #[arg(long, default_value = "footprint")]
     pub memory: String,
 
@@ -588,6 +591,22 @@ mod tests {
         for bad in ["", "abc", "-5m", "0", "5d", "m"] {
             assert!(parse_window(bad).is_err(), "{bad} should be rejected");
         }
+    }
+
+    #[test]
+    fn window_rejects_multibyte_suffixes_without_panicking() {
+        // `parse_window` slices `&s[..s.len() - 1]` to strip the unit. That is a
+        // BYTE index, so it would panic mid-codepoint if a multi-byte character
+        // could reach it. It cannot: the slicing arms only match ASCII 's'/'m'/
+        // 'h', and everything else falls through to the no-suffix branch, which
+        // does not slice. Pinned because the natural "tidy-up" — matching on a
+        // `char` set that includes a non-ASCII unit like 'µ' — reintroduces it.
+        for bad in ["15µ", "µ", "１５m", "5h🙂", "15 m", "s", "-", "1.5h"] {
+            assert!(parse_window(bad).is_err(), "{bad:?} should be rejected");
+        }
+        // A multi-byte char before an ASCII suffix parses its digits and fails on
+        // them, rather than panicking on the slice.
+        assert!(parse_window("15µs").is_err());
     }
 
     #[test]

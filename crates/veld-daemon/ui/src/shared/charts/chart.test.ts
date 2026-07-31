@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { axisMax, contiguousRuns, stackBands, stackedMax } from "./TimeSeriesChart";
+import {
+  PALETTE_SLOTS,
+  assignSlots,
+  axisMax,
+  contiguousRuns,
+  stackBands,
+  stackedMax,
+} from "./TimeSeriesChart";
 import type { ChartSeries } from "./TimeSeriesChart";
 import { STACK_METRICS, bucketValue, fmtCpuTime, fmtPercent } from "../ResourcePanel";
 import type { StatsBucket } from "../../api";
@@ -229,5 +236,52 @@ describe("stackBands", () => {
 
   it("stackedMax sums per index and ignores absences", () => {
     expect(stackedMax([series("a", [1, 4]), series("b", [2, null])], 2)).toBe(4);
+  });
+});
+
+describe("assignSlots", () => {
+  it("never gives two charted keys the same slot", () => {
+    // The regression: `size % 8` collided as soon as more than eight keys had
+    // been seen, putting two bands of the SAME colour in one chart at once.
+    const keys = Array.from({ length: PALETTE_SLOTS }, (_, i) => 1000 + i);
+    const got = assignSlots(keys, new Map());
+    expect(got.size).toBe(PALETTE_SLOTS);
+    expect(new Set(got.values()).size).toBe(PALETTE_SLOTS);
+  });
+
+  it("keeps a key's colour across polls", () => {
+    const first = assignSlots([1, 2, 3], new Map());
+    // The server reorders (it ranks by peak, which moves) — colours must not.
+    const second = assignSlots([3, 1, 2], first);
+    expect(second.get(1)).toBe(first.get(1));
+    expect(second.get(2)).toBe(first.get(2));
+    expect(second.get(3)).toBe(first.get(3));
+  });
+
+  it("reuses a slot only after its key stops being charted", () => {
+    const first = assignSlots([1, 2], new Map());
+    const freed = first.get(1)!;
+    // pid 1 exits; pid 9 arrives and may take the freed slot.
+    const second = assignSlots([2, 9], first);
+    expect(second.get(2)).toBe(first.get(2));
+    expect(second.get(9)).toBe(freed);
+    expect(new Set(second.values()).size).toBe(2);
+  });
+
+  it("survives a stale previous map that would collide", () => {
+    // Two keys previously held the same slot (what the old allocator produced).
+    // The honoured-then-fill pass must still hand out distinct slots.
+    const stale = new Map([
+      [1, 1],
+      [2, 1],
+    ]);
+    const got = assignSlots([1, 2], stale);
+    expect(new Set(got.values()).size).toBe(2);
+  });
+
+  it("ignores an out-of-range previous slot", () => {
+    const got = assignSlots([1], new Map([[1, 99]]));
+    expect(got.get(1)).toBeGreaterThanOrEqual(1);
+    expect(got.get(1)).toBeLessThanOrEqual(PALETTE_SLOTS);
   });
 });

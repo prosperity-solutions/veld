@@ -32,7 +32,12 @@ import { Loader, SegmentedControl, Select, Text, Tooltip } from "@mantine/core";
 import { api, type MemoryMetric, type RunRef, type StatsHistory } from "../api";
 import { notifyError } from "./notify";
 import { fmtBytes } from "./util";
-import { ChartSeries, TimeSeriesChart } from "./charts/TimeSeriesChart";
+import {
+  ChartSeries,
+  PALETTE_SLOTS,
+  TimeSeriesChart,
+  assignSlots,
+} from "./charts/TimeSeriesChart";
 
 type SplitMode = "total" | "type" | "process";
 
@@ -93,18 +98,29 @@ const METRIC_HELP: Record<MemoryMetric, string> = {
 };
 
 /** The page classes that stack into a total, in stack order. */
-export const STACK_METRICS: MemoryMetric[] = [
+export const STACK_METRICS = [
   "private_dirty",
   "private_clean",
   "shared_dirty",
   "shared_clean",
   "swap",
-];
+] as const satisfies readonly MemoryMetric[];
+
+/** The stackable page classes, as a narrow union rather than all of
+ * `MemoryMetric` — so a lookup table keyed by it is exhaustively checked. */
+export type StackMetric = (typeof STACK_METRICS)[number];
 
 /** Categorical slots for the page classes — fixed per class, so a class that is
  * absent on this platform leaves a hole in the palette rather than shifting the
- * colours of the ones that remain. */
-const CLASS_SLOT: Record<string, number> = {
+ * colours of the ones that remain.
+ *
+ * Keyed by the narrow [`StackMetric`] union, NOT by `string`: with a `string` key
+ * an engineer who adds a page class and follows the compiler through
+ * `METRIC_LABELS`/`METRIC_HELP` (which do force every key) would find this one
+ * compiles clean while `CLASS_SLOT[m]` returns `undefined`, yielding
+ * `var(--series-undefined)` — a series silently missing from the chart with no
+ * compile or runtime error. */
+const CLASS_SLOT: Record<StackMetric | "wired", number> = {
   private_dirty: 1,
   private_clean: 2,
   shared_dirty: 3,
@@ -208,21 +224,14 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
   }, [split, canSplitByType]);
 
   /**
-   * First-seen PID → colour slot, stable for as long as the panel is open.
+   * PID → colour slot, carried across polls.
    *
-   * A ref rather than state on purpose: assigning a slot must not re-render, and
-   * the map must survive every poll. Slots wrap at 8 (the palette's fixed size),
-   * so a node with more than eight charted processes reuses a hue — better than
-   * inventing one, per the palette's own rule.
+   * A ref rather than state: assigning a slot must not trigger a render, and the
+   * map has to survive every poll so a process keeps its colour. The allocation
+   * itself lives in `assignSlots`, which also guarantees no two charted PIDs
+   * share a slot at the same time.
    */
   const slots = useRef(new Map<number, number>());
-  const slotForPid = (pid: number): number => {
-    const existing = slots.current.get(pid);
-    if (existing != null) return existing;
-    const slot = (slots.current.size % 8) + 1;
-    slots.current.set(pid, slot);
-    return slot;
-  };
 
   /** The value this dimension plots, per bucket. */
   const readBucket = useMemo(
@@ -246,21 +255,56 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
       }));
     }
     if (split === "process") {
+      // The palette is eight fixed hues and a ninth is never generated, so past
+      // that the tail folds into one "Other" band. Folding rather than dropping
+      // matters here: these bands are STACKED, so discarding the tail would make
+      // the stack silently sum to less than the node's own figure.
+      const foldTail = data.processes.length > PALETTE_SLOTS;
+      const individual = foldTail
+        ? data.processes.slice(0, PALETTE_SLOTS - 1)
+        : data.processes;
+      const tail = foldTail ? data.processes.slice(PALETTE_SLOTS - 1) : [];
+
       // Bucket times differ per process (a process that started late has fewer
       // buckets), so index each series into the node's own time axis by `t`.
-      return data.processes.map((p) => {
+      const assigned = assignSlots(
+        individual.map((p) => p.pid),
+        slots.current,
+      );
+      slots.current = assigned;
+
+      const out: ChartSeries[] = individual.map((p) => {
         const byTime = new Map(p.buckets.map((b) => [b.t, readBucket(b)]));
         return {
           key: String(p.pid),
           label: `${p.name} (${p.pid})`,
-          // Colour follows the PID for the life of this panel, NOT its position
-          // in the list: the server ranks series by peak footprint over the
-          // requested window, so two children whose peaks cross would otherwise
-          // swap colours between 5s polls.
-          slot: slotForPid(p.pid),
+          slot: assigned.get(p.pid) ?? PALETTE_SLOTS,
           points: times.map((t) => byTime.get(t) ?? null),
         };
       });
+
+      if (tail.length > 0) {
+        const byTime = new Map<number, number>();
+        const seen = new Set<number>();
+        for (const p of tail) {
+          for (const b of p.buckets) {
+            const v = readBucket(b);
+            if (v == null) continue;
+            seen.add(b.t);
+            byTime.set(b.t, (byTime.get(b.t) ?? 0) + v);
+          }
+        }
+        out.push({
+          key: "other",
+          label: `Other (${tail.length} processes)`,
+          // The last slot, always — "Other" is not an entity competing for a
+          // colour, so it never participates in the stable assignment.
+          slot: PALETTE_SLOTS,
+          // A bucket where none of the tail existed is absent, not zero.
+          points: times.map((t) => (seen.has(t) ? (byTime.get(t) ?? 0) : null)),
+        });
+      }
+      return out;
     }
     const mean: ChartSeries = {
       key: isCpu ? "cpu" : metric,
