@@ -44,9 +44,9 @@ have since shipped — see below.)
 | Icons | One mark, two assets, drawn by a stdlib-only rasteriser (`desktop/scripts/make-icons.py`) | The app icon is the *favicon's* shape (rounded dark tile, white `V`, accent dot) because that is already what veld shows in a browser tab, and the menu-bar icon is `logo.svg`'s mark — the same one the Hammerspoon widget uses, so the two menu-bar presences are one identity rather than two lookalikes. The tray asset is a macOS **template** image (`*Template.png`, black + alpha): the OS tints it per menu bar, which is the only way one file stays legible in light *and* dark mode. Shipping the coloured mark instead is a white glyph on a light menu bar — the bug the Hammerspoon widget has, since it sets its icon non-template. Cost: the accent dot is a shape there, not a colour; the app icon carries the colour. The generator draws the mark analytically — it is a polygon and a circle, since every segment of `logo.svg`'s V is a straight line — so there is nothing to install and the bytes are identical on every machine. Both tools tried first were wrong in the same direction: `qlmanage` (QuickLook) composites thumbnails on an **opaque white background** and pads below its minimum size, which shipped a menu-bar icon that was a white tile with a dark V (a template image is alpha, so an opaque render is a solid blob — and invisible as a bug in any light-background preview), and ImageMagick's SVG renderer is blobby at icon sizes *and* its resize dropped the alpha channel to grayscale. The app icon is inset in a transparent margin, because macOS draws its own shadow into one and a full-bleed tile reads as a bigger, blockier icon than everything beside it in the dock. |
 | Packaging | **electron-builder**, macOS + Linux, riding the CLI's release pipeline | The app is packaged in the same workflow run that builds the CLI binaries, before the tag is created, and its artifacts are attached to the same GitHub release. A parallel pipeline would have been less plumbing exactly once and a version-skew source forever. No Windows target: the UI is served by the daemon, so a plain browser already covers that platform and a Windows build would be an installer around a page you can already open. |
 | Versioning | **One version, one tag** — the app's `package.json` version is the CLI's `Cargo.toml` version | The shell renders the daemon's UI, so the two halves are one product with one compatibility surface (the preload IPC a newer UI expects from an older shell). Release CI writes the version into `package.json` before packaging and semantic-release commits the same bump, which is exactly what it already does to `Cargo.toml`. The app reports skew (`updatePolicy.js` → `versionSkew`) rather than blocking on it: the fix is `veld update` in one direction and an app update in the other, and neither is something to refuse to start over. |
-| Auto-update | electron-updater against the same GitHub releases, **install-in-place only where it can actually work** | The check is uniform; applying it is not. macOS is download-only because Squirrel.Mac verifies that the replacement carries the running app's code signature and there is no Developer ID yet (see the row below) — a downloaded-then-rejected update is worse than no button. A Linux `.deb` is download-only because its files belong to dpkg. The AppImage self-installs, being a single file the running process may swap; `APPIMAGE` in the environment is how it knows it is one. `updateMode()` is one pure function, and the macOS half flips with the `MACOS_SIGNED` constant beside it — a constant rather than a branch to delete, because deleting the darwin case would fall through to a catch-all that returns `"download"` anyway, i.e. a no-op the existing test still passes. Both sides of the constant are tested. Every download is offered in a dialog first, including where it could be silent: applying an update restarts the app, and a dock full of terminal panes is not something to interrupt unannounced. |
+| Auto-update | electron-updater against the same GitHub releases, **install-in-place only where it can actually work** | The check is uniform; applying it is not. macOS self-installs now that releases are signed and notarized (see the row below): Squirrel.Mac verifies that the replacement carries the running app's code signature, which is exactly why it was download-only while the build was ad-hoc — a downloaded-then-rejected update is worse than no button. A Linux `.deb` is download-only because its files belong to dpkg. The AppImage self-installs, being a single file the running process may swap; `APPIMAGE` in the environment is how it knows it is one. `updateMode()` is one pure function, and the macOS half is a **measurement rather than a build-time constant**: `updater.js` runs `codesign --display` on its own bundle once at startup (~10-30 ms, no network) and passes the answer in. The first attempt was a `MACOS_SIGNED = true` constant, which is wrong in a way no constant can avoid — release CI signs, `just desktop-package` ad-hoc signs, and both compile from this same source, so the constant told a locally packaged build it could replace itself and it would download 113 MB before Squirrel.Mac refused the swap. The predicate (`isDeveloperIdSigned`: an `Authority=Developer ID Application:` line) is the same one release CI asserts on the artifact — one definition of "signed", checked at both ends — and with nothing measured it defaults to `"download"`, the answer that only ever costs a button. Every download is offered in a dialog first, including where it could be silent: applying an update restarts the app, and a dock full of terminal panes is not something to interrupt unannounced. |
 | Linux artifact naming | `executableName: veld-desktop`, set explicitly | electron-builder derives the Linux executable name from the npm package name, and `@veld/desktop` becomes `@velddesktop`, which its own path validation then rejects — *every* Linux build fails, which (because `release` needs the desktop job) takes the CLI's release with it. The scoped name stays: it is what keeps this npm project unpublishable by accident. Caught by CI's Linux packaging job, not by a local macOS build — which is the argument for that job existing. |
-| macOS signing | **Ad-hoc signed** (`scripts/adhoc-sign.js`), not unsigned, until a Developer ID exists | An ad-hoc signature is not a trust signal and Gatekeeper still quarantines the download. What it buys is launchability: on Apple Silicon every executable needs *some* valid signature, repacking Electron invalidates the one the prebuilt binaries shipped with, and the failure mode is "Veld is damaged and can't be opened" — which reads as a corrupt download and has no in-UI way out, unlike the "unidentified developer" prompt an ad-hoc build gets. electron-builder's own signing is explicitly disabled (`identity: null`) rather than left to auto-discovery, so the artifacts do not depend on which certificates happen to be in the building machine's keychain. |
+| macOS signing | **Developer ID + notarization in release CI; ad-hoc everywhere else** — and `scripts/adhoc-sign.js` stays | Releases are signed with the team's Developer ID Application certificate under the hardened runtime, then notarized and stapled: the .app by electron-builder, each disk image by the workflow afterwards, because Gatekeeper assesses the file the user downloads and the app's ticket is *inside* the app. The certificate arrives as `CSC_LINK` and is imported into a throwaway keychain, so a release still does not depend on what is in the building machine's keychain — the property `identity: null` used to protect. The ad-hoc hook could not be deleted as #167 §10 planned, because electron-builder signs on neither path that needs it: it refuses outright on pull-request builds (`isSignAllowed` bails on `GITHUB_BASE_REF`) and has no certificate on a contributor's laptop. So it steps aside instead when a real signature is coming — signing twice is not additive, and a bundle whose nested binaries are a mixture of ad-hoc and Developer ID is one notarization rejects. What ad-hoc buys where it does run is launchability, not trust: on Apple Silicon every executable needs *some* valid signature, repacking Electron invalidates the one the prebuilt binaries shipped with, and the failure mode is "Veld is damaged and can't be opened" — a corrupt-download story with no in-UI way out, unlike the "unidentified developer" prompt. Both assertions are made on the artifact rather than read out of the log, in opposite directions: PR CI requires `Signature=adhoc`, release CI requires `Authority=Developer ID Application:` plus a valid staple. |
 | UI library | **Mantine** (v9), theme mapped to the handoff tokens | Maintainer call, reversing an earlier hand-roll decision: a desktop-scale app accumulates overlay/chrome density (menus, dialogs, palette, notifications, settings) where hand-rolling re-derives focus traps, aria, and keyboard nav forever. Mantine v7+ is CSS-variable-themable, so the handoff palette maps onto it (`src/theme.ts`); custom layout surfaces (rail, panes, top bar) stay hand-built on the token CSS. Specialized libs still win for their niches (xterm.js, resizable panes). |
 
 ### Extraction escape hatch
@@ -533,7 +533,7 @@ feed is ever uploaded, and both workflows assert it exists.
 
 | Platform | Targets | Self-updates? |
 |---|---|---|
-| macOS arm64 + x64 | `.dmg` (install) and `.zip` (the update payload Squirrel.Mac reads) | No — unsigned; the app opens the release page |
+| macOS arm64 + x64 | `.dmg` (install) and `.zip` (the update payload Squirrel.Mac reads) | Yes, in place — a release is Developer ID signed and notarized. A build made without the certificate detects that about itself and opens the release page instead |
 | Linux x64 | `.AppImage` | Yes, in place |
 | Linux x64 | `.deb` | No — the files belong to dpkg |
 
@@ -562,19 +562,116 @@ beside `Cargo.toml`, so `main` reflects what shipped.
 
 CI verifies packaging on every PR (`desktop-package` in `ci.yml`) rather than
 finding out at release time: Linux builds the real installers, macOS builds
-`--dir` and asserts the ad-hoc signature verifies. macOS stops short of the
+`--dir` and asserts the bundle is *ad-hoc* signed (a PR runner has no certificate
+and electron-builder refuses to sign on a PR at all, so anything else means the
+hook stopped running or the runner grew an identity). macOS stops short of the
 dmg/zip because most PRs here never touch `desktop/` and that runner is billed at
 10×; the full macOS build runs at release.
 
-### Installing an unsigned macOS build
+### Signing and notarization
 
-Gatekeeper quarantines it. First launch: let the warning appear, then **System
+A release build is signed with the team's **Developer ID Application**
+certificate, hardened, notarized and stapled.
+
+**The secrets live in a GitHub Environment named `release`, not in the repository.**
+This is not ceremony: a repository secret is readable by any workflow run on any
+branch, the `.p12` in `CSC_LINK` *contains the private key*, and macOS self-update
+means that key is the only thing between a release and code execution on every
+install. Restrict the blast radius to the branch that is allowed to release.
+
+Setting it up, in order:
+
+1. Settings → Environments → **New environment** named `release`.
+2. **Deployment branches → Selected branches → `main`.** This is the control, and it
+   is the one part nothing in the repo can verify — a job cannot ask which rules its
+   environment has. Treat it as a manual precondition. (Do *not* add required
+   reviewers unless you want every release to pause: the job is on the critical path
+   to the tag, and it gates the Linux leg too.)
+3. Add the secrets below **to that environment**, not under Settings → Secrets.
+4. Add an environment **variable** `VELD_SIGNING_ENVIRONMENT` = `release`. The
+   workflow refuses to build without it, which catches never having done any of this
+   — a referenced-but-missing environment is auto-created by GitHub with no rules and
+   no secrets, so the failure is loud rather than a quietly unprotected release.
+
+Be clear about what is and is not enforced. Steps 2 and 3 are **manual
+preconditions**: a job cannot ask which rules its environment has, and
+`secrets.CSC_LINK` resolves a repository secret just as happily as an environment one
+(environment secrets merely take precedence). So secrets left on the repository-wide
+page, or an environment with no branch restriction, produce a perfectly green release
+with the private key readable from every branch. Nothing in the repo can tell you
+that happened — check it by hand, and keep the six secrets off Settings → Secrets and
+variables → Actions entirely.
+
+| Secret | What it is |
+|---|---|
+| `CSC_LINK` | base64 of the `.p12` (certificate **+** private key) — `base64 -i Veld.p12 \| tr -d '\n'` |
+| `CSC_KEY_PASSWORD` | the password the `.p12` was exported with |
+| `APPLE_TEAM_ID` | the team's 10-character Team ID — required on every route, because it is what the identity assertion pins |
+| `APPLE_API_KEY_P8` | contents of the App Store Connect API key (`AuthKey_*.p8`), downloadable exactly once. Must be a **Team** key — an Individual key has no Issuer ID, which this route requires |
+| `APPLE_API_KEY_ID` | that key's 10-character Key ID |
+| `APPLE_API_ISSUER` | the team's Issuer ID (a UUID, shared by all its keys) |
+
+`APPLE_ID` + `APPLE_APP_SPECIFIC_PASSWORD` are accepted in place of the three
+API-key secrets and need no Account Holder involvement, but tie every future
+release to one person's Apple account. The workflow picks one route, says which in
+the log, and passes only that route's variables — `getNotarizeOptions` checks
+`APPLE_ID` first and throws if its partners are missing, so a stray one would fail
+the build rather than fall back.
+
+Who can produce them, which is the part that is not a technical question: only the
+**Account Holder** of the Apple Developer Program membership can create a
+Developer ID certificate or a team API key — an Admin cannot. The certificate's
+private key is generated by whoever creates the signing request, so the
+lowest-privilege route is for a maintainer to send a `.certSigningRequest` and get
+the `.cer` back, keeping the key on their machine. A *cloud-managed* Developer ID
+certificate is not usable here: its private key stays with Apple, for Xcode Cloud.
+
+What the release job asserts, and why each part is insufficient alone:
+`Authority=Developer ID Application:` holds for *any* team's certificate and
+`stapler validate` for anything Apple ever notarized, so both are joined by
+`TeamIdentifier=$APPLE_TEAM_ID` and — for the app bundles — the `appId` read out of
+`electron-builder.yml`, rather than a copy of it kept here to drift. A wrong `.p12`
+would otherwise sign, notarize, pass and ship; and because Squirrel.Mac refuses a
+replacement whose signature does not match the running app's, a silent team change
+breaks self-update on every install that already exists.
+
+Failure modes, since this is the part nobody has seen yet:
+
+- **A missing secret** fails the job before packaging, naming the secret.
+- **A rejected notarization** (`Invalid`) is read out of `notarytool`'s JSON — it can
+  exit 0 on rejection — and `notarytool log` fetches Apple's reasons into the run
+  log; the usual causes are an unsigned nested binary or a missing entitlement.
+- **A stalled notary service** is bounded by `--timeout 15m` per disk image and by the
+  job's `timeout-minutes: 90`, rather than parking a 10×-billed runner until GitHub's
+  6-hour default. The numbers are chosen so the per-submission bound fires first and
+  produces a diagnostic, but that only covers the disk images: `@electron/notarize`
+  submits the two app bundles with no timeout of its own, so a stall there still ends
+  as a bare job cancellation with nothing from `notarytool log`.
+- **A disk image signed without a secure timestamp** is asserted against rather than
+  hoped for: electron-builder signs the image without an explicit `--timestamp`, and
+  Apple's notary service rejects a signature that carries none. If that is what fails
+  the first signed release, sign the image in the workflow with
+  `codesign --timestamp` instead of leaving it to the packager.
+- Any of these blocks the tag, deliberately: `release` needs this job, and the app
+  now tells installed copies they may replace themselves.
+
+Notarization is a round trip to Apple and there are four of them (two architectures
+× app and disk image), so the macOS leg is minutes longer than it was.
+
+### Installing a local (unsigned) macOS build
+
+Release downloads no longer need this — but `just desktop-package` on a machine
+without the certificate produces an ad-hoc build, and Gatekeeper quarantines that
+if it travels to someone else. (On a machine that *does* hold the Developer ID —
+a maintainer's — the hook stands aside and the local build is properly signed but
+**not** notarized, since no notarization credentials are in the environment. That
+build self-updates fine, because its signature matches a release's; handed to
+someone else it produces the same Gatekeeper dialog for the opposite reason.)
+First launch: let the warning appear, then **System
 Settings → Privacy & Security → *Open Anyway***; `xattr -dr
 com.apple.quarantine /Applications/Veld.app` is the scriptable equivalent.
 Right-click → *Open* is the instruction everyone remembers and it is no longer
-true — macOS 15 removed that bypass for apps that aren't notarized. This
-goes away with a Developer ID + notarization (issue #167 §10), which is also what
-turns macOS self-updates on.
+true — macOS 15 removed that bypass for apps that aren't notarized.
 
 ### What the app tells the user
 
@@ -838,10 +935,10 @@ already lives in the URL, so modes are just routes.
 5. ~~Device emulation + DevTools for browser panes~~ — shipped; see the decision
    log and the emulation notes above.
 6. Extension system (`veld-ui.json` badges), PR/CI badges, overview board.
-7. ~~Packaging, auto-update~~ — shipped; see *Packaging and updates* above.
-   Still open: macOS Developer ID signing + notarization (which is also what
-   turns macOS self-updates on), and installing the veld CLI *from* the app
-   rather than pointing at the install command.
+7. ~~Packaging, auto-update, macOS signing + notarization~~ — shipped; see
+   *Packaging and updates* and *Signing and notarization* above. Still open:
+   installing the veld CLI *from* the app rather than pointing at the install
+   command.
 
 The sequencing and the transport/renderer decisions for these live in
 [issue #167](https://github.com/prosperity-solutions/veld/issues/167).

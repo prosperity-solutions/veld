@@ -17,11 +17,15 @@
 // laptop is offline more often than a release is broken). A check the user asked
 // for reports every outcome, including "you're up to date".
 
+const { spawnSync } = require("node:child_process");
+const path = require("node:path");
+
 const { Notification, app, dialog, shell } = require("electron");
 const { autoUpdater } = require("electron-updater");
 
 const {
   downloadOnlyReason,
+  isDeveloperIdSigned,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -48,6 +52,33 @@ let currentSkew = null;
 let onSkewChange = null;
 
 /**
+ * Whether *this* bundle carries a Developer ID signature, which is what decides
+ * whether Squirrel.Mac will accept a replacement for it (issue #167 §10).
+ *
+ * Asked of the artifact rather than answered by a build-time constant, because
+ * release builds and `just desktop-package` builds compile from the same source
+ * and are signed differently — see `isDeveloperIdSigned`. Measured once at init:
+ * `codesign --display` reads the bundle's code directory without verifying it, so
+ * it costs ~10-30 ms and never touches the network.
+ *
+ * `execPath` is `Veld.app/Contents/MacOS/Veld`, so the bundle is three levels up.
+ * Anything unexpected — no `codesign`, a non-zero exit, an unpackaged run — is
+ * "not signed", which is the direction that only ever costs a download button.
+ *
+ * `spawnSync` rather than `execFileSync` for one non-obvious reason: `codesign
+ * --display` writes its report to **stderr**, which `execFileSync` returns to
+ * nobody, so reading its stdout would have reported every build as unsigned.
+ */
+function macSignedBundle() {
+  if (process.platform !== "darwin" || !app.isPackaged) return false;
+  const bundle = path.resolve(process.execPath, "..", "..", "..");
+  const result = spawnSync("/usr/bin/codesign", ["--display", "--verbose=2", bundle], {
+    encoding: "utf8",
+  });
+  return isDeveloperIdSigned(`${result.stdout ?? ""}${result.stderr ?? ""}`);
+}
+
+/**
  * Wire up the updater and start the background schedule.
  *
  * @param {{onSkewChange?: () => void}} [opts] called when the daemon-skew notice
@@ -59,6 +90,7 @@ function initUpdater(opts = {}) {
     platform: process.platform,
     isPackaged: app.isPackaged,
     env: process.env,
+    macSigned: macSignedBundle(),
   });
 
   // Every download in this file is one the user agreed to in a dialog first —
@@ -235,12 +267,22 @@ async function promptRestart(version) {
  * can mean the running AppImage is gone (electron-updater unlinks it before the
  * replacement is moved into place), so this offers the download rather than only
  * apologising — for some users it is the only way back to a working app.
+ *
+ * Reachable on macOS since #167 §10 turned self-install on there, and the two
+ * platforms fail differently: Squirrel.Mac rejects a replacement whose signature
+ * does not match the running app's, or cannot write to `/Applications`. Naming the
+ * Linux failure mode to a Mac user would send them looking for an AppImage they
+ * never had.
  */
 async function reportInstallFailure(err) {
+  const aftermath =
+    process.platform === "darwin"
+      ? "Download it from the release page instead — this app is still installed and still works."
+      : "Download it from the release page instead — on Linux the previous AppImage may already have been removed.";
   const { response } = await dialog.showMessageBox({
     type: "error",
     message: "The update could not be installed.",
-    detail: `${String(err?.message ?? err)}\n\nDownload it from the release page instead — on Linux the previous AppImage may already have been removed.`,
+    detail: `${String(err?.message ?? err)}\n\n${aftermath}`,
     buttons: ["Open Release Page", "Close"],
     defaultId: 0,
     cancelId: 1,

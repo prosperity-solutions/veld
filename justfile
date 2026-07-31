@@ -388,8 +388,9 @@ desktop-icons:
 #
 # The same commands release CI runs, minus the version injection — a local build
 # is whatever `desktop/package.json` says, which between releases is 0.0.0. macOS
-# artifacts are ad-hoc signed only (no Developer ID yet), so a build handed to
-# someone else needs `xattr -dr com.apple.quarantine` on the other end. On Linux
+# artifacts are ad-hoc signed here (the Developer ID certificate lives in release
+# CI, not on a contributor's machine), so a build handed to someone else needs
+# `xattr -dr com.apple.quarantine` on the other end. On Linux
 # everything lands in desktop/dist/, including the .deb — which is built by a
 # second invocation into desktop/dist-deb/ and moved, for the reason in
 # desktop/electron-builder.yml.

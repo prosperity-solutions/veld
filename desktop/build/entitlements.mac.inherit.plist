@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The entitlements for everything *inside* the bundle — the Electron helper apps and
+  frameworks, which are signed on their own terms rather than inheriting the outer
+  signature's.
+
+  Same three keys as `entitlements.mac.plist`, and the reasoning lives there. This
+  file exists as a separate copy rather than a reference because electron-builder
+  looks the two up by name in `buildResources` (`MacTargetHelper.getOptionsForFile`)
+  and, finding no `entitlements.mac.inherit.plist`, falls back to *its own bundled
+  template* — so without this file the helpers would silently keep the packager's
+  defaults the moment the outer plist changed. The renderers host web content and the
+  helpers run Chromium's sandboxed processes, so that divergence is the direction
+  nobody would notice.
+
+  Keep the two in sync — CI compares them as JSON, so comments may differ and keys may
+  not. If they ever *should* differ, that check is the thing to change deliberately,
+  and the reason belongs here.
+-->
+<plist version="1.0">
+  <dict>
+    <!-- V8. -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- Chromium still writes executable pages JIT alone does not cover. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- See entitlements.mac.plist for the argument about this one. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

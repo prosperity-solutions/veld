@@ -286,15 +286,51 @@ jobs:
             exit 1
           fi
       # The signature is the part that decides whether a downloaded build opens
-      # at all on Apple Silicon, and it comes from our own afterPack hook rather
-      # than from electron-builder — so assert it instead of trusting the log.
+      # at all on Apple Silicon, and here it comes from our own afterPack hook
+      # rather than from electron-builder — which refuses to sign anything on a
+      # pull-request build (`isSignAllowed` bails on GITHUB_BASE_REF) and has no
+      # certificate to sign with anyway. So assert *which* signature this is, not
+      # merely that one exists: `Signature=adhoc` failing would mean either the
+      # hook stopped running or a runner grew a keychain identity, and both are
+      # things a release must not inherit silently. The release workflow makes the
+      # mirror-image assertion (`Authority=Developer ID Application:`).
+      #
       # Both arches: electron-builder writes x64 to dist/mac and arm64 to
       # dist/mac-arm64, and the hook runs once per arch.
       - name: Verify the ad-hoc signature
         if: matrix.name == 'macos'
         run: |
-          codesign --verify --deep --strict dist/mac-arm64/Veld.app
-          codesign --verify --deep --strict dist/mac/Veld.app
+          set -eu
+          for app in dist/mac-arm64/Veld.app dist/mac/Veld.app; do
+            codesign --verify --deep --strict "$app"
+            if ! codesign --display --verbose=2 "$app" 2>&1 | grep -q '^Signature=adhoc'; then
+              echo "::error::$app is not ad-hoc signed — see desktop/scripts/adhoc-sign.js"
+              exit 1
+            fi
+          done
+
+      # The entitlements only take effect in the release build, so a typo in them
+      # would otherwise surface as a failed release rather than a failed PR. A
+      # malformed plist makes `codesign` reject the bundle outright. Both files:
+      # electron-builder picks them up by name, and a renamed or missing inherit
+      # plist silently falls back to the packager's own template.
+      - name: The entitlements plists parse and agree
+        if: matrix.name == 'macos'
+        run: |
+          set -eu
+          plutil -lint build/entitlements.mac.plist
+          plutil -lint build/entitlements.mac.inherit.plist
+          # One file per signing role means the two can drift, and the direction that
+          # matters is silent: a key added to the app's plist and not the helpers'
+          # ships renderers with a different hardened-runtime profile. Compared as
+          # JSON so the comment blocks (which are not the same, by design) are not
+          # what gets compared. If they ever *should* differ, this check is the thing
+          # to change, deliberately.
+          if ! diff <(plutil -convert json -o - build/entitlements.mac.plist) \
+                    <(plutil -convert json -o - build/entitlements.mac.inherit.plist); then
+            echo "::error::desktop/build/entitlements.mac.plist and entitlements.mac.inherit.plist have diverged — see the note in either file"
+            exit 1
+          fi
       # Same reason the release job checks it: a missing feed is invisible until
       # an installed app asks for an update. The macOS leg is `--dir`, which
       # produces no feed by design.
