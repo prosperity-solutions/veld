@@ -111,7 +111,8 @@ export function contiguousRuns(length: number, present: (i: number) => boolean):
  * index set makes bands overlap or float off the axis, which renders as a
  * plausible chart rather than as an error.
  *
- * `x`/`y` are the scales; `presence` is the policy above.
+ * `x`/`y` are the scales. Drawability is not a parameter: it is derived from
+ * each series' own [`AbsentMeaning`], so there is no policy a caller can get wrong.
  */
 export interface StackedGeometry {
   bands: { key: string; slot: number; d: string }[];
