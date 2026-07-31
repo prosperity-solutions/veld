@@ -34,8 +34,11 @@ export interface ChartSeries {
   label: string;
   /** 1-based categorical slot (`--series-N`). */
   slot: number;
-  /** One entry per `times` index; `null` where the metric was not sampled. */
+  /** One entry per `times` index; `null` where there is no value. */
   points: (number | null)[];
+  /** What a `null` in `points` means — see [`AbsentMeaning`]. Required, so a new
+   * series cannot be added without deciding. */
+  absent: AbsentMeaning;
 }
 
 /** Where the crosshair currently is, and whether the reader pinned it. */
@@ -57,19 +60,31 @@ export function axisMax(raw: number): number {
 }
 
 /**
- * How a stack decides an index is drawable — and it genuinely differs by what
- * the bands mean, which is why it is a parameter and not a constant.
+ * What a `null` in a series means. Declared **by the series itself**, because
+ * only its producer knows.
  *
- * - `"all"` — every band must have a value. For **page classes**: an absent
- *   class is *unmeasurable*, not zero, so a partial stack would draw a total
- *   that is silently too small. Same rule as `MemoryBreakdown::add` in Rust.
- * - `"any"` — one band with a value is enough, and an absent band contributes
- *   zero. For **processes**: an absent PID did not exist at that instant, so the
- *   sum over the processes that did exist *is* the tree's figure. Requiring all
- *   of them would blank the whole chart wherever any child was missing — and
- *   children come and go constantly, so that is most of a real window.
+ * - `"did-not-exist"` — the thing being measured wasn't there at that instant, so
+ *   it contributes **zero** and the rest of the stack still draws. A subprocess
+ *   that had not started, or had already exited.
+ * - `"unmeasurable"` — the value exists but this platform could not read it, so
+ *   the stack's total at that index is **unknown** and the index is dropped. A
+ *   memory page class on a process whose detailed read failed. Same rule as
+ *   `MemoryBreakdown::add` in Rust: an absent part poisons the sum.
+ *
+ * # Why this is per-series data and not a chart-level policy
+ *
+ * It was a chart-level policy through three revisions and produced a defect each
+ * time, because the policy was computed from *proxies* for the real question —
+ * first the split alone, then split-plus-metric — and each proxy carried stale
+ * state across some unrelated toggle. The last one blanked the entire CPU-by-
+ * process chart whenever a page-class metric was left selected from the previous
+ * time the Memory dimension was shown.
+ *
+ * A series knows what its own nulls mean at the moment it is built, next to the
+ * code that produced them. Moving the fact to the producer removes every place a
+ * consumer could infer it wrongly.
  */
-export type StackPresence = "all" | "any";
+export type AbsentMeaning = "did-not-exist" | "unmeasurable";
 
 /** Split indices into runs where `present` holds. */
 export function contiguousRuns(length: number, present: (i: number) => boolean): number[][] {
@@ -116,14 +131,15 @@ export interface StackedGeometry {
 export function stackBands(
   series: ChartSeries[],
   length: number,
-  presence: StackPresence,
   x: (i: number) => number,
   y: (v: number) => number,
 ): StackedGeometry {
-  const present =
-    presence === "all"
-      ? (i: number) => series.every((s) => s.points[i] != null)
-      : (i: number) => series.some((s) => s.points[i] != null);
+  // Derived from the series, not passed in: an index is drawable when nothing
+  // *unmeasurable* is missing there (that would make the total unknown) AND at
+  // least one band actually has a value (otherwise there is nothing to draw).
+  const present = (i: number) =>
+    series.every((s) => s.absent !== "unmeasurable" || s.points[i] != null) &&
+    series.some((s) => s.points[i] != null);
   const runs = contiguousRuns(length, present);
   const baselines = new Array(length).fill(0);
   const drawn = new Set(runs.flat());
@@ -211,6 +227,16 @@ export function assignSlots(
     out.set(k, next);
     used.add(next);
   }
+  if (out.size !== keys.length) {
+    // The caller must fold its tail so this cannot happen. Say so loudly rather
+    // than returning a partial map for a caller-side `?? PALETTE_SLOTS` to paper
+    // over — that fallback is where the previous duplicate-hue bug lived, and a
+    // silent gap here would recreate it for a future second caller.
+    console.error(
+      `assignSlots: ${keys.length} keys exceeds ${PALETTE_SLOTS} palette slots; ` +
+        `fold the tail into one series before calling.`,
+    );
+  }
   return out;
 }
 
@@ -239,12 +265,8 @@ export function TimeSeriesChart(props: {
   windowEnd: number;
   /** Describes the chart for screen readers; the legend carries the values. */
   ariaLabel: string;
-  /** Stacked-mode presence policy (see [`StackPresence`]). Defaults to `"all"`,
-   * the conservative choice: it can only ever draw less than the truth. */
-  stackPresence?: StackPresence;
 }) {
   const { times, series, mode, format, windowStart, windowEnd } = props;
-  const stackPresence = props.stackPresence ?? "all";
   const height = props.height ?? 150;
   // Fixed viewBox with `preserveAspectRatio="none"` would distort the strokes,
   // so the SVG scales via CSS width and a measured box instead.
@@ -281,8 +303,7 @@ export function TimeSeriesChart(props: {
   const x = (i: number) => PAD.left + ((times[i] - windowStart) / span) * plotW;
   const y = (v: number) => PAD.top + plotH - (v / max) * plotH;
 
-  const stacked =
-    mode === "stacked" ? stackBands(series, times.length, stackPresence, x, y) : null;
+  const stacked = mode === "stacked" ? stackBands(series, times.length, x, y) : null;
   const bands = stacked?.bands ?? [];
   const lines: { key: string; slot: number; d: string }[] = [];
 

@@ -170,18 +170,25 @@ describe("stackBands", () => {
   // Identity scales so the assertions read as values, not pixels.
   const x = (i: number) => i;
   const y = (v: number) => v;
+  /** A series whose nulls mean "this thing did not exist then" (contributes 0). */
   const series = (key: string, points: (number | null)[]): ChartSeries => ({
     key,
     label: key,
     slot: 1,
     points,
+    absent: "did-not-exist",
+  });
+
+  /** A series whose nulls mean "unmeasurable" (poisons the index). */
+  const unmeasurable = (key: string, points: (number | null)[]): ChartSeries => ({
+    ...series(key, points),
+    absent: "unmeasurable",
   });
 
   it("lays each band on the sum of the ones below it", () => {
     const { bands } = stackBands(
-      [series("a", [1, 1, 1]), series("b", [2, 2, 2])],
+      [unmeasurable("a", [1, 1, 1]), unmeasurable("b", [2, 2, 2])],
       3,
-      "all",
       x,
       y,
     );
@@ -191,12 +198,11 @@ describe("stackBands", () => {
     expect(bands[1].d).toBe("M0.0,3.0 L1.0,3.0 L2.0,3.0 L2.0,1.0 L1.0,1.0 L0.0,1.0 Z");
   });
 
-  it('"any" keeps drawing where one band is absent, treating it as zero', () => {
+  it("a did-not-exist absence contributes zero and the stack keeps drawing", () => {
     // The F1 case: `b` is a child that only existed at the last index.
     const { bands } = stackBands(
       [series("a", [1, 1, 1]), series("b", [null, null, 2])],
       3,
-      "any",
       x,
       y,
     );
@@ -206,11 +212,10 @@ describe("stackBands", () => {
     expect(bands[1].d).toBe("M0.0,1.0 L1.0,1.0 L2.0,3.0 L2.0,1.0 L1.0,1.0 L0.0,1.0 Z");
   });
 
-  it('"all" drops the index entirely where any band is absent', () => {
+  it("an unmeasurable absence drops the index for the whole stack", () => {
     const { bands } = stackBands(
-      [series("a", [1, 1, 1]), series("b", [2, null, 2])],
+      [unmeasurable("a", [1, 1, 1]), unmeasurable("b", [2, null, 2])],
       3,
-      "all",
       x,
       y,
     );
@@ -222,9 +227,8 @@ describe("stackBands", () => {
     // The silent-failure mode: if the baseline accumulated at every index rather
     // than only the drawn ones, `b`'s run after the gap would start too high.
     const { bands } = stackBands(
-      [series("a", [5, null, 5]), series("b", [1, 1, 1])],
+      [unmeasurable("a", [5, null, 5]), unmeasurable("b", [1, 1, 1])],
       3,
-      "all",
       x,
       y,
     );
@@ -241,9 +245,8 @@ describe("stackBands", () => {
     // the stack never had — dots floating over a hole. `tops` is now the single
     // source both read.
     const { tops } = stackBands(
-      [series("a", [1, 1, 1]), series("b", [2, null, 2])],
+      [unmeasurable("a", [1, 1, 1]), unmeasurable("b", [2, null, 2])],
       3,
-      "all",
       x,
       y,
     );
@@ -257,11 +260,10 @@ describe("stackBands", () => {
     expect(tops[1][2]).toBe(3);
   });
 
-  it('under "any", a band absent at an index still has a top to sit on', () => {
+  it("a did-not-exist band still has a top to sit on where it is absent", () => {
     const { tops } = stackBands(
       [series("a", [1, 1, 1]), series("b", [null, null, 2])],
       3,
-      "any",
       x,
       y,
     );
@@ -269,6 +271,57 @@ describe("stackBands", () => {
     // sits on the stack, which is what the path draws.
     expect(tops[1][0]).toBe(1);
     expect(tops[1][2]).toBe(3);
+  });
+
+  it("a mixed stack is drawable only where the unmeasurable bands have values", () => {
+    // Presence is a property of the DATA now, not of a policy the caller picks.
+    // `u` is unmeasurable-when-absent and missing at index 1, so index 1 is
+    // unknown for the whole stack; `d` is did-not-exist and missing at index 0,
+    // which contributes zero and blocks nothing.
+    const { bands, tops } = stackBands(
+      [series("d", [null, 5, 5]), unmeasurable("u", [1, null, 1])],
+      3,
+      x,
+      y,
+    );
+    expect(tops[0][0]).toBe(0); // `d` absent → contributes 0, still drawn
+    expect(tops[1][0]).toBe(1); // `u` present → stack top is 1
+    expect(tops[0][1]).toBeNull(); // index 1 poisoned by `u`
+    expect(tops[1][1]).toBeNull();
+    expect(tops[1][2]).toBe(6);
+    expect(bands).toHaveLength(2);
+  });
+
+  it("regression: a CPU-style stack is never blanked by a missing process", () => {
+    // The fourth defect in this area, and why presence moved onto the series.
+    // A CPU chart's series are always "did-not-exist" — a missing per-process CPU
+    // value can only mean the process wasn't there. Previously the policy was
+    // computed from a leftover memory metric, so a page class left selected from
+    // the Memory dimension forced the conservative rule and blanked the entire
+    // CPU-by-process chart whenever any child restarted.
+    const { tops } = stackBands(
+      [series("node", [10, 10, 10]), series("esbuild", [null, null, 4])],
+      3,
+      x,
+      y,
+    );
+    // Every index the parent reported is still drawn.
+    expect(tops[0].every((v) => v !== null)).toBe(true);
+    expect(tops[1][0]).toBe(10);
+    expect(tops[1][2]).toBe(14);
+  });
+
+  it("an all-absent index is not drawn even for did-not-exist series", () => {
+    // Nothing existed there, so there is no stack — not a zero-height one.
+    const { tops } = stackBands(
+      [series("a", [1, null]), series("b", [2, null])],
+      2,
+      x,
+      y,
+    );
+    expect(tops[0][0]).toBe(1);
+    expect(tops[0][1]).toBeNull();
+    expect(tops[1][1]).toBeNull();
   });
 
   it("stackedMax sums per index and ignores absences", () => {

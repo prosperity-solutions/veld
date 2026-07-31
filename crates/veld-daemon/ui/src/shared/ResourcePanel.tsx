@@ -33,6 +33,7 @@ import { api, type MemoryMetric, type RunRef, type StatsHistory } from "../api";
 import { notifyError } from "./notify";
 import { fmtBytes } from "./util";
 import {
+  AbsentMeaning,
   ChartSeries,
   PALETTE_SLOTS,
   TimeSeriesChart,
@@ -265,6 +266,20 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
    */
   const slots = useRef(new Map<string, number>());
 
+  /**
+   * What a missing value means for the series this panel is about to build —
+   * derived in the SAME place as `readBucket`, from the same two inputs, so the
+   * two can never disagree.
+   *
+   * A page class can be missing because one process's detailed read failed, which
+   * makes a stack total unknown. CPU and the memory totals cannot: for those, a
+   * missing per-process value can only mean the process wasn't there.
+   */
+  const absentMeaning: AbsentMeaning = useMemo(
+    () => (!isCpu && isPageClassMetric(metric) ? "unmeasurable" : "did-not-exist"),
+    [isCpu, metric],
+  );
+
   /** The value this dimension plots, per bucket. */
   const readBucket = useMemo(
     () =>
@@ -284,6 +299,8 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
         label: METRIC_LABELS[m],
         slot: CLASS_SLOT[m],
         points: data.buckets.map((b) => bucketValue(b, m)),
+        // A page class this platform could not read is unmeasurable, never zero.
+        absent: "unmeasurable" as const,
       }));
     }
     if (split === "process") {
@@ -305,6 +322,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           key: String(p.pid),
           label: `${p.name} (${p.pid})`,
           points: times.map((t) => byTime.get(t) ?? null),
+          absent: absentMeaning,
         };
       });
 
@@ -324,6 +342,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           label: `Other (${tail.length} processes)`,
           // A bucket where none of the tail existed is absent, not zero.
           points: times.map((t) => (seen.has(t) ? (byTime.get(t) ?? 0) : null)),
+          absent: absentMeaning,
         });
       }
 
@@ -342,6 +361,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
       label: isCpu ? "CPU" : METRIC_LABELS[metric],
       slot: 1,
       points: data.buckets.map(readBucket),
+      absent: absentMeaning,
     };
     // The peak within each bucket, where a bucket actually spans several
     // samples. Same unit and same axis as the mean, so this is one measure at
@@ -354,10 +374,12 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
             label: isCpu ? "CPU (peak)" : "Footprint (peak)",
             slot: 2,
             points: data.buckets.map((b) => (isCpu ? b.cpu_peak : b.footprint_peak)),
+            // Peaks exist only for footprint and CPU, both always measured.
+            absent: "did-not-exist" as const,
           };
     // Peak first so the mean draws over it rather than under.
     return peak ? [peak, mean] : [mean];
-  }, [data, split, metric, available, times, isCpu, readBucket, bucketsAggregate]);
+  }, [data, split, metric, available, times, isCpu, readBucket, bucketsAggregate, absentMeaning]);
 
   const noData = !loading && times.length === 0;
 
@@ -452,14 +474,6 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           times={times}
           series={series}
           mode={split === "total" ? "line" : "stacked"}
-          // Which absence semantics apply is decided by the METRIC, not only by
-          // the split. In the by-process split an absent PID did not exist, so it
-          // contributes zero and the rest of the stack still draws — but a
-          // per-process *page class* can also be absent because that one
-          // process's detailed read failed, and treating THAT as zero is the
-          // understated stack `"all"` exists to prevent. So `"any"` only for a
-          // metric whose absence can only mean "this process wasn't there".
-          stackPresence={split === "process" && !isPageClassMetric(metric) ? "any" : "all"}
           format={isCpu ? fmtPercent : fmtBytes}
           windowStart={data?.start ?? Date.now() - secs * 1000}
           windowEnd={data?.end ?? Date.now()}

@@ -90,6 +90,22 @@ pub struct GcSummary {
     pub orphaned_runs: Vec<Uuid>,
 }
 
+/// The two stats-pruning cutoffs, as `(node_aggregates, per_process)`.
+///
+/// Extracted and returned as a pair so the *wiring* is testable: both cutoffs are
+/// `DateTime<Utc>`, so passing them to the wrong prune call compiles happily and
+/// would silently prune node totals on the 2h horizon and per-process rows on the
+/// 24h one — the exact inverse of the documented split, with nothing failing.
+/// `now` is a parameter rather than read inside so a test can pin the arithmetic.
+fn retention_cutoffs(
+    now: chrono::DateTime<chrono::Utc>,
+) -> (chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>) {
+    (
+        now - chrono::Duration::seconds(NODE_STATS_RETENTION_SECS),
+        now - chrono::Duration::seconds(PROCESS_STATS_RETENTION_SECS),
+    )
+}
+
 /// Perform a single garbage-collection pass.
 pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let mut summary = GcSummary::default();
@@ -266,9 +282,8 @@ pub async fn run_gc() -> anyhow::Result<GcSummary> {
     let log_cutoff = chrono::Utc::now() - chrono::Duration::hours(MAX_LOG_AGE_HOURS);
     summary.logs_pruned = db.prune_logs_older_than(log_cutoff).unwrap_or(0);
     let _ = db.prune_orphaned_feedback(log_cutoff);
-    let stats_cutoff = chrono::Utc::now() - chrono::Duration::seconds(NODE_STATS_RETENTION_SECS);
+    let (stats_cutoff, proc_cutoff) = retention_cutoffs(chrono::Utc::now());
     summary.stats_pruned = db.prune_node_stats_older_than(stats_cutoff).unwrap_or(0);
-    let proc_cutoff = chrono::Utc::now() - chrono::Duration::seconds(PROCESS_STATS_RETENTION_SECS);
     summary.process_stats_pruned = db
         .prune_node_process_stats_older_than(proc_cutoff)
         .unwrap_or(0);
@@ -365,3 +380,33 @@ fn is_process_alive(pid: u32) -> bool {
 // escalates SIGTERM → bounded wait → SIGKILL for the whole process group —
 // the daemon reapers are exactly the paths that must not depend on a target
 // honoring SIGTERM.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_cutoffs_map_each_horizon_to_its_own_table() {
+        let now = chrono::DateTime::<chrono::Utc>::UNIX_EPOCH + chrono::Duration::days(10);
+        let (stats, proc_) = retention_cutoffs(now);
+
+        // Aggregates keep the longer history...
+        assert_eq!(
+            (now - stats).num_seconds(),
+            NODE_STATS_RETENTION_SECS,
+            "node aggregates must use NODE_STATS_RETENTION_SECS"
+        );
+        // ...per-process rows the shorter one. Swapping the pair at the call site
+        // compiles, so this is the only thing standing between a typo and an
+        // inverted retention policy.
+        assert_eq!(
+            (now - proc_).num_seconds(),
+            PROCESS_STATS_RETENTION_SECS,
+            "per-process rows must use PROCESS_STATS_RETENTION_SECS"
+        );
+        assert!(
+            proc_ > stats,
+            "the per-process cutoff is more recent, i.e. prunes more aggressively"
+        );
+    }
+}
