@@ -156,9 +156,40 @@ test("serializeWindowList leaves the other base alone", () => {
   assert.equal(written.main.length, 2);
   assert.deepEqual(written.main[1].bounds, { x: 1, y: 2, width: 3, height: 4 });
 
-  // An unreadable previous file starts a fresh one rather than refusing to write.
-  const fresh = JSON.parse(serializeWindowList("{oops", "main", []));
-  assert.deepEqual(fresh, { main: [] });
+  // An unreadable previous file starts a fresh one rather than refusing to
+  // write. An empty list is not worth a key: a base with no windows and a base
+  // that is absent reopen identically.
+  assert.deepEqual(JSON.parse(serializeWindowList("{oops", "main", [])), {});
+});
+
+test("serializeWindowList prunes bases nobody will read again", () => {
+  // `claimSlot` mints a `main-<pid>` base whenever a second instance finds the
+  // preferred one held, and that pid is gone forever once the run ends — so
+  // without pruning, every dev-instance collision leaves a key behind and the
+  // file grows monotonically across launches.
+  const previous = JSON.stringify({
+    main: [{ suffix: null, kind: "main", origin: null }],
+    "dev-41231": [{ suffix: null, kind: "main", origin: null }],
+    "main-9982": [{ suffix: "w2", kind: "detached", origin: null }],
+    dev: [{ suffix: null, kind: "main", origin: null }],
+    stale: [],
+  });
+  const written = JSON.parse(
+    serializeWindowList(previous, "main", [{ suffix: null, kind: "main", origin: null, bounds: null }]),
+  );
+  // `dev` is a real base another instance still uses; the pid-derived ones are not.
+  assert.deepEqual(Object.keys(written).sort(), ["dev", "main"]);
+});
+
+test("serializeWindowList keeps the pid-derived base it is currently writing", () => {
+  // A second dev instance *is* `dev-<pid>` for its whole run, and has to be able
+  // to reopen its own windows.
+  const written = JSON.parse(
+    serializeWindowList("{}", "dev-41231", [
+      { suffix: null, kind: "main", origin: null, bounds: null },
+    ]),
+  );
+  assert.deepEqual(Object.keys(written), ["dev-41231"]);
 });
 
 test("handBackTarget prefers the window the tabs actually came from", () => {

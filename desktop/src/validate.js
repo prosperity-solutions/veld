@@ -192,8 +192,9 @@ function safeRadius(raw) {
 // ---------------------------------------------------------------------------
 //
 // A tab record travels renderer → main → *another* renderer: out of the window
-// it is being pulled from, through `additionalArguments` (detach) or an IPC push
-// (hand-back on close), and into the layout of the window that receives it.
+// it is being pulled from, held by the main process, and into the layout of the
+// window that receives it — over `veld:window:seed` on a detach, or the
+// `pendingAdopt` queue on a hand-back.
 //
 // The **semantic** gate for one of these is `parseTab` in
 // `crates/veld-daemon/ui/src/panes/model.ts`, which every restored layout
@@ -327,13 +328,17 @@ function safeTransferTabs(raw) {
 }
 
 /**
- * The layout a detached window boots with, serialized for `additionalArguments`,
- * or `null` when there is nothing to seed.
+ * The layout a detached window boots with, or `null` when there is nothing to
+ * seed.
  *
- * Built here rather than forwarded from the page: the seed is the one payload
- * the shell puts on a command line, so the shell decides its shape and its size.
- * The result is read by `parseLayouts` in the new renderer, which is what makes
- * it a *layout* rather than a blob.
+ * Held by the main process and handed to the new renderer over the synchronous
+ * `veld:window:seed` channel (`windows.js`) — **not** on a command line, which
+ * is where it started and which was wrong on two counts; that history is in
+ * `MAX_SEED_BYTES` above and at the channel itself.
+ *
+ * Built here rather than forwarded from the page, so the shell decides its shape
+ * and its size. The result is read by `parseLayouts` in the new renderer, which
+ * is what makes it a *layout* rather than a blob.
  */
 function buildSeedLayout(worktreeId, tabs, ratio) {
   if (tabs.length === 0) return null;

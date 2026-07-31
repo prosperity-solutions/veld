@@ -217,6 +217,17 @@ function serializeWindowList(previousRaw, base, records) {
     origin: r.origin,
     bounds: r.bounds ?? null,
   }));
+  // Drop the bases nobody will ever read again. `claimSlot` mints a
+  // `main-<pid>` / `dev-<pid>` base whenever a second instance finds the
+  // preferred one held, and that pid is gone forever after that run — so
+  // without this every such collision leaves a key behind and the file grows
+  // monotonically across launches. An empty list goes too, for the same reason.
+  for (const [key, list] of Object.entries(all)) {
+    const ephemeral = /^(?:main|dev)-\d+$/.test(key);
+    if ((ephemeral && key !== base) || (Array.isArray(list) && list.length === 0)) {
+      delete all[key];
+    }
+  }
   return JSON.stringify(all);
 }
 

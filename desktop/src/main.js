@@ -612,16 +612,18 @@ app.whenReady().then(() => {
 app.on("before-quit", () => setQuitting(true));
 
 /**
- * …and a `before-quit` is not always a quit.
+ * …and a `before-quit` is not always a quit: `quitAndInstall` can fail and leave
+ * the app running (`updater.js` handles exactly that), and a macOS logout can be
+ * cancelled. The flag is re-armed by `openWindow` and by `activate` below.
  *
- * `quitAndInstall` can fail and leave the app running (`updater.js` handles
- * exactly that), and a macOS logout can be cancelled. Neither necessarily opens
- * a window, so `openWindow`'s own reset is not enough on its own: without these,
- * the flag stays set for the rest of the session, window persistence is frozen,
- * and every detached window closed afterwards silently abandons its tabs.
- * Focusing or activating a window is proof the app is still in use.
+ * Deliberately **not** by `browser-window-focus`, which looks like the obvious
+ * third signal and is the dangerous one: on macOS, closing the front window
+ * during a quit makes the next one key and emits focus *mid-teardown*, so every
+ * remaining `closed` would re-arm the persist that `setQuitting` exists to
+ * suppress — and write a window set one short for each one. The cost of leaving
+ * it out is a stale window set after a cancelled quit until the app is next
+ * activated, which loses a position; the cost of including it is losing windows.
  */
-app.on("browser-window-focus", () => setQuitting(false));
 
 app.on("window-all-closed", () => {
   // Keep the tray alive on macOS (standard behavior); quit elsewhere.

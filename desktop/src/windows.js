@@ -53,8 +53,11 @@ const {
  *   number, the persisted `origin: "w2"` names a window its tabs never came
  *   from; the record id never repeats and is what hand-back actually matches on.
  * @property {number} id  monotonic within this process
- * @property {string | null} seed  the layout this window boots with, read once
- *   over `veld:window:seed` and then dropped
+ * @property {string | null} seed  the layout this window boots with, served over
+ *   `veld:window:seed` and cleared when the `/ide` origin finishes loading (the
+ *   `did-finish-load` handler in `openWindow`) — **not** when it is read. A
+ *   preload runs on every load, the waiting page included, so dropping it on
+ *   read consumed it before the real page existed.
  * @property {{worktreeId: number, tabs: object[]} | null} snapshot
  *   what this window would hand back if it closed now — pushed by the renderer
  *   on every layout change, so a hand-back does not depend on the renderer still
@@ -368,20 +371,13 @@ function openWindow(options = {}) {
     }
   });
 
-  if (detached) {
-    // The page owns this window's title, and sets it from the active tab.
-    win.setTitle("Veld");
-  } else {
+  if (!detached) {
+    // A detached window's title belongs to the page, which sets it from the
+    // active tab — so only a main window cancels this.
     // Electron adopts `document.title` on every navigation unless the event is
     // cancelled, which is how a hard reload renamed the window.
     win.on("page-title-updated", (e) => e.preventDefault());
   }
-
-  // The seed has done its job once the real page is up; until then it must
-  // survive the waiting page's own preload run (see `veld:window:seed`).
-  win.webContents.on("did-finish-load", () => {
-    if (!win.isDestroyed() && win.webContents.getURL().startsWith(appOrigin)) record.seed = null;
-  });
 
   win.on("move", persistWindows);
   win.on("resize", persistWindows);
@@ -398,8 +394,12 @@ function openWindow(options = {}) {
     persistWindows();
   });
 
-  void loadAppWhenReady(win, url).catch(() => {
-    // A window closed mid-load. Nothing to report and nothing to retry.
+  void loadAppWhenReady(win, url).catch((err) => {
+    // A window closed mid-load is the ordinary case and says nothing. Anything
+    // else is a window that will sit there blank, and before this was a promise
+    // it surfaced as an unhandled rejection — swallowing every failure alike
+    // would remove the only signal that reached anyone.
+    if (!win.isDestroyed()) console.error("[veld] window failed to load", err);
   });
   persistWindows();
   return win;
@@ -560,15 +560,21 @@ function registerWindowIpc(ipcMain) {
    * `ipcMain.on` + `event.returnValue` rather than `handle`, because `handle` is
    * a promise and this must not be one.
    *
-   * **Cleared when the app page finishes loading, not when it is read.** A
-   * preload runs on *every* load in a `webContents`, including the `data:`
-   * waiting page `loadAppWhenReady` shows while the daemon is down — so a
-   * read-once seed was consumed by that page and gone by the time `/ide`
-   * actually loaded. Detaching during a daemon restart is the case terminals
-   * exist to survive, and it was the case that lost them: the tabs had already
-   * been released by the origin, so they then existed in no layout at all.
-   * Re-reading it after `/ide` has loaded is harmless — by then both storages
-   * hold the layout and the seed loses to them.
+   * **Cleared when the renderer first reports a snapshot, not when it is read
+   * and not when the page loads.** Two versions of this were wrong, both in the
+   * same direction — retiring the seed before anything else held the layout:
+   *
+   *  - Read-once: a preload runs on *every* load in a `webContents`, the `data:`
+   *    waiting page included, so the seed was consumed by that page and gone by
+   *    the time `/ide` loaded. Detaching during a daemon restart is the case
+   *    terminals exist to survive, and it was the case that lost them.
+   *  - Cleared at `did-finish-load`: a loaded page still does not know its
+   *    layout — the renderer cannot report one until `/api/repos` resolves the
+   *    worktree, and a failed first request retries five seconds later.
+   *
+   * A snapshot is the proof that something else now holds these tabs. Until one
+   * arrives, `handBack` falls back to the seed. Re-reading it is harmless: by
+   * then the page's own storages win over it (see `readLayouts`).
    *
    * Resolved from `event.sender` alone. Electron runs a preload in the main
    * frame only (`nodeIntegrationInSubFrames` is off), and the embedded panes have
@@ -658,6 +664,15 @@ function registerWindowIpc(ipcMain) {
     const worktreeId = safeWorktreeId(payload?.worktreeId);
     const tabs = safeTransferTabs(payload?.tabs);
     record.snapshot = worktreeId === null || tabs.length === 0 ? null : { worktreeId, tabs };
+    // **This is where the seed is retired**, not at `did-finish-load`. A page
+    // that has loaded does not yet know its layout: the renderer cannot report
+    // one until `/api/repos` resolves the worktree, and if that first request
+    // fails it retries five seconds later. Clearing on load left those seconds
+    // with neither a snapshot nor a seed, so closing the window in them handed
+    // back nothing — and the tabs had been released by the origin at detach.
+    // A snapshot arriving is the actual proof that something else now holds the
+    // layout. Dropping it late is free; dropping it early loses shells.
+    record.seed = null;
     return true;
   });
 
@@ -684,6 +699,9 @@ function initWindows(dependencies) {
   deps = dependencies;
 }
 
+// Exactly what `main.js` calls. `recordFor` and `persistWindows` are internal:
+// nothing can load this module without Electron, so an unused export here is
+// surface with no consumer and no test behind it.
 module.exports = {
   initWindows,
   openWindow,
@@ -692,6 +710,4 @@ module.exports = {
   registerWindowIpc,
   setQuitting,
   windowCount,
-  recordFor,
-  persistWindows,
 };

@@ -27,8 +27,13 @@ function fromArgv(flag) {
  * (`/proc/<pid>/cmdline`) and would carry a browser pane's URL, fragment
  * included.
  *
- * Read once here, at preload time; the main process drops it immediately, so a
- * reload gets `null` and falls back to `sessionStorage` (see `readLayouts`).
+ * Read here, at preload time — which happens on **every** load in this window,
+ * the `data:` waiting page included. That is exactly why the main process keeps
+ * the seed until the `/ide` origin has finished loading rather than dropping it
+ * on the first read: a read-once seed was consumed by the waiting page, and a
+ * detach during a daemon restart lost its tabs. Do not "simplify" that back.
+ * Re-reading it later is harmless — by then both storages hold the layout and
+ * the seed loses to them (see `readLayouts`).
  */
 function windowSeed() {
   try {
