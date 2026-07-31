@@ -30,8 +30,10 @@ const {
 } = require("./validate");
 const {
   canOpenAnother,
+  handBackTarget,
   nextSuffix,
   parseWindowList,
+  restoreBudget,
   safeBounds,
   serializeWindowList,
   slotFor,
@@ -43,15 +45,28 @@ const {
  * @property {string | null} suffix  `null` for the first window (bare base slot)
  * @property {string} slot
  * @property {"main" | "detached"} kind
- * @property {string | null} origin  which window a detached one came from
+ * @property {string | null} origin  which window a detached one came from, as a
+ *   *suffix* — the only form that survives into `windows.json`
+ * @property {number | null} originId  the same thing for this run, as a record
+ *   id. Suffixes are recycled, so after `w2` closes and a new window takes the
+ *   number, the persisted `origin: "w2"` names a window its tabs never came
+ *   from; the record id never repeats and is what hand-back actually matches on.
+ * @property {number} id  monotonic within this process
+ * @property {string | null} seed  the layout this window boots with, read once
+ *   over `veld:window:seed` and then dropped
  * @property {{worktreeId: number, tabs: object[]} | null} snapshot
  *   what this window would hand back if it closed now — pushed by the renderer
  *   on every layout change, so a hand-back does not depend on the renderer still
  *   being alive when `close` fires.
+ * @property {{worktreeId: number, tabs: object[]}[]} pendingAdopt
+ *   tabs handed to this window that its renderer has not collected yet
  */
 
 /** @type {Map<number, WindowRecord>} */
 const windows = new Map();
+
+/** Never reused, unlike a suffix. See `WindowRecord.originId`. */
+let nextRecordId = 1;
 
 /** @type {null | {
  *   baseUrl: string,
@@ -235,6 +250,11 @@ function takenSuffixes() {
  */
 function openWindow(options = {}) {
   const { kind = "main", origin = null, seed = null, repoRoot = null, worktreeId = null } = options;
+  // Opening a window means we are not on our way out after all. `before-quit`
+  // can fire without a quit following it — anything may cancel one — and a flag
+  // that only ever moves in one direction would silently disable window
+  // persistence for the rest of the session.
+  quitting = false;
   const explicit = Object.hasOwn(options, "suffix");
   if (!explicit && !canOpenAnother(windows.size)) return null;
 
@@ -280,18 +300,27 @@ function openWindow(options = {}) {
       // the seed *is* such state — a link can forge a URL but not a preload
       // argument. `chrome=none` is in the URL precisely because it is the one
       // piece here that grants nothing.
-      additionalArguments: [
-        `--veld-layout-slot=${slot}`,
-        `--veld-window-kind=${kind}`,
-        ...(seed
-          ? [`--veld-window-seed=${Buffer.from(seed, "utf8").toString("base64")}`]
-          : []),
-      ],
+      // The slot and the kind are short, fixed-charset and not secret, so argv
+      // is the right home: a link can forge a URL but not a preload argument.
+      // The **seed is deliberately not here** — see `record.seed` and the
+      // `veld:window:seed` channel below.
+      additionalArguments: [`--veld-layout-slot=${slot}`, `--veld-window-kind=${kind}`],
     },
   });
 
   /** @type {WindowRecord} */
-  const record = { win, suffix, slot, kind, origin, snapshot: null };
+  const record = {
+    win,
+    suffix,
+    slot,
+    kind,
+    origin,
+    originId: options.originId ?? null,
+    id: nextRecordId++,
+    seed,
+    snapshot: null,
+    pendingAdopt: [],
+  };
   windows.set(win.id, record);
 
   // Run URLs open in the user's real browser, never inside the shell.
@@ -368,16 +397,23 @@ function handBack(record) {
   const snapshot = record.snapshot;
   if (!snapshot || snapshot.tabs.length === 0) return;
 
+  // The precedence — record id, then persisted suffix, then any main window —
+  // is `handBackTarget` in `windowState.js`, where it is a decision over plain
+  // records and therefore has tests.
   const others = allRecords().filter((r) => r !== record && !r.win.isDestroyed());
-  // The window it came from first — including another detached one, since a tab
-  // can be pulled out of a detached window in turn and "back" means back there.
-  // Otherwise any main window, because the alternative is nowhere.
-  const target =
-    others.find((r) => r.suffix === record.origin) ??
-    others.find((r) => r.kind === "main") ??
-    null;
+  const target = handBackTarget(record, others);
   if (!target) return;
-  target.win.webContents.send("veld:window:adopt", snapshot);
+
+  // **Queued, then nudged** — never sent as a payload. `webContents.send` is
+  // fire-and-forget, and the listener on the other end only exists once the
+  // `/ide` bundle has mounted: a hand-back to a window still on the waiting page
+  // (the daemon is restarting — precisely the case terminals are built to
+  // survive), mid-reload, or still being restored would be dropped on the floor,
+  // and the tabs would be gone despite the docs promising they come back. The
+  // renderer collects this queue at mount *and* on the nudge, so neither
+  // ordering loses it.
+  target.pendingAdopt.push(snapshot);
+  target.win.webContents.send("veld:window:adopt");
 }
 
 /** Focus a main window, opening one if every window is gone (macOS keeps the
@@ -412,12 +448,12 @@ function focusPrimary() {
  */
 function restoreWindows() {
   const stored = parseWindowList(readStateRaw(), deps.slotBase);
+  // Room for the fallback below is reserved only when it will actually be
+  // needed, which is knowable up front — see `restoreBudget`.
+  const budget = restoreBudget(stored);
   const opened = [];
   for (const entry of stored) {
-    // The stored list is already capped, but the fallback below can add one
-    // more — a file holding `MAX_WINDOWS` detached windows would otherwise
-    // reopen as one over the ceiling.
-    if (!canOpenAnother(windows.size + 1)) break;
+    if (windows.size >= budget) break;
     const win = openWindow({
       kind: entry.kind,
       suffix: entry.suffix,
@@ -459,9 +495,54 @@ function senderWindow(event) {
 }
 
 function registerWindowIpc(ipcMain) {
-  ipcMain.handle("veld:window:new", (event) => {
-    if (!senderWindow(event)) return { opened: false };
-    return { opened: openWindow({ kind: "main" }) !== null };
+  /**
+   * The layout a freshly detached window boots with.
+   *
+   * **Synchronous, and read from the preload.** It has to be available in the
+   * renderer's *first* render: `pruneTerminals` ends every session the layouts
+   * do not name, so a seed arriving one tick late reads as "these are orphans"
+   * and hangs up the shells that were just transferred.
+   *
+   * It used to ride `additionalArguments`, which was wrong twice. A process's
+   * argv is world-readable on Linux (`/proc/<pid>/cmdline` is 0444), and a seed
+   * carries browser panes' URLs — query strings and fragments included, which is
+   * where an implicit-flow access token lives. And the size ceiling guarded the
+   * wrong number: the JSON's UTF-16 length, while what had to fit was the base64
+   * of its UTF-8 bytes, up to 4× larger and past Linux's 128 KB-per-argument
+   * limit — so a page with a very long title produced a window whose renderer
+   * never started, after the origin had already let its tabs go.
+   *
+   * `ipcMain.on` + `event.returnValue` rather than `handle`, because `handle` is
+   * a promise and this must not be one. **One-shot**: a reload has
+   * `sessionStorage` and must not be re-seeded.
+   *
+   * Resolved from `event.sender` alone. Electron runs a preload in the main
+   * frame only (`nodeIntegrationInSubFrames` is off), and the embedded panes have
+   * no preload at all, so nothing else can reach this channel — while
+   * `event.senderFrame` is not reliably populated this early, which is the one
+   * place the main-frame check every other handler makes would fail closed on
+   * the legitimate caller.
+   */
+  ipcMain.on("veld:window:seed", (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender);
+    const record = recordFor(win);
+    event.returnValue = record?.seed ?? null;
+    if (record) record.seed = null;
+  });
+
+  /**
+   * Collect tabs handed to this window by a detached one that closed.
+   *
+   * A queue rather than a push payload, drained by the renderer at mount and on
+   * the `veld:window:adopt` nudge — see `handBack` for why a plain `send` loses
+   * them.
+   */
+  ipcMain.handle("veld:window:take-adopted", (event) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return [];
+    const pending = record.pendingAdopt;
+    record.pendingAdopt = [];
+    return pending;
   });
 
   /**
@@ -484,9 +565,11 @@ function registerWindowIpc(ipcMain) {
     }
     const seed = buildSeedLayout(worktreeId, tabs, payload?.ratio);
     if (!seed) return { opened: false, reason: "invalid" };
+    const fromRecord = recordFor(from);
     const win = openWindow({
       kind: "detached",
-      origin: recordFor(from)?.suffix ?? null,
+      origin: fromRecord?.suffix ?? null,
+      originId: fromRecord?.id ?? null,
       originWindow: from,
       seed,
       repoRoot: safeRepoRoot(payload?.repoRoot),
@@ -505,7 +588,12 @@ function registerWindowIpc(ipcMain) {
    */
   ipcMain.handle("veld:window:snapshot", (event, payload) => {
     const record = recordFor(senderWindow(event));
-    if (!record) return false;
+    // Detached only, like `set-title` and `close`. A main window's tabs are its
+    // own and `handBack` would never read them, so retaining a snapshot for one
+    // is memory held in the privileged process for nothing — reachable from a
+    // main window navigated to `?chrome=none`, since that parameter is (rightly)
+    // forgeable.
+    if (!record || record.kind !== "detached") return false;
     const worktreeId = safeWorktreeId(payload?.worktreeId);
     const tabs = safeTransferTabs(payload?.tabs);
     record.snapshot = worktreeId === null || tabs.length === 0 ? null : { worktreeId, tabs };

@@ -5,10 +5,12 @@ const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
   canOpenAnother,
+  handBackTarget,
   isSuffix,
   nextSuffix,
   parseWindowList,
   parseWindowRecord,
+  restoreBudget,
   safeBounds,
   serializeWindowList,
   slotFor,
@@ -157,6 +159,62 @@ test("serializeWindowList leaves the other base alone", () => {
   // An unreadable previous file starts a fresh one rather than refusing to write.
   const fresh = JSON.parse(serializeWindowList("{oops", "main", []));
   assert.deepEqual(fresh, { main: [] });
+});
+
+test("handBackTarget prefers the window the tabs actually came from", () => {
+  const main = { id: 1, suffix: null, kind: "main" };
+  const w2 = { id: 2, suffix: "w2", kind: "detached" };
+  const closing = { id: 3, suffix: "w3", kind: "detached", origin: "w2", originId: 2 };
+  assert.equal(handBackTarget(closing, [main, w2]), w2);
+});
+
+test("handBackTarget does not deliver to a window that inherited the number", () => {
+  // The trap suffix reuse sets. `w2` opens a detached `w3`, then `w2` closes and
+  // a *new* window is allocated the free `w2`. Matching on the suffix would hand
+  // w3's tabs to a window they never came from — a plausible-looking wrong
+  // answer, which is worse than the fallback.
+  const main = { id: 1, suffix: null, kind: "main" };
+  const recycled = { id: 9, suffix: "w2", kind: "main" };
+  const closing = { id: 3, suffix: "w3", kind: "detached", origin: "w2", originId: 2 };
+  const target = handBackTarget(closing, [main, recycled]);
+  assert.notEqual(target, recycled);
+  assert.equal(target, main);
+});
+
+test("handBackTarget uses the suffix only for a restored window", () => {
+  // A restored window carries no `originId` — only the suffix survived into
+  // `windows.json`. Every record is new so no id could match, and no suffix has
+  // been recycled yet either, which is what makes the persisted one usable here
+  // and unusable in the test above.
+  const restoredOrigin = { id: 41, suffix: "w2", kind: "detached" };
+  const main = { id: 40, suffix: null, kind: "main" };
+  const closing = { id: 42, suffix: "w3", kind: "detached", origin: "w2", originId: null };
+  assert.equal(handBackTarget(closing, [main, restoredOrigin]), restoredOrigin);
+});
+
+test("handBackTarget ends at any main window, then at nothing", () => {
+  const main = { id: 1, suffix: null, kind: "main" };
+  const orphan = { id: 5, suffix: "w4", kind: "detached", origin: null, originId: null };
+  // Anywhere beats nowhere: these tabs name live shells, and a shell nobody
+  // adopts is hung up by the detach grace.
+  assert.equal(handBackTarget(orphan, [main]), main);
+  assert.equal(handBackTarget(orphan, []), null);
+  // Only detached windows left: nothing to hand to rather than a wrong guess.
+  assert.equal(handBackTarget(orphan, [{ id: 6, suffix: "w2", kind: "detached" }]), null);
+});
+
+test("restoreBudget reserves a window only when one will be needed", () => {
+  const main = { kind: "main" };
+  const detached = { kind: "detached" };
+  // A stored set with a main window reopens whole — reserving unconditionally
+  // dropped the last window of a full set, and with it a layout naming live
+  // shells; the next quit then rewrote the set one shorter and made it permanent.
+  assert.equal(restoreBudget([main, detached]), MAX_WINDOWS);
+  assert.equal(restoreBudget(Array(MAX_WINDOWS).fill(main)), MAX_WINDOWS);
+  // No main stored: one has to be opened afterwards, because an app whose every
+  // window is a bare dock has no rail and no way back.
+  assert.equal(restoreBudget([detached, detached]), MAX_WINDOWS - 1);
+  assert.equal(restoreBudget([]), MAX_WINDOWS - 1);
 });
 
 test("a serialized list round-trips through the parser", () => {

@@ -210,15 +210,38 @@ function safeRadius(raw) {
 const PANE_KINDS = ["terminal", "browser", "logs", "nodes", "new"];
 
 /**
- * Ceiling on a serialized seed, in characters.
+ * Ceiling on a serialized seed, in **UTF-8 bytes**.
  *
- * The seed rides `additionalArguments`, i.e. the new process's command line.
- * Every platform this app targets allows far more than this, but "far more" is
- * not a number the shell should discover at spawn time — an over-long argv fails
- * the *launch*, so the window never appears and the tabs are simply gone. A
- * detach carries one tab; 64 KB is three orders of magnitude of headroom.
+ * Bytes rather than JavaScript string length, because the two differ by up to 4×
+ * and the earlier version measured the wrong one. A tab's `title` comes from a
+ * page the user is previewing — arbitrary web content — so a document title of
+ * 50 000 CJK characters produced a 50 KB string that passed a 64 KB check and a
+ * 200 KB payload that did not. It mattered because the seed used to ride the new
+ * process's command line, and an over-long argument fails the *launch*: the
+ * window never appeared, after the origin had already released its tabs.
+ *
+ * The seed no longer goes near argv (see `veld:window:seed` in `windows.js`), so
+ * this is now a bound on what the main process will hold and hand over. Kept,
+ * and kept honest, because "we moved it, so the size stopped mattering" is how
+ * the next transport inherits the same bug.
  */
-const MAX_SEED_CHARS = 65536;
+const MAX_SEED_BYTES = 65536;
+
+/**
+ * Ceiling on one tab, in UTF-8 bytes.
+ *
+ * `safeTransferTab` deliberately carries unknown fields through, so the tab is
+ * the place a page-controlled string can grow without limit — and a *snapshot*
+ * is retained in the main process and re-copied on every layout change, with no
+ * seed-sized total to stop it. `title` is truncated rather than rejected,
+ * because a long page title is ordinary; anything still oversized after that is
+ * not a tab this shell needs to carry.
+ */
+const MAX_TAB_BYTES = 8192;
+
+function utf8Length(text) {
+  return Buffer.byteLength(text, "utf8");
+}
 
 /** How many tabs one transfer may carry. Two docks of a window that has hit its
  *  view budget, with room to spare. */
@@ -231,7 +254,7 @@ const MAX_TITLE_LEN = 200;
 function safeTitle(raw) {
   if (typeof raw !== "string") return null;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
-  const text = raw.replace(/[ -]/g, " ").trim();
+  const text = raw.replace(/[\x00-\x1f\x7f]/g, " ").trim();
   return text === "" ? null : text.slice(0, MAX_TITLE_LEN);
 }
 
@@ -254,7 +277,7 @@ function safeRepoRoot(raw) {
   if (typeof raw !== "string") return null;
   if (raw === "" || raw.length > 4096) return null;
   // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting them is the point.
-  if (/[ -]/.test(raw)) return null;
+  if (/[\x00-\x1f\x7f]/.test(raw)) return null;
   return raw;
 }
 
@@ -279,6 +302,11 @@ function safeTransferTab(raw) {
     // the seed path stringifies again and a throw there loses the window.
     return null;
   }
+  // `title` is the one field a previewed page controls directly
+  // (`document.title` is pushed onto the tab record), so it is truncated rather
+  // than allowed to set the size of everything downstream.
+  if (typeof round.title === "string") round.title = round.title.slice(0, MAX_TITLE_LEN);
+  if (utf8Length(JSON.stringify(round)) > MAX_TAB_BYTES) return null;
   return round;
 }
 
@@ -320,14 +348,16 @@ function buildSeedLayout(worktreeId, tabs, ratio) {
       focused: 0,
     },
   });
-  return seed.length > MAX_SEED_CHARS ? null : seed;
+  return utf8Length(seed) > MAX_SEED_BYTES ? null : seed;
 }
 
 module.exports = {
   ID_RE,
   PROFILE_RE,
   PANE_KINDS,
-  MAX_SEED_CHARS,
+  MAX_SEED_BYTES,
+  MAX_TAB_BYTES,
+  MAX_TITLE_LEN,
   MAX_TRANSFER_TABS,
   safeUrl,
   isViewId,

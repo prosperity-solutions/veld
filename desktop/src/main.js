@@ -12,6 +12,7 @@ const {
   BrowserWindow,
   Menu,
   Tray,
+  dialog,
   ipcMain,
   nativeImage,
 } = require("electron");
@@ -27,7 +28,7 @@ const {
   setQuitting,
   windowCount,
 } = require("./windows");
-const { canOpenAnother } = require("./windowState");
+const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
 const {
   checkForUpdates,
   initUpdater,
@@ -406,7 +407,7 @@ async function trayMenu() {
       // Disabled rather than hidden at the cap: a row that vanishes reads as a
       // broken menu, while a greyed one says the app is at its limit.
       enabled: canOpenAnother(windowCount()),
-      click: () => openWindow({ kind: "main" }),
+      click: () => newWindowOrSayWhyNot(),
     },
     { label: `Version ${app.getVersion()}`, enabled: false },
   );
@@ -420,6 +421,26 @@ async function trayMenu() {
     { label: "Quit", role: "quit" },
   );
   return Menu.buildFromTemplate(items);
+}
+
+/**
+ * Open a window, or say why not.
+ *
+ * The tray's row can grey itself out because the tray is rebuilt every ten
+ * seconds; the application menu is built once, and `⌘N` is an accelerator that
+ * fires whatever the menu currently claims. So the cap has to be reported at the
+ * moment it is hit, or the app's most direct affordance is a key that silently
+ * does nothing — which is the same argument the tray row's `enabled` was written
+ * for, applied to the surface that actually needs it.
+ */
+function newWindowOrSayWhyNot() {
+  if (openWindow({ kind: "main" })) return;
+  void dialog.showMessageBox({
+    type: "info",
+    message: `Veld Desktop is limited to ${MAX_WINDOWS} windows.`,
+    detail: "Close one and try again.",
+    buttons: ["OK"],
+  });
 }
 
 function createTray() {
@@ -486,7 +507,7 @@ function buildAppMenu() {
         {
           label: "New Window",
           accelerator: "CmdOrCtrl+N",
-          click: () => openWindow({ kind: "main" }),
+          click: () => newWindowOrSayWhyNot(),
         },
         { type: "separator" },
         ...(isMac

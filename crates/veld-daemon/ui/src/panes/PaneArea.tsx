@@ -85,6 +85,7 @@ import {
 } from "./model";
 import { notifyError } from "../shared/notify";
 import { desktopWindow } from "../shell";
+import { type DropZone, droppedOutside, sameZone, zoneAt } from "./dropModel";
 
 /**
  * Drag payload type for a pane tab.
@@ -104,42 +105,6 @@ import {
   terminalStatus,
   unmountTerminal,
 } from "./terminalHost";
-
-/**
- * Where a dragged tab would land: one drop model for both gestures.
- *
- * `into` is the dock under the cursor — the tab joins its strip. `left`/`right`
- * are the *pane area's* outer edges and mean "be that side of the split",
- * creating the second dock when there is only one. Reading the edges off the
- * whole area rather than off each dock is what keeps the two cases one rule:
- * with one pane the outer edges are its own, with two they are the outer edges
- * of the pair, and in both the gesture means the same thing.
- */
-// Three members with *unit* discriminants, not two with `"left" | "right"`:
-// a discriminant property has to be a literal type for TypeScript to narrow the
-// union on it, and a member typed `{where: "left" | "right"}` silently opts the
-// whole union out of that — every read of `.dock` then fails to compile.
-type DropZone = { where: "into"; dock: DockIndex } | { where: "left" } | { where: "right" };
-
-/** How much of the pane area's width each edge zone takes. Capped in pixels so a
- *  wide window does not turn a third of the screen into "split", and floored so
- *  a narrow one still has an edge to aim at. */
-function edgeWidth(areaWidth: number): number {
-  return Math.max(28, Math.min(96, areaWidth * 0.16));
-}
-
-function zoneAt(area: DOMRect, clientX: number, dock: DockIndex): DropZone {
-  const edge = edgeWidth(area.width);
-  if (clientX <= area.left + edge) return { where: "left" };
-  if (clientX >= area.right - edge) return { where: "right" };
-  return { where: "into", dock };
-}
-
-function sameZone(a: DropZone | null, b: DropZone | null): boolean {
-  if (a === null || b === null) return a === b;
-  if (a.where !== b.where) return false;
-  return a.where !== "into" || b.where !== "into" || a.dock === b.dock;
-}
 
 /**
  * One embedded-browser suspend for the whole tab-drag gesture.
@@ -169,26 +134,10 @@ function endTabDrag(): void {
   popBrowserSuspend();
 }
 
-/**
- * Whether a `dragend` landed outside this window, which is what dragging a tab
- * out to detach it looks like.
- *
- * `dropEffect === "none"` alone is not enough: it also describes a drop on any
- * non-target *inside* the window, and detaching then would make every fumbled
- * drag open a window. The screen-coordinate test is the other half.
- */
+/** `droppedOutside` against this window — the rule itself, and its tests, live
+ *  in `dropModel.ts`. */
 function droppedOutsideWindow(e: React.DragEvent): boolean {
-  if (e.dataTransfer.dropEffect !== "none") return false;
-  const { screenX, screenY } = e;
-  // A drag released over a menu bar or an OS panel reports 0,0 on some
-  // platforms; treat the degenerate point as "inside" rather than detaching.
-  if (screenX === 0 && screenY === 0) return false;
-  return (
-    screenX < window.screenX ||
-    screenY < window.screenY ||
-    screenX > window.screenX + window.outerWidth ||
-    screenY > window.screenY + window.outerHeight
-  );
+  return droppedOutside(window, e, e.dataTransfer.dropEffect);
 }
 
 export function PaneArea(props: {
@@ -295,8 +244,14 @@ export function PaneArea(props: {
   const dropPreview = (): React.CSSProperties | null => {
     if (!dropZone) return null;
     const pct = (n: number) => `${n * 100}%`;
-    if (dropZone.where === "left") return { left: 0, width: "50%" };
-    if (dropZone.where === "right") return { left: "50%", width: "50%" };
+    // Left and right are only a 50/50 split when there is one dock and the drop
+    // is about to *create* the second. With both already on screen the drop is a
+    // plain move into a dock the splitter has already sized, so previewing half
+    // the area was a promise the drop did not keep — at a ratio of 0.25 the
+    // highlight covered twice the region the tab landed in.
+    const left = bothVisible ? pct(layout.ratio) : "50%";
+    if (dropZone.where === "left") return { left: 0, width: left };
+    if (dropZone.where === "right") return { left: left, width: `calc(100% - ${left})` };
     if (!bothVisible) return { left: 0, width: "100%" };
     return dropZone.dock === 0
       ? { left: 0, width: pct(layout.ratio) }

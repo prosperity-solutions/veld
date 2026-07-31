@@ -60,7 +60,6 @@ export interface TabTransfer {
 export interface DesktopWindowApi {
   kind: "main" | "detached";
   seed: string | null;
-  newWindow(): Promise<{ opened: boolean }>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;
@@ -70,7 +69,11 @@ export interface DesktopWindowApi {
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;
-  onAdopt(fn: (payload: TabTransfer) => void): () => void;
+  /** Drain the hand-back queue. Call at mount as well as on the nudge — the
+   *  nudge can arrive before this page's listener exists. */
+  takeAdopted(): Promise<TabTransfer[]>;
+  /** A nudge with no payload: there is something in the queue. */
+  onAdopt(fn: () => void): () => void;
 }
 
 export const desktopWindow: DesktopWindowApi | null =

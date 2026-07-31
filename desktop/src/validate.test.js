@@ -3,7 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  MAX_SEED_CHARS,
+  MAX_SEED_BYTES,
+  MAX_TAB_BYTES,
   MAX_TRANSFER_TABS,
   buildSeedLayout,
   isProfileName,
@@ -362,18 +363,46 @@ test("buildSeedLayout produces a layout the renderer can parse", () => {
   assert.equal(buildSeedLayout(9, [], 0.5), null);
 });
 
-test("buildSeedLayout refuses a seed too large for a command line", () => {
-  // The seed rides `additionalArguments`. An over-long argv fails the *launch*,
-  // so the window never appears and the tabs are simply gone — refusing here
-  // leaves them in the layout that still has them.
+test("a page's title cannot set the size of a transfer", () => {
+  // `document.title` is pushed onto the tab record from a *previewed page* —
+  // arbitrary web content. It is the one page-controlled string in a tab, so it
+  // is truncated at the boundary rather than allowed to size everything
+  // downstream: the seed, and the snapshot the main process retains and
+  // re-copies on every layout change.
+  const tab = safeTransferTab({ id: "v1", kind: "browser", title: "x".repeat(50_000) });
+  assert.equal(tab.title.length, 200);
+});
+
+test("a transfer is bounded in UTF-8 bytes, not string length", () => {
+  // The bug this replaced: the ceiling counted JavaScript string length while
+  // what had to fit was the UTF-8 encoding — up to 4× larger. A 50 000-character
+  // CJK title measured 50 134 and encoded to 150 402 bytes, so it passed a
+  // 64 KB check and produced a payload well past Linux's 128 KB per-argument
+  // limit back when the seed rode argv. The window never started, *after* the
+  // origin had already released its tabs to it.
+  const cjk = "中".repeat(50_000);
+  assert.ok(cjk.length < MAX_SEED_BYTES);
+  assert.ok(Buffer.byteLength(cjk, "utf8") > MAX_SEED_BYTES);
+  // Truncation now stops it at the tab, and the seed is measured in bytes below.
+  assert.equal(safeTransferTab({ id: "v1", kind: "browser", title: cjk }).title.length, 200);
+
+  // A tab too big for reasons other than its title is dropped whole.
+  assert.equal(
+    safeTransferTab({ id: "v1", kind: "new", padding: "x".repeat(MAX_TAB_BYTES) }),
+    null,
+  );
+});
+
+test("buildSeedLayout refuses a seed too large to carry", () => {
   const fat = Array.from({ length: MAX_TRANSFER_TABS }, (_, i) => ({
     id: `t${i}`,
     kind: "browser",
-    title: "x".repeat(4000),
-    url: "http://localhost/",
+    title: "x".repeat(200),
+    // Under the per-tab cap individually; over the seed's ceiling together.
+    url: `http://localhost/${"p".repeat(6000)}`,
   }));
   const tabs = safeTransferTabs(fat);
   assert.equal(tabs.length, MAX_TRANSFER_TABS);
-  assert.ok(JSON.stringify(tabs).length > MAX_SEED_CHARS);
+  assert.ok(Buffer.byteLength(JSON.stringify(tabs), "utf8") > MAX_SEED_BYTES);
   assert.equal(buildSeedLayout(1, tabs, 0.5), null);
 });

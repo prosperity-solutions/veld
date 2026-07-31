@@ -908,15 +908,24 @@ export function readLayouts(
 ): Record<number, PaneLayout> {
   const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
   if (Object.keys(own).length > 0) return own;
-  const stored =
-    durable && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
-  if (Object.keys(stored).length > 0) return stored;
-  // Last, not first: the seed is what a *detach* handed this window at the
-  // moment it was created, so it is only ever right on the very first render of
-  // a brand-new window. Once that render has saved, both stores hold something
-  // and the seed is never consulted again — which is what keeps a reload of a
-  // detached window from resurrecting the tab set it opened with.
-  return parseLayouts(seed);
+  // **Before the slot store, not after.** A seed exists only for a window the
+  // shell created *this instant* by pulling tabs out of another one — a restored
+  // window is opened with a slot and no seed — so its presence is proof that
+  // nothing in the durable store can be this window's own state.
+  //
+  // Ordering it last was the first version and it was wrong, because slots are
+  // *reused*: `nextSuffix` hands out the lowest free suffix counting live
+  // windows only, and nothing ever clears `veld.panes.slot.<slot>.v1`. So
+  // detach → close that window → detach again lands the new window on the same
+  // slot, where it found the *previous* window's dead layout, returned it, and
+  // discarded the seed. Both halves of that are silent: the tab actually being
+  // moved exists in no layout at all (the origin already released and closed
+  // it), so its shell dies at the detach grace — and the resurrected ids get
+  // attached to, which *takes them over* from the window that just adopted
+  // them. Exactly the ping-pong slots exist to prevent.
+  const seeded = parseLayouts(seed);
+  if (Object.keys(seeded).length > 0) return seeded;
+  return durable && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
 }
 
 /** Persist to both stores. The session copy is what a reload reads; the slot

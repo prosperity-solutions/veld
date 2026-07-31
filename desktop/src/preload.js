@@ -1,10 +1,12 @@
 // Bridge between the daemon-served /ide UI and the desktop shell.
 //
-// Two things only: a marker so the UI knows it runs inside Electron, and the
-// embedded-browser surface (`browser`), which is the one feature the web build
-// cannot do itself. Every method is a fixed channel with a fixed shape — the
-// page never names a channel, so it cannot reach IPC handlers this file does
-// not list. See desktop/src/browserViews.js for what the other side enforces.
+// Three things: a marker so the UI knows it runs inside Electron, the window
+// surface (`window` — open, detach, hand back), and the embedded-browser surface
+// (`browser`). The last two are the features the web build cannot do itself.
+// Every method is a fixed channel with a fixed shape — the page never names a
+// channel, so it cannot reach IPC handlers this file does not list. See
+// desktop/src/windows.js and desktop/src/browserViews.js for what the other side
+// enforces.
 const { contextBridge, ipcRenderer } = require("electron");
 
 /** A `--flag=value` the main process put on this renderer's command line. */
@@ -15,21 +17,26 @@ function fromArgv(flag) {
 
 /**
  * The layout this window boots with, when it was opened by pulling tabs out of
- * another one — base64 JSON, decoded here and parsed by the renderer.
+ * another one.
  *
- * On the command line rather than in `localStorage`, because the seed has to be
- * readable *synchronously in the first render*: the renderer prunes every
- * terminal not named by its layouts, so a layout that arrives one tick late
- * reads as "these sessions are orphans" and hangs up the shells that were just
- * transferred. It is read once, at boot; from then on the window's own slot
- * store is the record (see `readLayouts`).
+ * **Synchronous on purpose.** The renderer prunes every terminal its layouts do
+ * not name, so a seed that arrives one tick late reads as "these sessions are
+ * orphans" and hangs up the shells that were just transferred — it has to be
+ * readable in the first render. `sendSync` is what makes that possible without
+ * putting it in argv, where it would be world-readable on Linux
+ * (`/proc/<pid>/cmdline`) and would carry a browser pane's URL, fragment
+ * included.
+ *
+ * Read once here, at preload time; the main process drops it immediately, so a
+ * reload gets `null` and falls back to `sessionStorage` (see `readLayouts`).
  */
-function windowSeedFromArgv() {
-  const raw = fromArgv("--veld-window-seed=");
-  if (!raw) return null;
+function windowSeed() {
   try {
-    return Buffer.from(raw, "base64").toString("utf8");
+    const raw = ipcRenderer.sendSync("veld:window:seed");
+    return typeof raw === "string" && raw !== "" ? raw : null;
   } catch {
+    // An older or partly-initialised shell: no seed, which is the same state
+    // every non-detached window is in.
     return null;
   }
 }
@@ -64,9 +71,7 @@ contextBridge.exposeInMainWorld("veldDesktop", {
   window: {
     /** `"main"` (a full /ide) or `"detached"` (a bare dock). */
     kind: fromArgv("--veld-window-kind=") === "detached" ? "detached" : "main",
-    seed: windowSeedFromArgv(),
-    /** Open another full window, with its own worktree selection and layout. */
-    newWindow: () => ipcRenderer.invoke("veld:window:new"),
+    seed: windowSeed(),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */
     detach: (payload) => ipcRenderer.invoke("veld:window:detach", payload),
@@ -78,7 +83,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     setTitle: (title) => ipcRenderer.invoke("veld:window:set-title", { title }),
     /** Close this window (detached only): a bare dock with no tabs left in it. */
     close: () => ipcRenderer.invoke("veld:window:close"),
-    /** Tabs handed back by a detached window that just closed. */
+    /** Collect tabs handed back by detached windows that have closed. Call at
+     *  mount *and* on the `onAdopt` nudge: the nudge can arrive before this
+     *  page's listener exists, and the queue is what makes that survivable. */
+    takeAdopted: () => ipcRenderer.invoke("veld:window:take-adopted"),
+    /** A nudge — "there is something in your queue" — with no payload. */
     onAdopt: (fn) => on("veld:window:adopt", fn),
   },
   browser: {

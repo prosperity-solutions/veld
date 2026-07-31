@@ -149,6 +149,55 @@ function parseWindowList(raw, base) {
 }
 
 /**
+ * Which live window should receive a closing detached window's tabs.
+ *
+ * `originId` is the discriminator, and the two cases are exclusive rather than
+ * a fallback chain.
+ *
+ * **It is set** when this process opened the window by detaching from another
+ * one, so the id is authoritative: a match is the origin, and *no* match means
+ * the origin has closed. Falling through to the suffix there is exactly the bug
+ * this function exists to avoid — suffixes are recycled lowest-first, so after
+ * `w2` closes and a new window takes the free number, `origin: "w2"` names a
+ * window these tabs never came from. A plausible-looking wrong answer is worse
+ * than the generic fallback.
+ *
+ * **It is null** for a window restored from `windows.json`, where only the
+ * suffix survived. Every record is new so no id could match, and no suffix has
+ * been recycled yet either, which is what makes the persisted one usable.
+ *
+ * Either way the last resort is any main window, because the alternative is
+ * nowhere and these tabs name live shells.
+ *
+ * Records here are plain `{id, suffix, kind}` — the decision has nothing to do
+ * with a `BrowserWindow`, which is what makes it testable.
+ */
+function handBackTarget(closing, others) {
+  if (closing.originId !== null && closing.originId !== undefined) {
+    const byId = others.find((r) => r.id === closing.originId);
+    if (byId) return byId;
+  } else if (closing.origin !== null && closing.origin !== undefined) {
+    const bySuffix = others.find((r) => r.suffix === closing.origin);
+    if (bySuffix) return bySuffix;
+  }
+  return others.find((r) => r.kind === "main") ?? null;
+}
+
+/**
+ * How many stored windows may be reopened.
+ *
+ * One short of the ceiling **only when the stored set has no main window**, in
+ * which case one has to be opened afterwards — an app whose every window is a
+ * bare dock has no rail and no way back. Reserving unconditionally was the first
+ * version and it silently dropped the last window of a full set, taking its
+ * layout and the live shells its terminal ids name with it; the next quit then
+ * rewrote the set one shorter, making the loss permanent.
+ */
+function restoreBudget(stored) {
+  return stored.some((e) => e.kind === "main") ? MAX_WINDOWS : MAX_WINDOWS - 1;
+}
+
+/**
  * Merge this base's windows into whatever the file already holds.
  *
  * Other bases are carried through untouched: a packaged app and a dev run share
@@ -179,6 +228,8 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  handBackTarget,
+  restoreBudget,
   safeBounds,
   parseWindowRecord,
   parseWindowList,

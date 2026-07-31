@@ -1141,15 +1141,35 @@ describe("layout slots", () => {
       expect(readLayouts(fake(), fake(), "main-w2", seed)).toEqual(seeded);
     });
 
-    it("loses to both stores, so a reload does not resurrect it", () => {
+    it("loses to the session store, so a reload does not resurrect it", () => {
       const mine = { 4: defaultLayout(0.8) };
-      expect(readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed))
-        .toEqual(mine);
-      // And to the slot store, which is what an app restart reads: by then the
-      // detached window has a history of its own and the seed is a snapshot of
-      // the moment it was created.
-      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(mine) });
-      expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(mine);
+      expect(
+        readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed),
+      ).toEqual(mine);
+    });
+
+    it("BEATS the slot store, because slots are reused", () => {
+      // The regression this ordering exists for. `nextSuffix` counts live
+      // windows only and nothing clears a slot's key, so: detach (window takes
+      // `main-w2`, writes its layout) → close it (tabs handed back, ids now live
+      // in the origin) → detach again → the new window lands on `main-w2` and
+      // finds the *dead* layout sitting there.
+      //
+      // Reading it would discard the seed, which is silent twice over: the tab
+      // being moved exists in no layout at all (the origin already released and
+      // closed it) so its shell dies at the grace, and the resurrected ids get
+      // attached to, taking them over from the window that just adopted them.
+      const dead = { 4: defaultLayout(0.8) };
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(dead) });
+      expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(seeded);
+    });
+
+    it("is not consulted by a restored window, which has no seed", () => {
+      // The case the wrong ordering was written for, and it cannot arise: a
+      // restored window is opened with a slot and no seed at all.
+      const own = { 4: defaultLayout(0.8) };
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(own) });
+      expect(readLayouts(fake(), durable, "main-w2", null)).toEqual(own);
     });
 
     it("goes through the same validation a restored layout does", () => {

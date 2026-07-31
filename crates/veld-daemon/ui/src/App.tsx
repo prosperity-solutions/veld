@@ -163,10 +163,50 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
 }
 
 /**
+ * A window's own remembered selection, plus the app-wide one.
+ *
+ * Two keys, written together and read in that order. The slot-scoped one is what
+ * makes several windows work: layouts are already per slot, so without a
+ * matching selection every window reopened after a restart read the *same*
+ * last-written worktree and showed a layout its panes were not for — a window
+ * would come back on the wrong repository with its own terminals sitting
+ * unattached. The unscoped one stays as the fallback, and it is the reason `⌘N`
+ * opens on what you were just looking at rather than on the first repo in the
+ * list: a brand-new slot has nothing of its own yet.
+ *
+ * A plain browser tab has no slot and therefore only the unscoped key, which is
+ * the behaviour it had before windows existed.
+ */
+function selectionKeys(name: string): [string, string] {
+  return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
+}
+
+function usePersistedPerWindow(name: string): [string, (v: string) => void] {
+  const [scoped, global] = selectionKeys(name);
+  const [value, setValue] = useState(
+    () => window.localStorage.getItem(scoped) ?? window.localStorage.getItem(global) ?? "",
+  );
+  const set = useCallback(
+    (v: string) => {
+      setValue(v);
+      try {
+        window.localStorage.setItem(scoped, v);
+        window.localStorage.setItem(global, v);
+      } catch {
+        // Storage unavailable: the selection lives in the URL for this session
+        // anyway, and losing it costs a default worktree on the next launch.
+      }
+    },
+    [scoped, global],
+  );
+  return [value, set];
+}
+
+/**
  * Selection state lives in the URL (`?repo=…&wt=…`) so views are addressable:
- * a future multi-window Electron layout opens one URL per worktree, browser
- * tabs deep-link, and reload restores the exact view. localStorage is the
- * fallback when the URL carries no selection.
+ * a multi-window Electron layout opens one URL per worktree, browser tabs
+ * deep-link, and reload restores the exact view. localStorage is the fallback
+ * when the URL carries no selection — per window slot first, see above.
  */
 function useUrlSelection(): {
   repo: string;
@@ -175,8 +215,8 @@ function useUrlSelection(): {
   setWt: (key: string) => void;
 } {
   const params = new URLSearchParams(window.location.search);
-  const [repo, setRepoState] = usePersisted("veld.repo", "");
-  const [wt, setWtState] = usePersisted("veld.worktree", "");
+  const [repo, setRepoState] = usePersistedPerWindow("veld.repo");
+  const [wt, setWtState] = usePersistedPerWindow("veld.worktree");
   const [urlRepo, setUrlRepo] = useState(params.get("repo") ?? "");
   const [urlWt, setUrlWt] = useState(params.get("wt") ?? "");
 
@@ -845,18 +885,27 @@ function AppInner(props: {
    * main process and another renderer, so they go through the same gate a
    * restored layout does.
    */
-  useEffect(
-    () =>
-      desktopWindow?.onAdopt(({ worktreeId, tabs }) => {
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (!shell) return;
+    const drain = async () => {
+      const transfers = await shell.takeAdopted().catch(() => []);
+      for (const { worktreeId, tabs } of transfers) {
         const parsed = parseTransferTabs(tabs);
-        if (parsed.length === 0) return;
+        if (parsed.length === 0) continue;
         setLayouts((prev) => {
           const next = adoptTabs(prev[worktreeId], parsed);
           return next ? { ...prev, [worktreeId]: next } : prev;
         });
-      }),
-    [],
-  );
+      }
+    };
+    // At mount **and** on the nudge. A detached window can close while this one
+    // is still on the waiting page or mid-reload, in which case the nudge lands
+    // before this listener exists — the queue in the main process is what makes
+    // that survivable, and draining it here is the half that collects it.
+    void drain();
+    return shell.onAdopt(() => void drain());
+  }, []);
 
   /**
    * Keep the shell's copy of what this window holds current.
@@ -889,6 +938,16 @@ function AppInner(props: {
   const heldTabs = useRef(false);
   useEffect(() => {
     if (!chromeless || !desktopWindow) return;
+    // The worktree this window was opened for is gone (removed, or its repo
+    // unregistered). `worktree` resolves by *falling back* — first main, then
+    // the first of the first repo — which in a full window is right and here is
+    // not: a bare dock has no rail and no top bar, so it would silently become a
+    // dock on an unrelated worktree, still wearing the old title, with its own
+    // tabs already pruned along with their layout. Close instead.
+    if (repoList && activeWtKey !== "" && String(worktree?.id ?? "") !== activeWtKey) {
+      void desktopWindow.close().catch(() => {});
+      return;
+    }
     if (layout && allTabs(layout).length > 0) {
       heldTabs.current = true;
       const active = activeTab(layout, layout.focused);
@@ -898,7 +957,7 @@ function AppInner(props: {
       return;
     }
     if (heldTabs.current) void desktopWindow.close().catch(() => {});
-  }, [chromeless, layout, worktree?.alias]);
+  }, [chromeless, layout, worktree?.id, worktree?.alias, repoList, activeWtKey]);
 
   // Terminals live outside React (see panes/terminalHost.ts), so nothing
   // unmounts them. The layouts are the whole record of which should exist;
