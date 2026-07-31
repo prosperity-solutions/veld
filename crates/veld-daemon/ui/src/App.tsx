@@ -132,7 +132,14 @@ import {
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
-import { chromeless, desktopWindow, layoutSlot, topbarClass, windowSeed } from "./shell";
+import {
+  chromeless,
+  desktopWindow,
+  layoutSlot,
+  topbarClass,
+  windowRestored,
+  windowSeed,
+} from "./shell";
 
 const POLL_MS = 5000;
 
@@ -789,7 +796,7 @@ function AppInner(props: {
   // lazy initialiser rather than in an effect: an empty first render would prune
   // every restored session before the restore landed.
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
-    loadLayouts(layoutSlot, windowSeed),
+    loadLayouts(layoutSlot, windowSeed, windowRestored),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
@@ -917,13 +924,20 @@ function AppInner(props: {
    */
   useEffect(() => {
     if (!chromeless || !desktopWindow || !worktree) return;
+    // Only while the resolved worktree is still the one this window was opened
+    // for. When it stops existing, `worktree` falls back to another one in the
+    // same commit — and this effect is declared before the close effect below,
+    // so it would run first and overwrite the last good snapshot with an empty
+    // one for the *fallback* worktree. The window then closed having handed back
+    // nothing, which is the one thing closing a detached window must never do.
+    if (activeWtKey !== "" && String(worktree.id) !== activeWtKey) return;
     void desktopWindow
       .snapshot({ worktreeId: worktree.id, tabs: layout ? allTabs(layout) : [] })
       .catch(() => {
         // The window can still be used; only the hand-back is lost, and the
         // shells it names outlive it either way under the detach grace.
       });
-  }, [chromeless, worktree?.id, layout]);
+  }, [chromeless, worktree?.id, layout, activeWtKey]);
 
   /**
    * A detached window's title bar and its lifetime.

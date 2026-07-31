@@ -351,6 +351,35 @@ function buildSeedLayout(worktreeId, tabs, ratio) {
   return utf8Length(seed) > MAX_SEED_BYTES ? null : seed;
 }
 
+/**
+ * Recover a hand-back payload from a seed, for a detached window that closed
+ * before its renderer ever reported one.
+ *
+ * The window is opened, the origin lets its tabs go, and then the window is
+ * closed during the up-to-two-second daemon check — or while the waiting page is
+ * up. There is no snapshot yet, so without this the tabs exist in no layout
+ * anywhere and their shells die at the detach grace. The seed is exactly the set
+ * that was handed over, which makes it the right thing to hand back.
+ */
+function transferFromSeed(seed) {
+  if (typeof seed !== "string" || seed === "") return null;
+  let parsed;
+  try {
+    parsed = JSON.parse(seed);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
+  for (const [key, layout] of Object.entries(parsed)) {
+    const worktreeId = safeWorktreeId(key);
+    if (worktreeId === null) continue;
+    const docks = Array.isArray(layout?.docks) ? layout.docks : [];
+    const tabs = safeTransferTabs(docks.flatMap((d) => (Array.isArray(d?.tabs) ? d.tabs : [])));
+    if (tabs.length > 0) return { worktreeId, tabs };
+  }
+  return null;
+}
+
 module.exports = {
   ID_RE,
   PROFILE_RE,
@@ -371,6 +400,7 @@ module.exports = {
   safeRadius,
   safeTitle,
   safeWorktreeId,
+  transferFromSeed,
   safeRepoRoot,
   safeTransferTab,
   safeTransferTabs,

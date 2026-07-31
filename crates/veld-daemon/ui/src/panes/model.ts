@@ -905,6 +905,9 @@ export function readLayouts(
   durable: LayoutStorage | null,
   slot: string | null,
   seed: string | null = null,
+  /** Whether the shell *reopened* this window on a slot it owned before, rather
+   *  than opening a new one that happened to be given the number. */
+  restored = false,
 ): Record<number, PaneLayout> {
   const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
   if (Object.keys(own).length > 0) return own;
@@ -925,6 +928,18 @@ export function readLayouts(
   // them. Exactly the ping-pong slots exist to prevent.
   const seeded = parseLayouts(seed);
   if (Object.keys(seeded).length > 0) return seeded;
+  // **Only a window that was reopened may read the slot store.** Slots are
+  // recycled and their keys are never cleared, so to a *new* window the stored
+  // layout is a dead one that happens to share a number — and adopting it means
+  // attaching to terminal ids another window is using, which takes those shells
+  // over. Sequence: detach a terminal, close the detached window (its tabs go
+  // back to the origin, which re-attaches), press ⌘N — the new window gets the
+  // freed suffix, restores the dead layout naming that same tab id, and steals
+  // the shell, leaving the origin on "connection lost".
+  //
+  // The seed covers the detach case, which is why the first version of this
+  // looked complete. A ⌘N window has no seed and fell straight through.
+  if (!restored) return {};
   return durable && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
 }
 
@@ -966,10 +981,11 @@ function storages(): { session: LayoutStorage | null; durable: LayoutStorage | n
 export function loadLayouts(
   slot: string | null,
   seed: string | null = null,
+  restored = false,
 ): Record<number, PaneLayout> {
   try {
     const { session, durable } = storages();
-    return readLayouts(session, durable, slot, seed);
+    return readLayouts(session, durable, slot, seed, restored);
   } catch {
     return {};
   }

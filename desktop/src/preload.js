@@ -71,6 +71,9 @@ contextBridge.exposeInMainWorld("veldDesktop", {
   window: {
     /** `"main"` (a full /ide) or `"detached"` (a bare dock). */
     kind: fromArgv("--veld-window-kind=") === "detached" ? "detached" : "main",
+    /** Whether the shell reopened this window on a slot it owned before. Only
+     *  then may the page restore that slot's durable layout — see `readLayouts`. */
+    restored: fromArgv("--veld-window-restored=") === "1",
     seed: windowSeed(),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */

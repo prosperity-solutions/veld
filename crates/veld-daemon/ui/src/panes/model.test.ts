@@ -1091,9 +1091,12 @@ describe("layout slots", () => {
 
   it("restores from the slot store when the session store is empty", () => {
     // The app restarted: a new window, so a new sessionStorage, but the holder
-    // processes kept the shells running and their ids are in here.
+    // processes kept the shells running and their ids are in here. The shell
+    // says so with the `restored` flag — a window that merely *inherited* this
+    // slot's number must not read it (see "only a reopened window reads the
+    // slot store" below).
     const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, "main")).toEqual(layouts);
+    expect(readLayouts(fake(), durable, "main", null, true)).toEqual(layouts);
   });
 
   it("prefers the session store, which is this window's own state", () => {
@@ -1169,7 +1172,7 @@ describe("layout slots", () => {
       // restored window is opened with a slot and no seed at all.
       const own = { 4: defaultLayout(0.8) };
       const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(own) });
-      expect(readLayouts(fake(), durable, "main-w2", null)).toEqual(own);
+      expect(readLayouts(fake(), durable, "main-w2", null, true)).toEqual(own);
     });
 
     it("goes through the same validation a restored layout does", () => {
@@ -1194,6 +1197,55 @@ describe("layout slots", () => {
       expect(readLayouts(fake(), fake(), "main")).toEqual({});
       expect(readLayouts(fake(), fake(), "main", null)).toEqual({});
       expect(readLayouts(fake(), fake(), "main", "{not json")).toEqual({});
+    });
+  });
+
+  describe("only a reopened window reads the slot store", () => {
+    const stored = { 4: defaultLayout(0.8) };
+    const durable = () => fake({ [layoutSlotKey("main-w2")]: serializeLayouts(stored) });
+
+    it("gives a brand-new window nothing, however full the slot is", () => {
+      // ⌘N is the case, and the seed fix did not cover it. Suffixes are
+      // recycled and a slot's key is never cleared, so to a genuinely new
+      // window that layout is a *dead* one that happens to share a number —
+      // adopting it means attaching to terminal ids another window is using,
+      // and an attach takes a shell over.
+      //
+      // Full sequence: detach a terminal, close the detached window (its tabs
+      // go back to the origin, which re-attaches), press ⌘N. The new window
+      // gets the freed suffix, restored the dead layout naming that same tab
+      // id, and stole the shell — leaving the origin on "connection lost",
+      // which is the exact ping-pong slots exist to prevent.
+      expect(readLayouts(fake(), durable(), "main-w2", null, false)).toEqual({});
+    });
+
+    it("gives a reopened window its layout back", () => {
+      // The other half, and the whole point of the durable store: shells that
+      // outlived the app have to be reachable again.
+      expect(readLayouts(fake(), durable(), "main-w2", null, true)).toEqual(stored);
+    });
+
+    it("defaults to not restoring, so a new caller cannot opt in by accident", () => {
+      expect(readLayouts(fake(), durable(), "main-w2")).toEqual({});
+    });
+
+    it("does not gate the session store or the seed", () => {
+      // A reload of a new window still has to come back, and a detached window
+      // still has to boot with what it was handed.
+      const mine = { 4: defaultLayout(0.3) };
+      expect(
+        readLayouts(
+          fake({ "veld.panes.v1": serializeLayouts(mine) }),
+          durable(),
+          "main-w2",
+          null,
+          false,
+        ),
+      ).toEqual(mine);
+      const seeded = { 5: defaultLayout(0.25) };
+      expect(readLayouts(fake(), durable(), "main-w2", serializeLayouts(seeded), false)).toEqual(
+        seeded,
+      );
     });
   });
 });

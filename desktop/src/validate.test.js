@@ -2,10 +2,13 @@
 // no Electron binary needed, which is why the validation lives in its own module.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const {
   MAX_SEED_BYTES,
   MAX_TAB_BYTES,
   MAX_TRANSFER_TABS,
+  PANE_KINDS,
   buildSeedLayout,
   isProfileName,
   isViewId,
@@ -297,6 +300,32 @@ test("safeRepoRoot rejects anything that could not be a path in a URL", () => {
   for (const none of ["", 42, null, undefined, {}]) {
     assert.equal(safeRepoRoot(none), null, JSON.stringify(none));
   }
+});
+
+test("PANE_KINDS agrees with the renderer's", () => {
+  // A tab crosses into this process when a pane is detached into its own
+  // window, so `safeTransferTab` needs the kind list — and this is plain JS, so
+  // nothing type-checks the two copies against each other. A kind added on the
+  // renderer side and forgotten here works everywhere *except* detach, which
+  // refuses with "the desktop shell refused the request" and points nowhere
+  // near the cause. That is this codebase's worst failure shape, and the same
+  // one `safeEmulation`'s field-set gate exists for.
+  //
+  // The gate lives on this side rather than the renderer's — unlike the
+  // emulation one — for a boring reason: `crates/veld-daemon/ui` has no
+  // `@types/node`, so reading a file from a vitest test costs a dependency,
+  // while `node --test` has `fs` already.
+  const source = readFileSync(
+    path.join(__dirname, "..", "..", "crates", "veld-daemon", "ui", "src", "panes", "model.ts"),
+    "utf8",
+  );
+  const match = source.match(/export const PANE_KINDS = \[([^\]]*)\]/);
+  assert.ok(match, "PANE_KINDS not found in panes/model.ts");
+  const theirs = match[1]
+    .split(",")
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+  assert.deepEqual(PANE_KINDS, theirs);
 });
 
 test("safeTransferTab keeps a tab's own fields and refuses a non-tab", () => {

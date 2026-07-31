@@ -29,9 +29,23 @@
  *    a pane that polls is a pane that keeps polling while nobody is looking at it.
  * 9. `DiagKind` in `model.ts`, if it is a run view — `diagTab` and the chooser's
  *    `onDiag` are typed by it, so a kind that is one has to be in that subset.
+ * 10. **`PANE_KINDS` in `desktop/src/validate.js`** — a second, hand-maintained
+ *    copy, because a tab now crosses into the Electron main process when a pane
+ *    is detached into its own window. A kind missing there works everywhere
+ *    except detach, which refuses with "the desktop shell refused the request"
+ *    and no hint where to look. Guarded by a drift-gate test in
+ *    `desktop/src/validate.test.js` ("PANE_KINDS agrees with the renderer's"),
+ *    which is why this one is enforced despite living in another language, in
+ *    another package, with no shared type between them.
+ * 11. `releaseForTransfer` below, **if the kind owns anything outside the
+ *    layout** — a live registry the way `terminal` and `browser` do. Removing a
+ *    tab from a layout is what destroys its resource (`pruneTerminals` /
+ *    `pruneBrowsers` collect against the layouts), so a detach has to let go
+ *    first or it kills the thing it is moving. Its `switch` is exhaustive, so
+ *    this one is a compile error rather than a checklist item you can miss.
  *
- * Only 1-3 and 9 are enforced. Note what is *not* a kind: the run's URLs, which
- * are a launcher shown inside a pane rather than a pane of their own
+ * Only 1-3, 9, 10 and 11 are enforced. Note what is *not* a kind: the run's
+ * URLs, which are a launcher shown inside a pane rather than a pane of their own
  * (`VeldLinks.tsx`).
  */
 
@@ -140,6 +154,42 @@ function droppedOutsideWindow(e: React.DragEvent): boolean {
   return droppedOutside(window, e, e.dataTransfer.dropEffect);
 }
 
+/**
+ * Let go of whatever a tab owns outside the layout, **without destroying it**,
+ * because it is about to exist in another window instead.
+ *
+ * A `switch` with an exhaustive `default` rather than
+ * `if (kind === "terminal")`, and that is the whole point of the function. The
+ * rule it enforces is the trap in this file: `pruneTerminals`/`pruneBrowsers`
+ * collect against the layouts, so *removing a tab is what destroys its
+ * resource* — a future pane kind with a live registry of its own (see the
+ * `PaneKind` docs in `model.ts`, which invite exactly that) would have its
+ * resource killed by a detach, silently, by a code path that never mentions it.
+ * Written this way, adding a kind is a compile error here instead.
+ */
+function releaseForTransfer(tab: PaneTab): void {
+  switch (tab.kind) {
+    case "terminal":
+      // The shell is the daemon's and outlives this page; the new window
+      // re-attaches by id. `disposeTerminal` would `DELETE` the session.
+      releaseTerminal(tab.id);
+      return;
+    case "browser":
+      // Deliberately nothing. A `WebContentsView` belongs to a window and cannot
+      // be re-parented, so a detach *is* a destroy-and-recreate: letting
+      // `pruneBrowsers` destroy this one is the intended half of it, and the tab
+      // record carries everything the new window rebuilds from.
+      return;
+    case "logs":
+    case "nodes":
+    case "new":
+      // Pure React; they own nothing outside the layout.
+      return;
+    default:
+      return unhandledKind(tab.kind);
+  }
+}
+
 export function PaneArea(props: {
   layout: PaneLayout;
   onLayout: (next: PaneLayoutUpdate) => void;
@@ -182,6 +232,7 @@ export function PaneArea(props: {
    */
   const detachTabs = async (tabs: PaneTab[]) => {
     if (!desktopWindow || tabs.length === 0) return;
+    let moved: PaneTab[] = [];
     try {
       const result = await desktopWindow.detach({
         worktreeId: props.worktreeId,
@@ -198,14 +249,25 @@ export function PaneArea(props: {
         );
         return;
       }
+      // Only what the shell actually took. Its own validation drops a tab that
+      // is too large, duplicated or of an unknown kind, so letting go of the
+      // whole list on `opened: true` would remove a refused tab from the only
+      // layout naming it. An older shell answers without the field; treat that
+      // as "all of them", which is what it did.
+      const accepted = new Set(result.accepted ?? tabs.map((t) => t.id));
+      moved = tabs.filter((t) => accepted.has(t.id));
+      if (moved.length < tabs.length) {
+        notifyError(
+          "Some panes stayed here",
+          `${tabs.length - moved.length} of ${tabs.length} could not be moved to the new window.`,
+        );
+      }
     } catch (err) {
       notifyError("Couldn't open a new window", err);
       return;
     }
-    for (const tab of tabs) {
-      if (tab.kind === "terminal") releaseTerminal(tab.id);
-    }
-    onLayout((prev) => tabs.reduce((acc, tab) => closeTab(acc, tab.id), prev));
+    for (const tab of moved) releaseForTransfer(tab);
+    onLayout((prev) => moved.reduce((acc, tab) => closeTab(acc, tab.id), prev));
   };
 
   const onBodyDragOver = (e: React.DragEvent, dock: DockIndex) => {

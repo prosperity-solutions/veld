@@ -47,6 +47,22 @@ export const windowSeed: string | null = (() => {
   return typeof raw === "string" && raw !== "" ? raw : null;
 })();
 
+/**
+ * Whether the shell **reopened** this window on a slot it owned before, rather
+ * than opening a new one that happened to be handed the number.
+ *
+ * Only a reopened window may restore the durable per-slot layout. Suffixes are
+ * recycled and a slot's key is never cleared, so to a genuinely new window that
+ * layout is a dead one naming terminal ids another window may be using — and
+ * attaching to those *takes the shells over*. See `readLayouts`.
+ *
+ * From the bridge, not the URL, for the same reason the slot is: it decides
+ * whether durable state naming live PTY sessions is adopted.
+ */
+export const windowRestored: boolean =
+  (window as { veldDesktop?: { window?: { restored?: unknown } } }).veldDesktop?.window
+    ?.restored === true;
+
 /** A payload of tabs moving between windows. Deliberately `unknown[]`: the
  *  receiving side runs them through `parseTransferTabs`, which is the same gate
  *  a restored layout goes through. */
@@ -65,7 +81,7 @@ export interface DesktopWindowApi {
     repoRoot: string;
     ratio: number;
     tabs: unknown[];
-  }): Promise<{ opened: boolean; reason?: string | null }>;
+  }): Promise<{ opened: boolean; reason?: string | null; accepted?: string[] }>;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;

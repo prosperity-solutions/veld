@@ -27,6 +27,7 @@ const {
   safeTitle,
   safeTransferTabs,
   safeWorktreeId,
+  transferFromSeed,
 } = require("./validate");
 const {
   canOpenAnother,
@@ -157,10 +158,14 @@ function persistWindows() {
           bounds: safeBounds(r.win.getNormalBounds()),
         }));
       fs.mkdirSync(path.dirname(deps.stateFile), { recursive: true });
-      fs.writeFileSync(
-        deps.stateFile,
-        serializeWindowList(readStateRaw(), deps.slotBase, records),
-      );
+      // Write-then-rename, because a torn file is worse than a stale one: a
+      // truncated `windows.json` parses to `[]`, the next launch opens a single
+      // window, and the first persist after that makes the loss of every other
+      // window's layout — and the live shells its terminal ids name —
+      // permanent.
+      const tmp = `${deps.stateFile}.tmp`;
+      fs.writeFileSync(tmp, serializeWindowList(readStateRaw(), deps.slotBase, records));
+      fs.renameSync(tmp, deps.stateFile);
     } catch {
       // An unwritable userData costs the window set on the next launch and
       // nothing else. The app still runs.
@@ -220,10 +225,17 @@ async function loadAppWhenReady(win, url) {
  */
 function detachBounds(originWin) {
   const size = { width: 1000, height: 700 };
-  const point = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(point);
-  const area = display.workArea;
   const from = originWin && !originWin.isDestroyed() ? originWin.getNormalBounds() : null;
+  // The origin window's display, not the cursor's, whenever there is an origin:
+  // the offset below is computed from that window's position, and clamping it
+  // into a *different* display's work area jams the new window against an edge.
+  // The cursor is only the fallback, and it has to be — on Wayland
+  // `getCursorScreenPoint` reports 0,0, which would send every detach to the
+  // primary display.
+  const display = from
+    ? screen.getDisplayMatching(from)
+    : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const area = display.workArea;
   const x = from ? from.x + 48 : area.x + Math.round((area.width - size.width) / 2);
   const y = from ? from.y + 48 : area.y + Math.round((area.height - size.height) / 2);
   return {
@@ -304,7 +316,17 @@ function openWindow(options = {}) {
       // is the right home: a link can forge a URL but not a preload argument.
       // The **seed is deliberately not here** — see `record.seed` and the
       // `veld:window:seed` channel below.
-      additionalArguments: [`--veld-layout-slot=${slot}`, `--veld-window-kind=${kind}`],
+      additionalArguments: [
+        `--veld-layout-slot=${slot}`,
+        `--veld-window-kind=${kind}`,
+        // An explicit suffix means the caller is *reopening* a window on a slot
+        // it owned before (`restoreWindows`, or `focusPrimary` bringing the app
+        // back with no windows left). Allocating one means a genuinely new
+        // window, which must not adopt whatever layout the recycled number's key
+        // still holds — that layout names terminal ids another window may be
+        // attached to, and attaching takes them over.
+        `--veld-window-restored=${explicit ? "1" : "0"}`,
+      ],
     },
   });
 
@@ -355,6 +377,12 @@ function openWindow(options = {}) {
     win.on("page-title-updated", (e) => e.preventDefault());
   }
 
+  // The seed has done its job once the real page is up; until then it must
+  // survive the waiting page's own preload run (see `veld:window:seed`).
+  win.webContents.on("did-finish-load", () => {
+    if (!win.isDestroyed() && win.webContents.getURL().startsWith(appOrigin)) record.seed = null;
+  });
+
   win.on("move", persistWindows);
   win.on("resize", persistWindows);
 
@@ -394,7 +422,11 @@ function openWindow(options = {}) {
 function handBack(record) {
   if (quitting) return;
   if (record.kind !== "detached") return;
-  const snapshot = record.snapshot;
+  // The seed is the fallback for a window that never got far enough to report a
+  // snapshot — closed during the daemon check, or while the waiting page was up.
+  // Its tabs were released by the origin the moment the detach was accepted, so
+  // without this they exist in no layout anywhere and die at the grace.
+  const snapshot = record.snapshot ?? transferFromSeed(record.seed);
   if (!snapshot || snapshot.tabs.length === 0) return;
 
   // The precedence — record id, then persisted suffix, then any main window —
@@ -462,6 +494,19 @@ function restoreWindows() {
     });
     if (win) opened.push(win);
   }
+
+  // Resolve every persisted `origin` suffix to the record id it now refers to,
+  // once, here. After this the suffix branch of `handBackTarget` never runs
+  // again — and it must not, because from the first ⌘N onward a freed suffix can
+  // belong to a window these tabs never came from. Suffixes are unique across
+  // the set that was just restored, so this is the one moment the mapping is
+  // unambiguous.
+  const bySuffix = new Map(allRecords().map((r) => [r.suffix, r.id]));
+  for (const record of allRecords()) {
+    if (record.originId === null && record.origin !== null) {
+      record.originId = bySuffix.get(record.origin) ?? null;
+    }
+  }
   if (!opened.some((w) => recordFor(w)?.kind === "main")) {
     // Either nothing was stored, or everything stored was a detached window
     // (its origin closed last). Either way the app needs a window with a rail in
@@ -513,8 +558,17 @@ function registerWindowIpc(ipcMain) {
    * never started, after the origin had already let its tabs go.
    *
    * `ipcMain.on` + `event.returnValue` rather than `handle`, because `handle` is
-   * a promise and this must not be one. **One-shot**: a reload has
-   * `sessionStorage` and must not be re-seeded.
+   * a promise and this must not be one.
+   *
+   * **Cleared when the app page finishes loading, not when it is read.** A
+   * preload runs on *every* load in a `webContents`, including the `data:`
+   * waiting page `loadAppWhenReady` shows while the daemon is down — so a
+   * read-once seed was consumed by that page and gone by the time `/ide`
+   * actually loaded. Detaching during a daemon restart is the case terminals
+   * exist to survive, and it was the case that lost them: the tabs had already
+   * been released by the origin, so they then existed in no layout at all.
+   * Re-reading it after `/ide` has loaded is harmless — by then both storages
+   * hold the layout and the seed loses to them.
    *
    * Resolved from `event.sender` alone. Electron runs a preload in the main
    * frame only (`nodeIntegrationInSubFrames` is off), and the embedded panes have
@@ -525,9 +579,7 @@ function registerWindowIpc(ipcMain) {
    */
   ipcMain.on("veld:window:seed", (event) => {
     const win = BrowserWindow.fromWebContents(event.sender);
-    const record = recordFor(win);
-    event.returnValue = record?.seed ?? null;
-    if (record) record.seed = null;
+    event.returnValue = recordFor(win)?.seed ?? null;
   });
 
   /**
@@ -575,7 +627,16 @@ function registerWindowIpc(ipcMain) {
       repoRoot: safeRepoRoot(payload?.repoRoot),
       worktreeId,
     });
-    return { opened: win !== null, reason: win ? null : "cap" };
+    // The accepted ids, not just `opened`. `safeTransferTabs` drops per tab (an
+    // over-long one, a duplicate id, an unknown kind) and truncates the list, so
+    // "a window opened" does not mean "all of them went" — and the renderer
+    // releases and closes exactly what it is told went. Anything else is a tab
+    // removed from the only layout that named it.
+    return {
+      opened: win !== null,
+      reason: win ? null : "cap",
+      accepted: win ? tabs.map((t) => t.id) : [],
+    };
   });
 
   /**

@@ -595,6 +595,7 @@ app.whenReady().then(() => {
   restoreWindows();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {
+    setQuitting(false);
     if (BrowserWindow.getAllWindows().length === 0) focusPrimary();
   });
 });
@@ -609,6 +610,18 @@ app.whenReady().then(() => {
  * the layouts, with their shells, to the grace.
  */
 app.on("before-quit", () => setQuitting(true));
+
+/**
+ * …and a `before-quit` is not always a quit.
+ *
+ * `quitAndInstall` can fail and leave the app running (`updater.js` handles
+ * exactly that), and a macOS logout can be cancelled. Neither necessarily opens
+ * a window, so `openWindow`'s own reset is not enough on its own: without these,
+ * the flag stays set for the rest of the session, window persistence is frozen,
+ * and every detached window closed afterwards silently abandons its tabs.
+ * Focusing or activating a window is proof the app is still in use.
+ */
+app.on("browser-window-focus", () => setQuitting(false));
 
 app.on("window-all-closed", () => {
   // Keep the tray alive on macOS (standard behavior); quit elsewhere.

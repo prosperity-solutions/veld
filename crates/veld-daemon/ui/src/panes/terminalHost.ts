@@ -17,7 +17,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { layoutSlot, windowSeed } from "../shell";
+import { layoutSlot, windowRestored, windowSeed } from "../shell";
 import { loadLayouts, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
@@ -42,7 +42,7 @@ const EXPECTED_RESUMES: Set<string> = (() => {
     // has neither store yet, so without it every transferred shell would be
     // "brand new" — and a transfer that arrived to find its shell gone would say
     // nothing at all, which is the one case this set exists to catch.
-    return new Set(Object.values(loadLayouts(layoutSlot, windowSeed)).flatMap(terminalIds));
+    return new Set(Object.values(loadLayouts(layoutSlot, windowSeed, windowRestored)).flatMap(terminalIds));
   } catch {
     return new Set<string>();
   }
