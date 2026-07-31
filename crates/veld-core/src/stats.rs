@@ -241,9 +241,18 @@ impl MemoryMetric {
         MemoryMetric::Swap,
     ];
 
-    /// Whether this metric is a page class rather than a total. Only page
-    /// classes can be absent on a platform, so this is what a UI checks before
-    /// telling the reader "no split available here".
+    /// Whether this metric is a page class rather than a total — i.e. whether a
+    /// platform may be unable to measure it at all.
+    ///
+    /// **Not the same question as "can it be stacked", and not the right test for
+    /// "is a private/shared split available here".** `wired` is a page class by
+    /// this predicate *and* is always present on macOS (it comes free with
+    /// `proc_pid_rusage`), so asking `any(is_page_class)` to decide whether to
+    /// warn "this platform reports totals only" answers yes on macOS and the
+    /// warning never appears — which is exactly the bug that was shipped and
+    /// fixed. For that question use [`MemoryMetric::STACK`]. Use this one to ask
+    /// whether a value's absence is meaningful, which is what the UI's
+    /// `isPageClassMetric` mirrors when choosing a stack's presence policy.
     pub fn is_page_class(&self) -> bool {
         !matches!(
             self,
@@ -569,6 +578,29 @@ mod tests {
         assert!(!b.has_page_classes());
         assert_eq!(MemoryMetric::PrivateDirty.read(1234, &b), None);
         assert_eq!(MemoryMetric::Resident.read(1234, &b), Some(1234));
+    }
+
+    #[test]
+    fn wired_is_a_page_class_but_is_not_stackable() {
+        // The distinction that caused a real bug: `wired` overlaps the
+        // private/shared split, so it is not stacked — but its absence IS
+        // meaningful, so it is a page class. Any code using one predicate for the
+        // other question is wrong.
+        assert!(MemoryMetric::Wired.is_page_class());
+        assert!(!MemoryMetric::STACK.contains(&MemoryMetric::Wired));
+        // And the totals are neither.
+        for m in [
+            MemoryMetric::Footprint,
+            MemoryMetric::Resident,
+            MemoryMetric::Virtual,
+        ] {
+            assert!(!m.is_page_class(), "{m} is a total");
+            assert!(!MemoryMetric::STACK.contains(&m));
+        }
+        // Everything stackable is a page class, but not the reverse.
+        for m in MemoryMetric::STACK {
+            assert!(m.is_page_class(), "{m} should be a page class");
+        }
     }
 
     #[test]

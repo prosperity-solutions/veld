@@ -98,20 +98,37 @@ export function contiguousRuns(length: number, present: (i: number) => boolean):
  *
  * `x`/`y` are the scales; `presence` is the policy above.
  */
+export interface StackedGeometry {
+  bands: { key: string; slot: number; d: string }[];
+  /**
+   * Cumulative top of each band per index — `tops[b][i]` is where band `b`'s
+   * upper edge sits — and `null` at every index no run covers.
+   *
+   * Published rather than left inside, because the crosshair dots used to
+   * recompute this sum themselves and the two disagreed exactly where a band was
+   * dropped: under the `"all"` policy an index with any absent series is in no
+   * band's path, yet the dots still placed themselves on a baseline the drawn
+   * stack never had — dots floating over a hole. One computation, one truth.
+   */
+  tops: (number | null)[][];
+}
+
 export function stackBands(
   series: ChartSeries[],
   length: number,
   presence: StackPresence,
   x: (i: number) => number,
   y: (v: number) => number,
-): { key: string; slot: number; d: string }[] {
+): StackedGeometry {
   const present =
     presence === "all"
       ? (i: number) => series.every((s) => s.points[i] != null)
       : (i: number) => series.some((s) => s.points[i] != null);
   const runs = contiguousRuns(length, present);
   const baselines = new Array(length).fill(0);
+  const drawn = new Set(runs.flat());
   const out: { key: string; slot: number; d: string }[] = [];
+  const tops: (number | null)[][] = [];
   for (const s of series) {
     const parts: string[] = [];
     for (const run of runs) {
@@ -137,33 +154,47 @@ export function stackBands(
     // Accumulate over the drawn indices only — accumulating everywhere would
     // raise the baseline under gaps and float the next band off the axis.
     for (const i of runs.flat()) baselines[i] += s.points[i] ?? 0;
+    // Snapshot this band's top AFTER accumulating it, `null` where nothing is
+    // drawn, so a reader of `tops` sees exactly what the paths show.
+    tops.push(
+      Array.from({ length }, (_, i) => (drawn.has(i) ? baselines[i] : null)),
+    );
   }
-  return out;
+  return { bands: out, tops };
 }
 
 /** Categorical palette size. Fixed — a 9th hue is never generated. */
 export const PALETTE_SLOTS = 8;
 
 /**
- * Assign colour slots to a set of series keys, stable across renders and free of
- * simultaneous collisions.
+ * Assign colour slots to the keys of **every band that will be drawn**, stable
+ * across renders and collision-free by construction.
  *
- * Both properties are needed and they pull against each other. Assigning by
+ * Two properties are needed and they pull against each other. Assigning by
  * position repaints every survivor when the server reorders (it ranks by peak,
- * which moves). Assigning `size % 8` on first sight is stable but *collides*
- * once more than eight keys have ever been seen — two bands in the same chart,
- * same colour, at the same time.
+ * which moves). Assigning `size % 8` on first sight is stable but collides once
+ * more than eight keys have been seen. So: honour a key's previous slot when it
+ * is still free, then fill the rest with the lowest free slot; keys that stop
+ * being drawn release their slots.
  *
- * So: honour a key's previous slot when it is still free, then fill the rest with
- * the lowest free slot. Keys that stop being charted release their slots. The
- * caller must pass at most [`PALETTE_SLOTS`] keys — fold the tail into an
- * "Other" series rather than asking for a ninth hue.
+ * **Pass every band's key in one call — including a synthetic one like "Other".**
+ * The reason is scar tissue: this allocator has produced three separate
+ * same-colour bugs, and the third came from *reserving* the last slot for an
+ * "Other" band outside the allocation. This function honoured a carried
+ * `prev === PALETTE_SLOTS` because nothing told it the slot was taken, so at the
+ * 8→9-process transition an individual band and "Other" shared a hue and kept
+ * sharing it. A reserved slot the allocator cannot see is the bug; one pass over
+ * one list removes the class of error rather than patching another instance.
+ *
+ * Keys are strings so a synthetic band participates on equal terms. At most
+ * [`PALETTE_SLOTS`] keys — fold the tail into "Other" rather than asking for a
+ * ninth hue.
  */
 export function assignSlots(
-  keys: number[],
-  previous: Map<number, number>,
-): Map<number, number> {
-  const out = new Map<number, number>();
+  keys: string[],
+  previous: Map<string, number>,
+): Map<string, number> {
+  const out = new Map<string, number>();
   const used = new Set<number>();
   for (const k of keys) {
     const prev = previous.get(k);
@@ -250,8 +281,9 @@ export function TimeSeriesChart(props: {
   const x = (i: number) => PAD.left + ((times[i] - windowStart) / span) * plotW;
   const y = (v: number) => PAD.top + plotH - (v / max) * plotH;
 
-  const bands =
-    mode === "stacked" ? stackBands(series, times.length, stackPresence, x, y) : [];
+  const stacked =
+    mode === "stacked" ? stackBands(series, times.length, stackPresence, x, y) : null;
+  const bands = stacked?.bands ?? [];
   const lines: { key: string; slot: number; d: string }[] = [];
 
   if (mode !== "stacked") {
@@ -381,27 +413,27 @@ export function TimeSeriesChart(props: {
               y1={PAD.top}
               y2={PAD.top + plotH}
             />
-            {series.map((s) =>
-              s.points[cur] == null ? null : (
+            {series.map((s, bi) => {
+              // Stacked: read the band top the geometry actually drew — `null`
+              // means this index is in no run, so there is nothing to sit on.
+              const cy = stacked
+                ? stacked.tops[bi]?.[cur]
+                : s.points[cur] == null
+                  ? null
+                  : (s.points[cur] as number);
+              if (cy == null) return null;
+              return (
                 <circle
                   key={s.key}
                   cx={x(cur)}
-                  cy={
-                    mode === "stacked"
-                      ? y(
-                          series
-                            .slice(0, series.findIndex((o) => o.key === s.key) + 1)
-                            .reduce((a, o) => a + (o.points[cur] ?? 0), 0),
-                        )
-                      : y(s.points[cur] as number)
-                  }
+                  cy={y(cy)}
                   r={3}
                   fill={`var(--series-${s.slot})`}
                   stroke="var(--panel)"
                   strokeWidth={2}
                 />
-              ),
-            )}
+              );
+            })}
           </>
         )}
         <text className="chart-tick" x={PAD.left} y={height - 5}>

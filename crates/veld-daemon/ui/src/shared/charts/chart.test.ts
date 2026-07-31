@@ -178,7 +178,7 @@ describe("stackBands", () => {
   });
 
   it("lays each band on the sum of the ones below it", () => {
-    const bands = stackBands(
+    const { bands } = stackBands(
       [series("a", [1, 1, 1]), series("b", [2, 2, 2])],
       3,
       "all",
@@ -193,7 +193,7 @@ describe("stackBands", () => {
 
   it('"any" keeps drawing where one band is absent, treating it as zero', () => {
     // The F1 case: `b` is a child that only existed at the last index.
-    const bands = stackBands(
+    const { bands } = stackBands(
       [series("a", [1, 1, 1]), series("b", [null, null, 2])],
       3,
       "any",
@@ -207,7 +207,7 @@ describe("stackBands", () => {
   });
 
   it('"all" drops the index entirely where any band is absent', () => {
-    const bands = stackBands(
+    const { bands } = stackBands(
       [series("a", [1, 1, 1]), series("b", [2, null, 2])],
       3,
       "all",
@@ -221,7 +221,7 @@ describe("stackBands", () => {
   it("does not raise the baseline under a gap", () => {
     // The silent-failure mode: if the baseline accumulated at every index rather
     // than only the drawn ones, `b`'s run after the gap would start too high.
-    const bands = stackBands(
+    const { bands } = stackBands(
       [series("a", [5, null, 5]), series("b", [1, 1, 1])],
       3,
       "all",
@@ -234,54 +234,116 @@ describe("stackBands", () => {
     expect(bands[1].d).not.toContain("2.0,11.0");
   });
 
+  it("publishes tops that match the drawn paths, null where nothing is drawn", () => {
+    // The crosshair dots used to recompute this sum themselves, and the two
+    // disagreed exactly where a band was dropped: under "all" an index with any
+    // absent series is in no path, yet the dots placed themselves on a baseline
+    // the stack never had — dots floating over a hole. `tops` is now the single
+    // source both read.
+    const { tops } = stackBands(
+      [series("a", [1, 1, 1]), series("b", [2, null, 2])],
+      3,
+      "all",
+      x,
+      y,
+    );
+    // Index 1 is dropped for the whole stack, so no band has a top there.
+    expect(tops[0][1]).toBeNull();
+    expect(tops[1][1]).toBeNull();
+    // Where drawn, a band's top is the cumulative sum including itself.
+    expect(tops[0][0]).toBe(1);
+    expect(tops[1][0]).toBe(3);
+    expect(tops[0][2]).toBe(1);
+    expect(tops[1][2]).toBe(3);
+  });
+
+  it('under "any", a band absent at an index still has a top to sit on', () => {
+    const { tops } = stackBands(
+      [series("a", [1, 1, 1]), series("b", [null, null, 2])],
+      3,
+      "any",
+      x,
+      y,
+    );
+    // `b` contributes 0 where absent, so its top equals `a`'s there — the dot
+    // sits on the stack, which is what the path draws.
+    expect(tops[1][0]).toBe(1);
+    expect(tops[1][2]).toBe(3);
+  });
+
   it("stackedMax sums per index and ignores absences", () => {
     expect(stackedMax([series("a", [1, 4]), series("b", [2, null])], 2)).toBe(4);
   });
 });
 
 describe("assignSlots", () => {
-  it("never gives two charted keys the same slot", () => {
-    // The regression: `size % 8` collided as soon as more than eight keys had
-    // been seen, putting two bands of the SAME colour in one chart at once.
-    const keys = Array.from({ length: PALETTE_SLOTS }, (_, i) => 1000 + i);
+  it("never gives two drawn keys the same slot", () => {
+    // The first regression: `size % 8` collided as soon as more than eight keys
+    // had been seen, putting two bands of the SAME colour in one chart at once.
+    const keys = Array.from({ length: PALETTE_SLOTS }, (_, i) => `${1000 + i}`);
     const got = assignSlots(keys, new Map());
     expect(got.size).toBe(PALETTE_SLOTS);
     expect(new Set(got.values()).size).toBe(PALETTE_SLOTS);
   });
 
   it("keeps a key's colour across polls", () => {
-    const first = assignSlots([1, 2, 3], new Map());
+    const first = assignSlots(["1", "2", "3"], new Map());
     // The server reorders (it ranks by peak, which moves) — colours must not.
-    const second = assignSlots([3, 1, 2], first);
-    expect(second.get(1)).toBe(first.get(1));
-    expect(second.get(2)).toBe(first.get(2));
-    expect(second.get(3)).toBe(first.get(3));
+    const second = assignSlots(["3", "1", "2"], first);
+    for (const k of ["1", "2", "3"]) expect(second.get(k)).toBe(first.get(k));
   });
 
-  it("reuses a slot only after its key stops being charted", () => {
-    const first = assignSlots([1, 2], new Map());
-    const freed = first.get(1)!;
-    // pid 1 exits; pid 9 arrives and may take the freed slot.
-    const second = assignSlots([2, 9], first);
-    expect(second.get(2)).toBe(first.get(2));
-    expect(second.get(9)).toBe(freed);
+  it("reuses a slot only after its key stops being drawn", () => {
+    const first = assignSlots(["1", "2"], new Map());
+    const freed = first.get("1")!;
+    const second = assignSlots(["2", "9"], first);
+    expect(second.get("2")).toBe(first.get("2"));
+    expect(second.get("9")).toBe(freed);
     expect(new Set(second.values()).size).toBe(2);
   });
 
   it("survives a stale previous map that would collide", () => {
-    // Two keys previously held the same slot (what the old allocator produced).
-    // The honoured-then-fill pass must still hand out distinct slots.
     const stale = new Map([
-      [1, 1],
-      [2, 1],
+      ["1", 1],
+      ["2", 1],
     ]);
-    const got = assignSlots([1, 2], stale);
+    const got = assignSlots(["1", "2"], stale);
     expect(new Set(got.values()).size).toBe(2);
   });
 
   it("ignores an out-of-range previous slot", () => {
-    const got = assignSlots([1], new Map([[1, 99]]));
-    expect(got.get(1)).toBeGreaterThanOrEqual(1);
-    expect(got.get(1)).toBeLessThanOrEqual(PALETTE_SLOTS);
+    const got = assignSlots(["1"], new Map([["1", 99]]));
+    expect(got.get("1")).toBeGreaterThanOrEqual(1);
+    expect(got.get("1")).toBeLessThanOrEqual(PALETTE_SLOTS);
+  });
+
+  it('gives "Other" a distinct hue at the 8→9 process transition', () => {
+    // The THIRD regression in this code, and why "Other" is allocated in the same
+    // pass instead of being pinned to a reserved slot: with 8 processes one of
+    // them holds slot 8; when a 9th appears the panel folds to 7 individuals plus
+    // "Other", and a reserved slot 8 collided with whichever individual still
+    // carried it.
+    const eight = Array.from({ length: 8 }, (_, i) => `${100 + i}`);
+    const poll1 = assignSlots(eight, new Map());
+    expect(new Set(poll1.values()).size).toBe(8);
+
+    // Fold: the first 7 individuals survive, the rest become one "Other" band.
+    const folded = [...eight.slice(0, 7), "other"];
+    const poll2 = assignSlots(folded, poll1);
+    expect(poll2.size).toBe(8);
+    expect(new Set(poll2.values()).size).toBe(8);
+    // Specifically: nothing shares a hue with "Other".
+    const otherSlot = poll2.get("other")!;
+    for (const k of eight.slice(0, 7)) {
+      expect(poll2.get(k)).not.toBe(otherSlot);
+    }
+    // And the survivors kept their colours.
+    for (const k of eight.slice(0, 7)) {
+      expect(poll2.get(k)).toBe(poll1.get(k));
+    }
+  });
+
+  it("handles an empty key list", () => {
+    expect(assignSlots([], new Map()).size).toBe(0);
   });
 });

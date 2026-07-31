@@ -41,6 +41,10 @@ import {
 
 type SplitMode = "total" | "type" | "process";
 
+/** Series key for the folded tail. A band like any other as far as colour
+ * allocation is concerned — that is the point. */
+const OTHER_KEY = "other";
+
 /** Which resource the chart plots. Separate charts, never one with two axes. */
 type Dimension = "memory" | "cpu";
 
@@ -59,6 +63,11 @@ const WINDOW_CHOICES = [
 /** Retention assumed before the first response arrives. Only ever narrows the
  * picker for one poll, and the server clamps regardless. */
 const ASSUMED_RETENTION_SECS = 86400;
+
+/** Per-process retention assumed before the first response arrives. Named for the
+ * same reason as the above rather than inlined: an unlinked retention literal is
+ * precisely what drifted out of agreement with the GC once already. */
+const ASSUMED_PROCESS_RETENTION_SECS = 7200;
 
 function windowPresets(retentionSecs: number) {
   const usable = WINDOW_CHOICES.filter((w) => Number(w.value) <= retentionSecs);
@@ -149,6 +158,12 @@ export function fmtPercent(v: number): string {
  * a real line down to zero for exactly the samples `veld stats` printed as `-`,
  * two readers of one artifact disagreeing about absent-vs-zero.
  */
+/** Whether a metric is a page class, i.e. one a platform may be unable to
+ * measure. Mirrors Rust's `MemoryMetric::is_page_class`. */
+export function isPageClassMetric(m: MemoryMetric): boolean {
+  return m !== "footprint" && m !== "resident" && m !== "virtual";
+}
+
 export function bucketValue(b: StatsHistory["buckets"][number], m: MemoryMetric): number | null {
   switch (m) {
     case "footprint":
@@ -210,7 +225,11 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
     };
   }, [props.run.projectRoot, props.run.name, props.nodeKey, secs, wantProcesses]);
 
-  const available = data?.available_metrics ?? ["footprint", "resident", "virtual"];
+  // Mirror the server's two UNCONDITIONAL totals (see `derive_available_metrics`).
+  // `virtual` is offered only when the data carries it, so listing it here would
+  // put a metric in the picker before the first payload that the payload may then
+  // withdraw.
+  const available = data?.available_metrics ?? ["footprint", "resident"];
   // CPU has no page classes, so "by type" belongs to the memory dimension only.
   const canSplitByType =
     dimension === "memory" && STACK_METRICS.some((m) => available.includes(m));
@@ -244,7 +263,7 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
    * itself lives in `assignSlots`, which also guarantees no two charted PIDs
    * share a slot at the same time.
    */
-  const slots = useRef(new Map<number, number>());
+  const slots = useRef(new Map<string, number>());
 
   /** The value this dimension plots, per bucket. */
   const readBucket = useMemo(
@@ -280,18 +299,11 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
 
       // Bucket times differ per process (a process that started late has fewer
       // buckets), so index each series into the node's own time axis by `t`.
-      const assigned = assignSlots(
-        individual.map((p) => p.pid),
-        slots.current,
-      );
-      slots.current = assigned;
-
-      const out: ChartSeries[] = individual.map((p) => {
+      const bands: Omit<ChartSeries, "slot">[] = individual.map((p) => {
         const byTime = new Map(p.buckets.map((b) => [b.t, readBucket(b)]));
         return {
           key: String(p.pid),
           label: `${p.name} (${p.pid})`,
-          slot: assigned.get(p.pid) ?? PALETTE_SLOTS,
           points: times.map((t) => byTime.get(t) ?? null),
         };
       });
@@ -307,17 +319,23 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
             byTime.set(b.t, (byTime.get(b.t) ?? 0) + v);
           }
         }
-        out.push({
-          key: "other",
+        bands.push({
+          key: OTHER_KEY,
           label: `Other (${tail.length} processes)`,
-          // The last slot, always — "Other" is not an entity competing for a
-          // colour, so it never participates in the stable assignment.
-          slot: PALETTE_SLOTS,
           // A bucket where none of the tail existed is absent, not zero.
           points: times.map((t) => (seen.has(t) ? (byTime.get(t) ?? 0) : null)),
         });
       }
-      return out;
+
+      // ONE allocation pass over every band that will be drawn — "Other"
+      // included. Reserving a slot for it outside this call is what produced the
+      // third same-colour bug in this code; see `assignSlots`.
+      const assigned = assignSlots(
+        bands.map((b) => b.key),
+        slots.current,
+      );
+      slots.current = assigned;
+      return bands.map((b) => ({ ...b, slot: assigned.get(b.key) ?? PALETTE_SLOTS }));
     }
     const mean: ChartSeries = {
       key: isCpu ? "cpu" : metric,
@@ -425,17 +443,23 @@ export function ResourcePanel(props: { run: RunRef; nodeKey: string }) {
           up; totals are kept for{" "}
           {formatDuration(data?.retention_secs ?? ASSUMED_RETENTION_SECS)} and
           per-process detail for{" "}
-          {formatDuration(data?.process_retention_secs ?? 7200)}.
+          {formatDuration(
+            data?.process_retention_secs ?? ASSUMED_PROCESS_RETENTION_SECS,
+          )}.
         </Text>
       ) : (
         <TimeSeriesChart
           times={times}
           series={series}
           mode={split === "total" ? "line" : "stacked"}
-          // Processes: an absent PID did not exist then, so it contributes zero
-          // and the rest of the stack still draws. Page classes: an absent class
-          // is unmeasurable, so a partial stack would understate the total.
-          stackPresence={split === "process" ? "any" : "all"}
+          // Which absence semantics apply is decided by the METRIC, not only by
+          // the split. In the by-process split an absent PID did not exist, so it
+          // contributes zero and the rest of the stack still draws — but a
+          // per-process *page class* can also be absent because that one
+          // process's detailed read failed, and treating THAT as zero is the
+          // understated stack `"all"` exists to prevent. So `"any"` only for a
+          // metric whose absence can only mean "this process wasn't there".
+          stackPresence={split === "process" && !isPageClassMetric(metric) ? "any" : "all"}
           format={isCpu ? fmtPercent : fmtBytes}
           windowStart={data?.start ?? Date.now() - secs * 1000}
           windowEnd={data?.end ?? Date.now()}

@@ -403,9 +403,12 @@ fn print_process_tree(row: &NodeStatsRow, metric: MemoryMetric) {
         ))
     );
     if row.processes.is_empty() {
-        output::print_info(
-            "No per-process samples for this node — they are pruned sooner than the aggregates (2h).",
-        );
+        // Formatted from the constant, not restated: an unlinked retention
+        // literal is exactly what drifted out of agreement with the GC before.
+        output::print_info(&format!(
+            "No per-process samples for this node — they are pruned sooner than the aggregates ({}h).",
+            veld_core::stats::PROCESS_STATS_RETENTION_SECS / 3600
+        ));
         return;
     }
     let headers = [
