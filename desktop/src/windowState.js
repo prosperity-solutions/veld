@@ -114,7 +114,19 @@ function parseWindowRecord(value) {
   // its tabs back to the same place across an app restart. An origin naming a
   // window that no longer exists is resolved at hand-back time, not here.
   const origin = isSuffix(value.origin) ? value.origin : null;
-  return { suffix, kind, origin, bounds: safeBounds(value.bounds) };
+  // …and which worktree it is a dock *for*. A detached window has no rail, so
+  // it cannot resolve a selection the way a main window does; without this it
+  // reopened against whatever the main window last selected, rendered blank
+  // (its real tabs sitting unread in its slot's layout), and handed back
+  // nothing when closed. A main window needs none of this — it has the rail,
+  // and its own slot-scoped selection key.
+  const worktreeId =
+    Number.isSafeInteger(value.worktreeId) && value.worktreeId > 0 ? value.worktreeId : null;
+  const repoRoot =
+    typeof value.repoRoot === "string" && value.repoRoot !== "" && value.repoRoot.length <= 4096
+      ? value.repoRoot
+      : null;
+  return { suffix, kind, origin, worktreeId, repoRoot, bounds: safeBounds(value.bounds) };
 }
 
 /**
@@ -203,7 +215,26 @@ function restoreBudget(stored) {
  * Other bases are carried through untouched: a packaged app and a dev run share
  * one `userData`, and the one quitting must not delete the other's windows.
  */
-function serializeWindowList(previousRaw, base, records) {
+/**
+ * Whether a pid is still running. Signal 0 is the existence check only — the
+ * same question `claimSlot` asks of the same pids. Injectable so the pruning
+ * below is testable without spawning processes.
+ *
+ * It answers "is *a* process alive", not "is *that instance* alive": a pid
+ * recycled after a reboot reads as live and keeps its base one launch longer,
+ * and `EPERM` (alive, another owner) reads as dead. Both are harmless for a
+ * per-user `userData`, and the pruning only has to converge, not be exact.
+ */
+function livePid(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function serializeWindowList(previousRaw, base, records, isPidAlive = livePid) {
   let all = {};
   try {
     const parsed = JSON.parse(previousRaw);
@@ -215,18 +246,30 @@ function serializeWindowList(previousRaw, base, records) {
     suffix: r.suffix,
     kind: r.kind,
     origin: r.origin,
+    worktreeId: r.worktreeId ?? null,
+    repoRoot: r.repoRoot ?? null,
     bounds: r.bounds ?? null,
   }));
   // Drop the bases nobody will ever read again. `claimSlot` mints a
   // `main-<pid>` / `dev-<pid>` base whenever a second instance finds the
-  // preferred one held, and that pid is gone forever after that run — so
-  // without this every such collision leaves a key behind and the file grows
-  // monotonically across launches. An empty list goes too, for the same reason.
+  // preferred one held, and once that run ends the key is unreachable — so
+  // without pruning, every such collision leaves one behind and the file grows
+  // monotonically across launches.
+  //
+  // **Liveness, not just the shape of the name.** Pruning every pid-derived base
+  // but our own deletes the windows of a second instance that is *still
+  // running*: two dev instances are a normal thing to want, the first owns
+  // `dev` and the second `dev-<pid>`, and the first one's next persist would
+  // wipe the second's set out from under it. `process.kill(pid, 0)` is the same
+  // question `claimSlot` asks of the same pids, and the OS answers it exactly.
   for (const [key, list] of Object.entries(all)) {
-    const ephemeral = /^(?:main|dev)-\d+$/.test(key);
-    if ((ephemeral && key !== base) || (Array.isArray(list) && list.length === 0)) {
+    if (Array.isArray(list) && list.length === 0) {
       delete all[key];
+      continue;
     }
+    if (key === base) continue;
+    const pid = key.match(/^(?:main|dev)-(\d+)$/);
+    if (pid && !isPidAlive(Number(pid[1]))) delete all[key];
   }
   return JSON.stringify(all);
 }

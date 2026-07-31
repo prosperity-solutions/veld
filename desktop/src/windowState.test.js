@@ -90,6 +90,8 @@ test("parseWindowRecord degrades every field it cannot use", () => {
     suffix: "w2",
     kind: "detached",
     origin: null,
+    worktreeId: null,
+    repoRoot: null,
     bounds: null,
   });
   // An unknown kind from a newer build becomes a main window rather than
@@ -98,6 +100,8 @@ test("parseWindowRecord degrades every field it cannot use", () => {
     suffix: null,
     kind: "main",
     origin: null,
+    worktreeId: null,
+    repoRoot: null,
     bounds: null,
   });
   assert.equal(parseWindowRecord(null), null);
@@ -164,9 +168,9 @@ test("serializeWindowList leaves the other base alone", () => {
 
 test("serializeWindowList prunes bases nobody will read again", () => {
   // `claimSlot` mints a `main-<pid>` base whenever a second instance finds the
-  // preferred one held, and that pid is gone forever once the run ends — so
-  // without pruning, every dev-instance collision leaves a key behind and the
-  // file grows monotonically across launches.
+  // preferred one held, and once that run ends the key is unreachable — so
+  // without pruning, every collision leaves one behind and the file grows
+  // monotonically across launches.
   const previous = JSON.stringify({
     main: [{ suffix: null, kind: "main", origin: null }],
     "dev-41231": [{ suffix: null, kind: "main", origin: null }],
@@ -174,20 +178,49 @@ test("serializeWindowList prunes bases nobody will read again", () => {
     dev: [{ suffix: null, kind: "main", origin: null }],
     stale: [],
   });
+  const dead = () => false;
   const written = JSON.parse(
-    serializeWindowList(previous, "main", [{ suffix: null, kind: "main", origin: null, bounds: null }]),
+    serializeWindowList(
+      previous,
+      "main",
+      [{ suffix: null, kind: "main", origin: null, bounds: null }],
+      dead,
+    ),
   );
-  // `dev` is a real base another instance still uses; the pid-derived ones are not.
+  // `dev` is a real base, not a pid-derived one, so it survives whatever its
+  // instance is doing; the two dead pid bases and the empty list go.
   assert.deepEqual(Object.keys(written).sort(), ["dev", "main"]);
+});
+
+test("serializeWindowList does not delete a live instance's windows", () => {
+  // The trap. Two dev instances are a normal thing to want: the first owns
+  // `dev`, the second `dev-<pid>`. Pruning on the *shape* of the name meant the
+  // first one's next persist wiped the second's window set out from under it
+  // while it was still running — and since a quit suppresses persistence, the
+  // second would never write it back.
+  const alive = (pid) => pid === 41231;
+  const previous = JSON.stringify({
+    "dev-41231": [{ suffix: null, kind: "main", origin: null }],
+    "dev-9982": [{ suffix: null, kind: "main", origin: null }],
+  });
+  const written = JSON.parse(
+    serializeWindowList(previous, "dev", [{ suffix: null, kind: "main", origin: null, bounds: null }], alive),
+  );
+  assert.ok(written["dev-41231"], "a running second instance keeps its windows");
+  assert.equal(written["dev-9982"], undefined, "a dead one is pruned");
 });
 
 test("serializeWindowList keeps the pid-derived base it is currently writing", () => {
   // A second dev instance *is* `dev-<pid>` for its whole run, and has to be able
-  // to reopen its own windows.
+  // to reopen its own windows — even though a liveness check on its own pid
+  // would be answering a question about itself.
   const written = JSON.parse(
-    serializeWindowList("{}", "dev-41231", [
-      { suffix: null, kind: "main", origin: null, bounds: null },
-    ]),
+    serializeWindowList(
+      "{}",
+      "dev-41231",
+      [{ suffix: null, kind: "main", origin: null, bounds: null }],
+      () => false,
+    ),
   );
   assert.deepEqual(Object.keys(written), ["dev-41231"]);
 });
@@ -250,8 +283,24 @@ test("restoreBudget reserves a window only when one will be needed", () => {
 
 test("a serialized list round-trips through the parser", () => {
   const records = [
-    { suffix: null, kind: "main", origin: null, bounds: { x: 0, y: 0, width: 1280, height: 800 } },
-    { suffix: "w2", kind: "detached", origin: null, bounds: null },
+    {
+      suffix: null,
+      kind: "main",
+      origin: null,
+      worktreeId: null,
+      repoRoot: null,
+      bounds: { x: 0, y: 0, width: 1280, height: 800 },
+    },
+    {
+      // A detached window is a dock *for* a worktree and has no rail to
+      // re-resolve one, so this has to survive a restart or it reopens blank.
+      suffix: "w2",
+      kind: "detached",
+      origin: null,
+      worktreeId: 12,
+      repoRoot: "/Users/x/code/veld",
+      bounds: null,
+    },
   ];
   const parsed = parseWindowList(serializeWindowList("", "main", records), "main");
   assert.deepEqual(parsed, records);

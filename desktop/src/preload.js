@@ -28,12 +28,15 @@ function fromArgv(flag) {
  * included.
  *
  * Read here, at preload time — which happens on **every** load in this window,
- * the `data:` waiting page included. That is exactly why the main process keeps
- * the seed until the `/ide` origin has finished loading rather than dropping it
- * on the first read: a read-once seed was consumed by the waiting page, and a
- * detach during a daemon restart lost its tabs. Do not "simplify" that back.
- * Re-reading it later is harmless — by then both storages hold the layout and
- * the seed loses to them (see `readLayouts`).
+ * the `data:` waiting page included. So this may well read the seed more than
+ * once, and that is fine: the main process keeps it until the renderer reports
+ * its first *snapshot*, i.e. until something else demonstrably holds these tabs.
+ * Retiring it on the first read, or when the page finished loading, were both
+ * tried and both lost a detach's tabs outright — see the `veld:window:seed`
+ * handler in `windows.js`. Do not "simplify" either of them back.
+ *
+ * A later read is harmless anyway: by then the page's own storages hold the
+ * layout and win over the seed (see `readLayouts`).
  */
 function windowSeed() {
   try {

@@ -54,16 +54,21 @@ const {
  *   from; the record id never repeats and is what hand-back actually matches on.
  * @property {number} id  monotonic within this process
  * @property {string | null} seed  the layout this window boots with, served over
- *   `veld:window:seed` and cleared when the `/ide` origin finishes loading (the
- *   `did-finish-load` handler in `openWindow`) — **not** when it is read. A
- *   preload runs on every load, the waiting page included, so dropping it on
- *   read consumed it before the real page existed.
+ *   `veld:window:seed` and retired when the renderer reports its **first
+ *   snapshot** — not when it is read, and not when the page loads. Both of those
+ *   were tried and both dropped it before anything else held the tabs; the
+ *   channel's own docstring has the two failures.
  * @property {{worktreeId: number, tabs: object[]} | null} snapshot
  *   what this window would hand back if it closed now — pushed by the renderer
  *   on every layout change, so a hand-back does not depend on the renderer still
  *   being alive when `close` fires.
  * @property {{worktreeId: number, tabs: object[]}[]} pendingAdopt
  *   tabs handed to this window that its renderer has not collected yet
+ * @property {number | null} worktreeId
+ * @property {string | null} repoRoot  which worktree a *detached* window is a
+ *   dock for. Persisted and put back in its URL on restore: a bare dock has no
+ *   rail, so without this it reopened against whatever the main window last
+ *   selected and came back blank, with its real tabs unread in its own slot.
  */
 
 /** @type {Map<number, WindowRecord>} */
@@ -96,8 +101,33 @@ let deps = null;
  */
 let quitting = false;
 
+/**
+ * Windows closed since `before-quit` fired.
+ *
+ * The discriminator between "the quit is happening" and "the quit was
+ * cancelled". A real quit closes windows; a cancelled one closes none — so a
+ * focus event with this at zero is a user still using the app, and the same
+ * event after a close is the teardown handing key status to the next window.
+ */
+let closedSinceQuit = 0;
+
 function setQuitting(value) {
   quitting = value;
+  if (value) closedSinceQuit = 0;
+}
+
+/**
+ * Re-arm the latch if the quit clearly is not happening.
+ *
+ * Needed because a stuck latch is not cosmetic: `handBack` is gated on it too,
+ * so every detached window closed afterwards abandons its tabs. And the events
+ * that would obviously re-arm it are not available where it matters —
+ * `activate` never fires on Linux, which is the only platform whose updater
+ * installs in place and can therefore leave the app running after a failed
+ * `quitAndInstall`.
+ */
+function noteStillRunning() {
+  if (closedSinceQuit === 0) quitting = false;
 }
 
 function windowCount() {
@@ -155,6 +185,8 @@ function persistWindows() {
           suffix: r.suffix,
           kind: r.kind,
           origin: r.origin,
+          worktreeId: r.worktreeId,
+          repoRoot: r.repoRoot,
           // Normal bounds, not `getBounds()`: a window remembered while
           // maximised or full-screen restores as a window with no way back to
           // the size it had before.
@@ -211,7 +243,14 @@ async function loadAppWhenReady(win, url) {
     }
     if (await deps.daemonReachable()) {
       clearInterval(timer);
-      await win.loadURL(url);
+      // Same treatment as the first load. This promise is discarded by the
+      // interval, so without the catch a window closed across the
+      // reachability check above — the ordinary case — is an unhandled
+      // rejection, on the very path most likely to take it.
+      if (win.isDestroyed()) return;
+      await win.loadURL(url).catch((err) => {
+        if (!win.isDestroyed()) console.error("[veld] window failed to load", err);
+      });
     }
   }, 2000);
 }
@@ -342,6 +381,9 @@ function openWindow(options = {}) {
     origin,
     originId: options.originId ?? null,
     id: nextRecordId++,
+    // Only meaningful for a detached window; see `parseWindowRecord`.
+    worktreeId,
+    repoRoot,
     seed,
     snapshot: null,
     pendingAdopt: [],
@@ -391,6 +433,7 @@ function openWindow(options = {}) {
   });
   win.on("closed", () => {
     windows.delete(win.id);
+    closedSinceQuit += 1;
     persistWindows();
   });
 
@@ -491,6 +534,8 @@ function restoreWindows() {
       suffix: entry.suffix,
       origin: entry.origin,
       bounds: entry.bounds,
+      repoRoot: entry.repoRoot,
+      worktreeId: entry.worktreeId,
     });
     if (win) opened.push(win);
   }
@@ -671,8 +716,12 @@ function registerWindowIpc(ipcMain) {
     // with neither a snapshot nor a seed, so closing the window in them handed
     // back nothing — and the tabs had been released by the origin at detach.
     // A snapshot arriving is the actual proof that something else now holds the
-    // layout. Dropping it late is free; dropping it early loses shells.
-    record.seed = null;
+    // layout — so only a *non-empty* one retires the seed. Clearing it
+    // unconditionally would have made the comment above false on the branch two
+    // lines up, which nulls the snapshot for an empty payload: the window would
+    // then hold neither. Unreachable from a fresh detach today, and one guard
+    // removal from losing shells again.
+    if (record.snapshot) record.seed = null;
     return true;
   });
 
@@ -709,5 +758,6 @@ module.exports = {
   restoreWindows,
   registerWindowIpc,
   setQuitting,
+  noteStillRunning,
   windowCount,
 };

@@ -24,6 +24,7 @@ const {
   initWindows,
   openWindow,
   registerWindowIpc,
+  noteStillRunning,
   restoreWindows,
   setQuitting,
   windowCount,
@@ -595,7 +596,7 @@ app.whenReady().then(() => {
   restoreWindows();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {
-    setQuitting(false);
+    noteStillRunning();
     if (BrowserWindow.getAllWindows().length === 0) focusPrimary();
   });
 });
@@ -610,19 +611,24 @@ app.whenReady().then(() => {
  * the layouts, with their shells, to the grace.
  */
 app.on("before-quit", () => setQuitting(true));
+app.on("browser-window-focus", () => noteStillRunning());
 
 /**
  * …and a `before-quit` is not always a quit: `quitAndInstall` can fail and leave
  * the app running (`updater.js` handles exactly that), and a macOS logout can be
- * cancelled. The flag is re-armed by `openWindow` and by `activate` below.
+ * cancelled.
  *
- * Deliberately **not** by `browser-window-focus`, which looks like the obvious
- * third signal and is the dangerous one: on macOS, closing the front window
- * during a quit makes the next one key and emits focus *mid-teardown*, so every
- * remaining `closed` would re-arm the persist that `setQuitting` exists to
- * suppress — and write a window set one short for each one. The cost of leaving
- * it out is a stale window set after a cancelled quit until the app is next
- * activated, which loses a position; the cost of including it is losing windows.
+ * A stuck latch is not cosmetic — `handBack` is gated on it too, so every
+ * detached window closed afterwards would abandon its tabs. And the obvious
+ * re-arms are not available where it matters: `activate` fires on a dock-icon
+ * click, which never happens on Linux, and Linux is the only platform whose
+ * updater installs in place and can therefore survive a failed `quitAndInstall`.
+ *
+ * So focus re-arms it after all, through `noteStillRunning`, which ignores the
+ * event once any window has closed since `before-quit`. That is the distinction
+ * the previous version was missing: a real quit closes windows (and on macOS
+ * hands key status to the next one mid-teardown, which is the focus event to
+ * ignore), while a cancelled quit closes none.
  */
 
 app.on("window-all-closed", () => {

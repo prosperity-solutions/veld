@@ -201,9 +201,9 @@ function safeRadius(raw) {
 // already goes through — it re-validates the URL, the emulation and the zoom on
 // the way in, and it is the copy with the tests. Restating it here would be a
 // second owner of a shape that has already drifted once, so this side checks
-// only what the *shell* is exposed to and the renderer cannot check for itself:
-// that the payload is structurally a tab, and that it is small enough to put on
-// a command line.
+// only what the *shell* is exposed to and the renderer cannot check for itself —
+// that the payload is structurally a tab, and that it is small enough for the
+// main process to hold and hand on.
 
 /** Pane kinds, mirroring `PANE_KINDS` in `panes/model.ts`. A kind missing here
  *  is a tab that cannot be detached; a stale extra one is inert, because the
