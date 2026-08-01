@@ -76,6 +76,12 @@ export interface TabTransfer {
 export interface DesktopWindowApi {
   kind: "main" | "detached";
   seed: string | null;
+  /** Another full window. Omit the payload for "another one like this"; pass a
+   *  worktree to open pointed at it. */
+  newWindow(payload?: {
+    repoRoot: string;
+    worktreeId: number;
+  }): Promise<{ opened: boolean; reason?: string | null }>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;

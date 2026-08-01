@@ -72,16 +72,47 @@ pub fn daemon_socket() -> PathBuf {
 /// never adopt the installed instance's terminal sessions, whose `worktree_id`s
 /// come from a different database entirely. `VELD_PTY_DIR` overrides it outright,
 /// which is how the daemon's own recovery test points a child at a temp dir.
+///
+/// **Under the home directory, not beside the daemon socket**, and that is a
+/// length constraint rather than a preference. A unix socket path is capped by
+/// `sockaddr_un::sun_path` — 104 bytes on macOS, 108 on Linux — and the port
+/// already separates instances, so following `VELD_DAEMON_SOCK` here bought
+/// nothing and cost the bound: `just dev-daemon` puts that socket inside the
+/// checkout, and a checkout under `~/git/_worktrees/<branch-name>/` produced a
+/// 112-byte path. The failure is `bind` reporting "path must be shorter than
+/// SUN_LEN", which reaches the user as "could not open a terminal" and names
+/// nothing they can act on. `socket_for` in the daemon already digests the
+/// *file* name for this reason; this is the other half of the same bound.
 pub fn pty_dir() -> PathBuf {
     if let Some(dir) = env_nonempty("VELD_PTY_DIR") {
         return PathBuf::from(dir);
     }
-    let socket = daemon_socket();
-    let base = socket
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join(format!("pty-{}", daemon_port()))
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".veld")
+        .join(format!("{PTY_DIR_PREFIX}{}", daemon_port()))
+}
+
+/// The longest a holder socket path may be, and what to do about it.
+///
+/// `sun_path` is 104 bytes on macOS and 108 on Linux; 104 is the safe floor.
+/// Checked before binding so the diagnostic can name the escape hatch — the
+/// bare `bind` error says only "path must be shorter than SUN_LEN", which is
+/// true, unhelpful, and surfaces as a terminal that will not open.
+pub const MAX_SOCKET_PATH: usize = 104;
+
+/// Whether `path` fits in a `sockaddr_un`, with the message to show when it
+/// does not.
+pub fn socket_path_too_long(path: &std::path::Path) -> Option<String> {
+    let len = path.as_os_str().as_encoded_bytes().len();
+    if len < MAX_SOCKET_PATH {
+        return None;
+    }
+    Some(format!(
+        "the terminal holder's socket path is {len} bytes, over the {MAX_SOCKET_PATH}-byte \
+         limit a unix socket allows ({}). Set VELD_PTY_DIR to a shorter directory.",
+        path.display()
+    ))
 }
 
 /// The prefix every [`pty_dir`] shares, for code that must find the holder
@@ -152,6 +183,55 @@ mod tests {
             std::env::set_var("VELD_MANAGEMENT_HOST", "veld-dev.localhost");
             assert_eq!(management_host().as_deref(), Some("veld-dev.localhost"));
             std::env::remove_var("VELD_MANAGEMENT_HOST");
+
+            // The holder directory does NOT follow the daemon socket, and that
+            // is the length bound rather than a preference — see `pty_dir`. A
+            // dev socket inside a deep checkout used to drag the holder sockets
+            // in with it and overrun `sun_path`.
+            std::env::remove_var("VELD_PTY_DIR");
+            std::env::set_var(
+                "VELD_DAEMON_SOCK",
+                "/Users/someone/git/_worktrees/a-long-branch-name/.veld-dev/daemon.sock",
+            );
+            let dir = pty_dir();
+            assert!(dir.starts_with(dirs::home_dir().unwrap()), "{dir:?}");
+            assert!(!dir.to_string_lossy().contains("_worktrees"), "{dir:?}");
+            std::env::remove_var("VELD_DAEMON_SOCK");
+
+            // …and the override still wins outright, which is how the recovery
+            // test points a child at a temp dir.
+            std::env::set_var("VELD_PTY_DIR", "/tmp/veld-pty-test");
+            assert_eq!(pty_dir(), PathBuf::from("/tmp/veld-pty-test"));
+            std::env::remove_var("VELD_PTY_DIR");
+
+            // The real default has to fit with room for the digest filename, or
+            // the bound below is theatre. Asserted here rather than in its own
+            // test because `pty_dir` reads the vars this test owns.
+            let realistic = pty_dir().join("0123456789abcdef.sock");
+            assert_eq!(socket_path_too_long(&realistic), None, "{realistic:?}");
         }
+    }
+
+    #[test]
+    fn socket_path_length_is_reported_before_bind() {
+        // `bind`'s own error is "path must be shorter than SUN_LEN", which names
+        // neither the path nor the way out, and reaches the user as a terminal
+        // that will not open.
+        assert_eq!(
+            socket_path_too_long(std::path::Path::new("/tmp/a.sock")),
+            None
+        );
+
+        let long = PathBuf::from(format!("/tmp/{}/0123456789abcdef.sock", "x".repeat(100)));
+        let msg = socket_path_too_long(&long).expect("over the limit");
+        assert!(msg.contains("VELD_PTY_DIR"), "{msg}");
+        assert!(msg.contains(&MAX_SOCKET_PATH.to_string()), "{msg}");
+
+        // The exact boundary, since this is an off-by-one waiting to happen:
+        // `sun_path` holds MAX_SOCKET_PATH bytes *including* the NUL.
+        let at = PathBuf::from("x".repeat(MAX_SOCKET_PATH));
+        assert!(socket_path_too_long(&at).is_some());
+        let under = PathBuf::from("x".repeat(MAX_SOCKET_PATH - 1));
+        assert_eq!(socket_path_too_long(&under), None);
     }
 }

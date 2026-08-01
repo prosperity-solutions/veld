@@ -626,6 +626,27 @@ function registerWindowIpc(ipcMain) {
   });
 
   /**
+   * Open another full window, optionally already pointed at a worktree.
+   *
+   * The selection travels as a payload rather than being left to the new
+   * window's own persisted key: that key is per slot, and a brand-new slot has
+   * nothing in it, so the window would open on whatever was last selected
+   * app-wide. `⌘N` sends nothing and gets exactly that fallback, which is the
+   * right answer for "another window like this one"; the rail's *Open in a new
+   * window* sends the worktree you right-clicked.
+   */
+  ipcMain.handle("veld:window:new", (event, payload) => {
+    if (!senderWindow(event)) return { opened: false, reason: "no-window" };
+    if (!canOpenAnother(windows.size)) return { opened: false, reason: "cap" };
+    const win = openWindow({
+      kind: "main",
+      repoRoot: safeRepoRoot(payload?.repoRoot),
+      worktreeId: safeWorktreeId(payload?.worktreeId),
+    });
+    return { opened: win !== null, reason: win ? null : "cap" };
+  });
+
+  /**
    * Collect tabs handed to this window by a detached one that closed.
    *
    * A queue rather than a push payload, drained by the renderer at mount and on

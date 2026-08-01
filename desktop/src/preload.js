@@ -83,6 +83,9 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  then may the page restore that slot's durable layout — see `readLayouts`. */
     restored: fromArgv("--veld-window-restored=") === "1",
     seed: windowSeed(),
+    /** Open another full window. With no payload it inherits the app-wide last
+     *  selection (what ⌘N does); with one it opens on that worktree. */
+    newWindow: (payload) => ipcRenderer.invoke("veld:window:new", payload ?? {}),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */
     detach: (payload) => ipcRenderer.invoke("veld:window:detach", payload),

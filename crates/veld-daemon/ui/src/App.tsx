@@ -54,6 +54,7 @@ import {
   IconTrash,
   IconSun,
   IconDeviceDesktop,
+  IconExternalLink,
   IconWorld,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
@@ -696,6 +697,34 @@ function AppInner(props: {
   }, [repos]);
 
   const { showContextMenu } = useContextMenu();
+  /**
+   * Open a second full window already pointed at a worktree.
+   *
+   * The selection rides the URL rather than the new window's own persisted key,
+   * because that key is per *slot* and a brand-new slot has nothing in it — the
+   * window would open on whatever was last selected app-wide, which is exactly
+   * the worktree you did not right-click.
+   */
+  const openWorktreeWindow = async (w: Worktree) => {
+    if (!desktopWindow) return;
+    try {
+      const result = await desktopWindow.newWindow({
+        repoRoot: w.repo_root,
+        worktreeId: w.id,
+      });
+      if (!result?.opened) {
+        notifyError(
+          "Couldn't open a new window",
+          result?.reason === "cap"
+            ? "Veld Desktop is at its window limit — close one and try again."
+            : "The desktop shell refused the request.",
+        );
+      }
+    } catch (err) {
+      notifyError("Couldn't open a new window", err);
+    }
+  };
+
   const worktreeMenu = (w: Worktree) => {
     const running = worktreeStatus(runsForWorktree(envs, w)) !== "stopped";
     // Run entries live here as well as on the row, because the collapsed rail
@@ -723,6 +752,21 @@ function AppInner(props: {
       : [];
     return showContextMenu([
       ...runItems,
+      // Electron only: a browser tab has no window manager to open one into.
+      // The rail is where you pick a worktree, so it is where "…and put it on
+      // the other monitor" belongs — the alternative is opening a window and
+      // then navigating it to the worktree you were already pointing at.
+      ...(desktopWindow
+        ? [
+            {
+              key: "new-window",
+              icon: <IconExternalLink size={14} />,
+              title: "Open in a new window",
+              onClick: () => void openWorktreeWindow(w),
+            },
+            { key: "new-window-divider" },
+          ]
+        : []),
       {
         key: "rename",
         title: "Rename…",

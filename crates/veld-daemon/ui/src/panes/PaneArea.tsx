@@ -216,6 +216,11 @@ export function PaneArea(props: {
   /** Where the tab currently being dragged would land, or `null`. */
   const [dropZone, setDropZone] = useState<DropZone | null>(null);
 
+  // Same backstop as the per-dock indicator below: a committed layout retires
+  // every preview, however the gesture that produced it ended.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: see `dropAt`.
+  useEffect(() => setDropZone(null), [layout]);
+
   /**
    * Move tabs into a window of their own.
    *
@@ -503,6 +508,24 @@ function DockView(props: {
   const [dropAt, setDropAt] = useState<{ id: string; after: boolean } | null>(null);
 
   /**
+   * Any indicator is stale the moment the layout moves.
+   *
+   * The backstop for a drag whose `dragend` never arrives, which is the normal
+   * case rather than the exotic one: `dragend` fires on the *source tab*, and a
+   * drop that moves that tab to the other dock unmounts it first. So a tab
+   * hovered on the way past — setting this dock's indicator — and then dropped
+   * on a pane body left a 2px accent bar wedged beside a tab, surviving until
+   * something else re-rendered it away.
+   *
+   * A drag alone never changes `layout` (`focusDock` returns the same object
+   * when nothing moved), so this cannot clear an indicator mid-gesture.
+   */
+  // biome-ignore lint/correctness/useExhaustiveDependencies: keyed on the layout
+  // object identity, which is the "something committed" signal; `dropAt` must
+  // not be a dependency or clearing it would re-run this forever.
+  useEffect(() => setDropAt(null), [layout]);
+
+  /**
    * Turn the `new` pane the user is choosing from into the kind they picked, or
    * open a fresh tab when there is nothing to convert (an empty dock).
    *
@@ -765,8 +788,16 @@ function DockView(props: {
           The edge zones live here too; see `zoneAt`. */}
       <div
         className="dock-body"
-        onDragOver={(e) => props.onBodyDragOver(e, index)}
-        onDrop={(e) => props.onBodyDrop(e, index)}
+        onDragOver={(e) => {
+          // Leaving the strip for the body retracts the strip's own indicator,
+          // so the two halves of the drop model never both claim the drag.
+          setDropAt(null);
+          props.onBodyDragOver(e, index);
+        }}
+        onDrop={(e) => {
+          setDropAt(null);
+          props.onBodyDrop(e, index);
+        }}
       >
         {(active === null || active.kind === "new") && (
           <PaneChooser
