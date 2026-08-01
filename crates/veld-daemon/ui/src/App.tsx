@@ -959,6 +959,18 @@ function AppInner(props: {
     // dock on an unrelated worktree, still wearing the old title, with its own
     // tabs already pruned along with their layout. Close instead.
     if (repoList && activeWtKey !== "" && String(worktree?.id ?? "") !== activeWtKey) {
+      // Hand back what this window actually holds *first*. `layout` above is
+      // the fallback worktree's, not ours — a restored detached window's real
+      // tabs are keyed under the worktree it was opened for, which is the one
+      // that just stopped resolving. Without this the window closed having
+      // reported nothing, and its shells were left to the detach grace instead
+      // of being reaped with the worktree like every other window's are.
+      const ownId = Number(activeWtKey);
+      const own = Number.isSafeInteger(ownId) ? layouts[ownId] : undefined;
+      const tabs = own ? allTabs(own) : [];
+      if (tabs.length > 0) {
+        void desktopWindow.snapshot({ worktreeId: ownId, tabs }).catch(() => {});
+      }
       void desktopWindow.close().catch(() => {});
       return;
     }
@@ -971,7 +983,7 @@ function AppInner(props: {
       return;
     }
     if (heldTabs.current) void desktopWindow.close().catch(() => {});
-  }, [chromeless, layout, worktree?.id, worktree?.alias, repoList, activeWtKey]);
+  }, [chromeless, layout, layouts, worktree?.id, worktree?.alias, repoList, activeWtKey]);
 
   // Terminals live outside React (see panes/terminalHost.ts), so nothing
   // unmounts them. The layouts are the whole record of which should exist;

@@ -102,32 +102,25 @@ let deps = null;
 let quitting = false;
 
 /**
- * Windows closed since `before-quit` fired.
+ * Set it, and clear it only from somewhere that *knows* the quit is not
+ * happening — never by inferring it from a window event.
  *
- * The discriminator between "the quit is happening" and "the quit was
- * cancelled". A real quit closes windows; a cancelled one closes none — so a
- * focus event with this at zero is a user still using the app, and the same
- * event after a close is the teardown handing key status to the next window.
+ * Two versions tried to infer it and both were wrong in opposite directions.
+ * Re-arming on `browser-window-focus` fires mid-teardown, because closing the
+ * front window hands key status to the next one. Filtering that with a
+ * "windows closed since `before-quit`" counter only moves the question to
+ * whether `closed` is emitted before that focus event — an ordering nobody
+ * here can check without running the app, and getting it wrong restores the
+ * first bug exactly.
+ *
+ * So the latch is one-way, and the *callers* that can prove the app is still
+ * alive clear it: opening a window, `activate`, and the updater's install-failure
+ * path — which is the only in-repo way a quit is actually cancelled
+ * (`quitAndInstall` can return without quitting) and, being Linux's AppImage
+ * updater, the one platform where `activate` never fires.
  */
-let closedSinceQuit = 0;
-
 function setQuitting(value) {
   quitting = value;
-  if (value) closedSinceQuit = 0;
-}
-
-/**
- * Re-arm the latch if the quit clearly is not happening.
- *
- * Needed because a stuck latch is not cosmetic: `handBack` is gated on it too,
- * so every detached window closed afterwards abandons its tabs. And the events
- * that would obviously re-arm it are not available where it matters —
- * `activate` never fires on Linux, which is the only platform whose updater
- * installs in place and can therefore leave the app running after a failed
- * `quitAndInstall`.
- */
-function noteStillRunning() {
-  if (closedSinceQuit === 0) quitting = false;
 }
 
 function windowCount() {
@@ -433,7 +426,6 @@ function openWindow(options = {}) {
   });
   win.on("closed", () => {
     windows.delete(win.id);
-    closedSinceQuit += 1;
     persistWindows();
   });
 
@@ -758,6 +750,5 @@ module.exports = {
   restoreWindows,
   registerWindowIpc,
   setQuitting,
-  noteStillRunning,
   windowCount,
 };

@@ -46,15 +46,22 @@ let installingVersion = null;
 let currentSkew = null;
 /** @type {(() => void) | null} */
 let onSkewChange = null;
+/** @type {(() => void) | null} */
+let onQuitCancelled = null;
 
 /**
  * Wire up the updater and start the background schedule.
  *
- * @param {{onSkewChange?: () => void}} [opts] called when the daemon-skew notice
- *   appears or clears, so the tray menu can re-render without polling for it.
+ * @param {{onSkewChange?: () => void, onQuitCancelled?: () => void}} [opts]
+ *   `onSkewChange` fires when the daemon-skew notice appears or clears, so the
+ *   tray menu can re-render without polling for it. `onQuitCancelled` fires
+ *   when an install failed *after* `quitAndInstall` was called — the app asked
+ *   to quit, `before-quit` ran, and then it kept running, which is a state the
+ *   rest of the shell has to be told about rather than infer.
  */
 function initUpdater(opts = {}) {
   onSkewChange = opts.onSkewChange ?? null;
+  onQuitCancelled = opts.onQuitCancelled ?? null;
   mode = updateMode({
     platform: process.platform,
     isPackaged: app.isPackaged,
@@ -87,6 +94,12 @@ function initUpdater(opts = {}) {
     // against the same daemon instead of focusing this one. Re-take it; the
     // successor cannot be holding it, or we would not be here.
     app.requestSingleInstanceLock();
+    // Same shape of recovery as the lock above: `quitAndInstall` already fired
+    // `before-quit`, and the app is now staying up. Anything that latched on
+    // that signal — window persistence, and the hand-back of a detached
+    // window's tabs — has to be un-latched, or it stays frozen for the rest of
+    // the session.
+    onQuitCancelled?.();
     void reportInstallFailure(err);
   });
 

@@ -24,7 +24,6 @@ const {
   initWindows,
   openWindow,
   registerWindowIpc,
-  noteStillRunning,
   restoreWindows,
   setQuitting,
   windowCount,
@@ -581,6 +580,11 @@ app.whenReady().then(() => {
       buildAppMenu();
       void refreshTray?.();
     },
+    // `quitAndInstall` can return without quitting, leaving the app running
+    // after `before-quit` already latched. This is the only in-repo path that
+    // genuinely cancels a quit, so it is the one that has to say so — and it is
+    // the AppImage updater's, i.e. Linux, where `activate` never fires.
+    onQuitCancelled: () => setQuitting(false),
   });
   setInterval(() => void daemonReachable(), VERSION_POLL_MS);
   // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which
@@ -596,7 +600,7 @@ app.whenReady().then(() => {
   restoreWindows();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {
-    noteStillRunning();
+    setQuitting(false);
     if (BrowserWindow.getAllWindows().length === 0) focusPrimary();
   });
 });
@@ -611,24 +615,19 @@ app.whenReady().then(() => {
  * the layouts, with their shells, to the grace.
  */
 app.on("before-quit", () => setQuitting(true));
-app.on("browser-window-focus", () => noteStillRunning());
 
 /**
- * …and a `before-quit` is not always a quit: `quitAndInstall` can fail and leave
- * the app running (`updater.js` handles exactly that), and a macOS logout can be
- * cancelled.
+ * …and a `before-quit` is not always a quit — `quitAndInstall` can return
+ * without quitting, and a macOS logout can be cancelled. A stuck latch is not
+ * cosmetic, because `handBack` is gated on it too: every detached window closed
+ * afterwards would abandon its tabs.
  *
- * A stuck latch is not cosmetic — `handBack` is gated on it too, so every
- * detached window closed afterwards would abandon its tabs. And the obvious
- * re-arms are not available where it matters: `activate` fires on a dock-icon
- * click, which never happens on Linux, and Linux is the only platform whose
- * updater installs in place and can therefore survive a failed `quitAndInstall`.
- *
- * So focus re-arms it after all, through `noteStillRunning`, which ignores the
- * event once any window has closed since `before-quit`. That is the distinction
- * the previous version was missing: a real quit closes windows (and on macOS
- * hands key status to the next one mid-teardown, which is the focus event to
- * ignore), while a cancelled quit closes none.
+ * The latch is therefore cleared only by callers that *know* the app is alive —
+ * `openWindow`, `activate`, and `initUpdater`'s `onQuitCancelled` — never by
+ * inferring it from a window event. Two versions tried to infer it and were
+ * wrong in opposite directions; `setQuitting` in `windows.js` has that history.
+ * The updater hook is the one that matters, since it is the only in-repo path
+ * that genuinely cancels a quit and it is Linux's, where `activate` never fires.
  */
 
 app.on("window-all-closed", () => {
