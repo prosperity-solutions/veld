@@ -95,6 +95,7 @@ import {
   paneTabLabel,
   parseSessionSets,
   parseTransferTabs,
+  readWorktreeLayout,
   saveLayouts,
   serializeSessionSets,
   sessionSetFor,
@@ -881,47 +882,60 @@ function AppInner(props: {
     if (!worktree) return;
     setLayouts((prev) => {
       if (prev[worktree.id]) return prev;
+      // The shared store first, read *now* rather than at boot: another window
+      // may have been using this worktree since, and its panes are the ones
+      // that exist. Defaulting straight to a fresh layout here is precisely how
+      // a second set would appear.
+      const existing = readWorktreeLayout(worktree.id, chromeless);
+      if (existing) return { ...prev, [worktree.id]: existing };
       const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
       return { ...prev, [worktree.id]: defaultLayout(seed) };
     });
   }, [worktree?.id]);
 
   /**
-   * A main window holds the panes of the worktree it is showing, and no others.
+   * Let go of one worktree's panes, because another window is taking it.
    *
-   * The in-memory half of "one set per worktree". Layouts are shared between
-   * windows now, so a window that kept the layouts of worktrees it had merely
-   * *visited* would keep their terminals attached too — and the window that
-   * later shows one of those worktrees attaches to the same session ids, which
-   * *takes them over*. Two windows would then trade those shells on every
-   * switch, which is the collision the old per-window store prevented by
-   * creating the duplicate sets this replaces.
+   * The in-memory half of "one set per worktree". A window keeps the panes of
+   * worktrees it has visited — mounted and attached, so switching back is
+   * instant rather than a reconnect and a scrollback replay — and gives one up
+   * only when somebody else claims it. Releasing on every switch instead was
+   * the first version, and it made the common case (one window, switching back
+   * and forth) pay for a collision that could not happen.
    *
    * `releaseTerminal`, never `disposeTerminal`: letting go is not closing. The
-   * shells keep running, the layout stays in the shared store, and the next
-   * window to show that worktree picks up both. This is the same distinction
-   * detach relies on, for the same reason — and it must happen *before* the
-   * layout leaves state, because `pruneTerminals` ends whatever the layouts no
-   * longer name.
-   *
-   * A detached window is exempt: it is a satellite holding tabs transferred out
-   * of someone else's worktree, and has no claim to give up.
+   * shells keep running, the layout stays in the shared store, and the window
+   * that claimed the worktree picks up both. Same distinction detach relies on,
+   * and the release must happen *before* the layout leaves state, because
+   * `pruneTerminals` ends whatever the layouts no longer name.
    */
   useEffect(() => {
-    if (chromeless || !worktree) return;
-    setLayouts((prev) => {
-      const stale = Object.keys(prev)
-        .map(Number)
-        .filter((id) => id !== worktree.id);
-      if (stale.length === 0) return prev;
-      for (const id of stale) {
-        for (const tab of allTabs(prev[id])) {
+    if (chromeless || !desktopWindow) return;
+    return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+      setLayouts((prev) => {
+        const giving = prev[worktreeId];
+        if (!giving) return prev;
+        for (const tab of allTabs(giving)) {
           if (tab.kind === "terminal") releaseTerminal(tab.id);
         }
-      }
-      return { [worktree.id]: prev[worktree.id] } as Record<number, PaneLayout>;
+        const next = { ...prev };
+        delete next[worktreeId];
+        return next;
+      });
     });
-  }, [chromeless, worktree?.id]);
+  }, [chromeless]);
+
+  /**
+   * Tell the shell what this window is holding, so it knows who to ask.
+   *
+   * Only a main window: a detached one holds tabs transferred out of a worktree
+   * its origin owns, and must never be asked to yield them — they are already
+   * where they belong.
+   */
+  useEffect(() => {
+    if (chromeless || !desktopWindow) return;
+    void desktopWindow.holdsWorktrees(Object.keys(layouts).map(Number)).catch(() => {});
+  }, [chromeless, layouts]);
 
   /**
    * Claim the worktree this window resolved to on its own, without a click.

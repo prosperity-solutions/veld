@@ -1027,6 +1027,35 @@ export function writeLayouts(
 // above writes its empty layout, and `parseLayout` rejects a layout with no tabs
 // on the way back in, so it is gone by the next read.
 
+/**
+ * One worktree's panes, read from the shared store **now**.
+ *
+ * The boot-time read is a snapshot, and a window may claim a worktree that
+ * another window has been using since — so falling back to `defaultLayout`
+ * because this window happens not to have it in memory would invent the second
+ * set of panes this whole design exists to prevent. Read fresh at the moment of
+ * claiming instead, which is the only moment it can be right.
+ *
+ * `null` when nothing is stored: then a default really is the answer.
+ */
+export function worktreeLayoutFrom(
+  durable: LayoutStorage | null,
+  worktreeId: number,
+): PaneLayout | null {
+  if (!durable) return null;
+  return parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null)[worktreeId] ?? null;
+}
+
+/** `worktreeLayoutFrom` against the real store, tolerating it being unusable. */
+export function readWorktreeLayout(worktreeId: number, satellite = false): PaneLayout | null {
+  if (satellite) return null;
+  try {
+    return worktreeLayoutFrom(storages().durable, worktreeId);
+  } catch {
+    return null;
+  }
+}
+
 /** The real storages, or `null` where they are unusable.
  *
  *  Storage *access* throws outright in some privacy configurations — not just

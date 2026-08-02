@@ -86,6 +86,11 @@ export interface DesktopWindowApi {
    *  the shell focused the window that already has it, and this one should not
    *  switch — a worktree has one set of panes and one window showing them. */
   claimWorktree(worktreeId: number): Promise<{ ok: boolean; reason?: string | null }>;
+  /** Which worktrees this window holds the panes of. Reported so the shell can
+   *  ask the right window to let go when another one claims a worktree. */
+  holdsWorktrees(worktreeIds: number[]): Promise<boolean>;
+  /** Let go of one worktree's panes — another window is taking it. */
+  onYieldWorktree(fn: (payload: { worktreeId: number }) => void): () => void;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;

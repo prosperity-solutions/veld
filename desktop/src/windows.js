@@ -99,6 +99,59 @@ let nextRecordId = 1;
  */
 const claims = new Map();
 
+/**
+ * Which windows still *hold* a worktree's panes, as opposed to showing them:
+ * `worktreeId → Set<record id>`.
+ *
+ * A window keeps the panes of worktrees it has visited, mounted and attached, so
+ * switching back to one is instant rather than a reconnect-and-replay. That is
+ * worth keeping, and it is also exactly what would make two windows fight: the
+ * moment another window claims a worktree, every other holder has to let go of
+ * that one — and only that one.
+ *
+ * Reported by each main window's renderer whenever its layouts change, because
+ * the shell cannot see what a page is holding. A window that never reports (an
+ * older build, a renderer that died) simply holds nothing here, which degrades
+ * to the previous behaviour rather than to a wrong one.
+ */
+const holders = new Map();
+
+function setHolds(recordId, worktreeIds) {
+  for (const [worktreeId, set] of [...holders]) {
+    if (worktreeIds.includes(worktreeId)) continue;
+    set.delete(recordId);
+    if (set.size === 0) holders.delete(worktreeId);
+  }
+  for (const worktreeId of worktreeIds) {
+    const set = holders.get(worktreeId) ?? new Set();
+    set.add(recordId);
+    holders.set(worktreeId, set);
+  }
+}
+
+function releaseHolds(recordId) {
+  for (const [worktreeId, set] of [...holders]) {
+    set.delete(recordId);
+    if (set.size === 0) holders.delete(worktreeId);
+  }
+}
+
+/**
+ * Tell every window except `keeper` to let go of `worktreeId`.
+ *
+ * "Let go", not "close": the renderer drops that worktree's layout and releases
+ * its terminals without ending them, so the shells keep running and the layout
+ * stays in the shared store for the window that just claimed it. Sent only for
+ * the one worktree being claimed, so a window's other panes are untouched.
+ */
+function yieldWorktree(worktreeId, keeper) {
+  for (const record of allRecords()) {
+    if (record.id === keeper || record.win.isDestroyed()) continue;
+    if (!holders.get(worktreeId)?.has(record.id)) continue;
+    record.win.webContents.send("veld:window:yield", { worktreeId });
+  }
+}
+
 /** The live record showing `worktreeId`, or `null`. */
 function claimHolder(worktreeId) {
   const id = claims.get(worktreeId);
@@ -467,6 +520,7 @@ function openWindow(options = {}) {
   });
   win.on("closed", () => {
     releaseClaims(record.id);
+    releaseHolds(record.id);
     windows.delete(win.id);
     persistWindows();
   });
@@ -714,12 +768,33 @@ function registerWindowIpc(ipcMain) {
       holder.win.focus();
       return { ok: false, reason: "shown-elsewhere" };
     }
-    // One worktree per window: taking a new one releases the old, which is what
-    // returns the previous layout to the shared store's care rather than
-    // stranding it behind a claim nobody will drop.
+    // One *displayed* worktree per window. Releasing the old claim does not
+    // make this window let go of that worktree's panes — it keeps them mounted
+    // so switching back is instant, and only lets go when somebody else claims
+    // that one.
     releaseClaims(record.id);
     claims.set(worktreeId, record.id);
+    // Which is now. Any other window still holding this worktree's panes has to
+    // let go before this one attaches, or the two would trade its shells.
+    yieldWorktree(worktreeId, record.id);
     return { ok: true };
+  });
+
+  /**
+   * What this window currently holds the panes of.
+   *
+   * The shell cannot see inside a page, and "who would I have to ask to let go"
+   * is a question only the pages can answer. Pushed on every layouts change,
+   * which is cheap — a list of numbers.
+   */
+  ipcMain.handle("veld:window:holds", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    if (!record || record.kind !== "main") return false;
+    const ids = Array.isArray(payload?.worktreeIds)
+      ? payload.worktreeIds.map(safeWorktreeId).filter((id) => id !== null)
+      : [];
+    setHolds(record.id, ids);
+    return true;
   });
 
   /**

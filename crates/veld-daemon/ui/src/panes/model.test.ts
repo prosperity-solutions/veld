@@ -52,6 +52,7 @@ import {
   setRatio,
   terminalIds,
   terminalLabel,
+  worktreeLayoutFrom,
   writeLayouts,
   updateTab,
   urlLabel,
@@ -1160,6 +1161,16 @@ describe("layout slots", () => {
     const durable = fake();
     writeLayouts(fake(), durable, "main", layouts);
     expect(readLayouts(fake(), durable, "main-w4")).toEqual(layouts);
+  });
+
+  it("reads one worktree's panes fresh, not from a boot snapshot", () => {
+    // What stops a window that claims a worktree from inventing a second set:
+    // it may not have that worktree in memory *because another window has been
+    // using it since this one booted*, and those panes are the ones that exist.
+    const durable = fake();
+    writeLayouts(fake(), durable, "main", { 7: layout });
+    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
+    expect(worktreeLayoutFrom(durable, 99)).toBeNull();
   });
 
   it("gives a plain browser tab nothing durable, in either direction", () => {

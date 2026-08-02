@@ -90,6 +90,13 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  another window has it and the shell just focused that window — the
      *  caller should stay where it is. */
     claimWorktree: (worktreeId) => ipcRenderer.invoke("veld:window:claim", { worktreeId }),
+    /** Which worktrees this window currently holds the panes of, so the shell
+     *  knows who to ask to let go when another window claims one. */
+    holdsWorktrees: (worktreeIds) =>
+      ipcRenderer.invoke("veld:window:holds", { worktreeIds }),
+    /** Let go of one worktree's panes — another window is taking it. Release,
+     *  never close: the shells keep running for whoever attaches next. */
+    onYieldWorktree: (fn) => on("veld:window:yield", fn),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */
     detach: (payload) => ipcRenderer.invoke("veld:window:detach", payload),
