@@ -104,6 +104,7 @@ import {
 import {
   applyTerminalTheme,
   pruneTerminals,
+  releaseTerminal,
   restartTerminal,
 } from "./panes/terminalHost";
 import {
@@ -443,9 +444,34 @@ function AppInner(props: {
     worktrees[0] ??
     null;
 
+  /**
+   * Show a worktree — or go to the window that already is.
+   *
+   * A worktree has one set of panes and one window showing them, so this asks
+   * the shell first. When another window has it, the shell focuses that window
+   * and this one stays put: the rail row becomes "take me to where this
+   * already is" rather than a way to grow a second set of terminals nobody can
+   * keep track of. In a plain browser there is no shell to ask and no second
+   * window to collide with, so the claim is a no-op.
+   */
   const selectWorktree = (w: Worktree) => {
-    setActiveRepoRoot(w.repo_root);
-    setActiveWtKey(String(w.id));
+    if (!desktopWindow) {
+      setActiveRepoRoot(w.repo_root);
+      setActiveWtKey(String(w.id));
+      return;
+    }
+    void desktopWindow
+      .claimWorktree(w.id)
+      .then((result) => {
+        if (!result?.ok) return; // shown elsewhere — the shell focused it
+        setActiveRepoRoot(w.repo_root);
+        setActiveWtKey(String(w.id));
+      })
+      .catch(() => {
+        // An older shell without the channel: behave as it did before.
+        setActiveRepoRoot(w.repo_root);
+        setActiveWtKey(String(w.id));
+      });
   };
 
   // Self-heal the URL to the RESOLVED selection: a stale/deep-linked
@@ -840,12 +866,12 @@ function AppInner(props: {
   // lazy initialiser rather than in an effect: an empty first render would prune
   // every restored session before the restore landed.
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
-    loadLayouts(layoutSlot, windowSeed, windowRestored),
+    loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
   useEffect(() => {
-    saveLayouts(layoutSlot, layouts);
+    saveLayouts(layoutSlot, layouts, chromeless);
   }, [layouts]);
 
   // Give a newly selected worktree a layout. New worktrees inherit the split
@@ -859,6 +885,56 @@ function AppInner(props: {
       return { ...prev, [worktree.id]: defaultLayout(seed) };
     });
   }, [worktree?.id]);
+
+  /**
+   * A main window holds the panes of the worktree it is showing, and no others.
+   *
+   * The in-memory half of "one set per worktree". Layouts are shared between
+   * windows now, so a window that kept the layouts of worktrees it had merely
+   * *visited* would keep their terminals attached too — and the window that
+   * later shows one of those worktrees attaches to the same session ids, which
+   * *takes them over*. Two windows would then trade those shells on every
+   * switch, which is the collision the old per-window store prevented by
+   * creating the duplicate sets this replaces.
+   *
+   * `releaseTerminal`, never `disposeTerminal`: letting go is not closing. The
+   * shells keep running, the layout stays in the shared store, and the next
+   * window to show that worktree picks up both. This is the same distinction
+   * detach relies on, for the same reason — and it must happen *before* the
+   * layout leaves state, because `pruneTerminals` ends whatever the layouts no
+   * longer name.
+   *
+   * A detached window is exempt: it is a satellite holding tabs transferred out
+   * of someone else's worktree, and has no claim to give up.
+   */
+  useEffect(() => {
+    if (chromeless || !worktree) return;
+    setLayouts((prev) => {
+      const stale = Object.keys(prev)
+        .map(Number)
+        .filter((id) => id !== worktree.id);
+      if (stale.length === 0) return prev;
+      for (const id of stale) {
+        for (const tab of allTabs(prev[id])) {
+          if (tab.kind === "terminal") releaseTerminal(tab.id);
+        }
+      }
+      return { [worktree.id]: prev[worktree.id] } as Record<number, PaneLayout>;
+    });
+  }, [chromeless, worktree?.id]);
+
+  /**
+   * Claim the worktree this window resolved to on its own, without a click.
+   *
+   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
+   * the fallback that lands on the first repo — all of which put a worktree on
+   * screen without anyone choosing it. Without it the first window to open
+   * claims nothing, and the second one is free to show the same worktree.
+   */
+  useEffect(() => {
+    if (chromeless || !desktopWindow || !worktree) return;
+    void desktopWindow.claimWorktree(worktree.id).catch(() => {});
+  }, [chromeless, worktree?.id]);
 
   // Accepts an updater as well as a value: two panes can report a change in the
   // same commit (two browser panes both finishing a navigation), and a value

@@ -82,6 +82,10 @@ export interface DesktopWindowApi {
     repoRoot: string;
     worktreeId: number;
   }): Promise<{ opened: boolean; reason?: string | null }>;
+  /** Ask to show a worktree. `ok: false` with `reason: "shown-elsewhere"` means
+   *  the shell focused the window that already has it, and this one should not
+   *  switch — a worktree has one set of panes and one window showing them. */
+  claimWorktree(worktreeId: number): Promise<{ ok: boolean; reason?: string | null }>;
   detach(payload: {
     worktreeId: number;
     repoRoot: string;

@@ -86,6 +86,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Open another full window. With no payload it inherits the app-wide last
      *  selection (what ⌘N does); with one it opens on that worktree. */
     newWindow: (payload) => ipcRenderer.invoke("veld:window:new", payload ?? {}),
+    /** Ask to show a worktree. `{ok:false, reason:"shown-elsewhere"}` means
+     *  another window has it and the shell just focused that window — the
+     *  caller should stay where it is. */
+    claimWorktree: (worktreeId) => ipcRenderer.invoke("veld:window:claim", { worktreeId }),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */
     detach: (payload) => ipcRenderer.invoke("veld:window:detach", payload),

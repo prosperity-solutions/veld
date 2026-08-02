@@ -77,6 +77,47 @@ const windows = new Map();
 /** Never reused, unlike a suffix. See `WindowRecord.originId`. */
 let nextRecordId = 1;
 
+/**
+ * Which window is showing which worktree: `worktreeId → record id`.
+ *
+ * **A worktree has one set of panes, and one window shows it.** Layouts live in
+ * a store shared by every window (`LAYOUT_WORKTREE_KEY` in `panes/model.ts`), so
+ * without this two windows would render the same set and both attach to its
+ * terminals — and an attach *takes a session over*, so they would trade every
+ * shell back and forth. The per-window layout store used to prevent that by
+ * giving each window a private copy, which is worse: it prevented the collision
+ * by creating the confusion, two independent sets of panes for one worktree with
+ * no way to tell which window held which shells.
+ *
+ * A claim is *displayed*, not owned. A window that switches away releases, and
+ * the layout stays in the shared store for whoever picks the worktree up next —
+ * which is what makes "close that window and it comes back over here" work with
+ * no hand-off protocol at all.
+ *
+ * Detached windows never claim: their tabs were transferred out of a worktree
+ * their origin is showing, and they are a satellite of that claim.
+ */
+const claims = new Map();
+
+/** The live record showing `worktreeId`, or `null`. */
+function claimHolder(worktreeId) {
+  const id = claims.get(worktreeId);
+  if (id === undefined) return null;
+  const holder = allRecords().find((r) => r.id === id && !r.win.isDestroyed());
+  if (!holder) {
+    claims.delete(worktreeId);
+    return null;
+  }
+  return holder;
+}
+
+/** Drop every claim held by a record — on close, and whenever it moves. */
+function releaseClaims(recordId) {
+  for (const [worktreeId, id] of [...claims]) {
+    if (id === recordId) claims.delete(worktreeId);
+  }
+}
+
 /** @type {null | {
  *   baseUrl: string,
  *   waitingHtml: string,
@@ -425,6 +466,7 @@ function openWindow(options = {}) {
     handBack(record);
   });
   win.on("closed", () => {
+    releaseClaims(record.id);
     windows.delete(win.id);
     persistWindows();
   });
@@ -644,6 +686,40 @@ function registerWindowIpc(ipcMain) {
       worktreeId: safeWorktreeId(payload?.worktreeId),
     });
     return { opened: win !== null, reason: win ? null : "cap" };
+  });
+
+  /**
+   * Ask to show a worktree.
+   *
+   * `{ok: true}` and the window renders it — including when this window already
+   * held it, so a re-select is not a fight with itself. `{ok: false}` and
+   * another window is already showing it, which is not an error to report but a
+   * place to go: the shell **focuses that window**, and the caller stays where
+   * it is. That is the whole answer to "two sets of panes for one worktree" —
+   * there is only ever one, and picking it twice takes you to it.
+   *
+   * A detached window never claims; it is a satellite of its origin's claim.
+   */
+  ipcMain.handle("veld:window:claim", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return { ok: false, reason: "no-window" };
+    if (record.kind !== "main") return { ok: true };
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    if (worktreeId === null) return { ok: false, reason: "invalid" };
+
+    const holder = claimHolder(worktreeId);
+    if (holder && holder.id !== record.id) {
+      if (holder.win.isMinimized()) holder.win.restore();
+      holder.win.show();
+      holder.win.focus();
+      return { ok: false, reason: "shown-elsewhere" };
+    }
+    // One worktree per window: taking a new one releases the old, which is what
+    // returns the previous layout to the shared store's care rather than
+    // stranding it behind a claim nobody will drop.
+    releaseClaims(record.id);
+    claims.set(worktreeId, record.id);
+    return { ok: true };
   });
 
   /**

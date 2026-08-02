@@ -881,6 +881,34 @@ export function layoutSlotKey(slot: string): string {
   return `veld.panes.slot.${slot}.v1`;
 }
 
+/**
+ * Every main window's layouts, keyed by worktree and **shared between windows**.
+ *
+ * A worktree has one set of panes, full stop — that is the whole model. Keying
+ * the durable store per *window* instead gave each window its own
+ * `layouts[worktree]`, so opening one worktree in two windows grew two
+ * independent sets of terminals and browser panes, and closing either window
+ * stranded its set until the detach grace killed it. Nobody can hold that in
+ * their head: which window has which shells, and what does closing this one
+ * cost me.
+ *
+ * What stops two windows attaching to one shell is no longer the storage key but
+ * an explicit **claim** in the shell (`veld:window:claim`): at most one window
+ * displays a given worktree, and picking one another window already shows
+ * focuses that window instead. That is a better fit than the slot ever was,
+ * because it can say *why* — the old scheme could only keep the two sets apart
+ * and had no way to explain the second one.
+ *
+ * Written read-through (see `saveLayouts`), because two windows share this key
+ * and each holds only the worktree it is showing — the same hazard, and the same
+ * fix, as `editSessions` in `App.tsx`.
+ *
+ * Detached windows are **not** in here: their tabs were transferred out of a
+ * worktree whose layout a main window owns, so a satellite writing this key
+ * would overwrite the layout it was pulled from. They keep the per-slot store.
+ */
+export const LAYOUT_WORKTREE_KEY = "veld.panes.worktrees.v1";
+
 export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
   return JSON.stringify(layouts);
 }
@@ -908,6 +936,9 @@ export function readLayouts(
   /** Whether the shell *reopened* this window on a slot it owned before, rather
    *  than opening a new one that happened to be given the number. */
   restored = false,
+  /** A detached window is a satellite of a main window's worktree, so it uses
+   *  the per-slot store; a main window uses the shared per-worktree one. */
+  satellite = false,
 ): Record<number, PaneLayout> {
   const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
   if (Object.keys(own).length > 0) return own;
@@ -939,22 +970,62 @@ export function readLayouts(
   //
   // The seed covers the detach case, which is why the first version of this
   // looked complete. A ⌘N window has no seed and fell straight through.
+  // Same gate as the write: no slot is a plain browser tab, which keeps its
+  // layout in `sessionStorage` alone.
+  if (!durable || !slot) return {};
+  // A main window reads the **shared** per-worktree store, and reads it whether
+  // or not it was restored: there is one set of panes per worktree, so a brand
+  // new window opening a worktree is *picking that set up*, not inventing a
+  // second one. What keeps two windows off one shell is the claim in the shell,
+  // not the storage key — see `LAYOUT_WORKTREE_KEY`.
+  if (!satellite) {
+    const shared = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null);
+    if (Object.keys(shared).length > 0) return shared;
+    // One-time fallback to whatever this window's slot store still holds, so an
+    // app updating into the shared store does not orphan the terminals it had.
+    return restored && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
+  }
+  // A satellite keeps the per-slot store, and only when reopened onto its own
+  // slot: a recycled slot's layout is a dead one that happens to share a number.
   if (!restored) return {};
-  return durable && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
+  return slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
 }
 
-/** Persist to both stores. The session copy is what a reload reads; the slot
- *  copy is what the next launch of the app reads. */
+/**
+ * Persist to both stores. The session copy is what a reload reads; the durable
+ * copy is what the next launch reads.
+ *
+ * The shared per-worktree store is written **read-through**: this window holds
+ * only the worktrees it is showing, so writing its whole `layouts` object would
+ * delete every other window's worktree from the key. Merging against what is on
+ * disk at write time — not against a snapshot taken at boot — is the same
+ * discipline `editSessions` documents in `App.tsx`, and for the same reason.
+ */
 export function writeLayouts(
   session: LayoutStorage | null,
   durable: LayoutStorage | null,
   slot: string | null,
   layouts: Record<number, PaneLayout>,
+  satellite = false,
 ): void {
   const serialized = serializeLayouts(layouts);
   session?.setItem(LAYOUT_STORAGE_KEY, serialized);
-  if (durable && slot) durable.setItem(layoutSlotKey(slot), serialized);
+  // No slot means a plain browser tab, which writes nothing durable at all — a
+  // tab *is* a session, and two of them restoring one layout would attach to the
+  // same shells and take them from each other. Only the Electron shell hands out
+  // slots, and only it arbitrates who shows what.
+  if (!durable || !slot) return;
+  if (satellite) {
+    durable.setItem(layoutSlotKey(slot), serialized);
+    return;
+  }
+  const onDisk = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null);
+  durable.setItem(LAYOUT_WORKTREE_KEY, serializeLayouts({ ...onDisk, ...layouts }));
 }
+
+// A worktree whose last pane is closed needs no explicit removal: the merge
+// above writes its empty layout, and `parseLayout` rejects a layout with no tabs
+// on the way back in, so it is gone by the next read.
 
 /** The real storages, or `null` where they are unusable.
  *
@@ -982,20 +1053,25 @@ export function loadLayouts(
   slot: string | null,
   seed: string | null = null,
   restored = false,
+  satellite = false,
 ): Record<number, PaneLayout> {
   try {
     const { session, durable } = storages();
-    return readLayouts(session, durable, slot, seed, restored);
+    return readLayouts(session, durable, slot, seed, restored, satellite);
   } catch {
     return {};
   }
 }
 
 /** Save the layouts, tolerating storage being unavailable or full. */
-export function saveLayouts(slot: string | null, layouts: Record<number, PaneLayout>): void {
+export function saveLayouts(
+  slot: string | null,
+  layouts: Record<number, PaneLayout>,
+  satellite = false,
+): void {
   try {
     const { session, durable } = storages();
-    writeLayouts(session, durable, slot, layouts);
+    writeLayouts(session, durable, slot, layouts, satellite);
   } catch {
     // The app keeps working; only the restore continuity is lost, and there is
     // nothing useful to tell the user.
