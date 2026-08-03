@@ -17,8 +17,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { layoutSlot } from "../shell";
-import { loadLayouts, terminalIds } from "./model";
+import { chromeless, layoutSlot, windowSeed } from "../shell";
+import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
 /**
@@ -29,16 +29,29 @@ import { handleKeyEvent } from "./terminalKeys";
  * cannot: was this a brand-new terminal, or one whose shell we expected to still
  * be there? Without it, a lost shell is silently replaced by an empty prompt.
  *
- * Read through `loadLayouts`, i.e. the *same* source the app restores from —
- * including the durable per-slot store. Reading `sessionStorage` directly meant
- * the set was always empty in the case that matters most: after Veld Desktop
- * restarts there is no `sessionStorage`, so every tab was treated as brand new
- * and a reboot (or an expired grace, or a refused protocol version) handed the
- * user fresh prompts in "restored" tabs without a word.
+ * Read from the durable store this window restores from. Reading
+ * `sessionStorage` directly meant the set was always empty in the case that
+ * matters most: after Veld Desktop restarts there is no `sessionStorage`, so
+ * every tab was treated as brand new and a reboot (or an expired grace, or a
+ * refused protocol version) handed the user fresh prompts in "restored" tabs
+ * without a word.
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    return new Set(Object.values(loadLayouts(layoutSlot)).flatMap(terminalIds));
+    // Read-only, and deliberately *not* through `loadLayouts`: "which shells
+    // might legitimately still be running" is a different question from "which
+    // panes does this window own", and a main window owns only what it displays
+    // (see `readLayouts`). Answering the first with the second is what let a
+    // window stamp its boot snapshot over another window's worktree.
+    //
+    // `windowSeed` on top, for the same reason it exists: a window opened by
+    // detaching a terminal has no store yet, so without it every transferred
+    // shell would look brand new — and a transfer that arrived to find its shell
+    // gone would say nothing at all, which is the case this set exists to catch.
+    return new Set([
+      ...storedTerminalIds(layoutSlot, chromeless),
+      ...Object.values(parseLayouts(windowSeed)).flatMap(terminalIds),
+    ]);
   } catch {
     return new Set<string>();
   }
@@ -598,6 +611,32 @@ function requestFit(s: Session): void {
  * one of the daemon's session slots) until the detach grace expires.
  */
 export function disposeTerminal(id: string): void {
+  releaseTerminal(id);
+  // Fire-and-forget: a failure here (daemon already gone) leaves the session
+  // to the daemon's reaper, and there is no UI left to report it to.
+  void api.closePtySession(id).catch(() => {});
+}
+
+/**
+ * Let go of a terminal **without ending its shell.**
+ *
+ * The handover half of `disposeTerminal`: everything this page owns of a session
+ * is torn down — the socket, the xterm, the element — and the shell keeps
+ * running, because another window is about to attach to it by id.
+ *
+ * This exists as its own export because the alternative shape is a trap. Every
+ * terminal is collected by `pruneTerminals`, which reads the layouts and ends
+ * anything not named in them, so *removing a tab from the layout is what kills a
+ * shell* — intent has nothing to do with it. A detach that simply moved the tab
+ * record to another window would therefore hang up the very shell it was moving,
+ * one commit later. Calling this first is what makes the tab's disappearance a
+ * transfer instead: by the time the prune effect runs, the id is not a session
+ * this page has, so there is nothing for it to collect.
+ *
+ * The shell then sits in the daemon's detach grace for the seconds it takes the
+ * new window to boot and attach — the same path a reload already takes.
+ */
+export function releaseTerminal(id: string): void {
   const s = sessions.get(id);
   if (!s) return;
   // Bump first, so the close handler doesn't report "connection lost" for a
@@ -609,9 +648,6 @@ export function disposeTerminal(id: string): void {
   s.term.dispose();
   s.listeners.clear();
   sessions.delete(id);
-  // Fire-and-forget: a failure here (daemon already gone) leaves the session
-  // to the daemon's reaper, and there is no UI left to report it to.
-  void api.closePtySession(id).catch(() => {});
 }
 
 /**

@@ -62,3 +62,37 @@ export function notifyDone(message: string): void {
     autoClose: INFO_MS,
   });
 }
+
+/**
+ * Report something the app did instead of what was asked — a redirect, not a
+ * failure and not a confirmation.
+ *
+ * Carries `data-veld-overlay` where `notifyDone` does not, and the difference is
+ * the trigger, not the tone. A confirmation follows a click in a portalled menu
+ * or popover, which has already suspended the panes; this one follows a click on
+ * a plain control (a rail row), so nothing has suspended anything and a toast in
+ * the top-right lands under whatever browser pane is there — invisible, which
+ * for a message explaining why the click did something else is the whole loss.
+ * Cost is the usual one: every embedded pane freezes on a still for `INFO_MS`.
+ *
+ * **At most one is ever on screen**, and that is what keeps the cost a constant.
+ * The freeze lasts as long as *any* marked toast is rendered, so unbounded
+ * toasts are an unbounded freeze: clicking four worktrees another window has —
+ * or one of them four times — would otherwise stack four independent 3s timers
+ * and hold every pane on a stale still for twelve seconds. Hidden and re-shown
+ * rather than merely deduplicated by id, because only the newest redirect is
+ * worth reading and Mantine drops a `show` whose id is already up, which would
+ * leave the wrong worktree named.
+ */
+const REDIRECT_ID = "veld-redirect";
+
+export function notifyRedirect(message: string): void {
+  notifications.hide(REDIRECT_ID);
+  notifications.show({
+    id: REDIRECT_ID,
+    color: "blue",
+    message,
+    autoClose: INFO_MS,
+    "data-veld-overlay": true,
+  });
+}

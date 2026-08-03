@@ -54,6 +54,7 @@ import {
   IconTrash,
   IconSun,
   IconDeviceDesktop,
+  IconExternalLink,
   IconWorld,
 } from "@tabler/icons-react";
 import { Notifications } from "@mantine/notifications";
@@ -62,7 +63,7 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
-import { notifyError } from "./shared/notify";
+import { notifyError, notifyRedirect } from "./shared/notify";
 import {
   JoinRequestRow,
   RunSharePanel,
@@ -79,6 +80,7 @@ import {
   activeTab,
   addTab,
   addTabToFocused,
+  adoptTabs,
   allTabs,
   browserIds,
   browserTab,
@@ -90,7 +92,10 @@ import {
   loadLayouts,
   newTabId,
   nextFreeProfile,
+  paneTabLabel,
   parseSessionSets,
+  parseTransferTabs,
+  readWorktreeLayout,
   saveLayouts,
   serializeSessionSets,
   sessionSetFor,
@@ -100,6 +105,7 @@ import {
 import {
   applyTerminalTheme,
   pruneTerminals,
+  releaseTerminal,
   restartTerminal,
 } from "./panes/terminalHost";
 import {
@@ -129,7 +135,14 @@ import {
   RenameWorktreeDialog,
 } from "./components/dialogs";
 
-import { layoutSlot, topbarClass } from "./shell";
+import {
+  chromeless,
+  desktopWindow,
+  layoutSlot,
+  topbarClass,
+  windowRestored,
+  windowSeed,
+} from "./shell";
 
 const POLL_MS = 5000;
 
@@ -160,10 +173,50 @@ function usePersisted(key: string, initial: string): [string, (v: string) => voi
 }
 
 /**
+ * A window's own remembered selection, plus the app-wide one.
+ *
+ * Two keys, written together and read in that order. The slot-scoped one is what
+ * makes several windows work: layouts are already per slot, so without a
+ * matching selection every window reopened after a restart read the *same*
+ * last-written worktree and showed a layout its panes were not for — a window
+ * would come back on the wrong repository with its own terminals sitting
+ * unattached. The unscoped one stays as the fallback, and it is the reason `⌘N`
+ * opens on what you were just looking at rather than on the first repo in the
+ * list: a brand-new slot has nothing of its own yet.
+ *
+ * A plain browser tab has no slot and therefore only the unscoped key, which is
+ * the behaviour it had before windows existed.
+ */
+function selectionKeys(name: string): [string, string] {
+  return layoutSlot ? [`${name}.slot.${layoutSlot}`, name] : [name, name];
+}
+
+function usePersistedPerWindow(name: string): [string, (v: string) => void] {
+  const [scoped, global] = selectionKeys(name);
+  const [value, setValue] = useState(
+    () => window.localStorage.getItem(scoped) ?? window.localStorage.getItem(global) ?? "",
+  );
+  const set = useCallback(
+    (v: string) => {
+      setValue(v);
+      try {
+        window.localStorage.setItem(scoped, v);
+        window.localStorage.setItem(global, v);
+      } catch {
+        // Storage unavailable: the selection lives in the URL for this session
+        // anyway, and losing it costs a default worktree on the next launch.
+      }
+    },
+    [scoped, global],
+  );
+  return [value, set];
+}
+
+/**
  * Selection state lives in the URL (`?repo=…&wt=…`) so views are addressable:
- * a future multi-window Electron layout opens one URL per worktree, browser
- * tabs deep-link, and reload restores the exact view. localStorage is the
- * fallback when the URL carries no selection.
+ * a multi-window Electron layout opens one URL per worktree, browser tabs
+ * deep-link, and reload restores the exact view. localStorage is the fallback
+ * when the URL carries no selection — per window slot first, see above.
  */
 function useUrlSelection(): {
   repo: string;
@@ -172,8 +225,8 @@ function useUrlSelection(): {
   setWt: (key: string) => void;
 } {
   const params = new URLSearchParams(window.location.search);
-  const [repo, setRepoState] = usePersisted("veld.repo", "");
-  const [wt, setWtState] = usePersisted("veld.worktree", "");
+  const [repo, setRepoState] = usePersistedPerWindow("veld.repo");
+  const [wt, setWtState] = usePersistedPerWindow("veld.worktree");
   const [urlRepo, setUrlRepo] = useState(params.get("repo") ?? "");
   const [urlWt, setUrlWt] = useState(params.get("wt") ?? "");
 
@@ -392,9 +445,80 @@ function AppInner(props: {
     worktrees[0] ??
     null;
 
+  /**
+   * Worktrees another window is showing.
+   *
+   * Only for the rail's benefit — the shell is the authority on who may show
+   * what, and `selectWorktree` still asks it. Rendering this is what stops the
+   * ownership model reading as a bug: without it, a row simply refuses to open
+   * and some other window jumps forward with no stated connection between the
+   * two.
+   */
+  const [elsewhere, setElsewhere] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (chromeless || !shell?.onClaimsChanged) return;
+    let cancelled = false;
+    let pushed = false;
+    // Both, and in this order: the subscription first, so a claim made while
+    // the initial query is in flight is not lost, then the query for the state
+    // that predates this window. `pushed` because the answer to the query can
+    // land after an update that supersedes it — and "nobody else has anything"
+    // is a real answer, so an empty set cannot stand in for "not yet asked".
+    const off = shell.onClaimsChanged((p) => {
+      pushed = true;
+      setElsewhere(new Set(p.worktreeIds));
+    });
+    void shell
+      .claimedElsewhere()
+      .then((ids) => {
+        if (!cancelled && !pushed) setElsewhere(new Set(ids));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [chromeless]);
+
+  /**
+   * Show a worktree — or go to the window that already is.
+   *
+   * A worktree has one set of panes and one window showing them, so this asks
+   * the shell first. When another window has it, the shell focuses that window
+   * and this one stays put: the rail row becomes "take me to where this
+   * already is" rather than a way to grow a second set of terminals nobody can
+   * keep track of. In a plain browser there is no shell to ask and no second
+   * window to collide with, so the claim is a no-op.
+   */
   const selectWorktree = (w: Worktree) => {
-    setActiveRepoRoot(w.repo_root);
-    setActiveWtKey(String(w.id));
+    if (!desktopWindow) {
+      setActiveRepoRoot(w.repo_root);
+      setActiveWtKey(String(w.id));
+      return;
+    }
+    void desktopWindow
+      .claimWorktree(w.id)
+      .then((result) => {
+        if (!result?.ok) {
+          // Without this the click reads as ignored: the row does not open,
+          // and a *different* window comes forward with nothing tying the two
+          // together. The toast is in this window, not the one that took
+          // focus — it is what you find when you come back, and the greyed
+          // rail row (`elsewhere`) is what warns you before you click.
+          if (result?.reason === "shown-elsewhere") {
+            notifyRedirect(`${w.alias} is open in another window — switched to it`);
+          }
+          return;
+        }
+        setActiveRepoRoot(w.repo_root);
+        setActiveWtKey(String(w.id));
+      })
+      .catch(() => {
+        // An older shell without the channel: behave as it did before.
+        setActiveRepoRoot(w.repo_root);
+        setActiveWtKey(String(w.id));
+      });
   };
 
   // Self-heal the URL to the RESOLVED selection: a stale/deep-linked
@@ -646,6 +770,34 @@ function AppInner(props: {
   }, [repos]);
 
   const { showContextMenu } = useContextMenu();
+  /**
+   * Open a second full window already pointed at a worktree.
+   *
+   * The selection rides the URL rather than the new window's own persisted key,
+   * because that key is per *slot* and a brand-new slot has nothing in it — the
+   * window would open on whatever was last selected app-wide, which is exactly
+   * the worktree you did not right-click.
+   */
+  const openWorktreeWindow = async (w: Worktree) => {
+    if (!desktopWindow) return;
+    try {
+      const result = await desktopWindow.newWindow({
+        repoRoot: w.repo_root,
+        worktreeId: w.id,
+      });
+      if (!result?.opened) {
+        notifyError(
+          "Couldn't open a new window",
+          result?.reason === "cap"
+            ? "Veld Desktop is at its window limit — close one and try again."
+            : "The desktop shell refused the request.",
+        );
+      }
+    } catch (err) {
+      notifyError("Couldn't open a new window", err);
+    }
+  };
+
   const worktreeMenu = (w: Worktree) => {
     const running = worktreeStatus(runsForWorktree(envs, w)) !== "stopped";
     // Run entries live here as well as on the row, because the collapsed rail
@@ -673,6 +825,21 @@ function AppInner(props: {
       : [];
     return showContextMenu([
       ...runItems,
+      // Electron only: a browser tab has no window manager to open one into.
+      // The rail is where you pick a worktree, so it is where "…and put it on
+      // the other monitor" belongs — the alternative is opening a window and
+      // then navigating it to the worktree you were already pointing at.
+      ...(desktopWindow
+        ? [
+            {
+              key: "new-window",
+              icon: <IconExternalLink size={14} />,
+              title: "Open in a new window",
+              onClick: () => void openWorktreeWindow(w),
+            },
+            { key: "new-window-divider" },
+          ]
+        : []),
       {
         key: "rename",
         title: "Rename…",
@@ -745,13 +912,17 @@ function AppInner(props: {
   // shells reachable after an app update rather than merely alive. Read with a
   // lazy initialiser rather than in an effect: an empty first render would prune
   // every restored session before the restore landed.
+  /** Every worktree is shown by another window, so this one has nothing to
+   *  display that is its own. */
+  const [claimBlocked, setClaimBlocked] = useState(false);
+
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
-    loadLayouts(layoutSlot),
+    loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
   const layout = worktree ? layouts[worktree.id] : undefined;
 
   useEffect(() => {
-    saveLayouts(layoutSlot, layouts);
+    saveLayouts(layoutSlot, layouts, chromeless);
   }, [layouts]);
 
   // Give a newly selected worktree a layout. New worktrees inherit the split
@@ -761,9 +932,105 @@ function AppInner(props: {
     if (!worktree) return;
     setLayouts((prev) => {
       if (prev[worktree.id]) return prev;
+      // The shared store first, read *now* rather than at boot: another window
+      // may have been using this worktree since, and its panes are the ones
+      // that exist. Defaulting straight to a fresh layout here is precisely how
+      // a second set would appear.
+      const existing = readWorktreeLayout(worktree.id, chromeless, layoutSlot);
+      if (existing) return { ...prev, [worktree.id]: existing };
       const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
       return { ...prev, [worktree.id]: defaultLayout(seed) };
     });
+  }, [worktree?.id]);
+
+  /**
+   * Let go of one worktree's panes, because another window is taking it.
+   *
+   * The in-memory half of "one set per worktree". A window keeps the panes of
+   * worktrees it has visited — mounted and attached, so switching back is
+   * instant rather than a reconnect and a scrollback replay — and gives one up
+   * only when somebody else claims it. Releasing on every switch instead was
+   * the first version, and it made the common case (one window, switching back
+   * and forth) pay for a collision that could not happen.
+   *
+   * `releaseTerminal`, never `disposeTerminal`: letting go is not closing. The
+   * shells keep running, the layout stays in the shared store, and the window
+   * that claimed the worktree picks up both. Same distinction detach relies on,
+   * and the release must happen *before* the layout leaves state, because
+   * `pruneTerminals` ends whatever the layouts no longer name.
+   */
+  useEffect(() => {
+    if (chromeless || !desktopWindow) return;
+    return desktopWindow.onYieldWorktree(({ worktreeId }) => {
+      setLayouts((prev) => {
+        const giving = prev[worktreeId];
+        if (!giving) return prev;
+        for (const tab of allTabs(giving)) {
+          if (tab.kind === "terminal") releaseTerminal(tab.id);
+        }
+        const next = { ...prev };
+        delete next[worktreeId];
+        return next;
+      });
+    });
+  }, [chromeless]);
+
+  /**
+   * Tell the shell what this window is holding, so it knows who to ask.
+   *
+   * Only a main window: a detached one holds tabs transferred out of a worktree
+   * its origin owns, and must never be asked to yield them — they are already
+   * where they belong.
+   */
+  useEffect(() => {
+    if (chromeless || !desktopWindow) return;
+    void desktopWindow.holdsWorktrees(Object.keys(layouts).map(Number)).catch(() => {});
+  }, [chromeless, layouts]);
+
+  /**
+   * Claim the worktree this window resolved to on its own, without a click.
+   *
+   * `selectWorktree` covers the rail; this covers boot, a restored `?wt=`, and
+   * the fallback that lands on the first repo — all of which put a worktree on
+   * screen without anyone choosing it. Without it the first window to open
+   * claims nothing, and the second one is free to show the same worktree.
+   */
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (chromeless || !shell || !worktree) return;
+    let cancelled = false;
+    void (async () => {
+      const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
+      if (cancelled || mine?.ok !== false) return;
+      // **Refused, so this window must show something else.** Ignoring the
+      // answer here was the hole that made the whole ownership model a
+      // suggestion: `⌘N` opens on the last-selected worktree by design, which
+      // is the one the window you pressed it in is showing — so the claim was
+      // always refused, always ignored, and the new window rendered the same
+      // panes and took their shells. `selectWorktree` honoured the refusal
+      // because a click has somewhere to stay; a window opening has not.
+      for (const candidate of worktrees) {
+        if (candidate.id === worktree.id) continue;
+        const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
+        if (cancelled) return;
+        if (free?.ok) {
+          setActiveRepoRoot(candidate.repo_root);
+          setActiveWtKey(String(candidate.id));
+          return;
+        }
+      }
+      // Every worktree in this repo is already on screen somewhere. Say so
+      // rather than showing a set of panes that belongs to another window.
+      if (!cancelled) setClaimBlocked(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chromeless, worktree?.id, worktrees]);
+
+  // Cleared as soon as this window is showing something it owns.
+  useEffect(() => {
+    if (claimBlocked) setClaimBlocked(false);
   }, [worktree?.id]);
 
   // Accepts an updater as well as a value: two panes can report a change in the
@@ -827,6 +1094,113 @@ function AppInner(props: {
         : Object.fromEntries(kept);
     });
   }, [repos]);
+
+  // ---- multi-window --------------------------------------------------------
+  //
+  // Two windows are two documents: separate module instances, separate
+  // registries, separate layout slots. Nothing is shared between them except the
+  // daemon, so a tab moving between windows is a *transfer* — see
+  // `desktop/src/windows.js`. These three effects are this window's half of it.
+
+  /**
+   * Tabs handed back by a detached window that just closed.
+   *
+   * Parsed here rather than trusted: they have been out of the page, through the
+   * main process and another renderer, so they go through the same gate a
+   * restored layout does.
+   */
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (!shell) return;
+    const drain = async () => {
+      const transfers = await shell.takeAdopted().catch(() => []);
+      for (const { worktreeId, tabs } of transfers) {
+        const parsed = parseTransferTabs(tabs);
+        if (parsed.length === 0) continue;
+        setLayouts((prev) => {
+          const next = adoptTabs(prev[worktreeId], parsed);
+          return next ? { ...prev, [worktreeId]: next } : prev;
+        });
+      }
+    };
+    // At mount **and** on the nudge. A detached window can close while this one
+    // is still on the waiting page or mid-reload, in which case the nudge lands
+    // before this listener exists — the queue in the main process is what makes
+    // that survivable, and draining it here is the half that collects it.
+    void drain();
+    return shell.onAdopt(() => void drain());
+  }, []);
+
+  /**
+   * Keep the shell's copy of what this window holds current.
+   *
+   * Only a detached window has anything to hand back, and only it can be closed
+   * with tabs still in it that belong somewhere else. Pushed on every layout
+   * change because `close` is not a moment a renderer can be asked anything —
+   * the answer has to already be in the main process when it fires.
+   */
+  useEffect(() => {
+    if (!chromeless || !desktopWindow || !worktree) return;
+    // Only while the resolved worktree is still the one this window was opened
+    // for. When it stops existing, `worktree` falls back to another one in the
+    // same commit — and this effect is declared before the close effect below,
+    // so it would run first and overwrite the last good snapshot with an empty
+    // one for the *fallback* worktree. The window then closed having handed back
+    // nothing, which is the one thing closing a detached window must never do.
+    if (activeWtKey !== "" && String(worktree.id) !== activeWtKey) return;
+    void desktopWindow
+      .snapshot({ worktreeId: worktree.id, tabs: layout ? allTabs(layout) : [] })
+      .catch(() => {
+        // The window can still be used; only the hand-back is lost, and the
+        // shells it names outlive it either way under the detach grace.
+      });
+  }, [chromeless, worktree?.id, layout, activeWtKey]);
+
+  /**
+   * A detached window's title bar and its lifetime.
+   *
+   * It has no top bar to say what it holds, so the OS title bar does — and it
+   * has no rail, no `+` outside its docks and no empty state worth showing, so a
+   * detached window whose last tab was closed closes itself. Guarded on having
+   * held something first: the layout is empty for the render or two before the
+   * repo list resolves, and closing there would make a detached window flash
+   * open and vanish.
+   */
+  const heldTabs = useRef(false);
+  useEffect(() => {
+    if (!chromeless || !desktopWindow) return;
+    // The worktree this window was opened for is gone (removed, or its repo
+    // unregistered). `worktree` resolves by *falling back* — first main, then
+    // the first of the first repo — which in a full window is right and here is
+    // not: a bare dock has no rail and no top bar, so it would silently become a
+    // dock on an unrelated worktree, still wearing the old title, with its own
+    // tabs already pruned along with their layout. Close instead.
+    if (repoList && activeWtKey !== "" && String(worktree?.id ?? "") !== activeWtKey) {
+      // Hand back what this window actually holds *first*. `layout` above is
+      // the fallback worktree's, not ours — a restored detached window's real
+      // tabs are keyed under the worktree it was opened for, which is the one
+      // that just stopped resolving. Without this the window closed having
+      // reported nothing, and its shells were left to the detach grace instead
+      // of being reaped with the worktree like every other window's are.
+      const ownId = Number(activeWtKey);
+      const own = Number.isSafeInteger(ownId) ? layouts[ownId] : undefined;
+      const tabs = own ? allTabs(own) : [];
+      if (tabs.length > 0) {
+        void desktopWindow.snapshot({ worktreeId: ownId, tabs }).catch(() => {});
+      }
+      void desktopWindow.close().catch(() => {});
+      return;
+    }
+    if (layout && allTabs(layout).length > 0) {
+      heldTabs.current = true;
+      const active = activeTab(layout, layout.focused);
+      const label = active ? paneTabLabel(layout, active) : "Veld";
+      const title = worktree ? `${label} — ${worktree.alias}` : label;
+      void desktopWindow.setTitle(title).catch(() => {});
+      return;
+    }
+    if (heldTabs.current) void desktopWindow.close().catch(() => {});
+  }, [chromeless, layout, layouts, worktree?.id, worktree?.alias, repoList, activeWtKey]);
 
   // Terminals live outside React (see panes/terminalHost.ts), so nothing
   // unmounts them. The layouts are the whole record of which should exist;
@@ -1323,6 +1697,40 @@ function AppInner(props: {
       </Popover>
     ) : null;
 
+  /**
+   * A detached window: the dock and nothing else.
+   *
+   * Same component, same data, no chrome — a rail and a worktree switcher in a
+   * window holding one terminal would be the app's furniture around a single
+   * pane. The selection still comes from `?repo=&wt=` (the shell puts the origin
+   * window's there when it opens this one), so everything below the top bar
+   * resolves exactly as it does in a full window.
+   */
+  if (chromeless) {
+    return (
+      <div className="frame chromeless">
+        {worktree && layout && (
+          <PaneArea
+            layout={layout}
+            onLayout={setLayout}
+            worktreeId={worktree.id}
+            repoRoot={worktree.repo_root}
+            serviceUrls={urls}
+            urlsEmptyHint={
+              worktree.has_veld_config
+                ? "Start the run and its services appear here."
+                : "This worktree has no veld.json, so there is nothing to run."
+            }
+            sessions={sessions}
+            onAddSession={nextSession ? addSession : undefined}
+            onRemoveSession={removeSession}
+            runCtx={runCtx}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="frame">
       <TopBar
@@ -1400,6 +1808,16 @@ function AppInner(props: {
             Import your first project
           </Button>
         </div>
+      ) : claimBlocked ? (
+        // Every worktree is already on screen in another window. Saying so beats
+        // the alternative this replaced — rendering a set of panes that belongs
+        // to a different window, and taking its shells on the way.
+        <div className="center-page">
+          <p>Every worktree is already open in another window.</p>
+          <Button size="md" variant="default" onClick={() => setDialog({ kind: "new-worktree" })}>
+            Create a worktree
+          </Button>
+        </div>
       ) : (
         <div className="workspace">
           <Rail
@@ -1410,6 +1828,7 @@ function AppInner(props: {
             canRun={canRunWorktreeNow}
             canStart={canStartWorktree}
             pendingFor={pendingFor}
+            elsewhere={elsewhere}
             onToggle={() => setRailWide((v) => !v)}
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
@@ -1422,6 +1841,7 @@ function AppInner(props: {
               layout={layout}
               onLayout={setLayout}
               worktreeId={worktree.id}
+              repoRoot={worktree.repo_root}
               serviceUrls={urls}
               urlsEmptyHint={
                 worktree.has_veld_config
@@ -1741,6 +2161,9 @@ function Rail(props: {
   canRun: (w: Worktree) => boolean;
   canStart: (w: Worktree) => boolean;
   pendingFor: (w: Worktree) => PendingAction | null;
+  /** Worktrees another window is showing. Clicking one goes there instead of
+   *  opening it here, so it is marked rather than left to surprise. */
+  elsewhere: Set<number>;
   onToggle: () => void;
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
@@ -1778,6 +2201,7 @@ function Rail(props: {
           // Inline controls are wide-only — a 64px collapsed row has no space
           // for them. Right-click reaches the same actions in either mode.
           const showRunControl = props.wide && props.canRun(w);
+          const away = props.elsewhere.has(w.id);
           return (
             /* A div with role=button, not a <button>: the row carries nested
                controls of its own, and a <button> inside a <button> violates
@@ -1794,8 +2218,12 @@ function Rail(props: {
               /* Selection is "which one am I looking at", not a toggle that
                  can be un-pressed — aria-current, not aria-pressed. */
               aria-current={props.active?.id === w.id ? true : undefined}
-              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}`}
-              title={`${w.alias} — ${w.branch}`}
+              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}`}
+              title={
+                away
+                  ? `${w.alias} — ${w.branch} (open in another window)`
+                  : `${w.alias} — ${w.branch}`
+              }
               onClick={() => props.onSelect(w)}
               onKeyDown={(e) => {
                 // Only the row's OWN key events. Keydown bubbles from the
@@ -1811,6 +2239,22 @@ function Rail(props: {
               onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
+              {/* Before the alias, where the eye already is for the dot — and
+                  rendered in the collapsed rail too, which is exactly where a
+                  greyed row alone would be too subtle to read. */}
+              {away && (
+                <IconExternalLink
+                  size={11}
+                  className="wt-away"
+                  /* Decorative, and it has to be. The row is a `role=button`
+                     whose accessible name comes from its content, so a label
+                     here would be folded into that name *before* the alias —
+                     "open in another window Sonnet feat/x" — and the `title`
+                     that already says it would be demoted to the description,
+                     announcing it a second time. The title carries it. */
+                  aria-hidden
+                />
+              )}
               {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
               {props.wide && <span className="wt-alias">{w.alias}</span>}
               {props.wide && <span className="wt-branch">{w.branch}</span>}

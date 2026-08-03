@@ -15,6 +15,7 @@ import {
   activeTab,
   addTab,
   addTabToFocused,
+  adoptTabs,
   allTabs,
   browserIds,
   browserProfileLabel,
@@ -27,6 +28,7 @@ import {
   findTab,
   focusDock,
   hasTab,
+  insertTab,
   lastBlankBrowserId,
   moveTab,
   moveTabToOtherDock,
@@ -35,19 +37,23 @@ import {
   nextFreeProfile,
   normalizeBrowserUrl,
   normalizeSessionSet,
+  LAYOUT_WORKTREE_KEY,
   layoutSlotKey,
   parseLayouts,
   paneTabLabel,
   parseSessionSets,
+  parseTransferTabs,
   replaceTab,
   readLayouts,
   serializeLayouts,
+  splitWithTab,
   serializeSessionSets,
   sessionSetFor,
   sessionsInUse,
   setRatio,
   terminalIds,
   terminalLabel,
+  worktreeLayoutFrom,
   writeLayouts,
   updateTab,
   urlLabel,
@@ -1066,13 +1072,40 @@ describe("layout slots", () => {
   const layout = defaultLayout(DEFAULT_RATIO);
   const layouts = { 7: layout };
 
-  it("writes both stores when the window owns a slot", () => {
+  it("writes a main window's layouts to the shared per-worktree store", () => {
     const session = fake();
     const durable = fake();
     writeLayouts(session, durable, "main", layouts);
     expect(session.map.get("veld.panes.v1")).toBe(serializeLayouts(layouts));
-    // The durable copy is what the *next launch of the app* reads.
-    expect(durable.map.get(layoutSlotKey("main"))).toBe(serializeLayouts(layouts));
+    // Keyed by worktree and shared, not by window: a worktree has one set of
+    // panes, and whichever window shows it next picks that set up.
+    expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBe(serializeLayouts(layouts));
+    expect(durable.map.get(layoutSlotKey("main"))).toBeUndefined();
+  });
+
+  it("merges the shared store rather than replacing it", () => {
+    // Each window holds only the worktree it is showing, so a blind write would
+    // delete every other window's worktree from the shared key. Same hazard and
+    // same fix as `editSessions` — read through at write time, not at boot.
+    const durable = fake({
+      [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: defaultLayout(0.2), 7: defaultLayout(0.9) }),
+    });
+    writeLayouts(fake(), durable, "main", { 7: layout });
+    const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
+    expect(Object.keys(written).sort()).toEqual(["4", "7"]);
+    expect(written[7].ratio).toBe(layout.ratio);
+    // …and the other window's worktree survives untouched.
+    expect(written[4].ratio).toBe(0.2);
+  });
+
+  it("keeps a detached window out of the shared store", () => {
+    // A satellite's tabs were transferred *out of* a worktree a main window
+    // owns, so writing them under that worktree's key would overwrite the
+    // layout they came from.
+    const durable = fake();
+    writeLayouts(fake(), durable, "main-w2", layouts, true);
+    expect(durable.map.get(layoutSlotKey("main-w2"))).toBe(serializeLayouts(layouts));
+    expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBeUndefined();
   });
 
   it("writes only the session store without a slot", () => {
@@ -1086,11 +1119,13 @@ describe("layout slots", () => {
     expect(durable.map.size).toBe(0);
   });
 
-  it("restores from the slot store when the session store is empty", () => {
+  it("restores a *satellite* from the slot store when the session store is empty", () => {
     // The app restarted: a new window, so a new sessionStorage, but the holder
-    // processes kept the shells running and their ids are in here.
-    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, "main")).toEqual(layouts);
+    // processes kept the shells running and their ids are in here. A main
+    // window picks its worktrees up one at a time instead — see "gives a main
+    // window nothing at boot" below.
+    const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(layouts);
   });
 
   it("prefers the session store, which is this window's own state", () => {
@@ -1107,13 +1142,56 @@ describe("layout slots", () => {
     expect(readLayouts(fake(), durable, null)).toEqual({});
   });
 
-  it("keeps slots apart", () => {
+  it("keeps satellites apart, by slot", () => {
     const durable = fake();
-    writeLayouts(fake(), durable, "main", layouts);
-    // A second window (a dev instance, or a detached window later) must start
-    // with its own panes rather than adopt the first window's session ids.
-    expect(readLayouts(fake(), durable, "alt-123")).toEqual({});
-    expect(layoutSlotKey("main")).not.toBe(layoutSlotKey("alt-123"));
+    writeLayouts(fake(), durable, "main-w2", layouts, true);
+    // A detached window restores only its *own* slot. Recycled slots are why
+    // this also needs `restored`: see "only a reopened window reads the slot
+    // store" below.
+    expect(readLayouts(fake(), durable, "main-w3", null, true, true)).toEqual({});
+    expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(layouts);
+    expect(layoutSlotKey("main-w2")).not.toBe(layoutSlotKey("main-w3"));
+  });
+
+  it("hands one worktree's panes to whichever main window shows it next", () => {
+    // The point of the shared store. Window A writes its layouts; window B, on
+    // a different slot, picks the same worktree up — one set of panes, one
+    // window showing them, and no hand-off protocol between them. What stops
+    // *both* rendering it is the shell's claim, not this key.
+    const durable = fake();
+    writeLayouts(fake(), durable, "main", { 7: layout });
+    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
+  });
+
+  it("gives a main window nothing at boot, whatever the store holds", () => {
+    // Ownership, not thrift. `writeLayouts` merges this window's `layouts` over
+    // what is on disk, so a window that booted holding every worktree stamped
+    // its boot snapshot back over each of them on every save — reverting
+    // worktrees another window had been editing since, and orphaning the panes
+    // added in the meantime. A window owns what it displays and picks the rest
+    // up one at a time through `worktreeLayoutFrom`.
+    const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, "main")).toEqual({});
+    expect(readLayouts(fake(), durable, "main", null, true)).toEqual({});
+  });
+
+  it("reads one worktree's panes fresh, not from a boot snapshot", () => {
+    // What stops a window that claims a worktree from inventing a second set:
+    // it may not have that worktree in memory *because another window has been
+    // using it since this one booted*, and those panes are the ones that exist.
+    const durable = fake();
+    writeLayouts(fake(), durable, "main", { 7: layout });
+    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
+    expect(worktreeLayoutFrom(durable, 99)).toBeNull();
+  });
+
+  it("gives a plain browser tab nothing durable, in either direction", () => {
+    // A tab is a session; two of them restoring one layout would attach to the
+    // same shells and take them from each other on every reattach.
+    const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, null)).toEqual({});
+    writeLayouts(fake(), durable, null, { 9: defaultLayout(0.4) });
+    expect(parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null)).toEqual(layouts);
   });
 
   it("survives storage being unavailable", () => {
@@ -1126,5 +1204,304 @@ describe("layout slots", () => {
   it("degrades to no saved layout on a corrupt slot store", () => {
     const durable = fake({ [layoutSlotKey("main")]: "{not json" });
     expect(readLayouts(fake(), durable, "main")).toEqual({});
+  });
+
+  describe("the detach seed", () => {
+    const seeded = { 4: defaultLayout(0.25) };
+    const seed = serializeLayouts(seeded);
+
+    it("is what a brand-new detached window boots with", () => {
+      // Neither store has anything: this window did not exist a moment ago, and
+      // the tabs it is meant to hold were handed to it on its command line.
+      expect(readLayouts(fake(), fake(), "main-w2", seed)).toEqual(seeded);
+    });
+
+    it("loses to the session store, so a reload does not resurrect it", () => {
+      const mine = { 4: defaultLayout(0.8) };
+      expect(
+        readLayouts(fake({ "veld.panes.v1": serializeLayouts(mine) }), fake(), "main-w2", seed),
+      ).toEqual(mine);
+    });
+
+    it("BEATS the slot store, because slots are reused", () => {
+      // The regression this ordering exists for. `nextSuffix` counts live
+      // windows only and nothing clears a slot's key, so: detach (window takes
+      // `main-w2`, writes its layout) → close it (tabs handed back, ids now live
+      // in the origin) → detach again → the new window lands on `main-w2` and
+      // finds the *dead* layout sitting there.
+      //
+      // Reading it would discard the seed, which is silent twice over: the tab
+      // being moved exists in no layout at all (the origin already released and
+      // closed it) so its shell dies at the grace, and the resurrected ids get
+      // attached to, taking them over from the window that just adopted them.
+      const dead = { 4: defaultLayout(0.8) };
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(dead) });
+      expect(readLayouts(fake(), durable, "main-w2", seed)).toEqual(seeded);
+    });
+
+    it("is not consulted by a restored window, which has no seed", () => {
+      // The case the wrong ordering was written for, and it cannot arise: a
+      // restored window is opened with a slot and no seed at all.
+      const own = { 4: defaultLayout(0.8) };
+      const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(own) });
+      expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(own);
+    });
+
+    it("goes through the same validation a restored layout does", () => {
+      // The seed has been out of the page and through the main process. A
+      // `javascript:` URL reaching a view from here is no better than one
+      // reaching it from storage.
+      const hostile = JSON.stringify({
+        4: {
+          docks: [
+            { tabs: [{ id: "v1", kind: "browser", url: "javascript:alert(1)" }], activeId: "v1" },
+            { tabs: [], activeId: null },
+          ],
+          ratio: 0.5,
+          focused: 0,
+        },
+      });
+      const restored = readLayouts(fake(), fake(), "main-w2", hostile);
+      expect(restored[4].docks[0].tabs[0].url).toBeUndefined();
+    });
+
+    it("is absent by default, so nothing changes for a window that has none", () => {
+      expect(readLayouts(fake(), fake(), "main")).toEqual({});
+      expect(readLayouts(fake(), fake(), "main", null)).toEqual({});
+      expect(readLayouts(fake(), fake(), "main", "{not json")).toEqual({});
+    });
+  });
+
+  describe("only a reopened window reads the slot store", () => {
+    const stored = { 4: defaultLayout(0.8) };
+    const durable = () => fake({ [layoutSlotKey("main-w2")]: serializeLayouts(stored) });
+
+    it("gives a brand-new window nothing, however full the slot is", () => {
+      // ⌘N is the case, and the seed fix did not cover it. Suffixes are
+      // recycled and a slot's key is never cleared, so to a genuinely new
+      // window that layout is a *dead* one that happens to share a number —
+      // adopting it means attaching to terminal ids another window is using,
+      // and an attach takes a shell over.
+      //
+      // Full sequence: detach a terminal, close the detached window (its tabs
+      // go back to the origin, which re-attaches), press ⌘N. The new window
+      // gets the freed suffix, restored the dead layout naming that same tab
+      // id, and stole the shell — leaving the origin on "connection lost",
+      // which is the exact ping-pong slots exist to prevent.
+      expect(readLayouts(fake(), durable(), "main-w2", null, false, true)).toEqual({});
+    });
+
+    it("gives a reopened satellite its layout back", () => {
+      // The other half, and the whole point of the durable store: shells that
+      // outlived the app have to be reachable again.
+      expect(readLayouts(fake(), durable(), "main-w2", null, true, true)).toEqual(stored);
+    });
+
+    it("defaults to not restoring, so a new caller cannot opt in by accident", () => {
+      expect(readLayouts(fake(), durable(), "main-w2", null, undefined, true)).toEqual({});
+    });
+
+    it("does not gate the session store or the seed", () => {
+      // A reload of a new window still has to come back, and a detached window
+      // still has to boot with what it was handed.
+      const mine = { 4: defaultLayout(0.3) };
+      expect(
+        readLayouts(
+          fake({ "veld.panes.v1": serializeLayouts(mine) }),
+          durable(),
+          "main-w2",
+          null,
+          false,
+          true,
+        ),
+      ).toEqual(mine);
+      const seeded = { 5: defaultLayout(0.25) };
+      expect(
+        readLayouts(fake(), durable(), "main-w2", serializeLayouts(seeded), false, true),
+      ).toEqual(seeded);
+    });
+  });
+});
+
+describe("splitWithTab", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "new", title: id });
+
+  function oneDock(...ids: string[]): PaneLayout {
+    return {
+      docks: [
+        { tabs: ids.map(tab), activeId: ids[0] ?? null },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+  }
+
+  it("creates the second dock on the right", () => {
+    const next = splitWithTab(oneDock("a", "b"), "b", 1);
+    expect(next.docks[0].tabs.map((t) => t.id)).toEqual(["a"]);
+    expect(next.docks[1].tabs.map((t) => t.id)).toEqual(["b"]);
+    expect(next.focused).toBe(1);
+  });
+
+  it("creates the second dock on the left, moving everything else right", () => {
+    // The half `moveTab` cannot express: there is no dock index that means
+    // "become the left pane and push the current one to the right".
+    const next = splitWithTab(oneDock("a", "b", "c"), "c", 0);
+    expect(next.docks[0].tabs.map((t) => t.id)).toEqual(["c"]);
+    expect(next.docks[1].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(next.docks[0].activeId).toBe("c");
+    expect(next.focused).toBe(0);
+  });
+
+  it("keeps an active tab on the side it did not move to", () => {
+    const layout = oneDock("a", "b", "c");
+    // `a` is active and stays behind; the successor rule applies to the dock it
+    // was left in, not to the one being created.
+    const next = splitWithTab(layout, "c", 0);
+    expect(next.docks[1].activeId).toBe("a");
+  });
+
+  it("is a no-op for a dock's only tab", () => {
+    // With one pane on screen the sides mean nothing — the same rule
+    // `normalizeDocks` enforces everywhere else.
+    const layout = oneDock("a");
+    expect(splitWithTab(layout, "a", 0)).toBe(layout);
+    expect(splitWithTab(layout, "a", 1)).toBe(layout);
+  });
+
+  it("is a plain move once both docks are on screen", () => {
+    const layout = splitWithTab(oneDock("a", "b"), "b", 1);
+    const back = splitWithTab(layout, "b", 0);
+    expect(back.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    // Emptying the right dock slides nothing: it was the right one.
+    expect(back.docks[1].tabs).toEqual([]);
+  });
+
+  it("ignores an id that is not in the layout", () => {
+    const layout = oneDock("a", "b");
+    expect(splitWithTab(layout, "ghost", 1)).toBe(layout);
+  });
+});
+
+describe("insertTab", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "new", title: id });
+  const three = () => {
+    let l: PaneLayout = {
+      docks: [
+        { tabs: [tab("a")], activeId: "a" },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+    l = insertTab(l, 0, tab("b"));
+    l = insertTab(l, 0, tab("c"));
+    return l;
+  };
+
+  it("places a tab where the caret was, not at the end", () => {
+    // What makes a cross-window drop honour where you aimed. `addTab` appends,
+    // which is right for a tab this window created and wrong for one arriving
+    // from another with a position behind it.
+    const l = insertTab(three(), 0, tab("x"), 1);
+    expect(l.docks[0].tabs.map((t) => t.id)).toEqual(["a", "x", "b", "c"]);
+    expect(l.docks[0].activeId).toBe("x");
+    expect(l.focused).toBe(0);
+  });
+
+  it("appends with no index, and clamps a nonsense one", () => {
+    expect(insertTab(three(), 0, tab("x")).docks[0].tabs.map((t) => t.id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "x",
+    ]);
+    expect(insertTab(three(), 0, tab("x"), 99).docks[0].tabs.at(-1)?.id).toBe("x");
+    expect(insertTab(three(), 0, tab("x"), -5).docks[0].tabs[0].id).toBe("x");
+  });
+
+  it("opens the second dock", () => {
+    const l = insertTab(three(), 1, tab("x"));
+    expect(l.docks[1].tabs.map((t) => t.id)).toEqual(["x"]);
+    expect(l.focused).toBe(1);
+  });
+
+  it("activates rather than duplicating an id it already holds", () => {
+    // Two tabs on one id would fight over one shell — the same rule `addTab`
+    // enforces, and now reachable from a second window too.
+    const l = three();
+    const again = insertTab(l, 1, tab("b"), 0);
+    expect(allTabs(again).filter((t) => t.id === "b")).toHaveLength(1);
+    expect(again.docks[1].tabs).toEqual([]);
+  });
+});
+
+describe("adoptTabs", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "terminal", title: id });
+
+  it("builds a layout for a worktree this window has never opened", () => {
+    const next = adoptTabs(undefined, [tab("a"), tab("b")]);
+    expect(next?.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(next?.docks[0].activeId).toBe("a");
+    expect(next?.docks[1].tabs).toEqual([]);
+  });
+
+  it("appends to the focused dock of an existing layout", () => {
+    const base = splitWithTab(
+      {
+        docks: [
+          { tabs: [tab("a"), tab("b")], activeId: "a" },
+          { tabs: [], activeId: null },
+        ],
+        ratio: DEFAULT_RATIO,
+        focused: 0,
+      },
+      "b",
+      1,
+    );
+    expect(base.focused).toBe(1);
+    const next = adoptTabs(base, [tab("c")]);
+    expect(next?.docks[1].tabs.map((t) => t.id)).toEqual(["b", "c"]);
+  });
+
+  it("skips ids the layout already holds", () => {
+    const base = adoptTabs(undefined, [tab("a")]);
+    // Two tabs on one id would fight over one shell. A hand-back racing a
+    // detach that was never committed is exactly how that would arise.
+    expect(adoptTabs(base ?? undefined, [tab("a")])).toBeNull();
+    const mixed = adoptTabs(base ?? undefined, [tab("a"), tab("b")]);
+    expect(mixed?.docks[0].tabs.map((t) => t.id)).toEqual(["a", "b"]);
+  });
+
+  it("returns null rather than an unchanged layout for nothing to adopt", () => {
+    expect(adoptTabs(undefined, [])).toBeNull();
+  });
+});
+
+describe("parseTransferTabs", () => {
+  it("applies the same gate a restored layout goes through", () => {
+    const tabs = parseTransferTabs([
+      { id: "sh1", kind: "terminal", title: "Terminal" },
+      // A URL that has been out of the page and back is exactly as untrusted as
+      // one read out of storage.
+      { id: "v1", kind: "browser", title: "Bad", url: "javascript:alert(1)" },
+      { id: "bad id", kind: "terminal" },
+      { id: "k1", kind: "wormhole" },
+      null,
+    ]);
+    expect(tabs.map((t) => t.id)).toEqual(["sh1", "v1"]);
+    expect(tabs[1].url).toBeUndefined();
+  });
+
+  it("deduplicates and tolerates a non-list", () => {
+    expect(
+      parseTransferTabs([
+        { id: "a", kind: "new", title: "one" },
+        { id: "a", kind: "new", title: "two" },
+      ]).length,
+    ).toBe(1);
+    expect(parseTransferTabs("nope")).toEqual([]);
+    expect(parseTransferTabs(undefined)).toEqual([]);
   });
 });

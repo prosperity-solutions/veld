@@ -135,6 +135,12 @@ pub async fn run(cfg: HolderConfig) -> anyhow::Result<()> {
 /// holder for this session is already running and this process must not fight it
 /// for the shell.
 fn bind(path: &std::path::Path) -> anyhow::Result<UnixListener> {
+    // Before anything else, because `bind`'s own answer to this is "path must be
+    // shorter than SUN_LEN" — true, and it names neither the path nor the way
+    // out. It reaches the user as "could not open a terminal".
+    if let Some(msg) = veld_core::instance::socket_path_too_long(path) {
+        anyhow::bail!(msg);
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("failed to create the holder socket directory")?;
         // 0700, and a failure here is fatal rather than ignored: the **directory**
