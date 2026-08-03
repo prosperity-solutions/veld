@@ -805,15 +805,23 @@ function registerWindowIpc(ipcMain) {
    * it. HTML5 drag events do not cross a `BrowserWindow` boundary at all — the
    * drag lives in the source document, and the window being dragged *onto*
    * never learns a drag is happening, so it cannot offer a drop target and the
-   * gesture silently did nothing. What the source *can* report is where the
-   * pointer was let go, in screen coordinates, and this process is the only one
-   * that knows which window is there.
+   * gesture silently did nothing.
+   *
+   * The **cursor position comes from the OS here**, not from the `dragend`
+   * event. That was the first version and it does not work: Chromium's
+   * `dragend` does not reliably carry the release point — depending on platform
+   * and on whether the drag was accepted it reports the drag's *start*, or
+   * `0,0`. Both read as "still inside the source window", so dropping a
+   * detached pane back onto the main window did nothing at all, which is
+   * indistinguishable from the feature being missing. `screen.getCursorScreenPoint()`
+   * is the same question asked of something that actually knows.
    *
    * Onto a window already showing that worktree → the tabs move into it, using
-   * the same queue a hand-back uses. Anywhere else → a new detached window, the
-   * behaviour drag-out already had. The worktree check is what keeps the
-   * gesture predictable: dropping panes into a window showing something else
-   * would file them under a worktree that window is not looking at.
+   * the same queue a hand-back uses. Back onto the source, or a window showing
+   * something else → nothing, so a fumbled drag is not a window. Anywhere else
+   * → a new detached window, the behaviour drag-out already had. The worktree
+   * check is what keeps the gesture predictable: dropping panes into a window
+   * showing something else would file them under a worktree it is not looking at.
    */
   ipcMain.handle("veld:window:drop-out", (event, payload) => {
     const from = senderWindow(event);
@@ -825,20 +833,28 @@ function registerWindowIpc(ipcMain) {
       return { moved: false, opened: false, reason: "invalid" };
     }
 
-    const x = Number(payload?.screenX);
-    const y = Number(payload?.screenY);
-    const target =
-      Number.isFinite(x) && Number.isFinite(y)
-        ? allRecords().find((r) => {
-            if (r.id === fromRecord.id || r.win.isDestroyed()) return false;
-            // Only a window that is showing this worktree. Its panes belong
-            // with the rest of that worktree's, not filed behind whatever the
-            // window happens to be looking at.
-            if (claims.get(worktreeId) !== r.id) return false;
-            const b = r.win.getBounds();
-            return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
-          })
-        : undefined;
+    const point = screen.getCursorScreenPoint();
+    const within = (record) => {
+      const b = record.win.getBounds();
+      return (
+        point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height
+      );
+    };
+    // Released back over the window it came from: a fumbled drag, not a
+    // request for anything. The renderer cannot tell this apart either, since
+    // `dropEffect` is "none" for a drop on any non-target.
+    if (!from.isDestroyed() && within(fromRecord)) {
+      return { moved: false, opened: false, reason: "inside" };
+    }
+
+    const target = allRecords().find((r) => {
+      if (r.id === fromRecord.id || r.win.isDestroyed()) return false;
+      // Only a window that is showing this worktree. Its panes belong with the
+      // rest of that worktree's, not filed behind whatever the window happens
+      // to be looking at.
+      if (claims.get(worktreeId) !== r.id) return false;
+      return within(r);
+    });
 
     if (target) {
       target.pendingAdopt.push({ worktreeId, tabs });

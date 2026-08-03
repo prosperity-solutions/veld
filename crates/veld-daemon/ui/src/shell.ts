@@ -105,8 +105,6 @@ export interface DesktopWindowApi {
     repoRoot: string;
     ratio: number;
     tabs: unknown[];
-    screenX: number;
-    screenY: number;
   }): Promise<{
     moved: boolean;
     opened: boolean;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type DropZone, droppedOutside, edgeWidth, sameZone, zoneAt } from "./dropModel";
+import { type DropZone, edgeWidth, sameZone, zoneAt } from "./dropModel";
 
 /** A pane area 1000px wide starting at x=100. At that width the 96px cap binds,
  *  so its edge zones are 100..196 and 1004..1100. */
@@ -87,47 +87,5 @@ describe("sameZone", () => {
     expect(sameZone(null, null)).toBe(true);
     expect(sameZone(null, { where: "left" })).toBe(false);
     expect(sameZone({ where: "left" }, null)).toBe(false);
-  });
-});
-
-describe("droppedOutside", () => {
-  const box = { screenX: 100, screenY: 100, outerWidth: 800, outerHeight: 600 };
-
-  it("requires the drop to have been refused", () => {
-    // A successful drop on one of our own targets is never a detach, however
-    // far the pointer travelled.
-    expect(droppedOutside(box, { screenX: 5000, screenY: 5000 }, "move")).toBe(false);
-    expect(droppedOutside(box, { screenX: 5000, screenY: 5000 }, "copy")).toBe(false);
-  });
-
-  it("does not detach on a fumbled drop inside the window", () => {
-    // The reason the coordinate test exists at all: `dropEffect === "none"` also
-    // describes releasing a tab over a pane's dead space, and detaching there
-    // would open a window on every mis-drag.
-    expect(droppedOutside(box, { screenX: 400, screenY: 300 }, "none")).toBe(false);
-  });
-
-  it("detaches past any edge", () => {
-    expect(droppedOutside(box, { screenX: 99, screenY: 300 }, "none")).toBe(true);
-    expect(droppedOutside(box, { screenX: 400, screenY: 99 }, "none")).toBe(true);
-    expect(droppedOutside(box, { screenX: 901, screenY: 300 }, "none")).toBe(true);
-    expect(droppedOutside(box, { screenX: 400, screenY: 701 }, "none")).toBe(true);
-  });
-
-  it("treats the window's own border as inside", () => {
-    expect(droppedOutside(box, { screenX: 100, screenY: 100 }, "none")).toBe(false);
-    expect(droppedOutside(box, { screenX: 900, screenY: 700 }, "none")).toBe(false);
-  });
-
-  it("ignores the 0,0 report some platforms give for a menu bar", () => {
-    expect(droppedOutside(box, { screenX: 0, screenY: 0 }, "none")).toBe(false);
-  });
-
-  it("works for a window on a display left of the primary one", () => {
-    // Negative screen coordinates are ordinary on a multi-monitor desk, which
-    // is the setup this whole feature is for.
-    const left = { screenX: -1800, screenY: 0, outerWidth: 800, outerHeight: 600 };
-    expect(droppedOutside(left, { screenX: -1400, screenY: 300 }, "none")).toBe(false);
-    expect(droppedOutside(left, { screenX: 200, screenY: 300 }, "none")).toBe(true);
   });
 });

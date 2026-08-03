@@ -64,39 +64,3 @@ export function sameZone(a: DropZone | null, b: DropZone | null): boolean {
   if (a.where !== b.where) return false;
   return a.where !== "into" || b.where !== "into" || a.dock === b.dock;
 }
-
-/** The window rectangle a drag is judged against, in screen coordinates. */
-export interface WindowBox {
-  screenX: number;
-  screenY: number;
-  outerWidth: number;
-  outerHeight: number;
-}
-
-/**
- * Whether a `dragend` landed outside the window, which is what dragging a tab
- * out to detach it looks like.
- *
- * `dropEffect === "none"` alone is not enough: it also describes a drop on any
- * non-target *inside* the window, and detaching then would make every fumbled
- * drag open a window. The screen-coordinate test is the other half, and it is
- * why this takes a box rather than reading `window` — a rule this easy to get
- * backwards should be checkable without a browser.
- */
-export function droppedOutside(
-  box: WindowBox,
-  point: { screenX: number; screenY: number },
-  dropEffect: string,
-): boolean {
-  if (dropEffect !== "none") return false;
-  const { screenX, screenY } = point;
-  // A drag released over a menu bar or an OS panel reports 0,0 on some
-  // platforms; treat the degenerate point as "inside" rather than detaching.
-  if (screenX === 0 && screenY === 0) return false;
-  return (
-    screenX < box.screenX ||
-    screenY < box.screenY ||
-    screenX > box.screenX + box.outerWidth ||
-    screenY > box.screenY + box.outerHeight
-  );
-}

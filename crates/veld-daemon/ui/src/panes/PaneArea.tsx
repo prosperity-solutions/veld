@@ -99,7 +99,7 @@ import {
 } from "./model";
 import { notifyError } from "../shared/notify";
 import { desktopWindow } from "../shell";
-import { type DropZone, droppedOutside, sameZone, zoneAt } from "./dropModel";
+import { type DropZone, sameZone, zoneAt } from "./dropModel";
 
 /**
  * Drag payload type for a pane tab.
@@ -146,12 +146,6 @@ function endTabDrag(): void {
   if (!tabDragSuspended) return;
   tabDragSuspended = false;
   popBrowserSuspend();
-}
-
-/** `droppedOutside` against this window — the rule itself, and its tests, live
- *  in `dropModel.ts`. */
-function droppedOutsideWindow(e: React.DragEvent): boolean {
-  return droppedOutside(window, e, e.dataTransfer.dropEffect);
 }
 
 /**
@@ -227,9 +221,15 @@ export function PaneArea(props: {
   const [dragOutside, setDragOutside] = useState(false);
 
   // Same backstop as the per-dock indicator below: a committed layout retires
-  // every preview, however the gesture that produced it ended.
+  // every preview, however the gesture that produced it ended. **Including the
+  // outside-the-window hint** — a drag-out that *works* removes the tab, which
+  // unmounts the element `dragend` would have fired on, so a successful move
+  // was exactly the case that left the hint on screen for good.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see `dropAt`.
-  useEffect(() => setDropZone(null), [layout]);
+  useEffect(() => {
+    setDropZone(null);
+    setDragOutside(false);
+  }, [layout]);
 
   /** Re-entering the window puts the split preview back in charge. */
   const onAreaDragOver = (e: React.DragEvent) => {
@@ -271,7 +271,7 @@ export function PaneArea(props: {
    * learns one is in progress. The shell owns every window's bounds and picks
    * the destination — an existing window showing this worktree, or a new one.
    */
-  const dropOutTabs = async (tabs: PaneTab[], screenX: number, screenY: number) => {
+  const dropOutTabs = async (tabs: PaneTab[]) => {
     if (!desktopWindow || tabs.length === 0) return;
     let moved: PaneTab[] = [];
     try {
@@ -280,9 +280,10 @@ export function PaneArea(props: {
         repoRoot: props.repoRoot,
         ratio: layout.ratio,
         tabs,
-        screenX,
-        screenY,
       });
+      // Released back over this window — a fumbled drag. Silent on purpose:
+      // nothing was asked for, so nothing is reported.
+      if (result?.reason === "inside") return;
       if (!result?.moved && !result?.opened) {
         notifyError(
           "Couldn't move that pane",
@@ -586,8 +587,9 @@ function DockView(props: {
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
   onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
-  /** Released outside the window — the shell decides where that lands. */
-  onDropOut: ((tabs: PaneTab[], screenX: number, screenY: number) => void) | undefined;
+  /** Released without being accepted — the shell decides where that lands,
+   *  including whether it was outside this window at all. */
+  onDropOut: ((tabs: PaneTab[]) => void) | undefined;
   onBodyDragOver: (e: React.DragEvent, dock: DockIndex) => void;
   onBodyDrop: (e: React.DragEvent, dock: DockIndex) => void;
   onClearZone: () => void;
@@ -787,12 +789,13 @@ function DockView(props: {
               setDropAt(null);
               props.onClearZone();
               endTabDrag();
-              // Released outside the window. Where that lands is the shell's to
-              // decide — another Veld window showing this worktree, or nowhere
-              // and therefore a new one — because a drag never crosses a window
-              // boundary and this page cannot see what is under the cursor.
-              if (props.onDropOut && droppedOutsideWindow(e)) {
-                props.onDropOut([tab], e.screenX, e.screenY);
+              // Released without any target accepting it. Whether that was
+              // outside the window at all — and if so, over what — is the
+              // shell's to answer: a drag never crosses a window boundary, and
+              // `dragend`'s own coordinates cannot be trusted to say where the
+              // pointer was (see the `veld:window:drop-out` handler).
+              if (props.onDropOut && e.dataTransfer.dropEffect === "none") {
+                props.onDropOut([tab]);
               }
             }}
           />
