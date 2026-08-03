@@ -99,6 +99,10 @@ export interface DesktopWindowApi {
   /** Which worktrees this window holds the panes of. Reported so the shell can
    *  ask the right window to let go when another one claims a worktree. */
   holdsWorktrees(worktreeIds: number[]): Promise<boolean>;
+  /** These worktrees have been deleted: drop every claim and hold on them. A
+   *  worktree id is a database rowid and gets **reused**, so a claim left on a
+   *  removed worktree greys out whichever one is created next. */
+  worktreesGone(worktreeIds: number[]): Promise<boolean>;
   /** Let go of one worktree's panes — another window is taking it. */
   onYieldWorktree(fn: (payload: { worktreeId: number }) => void): () => void;
   detach(payload: {

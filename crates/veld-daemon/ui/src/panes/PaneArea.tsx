@@ -103,6 +103,7 @@ import {
 import { notifyError } from "../shared/notify";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
+import { tabKeyAction } from "./tabKeys";
 
 /**
  * Drag payload type for a pane tab.
@@ -1025,6 +1026,7 @@ function DockView(props: {
             label={paneTabLabel(layout, tab)}
             icon={tabIcon(tab)}
             selected={tab.id === dock.activeId}
+            panelId={dockPanelId(index)}
             // Local drag first, then one forwarded from another window — the
             // two cannot both be live, and they draw the same caret.
             drop={
@@ -1162,6 +1164,12 @@ function DockView(props: {
           The edge zones live here too; see `zoneAt`. */}
       <div
         className="dock-body"
+        id={dockPanelId(index)}
+        // The other half of the tab relationship. Both attributes are conditional
+        // on there being an active tab: an empty dock shows the chooser, which is
+        // no tab's panel and has no tab to be labelled by.
+        role={active ? "tabpanel" : undefined}
+        aria-labelledby={active ? tabElementId(active.id) : undefined}
         onDragOver={(e) => {
           // Leaving the strip for the body retracts the strip's own indicator,
           // so the two halves of the drop model never both claim the drag.
@@ -1371,6 +1379,44 @@ function TabScroller(props: {
   );
 }
 
+/** The DOM id of a tab's button, and of a dock's panel. Both exist only so the
+ *  tab and the panel it controls can name each other. */
+function tabElementId(tabId: string): string {
+  return `pane-tab-${tabId}`;
+}
+function dockPanelId(index: DockIndex): string {
+  return `pane-panel-${index}`;
+}
+
+/**
+ * Keyboard navigation for a tab strip: arrows move, Home/End jump, Delete closes.
+ *
+ * What each key *means* is `tabKeyAction`, which is pure and tested. This half is
+ * the DOM: which tabs there are, and moving focus between them. The strip is
+ * walked through the DOM rather than through the layout on purpose — threading an
+ * index, the sibling ids and a ref per tab down from the dock reproduces what
+ * `role="tablist"` already holds: the tabs of *this* strip, in visual order,
+ * including whatever a drag just reordered.
+ */
+function onTabKeyDown(onClose: () => void) {
+  return (e: React.KeyboardEvent<HTMLButtonElement>) => {
+    const strip = e.currentTarget.closest('[role="tablist"]');
+    const tabs = strip
+      ? Array.from(strip.querySelectorAll<HTMLElement>('[role="tab"]'))
+      : [e.currentTarget as HTMLElement];
+    const action = tabKeyAction(e.key, tabs.indexOf(e.currentTarget), tabs.length);
+    if (action.kind === "ignore") return;
+    e.preventDefault();
+    if (action.kind === "close") {
+      // The close button is not a tab stop (see its `tabIndex`), so this is the
+      // keyboard's route to closing a pane — the key every tab strip uses.
+      onClose();
+      return;
+    }
+    tabs[action.index]?.focus();
+  };
+}
+
 /**
  * A tab and its close button as siblings, not nested.
  *
@@ -1385,6 +1431,8 @@ function TabButton(props: {
   /** The kind's glyph, so a strip of tabs is readable without their titles. */
   icon: React.ReactNode;
   selected: boolean;
+  /** The dock's panel, for `aria-controls` on the selected tab. */
+  panelId: string;
   /** Which edge to draw a drop indicator on, if any. */
   drop: "before" | "after" | null;
   onSelect: () => void;
@@ -1458,9 +1506,19 @@ function TabButton(props: {
       <button
         type="button"
         role="tab"
+        id={tabElementId(props.tab.id)}
         aria-selected={props.selected}
+        // Only the selected tab names the panel, because there is one panel per
+        // dock and it shows the *active* tab: pointing an unselected tab at it
+        // would send a screen reader to content that belongs to another tab.
+        aria-controls={props.selected ? props.panelId : undefined}
+        // Roving tabindex — a tab strip is **one** tab stop, and the arrows move
+        // within it. Before this, Tab walked every tab and every close button in
+        // both docks before reaching the pane content.
+        tabIndex={props.selected ? 0 : -1}
         className="pane-tab-label"
         onClick={props.onSelect}
+        onKeyDown={onTabKeyDown(props.onClose)}
         onAuxClick={(e) => {
           // Middle-click closes, as everywhere else with tabs.
           if (e.button === 1) props.onClose();
@@ -1475,6 +1533,7 @@ function TabButton(props: {
             ? "Drag to reorder, to a pane edge to split · double-click to send to the other pane"
             : "Drag to a pane edge to split",
           ...(props.canDetach ? ["Drag out of the window to open it in its own"] : []),
+          "← → to move between tabs · Delete to close",
           "Right-click for more",
         ].join("\n")}
       >
@@ -1487,6 +1546,11 @@ function TabButton(props: {
         type="button"
         className="pane-tab-close"
         aria-label={`Close ${props.label}`}
+        // Deliberately out of the tab order: a tablist is one tab stop, and with
+        // both docks full, tabbing through every close button on the way to the
+        // content is worse than the Delete key being the keyboard route (which the
+        // tab's tooltip names). Still clickable, and still announced as a button.
+        tabIndex={-1}
         onClick={props.onClose}
       >
         <IconX size={11} />

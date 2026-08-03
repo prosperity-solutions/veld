@@ -549,9 +549,40 @@ impl Diagnostics {
     }
 
     /// Count holder sockets, and how many of them answer.
+    ///
+    /// The row doubles as the check that a holder *can* bind here at all. A
+    /// `sockaddr_un` path is capped at 104 bytes and this directory's is not
+    /// something the user chose — it follows `$HOME` and the daemon port — so a
+    /// deep enough home overruns it. Reporting "No terminal holders" in that state
+    /// is true and useless: there are none because none can start, and the bare
+    /// `bind` error ("path must be shorter than SUN_LEN") only ever reaches the
+    /// user as a terminal that will not open. So the length is checked first, and
+    /// it is a *failure* rather than a note — nothing works until it is fixed.
     fn terminal_holders_check(&self) -> Check {
         let dir = veld_core::instance::pty_dir();
         let shown = tilde_path(&dir);
+        // The name a real socket would get: `socket_for` digests the session id to
+        // a fixed 16 hex chars precisely so every session's path is the same length,
+        // which is what makes one probe answer for all of them.
+        let probe = dir.join("0000000000000000.sock");
+        if veld_core::instance::socket_path_too_long(&probe).is_some() {
+            // The label is written here rather than reused from
+            // `socket_path_too_long`, whose message embeds the absolute path — right
+            // for the holder's own bind failure, wrong for this command, where every
+            // other displayed path goes through `tilde_path` and doctor output is
+            // what people paste into an issue.
+            return Check {
+                pass: false,
+                label: format!(
+                    "No terminal can start: the holder socket path is {} bytes, over the \
+                     {}-byte limit a unix socket allows ({}/<id>.sock). Set VELD_PTY_DIR \
+                     to a shorter directory.",
+                    probe.as_os_str().as_encoded_bytes().len(),
+                    veld_core::instance::MAX_SOCKET_PATH,
+                    shown,
+                ),
+            };
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             // No directory is the ordinary state: it appears with the first
             // terminal and nothing prunes it.

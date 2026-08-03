@@ -32,6 +32,7 @@ const {
 } = require("./validate");
 const {
   canOpenAnother,
+  forgetWorktrees,
   handBackTarget,
   nextSuffix,
   othersHolding,
@@ -978,6 +979,38 @@ function registerWindowIpc(ipcMain) {
       ? payload.worktreeIds.slice(0, MAX_HELD_WORKTREES).map(safeWorktreeId).filter((id) => id !== null)
       : [];
     setHoldsIn(holders, record.id, ids);
+    return true;
+  });
+
+  /**
+   * Worktrees that have just been deleted, so nothing keeps claiming them.
+   *
+   * Sent by whichever window did the deleting, because it is the only place the
+   * exact ids are known. Not restricted to what the sender itself holds — the
+   * claim being dropped usually belongs to *another* window, which is the window
+   * that was showing the worktree that has now been removed.
+   *
+   * See `forgetWorktrees` for why a leftover entry matters: worktree rowids are
+   * reused, so the ghost lands on a *new* worktree and reports it as open
+   * somewhere it is not.
+   */
+  ipcMain.handle("veld:window:worktrees-gone", (event, payload) => {
+    const record = recordFor(senderWindow(event));
+    // Main windows only, like `holds` beside it. A detached window is a satellite
+    // with no rail and no delete surface, so it has no business editing global
+    // ownership — and this handler is the one that accepts ids the sender does not
+    // hold, which is exactly why it should accept them from fewer callers.
+    if (!record || record.kind !== "main") return false;
+    const ids = Array.isArray(payload?.worktreeIds)
+      ? payload.worktreeIds
+          .slice(0, MAX_HELD_WORKTREES)
+          .map(safeWorktreeId)
+          .filter((id) => id !== null)
+      : [];
+    if (ids.length === 0) return false;
+    forgetWorktrees(claims, holders, ids);
+    // Every rail is showing the old answer until it is told otherwise.
+    broadcastClaims();
     return true;
   });
 

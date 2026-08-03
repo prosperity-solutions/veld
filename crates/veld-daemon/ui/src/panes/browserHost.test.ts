@@ -8,6 +8,7 @@ const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   canGoBack: false,
   canGoForward: false,
   error: null,
+  nested: null,
   profile: "default",
   loaded: false,
   emulationScale: 1,
@@ -46,6 +47,25 @@ describe("paneCovers", () => {
     ).toBe(false);
     expect(
       paneCovers(state({ url: "http://x.test/", loading: false, loaded: true })),
+    ).toBe(false);
+  });
+
+  it("covers a refused nested /ide, however far the page had got", () => {
+    // The refusal screen is DOM, and under Electron the native view paints over
+    // DOM — so if this predicate did not cover, the screen would be invisible in
+    // the desktop app and visible in a browser tab. There is also no view behind
+    // it at all (`ensure` does not create one while refused), so an uncovered
+    // pane would simply be blank.
+    expect(paneCovers(state({ url: "http://veld.localhost/ide", nested: "http://veld.localhost/ide" }))).toBe(true);
+    // Outranks a loaded page, for the same reason an error does: it replaced one.
+    expect(
+      paneCovers(
+        state({ url: "http://veld.localhost/ide", nested: "http://veld.localhost/ide", loaded: true }),
+      ),
+    ).toBe(true);
+    // And the pane goes back to showing the page once it is forced through.
+    expect(
+      paneCovers(state({ url: "http://veld.localhost/ide", nested: null, loaded: true })),
     ).toBe(false);
   });
 

@@ -5,6 +5,7 @@ const assert = require("node:assert/strict");
 const {
   MAX_WINDOWS,
   canOpenAnother,
+  forgetWorktrees,
   handBackTarget,
   isSuffix,
   nextSuffix,
@@ -353,6 +354,29 @@ test("releaseHolds forgets a window entirely", () => {
   releaseHolds(holders, 1);
   assert.equal(holders.has(7), false, "a set with only the dead window goes");
   assert.deepEqual([...holders.get(8)], [2], "a shared one keeps the survivor");
+});
+
+test("forgetWorktrees drops a deleted worktree from both maps, whoever held it", () => {
+  // Worktree rowids are reused (`INTEGER PRIMARY KEY`, no AUTOINCREMENT), so a
+  // claim left on a deleted worktree greys out whichever one is created next and
+  // focuses a window that is showing something else.
+  const claims = new Map([
+    [7, 1],
+    [8, 2],
+  ]);
+  const holders = new Map();
+  setHolds(holders, 1, [7, 8]);
+  setHolds(holders, 2, [8]);
+
+  forgetWorktrees(claims, holders, [8]);
+  assert.deepEqual([...claims], [[7, 1]], "the claim goes, whichever window had it");
+  assert.equal(holders.has(8), false, "and so does every hold on it");
+  assert.deepEqual([...holders.get(7)], [1], "an unrelated worktree is untouched");
+
+  forgetWorktrees(claims, holders, [99]);
+  assert.deepEqual([...claims], [[7, 1]], "an unknown worktree changes nothing");
+  forgetWorktrees(claims, holders, []);
+  assert.deepEqual([...claims], [[7, 1]], "and neither does an empty list");
 });
 
 test("releaseClaims drops every claim a window held", () => {

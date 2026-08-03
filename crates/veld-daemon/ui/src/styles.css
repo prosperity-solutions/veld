@@ -635,6 +635,9 @@ select:focus {
  * scroll state that did not exist. The **glow does the standing-out**, and a
  * box-shadow contributes nothing to layout or scroll extent — which is exactly
  * why it can be generous. */
+/* `drop-before` / `drop-after` are built at runtime (`drop-${props.drop}` in
+   PaneArea.tsx), so neither name appears anywhere in the sources. A dead-selector
+   sweep that greps for literals will offer both up for deletion — they are live. */
 .pane-tab.drop-before::before,
 .pane-tab.drop-after::after {
   content: "";
@@ -704,6 +707,15 @@ select:focus {
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
+}
+
+/* Keyboard focus inside the strip. The arrows move focus *without* selecting, so
+   focused-but-unselected is a normal state here and has to be visible — without a
+   ring the arrow keys look like they do nothing at all. */
+.pane-tab-label:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+  border-radius: 4px;
 }
 
 /* The text node itself does the ellipsis — the flex row above cannot, since the
@@ -1137,6 +1149,8 @@ select:focus {
   gap: 4px;
   height: 24px;
 }
+/* Mantine's own inner class, emitted by `Button` — it is in no source file here,
+   which is the third and last selector a literal-grep sweep will call dead. */
 .browser-device .mantine-Button-label {
   gap: 4px;
 }
@@ -1374,11 +1388,6 @@ select:focus {
   background: var(--panel2);
   font-size: 11px;
   color: var(--muted);
-}
-
-.browser-note.danger {
-  background: var(--danger-bg);
-  color: var(--danger);
 }
 
 .browser-note code {
@@ -2041,15 +2050,44 @@ select:focus {
   line-height: 1.6;
 }
 
-.primary-btn {
-  border: none;
-  background: var(--accent);
-  color: var(--live-ink);
-  font-weight: 600;
-  font-size: 12.5px;
-  padding: 8px 16px;
+/* Muted body text — hints, secondary lines, an empty state's explanation.
+   `var(--muted)` rather than `var(--faint)` despite the name: most `.faint`
+   elements sit inside a container that is already `--muted`
+   (`.browser-screen`, `.center-page p`), so the fainter token would have *dimmed*
+   six places that read correctly today. This rule exists because the class was
+   used in six files and defined in none — those outside such a container were
+   rendering at full contrast. */
+.faint {
+  color: var(--muted);
+}
+
+/* A small inline state marker in a dense row — the top bar's "no veld config" and
+   "repository unavailable" states. Also previously used and never defined, so it
+   rendered as bare text between real controls. The unavailable case overrides the
+   colour inline (`--warn`), which still wins over this. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--panel2);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* A boxed one-line note where a list would be — the command palette's
+   "nothing matches". Third of the same kind. */
+.note-card {
+  padding: 10px 12px;
+  border: 1px solid var(--border);
   border-radius: 8px;
-  cursor: pointer;
+  background: var(--panel2);
+  font-size: 12px;
+  color: var(--muted);
+  text-align: center;
 }
 
 /* Absolutely centered top-bar slot (Active|History in runs mode). */

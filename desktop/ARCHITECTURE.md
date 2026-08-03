@@ -311,6 +311,50 @@ requests at runtime — branding rule.
   survive); in a pane (`fill`) it is the whole dock body, with the toolbar fixed
   and the log area taking the rest. The pane variant is keyed by run instance, so
   a restart or a worktree switch does not carry another run's node filter in.
+- **The logs viewer decodes ANSI, and the terminal's palette is the one it uses.**
+  A log line is written for a terminal — the CLI colours its own output and dev
+  servers colour far more — so `shared/ansi.ts` turns SGR into styled spans, drops
+  every other escape sequence (there is no cursor to move in a line), and treats a
+  carriage return as the line starting over, because otherwise a 40-step progress
+  bar renders as all forty frames at once. Three consequences worth keeping: the
+  16-colour palette **moved out of `terminalHost.ts`** into that module and is now
+  shared, since the same output coloured one way in a shell and another in the logs
+  reads as a bug in whichever you saw second; `stripAnsi` is *defined* as the spans
+  joined, so search can never match text no span contains; and search runs over the
+  **joined** text rather than per span, because `ERROR` bold followed by a plain
+  message is the commonest colouring there is and a per-span search cannot see a
+  word that straddles the boundary. Searching the raw line was the previous
+  behaviour and silently missed any word with a colour change inside it.
+- **A tab strip is one keyboard stop, and its arrows do not select.** Tabs carry
+  `role="tab"` inside a `role="tablist"` scroller with a roving `tabIndex`, so Tab
+  reaches the strip once and `←`/`→`/`Home`/`End` move within it; `Delete` closes,
+  which is why the close button is deliberately *not* a tab stop (with both docks
+  full, tabbing through every close button on the way to the content is worse).
+  **Manual activation** is the load-bearing half: the ARIA pattern's other variant
+  selects as focus moves, which here would mount a `WebContentsView` for every
+  browser pane walked past and replace what you were looking at on the way. Only
+  the selected tab carries `aria-controls`, because a dock has one panel and it
+  shows the active tab — pointing an unselected tab at it would send a screen
+  reader to another tab's content. The key-to-index arithmetic is
+  `panes/tabKeys.ts`, pure and tested; the DOM half reads the tablist's own
+  children, which already hold what a threaded index would have to reproduce.
+- **A browser pane refuses Veld's own UI.** `/ide` inside `/ide` is the first thing
+  anyone tries, and the reason to catch it is not the joke: a nested instance is a
+  second complete copy of this app against the *same* daemon — its own pane
+  registry, its own PTY session ids spending the 48-session cap, and the shared
+  worktree layout store and the shell's claim map written from a place no window
+  knows about. `isVeldOwnUi` matches `/` or `/ide` on **this document's origin or
+  `veld.localhost`**, deliberately not on any loopback host: previewing a dev server
+  on `localhost:3000` is the pane's whole job, and a project with its own `/ide`
+  route is not far-fetched. The refusal is `nested` on the pane's state rather than
+  an `error` (nothing failed) and it is read by `paneCovers`, which stays the single
+  decision about whether a view is hidden. No `WebContentsView` is created while refused —
+  creating the thing being refused in order to keep it hidden would mint the very
+  sessions this prevents. (The browser build does create its `<iframe>` element,
+  because a forced navigation assigns `src` to it, but leaves that `src` unset, so
+  it loads nothing either way.) and the screen offers both ways out: the system browser,
+  and loading it here anyway, which addresses the *refused* URL rather than whatever
+  the address bar currently holds.
 - **The panes poll through the app, not themselves.** `/api/shares` and
   `/api/stats` ride IDE mode's existing 5s tick, `allSettled` beside the two calls
   that decide the offline banner — a stats hiccup must keep the last values rather

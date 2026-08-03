@@ -32,7 +32,7 @@ import {
   deviceLayout,
   scaledRadius,
 } from "./devices";
-import { type BrowserProfile, normalizeBrowserUrl } from "./model";
+import { type BrowserProfile, isVeldOwnUi, normalizeBrowserUrl } from "./model";
 
 export type BrowserBackend = "electron" | "iframe";
 
@@ -63,6 +63,14 @@ export interface BrowserState {
   canGoForward: boolean;
   /** Why the pane is blank, when we know. */
   error: BrowserError | null;
+  /**
+   * The URL of Veld's own UI that this pane refused to open, or `null`.
+   *
+   * Not an `error`: nothing failed, and the pane offers a way through (see
+   * `isVeldOwnUi`). It is its own state because the screen it shows is its own —
+   * with a different set of actions from "try again".
+   */
+  nested: string | null;
   profile: BrowserProfile;
   /** Whether a page has ever committed in this view. Distinguishes "opening" —
    *  where a spinner is the honest thing to show — from "reloading", where the
@@ -363,6 +371,18 @@ function paneSurface(): string {
   return /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(token) ? token : "#ffffff";
 }
 
+/**
+ * This document's origin — what `isVeldOwnUi` compares against.
+ *
+ * Read at the call site rather than at module load so the test environment (no
+ * `location`) does not need one, and wrapped because `/ide` is served from both
+ * the daemon's raw port and the Caddy-fronted name: whichever one the app itself
+ * was loaded from is by definition a nested instance of it.
+ */
+function selfOrigin(): string {
+  return typeof location === "undefined" ? "" : location.origin;
+}
+
 /** A failure raised on this side of the bridge, in the same shape as one the
  *  shell reports, so the pane has exactly one error path to render. */
 function localError(text: string): BrowserError {
@@ -426,6 +446,10 @@ function covered(v: View): boolean {
  */
 export function paneCovers(state: BrowserState, fallbackUrl?: string): boolean {
   if (state.error) return true;
+  // A refused nested `/ide` shows a screen of its own, and there is no view
+  // behind it — this has to be here rather than beside the rendering, because
+  // this function is the single decision both sides read.
+  if (state.nested) return true;
   if (!state.url && !fallbackUrl) return true;
   return !state.loaded && state.loading;
 }
@@ -565,6 +589,7 @@ export function browserStatus(id: string): BrowserState {
       canGoBack: false,
       canGoForward: false,
       error: null,
+      nested: null,
       profile: "default",
       loaded: false,
       emulationScale: 1,
@@ -605,7 +630,12 @@ export interface BrowserViewOptions {
 }
 
 function ensure(id: string, options: BrowserViewOptions): View {
-  const { url, profile } = options;
+  const { profile } = options;
+  // A layout can carry a URL from before this guard existed, or from a pane that
+  // was forced through it, so the restore path is checked exactly like a
+  // navigation — before any view is created for it.
+  const url = options.url;
+  const nested = url && isVeldOwnUi(url, selfOrigin()) ? url : null;
   const existing = views.get(id);
   if (existing) {
     // A profile is a cookie jar, and a view is bound to one for life. Switching
@@ -633,10 +663,11 @@ function ensure(id: string, options: BrowserViewOptions): View {
     state: {
       url: url ?? "",
       title: "",
-      loading: Boolean(url),
+      loading: Boolean(url) && !nested,
       canGoBack: false,
       canGoForward: false,
       error: null,
+      nested,
       profile,
       loaded: false,
       emulationScale: 1,
@@ -671,7 +702,11 @@ function ensure(id: string, options: BrowserViewOptions): View {
   }
 
   if (desktop) {
-    void createShellView(v, url);
+    // Not created at all while refused: making the thing being refused, in order
+    // to keep it hidden, would mint the session ids this guard exists to prevent.
+    // A forced navigation creates it then, through the same path a failed create
+    // is retried by.
+    if (!nested) void createShellView(v, url);
   } else {
     const iframe = document.createElement("iframe");
     iframe.className = "browser-frame";
@@ -691,7 +726,9 @@ function ensure(id: string, options: BrowserViewOptions): View {
       if (iframe.src === "about:blank") return;
       patch(v, { loading: false, loaded: true });
     });
-    if (url) iframe.src = url;
+    // The element is created either way — a forced navigation assigns `src` to
+    // it, and an iframe with no `src` loads nothing.
+    if (url && !nested) iframe.src = url;
     // Inside the device frame, not the container: the frame is the screen, and it
     // is what clips the page to the device's rounded corners.
     frame.appendChild(iframe);
@@ -725,7 +762,20 @@ export function unmountBrowser(id: string): void {
   v.container.remove();
 }
 
-export function navigateBrowser(id: string, raw: string): string | null {
+/**
+ * Point a pane at a URL. Returns the normalized target, or `null` if the input
+ * was not an address — the caller records the target in the layout.
+ *
+ * `force` is the way past the nested-`/ide` guard, and the returned target is the
+ * same either way: a refused URL is still where the user asked to go, so the
+ * address bar and the layout keep it exactly as they do for a page that failed to
+ * load.
+ */
+export function navigateBrowser(
+  id: string,
+  raw: string,
+  opts: { force?: boolean } = {},
+): string | null {
   const v = views.get(id);
   if (!v) return null;
   const url = normalizeBrowserUrl(raw);
@@ -733,7 +783,12 @@ export function navigateBrowser(id: string, raw: string): string | null {
     patch(v, { error: localError(`Not an http(s) address: ${raw.trim()}`) });
     return null;
   }
-  patch(v, { url, loading: true, error: null });
+  if (!opts.force && isVeldOwnUi(url, selfOrigin())) {
+    patch(v, { url, nested: url, loading: false, error: null });
+    applyVisibility(v);
+    return url;
+  }
+  patch(v, { url, loading: true, error: null, nested: null });
   applyVisibility(v);
   if (desktop) {
     void (async () => {
@@ -761,6 +816,9 @@ export function browserCommand(id: string, command: "back" | "forward" | "stop")
 export function reloadBrowser(id: string): void {
   const v = views.get(id);
   if (!v) return;
+  // A refused pane has nothing to reload, and the retry path below would create
+  // the view for the URL that was refused — the one thing this must not do.
+  if (v.state.nested) return;
   // `loading` only if there is something to load. A blank pane has no navigation
   // to clear the flag, so an unconditional `true` left a live spinner and an
   // enabled Stop over the URL launcher — a state a freshly opened blank pane
