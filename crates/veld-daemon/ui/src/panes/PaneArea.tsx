@@ -81,17 +81,20 @@ import {
   activateTab,
   activeTab,
   addTab,
+  addTabToFocused,
   browserTab,
   closeTab,
   diagTab,
   dockOf,
   dockVisible,
   focusDock,
+  insertTab,
   moveTab,
   moveTabToOtherDock,
   newPaneTab,
   newTabId,
   paneTabLabel,
+  parseTransferTabs,
   replaceTab,
   setRatio,
   splitWithTab,
@@ -146,6 +149,23 @@ function endTabDrag(): void {
   if (!tabDragSuspended) return;
   tabDragSuspended = false;
   popBrowserSuspend();
+}
+
+/**
+ * The same gesture, announced to the shell so it reaches the *other* windows.
+ *
+ * They have no drag events of their own — a drag never leaves the document it
+ * started in — so without this they keep their native views painting over any
+ * overlay, and never learn the pointer is above them. The shell broadcasts the
+ * start and then carries the cursor to whichever window it is over.
+ */
+function beginTabDragEverywhere(): void {
+  beginTabDrag();
+  void desktopWindow?.dragBegin().catch(() => {});
+}
+function endTabDragEverywhere(): void {
+  endTabDrag();
+  void desktopWindow?.dragEnd().catch(() => {});
 }
 
 /**
@@ -208,7 +228,7 @@ export function PaneArea(props: {
   const areaRef = useRef<HTMLDivElement>(null);
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
   /** Where the tab currently being dragged would land, or `null`. */
-  const [dropZone, setDropZone] = useState<DropZone | null>(null);
+  const [localDropZone, setDropZone] = useState<DropZone | null>(null);
   /**
    * Whether the pointer has left the window with a tab in hand.
    *
@@ -237,6 +257,58 @@ export function PaneArea(props: {
     setDragOutside(v);
   };
 
+  /**
+   * Where a tab being dragged **from another window** would land here.
+   *
+   * A drag never leaves the document it began in, so this window sees no
+   * `dragover` at all — the shell forwards the cursor instead
+   * (`onDragOver`), and this is that position resolved into the same answer a
+   * local drag would have produced. Rendered by the same indicators and applied
+   * by the same functions, so a drop from another window is not a second
+   * behaviour to learn.
+   */
+  const [remote, setRemote] = useState<
+    { at: { dock: DockIndex; tabId: string; after: boolean } } | { zone: DropZone } | null
+  >(null);
+  const remoteRef = useRef(remote);
+  remoteRef.current = remote;
+
+  /**
+   * Resolve a forwarded cursor into a drop target, by asking the document what
+   * is under it.
+   *
+   * `elementFromPoint` rather than arithmetic over the layout: the tab strip
+   * scrolls, tabs are variable width, and the docks are sized by a ratio the
+   * splitter moves. The DOM already knows all of that, and a second model of it
+   * here would be a second thing to keep in step.
+   */
+  const resolveRemote = (x: number, y: number) => {
+    const area = areaRef.current;
+    const el = document.elementFromPoint(x, y);
+    if (!area || !el || !area.contains(el)) {
+      setRemote(null);
+      return;
+    }
+    const dockEl = el.closest<HTMLElement>("[data-dock]");
+    const dock = (dockEl ? Number(dockEl.dataset.dock) : 0) as DockIndex;
+
+    const tabEl = el.closest<HTMLElement>("[data-tab-id]");
+    if (tabEl?.dataset.tabId) {
+      const box = tabEl.getBoundingClientRect();
+      setRemote({
+        at: { dock, tabId: tabEl.dataset.tabId, after: x > box.left + box.width / 2 },
+      });
+      return;
+    }
+    // The strip itself, past the last tab: append to that dock. Same rule the
+    // local drop already uses, and the reason the strip is a target at all.
+    if (el.closest(".pane-tabs")) {
+      setRemote({ zone: { where: "into", dock } });
+      return;
+    }
+    setRemote({ zone: zoneAt(area.getBoundingClientRect(), x, dock) });
+  };
+
   // Same backstop as the per-dock indicator below: a committed layout retires
   // every preview, however the gesture that produced it ended. **Including the
   // outside-the-window hint** — a drag-out that *works* removes the tab, which
@@ -247,6 +319,73 @@ export function PaneArea(props: {
     setDropZone(null);
     setOutside(false);
   }, [layout]);
+
+  /**
+   * A tab drag anywhere in the app.
+   *
+   * **Every** window freezes its embedded browser views for the duration, not
+   * just the one the drag started in. A `WebContentsView` is a native sibling of
+   * the page and paints over all DOM regardless of z-index, so a drop overlay
+   * under one is simply invisible — and the window being dragged *onto* is
+   * exactly the one that needs to show an overlay and has no drag events of its
+   * own to trigger the freeze. Same mechanism `onSplitterDown` uses locally.
+   */
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (!shell) return;
+    const offBegin = shell.onDragBegin(() => beginTabDrag());
+    const offEnd = shell.onDragEnd(() => {
+      endTabDrag();
+      setRemote(null);
+    });
+    const offOver = shell.onDragOver(({ x, y }) => resolveRemote(x, y));
+    const offOut = shell.onDragOut(() => setRemote(null));
+    return () => {
+      offBegin();
+      offEnd();
+      offOver();
+      offOut();
+      endTabDrag();
+    };
+  }, []);
+
+  /**
+   * Tabs dropped here from another window — placed where the preview said.
+   *
+   * The same three outcomes a local drop has, applied by the same functions:
+   * into a dock's strip at a caret, appended to a dock, or split to an edge.
+   * Split reuses `splitWithTab` by inserting first and moving second, so the
+   * one-dock case (where "make this the left pane" has no dock index) stays in
+   * one place.
+   */
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (!shell) return;
+    return shell.onDropHere(({ tabs }) => {
+      const parsed = parseTransferTabs(tabs);
+      if (parsed.length === 0) return;
+      const where = remoteRef.current;
+      setRemote(null);
+      onLayout((prev) => {
+        let next = prev;
+        for (const tab of parsed) {
+          if (where && "at" in where) {
+            const dock = where.at.dock;
+            const idx = next.docks[dock].tabs.findIndex((t) => t.id === where.at.tabId);
+            next = insertTab(next, dock, tab, idx < 0 ? undefined : idx + (where.at.after ? 1 : 0));
+          } else if (where && where.zone.where === "into") {
+            next = insertTab(next, where.zone.dock, tab);
+          } else if (where) {
+            next = insertTab(next, 0, tab);
+            next = splitWithTab(next, tab.id, where.zone.where === "left" ? 0 : 1);
+          } else {
+            next = addTabToFocused(next, tab);
+          }
+        }
+        return next;
+      });
+    });
+  }, [onLayout]);
 
   /** Re-entering the window puts the split preview back in charge. */
   const onAreaDragOver = (e: React.DragEvent) => {
@@ -372,7 +511,7 @@ export function PaneArea(props: {
     const id = e.dataTransfer.getData(TAB_MIME);
     const area = areaRef.current?.getBoundingClientRect();
     setDropZone(null);
-    endTabDrag();
+    endTabDragEverywhere();
     if (!id || !area) return;
     e.preventDefault();
     const zone = zoneAt(area, e.clientX, dock);
@@ -391,6 +530,10 @@ export function PaneArea(props: {
    * and a `getBoundingClientRect` per `dragover` is a read per pointer move.
    */
   const dropPreview = (): React.CSSProperties | null => {
+    // A drag from another window has no `dragover` here, so its position comes
+    // from `remote` — but it is the same kind of answer and gets the same
+    // picture. One preview, two sources.
+    const dropZone = localDropZone ?? (remote && "zone" in remote ? remote.zone : null);
     if (!dropZone) return null;
     const pct = (n: number) => `${n * 100}%`;
     // Left and right are only a 50/50 split when there is one dock and the drop
@@ -555,6 +698,11 @@ export function PaneArea(props: {
               onDetach={desktopWindow ? detachTabs : undefined}
               onDropOut={desktopWindow ? dropOutTabs : undefined}
               wasOutside={() => dragOutsideRef.current}
+              // The caret a drag from *another* window would insert at. Same
+              // indicator as a local drag's, because it is the same answer.
+              remoteAt={
+                remote && "at" in remote && remote.at.dock === index ? remote.at : null
+              }
               onBodyDragOver={onBodyDragOver}
               onBodyDrop={onBodyDrop}
               onClearZone={() => {
@@ -607,6 +755,8 @@ function DockView(props: {
   /** Whether the pointer was outside the window when the drag ended. Read at
    *  `dragend`, so it cannot come from a closed-over render. */
   wasOutside: () => boolean;
+  /** Where a drag from another window would insert in *this* dock's strip. */
+  remoteAt: { tabId: string; after: boolean } | null;
   onBodyDragOver: (e: React.DragEvent, dock: DockIndex) => void;
   onBodyDrop: (e: React.DragEvent, dock: DockIndex) => void;
   onClearZone: () => void;
@@ -656,7 +806,7 @@ function DockView(props: {
     props.onClearZone();
     // Here as well as in `onDragEnd`: a drop that moves a tab to another dock
     // unmounts the element the drag started on, and `dragend` never reaches it.
-    endTabDrag();
+    endTabDragEverywhere();
     if (!id) return;
     e.preventDefault();
     onLayout(moveTab(layout, id, index, at));
@@ -748,6 +898,11 @@ function DockView(props: {
       // where the *next* tab would open, not where focus actually is. Hanging a
       // focus style off a class driven by that field is the trap to avoid.
       className="dock"
+      // Read by `resolveRemote`, which hit-tests a cursor forwarded from
+      // another window's drag with `elementFromPoint` — the DOM already knows
+      // the scroll offsets, tab widths and split ratio that answer would
+      // otherwise have to be re-derived from.
+      data-dock={index}
       style={{ width: props.width }}
       onFocus={() => onLayout(focusDock(layout, index))}
       aria-label={index === 0 ? "Primary pane" : "Secondary pane"}
@@ -780,14 +935,26 @@ function DockView(props: {
             label={paneTabLabel(layout, tab)}
             icon={tabIcon(tab)}
             selected={tab.id === dock.activeId}
-            drop={dropAt?.id === tab.id ? (dropAt.after ? "after" : "before") : null}
+            // Local drag first, then one forwarded from another window — the
+            // two cannot both be live, and they draw the same caret.
+            drop={
+              dropAt?.id === tab.id
+                ? dropAt.after
+                  ? "after"
+                  : "before"
+                : props.remoteAt?.tabId === tab.id
+                  ? props.remoteAt.after
+                    ? "after"
+                    : "before"
+                  : null
+            }
             onSelect={() => onLayout(activateTab(layout, tab.id))}
             onClose={() => onLayout(closeTab(layout, tab.id))}
             onMove={() => onLayout(moveTabToOtherDock(layout, tab.id))}
             onMenu={(e) => tabMenu(tab)(e)}
             canMove={dock.tabs.length > 1}
             canDetach={props.onDetach !== undefined}
-            onDragStartTab={beginTabDrag}
+            onDragStartTab={beginTabDragEverywhere}
             onDragOverTab={(after) => {
               props.onClearZone();
               setDropAt({ id: tab.id, after });
@@ -810,7 +977,7 @@ function DockView(props: {
               const outside = props.wasOutside();
               setDropAt(null);
               props.onClearZone();
-              endTabDrag();
+              endTabDragEverywhere();
               // Released while the pointer was outside this window. **Not
               // `dropEffect`, and not coordinates** — see `dragOutsideRef`: the
               // OS routes drag events by stacking order, so `dragleave` is the
@@ -1164,6 +1331,8 @@ function TabButton(props: {
       // Presentational: the accessible tab is the button inside, so this wrapper
       // must not sit between the tablist and it as an unlabelled group.
       role="presentation"
+      // See `data-dock`: this is how a forwarded cursor finds the tab it is over.
+      data-tab-id={props.tab.id}
       className={[
         "pane-tab",
         props.selected ? "sel" : "",

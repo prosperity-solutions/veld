@@ -302,6 +302,33 @@ export function addTab(layout: PaneLayout, index: DockIndex, tab: PaneTab): Pane
   return { ...layout, docks, focused: index };
 }
 
+/**
+ * Add a tab at a position, rather than at the end.
+ *
+ * `addTab` appends, which is right for a tab this window created. A tab
+ * *arriving from another window* has a position: the caret the target was
+ * showing while the pointer hovered its strip. Without this, a cross-window drop
+ * could only land at the end — the same drop inside one window honours where you
+ * aimed, and a gesture that means two different things depending on which window
+ * you release over is the confusion this whole model exists to remove.
+ */
+export function insertTab(
+  layout: PaneLayout,
+  index: DockIndex,
+  tab: PaneTab,
+  at?: number,
+): PaneLayout {
+  if (hasTab(layout, tab.id)) return activateTab(layout, tab.id);
+  const docks: [Dock, Dock] = [layout.docks[0], layout.docks[1]];
+  const tabs = docks[index].tabs;
+  const pos = Math.max(0, Math.min(at ?? tabs.length, tabs.length));
+  docks[index] = {
+    tabs: [...tabs.slice(0, pos), tab, ...tabs.slice(pos)],
+    activeId: tab.id,
+  };
+  return { ...layout, docks, focused: index };
+}
+
 /** Add a tab to whichever dock last had focus. */
 export function addTabToFocused(layout: PaneLayout, tab: PaneTab): PaneLayout {
   return addTab(layout, layout.focused, tab);

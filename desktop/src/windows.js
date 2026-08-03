@@ -152,6 +152,85 @@ function yieldWorktree(worktreeId, keeper) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Cross-window tab drags
+// ---------------------------------------------------------------------------
+
+/**
+ * A tab drag in flight, and the pointer it is following.
+ *
+ * **Drag events never leave the document they started in.** The window being
+ * dragged *onto* is not told a drag exists, which is why — before this — it kept
+ * its native views painting over any overlay, showed no insertion indicator, and
+ * could only ever append a dropped tab at the end. Those were three faces of one
+ * fact, not three bugs.
+ *
+ * So the shell carries the pointer across. It broadcasts the start (every window
+ * freezes its browser views, because a `WebContentsView` paints over all DOM and
+ * an overlay under one is invisible), then polls the cursor and hands it to
+ * whichever window is under it, in *that window's* content coordinates. The
+ * target then runs its ordinary drop code: same edge zones, same tab caret, same
+ * preview. On release it commits what it was already showing.
+ *
+ * Polling rather than forwarding events, because the source stops receiving them
+ * the moment the pointer leaves it — that is the whole problem. `browserViews.js`
+ * forwards pointers window-wide for the same reason during a pane resize; this
+ * is that idea one level up.
+ */
+let drag = null;
+const DRAG_POLL_MS = 16;
+
+function beginDrag(sourceId) {
+  endDrag();
+  drag = { sourceId, overId: null, timer: null };
+  for (const r of allRecords()) {
+    if (!r.win.isDestroyed()) r.win.webContents.send("veld:window:drag-begin");
+  }
+  drag.timer = setInterval(pollDrag, DRAG_POLL_MS);
+}
+
+function pollDrag() {
+  if (!drag) return;
+  const point = screen.getCursorScreenPoint();
+  const over = allRecords().find((r) => {
+    if (r.win.isDestroyed()) return false;
+    const b = r.win.getBounds();
+    return (
+      point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height
+    );
+  });
+  // Only the window *under* the cursor hears about it, and only it. The source
+  // is included: while the pointer is back over it, its own DOM drag events are
+  // doing the job and a forwarded position would fight them, so it is told the
+  // pointer left instead.
+  const overId = over && over.id !== drag.sourceId ? over.id : null;
+  if (drag.overId !== null && drag.overId !== overId) {
+    const previous = allRecords().find((r) => r.id === drag.overId);
+    if (previous && !previous.win.isDestroyed()) {
+      previous.win.webContents.send("veld:window:drag-out");
+    }
+  }
+  drag.overId = overId;
+  if (!over || overId === null) return;
+  // Screen → that window's content coordinates, which is what its DOM works in.
+  const area = over.win.getContentBounds();
+  over.win.webContents.send("veld:window:drag-over", {
+    x: point.x - area.x,
+    y: point.y - area.y,
+  });
+}
+
+function endDrag() {
+  if (!drag) return;
+  clearInterval(drag.timer);
+  const over = drag.overId;
+  drag = null;
+  for (const r of allRecords()) {
+    if (!r.win.isDestroyed()) r.win.webContents.send("veld:window:drag-end");
+  }
+  return over;
+}
+
 /** The live record showing `worktreeId`, or `null`. */
 function claimHolder(worktreeId) {
   const id = claims.get(worktreeId);
@@ -823,6 +902,22 @@ function registerWindowIpc(ipcMain) {
    * check is what keeps the gesture predictable: dropping panes into a window
    * showing something else would file them under a worktree it is not looking at.
    */
+  /** A tab drag started here. Every window freezes its views; the cursor starts
+   *  being carried to whichever one it is over. */
+  ipcMain.handle("veld:window:drag-begin", (event) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return false;
+    beginDrag(record.id);
+    return true;
+  });
+
+  /** …and ended, however it ended. Idempotent: `drop-out` ends it too. */
+  ipcMain.handle("veld:window:drag-end", (event) => {
+    if (!senderWindow(event)) return false;
+    endDrag();
+    return true;
+  });
+
   ipcMain.handle("veld:window:drop-out", (event, payload) => {
     const from = senderWindow(event);
     const fromRecord = recordFor(from);
@@ -833,61 +928,33 @@ function registerWindowIpc(ipcMain) {
       return { moved: false, opened: false, reason: "invalid" };
     }
 
-    // The caller has already established that the pointer left *its* window —
-    // it is the only party that can, because drag events are routed by the OS
-    // and therefore know the stacking order. Geometry cannot: two Veld windows
-    // overlap, so a point inside the one on top is inside the one beneath it
-    // too, and testing the source's bounds here rejected every drop onto a
-    // window sitting over it.
-    const point = screen.getCursorScreenPoint();
-    const within = (record) => {
-      const b = record.win.getBounds();
-      return (
-        point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height
-      );
-    };
-
-    const target = allRecords().find((r) => {
-      if (r.id === fromRecord.id || r.win.isDestroyed()) return false;
-      // A window this worktree's panes belong in: the one *showing* it, or a
-      // detached window that is already a dock for it. Detached windows never
-      // claim — they are satellites of their origin's claim — so matching on
-      // the claim alone made them impossible to drop onto, which is the whole
-      // "drag a second pane into the detached window" gesture.
-      // `worktreeId` on a *main* window records what it was opened for, not
-      // what it is showing now, so only a detached window — which never
-      // changes worktree — may be matched that way.
-      const owns =
-        claims.get(worktreeId) === r.id ||
-        (r.kind === "detached" && r.worktreeId === worktreeId);
-      return owns && within(r);
-    });
-
-    // TEMPORARY (remove before the PR): this gesture has been diagnosed wrong
-    // three times from symptoms alone. One line in the terminal running the app
-    // says whether the IPC even arrived, where the OS thinks the cursor was,
-    // and which windows were candidates.
-    console.error(
-      "[veld] drop-out",
-      JSON.stringify({
-        from: fromRecord.id,
-        fromKind: fromRecord.kind,
-        worktreeId,
-        point,
-        target: target?.id ?? null,
-        windows: allRecords().map((r) => ({
-          id: r.id,
-          kind: r.kind,
-          worktreeId: r.worktreeId ?? null,
-          claims: claims.get(worktreeId) === r.id,
-          bounds: r.win.isDestroyed() ? null : r.win.getBounds(),
-        })),
-      }),
-    );
+    // Which window the pointer was over is what the poll has been tracking all
+    // along, not a bounds test taken here. Two Veld windows overlap, so a point
+    // inside the one on top is inside the one beneath it too — the poll pairs
+    // the OS cursor with the renderer's own "the pointer left me", and between
+    // them they respect a stacking order geometry alone cannot see.
+    const overId = endDrag() ?? null;
+    const over = overId === null ? null : allRecords().find((r) => r.id === overId);
+    // A window this worktree's panes belong in: the one *showing* it, or a
+    // detached window that is already a dock for it. Detached windows never
+    // claim — they are satellites of their origin's claim — so matching on the
+    // claim alone made them impossible to drop onto. And `worktreeId` on a
+    // *main* window records what it was opened for rather than what it shows
+    // now, so only a detached one may be matched that way.
+    const owns =
+      over &&
+      !over.win.isDestroyed() &&
+      over.id !== fromRecord.id &&
+      (claims.get(worktreeId) === over.id ||
+        (over.kind === "detached" && over.worktreeId === worktreeId));
+    const target = owns ? over : undefined;
 
     if (target) {
-      target.pendingAdopt.push({ worktreeId, tabs });
-      target.win.webContents.send("veld:window:adopt");
+      // `drop-here`, not the hand-back queue: the target has been previewing a
+      // *position* — an edge to split at, or a place in its tab strip — and
+      // that is where these belong. The queue exists for a closing window's
+      // tabs, which have no pointer behind them and can only be appended.
+      target.win.webContents.send("veld:window:drop-here", { worktreeId, tabs });
       if (target.win.isMinimized()) target.win.restore();
       target.win.show();
       target.win.focus();

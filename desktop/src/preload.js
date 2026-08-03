@@ -97,6 +97,23 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Let go of one worktree's panes — another window is taking it. Release,
      *  never close: the shells keep running for whoever attaches next. */
     onYieldWorktree: (fn) => on("veld:window:yield", fn),
+    /** A tab drag started here. Every window freezes its embedded browser views
+     *  (they paint over all DOM, so an overlay under one is invisible) and the
+     *  shell starts carrying the cursor to whichever window it is over. */
+    dragBegin: () => ipcRenderer.invoke("veld:window:drag-begin"),
+    /** …and ended. Idempotent; `dropOut` ends it too. */
+    dragEnd: () => ipcRenderer.invoke("veld:window:drag-end"),
+    /** A tab drag began *somewhere* — freeze this window's views for it. */
+    onDragBegin: (fn) => on("veld:window:drag-begin", fn),
+    onDragEnd: (fn) => on("veld:window:drag-end", fn),
+    /** The cursor is over this window, in its own content coordinates. Only the
+     *  window under it hears this, and never the one the drag started in — that
+     *  one has real drag events of its own. */
+    onDragOver: (fn) => on("veld:window:drag-over", fn),
+    /** …and has left again. */
+    onDragOut: (fn) => on("veld:window:drag-out", fn),
+    /** Tabs dropped on this window, to be placed where it was previewing. */
+    onDropHere: (fn) => on("veld:window:drop-here", fn),
     /** A tab released outside this window, at a point in *screen* coordinates.
      *  The shell decides whether that lands on another Veld window (move the
      *  tabs there) or on nothing (open a new window) — the page cannot see

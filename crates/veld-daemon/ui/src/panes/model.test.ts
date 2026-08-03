@@ -28,6 +28,7 @@ import {
   findTab,
   focusDock,
   hasTab,
+  insertTab,
   lastBlankBrowserId,
   moveTab,
   moveTabToOtherDock,
@@ -1368,6 +1369,59 @@ describe("splitWithTab", () => {
   it("ignores an id that is not in the layout", () => {
     const layout = oneDock("a", "b");
     expect(splitWithTab(layout, "ghost", 1)).toBe(layout);
+  });
+});
+
+describe("insertTab", () => {
+  const tab = (id: string): PaneTab => ({ id, kind: "new", title: id });
+  const three = () => {
+    let l: PaneLayout = {
+      docks: [
+        { tabs: [tab("a")], activeId: "a" },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+    l = insertTab(l, 0, tab("b"));
+    l = insertTab(l, 0, tab("c"));
+    return l;
+  };
+
+  it("places a tab where the caret was, not at the end", () => {
+    // What makes a cross-window drop honour where you aimed. `addTab` appends,
+    // which is right for a tab this window created and wrong for one arriving
+    // from another with a position behind it.
+    const l = insertTab(three(), 0, tab("x"), 1);
+    expect(l.docks[0].tabs.map((t) => t.id)).toEqual(["a", "x", "b", "c"]);
+    expect(l.docks[0].activeId).toBe("x");
+    expect(l.focused).toBe(0);
+  });
+
+  it("appends with no index, and clamps a nonsense one", () => {
+    expect(insertTab(three(), 0, tab("x")).docks[0].tabs.map((t) => t.id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "x",
+    ]);
+    expect(insertTab(three(), 0, tab("x"), 99).docks[0].tabs.at(-1)?.id).toBe("x");
+    expect(insertTab(three(), 0, tab("x"), -5).docks[0].tabs[0].id).toBe("x");
+  });
+
+  it("opens the second dock", () => {
+    const l = insertTab(three(), 1, tab("x"));
+    expect(l.docks[1].tabs.map((t) => t.id)).toEqual(["x"]);
+    expect(l.focused).toBe(1);
+  });
+
+  it("activates rather than duplicating an id it already holds", () => {
+    // Two tabs on one id would fight over one shell — the same rule `addTab`
+    // enforces, and now reachable from a second window too.
+    const l = three();
+    const again = insertTab(l, 1, tab("b"), 0);
+    expect(allTabs(again).filter((t) => t.id === "b")).toHaveLength(1);
+    expect(again.docks[1].tabs).toEqual([]);
   });
 });
 

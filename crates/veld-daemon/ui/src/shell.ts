@@ -97,6 +97,20 @@ export interface DesktopWindowApi {
     ratio: number;
     tabs: unknown[];
   }): Promise<{ opened: boolean; reason?: string | null; accepted?: string[] }>;
+  /** A tab drag started in this window. */
+  dragBegin(): Promise<boolean>;
+  dragEnd(): Promise<boolean>;
+  /** A tab drag began in *some* window — freeze this one's browser views, or a
+   *  drop overlay under a native view would be invisible. */
+  onDragBegin(fn: () => void): () => void;
+  onDragEnd(fn: () => void): () => void;
+  /** The cursor, in this window's content coordinates, while a drag started
+   *  elsewhere is over it. Drag events never cross a window, so this is the
+   *  only way a target can render its own drop preview. */
+  onDragOver(fn: (p: { x: number; y: number }) => void): () => void;
+  onDragOut(fn: () => void): () => void;
+  /** Tabs dropped here — place them where the preview said. */
+  onDropHere(fn: (p: TabTransfer) => void): () => void;
   /** A tab released outside this window. The shell resolves the screen point
    *  against every window it owns: onto one showing this worktree, the tabs
    *  move there; onto nothing, a new window opens. */
