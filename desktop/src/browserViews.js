@@ -672,10 +672,13 @@ let permissionStore = {};
  * or clearing a session, would be undone by the very next write.
  *
  * So deletions are recorded rather than inferred. `revoked` holds
- * `partition\0origin\0id` for a single permission set back to Default;
- * `clearedPartitions` holds a whole session that was signed out. Both are undone
- * by a later answer for the same key, or the panel would be unable to re-grant
- * something in the same session it revoked.
+ * `partition\0origin\0id` for a single permission set back to Default and is
+ * undone by a later answer for that key. `clearedPartitions` holds a whole
+ * session that was signed out and is **never** undone: it means "ignore the
+ * file's pre-clear contents for this partition", so re-granting inside a cleared
+ * session works without removing the marker — which matters because
+ * `persistPermissions` swallows write failures, and a marker dropped before its
+ * write landed would let every signed-out grant merge back.
  */
 const revoked = new Set();
 const clearedPartitions = new Set();
@@ -695,7 +698,10 @@ function recordAnswer(partition, origin, id, verdict) {
   permissionStore = permissions.setAnswer(permissionStore, partition, origin, id, verdict);
   if (verdict === "allow" || verdict === "deny") {
     revoked.delete(permissions.revocationKey(partition, key, id));
-    clearedPartitions.delete(partition);
+    // `clearedPartitions` is deliberately *not* cleared here. It no longer means
+    // "delete this partition" — `mergeForWrite` reads it as "ignore the file's
+    // pre-clear contents for it" — so a later answer is preserved on its own
+    // merits, and the marker can safely outlive a write that failed.
   } else {
     revoked.add(permissions.revocationKey(partition, key, id));
   }

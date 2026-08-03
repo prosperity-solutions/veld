@@ -464,8 +464,16 @@ fn parse_origin(raw: &str) -> Result<OriginPattern, String> {
     let last_label = host.rsplit('.').next().unwrap_or("");
     let numeric_last_label = !last_label.is_empty()
         && (last_label.chars().all(|c| c.is_ascii_digit())
-            || last_label.starts_with("0x")
-            || last_label.starts_with("0X"));
+            // `0x` alone does not make a label a number — the URL spec requires
+            // the remainder to be hex digits. `0xy` and `foo.0xy` are ordinary
+            // hostnames that browsers keep verbatim, and refusing them told the
+            // author to "write four decimal octets" about a name that is not an
+            // address at all.
+            || matches!(
+                last_label.get(..2).map(str::to_ascii_lowercase).as_deref(),
+                Some("0x")
+            ) && last_label.len() > 2
+                && last_label[2..].chars().all(|c| c.is_ascii_hexdigit()));
     if numeric_last_label
         && host.parse::<std::net::Ipv4Addr>().map(|ip| ip.to_string()) != Ok(host.clone())
     {

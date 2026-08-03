@@ -471,14 +471,29 @@ function mergeForWrite(onDisk, inMemory, { revoked = [], cleared = [] } = {}) {
       merged[partition][origin] = { ...(onDisk[partition]?.[origin] ?? {}), ...ids };
     }
   }
-  for (const partition of cleared) delete merged[partition];
+  // A cleared session keeps only what *this* process has recorded since — the
+  // file's pre-clear contents are dropped rather than the whole partition being
+  // deleted. Deleting it meant the marker had to survive until the write landed,
+  // and `persistPermissions` swallows write failures: a failed clear followed by
+  // any later answer would merge every signed-out grant back. Fail-open, on the
+  // one operation whose entire purpose is deletion.
+  for (const partition of cleared) {
+    merged[partition] = { ...(inMemory[partition] ?? {}) };
+    if (Object.keys(merged[partition]).length === 0) delete merged[partition];
+  }
   for (const key of revoked) {
     const [partition, origin, id] = key.split("\u0000");
-    const ids = merged[partition]?.[origin];
-    if (!ids) continue;
+    if (!merged[partition]?.[origin]) continue;
+    // Copied before deleting: the spreads above are shallow, so without this the
+    // `delete` reaches through into the caller's `onDisk` and silently corrupts
+    // it. Harmless while the caller re-parses the file every time, and a trap for
+    // the first person who caches that read.
+    const ids = { ...merged[partition][origin] };
     delete ids[id];
+    merged[partition] = { ...merged[partition] };
     if (Object.keys(ids).length === 0) delete merged[partition][origin];
-    if (merged[partition] && Object.keys(merged[partition]).length === 0) delete merged[partition];
+    else merged[partition][origin] = ids;
+    if (Object.keys(merged[partition]).length === 0) delete merged[partition];
   }
   return merged;
 }
