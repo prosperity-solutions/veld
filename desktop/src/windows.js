@@ -464,25 +464,48 @@ async function loadAppWhenReady(win, url) {
 function detachBounds(originWin) {
   const size = { width: 1000, height: 700 };
   const from = originWin && !originWin.isDestroyed() ? originWin.getNormalBounds() : null;
-  // The origin window's display, not the cursor's, whenever there is an origin:
-  // the offset below is computed from that window's position, and clamping it
-  // into a *different* display's work area jams the new window against an edge.
-  // The cursor is only the fallback, and it has to be — on Wayland
-  // `getCursorScreenPoint` reports 0,0, which would send every detach to the
-  // primary display.
-  const display = from
-    ? screen.getDisplayMatching(from)
-    : screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const cursor = screen.getCursorScreenPoint();
+  // Exactly 0,0 is treated as "no idea": it is a legal cursor position and also
+  // what Wayland reports when it will not say, and being wrong about a real
+  // top-left corner costs an offset window, while trusting Wayland's 0,0 would
+  // send every detach to the primary display.
+  const known = cursor.x !== 0 || cursor.y !== 0;
+  const display = known
+    ? screen.getDisplayNearestPoint(cursor)
+    : from
+      ? screen.getDisplayMatching(from)
+      : screen.getPrimaryDisplay();
   const area = display.workArea;
-  const x = from ? from.x + 48 : area.x + Math.round((area.width - size.width) / 2);
-  const y = from ? from.y + 48 : area.y + Math.round((area.height - size.height) / 2);
+
+  // **Where you dropped it**, on the display you dropped it on — which for this
+  // gesture is the whole point: dragging a pane to a second monitor and having
+  // the window appear back on the first is the one outcome that makes it
+  // useless. The pointer lands just inside the new window's tab strip, the way
+  // a tab torn out of a browser does, so the thing you were dragging is under
+  // the cursor when it arrives rather than somewhere else on screen.
+  //
+  // Placing it by the *origin* window was the previous rule, and it was right
+  // only while there was no trustworthy drop point to use instead.
+  const x = known ? cursor.x - GRAB_X : from ? from.x + 48 : area.x + (area.width - size.width) / 2;
+  const y = known ? cursor.y - GRAB_Y : from ? from.y + 48 : area.y + (area.height - size.height) / 2;
+
+  const width = Math.min(size.width, area.width);
+  const height = Math.min(size.height, area.height);
   return {
-    width: Math.min(size.width, area.width),
-    height: Math.min(size.height, area.height),
-    x: Math.max(area.x, Math.min(x, area.x + area.width - Math.min(size.width, area.width))),
-    y: Math.max(area.y, Math.min(y, area.y + area.height - Math.min(size.height, area.height))),
+    width,
+    height,
+    // Clamped to the work area of the display it is going to, so the title bar
+    // can never land off-screen — which on macOS is unrecoverable without the
+    // Window menu.
+    x: Math.round(Math.max(area.x, Math.min(x, area.x + area.width - width))),
+    y: Math.round(Math.max(area.y, Math.min(y, area.y + area.height - height))),
   };
 }
+
+/** Where the pointer sits inside a freshly detached window: just inside its tab
+ *  strip, so the pane you dragged is under the cursor when the window appears. */
+const GRAB_X = 90;
+const GRAB_Y = 18;
 
 /** The suffixes currently spoken for, including the bare base as `null`. */
 function takenSuffixes() {
