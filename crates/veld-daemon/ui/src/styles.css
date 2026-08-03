@@ -608,22 +608,35 @@ select:focus {
   color: var(--text);
 }
 
+/* The insertion caret.
+ *
+ * 3px, rounded, standing proud of the tab, with a glow. It was a flush 2px hair
+ * and it read as a border rather than a target — hardest to see at exactly the
+ * two positions that are hardest to hit, the start and end of the strip, where
+ * it sits against the strip's own edge. The glow is what makes it register at a
+ * glance while the eye is on the tab being dragged, not on the strip. */
 .pane-tab.drop-before::before,
 .pane-tab.drop-after::after {
   content: "";
   position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
+  top: -3px;
+  bottom: -3px;
+  width: 3px;
+  border-radius: 2px;
   background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent),
+    0 0 8px color-mix(in oklab, var(--accent) 70%, transparent);
+  /* Above the neighbouring tab, so the caret is never half-hidden behind the
+     tab it sits against. */
+  z-index: 2;
 }
 
 .pane-tab.drop-before::before {
-  left: -1px;
+  left: -2px;
 }
 
 .pane-tab.drop-after::after {
-  right: -1px;
+  right: -2px;
 }
 
 .pane-tab.dragging {

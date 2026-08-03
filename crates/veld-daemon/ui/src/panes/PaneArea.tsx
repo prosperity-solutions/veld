@@ -119,6 +119,32 @@ type RemoteTarget =
   | { at: { dock: DockIndex; tabId: string; after: boolean } }
   | { zone: DropZone }
   | null;
+
+/**
+ * The caret a pointer at `x` means, anywhere in a tab strip.
+ *
+ * Measured against the tabs' own midpoints rather than asking which element is
+ * under the pointer, because a strip is not only tabs: it has padding, a
+ * scroller, a `+` button and a flex spacer, and the gaps between those are
+ * exactly where the *first* and *last* positions live. Hit-testing the element
+ * meant the left edge of the first tab resolved to "somewhere in the strip" and
+ * fell through to appending — so index 0 was reachable only by landing inside
+ * the first tab's left half, and missing it silently sent the pane to the end.
+ *
+ * `null` only for a strip with no tabs at all, where there is no caret to draw
+ * and appending is the whole answer.
+ */
+function caretAt(strip: Element, x: number): { tabId: string; after: boolean } | null {
+  let last: { tabId: string; after: boolean } | null = null;
+  for (const el of strip.querySelectorAll<HTMLElement>("[data-tab-id]")) {
+    const id = el.dataset.tabId;
+    if (!id) continue;
+    const box = el.getBoundingClientRect();
+    if (x < box.left + box.width / 2) return { tabId: id, after: false };
+    last = { tabId: id, after: true };
+  }
+  return last;
+}
 import {
   focusTerminal,
   mountTerminal,
@@ -314,18 +340,13 @@ export function PaneArea(props: {
     const dockEl = el.closest<HTMLElement>("[data-dock]");
     const dock = (dockEl ? Number(dockEl.dataset.dock) : 0) as DockIndex;
 
-    const tabEl = el.closest<HTMLElement>("[data-tab-id]");
-    if (tabEl?.dataset.tabId) {
-      const box = tabEl.getBoundingClientRect();
-      setRemoteTarget({
-        at: { dock, tabId: tabEl.dataset.tabId, after: x > box.left + box.width / 2 },
-      });
-      return;
-    }
-    // The strip itself, past the last tab: append to that dock. Same rule the
-    // local drop already uses, and the reason the strip is a target at all.
-    if (el.closest(".pane-tabs")) {
-      setRemoteTarget({ zone: { where: "into", dock } });
+    // Anywhere in the strip resolves to a caret — over a tab, over the padding
+    // beside it, or past the last one. See `caretAt` for why the element under
+    // the pointer is the wrong question to ask here.
+    const strip = el.closest(".pane-tabs");
+    if (strip) {
+      const at = caretAt(strip, x);
+      setRemoteTarget(at ? { at: { dock, ...at } } : { zone: { where: "into", dock } });
       return;
     }
     setRemoteTarget({ zone: zoneAt(area.getBoundingClientRect(), x, dock) });
@@ -939,8 +960,12 @@ function DockView(props: {
     >
       <div
         className="pane-tabs"
-        // Dropping on the empty part of the strip appends to this dock, which
-        // is the only way to move a tab into a dock that has none.
+        // The **whole strip** resolves to a caret, not just the tabs in it: the
+        // padding either side of them is exactly where the first and last
+        // positions are aimed at, and treating it as "append" made index 0
+        // reachable only by hitting the first tab's left half. Also the only way
+        // to move a tab into a dock that has none, where there is no caret and
+        // appending is the answer.
         onDragOver={(e) => {
           if (!e.dataTransfer.types.includes(TAB_MIME)) return;
           e.preventDefault();
@@ -948,8 +973,24 @@ function DockView(props: {
           // the strip has to retract the body's preview — otherwise a drag that
           // crossed the body leaves a highlighted region behind it.
           props.onClearZone();
+          const at = caretAt(e.currentTarget, e.clientX);
+          setDropAt(at ? { id: at.tabId, after: at.after } : null);
         }}
-        onDrop={(e) => dropTab(e)}
+        onDrop={(e) => {
+          const at = caretAt(e.currentTarget, e.clientX);
+          if (!at) {
+            dropTab(e);
+            return;
+          }
+          const dragged = e.dataTransfer.getData(TAB_MIME);
+          const target = dock.tabs.findIndex((t) => t.id === at.tabId);
+          const from = dock.tabs.findIndex((t) => t.id === dragged);
+          // `moveTab` counts the destination *after* the tab is removed, which
+          // is what a caret between two tabs means — so a move within this dock
+          // from the left shifts everything after it down by one.
+          const removedBefore = from >= 0 && from < target;
+          dropTab(e, target + (at.after ? 1 : 0) - (removedBefore ? 1 : 0));
+        }}
       >
         {/* Only the tabs scroll. The `+` sits outside this box so it survives a
             strip full of tabs, and `role="tablist"` lives on the scroller rather
