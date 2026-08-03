@@ -863,6 +863,28 @@ function registerWindowIpc(ipcMain) {
       return owns && within(r);
     });
 
+    // TEMPORARY (remove before the PR): this gesture has been diagnosed wrong
+    // three times from symptoms alone. One line in the terminal running the app
+    // says whether the IPC even arrived, where the OS thinks the cursor was,
+    // and which windows were candidates.
+    console.error(
+      "[veld] drop-out",
+      JSON.stringify({
+        from: fromRecord.id,
+        fromKind: fromRecord.kind,
+        worktreeId,
+        point,
+        target: target?.id ?? null,
+        windows: allRecords().map((r) => ({
+          id: r.id,
+          kind: r.kind,
+          worktreeId: r.worktreeId ?? null,
+          claims: claims.get(worktreeId) === r.id,
+          bounds: r.win.isDestroyed() ? null : r.win.getBounds(),
+        })),
+      }),
+    );
+
     if (target) {
       target.pendingAdopt.push({ worktreeId, tabs });
       target.win.webContents.send("veld:window:adopt");

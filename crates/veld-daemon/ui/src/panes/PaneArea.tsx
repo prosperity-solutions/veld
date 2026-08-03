@@ -803,6 +803,11 @@ function DockView(props: {
               dropTab(e, at + (after ? 1 : 0) - (removedBefore ? 1 : 0));
             }}
             onDragEndTab={() => {
+              // **Read before clearing.** `onClearZone` resets the same flag,
+              // synchronously, so asking after it always answered "inside" and
+              // no drag ever left the window — including the plain detach that
+              // worked before this became the trigger.
+              const outside = props.wasOutside();
               setDropAt(null);
               props.onClearZone();
               endTabDrag();
@@ -811,7 +816,7 @@ function DockView(props: {
               // OS routes drag events by stacking order, so `dragleave` is the
               // one signal that knows two Veld windows overlap. Where it landed
               // is then the shell's to resolve.
-              if (props.onDropOut && props.wasOutside()) props.onDropOut([tab]);
+              if (props.onDropOut && outside) props.onDropOut([tab]);
             }}
           />
         ))}
