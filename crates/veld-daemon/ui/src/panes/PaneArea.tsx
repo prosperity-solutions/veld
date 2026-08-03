@@ -219,6 +219,23 @@ export function PaneArea(props: {
    * `dragleave` with no `relatedTarget`.
    */
   const [dragOutside, setDragOutside] = useState(false);
+  /**
+   * The same fact, readable from `dragend`.
+   *
+   * `dragend` fires from a handler closed over an older render, so the state
+   * above is not reliable there — and this is the *only* trustworthy answer to
+   * "did the pointer leave this window", which is what decides whether a
+   * released tab is going anywhere. Geometry cannot answer it: two Veld windows
+   * overlap, so a point can be inside both, and `dragend`'s own coordinates are
+   * not the release point (see the `veld:window:drop-out` handler). Drag events
+   * are routed by the OS, which is the only party that knows the stacking order
+   * — so `dragleave` is the answer, and this carries it.
+   */
+  const dragOutsideRef = useRef(false);
+  const setOutside = (v: boolean) => {
+    dragOutsideRef.current = v;
+    setDragOutside(v);
+  };
 
   // Same backstop as the per-dock indicator below: a committed layout retires
   // every preview, however the gesture that produced it ended. **Including the
@@ -228,13 +245,13 @@ export function PaneArea(props: {
   // biome-ignore lint/correctness/useExhaustiveDependencies: see `dropAt`.
   useEffect(() => {
     setDropZone(null);
-    setDragOutside(false);
+    setOutside(false);
   }, [layout]);
 
   /** Re-entering the window puts the split preview back in charge. */
   const onAreaDragOver = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes(TAB_MIME)) return;
-    if (dragOutside) setDragOutside(false);
+    if (dragOutsideRef.current) setOutside(false);
   };
 
   /**
@@ -244,7 +261,7 @@ export function PaneArea(props: {
   const onAreaDragLeave = (e: React.DragEvent) => {
     if (!e.dataTransfer.types.includes(TAB_MIME)) return;
     if (e.relatedTarget !== null) return;
-    setDragOutside(true);
+    setOutside(true);
     setDropZone(null);
   };
 
@@ -281,9 +298,6 @@ export function PaneArea(props: {
         ratio: layout.ratio,
         tabs,
       });
-      // Released back over this window — a fumbled drag. Silent on purpose:
-      // nothing was asked for, so nothing is reported.
-      if (result?.reason === "inside") return;
       if (!result?.moved && !result?.opened) {
         notifyError(
           "Couldn't move that pane",
@@ -540,11 +554,12 @@ export function PaneArea(props: {
               runCtx={props.runCtx}
               onDetach={desktopWindow ? detachTabs : undefined}
               onDropOut={desktopWindow ? dropOutTabs : undefined}
+              wasOutside={() => dragOutsideRef.current}
               onBodyDragOver={onBodyDragOver}
               onBodyDrop={onBodyDrop}
               onClearZone={() => {
                 setDropZone(null);
-                setDragOutside(false);
+                setOutside(false);
               }}
             />
           </Fragment>
@@ -587,9 +602,11 @@ function DockView(props: {
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
   onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
-  /** Released without being accepted — the shell decides where that lands,
-   *  including whether it was outside this window at all. */
+  /** Released outside this window — the shell decides where that lands. */
   onDropOut: ((tabs: PaneTab[]) => void) | undefined;
+  /** Whether the pointer was outside the window when the drag ended. Read at
+   *  `dragend`, so it cannot come from a closed-over render. */
+  wasOutside: () => boolean;
   onBodyDragOver: (e: React.DragEvent, dock: DockIndex) => void;
   onBodyDrop: (e: React.DragEvent, dock: DockIndex) => void;
   onClearZone: () => void;
@@ -785,18 +802,16 @@ function DockView(props: {
                 sameDock && dock.tabs.findIndex((t) => t.id === dragged) < at;
               dropTab(e, at + (after ? 1 : 0) - (removedBefore ? 1 : 0));
             }}
-            onDragEndTab={(e) => {
+            onDragEndTab={() => {
               setDropAt(null);
               props.onClearZone();
               endTabDrag();
-              // Released without any target accepting it. Whether that was
-              // outside the window at all — and if so, over what — is the
-              // shell's to answer: a drag never crosses a window boundary, and
-              // `dragend`'s own coordinates cannot be trusted to say where the
-              // pointer was (see the `veld:window:drop-out` handler).
-              if (props.onDropOut && e.dataTransfer.dropEffect === "none") {
-                props.onDropOut([tab]);
-              }
+              // Released while the pointer was outside this window. **Not
+              // `dropEffect`, and not coordinates** — see `dragOutsideRef`: the
+              // OS routes drag events by stacking order, so `dragleave` is the
+              // one signal that knows two Veld windows overlap. Where it landed
+              // is then the shell's to resolve.
+              if (props.onDropOut && props.wasOutside()) props.onDropOut([tab]);
             }}
           />
         ))}
@@ -1120,7 +1135,7 @@ function TabButton(props: {
   onDragStartTab: () => void;
   onDragOverTab: (after: boolean) => void;
   onDropTab: (e: React.DragEvent, after: boolean) => void;
-  onDragEndTab: (e: React.DragEvent) => void;
+  onDragEndTab: () => void;
 }) {
   const [dragging, setDragging] = useState(false);
   const box = useRef<HTMLSpanElement>(null);
@@ -1159,9 +1174,9 @@ function TabButton(props: {
         setDragging(true);
         props.onDragStartTab();
       }}
-      onDragEnd={(e) => {
+      onDragEnd={() => {
         setDragging(false);
-        props.onDragEndTab(e);
+        props.onDragEndTab();
       }}
       onDragOver={(e) => {
         if (!e.dataTransfer.types.includes(TAB_MIME)) return;

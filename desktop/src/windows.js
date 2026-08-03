@@ -833,6 +833,12 @@ function registerWindowIpc(ipcMain) {
       return { moved: false, opened: false, reason: "invalid" };
     }
 
+    // The caller has already established that the pointer left *its* window —
+    // it is the only party that can, because drag events are routed by the OS
+    // and therefore know the stacking order. Geometry cannot: two Veld windows
+    // overlap, so a point inside the one on top is inside the one beneath it
+    // too, and testing the source's bounds here rejected every drop onto a
+    // window sitting over it.
     const point = screen.getCursorScreenPoint();
     const within = (record) => {
       const b = record.win.getBounds();
@@ -840,20 +846,21 @@ function registerWindowIpc(ipcMain) {
         point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height
       );
     };
-    // Released back over the window it came from: a fumbled drag, not a
-    // request for anything. The renderer cannot tell this apart either, since
-    // `dropEffect` is "none" for a drop on any non-target.
-    if (!from.isDestroyed() && within(fromRecord)) {
-      return { moved: false, opened: false, reason: "inside" };
-    }
 
     const target = allRecords().find((r) => {
       if (r.id === fromRecord.id || r.win.isDestroyed()) return false;
-      // Only a window that is showing this worktree. Its panes belong with the
-      // rest of that worktree's, not filed behind whatever the window happens
-      // to be looking at.
-      if (claims.get(worktreeId) !== r.id) return false;
-      return within(r);
+      // A window this worktree's panes belong in: the one *showing* it, or a
+      // detached window that is already a dock for it. Detached windows never
+      // claim — they are satellites of their origin's claim — so matching on
+      // the claim alone made them impossible to drop onto, which is the whole
+      // "drag a second pane into the detached window" gesture.
+      // `worktreeId` on a *main* window records what it was opened for, not
+      // what it is showing now, so only a detached window — which never
+      // changes worktree — may be matched that way.
+      const owns =
+        claims.get(worktreeId) === r.id ||
+        (r.kind === "detached" && r.worktreeId === worktreeId);
+      return owns && within(r);
     });
 
     if (target) {
