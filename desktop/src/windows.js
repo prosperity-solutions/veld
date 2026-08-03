@@ -34,9 +34,13 @@ const {
   canOpenAnother,
   handBackTarget,
   nextSuffix,
+  othersHolding,
   parseWindowList,
+  releaseClaims: releaseClaimsIn,
+  releaseHolds: releaseHoldsIn,
   restoreBudget,
   safeBounds,
+  setHolds: setHoldsIn,
   serializeWindowList,
   slotFor,
 } = require("./windowState");
@@ -117,26 +121,6 @@ const claims = new Map();
  */
 const holders = new Map();
 
-function setHolds(recordId, worktreeIds) {
-  for (const [worktreeId, set] of [...holders]) {
-    if (worktreeIds.includes(worktreeId)) continue;
-    set.delete(recordId);
-    if (set.size === 0) holders.delete(worktreeId);
-  }
-  for (const worktreeId of worktreeIds) {
-    const set = holders.get(worktreeId) ?? new Set();
-    set.add(recordId);
-    holders.set(worktreeId, set);
-  }
-}
-
-function releaseHolds(recordId) {
-  for (const [worktreeId, set] of [...holders]) {
-    set.delete(recordId);
-    if (set.size === 0) holders.delete(worktreeId);
-  }
-}
-
 /**
  * Tell every window except `keeper` to let go of `worktreeId`.
  *
@@ -146,9 +130,9 @@ function releaseHolds(recordId) {
  * the one worktree being claimed, so a window's other panes are untouched.
  */
 function yieldWorktree(worktreeId, keeper) {
+  const ids = othersHolding(holders, worktreeId, keeper);
   for (const record of allRecords()) {
-    if (record.id === keeper || record.win.isDestroyed()) continue;
-    if (!holders.get(worktreeId)?.has(record.id)) continue;
+    if (record.win.isDestroyed() || !ids.includes(record.id)) continue;
     record.win.webContents.send("veld:window:yield", { worktreeId });
   }
 }
@@ -210,6 +194,11 @@ const pendingDrops = new Map();
 let nextDropId = 1;
 const DROP_ACK_MS = 2000;
 
+/** How many worktrees one window may claim to hold. A window holds the ones it
+ *  has visited, so this is generous; it exists so the map cannot grow without
+ *  bound on a renderer's say-so. */
+const MAX_HELD_WORKTREES = 256;
+
 function beginDrag(sourceId) {
   endDrag();
   lastOverId = null;
@@ -223,8 +212,15 @@ function beginDrag(sourceId) {
 function pollDrag() {
   if (!drag) return;
   const point = screen.getCursorScreenPoint();
+  // Bounds, and only bounds — Electron exposes no stacking order, so with two
+  // *non-source* windows overlapping under the cursor this picks whichever was
+  // created first rather than the one on top. Minimized and hidden windows are
+  // excluded because their bounds are still their restore bounds, and a window
+  // you cannot see swallowing the drop is the worst version of the ambiguity.
+  // The remaining case — two visible windows overlapping at the pointer — is a
+  // known limit rather than a solved problem.
   const over = allRecords().find((r) => {
-    if (r.win.isDestroyed()) return false;
+    if (r.win.isDestroyed() || r.win.isMinimized() || !r.win.isVisible()) return false;
     const b = r.win.getBounds();
     return (
       point.x >= b.x && point.x <= b.x + b.width && point.y >= b.y && point.y <= b.y + b.height
@@ -273,12 +269,6 @@ function claimHolder(worktreeId) {
   return holder;
 }
 
-/** Drop every claim held by a record — on close, and whenever it moves. */
-function releaseClaims(recordId) {
-  for (const [worktreeId, id] of [...claims]) {
-    if (id === recordId) claims.delete(worktreeId);
-  }
-}
 
 /** @type {null | {
  *   baseUrl: string,
@@ -651,10 +641,20 @@ function openWindow(options = {}) {
     handBack(record);
   });
   win.on("closed", () => {
-    releaseClaims(record.id);
-    releaseHolds(record.id);
+    // Otherwise the 16ms poll runs forever against a dead source, every other
+    // window stays view-frozen with no visible cause, and they keep rendering
+    // drop carets for a gesture that ended.
+    if (drag?.sourceId === record.id) endDrag();
+    releaseClaimsIn(claims, record.id);
+    releaseHoldsIn(holders, record.id);
     windows.delete(win.id);
     persistWindows();
+  });
+
+  // A window opened while a drag is in flight is polled and asked to resolve a
+  // target like any other, so it has to freeze its views like any other.
+  if (drag) win.webContents.on("did-finish-load", () => {
+    if (!win.isDestroyed() && drag) win.webContents.send("veld:window:drag-begin");
   });
 
   void loadAppWhenReady(win, url).catch((err) => {
@@ -895,16 +895,22 @@ function registerWindowIpc(ipcMain) {
 
     const holder = claimHolder(worktreeId);
     if (holder && holder.id !== record.id) {
-      if (holder.win.isMinimized()) holder.win.restore();
-      holder.win.show();
-      holder.win.focus();
+      // Only a *deliberate* pick raises the other window. A window working out
+      // what it may display asks about several worktrees in a row, and having
+      // each refusal yank a different window forward would be a window manager
+      // fighting the user over a question they did not ask.
+      if (payload?.focusHolder !== false) {
+        if (holder.win.isMinimized()) holder.win.restore();
+        holder.win.show();
+        holder.win.focus();
+      }
       return { ok: false, reason: "shown-elsewhere" };
     }
     // One *displayed* worktree per window. Releasing the old claim does not
     // make this window let go of that worktree's panes — it keeps them mounted
     // so switching back is instant, and only lets go when somebody else claims
     // that one.
-    releaseClaims(record.id);
+    releaseClaimsIn(claims, record.id);
     claims.set(worktreeId, record.id);
     // Which is now. Any other window still holding this worktree's panes has to
     // let go before this one attaches, or the two would trade its shells.
@@ -922,10 +928,12 @@ function registerWindowIpc(ipcMain) {
   ipcMain.handle("veld:window:holds", (event, payload) => {
     const record = recordFor(senderWindow(event));
     if (!record || record.kind !== "main") return false;
+    // Bounded like every other payload crossing this boundary — a renderer
+    // reporting an unbounded list would grow `holders` without limit.
     const ids = Array.isArray(payload?.worktreeIds)
-      ? payload.worktreeIds.map(safeWorktreeId).filter((id) => id !== null)
+      ? payload.worktreeIds.slice(0, MAX_HELD_WORKTREES).map(safeWorktreeId).filter((id) => id !== null)
       : [];
-    setHolds(record.id, ids);
+    setHoldsIn(holders, record.id, ids);
     return true;
   });
 
@@ -965,11 +973,15 @@ function registerWindowIpc(ipcMain) {
    */
   /** The receiving window reporting which tabs it actually placed. */
   ipcMain.handle("veld:window:drop-applied", (event, payload) => {
-    if (!senderWindow(event)) return false;
-    const settle = pendingDrops.get(payload?.dropId);
-    if (!settle) return false;
+    const record = recordFor(senderWindow(event));
+    const pending = record ? pendingDrops.get(payload?.dropId) : undefined;
+    // Bound to the window the drop was *sent* to. Ids are sequential from 1, so
+    // without this any renderer could settle another window's drop with an
+    // invented list — and the source would release tabs nobody placed, which is
+    // the vanished-pane outcome this protocol exists to prevent.
+    if (!pending || pending.targetId !== record.id) return false;
     pendingDrops.delete(payload.dropId);
-    settle(Array.isArray(payload?.accepted) ? payload.accepted.filter(isViewId) : []);
+    pending.settle(Array.isArray(payload?.accepted) ? payload.accepted.filter(isViewId) : []);
     return true;
   });
 
@@ -984,10 +996,10 @@ function registerWindowIpc(ipcMain) {
     }
 
     // Which window the pointer was over is what the poll has been tracking all
-    // along, not a bounds test taken here. Two Veld windows overlap, so a point
-    // inside the one on top is inside the one beneath it too — the poll pairs
-    // the OS cursor with the renderer's own "the pointer left me", and between
-    // them they respect a stacking order geometry alone cannot see.
+    // along, not a bounds test taken here. The renderer's own "the pointer left
+    // me" (`dragleave`, routed by the OS) settles source-versus-target, which
+    // geometry cannot — a point inside the window on top is inside the one
+    // beneath it too. It does *not* settle target-versus-target; see `pollDrag`.
     endDrag();
     const over = lastOverId === null ? null : allRecords().find((r) => r.id === lastOverId);
     // A window this worktree's panes belong in: the one *showing* it, or a
@@ -1011,7 +1023,7 @@ function registerWindowIpc(ipcMain) {
       // tabs, which have no pointer behind them and can only be appended.
       const dropId = nextDropId++;
       const accepted = await new Promise((resolve) => {
-        pendingDrops.set(dropId, resolve);
+        pendingDrops.set(dropId, { targetId: target.id, settle: resolve });
         setTimeout(() => {
           if (pendingDrops.delete(dropId)) resolve([]);
         }, DROP_ACK_MS);

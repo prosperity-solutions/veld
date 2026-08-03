@@ -17,8 +17,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
-import { layoutSlot, windowRestored, windowSeed } from "../shell";
-import { loadLayouts, terminalIds } from "./model";
+import { chromeless, layoutSlot, windowSeed } from "../shell";
+import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
 
 /**
@@ -29,20 +29,29 @@ import { handleKeyEvent } from "./terminalKeys";
  * cannot: was this a brand-new terminal, or one whose shell we expected to still
  * be there? Without it, a lost shell is silently replaced by an empty prompt.
  *
- * Read through `loadLayouts`, i.e. the *same* source the app restores from —
- * including the durable per-slot store. Reading `sessionStorage` directly meant
- * the set was always empty in the case that matters most: after Veld Desktop
- * restarts there is no `sessionStorage`, so every tab was treated as brand new
- * and a reboot (or an expired grace, or a refused protocol version) handed the
- * user fresh prompts in "restored" tabs without a word.
+ * Read from the durable store this window restores from. Reading
+ * `sessionStorage` directly meant the set was always empty in the case that
+ * matters most: after Veld Desktop restarts there is no `sessionStorage`, so
+ * every tab was treated as brand new and a reboot (or an expired grace, or a
+ * refused protocol version) handed the user fresh prompts in "restored" tabs
+ * without a word.
  */
 const EXPECTED_RESUMES: Set<string> = (() => {
   try {
-    // `windowSeed` for the same reason: a window opened by detaching a terminal
-    // has neither store yet, so without it every transferred shell would be
-    // "brand new" — and a transfer that arrived to find its shell gone would say
-    // nothing at all, which is the one case this set exists to catch.
-    return new Set(Object.values(loadLayouts(layoutSlot, windowSeed, windowRestored)).flatMap(terminalIds));
+    // Read-only, and deliberately *not* through `loadLayouts`: "which shells
+    // might legitimately still be running" is a different question from "which
+    // panes does this window own", and a main window owns only what it displays
+    // (see `readLayouts`). Answering the first with the second is what let a
+    // window stamp its boot snapshot over another window's worktree.
+    //
+    // `windowSeed` on top, for the same reason it exists: a window opened by
+    // detaching a terminal has no store yet, so without it every transferred
+    // shell would look brand new — and a transfer that arrived to find its shell
+    // gone would say nothing at all, which is the case this set exists to catch.
+    return new Set([
+      ...storedTerminalIds(layoutSlot, chromeless),
+      ...Object.values(parseLayouts(windowSeed)).flatMap(terminalIds),
+    ]);
   } catch {
     return new Set<string>();
   }

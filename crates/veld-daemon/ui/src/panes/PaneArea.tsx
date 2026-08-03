@@ -414,13 +414,26 @@ export function PaneArea(props: {
     if (!shell) return;
     return shell.onDropHere(({ dropId, tabs }) => {
       const parsed = parseTransferTabs(tabs);
-      // Acknowledge exactly what lands, and acknowledge *nothing* when nothing
-      // does: the source window is holding these open until this answers, and
-      // it keeps whatever this does not claim. Silence would strand them there,
-      // which is the safe direction — the alternative is a pane that vanishes
-      // with a live shell behind it.
-      void shell.dropApplied(dropId, parsed.map((t) => t.id)).catch(() => {});
-      if (parsed.length === 0) return;
+      if (parsed.length === 0) {
+        void shell.dropApplied(dropId, []).catch(() => {});
+        return;
+      }
+      // **Reserve before applying, and apply only if the reservation held.**
+      // The acknowledgement is what makes the source let go, so acking and
+      // inserting unconditionally left a window in which both happened: past
+      // the 2s deadline the source keeps its tabs *and* this window has already
+      // inserted them, so one tab id lives in two windows and both attach the
+      // same shell — the very outcome the protocol was added to prevent, with
+      // the failure moved rather than removed. Awaiting the answer makes the
+      // two decisions one.
+      void (async () => {
+        const held = await shell.dropApplied(dropId, parsed.map((t) => t.id)).catch(() => false);
+        if (!held) return;
+        applyDrop(parsed);
+      })();
+    });
+
+    function applyDrop(parsed: PaneTab[]) {
       const where = lastRemoteRef.current;
       setRemoteTarget(null);
       onLayout((prev) => {
@@ -441,7 +454,7 @@ export function PaneArea(props: {
         }
         return next;
       });
-    });
+    }
   }, [onLayout]);
 
   /** Re-entering the window puts the split preview back in charge. */

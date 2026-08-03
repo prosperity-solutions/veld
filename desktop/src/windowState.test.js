@@ -8,9 +8,13 @@ const {
   handBackTarget,
   isSuffix,
   nextSuffix,
+  othersHolding,
   parseWindowList,
   parseWindowRecord,
+  releaseClaims,
+  releaseHolds,
   restoreBudget,
+  setHolds,
   safeBounds,
   serializeWindowList,
   slotFor,
@@ -304,4 +308,64 @@ test("a serialized list round-trips through the parser", () => {
   ];
   const parsed = parseWindowList(serializeWindowList("", "main", records), "main");
   assert.deepEqual(parsed, records);
+});
+
+// ---------------------------------------------------------------------------
+// Worktree ownership
+// ---------------------------------------------------------------------------
+
+test("setHolds records exactly what a window holds, and nothing it dropped", () => {
+  const holders = new Map();
+  setHolds(holders, 1, [7, 9]);
+  setHolds(holders, 2, [9]);
+  assert.deepEqual([...holders.get(7)], [1]);
+  assert.deepEqual([...holders.get(9)].sort(), [1, 2]);
+
+  // A window reports its whole set each time, so a worktree it no longer holds
+  // has to disappear — otherwise it would keep being asked to yield panes it
+  // gave up long ago, and worse, keep being counted as a place they still are.
+  setHolds(holders, 1, [7]);
+  assert.deepEqual([...holders.get(9)], [2]);
+
+  // An emptied set is deleted rather than left as an empty husk, so
+  // `othersHolding` never has to distinguish "nobody" from "an empty entry".
+  setHolds(holders, 2, []);
+  assert.equal(holders.has(9), false);
+});
+
+test("othersHolding excludes the window that is claiming", () => {
+  const holders = new Map();
+  setHolds(holders, 1, [7]);
+  setHolds(holders, 2, [7]);
+  setHolds(holders, 3, [8]);
+  // The claimer must not be told to let go of what it is taking.
+  assert.deepEqual(othersHolding(holders, 7, 1), [2]);
+  assert.deepEqual(othersHolding(holders, 7, 2), [1]);
+  // Nobody else holds it, and nobody holds it at all — both are "no yields".
+  assert.deepEqual(othersHolding(holders, 8, 3), []);
+  assert.deepEqual(othersHolding(holders, 99, 1), []);
+});
+
+test("releaseHolds forgets a window entirely", () => {
+  const holders = new Map();
+  setHolds(holders, 1, [7, 8]);
+  setHolds(holders, 2, [8]);
+  releaseHolds(holders, 1);
+  assert.equal(holders.has(7), false, "a set with only the dead window goes");
+  assert.deepEqual([...holders.get(8)], [2], "a shared one keeps the survivor");
+});
+
+test("releaseClaims drops every claim a window held", () => {
+  // A window shows one worktree at a time, so taking a claim releases the old
+  // one through here — and closing releases all of them. A claim outliving its
+  // window would refuse every other window forever.
+  const claims = new Map([
+    [7, 1],
+    [8, 2],
+    [9, 1],
+  ]);
+  releaseClaims(claims, 1);
+  assert.deepEqual([...claims], [[8, 2]]);
+  releaseClaims(claims, 99);
+  assert.deepEqual([...claims], [[8, 2]], "an unknown window changes nothing");
 });

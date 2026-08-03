@@ -85,7 +85,12 @@ export interface DesktopWindowApi {
   /** Ask to show a worktree. `ok: false` with `reason: "shown-elsewhere"` means
    *  the shell focused the window that already has it, and this one should not
    *  switch — a worktree has one set of panes and one window showing them. */
-  claimWorktree(worktreeId: number): Promise<{ ok: boolean; reason?: string | null }>;
+  claimWorktree(
+    worktreeId: number,
+    /** Whether a refusal should raise the window that has it. False while a
+     *  window is working out what it may display — it asks about several. */
+    focusHolder?: boolean,
+  ): Promise<{ ok: boolean; reason?: string | null }>;
   /** Which worktrees this window holds the panes of. Reported so the shell can
    *  ask the right window to let go when another one claims a worktree. */
   holdsWorktrees(worktreeIds: number[]): Promise<boolean>;

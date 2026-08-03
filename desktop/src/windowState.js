@@ -209,6 +209,55 @@ function restoreBudget(stored) {
   return stored.some((e) => e.kind === "main") ? MAX_WINDOWS : MAX_WINDOWS - 1;
 }
 
+// ---------------------------------------------------------------------------
+// Worktree ownership
+// ---------------------------------------------------------------------------
+//
+// Two maps and the rules between them. `claims` is worktree → the one window
+// *showing* it; `holders` is worktree → every window still holding its panes,
+// which is a superset because a window keeps what it has visited so switching
+// back is instant rather than a reconnect. Pure bookkeeping, kept here rather
+// than in `windows.js`, because the failures are set arithmetic — a claim that
+// outlives its window, a holder never asked to let go — and `node --test` can
+// reach them here.
+
+/** Every window still holding `worktreeId` other than `keeper`: the ones that
+ *  have to let go before `keeper` may attach to its terminals. */
+function othersHolding(holders, worktreeId, keeper) {
+  return [...(holders.get(worktreeId) ?? [])].filter((id) => id !== keeper);
+}
+
+/** Record `recordId` as holding exactly `worktreeIds`, dropping whatever it held
+ *  before. Emptied sets are deleted rather than left as debris. */
+function setHolds(holders, recordId, worktreeIds) {
+  for (const [worktreeId, set] of [...holders]) {
+    if (worktreeIds.includes(worktreeId)) continue;
+    set.delete(recordId);
+    if (set.size === 0) holders.delete(worktreeId);
+  }
+  for (const worktreeId of worktreeIds) {
+    const set = holders.get(worktreeId) ?? new Set();
+    set.add(recordId);
+    holders.set(worktreeId, set);
+  }
+}
+
+/** Forget `recordId` entirely — its window is gone. */
+function releaseHolds(holders, recordId) {
+  for (const [worktreeId, set] of [...holders]) {
+    set.delete(recordId);
+    if (set.size === 0) holders.delete(worktreeId);
+  }
+}
+
+/** Drop every claim held by `recordId`. A window shows one worktree at a time,
+ *  so taking a new claim releases the old one through here too. */
+function releaseClaims(claims, recordId) {
+  for (const [worktreeId, id] of [...claims]) {
+    if (id === recordId) claims.delete(worktreeId);
+  }
+}
+
 /**
  * Merge this base's windows into whatever the file already holds.
  *
@@ -283,7 +332,11 @@ module.exports = {
   nextSuffix,
   canOpenAnother,
   handBackTarget,
+  othersHolding,
+  releaseClaims,
+  releaseHolds,
   restoreBudget,
+  setHolds,
   safeBounds,
   parseWindowRecord,
   parseWindowList,

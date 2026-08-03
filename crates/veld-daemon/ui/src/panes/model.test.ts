@@ -1119,14 +1119,13 @@ describe("layout slots", () => {
     expect(durable.map.size).toBe(0);
   });
 
-  it("restores from the slot store when the session store is empty", () => {
+  it("restores a *satellite* from the slot store when the session store is empty", () => {
     // The app restarted: a new window, so a new sessionStorage, but the holder
-    // processes kept the shells running and their ids are in here. The shell
-    // says so with the `restored` flag — a window that merely *inherited* this
-    // slot's number must not read it (see "only a reopened window reads the
-    // slot store" below).
-    const durable = fake({ [layoutSlotKey("main")]: serializeLayouts(layouts) });
-    expect(readLayouts(fake(), durable, "main", null, true)).toEqual(layouts);
+    // processes kept the shells running and their ids are in here. A main
+    // window picks its worktrees up one at a time instead — see "gives a main
+    // window nothing at boot" below.
+    const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(layouts);
   });
 
   it("prefers the session store, which is this window's own state", () => {
@@ -1160,8 +1159,20 @@ describe("layout slots", () => {
     // window showing them, and no hand-off protocol between them. What stops
     // *both* rendering it is the shell's claim, not this key.
     const durable = fake();
-    writeLayouts(fake(), durable, "main", layouts);
-    expect(readLayouts(fake(), durable, "main-w4")).toEqual(layouts);
+    writeLayouts(fake(), durable, "main", { 7: layout });
+    expect(worktreeLayoutFrom(durable, 7)).toEqual(layout);
+  });
+
+  it("gives a main window nothing at boot, whatever the store holds", () => {
+    // Ownership, not thrift. `writeLayouts` merges this window's `layouts` over
+    // what is on disk, so a window that booted holding every worktree stamped
+    // its boot snapshot back over each of them on every save — reverting
+    // worktrees another window had been editing since, and orphaning the panes
+    // added in the meantime. A window owns what it displays and picks the rest
+    // up one at a time through `worktreeLayoutFrom`.
+    const durable = fake({ [LAYOUT_WORKTREE_KEY]: serializeLayouts(layouts) });
+    expect(readLayouts(fake(), durable, "main")).toEqual({});
+    expect(readLayouts(fake(), durable, "main", null, true)).toEqual({});
   });
 
   it("reads one worktree's panes fresh, not from a boot snapshot", () => {
@@ -1233,7 +1244,7 @@ describe("layout slots", () => {
       // restored window is opened with a slot and no seed at all.
       const own = { 4: defaultLayout(0.8) };
       const durable = fake({ [layoutSlotKey("main-w2")]: serializeLayouts(own) });
-      expect(readLayouts(fake(), durable, "main-w2", null, true)).toEqual(own);
+      expect(readLayouts(fake(), durable, "main-w2", null, true, true)).toEqual(own);
     });
 
     it("goes through the same validation a restored layout does", () => {
@@ -1277,17 +1288,17 @@ describe("layout slots", () => {
       // gets the freed suffix, restored the dead layout naming that same tab
       // id, and stole the shell — leaving the origin on "connection lost",
       // which is the exact ping-pong slots exist to prevent.
-      expect(readLayouts(fake(), durable(), "main-w2", null, false)).toEqual({});
+      expect(readLayouts(fake(), durable(), "main-w2", null, false, true)).toEqual({});
     });
 
-    it("gives a reopened window its layout back", () => {
+    it("gives a reopened satellite its layout back", () => {
       // The other half, and the whole point of the durable store: shells that
       // outlived the app have to be reachable again.
-      expect(readLayouts(fake(), durable(), "main-w2", null, true)).toEqual(stored);
+      expect(readLayouts(fake(), durable(), "main-w2", null, true, true)).toEqual(stored);
     });
 
     it("defaults to not restoring, so a new caller cannot opt in by accident", () => {
-      expect(readLayouts(fake(), durable(), "main-w2")).toEqual({});
+      expect(readLayouts(fake(), durable(), "main-w2", null, undefined, true)).toEqual({});
     });
 
     it("does not gate the session store or the seed", () => {
@@ -1301,12 +1312,13 @@ describe("layout slots", () => {
           "main-w2",
           null,
           false,
+          true,
         ),
       ).toEqual(mine);
       const seeded = { 5: defaultLayout(0.25) };
-      expect(readLayouts(fake(), durable(), "main-w2", serializeLayouts(seeded), false)).toEqual(
-        seeded,
-      );
+      expect(
+        readLayouts(fake(), durable(), "main-w2", serializeLayouts(seeded), false, true),
+      ).toEqual(seeded);
     });
   });
 });

@@ -89,7 +89,8 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Ask to show a worktree. `{ok:false, reason:"shown-elsewhere"}` means
      *  another window has it and the shell just focused that window — the
      *  caller should stay where it is. */
-    claimWorktree: (worktreeId) => ipcRenderer.invoke("veld:window:claim", { worktreeId }),
+    claimWorktree: (worktreeId, focusHolder = true) =>
+      ipcRenderer.invoke("veld:window:claim", { worktreeId, focusHolder }),
     /** Which worktrees this window currently holds the panes of, so the shell
      *  knows who to ask to let go when another window claims one. */
     holdsWorktrees: (worktreeIds) =>

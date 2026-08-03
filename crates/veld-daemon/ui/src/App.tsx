@@ -866,6 +866,10 @@ function AppInner(props: {
   // shells reachable after an app update rather than merely alive. Read with a
   // lazy initialiser rather than in an effect: an empty first render would prune
   // every restored session before the restore landed.
+  /** Every worktree is shown by another window, so this one has nothing to
+   *  display that is its own. */
+  const [claimBlocked, setClaimBlocked] = useState(false);
+
   const [layouts, setLayouts] = useState<Record<number, PaneLayout>>(() =>
     loadLayouts(layoutSlot, windowSeed, windowRestored, chromeless),
   );
@@ -886,7 +890,7 @@ function AppInner(props: {
       // may have been using this worktree since, and its panes are the ones
       // that exist. Defaulting straight to a fresh layout here is precisely how
       // a second set would appear.
-      const existing = readWorktreeLayout(worktree.id, chromeless);
+      const existing = readWorktreeLayout(worktree.id, chromeless, layoutSlot);
       if (existing) return { ...prev, [worktree.id]: existing };
       const seed = Object.values(prev)[0]?.ratio ?? DEFAULT_RATIO;
       return { ...prev, [worktree.id]: defaultLayout(seed) };
@@ -946,9 +950,42 @@ function AppInner(props: {
    * claims nothing, and the second one is free to show the same worktree.
    */
   useEffect(() => {
-    if (chromeless || !desktopWindow || !worktree) return;
-    void desktopWindow.claimWorktree(worktree.id).catch(() => {});
-  }, [chromeless, worktree?.id]);
+    const shell = desktopWindow;
+    if (chromeless || !shell || !worktree) return;
+    let cancelled = false;
+    void (async () => {
+      const mine = await shell.claimWorktree(worktree.id, false).catch(() => null);
+      if (cancelled || mine?.ok !== false) return;
+      // **Refused, so this window must show something else.** Ignoring the
+      // answer here was the hole that made the whole ownership model a
+      // suggestion: `⌘N` opens on the last-selected worktree by design, which
+      // is the one the window you pressed it in is showing — so the claim was
+      // always refused, always ignored, and the new window rendered the same
+      // panes and took their shells. `selectWorktree` honoured the refusal
+      // because a click has somewhere to stay; a window opening has not.
+      for (const candidate of worktrees) {
+        if (candidate.id === worktree.id) continue;
+        const free = await shell.claimWorktree(candidate.id, false).catch(() => null);
+        if (cancelled) return;
+        if (free?.ok) {
+          setActiveRepoRoot(candidate.repo_root);
+          setActiveWtKey(String(candidate.id));
+          return;
+        }
+      }
+      // Every worktree in this repo is already on screen somewhere. Say so
+      // rather than showing a set of panes that belongs to another window.
+      if (!cancelled) setClaimBlocked(true);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chromeless, worktree?.id, worktrees]);
+
+  // Cleared as soon as this window is showing something it owns.
+  useEffect(() => {
+    if (claimBlocked) setClaimBlocked(false);
+  }, [worktree?.id]);
 
   // Accepts an updater as well as a value: two panes can report a change in the
   // same commit (two browser panes both finishing a navigation), and a value
@@ -1723,6 +1760,16 @@ function AppInner(props: {
         <div className="center-page">
           <Button size="md" onClick={() => setDialog({ kind: "import" })}>
             Import your first project
+          </Button>
+        </div>
+      ) : claimBlocked ? (
+        // Every worktree is already on screen in another window. Saying so beats
+        // the alternative this replaced — rendering a set of panes that belongs
+        // to a different window, and taking its shells on the way.
+        <div className="center-page">
+          <p>Every worktree is already open in another window.</p>
+          <Button size="md" variant="default" onClick={() => setDialog({ kind: "new-worktree" })}>
+            Create a worktree
           </Button>
         </div>
       ) : (

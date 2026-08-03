@@ -1006,11 +1006,21 @@ export function readLayouts(
   // second one. What keeps two windows off one shell is the claim in the shell,
   // not the storage key — see `LAYOUT_WORKTREE_KEY`.
   if (!satellite) {
-    const shared = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null);
-    if (Object.keys(shared).length > 0) return shared;
-    // One-time fallback to whatever this window's slot store still holds, so an
-    // app updating into the shared store does not orphan the terminals it had.
-    return restored && slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
+    // **Nothing.** A main window picks worktrees up one at a time, as it shows
+    // them (`readWorktreeLayout`, from the seeding effect in `App.tsx`), and
+    // must not boot holding the whole shared store.
+    //
+    // Loading all of it was the first version and it quietly corrupted the
+    // store: `writeLayouts` merges this window's `layouts` over what is on disk,
+    // so every worktree the window merely *booted with* got stamped back on
+    // every save — including ones another window had been editing for the last
+    // ten minutes. A yield only fires on a *later* claim, so a window opened
+    // after another claimed a worktree was never asked to let it go and reverted
+    // it forever. The panes added in the meantime were orphaned at the next
+    // launch, their session ids only ever having been in the store.
+    //
+    // Owning only what it displays is what makes the read-through merge true.
+    return {};
   }
   // A satellite keeps the per-slot store, and only when reopened onto its own
   // slot: a recycled slot's layout is a dead one that happens to share a number.
@@ -1068,18 +1078,49 @@ export function writeLayouts(
 export function worktreeLayoutFrom(
   durable: LayoutStorage | null,
   worktreeId: number,
+  slot: string | null = null,
 ): PaneLayout | null {
   if (!durable) return null;
-  return parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null)[worktreeId] ?? null;
+  const shared = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null)[worktreeId];
+  if (shared) return shared;
+  // Falls back to this window's own slot store, one worktree at a time, so an
+  // app updating into the shared store finds the panes it had rather than
+  // orphaning their shells. Narrow on purpose: taking the whole slot store would
+  // reintroduce the over-broad ownership the shared store exists to avoid.
+  return slot ? (parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null)[worktreeId] ?? null) : null;
 }
 
 /** `worktreeLayoutFrom` against the real store, tolerating it being unusable. */
-export function readWorktreeLayout(worktreeId: number, satellite = false): PaneLayout | null {
+export function readWorktreeLayout(
+  worktreeId: number,
+  satellite = false,
+  slot: string | null = null,
+): PaneLayout | null {
   if (satellite) return null;
   try {
-    return worktreeLayoutFrom(storages().durable, worktreeId);
+    return worktreeLayoutFrom(storages().durable, worktreeId, slot);
   } catch {
     return null;
+  }
+}
+
+/**
+ * Every terminal id the shared store knows about, for `EXPECTED_RESUMES`.
+ *
+ * Read-only and ownership-free, which is the distinction that matters: "which
+ * shells might legitimately still be running" is a different question from
+ * "which panes does this window hold", and answering the first by loading the
+ * second is what corrupted the store. Nothing is written back from this.
+ */
+export function storedTerminalIds(slot: string | null, satellite: boolean): string[] {
+  try {
+    const { durable } = storages();
+    if (!durable) return [];
+    const key = satellite ? (slot ? layoutSlotKey(slot) : null) : LAYOUT_WORKTREE_KEY;
+    if (!key) return [];
+    return Object.values(parseLayouts(durable.getItem(key) ?? null)).flatMap(terminalIds);
+  } catch {
+    return [];
   }
 }
 
