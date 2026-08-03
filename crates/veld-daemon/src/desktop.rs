@@ -71,6 +71,76 @@ async fn csrf_layer(
 }
 
 // ---------------------------------------------------------------------------
+// Process-global guards
+// ---------------------------------------------------------------------------
+
+/// A "one at a time, process-wide" gate.
+///
+/// Extracted from [`pick_directory`], where it was a function-local `static`
+/// plus an inline drop guard — correct, and untestable without opening a real
+/// modal dialog on somebody's screen. The release-on-drop half is the part worth
+/// pinning: every early return in that handler (a timeout, a backend failure,
+/// `?` on a serialization error) depends on it, and a leak there wedges the
+/// endpoint at 409 until the daemon restarts.
+struct SingleFlight(std::sync::atomic::AtomicBool);
+
+/// Held while a single-flight section runs; releases on drop.
+struct SingleFlightGuard<'a>(&'a SingleFlight);
+
+impl SingleFlight {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    /// `None` when somebody else is already inside.
+    fn try_enter(&self) -> Option<SingleFlightGuard<'_>> {
+        use std::sync::atomic::Ordering;
+        if self.0.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(SingleFlightGuard(self))
+        }
+    }
+}
+
+impl Drop for SingleFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.0.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// A debounce clock with the value the last real run produced.
+///
+/// Extracted from [`refresh_repos`] for the same reason as [`SingleFlight`]: it
+/// was a function-local `static` whose only exercise was a handler that spawns
+/// git. The memo is not an optimisation — it is what keeps concurrent clients
+/// *consistent*. Inside the window, a caller must be handed the previous run's
+/// answer rather than recomputing a weaker one (`is_dir` instead of a git
+/// reconcile), because the two disagree exactly when something is wrong.
+struct Debounce<T>(std::sync::Mutex<Option<(std::time::Instant, T)>>);
+
+impl<T: Clone> Debounce<T> {
+    const fn new() -> Self {
+        Self(std::sync::Mutex::new(None))
+    }
+
+    /// The last recorded value, if it was recorded within `window`.
+    fn fresh_within(&self, window: std::time::Duration) -> Option<T> {
+        let last = self.0.lock().expect("refresh debounce mutex poisoned");
+        match &*last {
+            Some((at, value)) if at.elapsed() < window => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    /// Start the window again, at `value`.
+    fn record(&self, value: T) {
+        *self.0.lock().expect("refresh debounce mutex poisoned") =
+            Some((std::time::Instant::now(), value));
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Native directory picker
 // ---------------------------------------------------------------------------
 
@@ -134,24 +204,17 @@ async fn run_picker(cmd: &str, args: &[&str]) -> Pick {
 /// permission denial).
 async fn pick_directory() -> Result<axum::response::Response, ApiError> {
     use axum::response::IntoResponse;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
     // Single-flight: dialogs are modal on the user's screen; N tabs (or a
-    // scripted loop) must not stack N of them.
-    static PICKER_OPEN: AtomicBool = AtomicBool::new(false);
-    if PICKER_OPEN.swap(true, Ordering::SeqCst) {
+    // scripted loop) must not stack N of them. The guard releases on drop, which
+    // is what covers every early return below.
+    static PICKER_OPEN: SingleFlight = SingleFlight::new();
+    let Some(_open) = PICKER_OPEN.try_enter() else {
         return Err(err(
             StatusCode::CONFLICT,
             "a directory picker is already open",
         ));
-    }
-    struct Reset;
-    impl Drop for Reset {
-        fn drop(&mut self) {
-            PICKER_OPEN.store(false, Ordering::SeqCst);
-        }
-    }
-    let _reset = Reset;
+    };
 
     // 10 minutes: the request intentionally blocks while the dialog is open.
     let picked = tokio::time::timeout(std::time::Duration::from_secs(600), async {
@@ -537,21 +600,14 @@ async fn list_repos() -> Result<Json<RepoList>, ApiError> {
 /// several clients polling concurrently don't multiply the git spawns.
 async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
     use std::collections::HashMap;
-    use std::sync::Mutex;
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
     /// Debounce clock + the availability each repo had at the last real sync.
     /// Memoizing availability keeps concurrent clients consistent: a non-due
     /// poll must not substitute a semantically-weaker check (is_dir) that can
     /// disagree with the due poll's git result during a failure.
-    static LAST_SYNC: Mutex<Option<(Instant, HashMap<String, bool>)>> = Mutex::new(None);
+    static LAST_SYNC: Debounce<HashMap<String, bool>> = Debounce::new();
 
-    let memo = {
-        let last = LAST_SYNC.lock().expect("refresh debounce mutex poisoned");
-        match &*last {
-            Some((t, memo)) if t.elapsed() < Duration::from_secs(2) => Some(memo.clone()),
-            _ => None,
-        }
-    };
+    let memo = LAST_SYNC.fresh_within(Duration::from_secs(2));
 
     let db = open_desktop_db()?;
     let mut repos = Vec::new();
@@ -568,8 +624,7 @@ async fn refresh_repos() -> Result<Json<RepoList>, ApiError> {
         repos.push(repo_view(&db, repo, available).await?);
     }
     if memo.is_none() {
-        *LAST_SYNC.lock().expect("refresh debounce mutex poisoned") =
-            Some((Instant::now(), availability));
+        LAST_SYNC.record(availability);
     }
     Ok(Json(RepoList { repos }))
 }
@@ -966,6 +1021,83 @@ async fn start_worktree_run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Process-global guards ----------------------------------------------
+
+    #[test]
+    fn single_flight_admits_one_and_releases_on_drop() {
+        let gate = SingleFlight::new();
+        let first = gate.try_enter().expect("nobody is inside yet");
+        assert!(
+            gate.try_enter().is_none(),
+            "a second entrant must be refused while the first holds it"
+        );
+        drop(first);
+        assert!(
+            gate.try_enter().is_some(),
+            "the gate must reopen when the guard drops"
+        );
+    }
+
+    #[test]
+    fn single_flight_releases_when_the_holder_unwinds() {
+        // The property the handler actually relies on: every early return — and a
+        // panic in a backend — has to leave the gate open, or the endpoint answers
+        // 409 forever. `catch_unwind` is the only way to assert that here.
+        let gate = SingleFlight::new();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _open = gate.try_enter().expect("free");
+            panic!("a picker backend blew up");
+        }));
+        assert!(result.is_err(), "the panic must not be swallowed");
+        assert!(
+            gate.try_enter().is_some(),
+            "unwinding past the guard must still release it"
+        );
+    }
+
+    #[test]
+    fn debounce_serves_the_memo_inside_the_window_and_nothing_outside_it() {
+        use std::time::Duration;
+        let debounce: Debounce<u32> = Debounce::new();
+        assert_eq!(
+            debounce.fresh_within(Duration::from_secs(60)),
+            None,
+            "nothing recorded yet is a miss, not a stale hit"
+        );
+
+        debounce.record(7);
+        assert_eq!(
+            debounce.fresh_within(Duration::from_secs(60)),
+            Some(7),
+            "a value recorded now is inside any real window"
+        );
+        // A zero window is "always due" — the same branch a two-second-old entry
+        // takes, without making the test sleep for it.
+        assert_eq!(debounce.fresh_within(Duration::ZERO), None);
+
+        debounce.record(9);
+        assert_eq!(
+            debounce.fresh_within(Duration::from_secs(60)),
+            Some(9),
+            "recording again replaces the memo and restarts the window"
+        );
+    }
+
+    #[test]
+    fn debounce_hands_every_caller_the_same_answer() {
+        // Why the memo exists: concurrent pollers inside one window must not each
+        // compute their own availability, because the cheap check and the git
+        // reconcile disagree exactly when a repo is in trouble.
+        use std::collections::HashMap;
+        use std::time::Duration;
+        let debounce: Debounce<HashMap<String, bool>> = Debounce::new();
+        debounce.record(HashMap::from([("/repo".to_string(), false)]));
+        let a = debounce.fresh_within(Duration::from_secs(60));
+        let b = debounce.fresh_within(Duration::from_secs(60));
+        assert_eq!(a, b);
+        assert_eq!(a.and_then(|m| m.get("/repo").copied()), Some(false));
+    }
 
     #[test]
     fn porcelain_parsing_marks_main_and_detached() {

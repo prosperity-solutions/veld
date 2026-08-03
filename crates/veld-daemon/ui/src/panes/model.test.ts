@@ -25,10 +25,12 @@ import {
   defaultLayout,
   diagTab,
   dockVisible,
+  dropWorktreeLayouts,
   findTab,
   focusDock,
   hasTab,
   insertTab,
+  isVeldOwnUi,
   lastBlankBrowserId,
   moveTab,
   moveTabToOtherDock,
@@ -611,6 +613,57 @@ describe("browser tabs", () => {
     expect(normalizeBrowserUrl("https://")).toBeNull();
   });
 
+  describe("isVeldOwnUi", () => {
+    const self = "http://127.0.0.1:19899";
+
+    it("catches this app's own two paths on the origin it was loaded from", () => {
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ide", self)).toBe(true);
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ide/", self)).toBe(true);
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ide?view=runs", self)).toBe(true);
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ide/anything", self)).toBe(true);
+      // `/` is the dashboard — the same non-use, and the one place a *click* could
+      // otherwise reach a nested `/ide` without passing through here.
+      expect(isVeldOwnUi("http://127.0.0.1:19899/", self)).toBe(true);
+      expect(isVeldOwnUi("http://127.0.0.1:19899", self)).toBe(true);
+    });
+
+    it("catches the Caddy-fronted name too, on any port", () => {
+      // The daemon is reachable two ways and the app only knows the one it was
+      // loaded from, so the other is matched by name.
+      expect(isVeldOwnUi("https://veld.localhost/ide", self)).toBe(true);
+      expect(isVeldOwnUi("https://veld.localhost:18443/ide", self)).toBe(true);
+      expect(isVeldOwnUi("https://veld.localhost/", self)).toBe(true);
+    });
+
+    it("leaves the daemon's other paths alone", () => {
+      // Reading an API response in a pane is legitimate and is not a second app.
+      expect(isVeldOwnUi("http://127.0.0.1:19899/api/health", self)).toBe(false);
+      expect(isVeldOwnUi("https://veld.localhost/api/repos", self)).toBe(false);
+      // `/ideas` is not `/ide`.
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ideas", self)).toBe(false);
+    });
+
+    it("never catches a dev server, which is the pane's whole job", () => {
+      // The reason this is not "any loopback host": a project with its own `/ide`
+      // route is not far-fetched, and `/` on a dev server is the commonest URL
+      // there is.
+      expect(isVeldOwnUi("http://localhost:3000/", self)).toBe(false);
+      expect(isVeldOwnUi("http://localhost:3000/ide", self)).toBe(false);
+      expect(isVeldOwnUi("http://127.0.0.1:3000/ide", self)).toBe(false);
+      // A run's own services are subdomains, so they are a different hostname.
+      expect(isVeldOwnUi("https://web.dev.veld.localhost/", self)).toBe(false);
+      expect(isVeldOwnUi("https://veld-api.dev.veld.localhost/", self)).toBe(false);
+    });
+
+    it("refuses to judge what is not an http(s) URL", () => {
+      expect(isVeldOwnUi("not a url", self)).toBe(false);
+      expect(isVeldOwnUi("file:///ide", self)).toBe(false);
+      // An empty self origin (no `location`, i.e. a test) must not make every
+      // relative-looking thing match.
+      expect(isVeldOwnUi("http://127.0.0.1:19899/ide", "")).toBe(false);
+    });
+  });
+
   it("labels a tab by host, falling back rather than throwing", () => {
     expect(urlLabel("https://web.dev.veld.localhost/a/b")).toBe("web.dev.veld.localhost");
     expect(urlLabel("http://localhost:3000")).toBe("localhost:3000");
@@ -1096,6 +1149,47 @@ describe("layout slots", () => {
     expect(written[7].ratio).toBe(layout.ratio);
     // …and the other window's worktree survives untouched.
     expect(written[4].ratio).toBe(0.2);
+  });
+
+  describe("dropWorktreeLayouts", () => {
+    it("removes a deleted worktree the merge would otherwise keep forever", () => {
+      // The merge above is exactly why this has to exist: dropping a worktree from
+      // the app's own `layouts` leaves the stored copy in place, and worktree
+      // rowids are reused — so the *next* worktree created inherits a deleted
+      // one's terminals and browser panes.
+      const durable = fake({
+        [LAYOUT_WORKTREE_KEY]: serializeLayouts({ 4: defaultLayout(0.2), 7: layout }),
+      });
+      dropWorktreeLayouts(durable, [7]);
+      const written = parseLayouts(durable.map.get(LAYOUT_WORKTREE_KEY) ?? null);
+      expect(Object.keys(written)).toEqual(["4"]);
+      expect(written[4].ratio).toBe(0.2);
+    });
+
+    it("does not rewrite the shared key when it changed nothing", () => {
+      // Two windows share this key, so a pointless write is a chance to clobber a
+      // concurrent one for no gain.
+      const stored = serializeLayouts({ 4: defaultLayout(0.2) });
+      const durable = fake({ [LAYOUT_WORKTREE_KEY]: stored });
+      let writes = 0;
+      const counted = {
+        getItem: durable.getItem,
+        setItem: (k: string, v: string) => {
+          writes += 1;
+          durable.setItem(k, v);
+        },
+      };
+      dropWorktreeLayouts(counted, [99]);
+      dropWorktreeLayouts(counted, []);
+      expect(writes).toBe(0);
+      expect(durable.map.get(LAYOUT_WORKTREE_KEY)).toBe(stored);
+    });
+
+    it("tolerates no durable storage at all", () => {
+      // Same configurations `storages()` guards against; forgetting is not a
+      // reason to throw where saving would not.
+      expect(() => dropWorktreeLayouts(null, [7])).not.toThrow();
+    });
   });
 
   it("keeps a detached window out of the shared store", () => {

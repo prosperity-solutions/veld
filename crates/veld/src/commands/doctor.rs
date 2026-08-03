@@ -549,9 +549,29 @@ impl Diagnostics {
     }
 
     /// Count holder sockets, and how many of them answer.
+    ///
+    /// The row doubles as the check that a holder *can* bind here at all. A
+    /// `sockaddr_un` path is capped at 104 bytes and this directory's is not
+    /// something the user chose — it follows `$HOME` and the daemon port — so a
+    /// deep enough home overruns it. Reporting "No terminal holders" in that state
+    /// is true and useless: there are none because none can start, and the bare
+    /// `bind` error ("path must be shorter than SUN_LEN") only ever reaches the
+    /// user as a terminal that will not open. So the length is checked first, and
+    /// it is a *failure* rather than a note — nothing works until it is fixed.
     fn terminal_holders_check(&self) -> Check {
         let dir = veld_core::instance::pty_dir();
         let shown = tilde_path(&dir);
+        // The name a real socket would get: `socket_for` digests the session id to
+        // a fixed 16 hex chars precisely so every session's path is the same length,
+        // which is what makes one probe answer for all of them.
+        if let Some(reason) =
+            veld_core::instance::socket_path_too_long(&dir.join("0000000000000000.sock"))
+        {
+            return Check {
+                pass: false,
+                label: format!("No terminal can start here — {reason}"),
+            };
+        }
         let Ok(entries) = std::fs::read_dir(&dir) else {
             // No directory is the ordinary state: it appears with the first
             // terminal and nothing prunes it.

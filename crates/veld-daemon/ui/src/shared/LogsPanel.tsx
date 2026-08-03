@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Group,
@@ -7,16 +7,23 @@ import {
   SegmentedControl,
   Text,
   TextInput,
+  useComputedColorScheme,
 } from "@mantine/core";
 import { api, type HistoryEntry, type LogResponse, type RunRef } from "../api";
 import { extractMsg, extractTs, fmtTs, fmtWhen, nodeColor } from "./util";
+import { ansiCss, markAnsiSpans, parseAnsi, type AnsiSpan } from "./ansi";
 
 interface Entry {
   node: string;
   variant: string;
   source: string;
   ts: string;
+  /** The message as escape-free text — what is on screen, and therefore what
+   *  search matches against. */
   msg: string;
+  /** The same message as styled runs. Parsed once here rather than per render:
+   *  the poll is every 2s and a search keystroke re-renders every row. */
+  spans: AnsiSpan[];
 }
 
 /**
@@ -124,12 +131,19 @@ export function LogsPanel(props: {
       const runLevel = n.node === "_veld";
       if (nodeFilter && !runLevel && `${n.node}:${n.variant}` !== nodeFilter) continue;
       for (const raw of n.lines) {
+        // The CLI colours its own output and dev servers colour far more, so a
+        // line arrives with SGR sequences in it and, for progress output,
+        // carriage returns. `parseAnsi` is the one place that decides what the
+        // line *says*; `msg` is that text and never the raw bytes, or a search
+        // for a word would miss it whenever a colour change sat inside it.
+        const spans = parseAnsi(extractMsg(raw));
         entries.push({
           node: n.node,
           variant: n.variant,
           source: n.source || "server",
           ts: extractTs(raw),
-          msg: extractMsg(raw),
+          msg: spans.map((s) => s.text).join(""),
+          spans,
         });
       }
     }
@@ -161,11 +175,32 @@ export function LogsPanel(props: {
 
   const multi = knownNodes.current.size > 1;
   const term = search.trim();
-  const highlight = (text: string) => {
-    if (!term) return text;
-    const re = new RegExp(`(${term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")})`, "ig");
-    const parts = text.split(re);
-    return parts.map((p, i) => (i % 2 === 1 ? <mark key={i}>{p}</mark> : p));
+  // The 16 ANSI slots are fixed colours, not design tokens, so they need to be
+  // resolved per theme rather than left to CSS variables. `forceColorScheme` on
+  // the provider is driven by the app's own toggle, so this tracks it.
+  const scheme = useComputedColorScheme("dark");
+
+  /** One message: its colour runs, with the search term marked inside them. */
+  const message = (e: Entry) => {
+    const pieces = markAnsiSpans(e.spans, term);
+    // The common line has no styling and no match: render the string, so the
+    // overwhelmingly common case adds no elements at all.
+    if (pieces.length === 1 && !pieces[0].mark && Object.keys(pieces[0].style).length === 0) {
+      return pieces[0].text;
+    }
+    return pieces.map((p, i) => {
+      const css = ansiCss(p.style, scheme);
+      const text = p.mark ? <mark>{p.text}</mark> : p.text;
+      // A styled piece needs its own span; an unstyled one does not, and a
+      // fragment keeps the row's DOM as small as the line deserves.
+      return Object.keys(css).length === 0 ? (
+        <React.Fragment key={i}>{text}</React.Fragment>
+      ) : (
+        <span key={i} style={css}>
+          {text}
+        </span>
+      );
+    });
   };
 
   return (
@@ -274,7 +309,7 @@ export function LogsPanel(props: {
                 </span>
               )}
               {!multi && e.source === "client" && <span className="node-tag">client</span>}
-              <span className="msg">{highlight(e.msg)}</span>
+              <span className="msg">{message(e)}</span>
             </div>
           </div>
         ))}

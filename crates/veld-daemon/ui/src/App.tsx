@@ -88,6 +88,7 @@ import {
   defaultLayout,
   diagTab,
   dockOf,
+  forgetWorktreeLayouts,
   lastBlankBrowserId,
   loadLayouts,
   newTabId,
@@ -1081,19 +1082,42 @@ function AppInner(props: {
     [],
   );
 
-  // Drop layouts for worktrees that no longer exist, so their terminals get
-  // collected below. Skipped while the repo list is empty — a failed poll
-  // must not read as "everything was deleted".
+  /**
+   * Forget worktrees that no longer exist — everywhere they are recorded.
+   *
+   * In memory, so their terminals get collected below. In the shared layout
+   * store, because that write is a *merge*: dropping a worktree from `layouts`
+   * leaves its stored panes untouched. And in the shell's claim map, so no window
+   * goes on reporting a deleted worktree as one it is showing.
+   *
+   * All three matter for the same reason: `worktrees.id` is a plain `INTEGER
+   * PRIMARY KEY`, so SQLite reuses the highest free rowid and the *next* worktree
+   * created can arrive wearing a deleted one's id — inheriting its panes, and
+   * being greyed out in the rail as "open in another window".
+   *
+   * Derived from the poll rather than hooked to the delete dialogs, which also
+   * covers a `git worktree remove` run in a terminal, and cannot race a claim: a
+   * worktree only enters this window's `layouts` after this window selected it
+   * from a list that had it. Skipped while the repo list is empty — a failed poll
+   * must not read as "everything was deleted".
+   */
   useEffect(() => {
     if (repos.length === 0) return;
     const alive = new Set(repos.flatMap((r) => r.worktrees.map((w) => w.id)));
-    setLayouts((prev) => {
-      const kept = Object.entries(prev).filter(([id]) => alive.has(Number(id)));
-      return kept.length === Object.keys(prev).length
-        ? prev
-        : Object.fromEntries(kept);
-    });
-  }, [repos]);
+    const gone = Object.keys(layouts)
+      .map(Number)
+      .filter((id) => !alive.has(id));
+    if (gone.length === 0) return;
+    setLayouts((prev) =>
+      Object.fromEntries(Object.entries(prev).filter(([id]) => alive.has(Number(id)))),
+    );
+    forgetWorktreeLayouts(gone);
+    void desktopWindow?.worktreesGone(gone).catch(() => {});
+    // `layouts` is a dependency on purpose: the ids to forget come from it, and
+    // reading them inside the updater would be too late — React runs that during
+    // the next render, not here. Converges, because the run after this one finds
+    // nothing left to forget.
+  }, [repos, layouts]);
 
   // ---- multi-window --------------------------------------------------------
   //

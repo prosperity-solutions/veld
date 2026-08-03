@@ -1208,6 +1208,9 @@ fn hostname_in_use_locally(hostname: &str) -> bool {
 
 /// Open the local dashboard in the default browser so the host can approve a
 /// pending join. Best-effort and OS-agnostic; a no-op where there is no opener.
+///
+/// Must be called from inside the runtime: both the spawn and its reaper need
+/// one. Every call site is a request handler, so that holds.
 fn open_dashboard() {
     // Open the Caddy-fronted dashboard (veld.localhost), not the daemon's raw
     // 127.0.0.1:19899 port.
@@ -1220,8 +1223,21 @@ fn open_dashboard() {
     let program: Option<&str> = None;
 
     if let Some(program) = program {
-        if let Err(e) = std::process::Command::new(program).arg(&url).spawn() {
-            debug!(error = %e, "could not open dashboard for approval");
+        // `tokio::process`, and the exit awaited in a task — the same pattern as
+        // the terminal opener in `management.rs`, for the same two reasons. A
+        // `std::process` child is never reaped, and this daemon runs for weeks: one
+        // zombie per manual join approval, in the one flow whose whole purpose is
+        // to be triggered repeatedly by strangers. And `xdg-open` can outlive the
+        // click (it delegates to a desktop-specific opener, which on some setups
+        // lives as long as the window), so the reap has to be a task rather than a
+        // blocking `wait` on a runtime worker.
+        match tokio::process::Command::new(program).arg(&url).spawn() {
+            Ok(mut child) => {
+                tokio::spawn(async move {
+                    let _ = child.wait().await;
+                });
+            }
+            Err(e) => debug!(error = %e, "could not open dashboard for approval"),
         }
     }
 }

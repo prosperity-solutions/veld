@@ -102,6 +102,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  knows who to ask to let go when another window claims one. */
     holdsWorktrees: (worktreeIds) =>
       ipcRenderer.invoke("veld:window:holds", { worktreeIds }),
+    /** These worktrees no longer exist — drop every claim and hold on them.
+     *  Worktree ids are database rowids and get reused, so a claim left on a
+     *  deleted one lands on whatever worktree is created next. */
+    worktreesGone: (worktreeIds) =>
+      ipcRenderer.invoke("veld:window:worktrees-gone", { worktreeIds }),
     /** Let go of one worktree's panes — another window is taking it. Release,
      *  never close: the shells keep running for whoever attaches next. */
     onYieldWorktree: (fn) => on("veld:window:yield", fn),

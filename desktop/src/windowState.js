@@ -259,6 +259,30 @@ function releaseClaims(claims, recordId) {
 }
 
 /**
+ * Forget worktrees that no longer exist, whoever held them.
+ *
+ * Both maps are keyed by the database's worktree rowid, and `worktrees.id` is a
+ * plain `INTEGER PRIMARY KEY` — **not** `AUTOINCREMENT` — so SQLite hands the
+ * highest free rowid to the next insert. Delete the newest worktree, create
+ * another, and it arrives wearing the dead one's id. With a claim left behind,
+ * that brand-new worktree is reported as already open in another window: its rail
+ * row is dimmed, and clicking it focuses a window that is showing something else
+ * entirely.
+ *
+ * The stale entry does eventually clear itself — a claim is released when its
+ * window claims anything else — which is why this is a small bug rather than a
+ * stuck one, and why the fix belongs at the deletion rather than in a sweep: the
+ * app knows the exact ids it just removed, so nothing has to be inferred from a
+ * list that might be a poll behind.
+ */
+function forgetWorktrees(claims, holders, worktreeIds) {
+  for (const worktreeId of worktreeIds) {
+    claims.delete(worktreeId);
+    holders.delete(worktreeId);
+  }
+}
+
+/**
  * Merge this base's windows into whatever the file already holds.
  *
  * Other bases are carried through untouched: a packaged app and a dev run share
@@ -331,6 +355,7 @@ module.exports = {
   slotFor,
   nextSuffix,
   canOpenAnother,
+  forgetWorktrees,
   handBackTarget,
   othersHolding,
   releaseClaims,

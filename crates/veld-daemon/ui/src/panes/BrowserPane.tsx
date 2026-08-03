@@ -25,6 +25,7 @@ import {
   IconDeviceMobile,
   IconDevices,
   IconExternalLink,
+  IconInfinity,
   IconLockOff,
   IconMinus,
   IconPlugConnectedX,
@@ -279,8 +280,11 @@ export function BrowserPane(props: {
   // stays blank, and neither is visible in the browser build.
   const covered = paneCovers(state, tab.url);
   const failure = state.error ? describeBrowserError(state.error) : null;
-  const chooser = covered && !failure && !state.url && !tab.url;
-  const opening = covered && !failure && !chooser;
+  // Veld's own UI, refused. Ranks above the others: nothing failed and nothing is
+  // loading, so neither of those screens applies.
+  const nested = state.nested;
+  const chooser = covered && !failure && !nested && !state.url && !tab.url;
+  const opening = covered && !failure && !nested && !chooser;
   const color = BROWSER_PROFILE_COLORS[profile];
 
   // Anything but the default is removable, including the one this pane is on:
@@ -302,13 +306,16 @@ export function BrowserPane(props: {
     return () => window.clearTimeout(timer);
   }, [opening, state.url]);
 
-  const submit = () => {
-    const target = navigateBrowser(id, draft);
+  /** Navigate, and record where the pane ended up. */
+  const go = (raw: string, opts: { force?: boolean } = {}) => {
+    const target = navigateBrowser(id, raw, opts);
     if (target) {
       setDraft(target);
       onTab({ url: target });
     }
   };
+  /** Go to whatever is in the address bar. */
+  const submit = () => go(draft);
 
   // ---- Device emulation and zoom -----------------------------------------
   //
@@ -1217,6 +1224,45 @@ export function BrowserPane(props: {
                 </button>
               </>
             )}
+          </div>
+        )}
+        {nested && (
+          // Pointing a pane at Veld's own UI is the first thing anyone tries, and
+          // this is the moment to be funny rather than to show an error — but the
+          // reason it is caught at all is in the second line, and it is not the
+          // joke: a nested instance is a whole second copy of this app talking to
+          // the same daemon.
+          <div className="browser-screen" role="status">
+            <span className="pane-screen-icon">
+              <IconInfinity size={26} />
+            </span>
+            <p className="pane-screen-title">You are already here</p>
+            <p>
+              A Veld inside your Veld would open its own terminals against the same
+              daemon, spend the session budget twice and write your pane layout from
+              two places at once. One of you is enough.
+            </p>
+            <div className="browser-suggestions">
+              {external && (
+                <button
+                  className="btn big"
+                  onClick={() => window.open(external, "_blank", "noreferrer")}
+                >
+                  <IconExternalLink size={15} /> Open in system browser
+                </button>
+              )}
+              {/* The escape hatch stays, because the guard cannot be certain: a dev
+                  instance on a management host of its own is missed, and somebody
+                  else's `/ide` route on this origin would be caught. Both are the
+                  user's call to overrule. */}
+              {/* The *refused* URL, not the address bar's draft: the user may
+                  have typed something else in it without pressing Enter, and this
+                  button means "that one, anyway". */}
+              <button className="btn big" onClick={() => go(nested, { force: true })}>
+                <IconArrowRight size={15} /> Load it here anyway
+              </button>
+            </div>
+            <p className="pane-screen-url">{nested}</p>
           </div>
         )}
         {failure && (

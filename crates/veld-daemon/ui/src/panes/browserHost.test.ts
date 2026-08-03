@@ -8,6 +8,7 @@ const state = (over: Partial<BrowserState> = {}): BrowserState => ({
   canGoBack: false,
   canGoForward: false,
   error: null,
+  nested: null,
   profile: "default",
   loaded: false,
   emulationScale: 1,

@@ -17,6 +17,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { api } from "../api";
+import { ANSI_DARK, ANSI_LIGHT } from "../shared/ansi";
 import { chromeless, layoutSlot, windowSeed } from "../shell";
 import { parseLayouts, storedTerminalIds, terminalIds } from "./model";
 import { handleKeyEvent } from "./terminalKeys";
@@ -98,46 +99,11 @@ interface Session {
 const sessions = new Map<string, Session>();
 let currentTheme: "dark" | "light" = "dark";
 
-/** ANSI palettes. These are terminal colours, not design tokens — programs
- *  address them by index, so they can't come from the theme variables. The
- *  background/foreground do, so a terminal matches the surrounding panel. */
-const ANSI_DARK = {
-  black: "#22262c",
-  red: "#e05a50",
-  green: "#3fbf7f",
-  yellow: "#e6b43c",
-  blue: "#5aa2e0",
-  magenta: "#b98ce0",
-  cyan: "#4fbfc0",
-  white: "#c8ced5",
-  brightBlack: "#666d76",
-  brightRed: "#ff7a70",
-  brightGreen: "#5fdf9f",
-  brightYellow: "#ffd45c",
-  brightBlue: "#7ac2ff",
-  brightMagenta: "#d9acff",
-  brightCyan: "#6fdfe0",
-  brightWhite: "#f2f4f6",
-};
-
-const ANSI_LIGHT = {
-  black: "#2b3138",
-  red: "#c33c32",
-  green: "#28965f",
-  yellow: "#a5761a",
-  blue: "#2f6fb5",
-  magenta: "#8a54b8",
-  cyan: "#1f8a8c",
-  white: "#5c636b",
-  brightBlack: "#98a0a9",
-  brightRed: "#e05a50",
-  brightGreen: "#3fbf7f",
-  brightYellow: "#c68f20",
-  brightBlue: "#3f8ad0",
-  brightMagenta: "#a06cd0",
-  brightCyan: "#2aa5a7",
-  brightWhite: "#171a1d",
-};
+// The ANSI palettes live in `shared/ansi.ts`, which is also what the logs panel
+// renders colour with. One owner: the same output shown in a shell and in the
+// logs would otherwise be two different sets of colours, and the divergence would
+// read as a bug in whichever one you saw second. The background/foreground still
+// come from the theme tokens below, so a terminal matches the panel around it.
 
 /** Read a design token, since xterm needs a literal colour string. Falls back
  *  when the variable is missing or holds a value xterm can't parse (the

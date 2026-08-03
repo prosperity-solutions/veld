@@ -743,6 +743,47 @@ export function normalizeBrowserUrl(raw: string): string | null {
   return u.toString();
 }
 
+/** `/`, `/ide`, or anything under `/ide` — the two paths that serve this app. */
+const VELD_UI_PATH = /^\/(?:ide(?:\/.*)?)?$/;
+
+/**
+ * Whether a URL is Veld's own management UI.
+ *
+ * A browser pane pointed at `/ide` is the first thing anyone tries, and the
+ * reason to catch it is not the joke. A nested instance is a second, complete
+ * copy of this app against the *same* daemon: it mounts its own pane registry,
+ * mints its own PTY session ids against the 48-session cap, and writes the shared
+ * worktree layout store and the desktop claim map from a place no window knows
+ * about. Two of those are silent and the third fights the outer app for its own
+ * shells.
+ *
+ * Matched on **origin or `veld.localhost`**, and deliberately not on "any
+ * loopback host": a pane's whole job is previewing a dev server on
+ * `localhost:3000`, and a project with its own `/ide` route is not far-fetched.
+ * `veld.localhost` is Veld's by construction — a run's services get
+ * `<node>.<run>.veld.localhost`, which is a different hostname — so the pair
+ * covers both ways the daemon is reachable (the raw port the app loads from, and
+ * the Caddy-fronted name) with nothing else caught.
+ *
+ * `/` is included alongside `/ide` for two reasons: pointing a pane at Veld's own
+ * dashboard is the same non-use as pointing it at `/ide`, and it is the one place
+ * a *click* could otherwise reach a nested `/ide` without going through this
+ * check. The known gap is a dev instance served on a `VELD_MANAGEMENT_HOST` of
+ * its own; the guard offers an explicit way through, which is the answer for both
+ * that and any false positive.
+ */
+export function isVeldOwnUi(url: string, selfOrigin: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return false;
+  if (!VELD_UI_PATH.test(u.pathname)) return false;
+  return u.origin === selfOrigin || u.hostname === "veld.localhost";
+}
+
 /** Short, stable label for a browser tab opened without a name of its own. A
  *  hostname stays as it is — that is what a hostname looks like — but the
  *  fallback is a word in a tab strip, so it is capitalised like the others. */
@@ -1063,6 +1104,45 @@ export function writeLayouts(
 // A worktree whose last pane is closed needs no explicit removal: the merge
 // above writes its empty layout, and `parseLayout` rejects a layout with no tabs
 // on the way back in, so it is gone by the next read.
+//
+// A worktree that is *deleted* does, which is what `dropWorktreeLayouts` below is
+// for: the merge only overwrites the keys it is given, so a key the app has
+// stopped holding keeps its stored value forever.
+
+/**
+ * Remove deleted worktrees from the shared store.
+ *
+ * Needed because the write above is a *merge*: dropping a worktree from the app's
+ * own `layouts` leaves the stored copy untouched, so nothing here is ever
+ * forgotten by omission.
+ *
+ * Which matters because `worktrees.id` is a plain `INTEGER PRIMARY KEY` and
+ * SQLite reuses the highest free rowid — delete the newest worktree and create
+ * another, and the new one inherits the dead one's panes: terminal ids whose
+ * sessions are gone (each reporting "the previous shell is gone") and browser
+ * panes from a checkout that no longer exists.
+ *
+ * A satellite window's slot store is deliberately not touched: its tabs were
+ * transferred out of a worktree a main window owns, and the window itself closing
+ * is what hands them back.
+ */
+export function dropWorktreeLayouts(
+  durable: LayoutStorage | null,
+  worktreeIds: number[],
+): void {
+  if (!durable || worktreeIds.length === 0) return;
+  const stored = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null);
+  let changed = false;
+  for (const id of worktreeIds) {
+    if (id in stored) {
+      delete stored[id];
+      changed = true;
+    }
+  }
+  // Only on a change: this key is shared between windows, so a rewrite that says
+  // nothing is still a chance to lose a concurrent write.
+  if (changed) durable.setItem(LAYOUT_WORKTREE_KEY, serializeLayouts(stored));
+}
 
 /**
  * One worktree's panes, read from the shared store **now**.
@@ -1157,6 +1237,15 @@ export function loadLayouts(
     return readLayouts(session, durable, slot, seed, restored, satellite);
   } catch {
     return {};
+  }
+}
+
+/** Forget deleted worktrees' panes, tolerating storage being unavailable. */
+export function forgetWorktreeLayouts(worktreeIds: number[]): void {
+  try {
+    dropWorktreeLayouts(storages().durable, worktreeIds);
+  } catch {
+    // Same as `saveLayouts`: nothing to tell the user, and nothing else breaks.
   }
 }
 
