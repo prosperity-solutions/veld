@@ -610,33 +610,40 @@ select:focus {
 
 /* The insertion caret.
  *
- * 3px, rounded, standing proud of the tab, with a glow. It was a flush 2px hair
- * and it read as a border rather than a target — hardest to see at exactly the
- * two positions that are hardest to hit, the start and end of the strip, where
- * it sits against the strip's own edge. The glow is what makes it register at a
- * glance while the eye is on the tab being dragged, not on the strip. */
+ * 3px and glowing, because a flush 2px hair read as a border rather than a
+ * target — worst at the two ends of the strip, where it sits against the
+ * strip's own edge and is also hardest to aim at.
+ *
+ * **Strictly inside the tab's box**, and that is a layout constraint rather
+ * than taste. The scroller measures `scrollWidth` to decide whether the strip
+ * has more tabs off-screen, with 1px of slack; a caret hanging 2px past the last
+ * tab grew that width and lit both edge fades, so the indicator invented a
+ * scroll state that did not exist. The **glow does the standing-out**, and a
+ * box-shadow contributes nothing to layout or scroll extent — which is exactly
+ * why it can be generous. */
 .pane-tab.drop-before::before,
 .pane-tab.drop-after::after {
   content: "";
   position: absolute;
-  top: -3px;
-  bottom: -3px;
+  top: 0;
+  bottom: 0;
   width: 3px;
   border-radius: 2px;
   background: var(--accent);
-  box-shadow: 0 0 0 1px color-mix(in oklab, var(--accent) 35%, transparent),
-    0 0 8px color-mix(in oklab, var(--accent) 70%, transparent);
+  box-shadow:
+    0 0 0 1px color-mix(in oklab, var(--accent) 40%, transparent),
+    0 0 9px 1px color-mix(in oklab, var(--accent) 75%, transparent);
   /* Above the neighbouring tab, so the caret is never half-hidden behind the
-     tab it sits against. */
+     tab it abuts. */
   z-index: 2;
 }
 
 .pane-tab.drop-before::before {
-  left: -2px;
+  left: 0;
 }
 
 .pane-tab.drop-after::after {
-  right: -2px;
+  right: 0;
 }
 
 .pane-tab.dragging {
