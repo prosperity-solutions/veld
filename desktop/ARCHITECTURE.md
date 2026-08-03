@@ -348,9 +348,11 @@ requests at runtime — branding rule.
   on `localhost:3000` is the pane's whole job, and a project with its own `/ide`
   route is not far-fetched. The refusal is `nested` on the pane's state rather than
   an `error` (nothing failed) and it is read by `paneCovers`, which stays the single
-  decision about whether a view is hidden. No view is created while refused —
+  decision about whether a view is hidden. No `WebContentsView` is created while refused —
   creating the thing being refused in order to keep it hidden would mint the very
-  sessions this prevents — and the screen offers both ways out: the system browser,
+  sessions this prevents. (The browser build does create its `<iframe>` element,
+  because a forced navigation assigns `src` to it, but leaves that `src` unset, so
+  it loads nothing either way.) and the screen offers both ways out: the system browser,
   and loading it here anyway, which addresses the *refused* URL rather than whatever
   the address bar currently holds.
 - **The panes poll through the app, not themselves.** `/api/shares` and

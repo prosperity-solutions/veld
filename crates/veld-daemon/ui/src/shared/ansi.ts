@@ -203,8 +203,12 @@ function applySgr(style: AnsiStyle, params: number[]): void {
         style.strike = true;
         break;
       // 21 is "double underline" in ECMA-48 and "bold off" in most terminals;
-      // either way it ends the bold run, which is all this renderer tracks.
-      case p === 21 || p === 22:
+      // either way it ends the bold run, which is all this renderer tracks of it.
+      case p === 21:
+        delete style.bold;
+        break;
+      // 22 is "normal intensity", which is the one that ends *both*.
+      case p === 22:
         delete style.bold;
         delete style.dim;
         break;
@@ -282,6 +286,10 @@ export function parseAnsi(text: string): AnsiSpan[] {
   // Fast path for the overwhelmingly common line. Every branch below is entered
   // by a control character, so a line with none of them is one unstyled span —
   // and the panel parses every line of every node on every 2s poll.
+  //
+  // **A constraint on edits below, not just a description of them:** anything new
+  // that must fire on a character outside `CONTROL_CHARS` is unreachable for most
+  // lines, and silently so. Widen the test with the branch, or the branch is dead.
   if (!CONTROL_CHARS.test(text)) return text ? [{ text, style: {} }] : [];
 
   const spans: AnsiSpan[] = [];

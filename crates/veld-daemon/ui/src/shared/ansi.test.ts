@@ -76,6 +76,13 @@ describe("parseAnsi", () => {
     expect(off).toEqual({ dim: true });
   });
 
+  it("distinguishes 21 from 22", () => {
+    // 22 is "normal intensity" and ends both; 21 is bold-off (or double-underline)
+    // and must leave dim alone — clearing both on 21 was a silent overreach.
+    expect(parseAnsi("\x1b[1;2mboth\x1b[21mdim only")[1].style).toEqual({ dim: true });
+    expect(parseAnsi("\x1b[1;2mboth\x1b[22mneither")[1].style).toEqual({});
+  });
+
   it("reads 256-colour and truecolor forms", () => {
     expect(shape(parseAnsi("\x1b[38;5;208morange"))).toEqual([["orange", 208]]);
     expect(shape(parseAnsi("\x1b[38;2;10;20;30mrgb"))).toEqual([["rgb", "rgb(10,20,30)"]]);
