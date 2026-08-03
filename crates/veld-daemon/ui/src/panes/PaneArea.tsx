@@ -112,6 +112,13 @@ import { type DropZone, sameZone, zoneAt } from "./dropModel";
  * accepted here), because `dragover` can only inspect types, never data.
  */
 const TAB_MIME = "application/x-veld-pane-tab";
+
+/** Where a tab dragged from *another* window would land in this one: at a caret
+ *  in a dock's strip, or in a region of the pane area. */
+type RemoteTarget =
+  | { at: { dock: DockIndex; tabId: string; after: boolean } }
+  | { zone: DropZone }
+  | null;
 import {
   focusTerminal,
   mountTerminal,
@@ -267,11 +274,26 @@ export function PaneArea(props: {
    * by the same functions, so a drop from another window is not a second
    * behaviour to learn.
    */
-  const [remote, setRemote] = useState<
-    { at: { dock: DockIndex; tabId: string; after: boolean } } | { zone: DropZone } | null
-  >(null);
-  const remoteRef = useRef(remote);
-  remoteRef.current = remote;
+  const [remote, setRemote] = useState<RemoteTarget>(null);
+
+  /**
+   * The same target, kept **past the end of the drag** so the drop can commit it.
+   *
+   * `remote` drives the indicator, so it has to clear the moment the gesture
+   * stops — and the shell ends the drag (every window thaws) *before* it tells
+   * this one that tabs landed here. Reading the rendered value at that point
+   * found it already cleared, and every cross-window drop fell back to
+   * appending: the split and the caret were shown honestly and then ignored.
+   *
+   * Same rule as `lastOverId` in the shell, one level down. The drag resolves
+   * the target continuously; the drop commits what it resolved; only the *next*
+   * drag invalidates it.
+   */
+  const lastRemoteRef = useRef<RemoteTarget>(null);
+  const setRemoteTarget = (v: RemoteTarget) => {
+    lastRemoteRef.current = v;
+    setRemote(v);
+  };
 
   /**
    * Resolve a forwarded cursor into a drop target, by asking the document what
@@ -286,7 +308,7 @@ export function PaneArea(props: {
     const area = areaRef.current;
     const el = document.elementFromPoint(x, y);
     if (!area || !el || !area.contains(el)) {
-      setRemote(null);
+      setRemoteTarget(null);
       return;
     }
     const dockEl = el.closest<HTMLElement>("[data-dock]");
@@ -295,7 +317,7 @@ export function PaneArea(props: {
     const tabEl = el.closest<HTMLElement>("[data-tab-id]");
     if (tabEl?.dataset.tabId) {
       const box = tabEl.getBoundingClientRect();
-      setRemote({
+      setRemoteTarget({
         at: { dock, tabId: tabEl.dataset.tabId, after: x > box.left + box.width / 2 },
       });
       return;
@@ -303,10 +325,10 @@ export function PaneArea(props: {
     // The strip itself, past the last tab: append to that dock. Same rule the
     // local drop already uses, and the reason the strip is a target at all.
     if (el.closest(".pane-tabs")) {
-      setRemote({ zone: { where: "into", dock } });
+      setRemoteTarget({ zone: { where: "into", dock } });
       return;
     }
-    setRemote({ zone: zoneAt(area.getBoundingClientRect(), x, dock) });
+    setRemoteTarget({ zone: zoneAt(area.getBoundingClientRect(), x, dock) });
   };
 
   // Same backstop as the per-dock indicator below: a committed layout retires
@@ -333,13 +355,21 @@ export function PaneArea(props: {
   useEffect(() => {
     const shell = desktopWindow;
     if (!shell) return;
-    const offBegin = shell.onDragBegin(() => beginTabDrag());
+    const offBegin = shell.onDragBegin(() => {
+      beginTabDrag();
+      // A new gesture is the only thing that invalidates the last one's target.
+      setRemoteTarget(null);
+    });
     const offEnd = shell.onDragEnd(() => {
       endTabDrag();
+      // The indicator goes; the *target* is kept for the `drop-here` that may be
+      // right behind this — see `lastRemoteRef`.
       setRemote(null);
     });
     const offOver = shell.onDragOver(({ x, y }) => resolveRemote(x, y));
-    const offOut = shell.onDragOut(() => setRemote(null));
+    // The pointer left this window, so nothing here is the target any more —
+    // and nothing will be delivered here either.
+    const offOut = shell.onDragOut(() => setRemoteTarget(null));
     return () => {
       offBegin();
       offEnd();
@@ -364,8 +394,8 @@ export function PaneArea(props: {
     return shell.onDropHere(({ tabs }) => {
       const parsed = parseTransferTabs(tabs);
       if (parsed.length === 0) return;
-      const where = remoteRef.current;
-      setRemote(null);
+      const where = lastRemoteRef.current;
+      setRemoteTarget(null);
       onLayout((prev) => {
         let next = prev;
         for (const tab of parsed) {
