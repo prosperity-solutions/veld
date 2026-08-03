@@ -178,10 +178,23 @@ function yieldWorktree(worktreeId, keeper) {
  * is that idea one level up.
  */
 let drag = null;
+/**
+ * Which window the most recent drag ended over, kept **after** the drag is over.
+ *
+ * Because the order the renderer reports things in must not matter. It ends the
+ * drag (so every window thaws) and then asks where the tab should go, and a
+ * first version that cleared this on the first call answered "nowhere" to the
+ * second — so every cross-window drop opened a new window instead of moving the
+ * tab, which looks exactly like the detached window reloading with its pane
+ * still in it. Reset when the next drag starts, which is the only moment it
+ * stops being the answer.
+ */
+let lastOverId = null;
 const DRAG_POLL_MS = 16;
 
 function beginDrag(sourceId) {
   endDrag();
+  lastOverId = null;
   drag = { sourceId, overId: null, timer: null };
   for (const r of allRecords()) {
     if (!r.win.isDestroyed()) r.win.webContents.send("veld:window:drag-begin");
@@ -223,12 +236,11 @@ function pollDrag() {
 function endDrag() {
   if (!drag) return;
   clearInterval(drag.timer);
-  const over = drag.overId;
+  lastOverId = drag.overId;
   drag = null;
   for (const r of allRecords()) {
     if (!r.win.isDestroyed()) r.win.webContents.send("veld:window:drag-end");
   }
-  return over;
 }
 
 /** The live record showing `worktreeId`, or `null`. */
@@ -876,32 +888,6 @@ function registerWindowIpc(ipcMain) {
     return true;
   });
 
-  /**
-   * A tab released outside its own window: either onto another Veld window, or
-   * onto nothing.
-   *
-   * **The main process has to decide this**, because the renderer cannot see
-   * it. HTML5 drag events do not cross a `BrowserWindow` boundary at all — the
-   * drag lives in the source document, and the window being dragged *onto*
-   * never learns a drag is happening, so it cannot offer a drop target and the
-   * gesture silently did nothing.
-   *
-   * The **cursor position comes from the OS here**, not from the `dragend`
-   * event. That was the first version and it does not work: Chromium's
-   * `dragend` does not reliably carry the release point — depending on platform
-   * and on whether the drag was accepted it reports the drag's *start*, or
-   * `0,0`. Both read as "still inside the source window", so dropping a
-   * detached pane back onto the main window did nothing at all, which is
-   * indistinguishable from the feature being missing. `screen.getCursorScreenPoint()`
-   * is the same question asked of something that actually knows.
-   *
-   * Onto a window already showing that worktree → the tabs move into it, using
-   * the same queue a hand-back uses. Back onto the source, or a window showing
-   * something else → nothing, so a fumbled drag is not a window. Anywhere else
-   * → a new detached window, the behaviour drag-out already had. The worktree
-   * check is what keeps the gesture predictable: dropping panes into a window
-   * showing something else would file them under a worktree it is not looking at.
-   */
   /** A tab drag started here. Every window freezes its views; the cursor starts
    *  being carried to whichever one it is over. */
   ipcMain.handle("veld:window:drag-begin", (event) => {
@@ -918,6 +904,24 @@ function registerWindowIpc(ipcMain) {
     return true;
   });
 
+  /**
+   * A tab released outside its own window: onto another Veld window, or onto
+   * nothing.
+   *
+   * **Commits the target the drag already worked out — it does not recompute
+   * one.** The poll has been resolving which window the cursor is over for the
+   * whole gesture, and the window under it has been resolving where inside
+   * itself; between them the answer is settled well before the release. Every
+   * earlier version asked again here instead — from `dragend`'s coordinates
+   * (which are the drag's *start*, or `0,0`), then from a bounds test (which
+   * cannot see that two windows overlap) — and each was wrong in its own way.
+   * Asking at release is the mistake; the drag is the only thing that watched
+   * it happen.
+   *
+   * Onto a window that owns this worktree → the tabs move there, placed where
+   * that window was previewing. Anywhere else, including back over the source →
+   * a new detached window, which is what drag-out already did.
+   */
   ipcMain.handle("veld:window:drop-out", (event, payload) => {
     const from = senderWindow(event);
     const fromRecord = recordFor(from);
@@ -933,8 +937,8 @@ function registerWindowIpc(ipcMain) {
     // inside the one on top is inside the one beneath it too — the poll pairs
     // the OS cursor with the renderer's own "the pointer left me", and between
     // them they respect a stacking order geometry alone cannot see.
-    const overId = endDrag() ?? null;
-    const over = overId === null ? null : allRecords().find((r) => r.id === overId);
+    endDrag();
+    const over = lastOverId === null ? null : allRecords().find((r) => r.id === lastOverId);
     // A window this worktree's panes belong in: the one *showing* it, or a
     // detached window that is already a dock for it. Detached windows never
     // claim — they are satellites of their origin's claim — so matching on the
