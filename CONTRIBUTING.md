@@ -31,9 +31,11 @@ just test             # run all tests
 
 For the /ide management UI and the Electron desktop shell, see
 [desktop/ARCHITECTURE.md](desktop/ARCHITECTURE.md) (`just dev-ui`,
-`just dev-desktop`, and `just desktop-package` to build the installers —
-macOS builds are ad-hoc signed only, so one handed to someone else needs
-`xattr -dr com.apple.quarantine` on the other end).
+`just dev-desktop`, and `just desktop-package` to build the installers — a local
+macOS build is ad-hoc signed unless the machine holds the project's Developer ID
+certificate, so one handed to someone else needs `xattr -dr com.apple.quarantine`
+on the other end, and an ad-hoc one offers updates as a download rather than
+installing them itself, since macOS will not let it replace its own signature).
 
 The workspace has four crates:
 

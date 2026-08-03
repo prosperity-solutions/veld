@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   compareVersions,
   downloadOnlyReason,
+  isDeveloperIdSigned,
   releasePageUrl,
   updateMode,
   versionSkew,
@@ -18,19 +19,54 @@ test("an unpackaged run never updates itself", () => {
   }
 });
 
-test("macOS is download-only until the app is signed", () => {
-  assert.equal(updateMode({ platform: "darwin", isPackaged: true }), "download");
-  // The other side of the switch, so flipping MACOS_SIGNED is a change this
-  // suite has already checked rather than one it silently accepts.
+test("a signed macOS build installs in place, an unsigned one cannot", () => {
   assert.equal(
     updateMode({ platform: "darwin", isPackaged: true, macSigned: true }),
     "install",
   );
+  assert.equal(
+    updateMode({ platform: "darwin", isPackaged: true, macSigned: false }),
+    "download",
+  );
+  // Nobody measured → the answer that costs a download button rather than a
+  // download the platform will then refuse to apply.
+  assert.equal(updateMode({ platform: "darwin", isPackaged: true }), "download");
   // Signing says nothing about Linux packaging.
   assert.equal(
     updateMode({ platform: "linux", isPackaged: true, env: {}, macSigned: true }),
     "download",
   );
+});
+
+test("isDeveloperIdSigned reads codesign's report, not a build-time promise", () => {
+  // Trimmed `codesign --display --verbose=2` output, in the two shapes that decide
+  // whether Squirrel.Mac can swap this bundle.
+  const signed = [
+    "Identifier=dev.veld.desktop",
+    "Signature size=9046",
+    "Authority=Developer ID Application: Prosperity Solutions (TEAM123456)",
+    "Authority=Developer ID Certification Authority",
+    "TeamIdentifier=TEAM123456",
+  ].join("\n");
+  const adhoc = [
+    "Identifier=dev.veld.desktop",
+    "CodeDirectory v=20400 size=297 flags=0x2(adhoc) hashes=3+3 location=embedded",
+    "Signature=adhoc",
+    "TeamIdentifier=not set",
+  ].join("\n");
+
+  assert.equal(isDeveloperIdSigned(signed), true);
+  assert.equal(isDeveloperIdSigned(adhoc), false);
+  // Not a substring match: an Authority further down the chain, or the string
+  // appearing inside some other field, must not pass for the leaf certificate.
+  assert.equal(
+    isDeveloperIdSigned("Authority=Developer ID Certification Authority"),
+    false,
+  );
+  assert.equal(isDeveloperIdSigned("x=Authority=Developer ID Application: nope"), false);
+  // A failed probe hands this whatever it got, including nothing at all.
+  assert.equal(isDeveloperIdSigned(""), false);
+  assert.equal(isDeveloperIdSigned(undefined), false);
 });
 
 test("only an AppImage can install in place on Linux", () => {
@@ -50,9 +86,12 @@ test("only an AppImage can install in place on Linux", () => {
 test("download-only says why, per platform", () => {
   // The two platforms are download-only for unrelated reasons; one string
   // covering both is wrong on whichever it wasn't written for.
-  assert.match(downloadOnlyReason({ platform: "darwin" }), /code-signed/);
+  assert.match(downloadOnlyReason({ platform: "darwin" }), /Developer ID/);
   assert.match(downloadOnlyReason({ platform: "linux" }), /package manager/);
-  assert.doesNotMatch(downloadOnlyReason({ platform: "linux" }), /code-signed/);
+  assert.doesNotMatch(downloadOnlyReason({ platform: "linux" }), /Developer ID/);
+  // It describes *this build*, not veld: releases are signed, so a sentence
+  // claiming otherwise would be false on the only path that can reach it.
+  assert.doesNotMatch(downloadOnlyReason({ platform: "darwin" }), /yet/);
   assert.ok(downloadOnlyReason({ platform: "freebsd" }).length > 0);
 });
 

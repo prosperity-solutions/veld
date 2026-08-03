@@ -181,15 +181,36 @@ jobs:
   # runs *before* semantic-release commits the bump, so the checkout is still on
   # the previous version.
   #
-  # macOS is unsigned (issue #167 §10) — `scripts/adhoc-sign.js` ad-hoc signs the
-  # bundle so it launches on Apple Silicon at all, and the app knows it cannot
-  # replace itself until a Developer ID exists. Linux is x64 only: there is no
-  # arm64 Linux runner in this matrix, and no reported demand.
+  # macOS is signed with the team's Developer ID, notarized and stapled (issue
+  # #167 §10) — the app, by electron-builder, and each disk image afterwards,
+  # because Gatekeeper assesses the file the user actually downloads. That takes the
+  # certificate plus one of two notarization credential sets (see the credentials
+  # step); they are asserted before packaging starts and the result is asserted on
+  # the artifacts, since every way electron-builder can fail to sign or notarize is a
+  # *warning*. Linux is x64 only: there is no arm64 Linux runner in this matrix, and
+  # no reported demand.
   desktop:
     name: Build Desktop (${{ matrix.name }})
     permissions:
       contents: read
     needs: plan
+    # The signing secrets live in this environment, not in the repository — a
+    # Developer ID private key readable by any workflow run on any branch is one
+    # push away from being extracted, and the macOS self-update this diff enables
+    # makes that key the *only* thing standing between a release and code execution
+    # on every install. The environment restricts it to `main`; see
+    # desktop/ARCHITECTURE.md → "Signing and notarization" for the setup, which has
+    # to exist before this workflow can produce a release.
+    environment: release
+    # Notarization is a wait on Apple. An unbounded one parks a 10×-billed runner
+    # until GitHub's 6-hour default and blocks the tag behind it.
+    #
+    # The number has to clear the sum of what runs inside it, or the per-submission
+    # `--timeout` below can never fire first and a notary stall is a bare
+    # cancellation with no `notarytool log`: ~20 min of packaging, two app
+    # notarizations electron-builder does *without* a timeout, and two disk images at
+    # `--timeout 15m` worst case. A healthy release is ~35 min.
+    timeout-minutes: 90
     if: >-
       github.event_name == 'push'
       && needs.plan.outputs.new_release_published == 'true'
@@ -230,8 +251,260 @@ jobs:
 
       - run: npm ci
 
-      - name: Package
+      # Fail before spending ten minutes of a 10×-billed runner, and fail where the
+      # cause is legible. Nothing downstream would: electron-builder skips signing
+      # with a warning when it cannot find the certificate, and skips notarization
+      # with a warning when the credentials are absent. Blocking the whole release
+      # (this job is `fail-fast`, and `release` needs it) is the intended cost —
+      # `desktop/src/updatePolicy.js` now tells installed macOS apps they may
+      # replace themselves, which is only true of a signed build, so shipping an
+      # unsigned one would strand every existing install on a broken update path.
+      #
+      # Notarization accepts either credential set Apple offers, because which one
+      # a team can produce is an org-politics question, not a technical one:
+      #
+      #   - An **App Store Connect API key** (`APPLE_API_KEY_P8` +
+      #     `APPLE_API_KEY_ID` + `APPLE_API_ISSUER`) belongs to the team, so a
+      #     release does not depend on one person's Apple account still existing.
+      #     Only the Account Holder can mint one. Preferred.
+      #   - An **Apple ID + app-specific password** (`APPLE_ID` +
+      #     `APPLE_APP_SPECIFIC_PASSWORD`), which any team member can produce for
+      #     themselves.
+      #
+      # `APPLE_TEAM_ID` is required either way — not for notarization (the API-key
+      # route does not need it) but for the identity assertion further down, which
+      # is the only thing that can tell the *right* Developer ID certificate from
+      # any other team's.
+      #
+      # This step decides which route is in play and writes **nothing secret**
+      # anywhere: only the route name and the key's path leave it as outputs. The
+      # obvious alternative — exporting the chosen credentials through $GITHUB_ENV —
+      # is worse twice over: `echo "NAME=$VALUE"` turns one stray newline in a
+      # secret into arbitrary further assignments (`NODE_OPTIONS=--require=…`
+      # honoured by the signing step), and every later step in the job inherits
+      # them, including third-party actions on mutable tags.
+      - name: Choose the macOS notarization credentials
+        id: creds
+        if: matrix.name == 'macos'
+        env:
+          # An environment *variable*, not a secret. Be precise about what it proves,
+          # because it is easy to overstate: only that a variable of this name is
+          # visible to this job. It catches the release-environment setup never having
+          # been done at all — the likely miss — and nothing more. It cannot see where
+          # a secret came from (`secrets.*` resolves repository secrets too, with
+          # environment ones merely taking precedence), and `vars.*` resolves
+          # repository variables as well, so a variable set on the wrong page also
+          # satisfies it.
+          #
+          # So both halves of the actual protection — the secrets living in the
+          # environment rather than the repository, and the environment's deployment
+          # branches being restricted to `main` — stay manual preconditions. They are
+          # written down as a numbered procedure in desktop/ARCHITECTURE.md, which is
+          # what the error message below points at.
+          SIGNING_ENVIRONMENT: ${{ vars.VELD_SIGNING_ENVIRONMENT }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -eu
+          if [ "${SIGNING_ENVIRONMENT-}" != "release" ]; then
+            echo "::error::the 'release' environment is not set up — define its variable VELD_SIGNING_ENVIRONMENT=release *in the environment* (Settings → Environments → release → Variables), and keep the signing secrets there rather than in repository secrets. See desktop/ARCHITECTURE.md → 'Signing and notarization'"
+            exit 1
+          fi
+          missing=
+          [ -n "${CSC_LINK-}" ] || missing="$missing CSC_LINK"
+          [ -n "${CSC_KEY_PASSWORD-}" ] || missing="$missing CSC_KEY_PASSWORD"
+          [ -n "${APPLE_TEAM_ID-}" ] || missing="$missing APPLE_TEAM_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing secrets in the 'release' environment:$missing — see desktop/ARCHITECTURE.md → 'Signing and notarization' for how each one is produced"
+            exit 1
+          fi
+
+          if [ -n "${APPLE_API_KEY_P8-}" ] && [ -n "${APPLE_API_KEY_ID-}" ] && [ -n "${APPLE_API_ISSUER-}" ]; then
+            # @electron/notarize and notarytool both want the key as a *file*. The
+            # runner is ephemeral and RUNNER_TEMP is outside the workspace, so it
+            # cannot be picked up by a glob or packed into an artifact. Unlike an
+            # environment variable it does outlive this step, which is why the last
+            # step of the job deletes it.
+            key="$RUNNER_TEMP/AuthKey.p8"
+            printf '%s' "$APPLE_API_KEY_P8" > "$key"
+            chmod 600 "$key"
+            echo "route=api" >> "$GITHUB_OUTPUT"
+            echo "api_key_path=$key" >> "$GITHUB_OUTPUT"
+            echo "notarizing with an App Store Connect API key"
+          elif [ -n "${APPLE_ID-}" ] && [ -n "${APPLE_APP_SPECIFIC_PASSWORD-}" ]; then
+            echo "route=apple-id" >> "$GITHUB_OUTPUT"
+            echo "api_key_path=" >> "$GITHUB_OUTPUT"
+            echo "notarizing with an Apple ID and app-specific password"
+          else
+            echo "::error::no complete notarization credentials — set either APPLE_API_KEY_P8 + APPLE_API_KEY_ID + APPLE_API_ISSUER, or APPLE_ID + APPLE_APP_SPECIFIC_PASSWORD. See desktop/ARCHITECTURE.md → 'Signing and notarization'"
+            exit 1
+          fi
+
+      # Two Package steps for one command, so the certificate never enters the Linux
+      # runner's environment. electron-builder imports CSC_LINK into a throwaway
+      # keychain, finds the identity named by `mac.identity`, signs with the hardened
+      # runtime and entitlements, then notarizes and staples the .app before the dmg
+      # and zip are built from it.
+      #
+      # Only the chosen route's variables are non-empty. That is load-bearing rather
+      # than tidy: `getNotarizeOptions` checks `APPLE_ID` *first* and throws if its
+      # partners are missing, so leaking a stray `APPLE_ID` into the API-key route
+      # would fail the build outright. An empty string reads as absent.
+      - name: Package (signed and notarized)
+        if: matrix.name == 'macos'
         run: ${{ matrix.run }}
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_API_KEY: ${{ steps.creds.outputs.api_key_path }}
+          APPLE_API_KEY_ID: ${{ steps.creds.outputs.route == 'api' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ steps.creds.outputs.route == 'api' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_ID: ${{ steps.creds.outputs.route == 'apple-id' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.creds.outputs.route == 'apple-id' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ steps.creds.outputs.route == 'apple-id' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Package
+        if: matrix.name != 'macos'
+        run: ${{ matrix.run }}
+
+      # The disk image needs its own notarization ticket: the one electron-builder
+      # stapled is inside the .app, and an unnotarized image shows the very dialog
+      # this exists to remove when it is mounted. Sequential on purpose — bash 3.2
+      # on the runner has no `wait -n`, and a backgrounded round trip that fails
+      # would surface as a confusing staple error instead of Apple's own message.
+      #
+      # `notarytool submit --wait` has been reported to exit 0 on a rejected
+      # submission, so the status is read out of its JSON and `notarytool log`
+      # fetches Apple's reasons — an `Invalid` verdict otherwise surfaces as a bare
+      # "could not find ticket" from stapler, with the actual cause (an unsigned
+      # nested binary, a missing entitlement) left on Apple's server. `--timeout`
+      # bounds the wait; the job's own `timeout-minutes` is the backstop for the
+      # notarization electron-builder does inside the packaging step.
+      - name: Notarize and staple the disk images
+        if: matrix.name == 'macos'
+        env:
+          APPLE_API_KEY: ${{ steps.creds.outputs.api_key_path }}
+          APPLE_API_KEY_ID: ${{ steps.creds.outputs.route == 'api' && secrets.APPLE_API_KEY_ID || '' }}
+          APPLE_API_ISSUER: ${{ steps.creds.outputs.route == 'api' && secrets.APPLE_API_ISSUER || '' }}
+          APPLE_ID: ${{ steps.creds.outputs.route == 'apple-id' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ steps.creds.outputs.route == 'apple-id' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          # notarytool spells the credentials differently from the environment
+          # variables electron-builder reads, so they are re-expressed as arguments.
+          if [ -n "$APPLE_API_KEY" ]; then
+            set -- --key "$APPLE_API_KEY" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER"
+          else
+            set -- --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_SPECIFIC_PASSWORD"
+          fi
+          for dmg in dist/*.dmg; do
+            echo "notarizing $dmg"
+            submission=$(xcrun notarytool submit "$dmg" "$@" --wait --timeout 15m --output-format json)
+            status=$(printf '%s' "$submission" | jq -r '.status // "unknown"')
+            id=$(printf '%s' "$submission" | jq -r '.id // empty')
+            echo "$dmg → $status ($id)"
+            if [ "$status" != "Accepted" ]; then
+              [ -n "$id" ] && xcrun notarytool log "$id" "$@" || true
+              echo "::error::notarization of $dmg came back $status"
+              exit 1
+            fi
+            xcrun stapler staple "$dmg"
+          done
+
+      # What the log claimed is not what shipped. Both arches: electron-builder
+      # writes x64 to dist/mac and arm64 to dist/mac-arm64, and signs each on its
+      # own. The zip needs no check of its own — it is packed from the .app verified
+      # here, ticket included.
+      #
+      # Three assertions, not one, because each of the first two passes for the
+      # wrong artifact on its own: `Authority=Developer ID Application:` holds for
+      # *any* team's certificate and `stapler validate` for anything Apple ever
+      # notarized, so a wrong `.p12` — hand-made, once, by someone who is not the
+      # person merging this — would sign, notarize and ship. `TeamIdentifier` pins
+      # whose certificate it is and `Identifier` pins which app, and both matter
+      # beyond this release: Squirrel.Mac refuses a replacement whose signature does
+      # not match the running app's, so a silent team change breaks self-update on
+      # every install that already exists.
+      - name: The macOS artifacts are Developer ID signed, notarized and stapled
+        if: matrix.name == 'macos'
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -eu
+          # Read out of the packaging config rather than restated here, so renaming the
+          # bundle id stays a one-line change and this still compares the artifact
+          # against what it was supposed to be built as. Tolerates the legal YAML
+          # spellings of the value (quoted, extra spaces, a trailing comment); anything
+          # it cannot read comes out empty and fails on the next line rather than
+          # silently asserting nothing.
+          app_id=$(sed -n 's/^appId:[[:space:]]*["'"'"']\{0,1\}\([^"'"'"'[:space:]#]*\).*/\1/p' electron-builder.yml)
+          [ -n "$app_id" ] || { echo "::error::could not read appId from desktop/electron-builder.yml"; exit 1; }
+
+          # $1 = artifact, $2… = literal prefixes one of its signature's lines must
+          # start with.
+          assert_signature() {
+            target=$1
+            shift
+            # `codesign --display` reports on stderr, hence the redirect — and `||
+            # true`, because under `set -e` a non-zero codesign exit would kill the
+            # step from inside this assignment: no annotation, no report, an empty
+            # log for the one step whose job is to say what went wrong. An unsigned
+            # artifact is exactly that case (`signDmg` returns silently when there is
+            # no identity), so the failure has to be reported below.
+            report=$(codesign --display --verbose=2 "$target" 2>&1 || true)
+            for expected in "$@"; do
+              # `awk`'s `index($0, s) == 1` is a **literal prefix** test, which is what
+              # this needs and what neither grep flag gives on its own: `-F` is literal
+              # but cannot anchor, and `-E` anchors but turns the dots in
+              # `Identifier=dev.veld.desktop` into wildcards that accept
+              # `devXveldYdesktop`. Anchoring matters because it is what makes this the
+              # same predicate as `isDeveloperIdSigned`'s `/^Authority=…/m` — one
+              # definition of "signed", asserted at both ends. Two earlier spellings of
+              # this test were wrong in opposite directions, and a shell-quoting one
+              # (`case` against `$(printf '\n')`, which is the empty string) failed
+              # *open* while reading as if it anchored.
+              if ! printf '%s\n' "$report" \
+                | awk -v s="$expected" 'index($0, s) == 1 { found = 1 } END { exit !found }'; then
+                echo "::error::$target is not the expected signed artifact — no line starting '$expected' in its signature"
+                printf '%s\n' "$report"
+                exit 1
+              fi
+            done
+          }
+          for app in dist/mac-arm64/Veld.app dist/mac/Veld.app; do
+            codesign --verify --deep --strict --verbose=2 "$app"
+            assert_signature "$app" \
+              "Authority=Developer ID Application:" \
+              "TeamIdentifier=$APPLE_TEAM_ID" \
+              "Identifier=$app_id"
+            xcrun stapler validate "$app"
+          done
+          # The disk image is signed and notarized separately from the app inside it,
+          # so it is asserted separately — minus the bundle identifier, which for a
+          # disk image codesign derives from the file name rather than from
+          # Info.plist, and plus the secure timestamp. That last one is not
+          # decoration: electron-builder signs the image without an explicit
+          # `--timestamp` (`dmg-builder/out/dmg.js`), codesign's default is
+          # documented as "may result in some but not all code signatures being
+          # timestamped", and Apple's notary service rejects a signature without one.
+          # If this is what fails the first signed release, the fix is to sign the
+          # image here with `codesign --timestamp` instead of letting the packager do
+          # it — asserted rather than assumed because it cannot be tested without the
+          # certificate.
+          for dmg in dist/*.dmg; do
+            assert_signature "$dmg" \
+              "Authority=Developer ID Application:" \
+              "TeamIdentifier=$APPLE_TEAM_ID" \
+              "Timestamp="
+            xcrun stapler validate "$dmg"
+          done
 
       # `if-no-files-found: error` is all-or-nothing, so it cannot notice that
       # one glob matched nothing — and the update feed is the file whose absence
@@ -265,6 +538,15 @@ jobs:
             desktop/dist/*.blockmap
             desktop/dist/latest*.yml
           if-no-files-found: error
+
+      # The API key is a file, so it outlives the step that wrote it and every later
+      # step — including third-party actions — can read it. `always()` so a failed
+      # notarization does not leave it behind either. The runner is ephemeral, so
+      # this is defence in depth rather than the only thing standing between the key
+      # and the outside.
+      - name: Remove the App Store Connect API key
+        if: always() && matrix.name == 'macos'
+        run: rm -f "$RUNNER_TEMP/AuthKey.p8"
 
   # ── All builds passed → create the tag ─────────────────────────────
   release:

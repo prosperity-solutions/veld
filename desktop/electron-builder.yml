@@ -11,10 +11,13 @@ appId: dev.veld.desktop
 productName: Veld
 copyright: Copyright © Prosperity Solutions
 
-# `buildResources` is deliberately left at its default (`build/`, which does not
-# exist here): electron-builder excludes that directory from the packaged app, and
-# `assets/` has to ship — the tray icon is read from it at runtime. The icons are
-# referenced by explicit path below instead.
+# `buildResources` is deliberately left at its default (`build/`): electron-builder
+# excludes that directory from the packaged app, which is exactly right for the two
+# entitlements plists that live there — and it is why `assets/`, which *has* to ship
+# (the tray icon is read from it at runtime), is not in it. The icons are referenced
+# by explicit path below; the entitlements deliberately are not, and are picked up
+# from `build/` by name instead — see the `mac` block for why a spelled-out path
+# would be the fragile choice there.
 directories:
   output: dist
 
@@ -47,18 +50,75 @@ mac:
     - target: dmg
       arch: [arm64, x64]
     # The zip is what Squirrel.Mac updates *from* — a dmg is a disk image, not an
-    # update payload — so `latest-mac.yml` points at it. Shipped now even though
-    # macOS self-install is off (see below), because the alternative is a release
-    # whose update feed describes files that aren't there.
+    # update payload — so `latest-mac.yml` points at it, and now that a release is
+    # signed it is the file macOS self-updates actually download (the app decides
+    # that by inspecting its own signature: `updatePolicy.js` → `isDeveloperIdSigned`,
+    # called from `updater.js`).
     - target: zip
       arch: [arm64, x64]
-  # No Developer ID yet (issue #167 §10). electron-builder's own signing is
-  # skipped explicitly rather than left to auto-discovery — otherwise the
-  # artifacts depend on which certificates happen to be in the keychain of the
-  # machine that built them, which is the one property a release must not have.
-  # `scripts/adhoc-sign.js` then ad-hoc signs the bundle, which is not a
-  # trust signal but *is* what makes it launch at all on Apple Silicon.
-  identity: null
+  # ── Developer ID signing + notarization (issue #167 §10) ──────────
+  #
+  # `identity` is a *substring qualifier* matched against `security find-identity
+  # -v` output, not a full certificate name (app-builder-lib's `_findIdentity`),
+  # so this selects the team's Developer ID Application certificate without
+  # hardcoding the company's legal name here or spending a repository secret on
+  # it. Release CI supplies the certificate itself as `CSC_LINK` /
+  # `CSC_KEY_PASSWORD`, which electron-builder imports into a throwaway keychain —
+  # so a release still does not depend on what happens to be in the runner's
+  # keychain, which is the property the previous `identity: null` was protecting.
+  #
+  # Where there is no Developer ID — a contributor's laptop, and *every* PR build,
+  # since electron-builder refuses to sign at all when `GITHUB_BASE_REF` is set —
+  # signing is skipped with a warning and `scripts/adhoc-sign.js` ad-hoc signs
+  # instead. That is not a trust signal but is what makes the bundle launch at all
+  # on Apple Silicon; see the hook for why it cannot simply be deleted.
+  identity: Developer ID Application
+  # Required by notarization, and the reason `build/entitlements.mac.plist` and
+  # `build/entitlements.mac.inherit.plist` exist: under the hardened runtime Electron
+  # cannot JIT or load its own frameworks without those exceptions, so a hardened
+  # build with no entitlements is signed, notarized, and then crashes on launch.
+  #
+  # There is deliberately no `entitlements:` key naming them. electron-builder picks
+  # both up from `buildResources` by name, anchored at the project directory — while
+  # a spelled-out relative path is passed to `codesign` verbatim, resolved against
+  # whatever the *process* working directory happens to be. Every caller today runs
+  # from `desktop/`, so a path would work by coincidence and break the first time
+  # anything invokes electron-builder from the repo root.
+  hardenedRuntime: true
+  # `spctl --assess` on the machine that just built the app answers a question
+  # about *that machine's* policy state; the release workflow verifies the
+  # signing identity and the notarization ticket on the artifact instead.
+  gatekeeperAssess: false
+  # Notarization is driven by the environment rather than by a key here:
+  # electron-builder notarizes and staples the .app after signing it whenever it finds
+  # credentials in the environment (`MacTargetHelper.getNotarizeOptions`), and **skips
+  # it with a warning** when it does not. A warning is not a gate, which is why
+  # release CI asserts the staple on the built app instead of trusting the log. The
+  # only thing a `notarize:` key could do here is turn it off.
+  #
+  # It accepts either an App Store Connect API key (`APPLE_API_KEY` — a *path* — plus
+  # `APPLE_API_KEY_ID` and `APPLE_API_ISSUER`) or an Apple ID (`APPLE_ID` +
+  # `APPLE_APP_SPECIFIC_PASSWORD` + `APPLE_TEAM_ID`), and it checks `APPLE_ID`
+  # **first** and throws if that route is half-populated. So the two sets are mutually
+  # exclusive in practice, and `.github/workflows/release.yml`'s credentials step is
+  # what picks one; do not add a stray `APPLE_ID` to a job using the API key.
+# The disk image needs a notarization ticket of its own. Gatekeeper assesses the
+# *downloaded* file when it is opened, and the ticket electron-builder staples to
+# the .app is inside the .app — mounting an unnotarized image shows the same
+# "Apple could not verify" dialog this whole change exists to remove, however well
+# signed the app inside it is. So the dmg is signed here and notarized + stapled by
+# the release workflow, in a second round trip after packaging.
+#
+# `writeUpdateInfo: false` is what makes that safe: electron-builder hashes each
+# artifact as it finishes, so a dmg entry in `latest-mac.yml` (and its blockmap)
+# would describe the bytes *before* stapling and be wrong the moment the ticket
+# lands. Nothing loses information — electron-updater's macOS path takes the zip
+# and excludes dmg/pkg outright (`findFile(files, "zip", ["pkg", "dmg"])`), so the
+# feed never described a file it could use. The dmg stays a plain download.
+dmg:
+  sign: true
+  writeUpdateInfo: false
+
 linux:
   category: Development
   icon: assets/icon.png

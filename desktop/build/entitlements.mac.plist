@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardened-runtime exceptions for the Veld Desktop **app bundle**'s Developer ID
+  signature. electron-builder finds this file by name in `buildResources` (`build/`);
+  nothing in electron-builder.yml spells out a path, deliberately — see the `mac`
+  block there. The nested helpers and frameworks get the sibling
+  `entitlements.mac.inherit.plist` instead.
+
+  The first two are what Electron needs to run *at all* under the hardened runtime,
+  which notarization requires: V8 compiles JavaScript at runtime. Without them the
+  app is signed and notarized and then crashes on launch, which is a worse failure
+  than the Gatekeeper warning this replaces.
+
+  The third — `disable-library-validation` — is the one worth arguing about, and the
+  honest statement of it is: library validation would accept anything signed with
+  *our own* Team ID, and after this change every framework and helper in the bundle
+  is, so it is not needed for Electron's own code. What it actually grants is loading
+  code signed by anyone — and the sibling inherit plist grants the same thing to every
+  helper and renderer. It is kept for two reasons and neither is "Electron requires
+  it": removing
+  it can only be validated by launching a Developer ID-signed build, which cannot be
+  done until the certificate exists, and the failure mode of being wrong is a crash
+  on launch for every user. The residual exposure is also small in context — this
+  app runs the user's own shell in a PTY, so an attacker who can place a dylib for
+  it to load can already run commands. Revisit once a signed build can be launched:
+  drop the key, launch, restore only if it fails.
+
+  It is byte-identical to the template electron-builder falls back to
+  (app-builder-lib/templates/entitlements.mac.plist) and committed anyway: this
+  is a security-relevant property of the shipped binary, so it belongs in the
+  repo where a reviewer can see it, not in a node_modules file that a dependency
+  bump may quietly change.
+
+  Deliberately *not* here: no App Sandbox (this is a Developer ID build, not a
+  Mac App Store one), and no `com.apple.security.cs.allow-dyld-environment-variables`
+  — the shell spawns child processes (`veld`, `git`) but never injects DYLD_* into
+  them, and an entitlement nothing needs is one more thing weakening the runtime.
+-->
+<plist version="1.0">
+  <dict>
+    <!-- V8. https://developer.apple.com/documentation/security/com_apple_security_cs_allow-jit -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <!-- Chromium still writes executable pages JIT alone does not cover. -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <!-- See the note above: kept as electron-builder's own default until a signed
+         build can be launched without it.
+         https://github.com/electron-userland/electron-builder/issues/3940 -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+  </dict>
+</plist>

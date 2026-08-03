@@ -8,17 +8,32 @@
 const GITHUB_REPO = "prosperity-solutions/veld";
 
 /**
- * Whether the macOS build carries a Developer ID signature (issue #167 §10).
+ * Whether a `codesign --display --verbose=2` report describes a Developer
+ * ID-signed bundle (issue #167 §10).
  *
- * A constant rather than a branch to delete, because "delete this line" was the
- * wrong instruction: `updateMode`'s catch-all also returns `"download"`, so
- * removing the darwin case changes nothing and the existing test still passes —
- * a contributor doing exactly what the comment said would ship no behaviour
- * change and believe otherwise. Flipping this to `true` (and packaging with a
- * real identity, and notarizing) is the whole switch, and both sides of it are
- * tested.
+ * This replaced a `MACOS_SIGNED` build-time constant, which was wrong in a way a
+ * constant cannot avoid: release CI signs, `just desktop-package` on a
+ * contributor's Mac ad-hoc signs, and both compile from this same source. A
+ * constant set for the release build tells a locally packaged one it may replace
+ * itself, so it would download 113 MB and only then have Squirrel.Mac reject the
+ * swap — precisely the "downloaded-then-rejected update is worse than no button"
+ * failure the platform split exists to avoid.
+ *
+ * So the build measures itself instead. `Authority=` is the certificate that
+ * vouches for the bundle; an ad-hoc signature reports `Signature=adhoc` and no
+ * Authority line at all. This is the same predicate release CI asserts on the
+ * artifact (`.github/workflows/release.yml`), which is the point — one definition
+ * of "signed", checked at both ends.
+ *
+ * Pure so it can be tested; the caller runs `codesign` (see `updater.js`).
+ *
+ * @param {string} codesignOutput combined stdout+stderr of
+ *   `codesign --display --verbose=2 <bundle>`
+ * @returns {boolean}
  */
-const MACOS_SIGNED = false;
+function isDeveloperIdSigned(codesignOutput) {
+  return /^Authority=Developer ID Application:/m.test(String(codesignOutput ?? ""));
+}
 
 /**
  * How this build is allowed to apply an update.
@@ -30,20 +45,21 @@ const MACOS_SIGNED = false;
  *   swap, and `APPIMAGE` in the environment is how the running process knows it
  *   *is* one (a .deb install has no such variable, and nothing in it a process
  *   may replace without the package manager).
- * - `"download"` — check and tell the user, but hand the install to them. macOS
- *   is here because Squirrel.Mac verifies that the replacement carries the same
- *   code signature as the running app, and veld has no Developer ID yet (issue
- *   #167 §10); the .deb is here because its files belong to dpkg.
+ * - `"download"` — check and tell the user, but hand the install to them. The .deb
+ *   is here because its files belong to dpkg; a macOS build is here when it is not
+ *   Developer ID-signed, because Squirrel.Mac verifies that the replacement
+ *   carries the same code signature as the running app — an ad-hoc build would
+ *   download an update and only then find out it could not apply it.
  *
- * The macOS half flips with `MACOS_SIGNED` above, once signing lands.
+ * `macSigned` defaults to `false` — the answer that is safe when nobody measured.
+ * The caller measures it (`updater.js`, via `isDeveloperIdSigned`); a pure
+ * function cannot.
  *
  * @param {{platform: string, isPackaged: boolean, env?: Record<string, string | undefined>, macSigned?: boolean}} ctx
  * @returns {"off" | "install" | "download"}
  */
-function updateMode({ platform, isPackaged, env = {}, macSigned = MACOS_SIGNED }) {
+function updateMode({ platform, isPackaged, env = {}, macSigned = false }) {
   if (!isPackaged) return "off";
-  // Unsigned → Squirrel.Mac rejects the swap after the download, so there is
-  // nothing to gain by starting one.
   if (platform === "darwin") return macSigned ? "install" : "download";
   if (platform === "linux") return env.APPIMAGE ? "install" : "download";
   return "download";
@@ -55,12 +71,16 @@ function updateMode({ platform, isPackaged, env = {}, macSigned = MACOS_SIGNED }
  * platforms are download-only for unrelated reasons and one string covering both
  * is a falsehood on whichever platform it was not written for.
  *
+ * The darwin string is reachable exactly for a build that is not Developer
+ * ID-signed — a local `just desktop-package`, not a release — so it says that about
+ * *this build* rather than about veld.
+ *
  * @param {{platform: string}} ctx
  * @returns {string}
  */
 function downloadOnlyReason({ platform }) {
   if (platform === "darwin") {
-    return "Veld Desktop isn't code-signed yet, so macOS won't let it replace itself.";
+    return "This build isn't signed with a Developer ID, so macOS won't let it replace itself.";
   }
   if (platform === "linux") {
     return "This is a .deb install, so its files belong to your package manager.";
@@ -150,6 +170,7 @@ module.exports = {
   GITHUB_REPO,
   compareVersions,
   downloadOnlyReason,
+  isDeveloperIdSigned,
   releasePageUrl,
   updateMode,
   versionSkew,
