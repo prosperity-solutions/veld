@@ -281,13 +281,23 @@ function claimHolder(worktreeId) {
  * a rail that only refreshed when *you* did something would stay wrong for as
  * long as you did nothing.
  */
-function broadcastClaims() {
-  const live = allRecords().filter((r) => !r.win.isDestroyed());
-  const ids = new Set(live.map((r) => r.id));
-  // `claimHolder` prunes lazily, one worktree at a time, and it is not on this
+function pruneClaims() {
+  const ids = new Set(allRecords().filter((r) => !r.win.isDestroyed()).map((r) => r.id));
+  let dropped = false;
+  // `claimHolder` prunes lazily, one worktree at a time, and it is not on every
   // path — a dead window's claim left here would grey a rail row out with no
   // window behind it and no way for the user to reach it again.
-  for (const [worktreeId, id] of claims) if (!ids.has(id)) claims.delete(worktreeId);
+  for (const [worktreeId, id] of claims) {
+    if (ids.has(id)) continue;
+    claims.delete(worktreeId);
+    dropped = true;
+  }
+  return dropped;
+}
+
+function broadcastClaims() {
+  pruneClaims();
+  const live = allRecords().filter((r) => !r.win.isDestroyed());
   for (const record of live) {
     if (record.kind !== "main") continue;
     const worktreeIds = [];
@@ -981,10 +991,15 @@ function registerWindowIpc(ipcMain) {
   ipcMain.handle("veld:window:claims", (event) => {
     const record = recordFor(senderWindow(event));
     if (!record) return [];
+    // Every other mutator of `claims` broadcasts, and a read that prunes is a
+    // mutator: dropping an entry here and telling nobody would leave the *other*
+    // rails greying out a worktree whose window is gone.
+    const dropped = pruneClaims();
     const worktreeIds = [];
     for (const [worktreeId, id] of claims) {
-      if (id !== record.id && claimHolder(worktreeId)) worktreeIds.push(worktreeId);
+      if (id !== record.id) worktreeIds.push(worktreeId);
     }
+    if (dropped) broadcastClaims();
     return worktreeIds;
   });
 
