@@ -80,7 +80,7 @@ pub enum Severity {
     Error,
     Warning,
     /// Nothing is wrong. Used where veld has something to *tell* the author about
-    /// a legitimate declaration — currently that `hooks` and `ui` are reserved and
+    /// a legitimate declaration — currently that `hooks` and the rest of `ide` are reserved and
     /// parsed but not executed by this version, which they could not otherwise
     /// discover without reading the changelog.
     Notice,
@@ -149,6 +149,16 @@ impl Finding {
             " Veld now accepts real `//` comments in every config file, so this \
              key can simply become a comment."
                 .to_owned()
+        } else if key == "ui" {
+            // `ui` was reserved-and-uninterpreted for the whole of schemaVersion 3
+            // until the release that gave it a meaning, which is also the release
+            // that renamed it. Nothing acted on the old spelling, so the fix is a
+            // rename and nothing else — but the error has to *say* that, or it
+            // reads as veld having dropped a key it used to accept.
+            " `ui` was renamed to `ide` in this version: it names veld's own IDE \
+             surfaces (Veld Desktop and /ide), and it stayed reserved until now, so \
+             renaming the key is the whole migration."
+                .to_owned()
         } else {
             String::new()
         };
@@ -156,8 +166,9 @@ impl Finding {
             severity: Severity::Error,
             location: location.to_owned(),
             message: format!(
-                "unknown top-level key \"{key}\". Expected one of: {}. (`hooks` and `ui` \
-                 are reserved and parsed but not executed.){hint}",
+                "unknown top-level key \"{key}\". Expected one of: {}. (`hooks` is reserved and \
+                 parsed but not executed; so is every key under `ide` except \
+                 `quicklinks` and `permissions`.){hint}",
                 KNOWN_TOP_LEVEL_KEYS.join(", ")
             ),
             rule: "unknown-top-level-key".to_owned(),
@@ -389,10 +400,21 @@ pub struct VeldConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<serde_json::Value>,
 
-    /// **Reserved.** JSON-defined UI extensions for the desktop app and the IDE
-    /// view. Parsed, stored, not executed. See [`Self::hooks`].
+    /// Per-project settings for veld's own IDE surfaces — Veld Desktop and the
+    /// `/ide` view.
+    ///
+    /// `quicklinks` and `permissions` are interpreted (see [`crate::ide`]);
+    /// everything else under this key is **reserved** — parsed, stored, and not
+    /// rendered by this version, so a JSON-defined IDE extension can take whatever
+    /// shape it eventually needs. See [`Self::hooks`].
+    ///
+    /// Spelled `ui` while it was wholly reserved. Renamed here, in the release that
+    /// first gave it a meaning, because a top-level key rename is breaking and
+    /// there was no second chance at it: `/ide` is the route and an IDE surface is
+    /// what the reservation was for, while "UI" could equally have named the
+    /// dashboard or the CLI's own output.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ui: Option<serde_json::Value>,
+    pub ide: Option<serde_json::Value>,
 
     /// Whether this config was assembled from more than one file.
     ///
@@ -2344,6 +2366,17 @@ pub fn resolve_variant(
 }
 
 impl VeldConfig {
+    /// The interpreted part of the `ide` namespace.
+    ///
+    /// Derived on demand rather than stored: [`Self::ide`] holds the raw value and
+    /// stays the single source of truth, so nothing here can reshape what the
+    /// loader round-trips or what the opaque-`ide` exemption in
+    /// [`reject_v3_legacy_commands`] walks past.
+    #[must_use]
+    pub fn ide_section(&self) -> crate::ide::IdeSection {
+        crate::ide::parse(self.ide.as_ref())
+    }
+
     /// Resolve a node+variant by name, if both exist.
     pub fn resolved(&self, node: &str, variant: &str) -> Option<ResolvedVariant> {
         let node_cfg = self.nodes.get(node)?;
@@ -2524,7 +2557,7 @@ pub fn parse_config_with_files(path: &Path) -> Result<crate::include::LoadedConf
 ///
 /// There is deliberately no automated converter. veld shipped one and removed it:
 /// preserving comments meant rewriting bytes, and a byte-level rewriter cannot see
-/// that `hooks` and `ui` are opaque, so it edited the blobs veld promises not to
+/// that `hooks` and `ide` are opaque, so it edited the blobs veld promises not to
 /// interpret. Detection is structural and exact and stays here; the rewrite is a
 /// judgment (`argv` or `shell`?) best left to whoever — or whatever — is reading
 /// the config, with `veld lint` as the check afterwards.
@@ -2553,7 +2586,7 @@ pub const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "teardown",
     "nodes",
     "hooks",
-    "ui",
+    "ide",
 ];
 
 /// `command` is gone: every place that runs something says `argv` or `shell`.
@@ -2582,14 +2615,14 @@ pub(crate) fn reject_v3_legacy_commands(
                     } else {
                         format!("{at}.{key}")
                     };
-                    // `hooks` and `ui` are reserved and **opaque** (F8): veld does
+                    // `hooks` and `ide` are reserved and **opaque** (F8): veld does
                     // not interpret their contents, so it must not police their key
                     // names either. A UI extension declaring a `command` key is its
                     // own business — treating it as veld's legacy key made the whole
                     // config unloadable. This exemption is also why the automated
                     // converter was removed: it worked on bytes, so it could not see
                     // the exemption and rewrote the opaque blobs anyway.
-                    if at.is_empty() && (key == "hooks" || key == "ui") {
+                    if at.is_empty() && (key == "hooks" || key == "ide") {
                         continue;
                     }
                     if key == "command" {
@@ -2668,13 +2701,18 @@ pub fn validate(config: &VeldConfig) -> Vec<Finding> {
     findings
 }
 
-/// F8: `hooks` and `ui` are reserved — parsed, stored, and **not executed** by
-/// this version.
+/// F8: `hooks` is reserved — parsed, stored, and **not executed** by this
+/// version — and so is everything under `ide` except the parts veld now renders.
 ///
 /// Saying so is the whole point of reserving them. An author who writes a
 /// `worktree.created` hook and sees nothing happen has no way to tell a
 /// not-yet-implemented feature from a config mistake, and would reasonably spend
 /// an afternoon on the difference.
+///
+/// `ide.quicklinks` and `ide.permissions` are the exception: they *are* interpreted
+/// (see [`crate::ide`]), so reporting them as inert would now be the lie F8 exists
+/// to prevent. Their own defects are reported here too, as warnings — the parser
+/// drops what it cannot understand and this is the only surface that says so.
 fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
     if let Some(hooks) = &config.hooks {
         let count = hooks.as_object().map(|o| o.len()).unwrap_or(0);
@@ -2688,16 +2726,54 @@ fn check_reserved_namespaces(config: &VeldConfig, out: &mut Vec<Finding>) {
             ),
         ));
     }
-    if let Some(ui) = &config.ui {
-        let count = ui.as_object().map(|o| o.len()).unwrap_or(0);
-        out.push(Finding::notice(
-            "reserved-not-executed",
-            "ui",
-            format!(
-                "`ui` is declared ({count} extension(s)); this version of veld parses and \
-                 stores them but does not render them"
-            ),
-        ));
+    if config.ide.is_some() {
+        let section = config.ide_section();
+        for problem in &section.problems {
+            out.push(Finding::warning(
+                "ide-entry-ignored",
+                problem.location.clone(),
+                problem.message.clone(),
+            ));
+        }
+        // A *well-formed* grant to a remote origin produced no output at all, so
+        // `veld lint` called a config that hands a third-party server standing
+        // camera access "valid". The whole mitigation for config-declared grants
+        // is that they are reviewable, and the person who clones a repo reads
+        // neither its `veld.json` nor veld's docs — this is the one surface that
+        // reaches them. Loopback grants stay silent: a config that can already
+        // run `argv` on the machine is not meaningfully constrained by
+        // withholding a camera from its own dev server.
+        for rule in &section.permissions {
+            if rule.allow.is_empty() || crate::ide::is_local_origin(&rule.origin) {
+                continue;
+            }
+            out.push(Finding::warning(
+                "ide-remote-permission-grant",
+                format!("ide.permissions[{}]", rule.origin.raw),
+                format!(
+                    "grants {} to {}, which is not this machine. Anyone who opens this project \
+                     in a Veld Desktop browser pane gives that server's JavaScript a standing \
+                     capability on their own machine, without being asked. Remove it, or keep \
+                     it and be sure the origin is one you control",
+                    rule.allow.join(", "),
+                    rule.origin.raw,
+                ),
+            ));
+        }
+        if !section.uninterpreted.is_empty() {
+            let count = section.uninterpreted.len();
+            let names = section.uninterpreted.join(", ");
+            out.push(Finding::notice(
+                "reserved-not-executed",
+                "ide",
+                format!(
+                    "`ide` declares {count} key(s) this version does not render ({names}); they \
+                     are parsed and stored so the shape does not change when they are \
+                     implemented. `ide.quicklinks` is rendered wherever `/ide` runs, and \
+                     `ide.permissions` by Veld Desktop"
+                ),
+            ));
+        }
     }
 }
 
@@ -5105,7 +5181,7 @@ mod tests {
                 round.hooks, cfg.hooks,
                 "{label}: reserved keys must survive"
             );
-            assert_eq!(round.ui, cfg.ui, "{label}: reserved keys must survive");
+            assert_eq!(round.ide, cfg.ide, "{label}: reserved keys must survive");
             assert_eq!(
                 round.vars.as_ref().map(|v| v.len()),
                 cfg.vars.as_ref().map(|v| v.len()),
@@ -5116,7 +5192,7 @@ mod tests {
 
     // -- F8: reserved namespaces ----------------------------------------------
 
-    /// `hooks` and `ui` parse, round-trip, and produce the not-executed notice.
+    /// `hooks` and `ide` parse, round-trip, and produce the not-executed notice.
     ///
     /// The notice is the point of reserving them: an author who writes a
     /// `worktree.created` hook and sees nothing happen otherwise cannot tell a
@@ -5130,7 +5206,7 @@ mod tests {
                     "worktree.created": [ { "argv": ["./scripts/setup-worktree.sh"] } ],
                     "run.stopped":      [ { "shell": "./scripts/collect.sh" } ]
                 },
-                "ui": { "my-ext": { "title": "Mine", "panel": "p", "commands": [] } },
+                "ide": { "my-ext": { "title": "Mine", "panel": "p", "commands": [] } },
                 "nodes": {}
             }"#,
         )
@@ -5138,20 +5214,20 @@ mod tests {
 
         // Held opaquely — veld does not interpret the shape.
         assert_eq!(cfg.hooks.as_ref().unwrap().as_object().unwrap().len(), 2);
-        assert!(cfg.ui.as_ref().unwrap().get("my-ext").is_some());
+        assert!(cfg.ide.as_ref().unwrap().get("my-ext").is_some());
 
         // Round-trips, so `veld config` cannot silently drop them.
         let round: VeldConfig =
             serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
         assert_eq!(round.hooks, cfg.hooks);
-        assert_eq!(round.ui, cfg.ui);
+        assert_eq!(round.ide, cfg.ide);
 
         let findings = validate(&cfg);
         let notices: Vec<&Finding> = findings
             .iter()
             .filter(|f| f.rule == "reserved-not-executed")
             .collect();
-        assert_eq!(notices.len(), 2, "one each for hooks and ui: {findings:?}");
+        assert_eq!(notices.len(), 2, "one each for hooks and ide: {findings:?}");
         assert!(
             notices.iter().all(|f| f.severity == Severity::Notice),
             "a legitimate declaration is not a warning: {notices:?}"
@@ -5164,6 +5240,121 @@ mod tests {
         );
         // …and never blocks a run.
         assert!(error_summary(&findings).is_none());
+    }
+
+    /// F8 narrowed: the parts of `ide` veld now renders must stop reporting as inert.
+    ///
+    /// The whole value of the notice is that it is true. A config whose `ide` holds
+    /// only quicklinks and permissions is fully interpreted, so saying "parsed but
+    /// not rendered" about it would send an author looking for a bug in the one
+    /// place there isn't one.
+    #[test]
+    fn an_interpreted_ide_section_reports_no_reserved_notice() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "ide": {
+                    "quicklinks": [ { "label": "Staging", "url": "https://staging.example.com" } ],
+                    "permissions": [ { "origin": "http://localhost:*", "allow": ["camera"] } ]
+                },
+                "nodes": {}
+            }"#,
+        )
+        .unwrap();
+
+        let section = cfg.ide_section();
+        assert_eq!(section.quicklinks.len(), 1);
+        assert_eq!(section.permissions.len(), 1);
+
+        let findings = validate(&cfg);
+        assert!(
+            !findings.iter().any(|f| f.rule == "reserved-not-executed"),
+            "nothing here is unrendered: {findings:?}"
+        );
+        assert!(error_summary(&findings).is_none());
+    }
+
+    /// The rename hint is the entire user-facing artifact of a breaking change,
+    /// and four documents assert it exists. Nothing tested it.
+    #[test]
+    fn the_old_ui_key_reports_the_rename_rather_than_a_bare_unknown_key() {
+        // Through the real loader: the unknown-key walk reads the raw document, so
+        // a `serde_json::from_str` here would silently drop the key and test
+        // nothing. (It did, the first time this was written.)
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("veld.json");
+        std::fs::write(
+            &path,
+            r#"{ "schemaVersion": "3", "name": "t", "ui": { "quicklinks": [] }, "nodes": {} }"#,
+        )
+        .unwrap();
+        let cfg = parse_config(&path).expect("a renamed key must not strand `veld stop`");
+        let findings = validate(&cfg);
+        let hit = findings
+            .iter()
+            .find(|f| f.rule == "unknown-top-level-key")
+            .unwrap_or_else(|| panic!("`ui` is no longer a known key: {findings:?}"));
+        assert!(
+            hit.message.contains("renamed to `ide`"),
+            "the message has to name the rename, or a breaking change reads as a dropped \
+             feature: {}",
+            hit.message
+        );
+    }
+
+    /// A grant to a remote origin is well-formed, so nothing else reports it —
+    /// and "it is reviewable" is the whole mitigation for config-declared grants.
+    #[test]
+    fn a_grant_to_a_remote_origin_is_reported_while_a_local_one_is_not() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "ide": { "permissions": [
+                    { "origin": "http://localhost:*", "allow": ["camera"] },
+                    { "origin": "https://staging.example.com", "allow": ["geolocation"] },
+                    { "origin": "https://analytics.example.com", "deny": ["camera"] }
+                ] },
+                "nodes": {}
+            }"#,
+        )
+        .unwrap();
+        let findings = validate(&cfg);
+        let warned: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "ide-remote-permission-grant")
+            .collect();
+        assert_eq!(warned.len(), 1, "only the remote *allow*: {findings:?}");
+        assert!(warned[0].location.contains("staging.example.com"));
+        // A warning, never an error — it must not block `veld start`.
+        assert!(error_summary(&findings).is_none());
+    }
+
+    /// A defect inside the interpreted part is a *warning*, never a load failure.
+    ///
+    /// Same reasoning as F0.1 everywhere else: a typo in a desktop-only
+    /// convenience field must not be able to take `veld stop` down with it.
+    #[test]
+    fn a_malformed_ui_entry_warns_and_grants_nothing() {
+        let cfg: VeldConfig = serde_json::from_str(
+            r#"{
+                "schemaVersion": "3", "name": "t",
+                "ide": {
+                    "permissions": [ { "origin": "localhost:3000", "allow": ["camera"] } ]
+                },
+                "nodes": {}
+            }"#,
+        )
+        .unwrap();
+
+        assert!(cfg.ide_section().permissions.is_empty(), "fail closed");
+        let findings = validate(&cfg);
+        let warnings: Vec<&Finding> = findings
+            .iter()
+            .filter(|f| f.rule == "ide-entry-ignored")
+            .collect();
+        assert_eq!(warnings.len(), 1, "{findings:?}");
+        assert_eq!(warnings[0].location, "ide.permissions[0].origin");
+        assert!(error_summary(&findings).is_none(), "must not block a run");
     }
 
     /// Reserving two keys must not open the door to every other typo — but the

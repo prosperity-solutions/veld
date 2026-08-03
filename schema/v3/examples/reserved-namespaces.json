@@ -7,7 +7,7 @@
     "project.created": [{ "argv": ["pnpm", "install"] }],
     "run.stopped": [{ "shell": "./scripts/collect-artifacts.sh | tee artifacts.log" }]
   },
-  "ui": {
+  "ide": {
     "my-extension": { "title": "Mine", "panel": "panel.html", "commands": [] }
   },
   "setup": [

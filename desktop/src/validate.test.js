@@ -435,3 +435,51 @@ test("buildSeedLayout refuses a seed too large to carry", () => {
   assert.ok(Buffer.byteLength(JSON.stringify(tabs), "utf8") > MAX_SEED_BYTES);
   assert.equal(buildSeedLayout(1, tabs, 0.5), null);
 });
+
+test("safeMedia keeps only features and values Chromium accepts", () => {
+  const { safeMedia } = require("./validate");
+  assert.deepStrictEqual(safeMedia({ "prefers-color-scheme": "dark" }), {
+    "prefers-color-scheme": "dark",
+  });
+  // One bad value must not cost a good override beside it.
+  assert.deepStrictEqual(
+    safeMedia({ "prefers-color-scheme": "dark", "forced-colors": "sideways" }),
+    { "prefers-color-scheme": "dark" },
+  );
+  // Nothing left means null, which is what releases the debugger.
+  assert.strictEqual(safeMedia({ "prefers-color-scheme": "sepia" }), null);
+  assert.strictEqual(safeMedia({ "prefers-contrast": "more" }), null);
+  assert.strictEqual(safeMedia(null), null);
+  assert.strictEqual(safeMedia("dark"), null);
+});
+
+test("isPermissionRule re-applies the wildcard confinement the config parser enforces", () => {
+  const { isPermissionRule } = require("./validate");
+  const IDS = ["camera", "display-capture"];
+  const rule = (origin, over = {}) => ({ origin, allow: ["camera"], ...over });
+  const origin = (over = {}) => ({ scheme: "https", host: "veld.localhost", port: 443, ...over });
+
+  assert.ok(isPermissionRule(rule(origin()), IDS));
+  assert.ok(isPermissionRule(rule(origin({ wildcard: true })), IDS));
+  assert.ok(isPermissionRule(rule(origin({ port: null })), IDS), "null port = any port");
+
+  // The confinement `veld_core::ide` spends its longest comment on. A copy of the
+  // check that omitted it would let one crafted rule grant every host under a TLD.
+  assert.ok(!isPermissionRule(rule(origin({ host: "com", wildcard: true })), IDS));
+  assert.ok(!isPermissionRule(rule(origin({ host: "dev", wildcard: true })), IDS));
+  // …but the loopback TLD stays legal, as it is in the parser.
+  assert.ok(isPermissionRule(rule(origin({ host: "localhost", wildcard: true })), IDS));
+  // An IP literal has no subdomains.
+  assert.ok(!isPermissionRule(rule(origin({ host: "[::1]", wildcard: true })), IDS));
+  // A `*` left in the host would be compared literally, or read as a label.
+  assert.ok(!isPermissionRule(rule(origin({ host: "*.veld.localhost" })), IDS));
+
+  assert.ok(!isPermissionRule(rule(origin({ scheme: "file" })), IDS));
+  assert.ok(!isPermissionRule(rule(origin({ host: "" })), IDS));
+  assert.ok(!isPermissionRule(rule(origin({ port: "443" })), IDS));
+  assert.ok(!isPermissionRule(rule(origin({ wildcard: "yes" })), IDS));
+  assert.ok(!isPermissionRule(rule(origin(), { allow: ["root-access"] }), IDS));
+  assert.ok(!isPermissionRule(rule(origin(), { deny: "camera" }), IDS));
+  assert.ok(!isPermissionRule(null, IDS));
+  assert.ok(!isPermissionRule({ origin: "https://x" }, IDS));
+});

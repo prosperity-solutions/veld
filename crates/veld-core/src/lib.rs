@@ -5,6 +5,7 @@ pub mod feedback;
 pub mod graph;
 pub mod health;
 pub mod helper;
+pub mod ide;
 pub mod include;
 pub mod instance;
 pub mod jsonc;

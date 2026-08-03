@@ -127,13 +127,102 @@
         }
       }
     },
-    "ui": {
+    "ide": {
       "type": "object",
-      "description": "RESERVED. JSON-defined UI extensions for the desktop app. Parsed and stored but NOT RENDERED by this version of veld.",
-      "additionalProperties": true
+      "description": "Per-project settings for Veld's own IDE surfaces — Veld Desktop and the /ide view in a browser. `quicklinks` and `permissions` are rendered; every other key here is RESERVED — parsed and stored, but not rendered by this version, and `veld lint` says so. Spelled `ui` while the whole key was reserved; renamed in the release that first gave it a meaning, so a config carrying the old spelling gets an unknown-top-level-key error naming the rename.",
+      "additionalProperties": true,
+      "properties": {
+        "quicklinks": {
+          "type": "array",
+          "description": "Project links that are not veld's own — staging, a dashboard, an internal wiki — shown beside the run's URLs on a browser pane's start page. Versioned with the repo, so a teammate who clones it gets the same links.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "url"],
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "description": "What the link is called."
+              },
+              "url": {
+                "type": "string",
+                "pattern": "^https?://",
+                "description": "An http:// or https:// URL. Other schemes are refused: a quicklink is a repo-controlled string that a click hands to the OS, and `vscode://` or `file://` would make a config file a launcher for whatever the machine has registered. Literal only — `${...}` is not interpolated here, because the start page is rendered with no run to resolve against."
+              }
+            }
+          },
+          "examples": [
+            [
+              { "label": "Staging", "url": "https://staging.example.com" },
+              { "label": "Grafana", "url": "https://grafana.internal" }
+            ]
+          ]
+        },
+        "permissions": {
+          "type": "array",
+          "description": "Browser permissions this project pre-answers for web content shown in a Veld Desktop browser pane, so a dev server that needs geolocation or a camera works for everyone who clones the repo instead of prompting each of them. A permission a user answers by hand always wins over what is written here, and every grant from this file is shown — labelled as coming from veld.json — in the pane's per-site permission panel, where it can be revoked. Understand what you are granting: an entry for a remote origin hands that server's JavaScript a standing capability on the machine of anyone who opens it in a pane.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["origin"],
+            "properties": {
+              "origin": {
+                "type": "string",
+                "pattern": "^https?://(\\*\\.)?[^/?#@*]+(:([0-9]+|\\*))?$",
+                "description": "A bare origin: scheme://host[:port], http or https, no path. A leading `*.` on the host matches any subdomain at any depth — `https://*.veld.localhost:*` covers `website.my-run.veld.localhost` on any port (pair the two wildcards — an unprivileged install serves on 18443, and an omitted port means 443), which is the form to use for veld's own URLs because they carry the RUN NAME in the hostname and run names change. Matching is label-wise, so `evilveld.localhost` does not match, and `*.x` does not match `x` itself. A wildcard over a single label (`*.com`) is refused; `*.localhost` is allowed, since RFC 6761 pins it to loopback. The port may be `*` for 'any port', which is worth knowing because dev servers move; an OMITTED port means the scheme's default port (so `http://example.com` is port 80 exactly), not any port.",
+                "examples": ["https://*.veld.localhost:*", "http://localhost:*", "http://127.0.0.1:5173", "https://staging.example.com"]
+              },
+              "allow": {
+                "type": "array",
+                "description": "Permissions granted without prompting.",
+                "items": { "$ref": "#/$defs/permissionId" }
+              },
+              "deny": {
+                "type": "array",
+                "description": "Permissions refused without prompting. Wins over `allow` in the same rule and over any other matching rule, and is how a project withdraws something Veld allows by default — screen capture of a pane's own contents is the one such default.",
+                "items": { "$ref": "#/$defs/permissionId" }
+              }
+            }
+          },
+          "examples": [
+            [
+              { "origin": "http://localhost:*", "allow": ["geolocation", "clipboard-read"] },
+              { "origin": "https://staging.example.com", "deny": ["display-capture"] }
+            ]
+          ]
+        }
+      }
     }
   },
   "$defs": {
+    "permissionId": {
+      "type": "string",
+      "description": "A browser permission, in veld's spelling. These are veld's own ids rather than Electron's, and differ in one place on purpose: Electron's `media` covers camera and microphone together, while a per-site panel has to show them as the two separate switches every browser shows. Veld Desktop maps them back; a browser tab has no panes, so nothing here applies there.",
+      "enum": [
+        "camera",
+        "clipboard-read",
+        "clipboard-write",
+        "display-capture",
+        "file-system",
+        "fullscreen",
+        "geolocation",
+        "hid",
+        "idle-detection",
+        "keyboard-lock",
+        "microphone",
+        "midi",
+        "notifications",
+        "open-external",
+        "pointer-lock",
+        "protected-media",
+        "serial",
+        "speaker-selection",
+        "storage-access",
+        "usb",
+        "window-management"
+      ]
+    },
     "value": {
       "description": "A value: a plain string (a non-secret literal), or an object naming exactly one source plus an optional `secret` flag. veld never takes custody of a secret \u2014 it carries a pointer and a flag, resolves it at run start, and passes it to the process's environment or a file. Nothing here names a vendor: `argv` runs a command and reads stdout, and which command that is is your business.",
       "oneOf": [

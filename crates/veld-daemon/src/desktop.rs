@@ -511,6 +511,26 @@ struct WorktreeView {
     /// Startable nodes with their variants — the UI's custom-selection
     /// source when no preset fits (hidden nodes excluded).
     nodes: Vec<NodeOptionView>,
+    /// The interpreted part of the checkout's `ide` config section.
+    ///
+    /// **Always present, with arrays that may be empty.** Omitting it when empty
+    /// is what the client types would then have to lie about — the exact defect
+    /// #190 shipped with `public_urls`/`connections`.
+    ide: IdeView,
+}
+
+/// The `ide` config as the UI consumes it.
+///
+/// A lean view rather than `veld_core::ide::IdeSection` itself: the section also
+/// carries the parse problems and the still-uninterpreted key names, and those
+/// belong to `veld lint`, not to a repo listing.
+#[derive(Serialize, Default)]
+struct IdeView {
+    quicklinks: Vec<veld_core::ide::Quicklink>,
+    /// Permission pre-answers for browser panes. Only Veld Desktop can act on
+    /// these — a browser tab has no panes — but they travel here because the
+    /// renderer is what relays them to the Electron main process.
+    permissions: Vec<veld_core::ide::PermissionRule>,
 }
 
 #[derive(Serialize)]
@@ -552,11 +572,22 @@ fn worktree_view(wt: WorktreeRecord) -> WorktreeView {
         })
         .unwrap_or_default();
     nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    let ide = cfg
+        .as_ref()
+        .map(|c| {
+            let section = c.ide_section();
+            IdeView {
+                quicklinks: section.quicklinks,
+                permissions: section.permissions,
+            }
+        })
+        .unwrap_or_default();
     WorktreeView {
         worktree: wt,
         has_veld_config,
         presets,
         nodes,
+        ide,
     }
 }
 

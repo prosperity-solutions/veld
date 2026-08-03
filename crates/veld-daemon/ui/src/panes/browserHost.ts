@@ -27,12 +27,14 @@
 import {
   type DeviceLayout,
   type PaneEmulation,
+  type PaneMedia,
   DEFAULT_ZOOM,
   clampZoom,
   deviceLayout,
   scaledRadius,
 } from "./devices";
 import { type BrowserProfile, isVeldOwnUi, normalizeBrowserUrl } from "./model";
+import type { PermissionId, PermissionRule } from "../api";
 
 export type BrowserBackend = "electron" | "iframe";
 
@@ -111,6 +113,9 @@ export interface BrowserState {
    * claiming a mode it does not have.
    */
   touchActive: boolean;
+  /** Whether the emulated media features are *actually* in force — same caveat as
+   *  `touchActive`, and the same reason: they share one debugger session. */
+  mediaActive: boolean;
   /** Whether this pane's (detached) DevTools window is open. */
   devToolsOpen: boolean;
 }
@@ -126,6 +131,7 @@ interface DesktopBrowserApi {
        *  recreates its view, and a device arriving a round trip late is visible
        *  as the page laying out at pane size and then jumping. */
       emulation: PaneEmulation | null;
+      media: PaneMedia | null;
       zoom: number;
       /** The theme's content surface, so a view does not flash white in a dark app
        *  before the guest paints. */
@@ -148,6 +154,10 @@ interface DesktopBrowserApi {
     command: "back" | "forward" | "reload" | "stop" | "focus",
   ): Promise<void>;
   emulate(viewId: string, emulation: PaneEmulation | null): Promise<void>;
+  /** Optional here, and in every permission method below: these arrived after
+   *  the bridge did, and an older shell will not have them. See the note above
+   *  the permission helpers. */
+  setMedia?(viewId: string, media: PaneMedia | null): Promise<void>;
   setZoom(viewId: string, zoom: number): Promise<void>;
   devTools(viewId: string, action: "toggle" | "open" | "close"): Promise<void>;
   /** Window-wide: the shell resolves the window from the sender, so a disarm lands
@@ -167,6 +177,51 @@ interface DesktopBrowserApi {
   onPointer(
     fn: (payload: { viewId: string; type: string; x: number; y: number }) => void,
   ): () => void;
+  /** The permission policy for every pane in this window: the selected worktree's
+   *  `ide.permissions`, and the origins veld itself serves for its run. */
+  setPolicy?(rules: PermissionRule[], trustedOrigins: string[]): Promise<void>;
+  onPermissionRequest?(fn: (payload: PermissionPrompt) => void): () => void;
+  answerPermission?(requestId: number, verdict: "allow" | "deny"): Promise<void>;
+  abandonPermission?(requestId: number): Promise<void>;
+  onPermissions?(
+    fn: (payload: {
+      viewId: string;
+      origin: string | null;
+      settings: PermissionSetting[];
+    }) => void,
+  ): () => void;
+  permissions?(viewId: string): Promise<void>;
+  setPermission?(
+    viewId: string,
+    origin: string,
+    permission: PermissionId,
+    verdict: PermissionVerdict | "default",
+  ): Promise<void>;
+}
+
+/** A page asking for something nothing has answered yet. */
+export interface PermissionPrompt {
+  requestId: number;
+  viewId: string;
+  profile: BrowserProfile;
+  /** One request can cover two switches — Electron reports camera and microphone
+   *  together — and the answer applies to all of them. */
+  permissions: PermissionId[];
+  origin: string;
+  /** False when a cross-origin subframe asked, which is a different sentence from
+   *  the page asking. */
+  isMainFrame: boolean;
+  paneUrl: string;
+}
+
+export type PermissionVerdict = "allow" | "deny";
+
+/** One row of the per-site panel. `source` is what lets a row say where its
+ *  answer came from instead of presenting a repo's decision as the user's own. */
+export interface PermissionSetting {
+  id: PermissionId;
+  verdict: PermissionVerdict | "ask";
+  source: "user" | "config" | "default";
 }
 
 declare global {
@@ -259,6 +314,8 @@ interface View {
    * when that happens. Same shape as `url`, for the same reason.
    */
   emulation: PaneEmulation | null;
+  /** The media features this view overrides, live copy of `PaneTab.media`. */
+  media: PaneMedia | null;
   zoom: number;
   /** The factor and corner radius last pushed with the bounds, so a resize that
    *  changes neither costs no re-emulation — which relayouts the guest page. */
@@ -321,6 +378,7 @@ async function createShellView(v: View, url: string | undefined): Promise<boolea
         url,
         profile: v.profile,
         emulation: v.emulation,
+        media: v.media,
         zoom: v.zoom,
         background: paneSurface(),
       }))
@@ -599,6 +657,7 @@ export function browserStatus(id: string): BrowserState {
       deviceHeight: 0,
       resizing: false,
       touchActive: false,
+      mediaActive: false,
       devToolsOpen: false,
     }
   );
@@ -626,6 +685,7 @@ export interface BrowserViewOptions {
   url?: string;
   profile: BrowserProfile;
   emulation?: PaneEmulation | null;
+  media?: PaneMedia | null;
   zoom?: number;
 }
 
@@ -677,6 +737,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
       deviceHeight: 0,
       resizing: false,
       touchActive: false,
+      mediaActive: false,
       devToolsOpen: false,
     },
     listeners: new Set(),
@@ -687,6 +748,7 @@ function ensure(id: string, options: BrowserViewOptions): View {
     freezeGeneration: 0,
     visible: true,
     emulation: options.emulation ?? null,
+    media: options.media ?? null,
     zoom: clampZoom(options.zoom ?? DEFAULT_ZOOM),
     scale: 1,
     radius: 0,
@@ -897,6 +959,26 @@ export function setBrowserEmulation(id: string, emulation: PaneEmulation | null)
   // it is emulating a phone, so a refused call has to be visible or the chrome is
   // lying about what the page is being shown as.
   void desktop.emulate(id, emulation).catch(reportFailure(v));
+}
+
+/**
+ * Override this pane's media features, or clear them with `null`.
+ *
+ * Same ownership rule as `setBrowserEmulation`: the live copy is written first
+ * and unconditionally, so a view the shell has not created yet comes back with
+ * the overrides the pane is set to. Electron-only — an `<iframe>` cannot be told
+ * what its media queries should answer, and pretending otherwise would put a
+ * control in the browser build that silently does nothing.
+ */
+export function setBrowserMedia(id: string, media: PaneMedia | null): void {
+  const v = views.get(id);
+  if (!v) return;
+  v.media = media;
+  if (!desktop || !v.shellHasView) return;
+  // Optional-chained for the same version-skew reason as the permission bridge
+  // below: an older shell has no `setMedia`, and a media override that silently
+  // does nothing is far better than an app that fails to render.
+  void desktop.setMedia?.(id, media).catch(reportFailure(v));
 }
 
 /**
@@ -1317,6 +1399,7 @@ if (desktop) {
     // only when present, so an event about something else cannot reset them. The
     // scale is *not* here — it is this side's own number, pushed with the bounds.
     if (typeof payload.touchActive === "boolean") next.touchActive = payload.touchActive;
+    if (typeof payload.mediaActive === "boolean") next.mediaActive = payload.mediaActive;
     if (typeof payload.devToolsOpen === "boolean") next.devToolsOpen = payload.devToolsOpen;
     // A committed page is what makes a reload keep showing the old one rather
     // than a spinner over nothing.
@@ -1355,4 +1438,98 @@ export function onBrowserOpenRequest(
 
 export function onBrowserAccelerator(fn: (accelerator: string) => void): () => void {
   return desktop ? desktop.onAccelerator((p) => fn(p.accelerator)) : () => {};
+}
+
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+//
+// All Electron-only, and every function here is a no-op in the browser build.
+// That is not a gap being papered over: an `<iframe>` fallback has no permission
+// surface to govern in the first place — the page inside it is subject to *this*
+// document's permissions policy, which is the browser's own business and not
+// veld's to answer.
+//
+// **Every call below is optional-chained through the method, not just through
+// `desktop`.** The two halves of Veld Desktop update independently — `veld update`
+// bumps the daemon (and with it this bundle), while the app updates on its own
+// cadence, which `desktop/ARCHITECTURE.md` names as *the* compatibility surface
+// and deliberately reports rather than blocks on. So a newer bundle routinely runs
+// inside an older shell, where `veldDesktop.browser` exists but these methods do
+// not. `desktop?.setPolicy(...)` guards the wrong thing: the bridge is present and
+// the *method* is `undefined`, so it throws — synchronously, inside a React effect
+// that runs on every `/ide` load, and there is no error boundary under `ui/src`.
+// The whole app unmounts to a blank window, not just the pane. A missing method
+// has to degrade to "panes keep asking", which is the safe direction anyway.
+
+/**
+ * Hand the window's panes the policy they are answered against.
+ *
+ * Called whenever the selected worktree or its run's URLs change, because both
+ * halves come from there: the rules are that checkout's `ide.permissions`, and the
+ * trusted origins are the URLs veld serves for its run — the only origins screen
+ * capture is granted at without asking.
+ */
+export function setBrowserPolicy(rules: PermissionRule[], trustedOrigins: string[]): void {
+  if (!desktop) return;
+  void desktop.setPolicy?.(rules, trustedOrigins).catch(() => {
+    // A policy that failed to land means panes keep asking rather than granting
+    // silently — the safe direction, and not worth a toast.
+  });
+}
+
+/**
+ * The origin of a URL, or `""` when it has none.
+ *
+ * Used to decide whether a navigation changed the *site* — a question `state.url`
+ * cannot answer, because an in-page navigation changes the URL without leaving
+ * the origin.
+ */
+export function originOf(url: string): string {
+  if (!url) return "";
+  try {
+    return new URL(url).origin;
+  } catch {
+    return "";
+  }
+}
+
+export function onPermissionRequest(fn: (prompt: PermissionPrompt) => void): () => void {
+  return desktop?.onPermissionRequest ? desktop.onPermissionRequest(fn) : () => {};
+}
+
+export function answerPermission(requestId: number, verdict: PermissionVerdict): void {
+  void desktop?.answerPermission?.(requestId, verdict).catch(() => {});
+}
+
+/**
+ * Drop a prompt the UI cannot show, without answering it.
+ *
+ * The page is refused *this* request and nothing is recorded. Not the same as
+ * sending a deny: a stored deny outranks the project config permanently, so
+ * answering on the user's behalf because two requests arrived at once would
+ * silently block a permission they never saw.
+ */
+export function abandonPermission(requestId: number): void {
+  void desktop?.abandonPermission?.(requestId).catch(() => {});
+}
+
+export function onPermissionSettings(
+  fn: (payload: { viewId: string; origin: string | null; settings: PermissionSetting[] }) => void,
+): () => void {
+  return desktop?.onPermissions ? desktop.onPermissions(fn) : () => {};
+}
+
+/** Ask for the current site's state — a panel opened before any navigation has none. */
+export function requestPermissionSettings(viewId: string): void {
+  void desktop?.permissions?.(viewId).catch(() => {});
+}
+
+export function setPermission(
+  viewId: string,
+  origin: string,
+  permission: PermissionId,
+  verdict: PermissionVerdict | "default",
+): void {
+  void desktop?.setPermission?.(viewId, origin, permission, verdict).catch(() => {});
 }

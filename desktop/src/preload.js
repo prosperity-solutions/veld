@@ -177,6 +177,10 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Emulate a device, or `null` to show the pane at pane size. */
     emulate: (viewId, emulation) =>
       ipcRenderer.invoke("veld:browser:emulate", { viewId, emulation }),
+    /** Override the page's media features (`prefers-color-scheme` and friends), or
+     *  `null` for whatever the host reports. About the *page*, not about Veld's
+     *  own theme. */
+    setMedia: (viewId, media) => ipcRenderer.invoke("veld:browser:media", { viewId, media }),
     /** Repaint every pane view on the page's theme surface — what shows before a guest
      *  paints. Window-wide: a theme switch is one event for the whole app. */
     setBackground: (background) =>
@@ -207,5 +211,32 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onOpenRequest: (fn) => on("veld:browser:open-request", fn),
     /** An app accelerator a focused view would otherwise have swallowed. */
     onAccelerator: (fn) => on("veld:browser:accelerator", fn),
+
+    /** The selected worktree's `ide.permissions`, plus the origins veld serves for
+     *  its run — the policy every pane in this window is answered against. Pushed
+     *  by the UI because it is what knows which worktree the window is showing. */
+    setPolicy: (rules, trustedOrigins) =>
+      ipcRenderer.invoke("veld:browser:policy", { rules, trustedOrigins }),
+    /** A page asked for a permission nothing has answered yet. The pane raises the
+     *  prompt, because it is the only surface that can name the site *and* the
+     *  pane it is in. */
+    onPermissionRequest: (fn) => on("veld:browser:permission-request", fn),
+    /** The user's answer to one of those prompts. */
+    answerPermission: (requestId, verdict) =>
+      ipcRenderer.invoke("veld:browser:permission-reply", { requestId, verdict }),
+    /** Drop a prompt without answering it — a second request arrived, or the page
+     *  navigated away. Refuses that one request and remembers nothing, which is
+     *  the difference between this and sending a Block nobody chose. */
+    abandonPermission: (requestId) =>
+      ipcRenderer.invoke("veld:browser:permission-abandon", { requestId }),
+    /** Every permission's state for the pane's current site, pushed on navigation
+     *  and after any change — what the per-site panel renders. */
+    onPermissions: (fn) => on("veld:browser:permissions", fn),
+    /** Ask for that state now; a panel opened before the first navigation has none. */
+    permissions: (viewId) => ipcRenderer.invoke("veld:browser:permissions", { viewId }),
+    /** Set one permission from the panel. `"default"` clears the user's answer and
+     *  hands the decision back to the project config or veld's default. */
+    setPermission: (viewId, origin, permission, verdict) =>
+      ipcRenderer.invoke("veld:browser:set-permission", { viewId, origin, permission, verdict }),
   },
 });

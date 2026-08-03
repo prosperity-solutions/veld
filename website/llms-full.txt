@@ -379,6 +379,8 @@ Rewrite headers on the way through the reverse proxies with `proxy` at the proje
 | `setup` | array | No | Lifecycle steps before graph execution (see Setup & Teardown) |
 | `teardown` | array | No | Lifecycle steps after all nodes stop (see Setup & Teardown) |
 | `nodes` | object | Yes | The dependency graph nodes |
+| `ide` | object | No | Settings for Veld's own IDE surfaces (Veld Desktop and /ide). `ide.quicklinks` (`[{label, url}]`, http(s) only, no interpolation) adds the project's own links beside the run's URLs on a browser pane's start page. `ide.permissions` (`[{origin, allow?, deny?}]`) pre-answers browser permissions for embedded browser panes: origin is a bare `scheme://host[:port]`; a leading `*.` on the host matches any depth of subdomain and is the form to use for veld's own URLs, which carry the run name in the hostname — pair it with a `:*` port, since an unprivileged install serves on 18443 and an omitted port means 443 (`*.com`-style single-label wildcards are refused, and `*.x` does not match `x`); the port may be `*`, while an omitted port means the scheme's default. A user's own answer beats the config, and `deny` beats `allow`. Malformed entries are dropped with a `veld lint` warning and grant nothing. Every other key under `ide` is reserved — parsed, stored, not rendered |
+| `hooks` | object | No | **Reserved.** Repo-declared lifecycle hooks; parsed and stored, not executed by this version. `veld lint` says so |
 
 ### Setup & Teardown
 

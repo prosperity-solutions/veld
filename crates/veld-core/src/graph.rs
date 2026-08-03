@@ -693,7 +693,7 @@ mod tests {
             teardown: None,
             vars: None,
             hooks: None,
-            ui: None,
+            ide: None,
             loaded_from_multiple_files: false,
             deferred_findings: Vec::new(),
             nodes: HashMap::from([

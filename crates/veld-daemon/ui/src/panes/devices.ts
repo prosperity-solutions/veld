@@ -844,3 +844,89 @@ export function sanitizeZoom(raw: unknown): number | null {
   const zoom = clampZoom(n);
   return zoom === DEFAULT_ZOOM ? null : zoom;
 }
+
+// ---------------------------------------------------------------------------
+// Emulated media features
+// ---------------------------------------------------------------------------
+//
+// The same question a device width asks, put to a media feature: *what does this
+// page look like for someone whose OS says dark, or who has asked for less
+// motion?* Unlike the metrics and the user agent, Electron exposes no API for it —
+// it is `Emulation.setEmulatedMedia` over the same CDP session touch emulation
+// uses, which is why a pane reports whether it is actually in force
+// (`mediaActive`) rather than claiming a mode something else may have taken.
+//
+// Three features rather than one, because they are the same call at the same cost
+// and the two extras are the accessibility half of the same job.
+
+/** The features a pane can override, with the values each accepts. */
+export const MEDIA_FEATURES = {
+  "prefers-color-scheme": ["light", "dark"],
+  "prefers-reduced-motion": ["reduce", "no-preference"],
+  "forced-colors": ["active", "none"],
+} as const;
+
+export type MediaFeature = keyof typeof MEDIA_FEATURES;
+
+/** A pane's overrides. An absent key means "whatever the host reports". */
+export type PaneMedia = Partial<Record<MediaFeature, string>>;
+
+/** How each feature and value is worded in the menu. */
+export const MEDIA_LABELS: Record<MediaFeature, { title: string; values: Record<string, string> }> =
+  {
+    "prefers-color-scheme": {
+      title: "Colour scheme",
+      values: { light: "Light", dark: "Dark" },
+    },
+    "prefers-reduced-motion": {
+      title: "Reduced motion",
+      values: { reduce: "Reduce", "no-preference": "No preference" },
+    },
+    "forced-colors": {
+      title: "Forced colours",
+      values: { active: "Active", none: "None" },
+    },
+  };
+
+/** Set or clear one feature, returning `null` when nothing is overridden any more
+ *  — one representation for "no overrides", which is what decides whether the
+ *  debugger is attached at all. */
+export function withMediaFeature(
+  media: PaneMedia | null,
+  feature: MediaFeature,
+  value: string | null,
+): PaneMedia | null {
+  const next: PaneMedia = { ...(media ?? {}) };
+  if (value === null) delete next[feature];
+  else next[feature] = value;
+  return Object.keys(next).length > 0 ? next : null;
+}
+
+/** What the pane's chrome says is being emulated, or `null` for nothing. */
+export function mediaLabel(media: PaneMedia | null): string | null {
+  const parts = (Object.keys(MEDIA_FEATURES) as MediaFeature[])
+    .filter((feature) => media?.[feature])
+    .map((feature) => MEDIA_LABELS[feature].values[media![feature]!] ?? media![feature]!);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * Accept a stored media override, or reject it.
+ *
+ * Same rule as `sanitizeEmulation`: storage is where a stale build's — or a
+ * hand-edited — value sits waiting to be handed to a view on restore. Unknown
+ * features and values are dropped individually rather than failing the set, since
+ * one bad key should not cost a perfectly good colour-scheme override.
+ */
+export function sanitizeMedia(raw: unknown): PaneMedia | null {
+  if (typeof raw !== "object" || raw === null) return null;
+  const source = raw as Record<string, unknown>;
+  const out: PaneMedia = {};
+  for (const [feature, allowed] of Object.entries(MEDIA_FEATURES)) {
+    const value = source[feature];
+    if (typeof value === "string" && (allowed as readonly string[]).includes(value)) {
+      out[feature as MediaFeature] = value;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}

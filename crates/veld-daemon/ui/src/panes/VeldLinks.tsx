@@ -18,15 +18,27 @@
 import { ActionIcon, Tooltip } from "@mantine/core";
 import { IconCheck, IconCopy, IconExternalLink, IconWorldOff } from "@tabler/icons-react";
 import { useState } from "react";
+import type { Quicklink } from "../api";
 
 export function VeldLinks(props: {
   urls: Array<[string, string]>;
+  /**
+   * The project's own links, from `ide.quicklinks` in its config.
+   *
+   * The other half of a start page: veld's URLs are the ones veld made, and these
+   * are the ones it didn't — staging, a dashboard, an internal wiki. Shipping a
+   * hardcoded set of those would be an opinion no tool should have, so they come
+   * from the repo and are versioned and shared with it.
+   */
+  quicklinks: Quicklink[];
   /** Why there are none, which only the app knows (no run, or no veld.json). */
   emptyHint: string;
   /** Open this URL — in the pane the list is being shown in. */
   onOpen: (name: string, url: string) => void;
 }) {
-  if (props.urls.length === 0) {
+  // Only when *both* lists are empty. A project with quicklinks and no run has
+  // something to show, and the "no URLs yet" screen would be hiding it.
+  if (props.urls.length === 0 && props.quicklinks.length === 0) {
     return (
       <div className="links-empty">
         <IconWorldOff size={26} />
@@ -37,23 +49,54 @@ export function VeldLinks(props: {
   }
   return (
     <div className="links-list">
-      <span className="section-label">Veld URLs</span>
-      {props.urls.map(([name, url]) => (
-        <LinkRow key={name} name={name} url={url} onOpen={() => props.onOpen(name, url)} />
-      ))}
-      {props.urls.length > 1 && (
-        <button
-          className="btn links-all"
-          onClick={() => props.urls.forEach(([, url]) => window.open(url, "_blank"))}
-        >
-          <IconExternalLink size={13} /> Open all in system browser
-        </button>
+      {props.urls.length > 0 && (
+        <>
+          <span className="section-label">Veld URLs</span>
+          {props.urls.map(([name, url]) => (
+            <LinkRow key={name} name={name} url={url} onOpen={() => props.onOpen(name, url)} />
+          ))}
+          {props.urls.length > 1 && (
+            <button
+              className="btn links-all"
+              onClick={() => props.urls.forEach(([, url]) => window.open(url, "_blank"))}
+            >
+              <IconExternalLink size={13} /> Open all in system browser
+            </button>
+          )}
+        </>
+      )}
+      {props.quicklinks.length > 0 && (
+        <>
+          <span className="section-label">Project links</span>
+          {props.quicklinks.map((link) => (
+            // Keyed by url, not label: two links may legitimately share a label
+            // ("Docs" for two services), and duplicate keys drop rows silently.
+            // A repeated url is the same link twice, which is a config mistake
+            // and loses nothing by collapsing.
+            <LinkRow
+              key={link.url}
+              name={link.label}
+              url={link.url}
+              live={false}
+              onOpen={() => props.onOpen(link.label, link.url)}
+            />
+          ))}
+        </>
       )}
     </div>
   );
 }
 
-function LinkRow(props: { name: string; url: string; onOpen: () => void }) {
+function LinkRow(props: {
+  name: string;
+  url: string;
+  /** Whether veld knows this thing is up. True for a run's URLs — veld started
+   *  them — and false for a project link, which is just a string in a config. A
+   *  green dot beside an address nobody has probed would be a claim veld cannot
+   *  make. */
+  live?: boolean;
+  onOpen: () => void;
+}) {
   const [copied, setCopied] = useState(false);
   return (
     <div className="link-row">
@@ -63,7 +106,10 @@ function LinkRow(props: { name: string; url: string; onOpen: () => void }) {
         onClick={props.onOpen}
         title={`Open ${props.name} here`}
       >
-        <span className="dot running" style={{ animation: "none" }} />
+        <span
+          className={props.live === false ? "dot" : "dot running"}
+          style={{ animation: "none" }}
+        />
         <span className="link-text">
           <span className="name">{props.name}</span>
           <span className="url">{props.url}</span>

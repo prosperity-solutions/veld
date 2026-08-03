@@ -23,19 +23,32 @@
 // content cannot reach this IPC surface in the first place; the keying and the
 // frame check are what keep that true if one ever gains a preload.
 
-const { WebContentsView, ipcMain, screen, session } = require("electron");
+const fs = require("node:fs");
+const path = require("node:path");
+const {
+  BrowserWindow,
+  WebContentsView,
+  ipcMain,
+  screen,
+  session,
+  webContents: allWebContents,
+} = require("electron");
 // The trust boundary lives in its own tested module — see src/validate.js.
 const {
   isProfileName,
   isViewId,
   safeColor,
   partitionFor,
+  isPermissionRule,
   safeEmulation,
+  safeMedia,
   safeRadius,
   safeScale,
   safeUrl,
   safeZoom,
 } = require("./validate");
+// The permission policy is likewise its own tested, Electron-free module.
+const permissions = require("./permissions");
 
 /**
  * Per-window view cap.
@@ -54,7 +67,8 @@ const MAX_VIEWS_PER_WINDOW = 16;
 /**
  * @typedef {{view: import('electron').WebContentsView, profile: string, visible: boolean,
  *            emulation: Emulation|null, zoom: number, defaultUserAgent: string,
- *            scale: number, radius: number, touchActive: boolean,
+ *            media: Record<string, string>|null, scale: number, radius: number,
+ *            touchActive: boolean, mediaActive: boolean,
  *            frameReady: boolean, emulated: boolean, dragging: boolean,
  *            touchQueue: Promise<void>|undefined}} Entry
  */
@@ -95,6 +109,7 @@ function stateOf(viewId, entry, error) {
       canGoForward: false,
       profile: entry.profile,
       touchActive: false,
+      mediaActive: false,
       devToolsOpen: false,
       ...(error === undefined ? {} : { error }),
     };
@@ -107,13 +122,15 @@ function stateOf(viewId, entry, error) {
     canGoBack: wc.navigationHistory.canGoBack(),
     canGoForward: wc.navigationHistory.canGoForward(),
     profile: entry.profile,
-    // The two things the pane cannot work out for itself: whether touch is
-    // actually in force (something else can hold Chromium's debugger — see
-    // [`applyTouch`]) and whether the inspector is open. The emulated size, the
+    // The three things the pane cannot work out for itself: whether touch and the
+    // emulated media features are actually in force (both ride one debugger
+    // session, and something else can hold it — see [`applyCdpNow`]) and whether
+    // the inspector is open. The emulated size, the
     // zoom and the scale are all the renderer's own. Flat primitives on purpose:
     // the renderer's `patch` compares values with `!==`, so a nested object would
     // count as changed on every event and re-render every pane.
     touchActive: entry.touchActive,
+    mediaActive: entry.mediaActive,
     devToolsOpen: wc.isDevToolsOpened(),
     ...(error === undefined ? {} : { error }),
   };
@@ -252,28 +269,60 @@ function applyZoom(entry) {
  */
 function applyTouch(window, viewId, entry) {
   entry.touchQueue = (entry.touchQueue ?? Promise.resolve())
-    .then(() => applyTouchNow(window, viewId, entry))
+    .then(() => applyCdpNow(window, viewId, entry))
     .catch(() => {});
   return entry.touchQueue;
 }
 
-/** The body of [`applyTouch`]. **Never call this directly** — it awaits CDP round
- *  trips, and two interleaved runs are exactly what the queue above exists to
- *  prevent. */
-async function applyTouchNow(window, viewId, entry) {
+/**
+ * The media features a pane can override, and the CDP value for each.
+ *
+ * `Emulation.setEmulatedMedia` is one call for all of them: the `features` array
+ * replaces the whole set, so an empty array is the reset and there is no
+ * per-feature clear to get wrong.
+ */
+const MEDIA_FEATURES = ["prefers-color-scheme", "prefers-reduced-motion", "forced-colors"];
+
+/** Whether anything is being overridden — `null` per feature means "the host's". */
+function hasMediaOverrides(media) {
+  return MEDIA_FEATURES.some((name) => media?.[name]);
+}
+
+/**
+ * The body of [`applyTouch`], which now owns **everything CDP**.
+ *
+ * One function for touch and media because they share one debugger session and
+ * the earlier split would have broken both: turning touch off detached the
+ * session, which silently dropped a media override that was still meant to be in
+ * force. So the attach is driven by whether *anything* wants it, and the detach
+ * only happens when nothing does.
+ *
+ * **Never call this directly** — it awaits CDP round trips, and two interleaved
+ * runs are exactly what the queue exists to prevent.
+ */
+async function applyCdpNow(window, viewId, entry) {
   const wc = entry.view.webContents;
   if (wc.isDestroyed()) return;
-  const wanted = entry.emulation?.touch === true;
+  const wantTouch = entry.emulation?.touch === true;
+  const wantMedia = hasMediaOverrides(entry.media);
   const dbg = wc.debugger;
 
-  if (!wanted) {
-    if (entry.touchActive && dbg.isAttached()) {
+  const report = (touch, media) => {
+    if (entry.touchActive === touch && entry.mediaActive === media) return;
+    entry.touchActive = touch;
+    entry.mediaActive = media;
+    pushState(window, viewId, entry);
+  };
+
+  if (!wantTouch && !wantMedia) {
+    if ((entry.touchActive || entry.mediaActive) && dbg.isAttached()) {
       // Explicitly off before detaching. Detaching *should* drop the session's
       // overrides on its own, but "should" is the wrong footing for a page that
       // would otherwise keep answering mouse drags with touch events.
       try {
         await dbg.sendCommand("Emulation.setEmitTouchEventsForMouse", { enabled: false });
         await dbg.sendCommand("Emulation.setTouchEmulationEnabled", { enabled: false });
+        await dbg.sendCommand("Emulation.setEmulatedMedia", { features: [] });
       } catch {
         // The session went away underneath us — which is the state we wanted.
       }
@@ -285,34 +334,57 @@ async function applyTouchNow(window, viewId, entry) {
         // Already gone.
       }
     }
-    if (entry.touchActive) {
-      entry.touchActive = false;
-      pushState(window, viewId, entry);
-    }
+    report(false, false);
     return;
   }
 
   try {
     if (!dbg.isAttached()) dbg.attach("1.3");
-    await dbg.sendCommand("Emulation.setTouchEmulationEnabled", {
-      enabled: true,
-      maxTouchPoints: 1,
+  } catch (error) {
+    // Something else holds Chromium's debugger for this view — the built-in
+    // DevTools is the usual one. Reported as suspended rather than as on, and
+    // retried when DevTools closes.
+    console.warn("[veld] CDP attach refused", error);
+    report(false, false);
+    return;
+  }
+
+  try {
+    // Both are sent every run, including the "off" side: with the session shared,
+    // a pane that turns touch off while a media override keeps the debugger
+    // attached still has to be *told* touch is off.
+    //
+    // **`maxTouchPoints` only when enabling.** CDP validates it to 1–16, so
+    // sending `0` alongside `enabled: false` is a protocol error — which threw
+    // before `setEmulatedMedia` was reached and reported the media override as
+    // suspended. It was invisible while touch and media shared no code, because
+    // the old off-path sent `{ enabled: false }` and nothing else; merging the
+    // two features onto one applier is what introduced it.
+    await dbg.sendCommand(
+      "Emulation.setTouchEmulationEnabled",
+      wantTouch ? { enabled: true, maxTouchPoints: 1 } : { enabled: false },
+    );
+    await dbg.sendCommand(
+      "Emulation.setEmitTouchEventsForMouse",
+      wantTouch ? { enabled: true, configuration: "mobile" } : { enabled: false },
+    );
+    await dbg.sendCommand("Emulation.setEmulatedMedia", {
+      features: MEDIA_FEATURES.filter((name) => entry.media?.[name]).map((name) => ({
+        name,
+        value: entry.media[name],
+      })),
     });
-    await dbg.sendCommand("Emulation.setEmitTouchEventsForMouse", {
-      enabled: true,
-      configuration: "mobile",
-    });
-    if (!entry.touchActive) {
-      entry.touchActive = true;
-      pushState(window, viewId, entry);
-    }
-  } catch {
-    // DevTools holds the session, or the view is tearing down. The pane shows
-    // touch as suspended rather than as on.
-    if (entry.touchActive) {
-      entry.touchActive = false;
-      pushState(window, viewId, entry);
-    }
+    report(wantTouch, wantMedia);
+  } catch (error) {
+    // A command was refused, or the view is tearing down. The pane shows both as
+    // suspended rather than as on — the same honesty `touchActive` has always
+    // had, now for the feature that shares its session.
+    //
+    // Logged as well as reported: "the emulated colour scheme did nothing" and
+    // "the CDP call threw" look identical from the pane, and only one of them is
+    // veld's bug. This log is what identified exactly that.
+    console.warn("[veld] CDP emulation command failed", error);
+    report(false, false);
   }
 }
 
@@ -364,6 +436,12 @@ function attachListeners(window, viewId, entry) {
   wc.on("page-title-updated", () => push());
   wc.on("did-navigate", () => push());
   wc.on("did-navigate-in-page", () => push());
+
+  // The per-site panel is per *site*, so it has to be re-sent when the site
+  // changes. Not on `did-navigate-in-page`: a fragment change cannot cross an
+  // origin, and re-sending on every `pushState` would repaint the panel while a
+  // single-page app routes.
+  wc.on("did-navigate", () => pushPermissionState(window, viewId, entry));
 
   // Errors go over the wire **structured**, not as a sentence. The pane picks the
   // icon and the wording from the code — "nothing is listening" and "that
@@ -525,28 +603,544 @@ function attachListeners(window, viewId, entry) {
     void applyTouch(window, viewId, entry);
   });
   wc.debugger.on("detach", () => {
-    if (!entry.touchActive) return;
+    // Both, because both ride this one session: a detach from any cause takes the
+    // media override with the touch emulation.
+    if (!entry.touchActive && !entry.mediaActive) return;
     entry.touchActive = false;
+    entry.mediaActive = false;
     push();
   });
 
-  // No device access from an embedded preview. Notifications, camera, mic,
-  // geolocation and the rest would be granted against the *pane's* origin with no
-  // chrome to attribute the prompt to, so the whole set is denied.
-  //
-  // Both handlers, not just the request one: Electron's own docs say "you must
-  // also implement setPermissionRequestHandler to get complete permission
-  // handling. Most web APIs do a permission check and then make a permission
-  // request if the check is denied" — and four permissions appear in the *check*
-  // union and never in the request one (`deprecated-sync-clipboard-read`, `hid`,
-  // `serial`, `usb`). Sync clipboard read is the concrete one: without a check
-  // handler a previewed page could `document.execCommand("paste")` and read
-  // whatever the user last copied, with no prompt.
-  wc.session.setPermissionRequestHandler((_wc, _permission, callback) => callback(false));
-  wc.session.setPermissionCheckHandler(() => false);
+  wirePermissionHandlers(wc.session, partitionFor(entry.profile));
 }
 
-function disposeEntry(window, entry) {
+// ---------------------------------------------------------------------------
+// Permissions
+// ---------------------------------------------------------------------------
+//
+// Panes used to refuse every permission outright. What replaces that is
+// `permissions.js` — a policy over the user's stored answers, the project's
+// `ide.permissions`, and veld's defaults — plus the two things only this file can
+// do: raise the prompt, and answer Electron.
+//
+// Three constraints shape the code below.
+//
+// **Handlers are per *session*, not per view.** Panes sharing a profile share one
+// `Session`, so registering in `attachListeners` would re-register the same
+// handler for every pane in that jar, and — worse — the handler is asked about
+// *any* WebContents on the session, including a pane's detached DevTools
+// frontend. So the registration is per partition and the dispatch starts by
+// resolving the WebContents back to a pane. Anything unresolvable is denied:
+// there is no pane to attribute it to and no prompt that could name one.
+//
+// **The check handler is synchronous.** It cannot prompt, so "ask" has to answer
+// `false` there — a page's `navigator.permissions.query()` therefore reports
+// `denied` until a real request has been answered. That is the one place the
+// policy is visibly poorer than a browser's, and it is Electron's API shape, not
+// a choice. It is also the strongest argument for `ide.permissions`: a config
+// answer *is* available synchronously.
+//
+// **A prompt's answer is sticky**, and for screen capture that is deliberately
+// *stickier than Chrome*. Allow and Block are remembered for (session, origin,
+// permission) rather than being per-invocation — which is what lets
+// `setDisplayMediaRequestHandler`, running *after* the `display-capture` request
+// has already been answered, re-resolve the same verdict instead of raising a
+// second prompt for one `getDisplayMedia` call.
+//
+// Chrome persists camera and microphone but pointedly does **not** persist
+// display capture: one Allow there covers one capture. Veld's answer to the gap
+// that opens is the user-gesture requirement in the display-media handler — a
+// remembered Allow still cannot be cashed in by a script on page load — plus the
+// per-site panel, where the grant is visible and revocable. A per-invocation
+// prompt would be the stricter design; it needs a one-shot token threaded
+// through the second pass, which is a bigger change than this batch.
+
+/** Where user answers are persisted. Set by [`registerBrowserViewIpc`]. */
+let permissionsFile = null;
+
+/** partition → origin → permission id → "allow" | "deny". */
+let permissionStore = {};
+
+/**
+ * Answers this process has deliberately **removed**, which a merge cannot infer.
+ *
+ * [`persistPermissions`] merges with the file rather than overwriting it, so that
+ * a second app instance does not clobber this one's answers. The cost of merging
+ * is that an *absence* carries no information: "this process never saw it" and
+ * "this process deleted it" look identical, and the merge resolves both in favour
+ * of the file. That is fail-**open** — pressing Default on a granted permission,
+ * or clearing a session, would be undone by the very next write.
+ *
+ * So deletions are recorded rather than inferred. `revoked` holds
+ * `partition\0origin\0id` for a single permission set back to Default;
+ * `clearedPartitions` holds a whole session that was signed out. Both are undone
+ * by a later answer for the same key, or the panel would be unable to re-grant
+ * something in the same session it revoked.
+ */
+const revoked = new Set();
+const clearedPartitions = new Set();
+
+/**
+ * Record one answer, and keep the deletion bookkeeping straight.
+ *
+ * The only writer of `permissionStore`, so the two sets above cannot drift from
+ * it per call site. Setting a permission back to Default *is* a deletion and has
+ * to be remembered as one; setting it to Allow or Block undoes both a previous
+ * revocation and a session clear, or the panel could not re-grant something in
+ * the session it had just signed out of.
+ */
+function recordAnswer(partition, origin, id, verdict) {
+  const key = permissions.originKey(origin);
+  if (!key) return;
+  permissionStore = permissions.setAnswer(permissionStore, partition, origin, id, verdict);
+  if (verdict === "allow" || verdict === "deny") {
+    revoked.delete(permissions.revocationKey(partition, key, id));
+    clearedPartitions.delete(partition);
+  } else {
+    revoked.add(permissions.revocationKey(partition, key, id));
+  }
+}
+
+/** Partitions whose session already carries our handlers. */
+const wiredPartitions = new Set();
+
+/**
+ * window.id → the policy inputs its renderer last pushed.
+ *
+ * Per window because a window shows one worktree, and the rules come from *that*
+ * checkout's config. `trustedOrigins` are the URLs veld itself serves for the
+ * selected run — the only origins screen capture is granted at without asking.
+ */
+/** @type {Map<number, {rules: unknown[], trustedOrigins: string[]}>} */
+const policyByWindow = new Map();
+
+/**
+ * How long a prompt may go unanswered before it is released.
+ *
+ * Not a UX timeout — a stuck-request backstop for the one case the renderer
+ * cannot cover, where a prompt is raised for a pane whose chrome was never
+ * mounted and nothing is subscribed to receive it. Generous, because a prompt
+ * somebody is actually reading must never expire under them.
+ */
+const PROMPT_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * requestId → the prompt awaiting an answer from a renderer.
+ *
+ * The window id travels with it so a closing window can settle exactly its own
+ * prompts — the page behind a prompt nobody can answer any more is otherwise
+ * waiting on a callback that will never fire. The view id does the same for a
+ * closing *tab*, and `expiry` is the backstop timer above, cleared by
+ * `releasePrompt` whichever way the prompt ends.
+ */
+/** @type {Map<number, {windowId: number, viewId: string, expiry: NodeJS.Timeout,
+ *                      resolve: (verdict: string|null) => void}>} */
+const pendingPrompts = new Map();
+let nextPromptId = 1;
+
+function loadPermissions() {
+  if (!permissionsFile) return {};
+  try {
+    return permissions.sanitizeStore(JSON.parse(fs.readFileSync(permissionsFile, "utf8")));
+  } catch {
+    // Missing on first run, and unreadable or corrupt is the same answer: start
+    // from nothing granted. `sanitizeStore` makes the same choice field by field.
+    return {};
+  }
+}
+
+/**
+ * Merge this process's answers into whatever is on disk, then write.
+ *
+ * **Read-merge-write, not write.** `main.js` lets an unpackaged instance run
+ * beside the packaged one, and `app.setName("Veld")` gives both the same
+ * `userData` — so two processes target this file. A wholesale write from an
+ * in-memory copy read at startup means the last one to quit silently discards the
+ * other's answers, and the loss is **fail-open** in the case that matters: a user
+ * Block outranks a config `allow`, so losing it resumes a grant they had
+ * explicitly refused.
+ *
+ * This process wins per (partition, origin, permission) — it holds the answer the
+ * user just gave — while anything it has never seen is preserved. Not atomic
+ * against a concurrent writer, and does not pretend to be: the window is one
+ * file read, and the failure it removes is the common one (two instances used
+ * hours apart) rather than the rare one.
+ */
+function persistPermissions() {
+  if (!permissionsFile) return;
+  try {
+    const merged = permissions.mergeForWrite(loadPermissions(), permissionStore, {
+      revoked: [...revoked],
+      cleared: [...clearedPartitions],
+    });
+    fs.mkdirSync(path.dirname(permissionsFile), { recursive: true });
+    // Write-then-rename, as `windows.js` does: a torn file parses as "nothing
+    // granted", which is safe but silently costs every answer the user gave.
+    const tmp = `${permissionsFile}.tmp`;
+    fs.writeFileSync(tmp, `${JSON.stringify(merged, null, 2)}\n`);
+    fs.renameSync(tmp, permissionsFile);
+  } catch {
+    // An unwritable userData costs the answers on the next launch and nothing
+    // else — this session keeps the in-memory store.
+  }
+}
+
+/**
+ * The pane a WebContents belongs to, or `null`.
+ *
+ * `null` is the answer for a detached DevTools frontend, a view mid-disposal, and
+ * anything else sharing the session — every one of which must be denied rather
+ * than inheriting the pane's grants.
+ */
+function paneOf(wc) {
+  if (!wc || wc.isDestroyed()) return null;
+  // **By id, not by object identity.** `view.webContents` is a getter, and a
+  // WebContents reached another way — `webContents.fromFrame`, or the argument
+  // Electron hands a session handler — is not guaranteed to be the same JS
+  // wrapper as the one held here. Identity compared equal often enough to look
+  // right and failed in exactly the place that matters: a miss here is a silent
+  // `callback(false)`, so every permission was denied and none of them prompted,
+  // while the per-site panel (which is handed its entry and never comes through
+  // this function) went on rendering the correct verdicts.
+  const id = wc.id;
+  for (const [windowId, entries] of byWindow) {
+    for (const [viewId, entry] of entries) {
+      const paneWc = entry.view.webContents;
+      if (!paneWc.isDestroyed() && paneWc.id === id) {
+        return { windowId, viewId, entry };
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * The origin to attribute a permission request to.
+ *
+ * Electron's request details are not uniform — `requestingUrl` is documented as
+ * absent for a cross-origin subframe, `securityOrigin` appears only on some
+ * request shapes, and the check handler passes its origin as a separate argument
+ * — so reading one field and denying when it is empty makes an ordinary request
+ * unattributable. The pane's own committed URL is the last resort, and it is the
+ * same value the per-site panel resolves against, which is what keeps the panel
+ * and the prompt from disagreeing about what the site is.
+ *
+ * **The fallback is main-frame only, and that is the whole safety of it.** An
+ * opaque origin — a sandboxed iframe, `srcdoc`, a `data:` document — serialises
+ * as the literal string `"null"`, which no parser here accepts. Falling back to
+ * the pane's top-level URL for one of those would attribute a *subframe's*
+ * request to the embedding page: the frame would inherit whatever that page was
+ * granted by `veld.json` or by the user, and the prompt would name the parent
+ * while something else did the asking. A subframe veld cannot name gets no
+ * origin and is therefore denied, which is the only honest answer.
+ */
+function requestOrigin(pane, isMainFrame, ...candidates) {
+  for (const candidate of candidates) {
+    const origin = permissions.parseOrigin(candidate);
+    if (origin) return origin;
+  }
+  if (!isMainFrame) return null;
+  const wc = pane.entry.view.webContents;
+  return wc.isDestroyed() ? null : permissions.parseOrigin(wc.getURL());
+}
+
+function policyFor(windowId) {
+  return policyByWindow.get(windowId) ?? { rules: [], trustedOrigins: [] };
+}
+
+/**
+ * The live window behind an id, or `null`.
+ *
+ * `byWindow` is keyed by id and holds views, not windows, and a handler that
+ * fires while a window is tearing down has an id that no longer resolves.
+ */
+function windowById(windowId) {
+  const window = BrowserWindow.fromId(windowId);
+  return window && !window.isDestroyed() ? window : null;
+}
+
+/** The inputs `permissions.resolve` needs for a request on one pane. */
+function policyInputs(pane, origin) {
+  const { rules, trustedOrigins } = policyFor(pane.windowId);
+  return {
+    origin,
+    rules,
+    trustedOrigins,
+    stored: permissionStore[partitionFor(pane.entry.profile)] ?? {},
+  };
+}
+
+/**
+ * Put the question to the user, and resolve with their answer.
+ *
+ * The prompt is rendered by the pane's own UI rather than as a native dialog,
+ * because the whole reason panes refused permissions before was that a dialog
+ * saying "Veld" cannot honestly ask on example.com's behalf. In the pane it can
+ * name the origin, the pane and its session colour.
+ *
+ * Resolves to `"allow"`, `"deny"`, or **`null` when nobody answered** — the
+ * window went away, or the prompt was abandoned. The distinction is load-bearing:
+ * an unanswered prompt still has to deny *this request*, because a page waiting on
+ * a callback that never fires is a hung feature with no error, but it must **not
+ * be remembered**. Storing it wrote a permanent Block for that site and
+ * permission, outranking the project config, with nothing in the UI explaining why
+ * a granted permission had stopped working.
+ */
+function askUser(window, viewId, entry, ids, origin, details) {
+  if (window.isDestroyed() || window.webContents.isDestroyed()) return Promise.resolve(null);
+  const requestId = nextPromptId++;
+  return new Promise((resolve) => {
+    // **A backstop, because one case cannot be fixed from the renderer.** Only the
+    // *active* tab renders a pane's chrome, so a request from a background pane —
+    // whose page is still running — is sent to a window where nothing is
+    // subscribed. Nobody answers, nobody abandons, and the page's promise never
+    // settles: a hung feature with no error, which is precisely what this whole
+    // surface replaced. The renderer releases what it can see (a second
+    // concurrent prompt, a cross-origin navigation, its own unmount); this covers
+    // the prompt it never received. Generous, because a visible prompt a person
+    // is reading must never expire under them.
+    const expiry = setTimeout(() => {
+      const pending = pendingPrompts.get(requestId);
+      if (!pending) return;
+      pendingPrompts.delete(requestId);
+      warnDenied(
+        ids.join(", "),
+        "no answer — the pane's chrome was never shown, or the prompt was left open",
+      );
+      pending.resolve(null);
+    }, PROMPT_TIMEOUT_MS);
+    // Never keep the app alive for a prompt nobody is looking at.
+    expiry.unref?.();
+    pendingPrompts.set(requestId, { windowId: window.id, viewId, resolve, expiry });
+    send(window, "veld:browser:permission-request", {
+      requestId,
+      viewId,
+      profile: entry.profile,
+      permissions: ids,
+      origin: permissions.originKey(origin),
+      // A cross-origin subframe asking is a different sentence from the page
+      // asking, and the pane is the only surface that can say which it was.
+      isMainFrame: details?.isMainFrame !== false,
+      paneUrl: entry.view.webContents.isDestroyed() ? "" : entry.view.webContents.getURL(),
+    });
+  });
+}
+
+function settlePrompt(windowId, requestId, verdict) {
+  const pending = pendingPrompts.get(requestId);
+  // The window check is the same ownership rule the rest of this file applies:
+  // one window's renderer must not be able to answer another's prompt.
+  if (!pending || pending.windowId !== windowId) return;
+  releasePrompt(requestId, pending);
+  pending.resolve(verdict === "allow" ? "allow" : "deny");
+}
+
+/** Forget a prompt and stop its backstop timer. Never resolves — the caller
+ *  decides what the answer was. */
+function releasePrompt(requestId, pending) {
+  clearTimeout(pending.expiry);
+  pendingPrompts.delete(requestId);
+}
+
+/**
+ * Release prompts nobody can answer any more, so no page waits forever.
+ *
+ * `null`, not `"deny"`: nobody answered these, and the caller must not record an
+ * answer nobody gave.
+ *
+ * Scoped by window *or* by view, because a prompt outlives its pane in two ways
+ * and only one of them was handled: closing the window, and closing (or
+ * session-switching) the **tab**, which disposes the view and leaves the prompt's
+ * `resolve` closure alive with nothing left that could ever call it.
+ */
+function abandonPrompts({ windowId, viewId }) {
+  for (const [requestId, pending] of pendingPrompts) {
+    const mine =
+      viewId === undefined ? pending.windowId === windowId : pending.viewId === viewId;
+    if (!mine) continue;
+    releasePrompt(requestId, pending);
+    pending.resolve(null);
+  }
+}
+
+/**
+ * Register the permission handlers on one session, once.
+ *
+ * Both handlers, not just the request one: Electron's own docs say "you must also
+ * implement setPermissionRequestHandler to get complete permission handling. Most
+ * web APIs do a permission check and then make a permission request if the check
+ * is denied" — and four permissions appear in the *check* union and never in the
+ * request one (`deprecated-sync-clipboard-read`, `hid`, `serial`, `usb`). Sync
+ * clipboard read is the concrete one: with no check handler a previewed page can
+ * `document.execCommand("paste")` and read whatever the user last copied.
+ */
+function wirePermissionHandlers(ses, partition) {
+  if (wiredPartitions.has(partition)) return;
+  wiredPartitions.add(partition);
+
+  ses.setPermissionRequestHandler((wc, permission, callback, details) => {
+    const pane = paneOf(wc);
+    // Reported, not swallowed. Every branch below that denies without asking is
+    // indistinguishable, from the page's side, from a policy that said no — which
+    // is how a resolution bug reads as "the config does not work". One line on
+    // stderr turns the next occurrence into a five-second diagnosis.
+    if (!pane) return denyUnattributable(callback, permission, "no pane owns this WebContents");
+    const window = windowById(pane.windowId);
+    if (!window) return denyUnattributable(callback, permission, "the pane's window is gone");
+    const origin = requestOrigin(
+      pane,
+      details?.isMainFrame === true,
+      details?.requestingUrl,
+      details?.securityOrigin,
+    );
+    const outcome = permissions.resolve({
+      electronName: permission,
+      details,
+      kind: "request",
+      ...policyInputs(pane, origin),
+    });
+    if (outcome.verdict !== "ask") {
+      // Including the allow, at debug volume: a permission path that answers
+      // silently in every direction is one where "the config does not work" and
+      // "Chromium refused for its own reasons" look identical from the page.
+      if (outcome.verdict === "deny") {
+        warnDenied(permission, `policy (${outcome.source}) for ${permissions.originKey(origin)}`);
+      }
+      return callback(outcome.verdict === "allow");
+    }
+
+    void askUser(window, pane.viewId, pane.entry, outcome.ids, origin, details)
+      .catch((error) => {
+        // Electron is holding a callback: a throw anywhere above must still become
+        // an answer, or the page waits forever. This is how one undefined constant
+        // hung every prompted permission.
+        console.warn("[veld] permission prompt failed", error);
+        return null;
+      })
+      .then((answer) => {
+      if (answer === null) {
+        // Nobody answered. Refuse this request — the page is waiting — but record
+        // nothing: a remembered "deny" here is indistinguishable from one the user
+        // chose, and it outranks the project config permanently.
+        warnDenied(permission, "the prompt was dismissed without an answer");
+        return callback(false);
+      }
+      // Remembered *before* answering: `setDisplayMediaRequestHandler` runs
+      // straight after this for a `getDisplayMedia` call and re-resolves the
+      // policy, and it must find the answer already there or it prompts again for
+      // the same call.
+      for (const id of outcome.ids) {
+        recordAnswer(partitionFor(pane.entry.profile), origin, id, answer);
+      }
+      persistPermissions();
+      pushPermissionState(window, pane.viewId, pane.entry);
+      callback(answer === "allow");
+    });
+  });
+
+  ses.setPermissionCheckHandler((wc, permission, requestingOrigin, details) => {
+    const pane = paneOf(wc);
+    if (!pane) return false;
+    const origin = requestOrigin(
+      pane,
+      details?.isMainFrame === true,
+      requestingOrigin,
+      details?.requestingUrl,
+      details?.securityOrigin,
+    );
+    const outcome = permissions.resolve({
+      electronName: permission,
+      details,
+      kind: "check",
+      ...policyInputs(pane, origin),
+    });
+    // "ask" is `false` here — this handler has no way to prompt. See the note at
+    // the top of this section.
+    return outcome.verdict === "allow";
+  });
+
+  // Without this handler Electron rejects `getDisplayMedia` outright, whatever
+  // the permission says: there is no built-in picker for it to fall back on. The
+  // grant is deliberately narrow — the requesting frame itself, which is exactly
+  // what `preferCurrentTab` asks for, and what veld's own feedback overlay uses.
+  // Nothing outside the pane is ever offered, so there is no picker to show.
+  ses.setDisplayMediaRequestHandler((request, callback) => {
+    const wc = request.frame ? allWebContents.fromFrame(request.frame) : null;
+    const pane = paneOf(wc);
+    if (!pane) {
+      warnDenied("display-capture", "no pane owns the requesting frame");
+      return callback({});
+    }
+    // The display-media request carries a frame rather than a flag, so the
+    // main-frame test is the frame itself.
+    const paneWc = pane.entry.view.webContents;
+    const fromMainFrame = !paneWc.isDestroyed() && request.frame === paneWc.mainFrame;
+    const origin = requestOrigin(pane, fromMainFrame, request.securityOrigin);
+    const outcome = permissions.resolve({
+      electronName: "display-capture",
+      kind: "request",
+      origin,
+      ...policyInputs(pane, origin),
+    });
+    if (outcome.verdict !== "allow") {
+      // The one place a denial is worth a line even when the policy meant it:
+      // `veld feedback` screenshots run through here, and "the overlay says
+      // denied" is otherwise a dead end.
+      warnDenied("display-capture", `policy says ${outcome.verdict} for ${permissions.originKey(origin)}`);
+      return callback({});
+    }
+    // **A gesture is required even when the answer is already yes.** A stored
+    // Allow outranks the policy forever, so without this one click on one
+    // screenshot became a standing, silent, script-callable capture of the pane
+    // at that origin — a page could grab a frame on load. Browsers require
+    // transient activation for `getDisplayMedia` for exactly this reason, and
+    // Electron reports it on the request.
+    if (!request.userGesture) {
+      warnDenied("display-capture", "no user gesture — capture must follow a click or keypress");
+      return callback({});
+    }
+    callback({
+      video: request.frame,
+      // Tab audio travels with the capture the way it does in a browser, and only
+      // when the page asked for it.
+      ...(request.audioRequested ? { audio: request.frame } : {}),
+    });
+  });
+}
+
+/** One line on stderr when a permission is refused for a structural reason. */
+function warnDenied(permission, why) {
+  console.warn(`[veld] permission "${permission}" denied: ${why}`);
+}
+
+function denyUnattributable(callback, permission, why) {
+  warnDenied(permission, why);
+  callback(false);
+}
+
+/** Tell a pane's chrome what its current site is allowed to do. */
+function pushPermissionState(window, viewId, entry) {
+  if (window.isDestroyed() || entry.view.webContents.isDestroyed()) return;
+  const origin = permissions.parseOrigin(entry.view.webContents.getURL());
+  const { rules, trustedOrigins } = policyFor(window.id);
+  send(window, "veld:browser:permissions", {
+    viewId,
+    origin: permissions.originKey(origin),
+    settings: origin
+      ? permissions.siteSettings({
+          origin,
+          rules,
+          trustedOrigins,
+          stored: permissionStore[partitionFor(entry.profile)] ?? {},
+        })
+      : [],
+  });
+}
+
+function disposeEntry(window, entry, viewId) {
+  // A prompt this pane raised can no longer be answered — its chrome is going
+  // away — and the page behind it is blocked on the callback.
+  if (viewId !== undefined) abandonPrompts({ windowId: window.id, viewId });
   // A view disposed mid-gesture must not stay armed: nothing else clears this once the
   // entry is unreachable, and a forwarding view costs a cursor read and an IPC message
   // per mouse move.
@@ -576,9 +1170,13 @@ function disposeEntry(window, entry) {
 
 /** Drop every view a window owns. Called when the window closes. */
 function disposeWindow(window) {
+  // Before the views go: a prompt this window was showing can no longer be
+  // answered, and the page behind it is blocked on the callback.
+  abandonPrompts({ windowId: window.id });
+  policyByWindow.delete(window.id);
   const entries = byWindow.get(window.id);
   if (!entries) return;
-  for (const entry of entries.values()) disposeEntry(window, entry);
+  for (const [viewId, entry] of entries) disposeEntry(window, entry, viewId);
   byWindow.delete(window.id);
 }
 
@@ -589,8 +1187,14 @@ function disposeWindow(window) {
  * caller's own `BrowserWindow`. Handlers that cannot resolve one do nothing:
  * a message from a destroyed window is a race, not an error worth throwing at
  * a renderer that is already gone.
+ *
+ * `opts.permissionsFile` is where per-site permission answers live. Passed in
+ * rather than derived here so this module stays testable and so the path is
+ * decided in one place with the other `userData` files.
  */
-function registerBrowserViewIpc(resolveWindow) {
+function registerBrowserViewIpc(resolveWindow, opts = {}) {
+  permissionsFile = opts.permissionsFile ?? null;
+  permissionStore = loadPermissions();
   /**
    * The window whose views this sender may address, or null.
    *
@@ -686,6 +1290,11 @@ function registerBrowserViewIpc(resolveWindow) {
       // came back one round trip late would be visible as the page laying out at
       // pane size and then jumping.
       emulation: safeEmulation(args?.emulation),
+      // Media overrides arrive with `create` for the same reason the emulation
+      // does: a pane switching session recreates its view, and a dark-mode
+      // override that came back a round trip late is visible as the page
+      // painting light and then flipping.
+      media: safeMedia(args?.media),
       zoom: safeZoom(args?.zoom) ?? 1,
       // The session's own UA, captured before anything overrides it — what
       // "no emulated device" has to restore.
@@ -693,6 +1302,7 @@ function registerBrowserViewIpc(resolveWindow) {
       scale: 1,
       radius: 0,
       touchActive: false,
+      mediaActive: false,
       // Nothing has navigated yet, so the emulation calls are not safe to make —
       // rule 2. The first `did-navigate` flips this and applies them.
       frameReady: false,
@@ -784,6 +1394,26 @@ function registerBrowserViewIpc(resolveWindow) {
     // to reload: a blank pane has nothing to re-request, and `reload()` on one
     // would report a navigation the pane never made.
     if (emulationNeedsReload(prev, next) && wc.getURL()) wc.reload();
+    pushState(window, args.viewId, entry);
+  });
+
+  /**
+   * Emulate `prefers-color-scheme` and friends for one pane.
+   *
+   * The same question a device width asks, put to a media feature — and the one
+   * part of emulation Electron has no API for, so it goes over CDP like touch
+   * does. No reload: unlike the user agent, a media feature is a live media query
+   * and Chromium re-evaluates it, which is the whole reason this reads as
+   * flipping the page's theme rather than reloading it into another one.
+   */
+  ipcMain.handle("veld:browser:media", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const { window, entry } = found;
+    if (entry.view.webContents.isDestroyed()) return;
+    entry.media = safeMedia(args?.media);
+    // Through the same queue as touch, because they share one debugger session.
+    void applyTouch(window, args.viewId, entry);
     pushState(window, args.viewId, entry);
   });
 
@@ -954,7 +1584,7 @@ function registerBrowserViewIpc(resolveWindow) {
   ipcMain.handle("veld:browser:destroy", (event, args) => {
     const found = lookup(event, args?.viewId);
     if (!found) return;
-    disposeEntry(found.window, found.entry);
+    disposeEntry(found.window, found.entry, args.viewId);
     byWindow.get(found.window.id)?.delete(args.viewId);
   });
 
@@ -988,8 +1618,118 @@ function registerBrowserViewIpc(resolveWindow) {
         if (!entry.view.webContents.isDestroyed()) entry.view.webContents.reload();
       }
     }
+    // Permissions the user granted this session go with it. A grant that
+    // survived "sign out of this session" would be the one piece of "this site
+    // knows me" the clear silently missed.
+    permissionStore = permissions.forgetPartition(permissionStore, partitionFor(profile));
+    clearedPartitions.add(partitionFor(profile));
+    // The whole partition is going, so its per-answer revocations are redundant —
+    // and leaving them would keep re-deleting answers given after a later re-grant.
+    for (const key of [...revoked]) {
+      if (key.startsWith(`${partitionFor(profile)}\u0000`)) revoked.delete(key);
+    }
+    persistPermissions();
+    for (const [windowId, entries] of byWindow) {
+      const window = windowById(windowId);
+      if (!window) continue;
+      for (const [viewId, entry] of entries) {
+        if (entry.profile === profile) pushPermissionState(window, viewId, entry);
+      }
+    }
+  });
+
+  // -- Permissions ----------------------------------------------------------
+
+  /**
+   * The policy inputs for this window: the selected worktree's `ide.permissions`,
+   * and the origins veld itself serves for its run.
+   *
+   * Pushed by the renderer rather than fetched here, because the renderer is what
+   * knows which worktree the window is showing and already holds `/api/repos`.
+   * Everything in it is treated as untrusted: the rules are re-validated below,
+   * and the trusted origins are normalised through the same parser the matcher
+   * uses, so a malformed entry cannot widen anything.
+   */
+  ipcMain.handle("veld:browser:policy", (event, args) => {
+    const window = senderWindow(event);
+    if (!window) return;
+    const rules = Array.isArray(args?.rules) ? args.rules.filter((rule) => isPermissionRule(rule, permissions.VELD_PERMISSIONS)) : [];
+    // Filtered to this machine, not merely parsed. These origins get
+    // `display-capture` with no prompt on the premise that they are "origins veld
+    // itself serves" — but they are built from the project's own `url_template`,
+    // and a non-`.localhost` template is only *warned* about by `veld start`,
+    // never refused. Without this filter a repo could put a public origin into
+    // the silent-capture set by editing one config line.
+    const trustedOrigins = Array.isArray(args?.trustedOrigins)
+      ? args.trustedOrigins
+          .map((url) => permissions.parseOrigin(url))
+          .filter((origin) => origin !== null && permissions.isLocalOrigin(origin))
+          .map((origin) => permissions.originKey(origin))
+      : [];
+    policyByWindow.set(window.id, { rules, trustedOrigins });
+    // The panel is showing verdicts computed from the previous policy.
+    for (const [viewId, entry] of entriesFor(window.id)) {
+      pushPermissionState(window, viewId, entry);
+    }
+  });
+
+  /** A user's answer to a prompt this window raised. */
+  ipcMain.handle("veld:browser:permission-reply", (event, args) => {
+    const window = senderWindow(event);
+    if (!window) return;
+    const requestId = Number(args?.requestId);
+    if (!Number.isInteger(requestId)) return;
+    settlePrompt(window.id, requestId, args?.verdict === "allow" ? "allow" : "deny");
+  });
+
+  /**
+   * The UI is dropping a prompt without an answer — a second request arriving
+   * while one is already up, or the page navigating out from under it.
+   *
+   * Distinct from a reply, and that is the whole point: the renderer previously
+   * had **no way** to release a prompt, so its only options were to answer for
+   * the user (writing a permanent verdict they never chose) or to drop it on the
+   * floor, leaving the page blocked on a callback that could never fire. Resolves
+   * `null`, so the request is refused and nothing is remembered.
+   */
+  ipcMain.handle("veld:browser:permission-abandon", (event, args) => {
+    const window = senderWindow(event);
+    if (!window) return;
+    const requestId = Number(args?.requestId);
+    if (!Number.isInteger(requestId)) return;
+    const pending = pendingPrompts.get(requestId);
+    if (!pending || pending.windowId !== window.id) return;
+    releasePrompt(requestId, pending);
+    pending.resolve(null);
+  });
+
+  /**
+   * Set (or clear) one permission from the per-site panel.
+   *
+   * `verdict: "default"` removes the user's answer and lets the project config or
+   * veld's default answer again — which is what makes the panel's third state
+   * meaningful rather than a disguised deny.
+   */
+  ipcMain.handle("veld:browser:set-permission", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    const origin = permissions.parseOrigin(args?.origin);
+    if (!origin) return;
+    const id = typeof args?.permission === "string" ? args.permission : "";
+    const verdict = args?.verdict === "allow" || args?.verdict === "deny" ? args.verdict : "default";
+    recordAnswer(partitionFor(found.entry.profile), origin, id, verdict);
+    persistPermissions();
+    pushPermissionState(found.window, args.viewId, found.entry);
+  });
+
+  /** The panel asking for the current site's state — a cold open needs it. */
+  ipcMain.handle("veld:browser:permissions", (event, args) => {
+    const found = lookup(event, args?.viewId);
+    if (!found) return;
+    pushPermissionState(found.window, args.viewId, found.entry);
   });
 }
+
 
 /**
  * Show or hide a view, keeping its process and its page.

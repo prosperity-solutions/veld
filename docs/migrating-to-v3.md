@@ -27,7 +27,7 @@ and rule name. Verify the result, don't trust the rewrite.
 
 veld shipped a `veld config --migrate` and removed it. Preserving your comments
 ruled out a serde round-trip, so it rewrote bytes — and a byte-level rewriter
-cannot see structure, so it could not honour the rule that `hooks` and `ui` are
+cannot see structure, so it could not honour the rule that `hooks` and `ide` are
 opaque blobs veld promises not to interpret. It rewrote a `command` key inside
 them anyway. Making it structural would have deleted the comments it existed to
 protect.
@@ -147,9 +147,15 @@ position named — which is a useful final check in its own right.
 
 ### What to leave alone
 
-- **`hooks` and `ui`.** Opaque to veld. A `command` key *inside* them is not
+- **`hooks` and `ide`.** Opaque to veld. A `command` key *inside* them is not
   veld's key and must not be touched — the loader deliberately does not look
-  there. (This is the rule the removed converter broke.)
+  there. (This is the rule the removed converter broke.) Two keys under `ide` are
+  now interpreted — `quicklinks` and `permissions`, see
+  [configuration.md](configuration.md#ide-quicklinks-and-permissions) — but they
+  are additions rather than a migration: a config that has neither is unaffected,
+  and the rest of `ide` stays opaque, including the `command` exemption.
+  A config still spelling the key `ui` gets an unknown-top-level-key error that
+  names the rename — that is the whole migration.
 - **`sensitive_outputs`.** Still supported, unchanged, not deprecated.
 - **Comments, formatting, key order.** Nothing about v3 requires changing them.
 - **Anything already in v3 form.**
