@@ -215,11 +215,38 @@ export function PaneArea(props: {
   const bothVisible = dockVisible(layout, 0) && dockVisible(layout, 1);
   /** Where the tab currently being dragged would land, or `null`. */
   const [dropZone, setDropZone] = useState<DropZone | null>(null);
+  /**
+   * Whether the pointer has left the window with a tab in hand.
+   *
+   * Once it is outside, no `dragover` fires and the split preview would simply
+   * freeze wherever it was last — showing a confident "this pane will split
+   * here" while the actual outcome is a *new window*. The two destinations need
+   * two different pictures, and this is the only signal that the drag has left:
+   * `dragleave` with no `relatedTarget`.
+   */
+  const [dragOutside, setDragOutside] = useState(false);
 
   // Same backstop as the per-dock indicator below: a committed layout retires
   // every preview, however the gesture that produced it ended.
   // biome-ignore lint/correctness/useExhaustiveDependencies: see `dropAt`.
   useEffect(() => setDropZone(null), [layout]);
+
+  /** Re-entering the window puts the split preview back in charge. */
+  const onAreaDragOver = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+    if (dragOutside) setDragOutside(false);
+  };
+
+  /**
+   * `relatedTarget === null` is the drag crossing the window's own edge —
+   * moving between two elements inside it always names the one being entered.
+   */
+  const onAreaDragLeave = (e: React.DragEvent) => {
+    if (!e.dataTransfer.types.includes(TAB_MIME)) return;
+    if (e.relatedTarget !== null) return;
+    setDragOutside(true);
+    setDropZone(null);
+  };
 
   /**
    * Move tabs into a window of their own.
@@ -235,6 +262,46 @@ export function PaneArea(props: {
    * `pruneTerminals` collects against: remove the tab first and the effect that
    * runs on the next commit ends the shell we are in the middle of moving.
    */
+  /**
+   * Tabs released outside this window, at a point on the screen.
+   *
+   * Routed through the shell rather than decided here, because "was that over
+   * another Veld window?" is a question a renderer cannot answer: a drag never
+   * crosses a window boundary, so the window being dropped onto never even
+   * learns one is in progress. The shell owns every window's bounds and picks
+   * the destination — an existing window showing this worktree, or a new one.
+   */
+  const dropOutTabs = async (tabs: PaneTab[], screenX: number, screenY: number) => {
+    if (!desktopWindow || tabs.length === 0) return;
+    let moved: PaneTab[] = [];
+    try {
+      const result = await desktopWindow.dropOut({
+        worktreeId: props.worktreeId,
+        repoRoot: props.repoRoot,
+        ratio: layout.ratio,
+        tabs,
+        screenX,
+        screenY,
+      });
+      if (!result?.moved && !result?.opened) {
+        notifyError(
+          "Couldn't move that pane",
+          result?.reason === "cap"
+            ? "Veld Desktop is at its window limit — close one and try again."
+            : "The desktop shell refused the request.",
+        );
+        return;
+      }
+      const accepted = new Set(result.accepted ?? tabs.map((t) => t.id));
+      moved = tabs.filter((t) => accepted.has(t.id));
+    } catch (err) {
+      notifyError("Couldn't move that pane", err);
+      return;
+    }
+    for (const tab of moved) releaseForTransfer(tab);
+    onLayout((prev) => moved.reduce((acc, tab) => closeTab(acc, tab.id), prev));
+  };
+
   const detachTabs = async (tabs: PaneTab[]) => {
     if (!desktopWindow || tabs.length === 0) return;
     let moved: PaneTab[] = [];
@@ -415,7 +482,12 @@ export function PaneArea(props: {
   }
 
   return (
-    <div className="dock-area" ref={areaRef}>
+    <div
+      className="dock-area"
+      ref={areaRef}
+      onDragOver={onAreaDragOver}
+      onDragLeave={onAreaDragLeave}
+    >
       {([0, 1] as DockIndex[]).map((index) => {
         if (!dockVisible(layout, index)) return null;
         const width = bothVisible
@@ -466,9 +538,13 @@ export function PaneArea(props: {
               onRemoveSession={props.onRemoveSession}
               runCtx={props.runCtx}
               onDetach={desktopWindow ? detachTabs : undefined}
+              onDropOut={desktopWindow ? dropOutTabs : undefined}
               onBodyDragOver={onBodyDragOver}
               onBodyDrop={onBodyDrop}
-              onClearZone={() => setDropZone(null)}
+              onClearZone={() => {
+                setDropZone(null);
+                setDragOutside(false);
+              }}
             />
           </Fragment>
         );
@@ -476,7 +552,21 @@ export function PaneArea(props: {
       {/* Above the docks and un-hittable: the drop it previews is being handled
           by the body underneath it, and a target that intercepts its own
           pointer events would swallow every `dragover` after the first. */}
-      {previewStyle && <div className="dock-drop-zone" style={previewStyle} aria-hidden />}
+      {previewStyle && !dragOutside && (
+        <div className="dock-drop-zone" style={previewStyle} aria-hidden />
+      )}
+      {/* Outside the window, the answer is a *window*, not a split — so it gets
+          its own picture rather than a stale one of the wrong outcome. Drawn
+          inside the window because that is the only surface there is; the
+          cursor is out over the desktop. */}
+      {dragOutside && desktopWindow && (
+        <div className="dock-detach-hint" aria-hidden>
+          {/* Both destinations, because the page cannot tell which one it is —
+              only the shell knows what window is under the cursor. Promising
+              just the new window would be wrong half the time. */}
+          <span>Release over another Veld window to move it there — or anywhere else for a new one</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -496,6 +586,8 @@ function DockView(props: {
   /** Pull tabs out into a window of their own. Absent outside Electron, which
    *  has no window manager to pull them into. */
   onDetach: ((tabs: PaneTab[]) => void | Promise<void>) | undefined;
+  /** Released outside the window — the shell decides where that lands. */
+  onDropOut: ((tabs: PaneTab[], screenX: number, screenY: number) => void) | undefined;
   onBodyDragOver: (e: React.DragEvent, dock: DockIndex) => void;
   onBodyDrop: (e: React.DragEvent, dock: DockIndex) => void;
   onClearZone: () => void;
@@ -695,11 +787,13 @@ function DockView(props: {
               setDropAt(null);
               props.onClearZone();
               endTabDrag();
-              // Released outside the window: the same gesture as the context
-              // menu's "Open in a new window", which is the point — a tab pulled
-              // out of the strip and a tab dropped on a pane edge are one drop
-              // model with two destinations, not two features.
-              if (props.onDetach && droppedOutsideWindow(e)) void props.onDetach([tab]);
+              // Released outside the window. Where that lands is the shell's to
+              // decide — another Veld window showing this worktree, or nowhere
+              // and therefore a new one — because a drag never crosses a window
+              // boundary and this page cannot see what is under the cursor.
+              if (props.onDropOut && droppedOutsideWindow(e)) {
+                props.onDropOut([tab], e.screenX, e.screenY);
+              }
             }}
           />
         ))}

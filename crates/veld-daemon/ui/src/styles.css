@@ -733,6 +733,35 @@ select:focus {
     width 90ms ease;
 }
 
+/* The other destination: the pointer has left the window, so releasing opens a
+   new one. Deliberately *unlike* the split preview — dashed, not filled, and
+   over the whole region rather than a half — because the filled half-pane was
+   the wrong promise, and a picture that merely looks similar would be read as
+   the same outcome. Drawn inside the window because the cursor is out over the
+   desktop and this is the only surface available. */
+.dock-detach-hint {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px dashed var(--border-strong, var(--border));
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--bg) 55%, transparent);
+}
+
+.dock-detach-hint span {
+  padding: 7px 14px;
+  border-radius: 999px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 35%);
+}
+
 .dock {
   display: flex;
   flex-direction: column;

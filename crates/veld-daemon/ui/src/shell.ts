@@ -97,6 +97,22 @@ export interface DesktopWindowApi {
     ratio: number;
     tabs: unknown[];
   }): Promise<{ opened: boolean; reason?: string | null; accepted?: string[] }>;
+  /** A tab released outside this window. The shell resolves the screen point
+   *  against every window it owns: onto one showing this worktree, the tabs
+   *  move there; onto nothing, a new window opens. */
+  dropOut(payload: {
+    worktreeId: number;
+    repoRoot: string;
+    ratio: number;
+    tabs: unknown[];
+    screenX: number;
+    screenY: number;
+  }): Promise<{
+    moved: boolean;
+    opened: boolean;
+    reason?: string | null;
+    accepted?: string[];
+  }>;
   snapshot(payload: TabTransfer): Promise<boolean>;
   setTitle(title: string): Promise<boolean>;
   close(): Promise<boolean>;

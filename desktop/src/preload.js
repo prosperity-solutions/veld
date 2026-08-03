@@ -97,6 +97,11 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** Let go of one worktree's panes — another window is taking it. Release,
      *  never close: the shells keep running for whoever attaches next. */
     onYieldWorktree: (fn) => on("veld:window:yield", fn),
+    /** A tab released outside this window, at a point in *screen* coordinates.
+     *  The shell decides whether that lands on another Veld window (move the
+     *  tabs there) or on nothing (open a new window) — the page cannot see
+     *  either, since a drag never crosses a window boundary. */
+    dropOut: (payload) => ipcRenderer.invoke("veld:window:drop-out", payload),
     /** Pull tabs out into a window of their own. Resolves `{opened}` — the page
      *  must not remove them from its own layout until this says it worked. */
     detach: (payload) => ipcRenderer.invoke("veld:window:detach", payload),

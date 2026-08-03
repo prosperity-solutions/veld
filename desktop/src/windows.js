@@ -798,6 +798,78 @@ function registerWindowIpc(ipcMain) {
   });
 
   /**
+   * A tab released outside its own window: either onto another Veld window, or
+   * onto nothing.
+   *
+   * **The main process has to decide this**, because the renderer cannot see
+   * it. HTML5 drag events do not cross a `BrowserWindow` boundary at all — the
+   * drag lives in the source document, and the window being dragged *onto*
+   * never learns a drag is happening, so it cannot offer a drop target and the
+   * gesture silently did nothing. What the source *can* report is where the
+   * pointer was let go, in screen coordinates, and this process is the only one
+   * that knows which window is there.
+   *
+   * Onto a window already showing that worktree → the tabs move into it, using
+   * the same queue a hand-back uses. Anywhere else → a new detached window, the
+   * behaviour drag-out already had. The worktree check is what keeps the
+   * gesture predictable: dropping panes into a window showing something else
+   * would file them under a worktree that window is not looking at.
+   */
+  ipcMain.handle("veld:window:drop-out", (event, payload) => {
+    const from = senderWindow(event);
+    const fromRecord = recordFor(from);
+    if (!from || !fromRecord) return { moved: false, opened: false };
+    const worktreeId = safeWorktreeId(payload?.worktreeId);
+    const tabs = safeTransferTabs(payload?.tabs);
+    if (worktreeId === null || tabs.length === 0) {
+      return { moved: false, opened: false, reason: "invalid" };
+    }
+
+    const x = Number(payload?.screenX);
+    const y = Number(payload?.screenY);
+    const target =
+      Number.isFinite(x) && Number.isFinite(y)
+        ? allRecords().find((r) => {
+            if (r.id === fromRecord.id || r.win.isDestroyed()) return false;
+            // Only a window that is showing this worktree. Its panes belong
+            // with the rest of that worktree's, not filed behind whatever the
+            // window happens to be looking at.
+            if (claims.get(worktreeId) !== r.id) return false;
+            const b = r.win.getBounds();
+            return x >= b.x && x <= b.x + b.width && y >= b.y && y <= b.y + b.height;
+          })
+        : undefined;
+
+    if (target) {
+      target.pendingAdopt.push({ worktreeId, tabs });
+      target.win.webContents.send("veld:window:adopt");
+      if (target.win.isMinimized()) target.win.restore();
+      target.win.show();
+      target.win.focus();
+      return { moved: true, opened: false, accepted: tabs.map((t) => t.id) };
+    }
+
+    if (!canOpenAnother(windows.size)) return { moved: false, opened: false, reason: "cap" };
+    const seed = buildSeedLayout(worktreeId, tabs, payload?.ratio);
+    if (!seed) return { moved: false, opened: false, reason: "invalid" };
+    const win = openWindow({
+      kind: "detached",
+      origin: fromRecord.suffix,
+      originId: fromRecord.id,
+      originWindow: from,
+      seed,
+      repoRoot: safeRepoRoot(payload?.repoRoot),
+      worktreeId,
+    });
+    return {
+      moved: false,
+      opened: win !== null,
+      reason: win ? null : "cap",
+      accepted: win ? tabs.map((t) => t.id) : [],
+    };
+  });
+
+  /**
    * Collect tabs handed to this window by a detached one that closed.
    *
    * A queue rather than a push payload, drained by the renderer at mount and on
