@@ -2,16 +2,28 @@
 // no Electron binary needed, which is why the validation lives in its own module.
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 const {
+  MAX_SEED_BYTES,
+  MAX_TAB_BYTES,
+  MAX_TRANSFER_TABS,
+  PANE_KINDS,
+  buildSeedLayout,
   isProfileName,
   isViewId,
   partitionFor,
   safeColor,
   safeEmulation,
   safeRadius,
+  safeRepoRoot,
   safeScale,
+  safeTitle,
+  safeTransferTab,
+  safeTransferTabs,
   safeUrl,
   safeUserAgent,
+  safeWorktreeId,
   safeZoom,
 } = require("./validate");
 
@@ -251,4 +263,175 @@ test("safeRadius bounds the screen's corners", () => {
   for (const none of [0, -8, NaN, "round", null, undefined, {}]) {
     assert.equal(safeRadius(none), 0, JSON.stringify(none));
   }
+});
+
+// ---------------------------------------------------------------------------
+// Window transfers
+// ---------------------------------------------------------------------------
+
+test("safeTitle strips what a title bar cannot render", () => {
+  assert.equal(safeTitle("npm run dev"), "npm run dev");
+  // Control characters become spaces rather than rejecting the whole title: a
+  // page title carrying a stray newline is common and still worth showing.
+  assert.equal(safeTitle("a\nb\tc"), "a b c");
+  assert.equal(safeTitle("  spaced  "), "spaced");
+  assert.equal(safeTitle("x".repeat(500)).length, 200);
+  for (const none of ["", "   ", "\n", 42, null, undefined, {}]) {
+    assert.equal(safeTitle(none), null, JSON.stringify(none));
+  }
+});
+
+test("safeWorktreeId takes a rowid and nothing else", () => {
+  assert.equal(safeWorktreeId(7), 7);
+  assert.equal(safeWorktreeId("7"), 7);
+  for (const none of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, "", "abc", null, {}]) {
+    assert.equal(safeWorktreeId(none), null, JSON.stringify(none));
+  }
+});
+
+test("safeRepoRoot rejects anything that could not be a path in a URL", () => {
+  assert.equal(safeRepoRoot("/Users/x/code/veld"), "/Users/x/code/veld");
+  // A newline in a value the shell puts in a query parameter is the shape worth
+  // refusing outright rather than escaping.
+  assert.equal(safeRepoRoot("/Users/x\n/evil"), null);
+  // A space is legal in a path and must survive — URLSearchParams encodes it.
+  assert.equal(safeRepoRoot("/Users/x/My Code"), "/Users/x/My Code");
+  assert.equal(safeRepoRoot(`/${"x".repeat(5000)}`), null);
+  for (const none of ["", 42, null, undefined, {}]) {
+    assert.equal(safeRepoRoot(none), null, JSON.stringify(none));
+  }
+});
+
+test("PANE_KINDS agrees with the renderer's", () => {
+  // A tab crosses into this process when a pane is detached into its own
+  // window, so `safeTransferTab` needs the kind list — and this is plain JS, so
+  // nothing type-checks the two copies against each other. A kind added on the
+  // renderer side and forgotten here works everywhere *except* detach, which
+  // refuses with "the desktop shell refused the request" and points nowhere
+  // near the cause. That is this codebase's worst failure shape, and the same
+  // one `safeEmulation`'s field-set gate exists for.
+  //
+  // The gate lives on this side rather than the renderer's — unlike the
+  // emulation one — for a boring reason: `crates/veld-daemon/ui` has no
+  // `@types/node`, so reading a file from a vitest test costs a dependency,
+  // while `node --test` has `fs` already.
+  const source = readFileSync(
+    path.join(__dirname, "..", "..", "crates", "veld-daemon", "ui", "src", "panes", "model.ts"),
+    "utf8",
+  );
+  const match = source.match(/export const PANE_KINDS = \[([^\]]*)\]/);
+  assert.ok(match, "PANE_KINDS not found in panes/model.ts");
+  const theirs = match[1]
+    .split(",")
+    .map((s) => s.trim().replace(/^["']|["']$/g, ""))
+    .filter(Boolean);
+  assert.deepEqual(PANE_KINDS, theirs);
+});
+
+test("safeTransferTab keeps a tab's own fields and refuses a non-tab", () => {
+  const tab = {
+    id: "abc_123",
+    kind: "browser",
+    title: "Preview",
+    url: "http://localhost:3000/",
+    profile: "otter",
+    emulation: { width: 390, height: 844, ua: "Mozilla/5.0" },
+    zoom: 1.25,
+  };
+  // Carried through whole: the receiving renderer's `parseTab` is what decides
+  // which fields mean anything, and a field dropped here is invisible until the
+  // pane arrives in the new window without it.
+  assert.deepEqual(safeTransferTab(tab), tab);
+
+  assert.equal(safeTransferTab({ id: "a", kind: "wormhole" }), null);
+  assert.equal(safeTransferTab({ id: "not a valid id!", kind: "terminal" }), null);
+  assert.equal(safeTransferTab({ kind: "terminal" }), null);
+  for (const none of [null, undefined, 42, "tab", []]) {
+    assert.equal(safeTransferTab(none), null, JSON.stringify(none));
+  }
+});
+
+test("safeTransferTabs deduplicates by id and bounds the list", () => {
+  const tabs = safeTransferTabs([
+    { id: "a", kind: "terminal", title: "one" },
+    // Two tabs on one id would fight over one shell in the receiving window.
+    { id: "a", kind: "terminal", title: "again" },
+    { id: "b", kind: "new", title: "two" },
+    { id: "!!", kind: "new" },
+    "not a tab",
+  ]);
+  assert.deepEqual(
+    tabs.map((t) => t.id),
+    ["a", "b"],
+  );
+  assert.equal(tabs[0].title, "one");
+
+  const many = Array.from({ length: MAX_TRANSFER_TABS + 20 }, (_, i) => ({
+    id: `t${i}`,
+    kind: "new",
+  }));
+  assert.equal(safeTransferTabs(many).length, MAX_TRANSFER_TABS);
+  assert.deepEqual(safeTransferTabs("nope"), []);
+});
+
+test("buildSeedLayout produces a layout the renderer can parse", () => {
+  const tabs = safeTransferTabs([{ id: "sh1", kind: "terminal", title: "Terminal" }]);
+  const seed = JSON.parse(buildSeedLayout(9, tabs, 0.3));
+  assert.deepEqual(Object.keys(seed), ["9"]);
+  assert.deepEqual(seed[9].docks[0].tabs, tabs);
+  assert.equal(seed[9].docks[0].activeId, "sh1");
+  // The second dock exists and is empty: `parseLayout` requires exactly two and
+  // returns null for a layout that has any other number.
+  assert.deepEqual(seed[9].docks[1], { tabs: [], activeId: null });
+  assert.equal(seed[9].ratio, 0.3);
+
+  // A ratio that is not a number must not reach the JSON as NaN, which
+  // serializes to `null` and would clamp to the default on the far side anyway —
+  // but only after `Number(null)` had quietly made it 0.
+  assert.equal(JSON.parse(buildSeedLayout(9, tabs, "wide"))[9].ratio, 0.5);
+  assert.equal(buildSeedLayout(9, [], 0.5), null);
+});
+
+test("a page's title cannot set the size of a transfer", () => {
+  // `document.title` is pushed onto the tab record from a *previewed page* —
+  // arbitrary web content. It is the one page-controlled string in a tab, so it
+  // is truncated at the boundary rather than allowed to size everything
+  // downstream: the seed, and the snapshot the main process retains and
+  // re-copies on every layout change.
+  const tab = safeTransferTab({ id: "v1", kind: "browser", title: "x".repeat(50_000) });
+  assert.equal(tab.title.length, 200);
+});
+
+test("a transfer is bounded in UTF-8 bytes, not string length", () => {
+  // The bug this replaced: the ceiling counted JavaScript string length while
+  // what had to fit was the UTF-8 encoding — up to 4× larger. A 50 000-character
+  // CJK title measured 50 134 and encoded to 150 402 bytes, so it passed a
+  // 64 KB check and produced a payload well past Linux's 128 KB per-argument
+  // limit back when the seed rode argv. The window never started, *after* the
+  // origin had already released its tabs to it.
+  const cjk = "中".repeat(50_000);
+  assert.ok(cjk.length < MAX_SEED_BYTES);
+  assert.ok(Buffer.byteLength(cjk, "utf8") > MAX_SEED_BYTES);
+  // Truncation now stops it at the tab, and the seed is measured in bytes below.
+  assert.equal(safeTransferTab({ id: "v1", kind: "browser", title: cjk }).title.length, 200);
+
+  // A tab too big for reasons other than its title is dropped whole.
+  assert.equal(
+    safeTransferTab({ id: "v1", kind: "new", padding: "x".repeat(MAX_TAB_BYTES) }),
+    null,
+  );
+});
+
+test("buildSeedLayout refuses a seed too large to carry", () => {
+  const fat = Array.from({ length: MAX_TRANSFER_TABS }, (_, i) => ({
+    id: `t${i}`,
+    kind: "browser",
+    title: "x".repeat(200),
+    // Under the per-tab cap individually; over the seed's ceiling together.
+    url: `http://localhost/${"p".repeat(6000)}`,
+  }));
+  const tabs = safeTransferTabs(fat);
+  assert.equal(tabs.length, MAX_TRANSFER_TABS);
+  assert.ok(Buffer.byteLength(JSON.stringify(tabs), "utf8") > MAX_SEED_BYTES);
+  assert.equal(buildSeedLayout(1, tabs, 0.5), null);
 });

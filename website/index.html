@@ -243,13 +243,16 @@
     /* Last row of features + the "coming soon" joke bar. The joke cell fills the
        leftover slack so the grid never shows an empty gray gap.
 
-       This is arithmetic, not taste: at 3 columns, N feature cells leave N mod 3
-       filled in the final row. Rather than re-tuning a span every time a feature is
-       added — which is exactly what went wrong when this said "tuned to 13" and the
-       count became 17 — the last feature cell takes `cell-wide` (span 2) to finish
-       its row, and the joke bar spans the full 3. So the invariant to keep is:
-       (feature cells) mod 3 == 2, with `cell-wide` on the last one.
-       Currently 17 cells → 5 full rows + [1 + wide] + [joke bar full width]. */
+       This is arithmetic, not taste: at 3 columns, the *slots* the feature cells
+       occupy must divide by 3, or the final row shows an empty gray gap. Rather
+       than re-tuning a span every time a feature is added — which is what went
+       wrong when this said "tuned to 13" and the count became 17 — `cell-wide`
+       (span 2) exists to absorb the slack when the raw count doesn't divide.
+       The invariant: (feature cells + 1 for each `cell-wide`) mod 3 == 0, with
+       the joke bar spanning the full 3 after them.
+       Currently 18 cells, none wide → 6 full rows + [joke bar full width]. When
+       the next feature lands, 19 doesn't divide — put `cell-wide` back on the
+       last cell to make it 20... which also doesn't; add two, or leave one out. */
     .grid .cell-wide { grid-column: span 2; }
     .grid .cell-next { grid-column: span 3; background: color-mix(in srgb, var(--accent-ink) 6%, var(--bg)); }
     @media (max-width: 760px) {
@@ -424,9 +427,10 @@ veld share <span class="kw">--web</span>
         <div class="cell"><h3>Many runs, side by side</h3><p>Give every branch or git worktree its own environment — they run in parallel without clashing. Re-running by name just resumes.</p></div>
         <div class="cell"><h3>Scripts &amp; agents love it</h3><p>Every command has a <code>--json</code> mode for CI, scripts, and coding agents.</p></div>
         <div class="cell"><h3>A dashboard in your browser</h3><p>See health, per-service memory &amp; CPU, tail logs, search, browse past runs, and stop/restart — all at <code>veld.localhost</code>.</p></div>
+        <div class="cell"><h3>Memory numbers that are actually true</h3><p>Adding up a process tree&rsquo;s memory double-counts everything its processes share, so Veld reports the real footprint instead. Expand a service for a scrubbable graph of memory or CPU &mdash; by memory type, or by which subprocess is eating it.</p></div>
         <div class="cell"><h3>Browser errors in your terminal</h3><p>Captures the app's console logs and crashes so you can read them from the CLI.</p></div>
         <div class="cell"><h3>Share with a teammate</h3><p>Send a colleague an encrypted link; they open the same URLs on their machine. No accounts, no server.</p></div>
-        <div class="cell cell-wide"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
+        <div class="cell"><h3>Or share with anyone</h3><p><code>veld share --web</code> gives you a real public URL — the other person doesn't need Veld at all.</p></div>
         <div class="cell cell-next">
           <div class="next-line">
             <span class="next-prompt">$ claude</span>
@@ -459,6 +463,7 @@ veld share <span class="kw">--web</span>
         <div class="cli-row"><code>veld stop [--name N] [--all]</code><span>Stop a running environment</span></div>
         <div class="cli-row"><code>veld restart [--name N]</code><span>Restart an environment</span></div>
         <div class="cli-row"><code>veld status [--name N]</code><span>Show run status</span></div>
+        <div class="cli-row"><code>veld stats [--processes] [--history] [--cpu]</code><span>Detailed CPU &amp; memory — split by memory type and by subprocess, with history</span></div>
         <div class="cli-row"><code>veld urls [--name N]</code><span>Show URLs for a run</span></div>
         <div class="cli-row"><code>veld logs [-f] [-s TERM] [--run ID]</code><span>View logs (follow, search, source filter — including past runs)</span></div>
         <div class="cli-row"><code>veld graph / nodes / presets / runs</code><span>Inspect the config and the run history</span></div>

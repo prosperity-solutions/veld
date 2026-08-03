@@ -29,13 +29,23 @@ mod desktop;
 #[path = "pty.rs"]
 mod pty;
 
-/// Hang up every live terminal session.
+/// Note the terminal sessions being left running.
 ///
-/// Re-exported for the daemon's shutdown path: terminal shells are our children
-/// but live in their own sessions, so a restart (`veld update` hard-restarts the
-/// daemon) would otherwise leave them running with nothing able to reattach.
+/// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a
+/// session's PTY belongs to a holder process, so the shells survive a restart —
+/// which is what makes `veld update` safe to run with terminals open. See
+/// `pty::shutdown_sessions`.
 pub async fn shutdown_terminal_sessions() {
     pty::shutdown_sessions().await;
+}
+
+/// Serve one terminal session as a holder process (`veld-daemon --pty-holder`).
+///
+/// Re-exported for `main`, which dispatches to it before any of the daemon's own
+/// startup: a holder binds no port, opens no database, and must not be mistaken
+/// for a second daemon.
+pub async fn run_pty_holder() -> anyhow::Result<()> {
+    pty::holder::run_from_stdin().await
 }
 
 // The feedback HTTP server listens on this instance's daemon port —
@@ -107,6 +117,11 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
     // shell), which means something has to collect the ones nobody comes back
     // for. Started here rather than in pty::routes() so that building a router
     // in a test doesn't leave a timer running.
+    // Holders whose daemon went away are still serving their shells; this is
+    // where a fresh daemon takes them back. Before the reaper, so an adopted
+    // session's detach clock is running by the time anything can collect it, and
+    // before the listener binds, so no attach can race a half-adopted registry.
+    pty::adopt_existing_sessions().await;
     pty::spawn_session_reaper();
 
     let addr = SocketAddr::from(([127, 0, 0, 1], veld_core::instance::daemon_port()));

@@ -12,12 +12,23 @@ const {
   BrowserWindow,
   Menu,
   Tray,
+  dialog,
+  ipcMain,
   nativeImage,
-  shell,
 } = require("electron");
 const fs = require("node:fs");
 const path = require("node:path");
 const { registerBrowserViewIpc, disposeWindow } = require("./browserViews");
+const {
+  focusPrimary,
+  initWindows,
+  openWindow,
+  registerWindowIpc,
+  restoreWindows,
+  setQuitting,
+  windowCount,
+} = require("./windows");
+const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
 const {
   checkForUpdates,
   initUpdater,
@@ -47,8 +58,9 @@ const TRAY_ICON = path.join(ASSETS, "trayTemplate.png");
 // would otherwise call itself "Electron".
 app.setName("Veld");
 
+// The page URL itself is built per window in `windows.js` — a detached window
+// carries `chrome=none` and the selection it was pulled out of.
 const BASE_URL = process.env.VELD_DESKTOP_URL ?? "http://127.0.0.1:19899";
-const APP_URL = `${BASE_URL}/ide?shell=electron`;
 const HEALTH_URL = `${BASE_URL}/api/health`;
 const ENVIRONMENTS_URL = `${BASE_URL}/api/environments`;
 const REPOS_URL = `${BASE_URL}/api/repos`;
@@ -63,8 +75,6 @@ const REPOS_URL = `${BASE_URL}/api/repos`;
 const TOPBAR_HEIGHT = 42;
 const TRAFFIC_LIGHT_SIZE = 12;
 
-/** @type {BrowserWindow | null} */
-let win = null;
 /** @type {Tray | null} */
 let tray = null;
 /** Set once the tray exists; the updater calls it when the skew notice changes. */
@@ -80,6 +90,81 @@ let refreshTray = null;
  */
 const isPrimaryInstance = !app.isPackaged || app.requestSingleInstanceLock();
 if (!isPrimaryInstance) app.quit();
+
+/**
+ * The **process's** half of a layout slot; `windows.js` adds the per-window half.
+ *
+ * A layout names live PTY session ids, and a second attach to a session *takes
+ * it over* rather than mirroring it — so two renderers restoring one layout
+ * would trade every shell back and forth indefinitely. A slot is what keeps them
+ * apart, and it must be stable for one window across restarts and different
+ * between any two live windows. Two independent things can collide, so the slot
+ * has two parts: this base separates *processes*, and the suffix
+ * (`slotFor`/`nextSuffix` in `windowState.js`) separates windows within one.
+ *
+ * Derived from `isPackaged`, deliberately **not** from the single-instance lock.
+ * Asking for the lock unpackaged looked like a free way to tell a first instance
+ * from a second, and it was not: the lock is per appId and first-caller-wins, so a
+ * dev instance holding it made the *packaged* app quit on launch, and whichever
+ * happened to start first got the durable slot — a dev run inheriting the
+ * installed app's terminals, the exact opposite of the intent.
+ *
+ * Two concurrent dev instances (a normal thing to want, per the comment above) do
+ * share `dev`, and would fight over a shell if both restored the same layout.
+ * `claimSlot` is what prevents that: the second one finds the first's live pid in
+ * the slot's lockfile and takes a base of its own.
+ */
+const SLOT_BASE = claimSlot(app.isPackaged ? "main" : "dev");
+
+/**
+ * Claim `preferred`, or fall back to a slot of our own if a live process holds it.
+ *
+ * A lockfile with a pid, rather than a timestamp or a heartbeat: liveness is a
+ * question the OS can answer exactly (`kill(pid, 0)`), while a timestamp cannot
+ * tell "quit five seconds ago" from "still running" — and the five-seconds-ago
+ * case is a user relaunching the app, which is precisely when the layout must be
+ * restored rather than abandoned.
+ */
+function claimSlot(preferred) {
+  const fs = require("node:fs");
+  const path = require("node:path");
+  // An instance that is about to quit must not touch the lock: it would overwrite
+  // the live primary's pid with its own and then exit, leaving a stale lock that
+  // sends the *next* launch to a fresh slot — and to no restored terminals.
+  if (!isPrimaryInstance) return preferred;
+  try {
+    const dir = path.join(app.getPath("userData"), "layout-slots");
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, `${preferred}.lock`);
+    // Scoped to the read alone. Wrapping the write in the same `try` meant the
+    // very first launch — when the file does not exist yet — threw ENOENT on this
+    // line and skipped straight past the write, so the lock was never created on
+    // any launch and this function always returned `preferred`: a no-op that
+    // looked like protection.
+    let held = Number.NaN;
+    try {
+      held = Number.parseInt(fs.readFileSync(lock, "utf8"), 10);
+    } catch {
+      // No lock yet, or unreadable: treat the slot as free and claim it below.
+    }
+    if (Number.isInteger(held) && held !== process.pid) {
+      try {
+        // Signal 0 is the existence/permission check only.
+        process.kill(held, 0);
+        // Somebody is using this slot; take one nobody can be using.
+        return `${preferred}-${process.pid}`;
+      } catch {
+        // Stale lock: the process that wrote it is gone, so the slot is ours —
+        // and so are the shells its layout names, which is the whole point.
+      }
+    }
+    fs.writeFileSync(lock, String(process.pid));
+  } catch {
+    // No userData, an unwritable directory: fall through to the preferred slot.
+    // Worst case is two windows sharing one, which is where this started.
+  }
+  return preferred;
+}
 
 // Shown while the daemon is unreachable; self-contained and branded
 // (dark tokens + wordmark dot styling from the design handoff).
@@ -137,97 +222,21 @@ async function daemonReachable() {
   }
 }
 
-async function loadAppWhenReady(window) {
-  if (await daemonReachable()) {
-    await window.loadURL(APP_URL);
-    return;
-  }
-  await window.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(WAITING_HTML)}`,
-  );
-  const timer = setInterval(async () => {
-    if (window.isDestroyed()) {
-      clearInterval(timer);
-      return;
-    }
-    if (await daemonReachable()) {
-      clearInterval(timer);
-      await window.loadURL(APP_URL);
-    }
-  }, 2000);
-}
-
-function createWindow() {
-  win = new BrowserWindow({
-    // The window is titled by the app, not by the page: the UI is served from a
-    // URL, so without this the title bar (and the macOS window menu, and Mission
-    // Control) show whatever `<title>` the daemon's bundle happens to carry.
-    title: "Veld",
-    width: 1280,
-    height: 800,
-    minWidth: 900,
-    minHeight: 540,
-    // Frameless with native traffic lights: the web UI renders veld controls
-    // into the title-bar row (drag region handled in its CSS).
-    titleBarStyle: "hiddenInset",
-    // Vertically centred in the top bar; `x` keeps hiddenInset's own inset.
-    trafficLightPosition: {
-      x: 13,
-      y: Math.round((TOPBAR_HEIGHT - TRAFFIC_LIGHT_SIZE) / 2),
-    },
-    backgroundColor: "#0d0e10",
-    // Windows/Linux take the window icon from here; macOS uses the bundle's (or
-    // the dock icon set in `whenReady` while running unpackaged).
-    icon: APP_ICON,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      preload: require("node:path").join(__dirname, "preload.js"),
-    },
-  });
-
-  // Run URLs open in the user's real browser, never inside the shell.
-  win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
-    return { action: "deny" };
-  });
-
-  // Same policy for top-level navigations (plain <a>, window.location,
-  // redirects): the shell renders only the app origin; anything else goes to
-  // the real browser. data: URLs (the waiting page) load via loadURL, which
-  // doesn't emit will-navigate.
-  const appOrigin = new URL(APP_URL).origin;
-  win.webContents.on("will-navigate", (event, url) => {
-    // Fail CLOSED: an unparseable target must not fall through into the
-    // shell (skipping preventDefault would navigate).
-    let origin = null;
-    try {
-      origin = new URL(url).origin;
-    } catch {
-      // leave origin null → blocked below
-    }
-    if (origin !== appOrigin) {
-      event.preventDefault();
-      if (origin) void shell.openExternal(url);
-    }
-  });
-
-  void loadAppWhenReady(win);
-  // Before `closed`: the window's `contentView` must still exist to detach the
-  // browser panes from, and a view outliving its window keeps a renderer
-  // process alive with nothing to paint into.
-  // …and the page must not take it back. Electron adopts `document.title` on every
-  // navigation unless the event is cancelled, which is how a hard reload renamed
-  // the window.
-  win.on("page-title-updated", (e) => e.preventDefault());
-
-  win.on("close", () => {
-    if (win) disposeWindow(win);
-  });
-  win.on("closed", () => {
-    win = null;
-  });
-}
+// Window creation, the per-window layout slots and the detach/hand-back
+// ownership rules live in `windows.js`; this file wires it to the pieces that
+// are the app's rather than a window's (the waiting page, the daemon poll, the
+// icon, the top bar's geometry).
+initWindows({
+  baseUrl: BASE_URL,
+  waitingHtml: WAITING_HTML,
+  daemonReachable,
+  appIcon: APP_ICON,
+  topbarHeight: TOPBAR_HEIGHT,
+  trafficLightSize: TRAFFIC_LIGHT_SIZE,
+  slotBase: SLOT_BASE,
+  stateFile: path.join(app.getPath("userData"), "windows.json"),
+  disposeWindow,
+});
 
 /**
  * The menu-bar icon: the veld mark as a macOS template image.
@@ -384,7 +393,7 @@ async function trayMenu() {
       items.push({
         label,
         toolTip: root ?? undefined,
-        click: () => focusWindow(),
+        click: () => focusPrimary(),
       });
     }
   } catch {
@@ -392,7 +401,14 @@ async function trayMenu() {
   }
   items.push(
     { type: "separator" },
-    { label: "Open Veld Desktop", click: () => focusWindow() },
+    { label: "Open Veld Desktop", click: () => focusPrimary() },
+    {
+      label: "New Window",
+      // Disabled rather than hidden at the cap: a row that vanishes reads as a
+      // broken menu, while a greyed one says the app is at its limit.
+      enabled: canOpenAnother(windowCount()),
+      click: () => newWindowOrSayWhyNot(),
+    },
     { label: `Version ${app.getVersion()}`, enabled: false },
   );
   const skew = skewMenuItem();
@@ -407,10 +423,24 @@ async function trayMenu() {
   return Menu.buildFromTemplate(items);
 }
 
-function focusWindow() {
-  if (!win) createWindow();
-  win?.show();
-  win?.focus();
+/**
+ * Open a window, or say why not.
+ *
+ * The tray's row can grey itself out because the tray is rebuilt every ten
+ * seconds; the application menu is built once, and `⌘N` is an accelerator that
+ * fires whatever the menu currently claims. So the cap has to be reported at the
+ * moment it is hit, or the app's most direct affordance is a key that silently
+ * does nothing — which is the same argument the tray row's `enabled` was written
+ * for, applied to the surface that actually needs it.
+ */
+function newWindowOrSayWhyNot() {
+  if (openWindow({ kind: "main" })) return;
+  void dialog.showMessageBox({
+    type: "info",
+    message: `Veld Desktop is limited to ${MAX_WINDOWS} windows.`,
+    detail: "Close one and try again.",
+    buttons: ["OK"],
+  });
 }
 
 function createTray() {
@@ -468,9 +498,22 @@ function buildAppMenu() {
       : []),
     {
       label: "File",
-      submenu: isMac
-        ? [{ role: "close" }]
-        : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }],
+      submenu: [
+        // A main-process accelerator, so it works with a native browser pane
+        // focused. A focused `WebContentsView` swallows every keystroke — which
+        // is why the palette's ⌘K has to be forwarded back to the page from
+        // `browserViews.js` — but a menu accelerator is handled before the web
+        // contents sees the key, so this one needs no forwarding.
+        {
+          label: "New Window",
+          accelerator: "CmdOrCtrl+N",
+          click: () => newWindowOrSayWhyNot(),
+        },
+        { type: "separator" },
+        ...(isMac
+          ? [{ role: "close" }]
+          : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }]),
+      ],
     },
     {
       label: "Edit",
@@ -510,7 +553,7 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-app.on("second-instance", () => focusWindow());
+app.on("second-instance", () => focusPrimary());
 
 /**
  * Keep the daemon's version current for the skew notice. The reachability poll
@@ -525,6 +568,7 @@ app.whenReady().then(() => {
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
   registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender));
+  registerWindowIpc(ipcMain);
   buildAppMenu();
   app.setAboutPanelOptions({
     applicationName: "Veld",
@@ -536,6 +580,11 @@ app.whenReady().then(() => {
       buildAppMenu();
       void refreshTray?.();
     },
+    // `quitAndInstall` can return without quitting, leaving the app running
+    // after `before-quit` already latched. This is the only in-repo path that
+    // genuinely cancels a quit, so it is the one that has to say so — and it is
+    // the AppImage updater's, i.e. Linux, where `activate` never fires.
+    onQuitCancelled: () => setQuitting(false),
   });
   setInterval(() => void daemonReachable(), VERSION_POLL_MS);
   // Unpackaged runs (`npm start`) show Electron's own icon in the dock, which
@@ -545,12 +594,41 @@ app.whenReady().then(() => {
     const icon = nativeImage.createFromPath(APP_ICON);
     if (!icon.isEmpty()) app.dock?.setIcon(icon);
   }
-  createWindow();
+  // The windows the last run ended with, not just one: a detached window holds
+  // live shells, and reopening only the main window would leave them running,
+  // unreachable, until the detach grace hangs them up.
+  restoreWindows();
   if (process.platform === "darwin") createTray();
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    setQuitting(false);
+    if (BrowserWindow.getAllWindows().length === 0) focusPrimary();
   });
 });
+
+/**
+ * A quit is not a series of window closes.
+ *
+ * Every window's `close` runs on the way out, and without this flag each
+ * detached one would try to hand its tabs to a window that is also closing, and
+ * each `closed` would rewrite the persisted window set one window shorter —
+ * so the next launch would reopen exactly one window and abandon the rest of
+ * the layouts, with their shells, to the grace.
+ */
+app.on("before-quit", () => setQuitting(true));
+
+/**
+ * …and a `before-quit` is not always a quit — `quitAndInstall` can return
+ * without quitting, and a macOS logout can be cancelled. A stuck latch is not
+ * cosmetic, because `handBack` is gated on it too: every detached window closed
+ * afterwards would abandon its tabs.
+ *
+ * The latch is therefore cleared only by callers that *know* the app is alive —
+ * `openWindow`, `activate`, and `initUpdater`'s `onQuitCancelled` — never by
+ * inferring it from a window event. Two versions tried to infer it and were
+ * wrong in opposite directions; `setQuitting` in `windows.js` has that history.
+ * The updater hook is the one that matters, since it is the only in-repo path
+ * that genuinely cancels a quit and it is Linux's, where `activate` never fires.
+ */
 
 app.on("window-all-closed", () => {
   // Keep the tray alive on macOS (standard behavior); quit elsewhere.

@@ -47,6 +47,10 @@ pub fn routes() -> Router {
         .route("/api/health", get(health))
         .route("/api/environments", get(list_environments))
         .route("/api/stats", get(get_stats))
+        // Scrubbable history for one node. Project-scoped like every
+        // run-addressed route, but via required query fields rather than a path
+        // segment — the node key (`"node:variant"`) is not URL-path-safe.
+        .route("/api/stats/history", get(get_stats_history))
         // Every route below that takes a `{run}` segment MUST also take the
         // project scope — a run name alone is ambiguous across projects. See
         // [`RunScope`]; `handler_guards` pins that each one 400s without it.
@@ -354,12 +358,52 @@ struct StatsResponse {
 struct NodeStats {
     /// CPU percentage of a single core, summed across the process tree.
     cpu: f32,
-    /// Resident memory in bytes, summed across the process tree.
+    /// Resident memory in bytes, summed across the process tree. Double-counts
+    /// pages shared inside the tree — `footprint` is the figure to show.
     mem: u64,
     /// Number of live processes in the tree.
     procs: u32,
-    /// Recent memory samples (bytes), oldest-first, for the sparkline.
+    /// Recent **footprint** samples (bytes), oldest-first, for the sparkline.
+    /// Footprint rather than RSS so the collapsed sparkline and the expanded
+    /// chart plot the same quantity — two charts of one node that disagree are
+    /// worse than one chart.
     spark: Vec<u64>,
+    /// The honest tree total: summed PSS (Linux) / phys_footprint (macOS).
+    footprint: u64,
+    /// Virtual address space, summed.
+    virt: u64,
+    /// Cumulative CPU seconds burned by the tree.
+    cpu_seconds: f64,
+    /// Page-class split, when the platform reports one (Linux). `null` on macOS
+    /// and on samples taken with `VELD_STATS_MEMORY_DETAIL=off`; the UI hides
+    /// the "split by type" view rather than drawing an empty stack.
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+/// The optional page-class fields, flattened into [`NodeStats`] and
+/// [`StatsBucketDto`] so both wire shapes name them identically.
+#[derive(Serialize, Default)]
+struct MemoryClasses {
+    private_clean: Option<u64>,
+    private_dirty: Option<u64>,
+    shared_clean: Option<u64>,
+    shared_dirty: Option<u64>,
+    swap: Option<u64>,
+    wired: Option<u64>,
+}
+
+impl From<&veld_core::stats::MemoryBreakdown> for MemoryClasses {
+    fn from(m: &veld_core::stats::MemoryBreakdown) -> Self {
+        Self {
+            private_clean: m.private_clean,
+            private_dirty: m.private_dirty,
+            shared_clean: m.shared_clean,
+            shared_dirty: m.shared_dirty,
+            swap: m.swap,
+            wired: m.wired,
+        }
+    }
 }
 
 async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
@@ -394,7 +438,7 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
                     .node_stats_history(&entry.project_root, run_name, &node_key, SPARK_POINTS)
                     .unwrap_or_default()
                     .iter()
-                    .map(|h| h.memory_bytes)
+                    .map(|h| h.memory.footprint)
                     .collect();
                 nodes.insert(
                     node_key,
@@ -403,6 +447,10 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
                         mem: s.memory_bytes,
                         procs: s.process_count,
                         spark,
+                        footprint: s.memory.footprint,
+                        virt: s.memory.virtual_bytes,
+                        cpu_seconds: s.cpu_seconds,
+                        classes: (&s.memory).into(),
                     },
                 );
             }
@@ -417,6 +465,306 @@ async fn get_stats() -> Result<Json<StatsResponse>, StatusCode> {
     }
 
     Ok(Json(StatsResponse { projects }))
+}
+
+// ---------------------------------------------------------------------------
+// Stats history API — the scrubbable graphs
+// ---------------------------------------------------------------------------
+
+/// Longest history window a client may request (seconds).
+///
+/// Taken from `veld_core::stats::NODE_STATS_RETENTION_SECS` rather than restated:
+/// asking for more than the GC keeps can only return the same rows, and a local
+/// copy of the number would let the two drift until the API promised a day of
+/// data it no longer had.
+const MAX_HISTORY_WINDOW_SECS: i64 = veld_core::stats::NODE_STATS_RETENTION_SECS;
+
+/// Default window when the client doesn't ask (15 minutes).
+const DEFAULT_HISTORY_WINDOW_SECS: i64 = 900;
+
+/// Ceiling on returned buckets. The bucket width is derived from
+/// `window / points`, so this — not the window — is what bounds the payload and
+/// the render cost. 2000 points is already finer than any plausible chart pixel
+/// width.
+const MAX_HISTORY_POINTS: u32 = 2000;
+
+/// Default bucket count: enough to fill a wide chart at one point per few
+/// pixels without asking the browser to draw more than it can show.
+const DEFAULT_HISTORY_POINTS: u32 = 240;
+
+/// Cap on per-process series returned. Past this the chart is unreadable and the
+/// legend is longer than the graph; the omitted tail is reported in
+/// `processes_omitted` so the UI can say so rather than silently truncating.
+const MAX_PROCESS_SERIES: usize = 12;
+
+/// Clamp a requested window to what retention can actually answer.
+///
+/// Pure and separate from the handler so the clamp has a test: the handler's DB
+/// access is what made this untestable before.
+fn clamp_window_secs(requested: Option<i64>) -> i64 {
+    requested
+        .unwrap_or(DEFAULT_HISTORY_WINDOW_SECS)
+        .clamp(1, MAX_HISTORY_WINDOW_SECS)
+}
+
+/// Which memory metrics these buckets actually carry, in picker order.
+///
+/// **Unions over every bucket, not just the newest.** Reading only the last
+/// bucket looked like it bought picker stability and did the opposite: one
+/// process failing its `smaps_rollup` read poisons that whole sample's page
+/// classes (`MemoryBreakdown::add`, and the SQL `CASE WHEN COUNT(x)=COUNT(*)`),
+/// and a short-lived child exiting mid-scan is routine — so a single transient
+/// failure in the newest bucket dropped every page class from the picker, which
+/// made the UI reset the reader's chosen metric and kick them out of the
+/// by-type view. A class present anywhere in the window is offerable; the
+/// buckets where it is absent render as gaps, which the chart already does.
+fn derive_available_metrics(buckets: &[veld_core::stats::StatsBucket]) -> Vec<&'static str> {
+    use veld_core::stats::MemoryMetric;
+    // Footprint and resident always have a value (footprint falls back to RSS).
+    // `virtual` does NOT: a pre-v7 row never recorded it, and `MemoryMetric::read`
+    // reports 0 as absent — so offering it unconditionally listed a metric that
+    // renders as an unexplained blank chart on a window of old samples.
+    let mut out = vec![
+        MemoryMetric::Footprint.as_str(),
+        MemoryMetric::Resident.as_str(),
+    ];
+    for m in MemoryMetric::ALL {
+        if !out.contains(&m.as_str())
+            && buckets
+                .iter()
+                .any(|b| m.read(b.memory_bytes, &b.memory).is_some())
+        {
+            out.push(m.as_str());
+        }
+    }
+    out
+}
+
+/// Truncate per-process series to [`MAX_PROCESS_SERIES`], returning how many
+/// were dropped. Counting before truncating is the whole content of this
+/// function — swap the two and `processes_omitted` is always 0 and the UI's
+/// "N more processes not charted" note silently disappears.
+fn cap_series<T>(series: &mut Vec<T>) -> usize {
+    let omitted = series.len().saturating_sub(MAX_PROCESS_SERIES);
+    series.truncate(MAX_PROCESS_SERIES);
+    omitted
+}
+
+#[derive(Deserialize)]
+struct HistoryQuery {
+    /// Required, like every run-addressed route — a bare run name is ambiguous
+    /// across projects.
+    project_root: String,
+    run: String,
+    /// Node key, `"node:variant"`.
+    node: String,
+    /// Window length in seconds, ending now. Clamped to
+    /// [`MAX_HISTORY_WINDOW_SECS`].
+    #[serde(default)]
+    window: Option<i64>,
+    /// Requested bucket count, clamped to [`MAX_HISTORY_POINTS`].
+    #[serde(default)]
+    points: Option<u32>,
+    /// Include the per-process series and the latest process tree. Off by
+    /// default: it is several times the query cost and the collapsed UI never
+    /// needs it.
+    #[serde(default)]
+    processes: bool,
+}
+
+/// One aggregated bucket on the wire. A flatter shape than
+/// [`veld_core::stats::StatsBucket`] — the page classes are hoisted to the top
+/// level so a chart can index a metric by its wire name (`"private_dirty"`)
+/// without knowing whether it lives in a nested object.
+#[derive(Serialize)]
+struct StatsBucketDto {
+    /// Bucket start, epoch milliseconds.
+    t: i64,
+    /// Raw samples averaged into this bucket. Never 0 — empty buckets are
+    /// omitted, so a gap in `t` means "no data", not "zero usage".
+    samples: u32,
+    cpu: f32,
+    cpu_peak: f32,
+    procs: f32,
+    /// RSS (`resident`), averaged.
+    resident: u64,
+    footprint: u64,
+    footprint_peak: u64,
+    #[serde(rename = "virtual")]
+    virtual_bytes: u64,
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+impl From<&veld_core::stats::StatsBucket> for StatsBucketDto {
+    fn from(b: &veld_core::stats::StatsBucket) -> Self {
+        Self {
+            t: b.bucket_start.timestamp_millis(),
+            samples: b.samples,
+            cpu: b.cpu_percent,
+            cpu_peak: b.cpu_peak,
+            procs: b.process_count,
+            resident: b.memory_bytes,
+            footprint: b.memory.footprint,
+            footprint_peak: b.footprint_peak,
+            virtual_bytes: b.memory.virtual_bytes,
+            classes: (&b.memory).into(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ProcessSeriesDto {
+    pid: u32,
+    name: String,
+    cmd: Option<String>,
+    buckets: Vec<StatsBucketDto>,
+}
+
+/// One process in the latest tree snapshot, for the process table.
+#[derive(Serialize)]
+struct ProcessRowDto {
+    pid: u32,
+    parent_pid: Option<u32>,
+    /// Depth below the node's root process. A row's parent may be absent from
+    /// this list (the sampler caps how many processes it records per sample), so
+    /// indent by `depth` rather than by looking the parent up.
+    depth: u32,
+    name: String,
+    cmd: Option<String>,
+    cpu: f32,
+    cpu_seconds: f64,
+    resident: u64,
+    footprint: u64,
+    #[serde(rename = "virtual")]
+    virtual_bytes: u64,
+    /// Epoch milliseconds, when the platform reported a start time.
+    started_at: Option<i64>,
+    #[serde(flatten)]
+    classes: MemoryClasses,
+}
+
+#[derive(Serialize)]
+struct StatsHistoryResponse {
+    /// Window actually served, in epoch milliseconds — the clamps mean this can
+    /// be narrower than requested, and a chart's axis must follow what was
+    /// served, not what was asked for.
+    start: i64,
+    end: i64,
+    bucket_secs: i64,
+    /// Memory metrics this node's samples actually carry, in the order a picker
+    /// should offer them. Derived from the data rather than from the daemon's
+    /// platform, so a window spanning a `VELD_STATS_MEMORY_DETAIL` change
+    /// reports honestly.
+    available_metrics: Vec<&'static str>,
+    buckets: Vec<StatsBucketDto>,
+    /// Per-process series, empty unless `processes=true`.
+    processes: Vec<ProcessSeriesDto>,
+    /// How many series were dropped by [`MAX_PROCESS_SERIES`].
+    processes_omitted: usize,
+    /// The most recent process tree. Served whenever the node has rows —
+    /// unlike `processes`, this is one query for the latest sample, and the UI
+    /// shows the table under every split mode.
+    tree: Vec<ProcessRowDto>,
+    /// Retention horizon for node aggregates (seconds). Served so the UI builds
+    /// its window presets from what the daemon actually keeps instead of a
+    /// hardcoded copy that can silently drift out of agreement with the GC.
+    retention_secs: i64,
+    /// Retention horizon for per-process rows (seconds) — shorter than
+    /// `retention_secs`. A by-process chart over a longer window is legitimately
+    /// empty before this boundary, and the UI says so rather than looking broken.
+    process_retention_secs: i64,
+}
+
+async fn get_stats_history(
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<StatsHistoryResponse>, StatusCode> {
+    use veld_core::stats::StatsWindow;
+
+    validate_run_name(&q.run)?;
+    let db = open_db()?;
+    let registry = db.registry().map_err(|e| {
+        warn!("failed to load registry for stats history: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    // Resolves to the registry's own path, and 404s a project the daemon does
+    // not track — the same gate every run-addressed route uses.
+    let project_root = resolve_run_project(&registry, &q.project_root, &q.run)?;
+
+    let end = chrono::Utc::now();
+    let window_secs = clamp_window_secs(q.window);
+    let start = end - chrono::Duration::seconds(window_secs);
+    let points = q.points.unwrap_or(DEFAULT_HISTORY_POINTS);
+    let window = StatsWindow::for_points(start, end, points.min(MAX_HISTORY_POINTS));
+
+    let buckets = db
+        .node_stats_buckets(&project_root, &q.run, &q.node, window)
+        .map_err(|e| {
+            warn!("failed to load stats history for '{}': {e}", q.node);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let available_metrics = derive_available_metrics(&buckets);
+
+    // The tree is one query for the latest sample, so it is served for every
+    // split mode — the UI's process table sits under all of them. Only the
+    // per-process *series* (one grouped query over the whole window) is gated
+    // on `processes`.
+    let tree = db
+        .latest_process_tree(&project_root, &q.run, &q.node)
+        .unwrap_or_default();
+
+    let (processes, processes_omitted) = if q.processes {
+        let mut series = db
+            .process_stats_buckets(&project_root, &q.run, &q.node, window)
+            .map_err(|e| {
+                warn!("failed to load process history for '{}': {e}", q.node);
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        // Already sorted heaviest-first by the query, so truncation drops the
+        // tail rather than an arbitrary slice.
+        let omitted = cap_series(&mut series);
+        (series, omitted)
+    } else {
+        (Vec::new(), 0)
+    };
+
+    Ok(Json(StatsHistoryResponse {
+        start: start.timestamp_millis(),
+        end: end.timestamp_millis(),
+        bucket_secs: window.bucket_secs,
+        available_metrics,
+        buckets: buckets.iter().map(StatsBucketDto::from).collect(),
+        processes: processes
+            .into_iter()
+            .map(|s| ProcessSeriesDto {
+                pid: s.pid,
+                name: s.name,
+                cmd: s.cmd,
+                buckets: s.buckets.iter().map(StatsBucketDto::from).collect(),
+            })
+            .collect(),
+        processes_omitted,
+        retention_secs: veld_core::stats::NODE_STATS_RETENTION_SECS,
+        process_retention_secs: veld_core::stats::PROCESS_STATS_RETENTION_SECS,
+        tree: tree
+            .into_iter()
+            .map(|p| ProcessRowDto {
+                pid: p.pid,
+                parent_pid: p.parent_pid,
+                depth: p.depth,
+                name: p.name,
+                cmd: p.cmd,
+                cpu: p.cpu_percent,
+                cpu_seconds: p.cpu_seconds,
+                resident: p.memory_bytes,
+                footprint: p.memory.footprint,
+                virtual_bytes: p.memory.virtual_bytes,
+                started_at: p.started_at.map(|t| t.timestamp_millis()),
+                classes: (&p.memory).into(),
+            })
+            .collect(),
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -1295,6 +1643,35 @@ mod tests {
                 status(get("/api/logs/main?lines=500")).await,
                 StatusCode::BAD_REQUEST
             );
+            // Stats history addresses a run through required query fields rather
+            // than a path segment (a node key like `web:local` is not
+            // path-safe), so the same rule has to hold there: no project scope,
+            // no answer. Rejected during extraction, before any DB access.
+            assert_eq!(
+                status(get("/api/stats/history?run=main&node=web:local")).await,
+                StatusCode::BAD_REQUEST
+            );
+            assert_eq!(
+                status(get(
+                    "/api/stats/history?project_root=/repos/alpha&node=web:local"
+                ))
+                .await,
+                StatusCode::BAD_REQUEST,
+                "a scope without a run name is not addressable either"
+            );
+        }
+
+        #[tokio::test]
+        async fn stats_history_validates_its_numeric_query_fields() {
+            // `window`/`points` are typed, so a garbage value must 400 rather
+            // than silently falling back to a default window — a client asking
+            // for the wrong range should be told, not quietly answered.
+            for uri in [
+                "/api/stats/history?project_root=/repos/alpha&run=main&node=web:local&window=soon",
+                "/api/stats/history?project_root=/repos/alpha&run=main&node=web:local&points=lots",
+            ] {
+                assert_eq!(status(get(uri)).await, StatusCode::BAD_REQUEST, "{uri}");
+            }
         }
 
         #[tokio::test]
@@ -1326,6 +1703,131 @@ mod tests {
                 .await,
                 StatusCode::BAD_REQUEST
             );
+        }
+    }
+
+    /// The pure parts of `/api/stats/history`. The handler itself needs a DB, so
+    /// these three were extracted precisely so the rules could be pinned.
+    mod stats_history {
+        use super::super::*;
+        use veld_core::stats::{MemoryBreakdown, StatsBucket};
+
+        fn bucket(memory: MemoryBreakdown) -> StatsBucket {
+            StatsBucket {
+                bucket_start: chrono::DateTime::<chrono::Utc>::UNIX_EPOCH,
+                samples: 1,
+                cpu_percent: 1.0,
+                cpu_peak: 1.0,
+                process_count: 1.0,
+                memory_bytes: 1000,
+                memory,
+                footprint_peak: 500,
+            }
+        }
+
+        fn detailed() -> MemoryBreakdown {
+            MemoryBreakdown {
+                footprint: 500,
+                virtual_bytes: 5000,
+                private_clean: Some(1),
+                private_dirty: Some(2),
+                shared_clean: Some(3),
+                shared_dirty: Some(4),
+                swap: Some(5),
+                wired: Some(6),
+            }
+        }
+
+        #[test]
+        fn window_clamps_to_retention_and_defaults() {
+            assert_eq!(clamp_window_secs(None), DEFAULT_HISTORY_WINDOW_SECS);
+            assert_eq!(clamp_window_secs(Some(300)), 300);
+            // Asking for a week can only return what retention kept.
+            assert_eq!(
+                clamp_window_secs(Some(7 * 24 * 3600)),
+                MAX_HISTORY_WINDOW_SECS
+            );
+            // Zero and negative would make an empty or inverted range.
+            assert_eq!(clamp_window_secs(Some(0)), 1);
+            assert_eq!(clamp_window_secs(Some(-60)), 1);
+        }
+
+        #[test]
+        fn the_window_clamp_tracks_gc_retention() {
+            // The two used to be independent literals whose doc comments merely
+            // claimed to agree. Now one defines the other — assert it, so a
+            // future edit that reintroduces a local copy fails here.
+            assert_eq!(
+                MAX_HISTORY_WINDOW_SECS,
+                veld_core::stats::NODE_STATS_RETENTION_SECS
+            );
+            // (The ordering of the two horizons is guarded by a `const` assert
+            // at their definition in `veld_core::stats`.)
+        }
+
+        #[test]
+        fn available_metrics_always_offers_the_two_unconditional_totals() {
+            // Even with no data at all — the picker must never be empty.
+            // `virtual` is deliberately NOT here: a pre-v7 row never recorded it
+            // and `MemoryMetric::read` reports 0 as absent, so offering it
+            // unconditionally would list a metric that plots as a blank chart.
+            let m = derive_available_metrics(&[]);
+            assert_eq!(m, vec!["footprint", "resident"]);
+        }
+
+        #[test]
+        fn virtual_is_offered_only_when_the_data_carries_it() {
+            let mut b = bucket(detailed());
+            assert!(
+                derive_available_metrics(&[b]).contains(&"virtual"),
+                "a real virtual size is offerable"
+            );
+            // A bucket built from pre-v7 rows: `virtual_bytes` averaged to
+            // nothing and surfaced as 0, which means "not recorded".
+            b.memory.virtual_bytes = 0;
+            assert!(
+                !derive_available_metrics(&[b]).contains(&"virtual"),
+                "an unrecorded virtual size must not be offered"
+            );
+        }
+
+        #[test]
+        fn a_class_present_in_any_bucket_stays_offerable() {
+            // The regression this replaced: one transient probe failure in the
+            // NEWEST bucket used to drop every page class from the picker, which
+            // reset the reader's metric and closed the by-type view.
+            let buckets = vec![
+                bucket(detailed()),
+                bucket(MemoryBreakdown::basic(1000, 5000)), // newest: probe failed
+            ];
+            let m = derive_available_metrics(&buckets);
+            assert!(
+                m.contains(&"private_dirty"),
+                "a class measured earlier in the window is still offerable, got {m:?}"
+            );
+            assert!(m.contains(&"swap"));
+        }
+
+        #[test]
+        fn a_class_no_bucket_carries_is_not_offered() {
+            // macOS: totals only. The picker must not list what it cannot plot.
+            let buckets = vec![bucket(MemoryBreakdown::basic(1000, 5000))];
+            let m = derive_available_metrics(&buckets);
+            assert_eq!(m, vec!["footprint", "resident", "virtual"]);
+            assert!(!m.contains(&"private_dirty"));
+        }
+
+        #[test]
+        fn cap_series_counts_before_truncating() {
+            let mut few: Vec<u32> = (0..3).collect();
+            assert_eq!(cap_series(&mut few), 0);
+            assert_eq!(few.len(), 3);
+
+            let mut many: Vec<u32> = (0..MAX_PROCESS_SERIES as u32 + 5).collect();
+            assert_eq!(cap_series(&mut many), 5, "omitted count is pre-truncation");
+            assert_eq!(many.len(), MAX_PROCESS_SERIES);
+            // Heaviest-first ordering means truncation keeps the head.
+            assert_eq!(many[0], 0);
         }
     }
 

@@ -2,6 +2,7 @@ mod broadcaster;
 mod feedback_server;
 mod gc;
 mod monitor;
+mod procmem;
 mod share;
 mod stats;
 
@@ -20,11 +21,14 @@ const DEFAULT_SOCKET: &str = "~/.veld/daemon.sock";
 
 struct Args {
     socket_path: PathBuf,
+    /// True for `--pty-holder`: serve one terminal session and nothing else.
+    pty_holder: bool,
 }
 
 fn parse_args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut socket_path: Option<PathBuf> = None;
+    let mut pty_holder = false;
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -37,10 +41,17 @@ fn parse_args() -> Args {
                 println!();
                 println!("Options:");
                 println!("  --socket-path <PATH>  Path to Unix socket (default: {DEFAULT_SOCKET})");
+                println!(
+                    "  --pty-holder          Serve one terminal session (spawned by the daemon)"
+                );
                 println!("  --version, -V         Print version and exit");
                 println!("  --help, -h            Print help and exit");
                 std::process::exit(0);
             }
+            // Not a user-facing mode: the daemon spawns itself with this to put
+            // a terminal's PTY in a process that outlives the daemon, and hands
+            // it its configuration on stdin.
+            "--pty-holder" => pty_holder = true,
             "--socket-path" => {
                 socket_path = Some(PathBuf::from(
                     args.next().expect("--socket-path requires a value"),
@@ -57,7 +68,10 @@ fn parse_args() -> Args {
     // installed default (~/.veld/daemon.sock).
     let socket_path = socket_path.unwrap_or_else(veld_core::instance::daemon_socket);
 
-    Args { socket_path }
+    Args {
+        socket_path,
+        pty_holder,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -66,16 +80,37 @@ fn parse_args() -> Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialise tracing.
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .with_target(false)
-        .init();
-
+    // Parsed before tracing is initialised, because the mode decides where the
+    // logs go — and parsing writes nothing.
     let args = parse_args();
+
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    if args.pty_holder {
+        // A holder logs to **stderr**, and the daemon spawns it with stderr
+        // inherited, so its lines land in the daemon's log beside the session
+        // they belong to. Not stdout: that is nulled on the spawn (a pipe nobody
+        // drains would block the holder the first time it filled), so a
+        // stdout-bound subscriber would discard every diagnostic this process
+        // ever produces — including why it failed to start.
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(false)
+            .init();
+    }
+
+    // A holder is not a daemon: it binds no port and no socket of the daemon's,
+    // opens no database, and starts no background task. Dispatched before any of
+    // that so nothing below can mistake it for a second instance.
+    if args.pty_holder {
+        return feedback_server::run_pty_holder().await;
+    }
 
     info!("veld-daemon {VERSION} starting");
     info!("socket path: {}", args.socket_path.display());
@@ -228,10 +263,13 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Hang up terminal shells before anything else. They are the only children
-    // that outlive us on their own (own session, own controlling terminal), so a
-    // restart would otherwise leave orphans no client can ever reattach to.
-    // Ordered before the aborts because it needs the runtime to still be turning.
+    // Terminal shells are deliberately **left running**. Their PTYs belong to
+    // holder processes rather than to this one, so a shutdown is invisible to them
+    // and the next daemon adopts them — which is what makes `veld update` safe to
+    // run with terminals open. This call only records how many were left; what
+    // still ends a shell is an explicit `DELETE`, the detach reaper, or the
+    // holder's own orphan grace. Ordered before the aborts because it needs the
+    // runtime to still be turning.
     feedback_server::shutdown_terminal_sessions().await;
 
     // Abort background tasks.

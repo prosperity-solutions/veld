@@ -35,6 +35,15 @@ import { type PaneEmulation, sanitizeEmulation, sanitizeZoom } from "./devices";
  * below — because they are content you sit in front of and arrange beside a
  * terminal, not a way to get somewhere else.
  *
+ * **Adding a kind that owns live state?** A terminal is the worked example, and it
+ * needs three things beyond a renderer: a module-level registry outside React (so
+ * a tab switch cannot destroy it — `panes/terminalHost.ts`), a durable home for
+ * the ids naming that state (`layoutSlotKey` below, because a Veld Desktop restart
+ * empties `sessionStorage`), and a way to notice that the state it named is *gone*
+ * (`EXPECTED_RESUMES` in `terminalHost.ts`, which must read through `loadLayouts`
+ * or it is empty in exactly the case that matters). `panes/browserHost.ts` is the
+ * second example and needs none of the durability, because a page is re-creatable.
+ *
  * There is deliberately no `services` kind. The run's URLs are a *launcher*, not
  * a peer of a terminal and a page, and a launcher belongs wherever you are about
  * to need it: a `new` pane and a browser pane with no URL both show them
@@ -221,11 +230,20 @@ export function clampRatio(r: number): number {
  * lives in the thing that can act on it, one click from being the page itself.
  */
 export function defaultLayout(ratio = DEFAULT_RATIO): PaneLayout {
-  const terminal: PaneTab = { id: newTabId(), kind: "terminal", title: "Terminal" };
+  // A `new` pane, not a terminal: selecting a worktree must not start a shell.
+  //
+  // A terminal tab's id *is* a daemon session id, so seeding one here meant
+  // browsing the worktree rail spent the daemon's session budget — one real
+  // shell process per worktree merely looked at, against a cap of 48 — and, now
+  // that shells outlive the daemon, one holder process each to go with it. The
+  // chooser this renders has a Terminal button as its first item, so asking for
+  // one is a single click; nothing is hidden, only deferred to the point where
+  // the user actually wants a shell.
+  const chooser = newPaneTab();
   const browser = browserTab({});
   return {
     docks: [
-      { tabs: [terminal], activeId: terminal.id },
+      { tabs: [chooser], activeId: chooser.id },
       { tabs: [browser], activeId: browser.id },
     ],
     ratio: clampRatio(ratio),
@@ -281,6 +299,33 @@ export function addTab(layout: PaneLayout, index: DockIndex, tab: PaneTab): Pane
   if (hasTab(layout, tab.id)) return activateTab(layout, tab.id);
   const docks: [Dock, Dock] = [layout.docks[0], layout.docks[1]];
   docks[index] = { tabs: [...docks[index].tabs, tab], activeId: tab.id };
+  return { ...layout, docks, focused: index };
+}
+
+/**
+ * Add a tab at a position, rather than at the end.
+ *
+ * `addTab` appends, which is right for a tab this window created. A tab
+ * *arriving from another window* has a position: the caret the target was
+ * showing while the pointer hovered its strip. Without this, a cross-window drop
+ * could only land at the end — the same drop inside one window honours where you
+ * aimed, and a gesture that means two different things depending on which window
+ * you release over is the confusion this whole model exists to remove.
+ */
+export function insertTab(
+  layout: PaneLayout,
+  index: DockIndex,
+  tab: PaneTab,
+  at?: number,
+): PaneLayout {
+  if (hasTab(layout, tab.id)) return activateTab(layout, tab.id);
+  const docks: [Dock, Dock] = [layout.docks[0], layout.docks[1]];
+  const tabs = docks[index].tabs;
+  const pos = Math.max(0, Math.min(at ?? tabs.length, tabs.length));
+  docks[index] = {
+    tabs: [...tabs.slice(0, pos), tab, ...tabs.slice(pos)],
+    activeId: tab.id,
+  };
   return { ...layout, docks, focused: index };
 }
 
@@ -395,6 +440,96 @@ export function moveTab(
   // Dragging the left dock's only tab to the right is a no-op once normalised,
   // which is right: with one pane on screen the sides mean nothing.
   return normalizeDocks({ ...layout, docks, focused: dock });
+}
+
+/**
+ * Put a tab on one side of the split, creating the second dock if there is only
+ * one on screen.
+ *
+ * This is what dropping a tab on a pane's left or right *edge* means, and it is
+ * the half `moveTab` cannot express. With both docks visible the two coincide —
+ * "the right-hand side" is dock 1 either way. With one dock they do not: making
+ * the dragged tab the *left* pane means everything else has to become the right
+ * one, and there is no dock index that says so.
+ *
+ * A dock's only tab dropped on its own side is a no-op, not an empty pane: with
+ * one pane on screen the sides mean nothing, which is the rule `normalizeDocks`
+ * already enforces everywhere else.
+ */
+export function splitWithTab(layout: PaneLayout, id: string, side: DockIndex): PaneLayout {
+  const from = dockOf(layout, id);
+  if (from === null) return layout;
+  if (dockVisible(layout, 0) && dockVisible(layout, 1)) return moveTab(layout, id, side);
+
+  // One dock on screen, which `normalizeDocks` guarantees is dock 0.
+  const tab = layout.docks[0].tabs.find((t) => t.id === id);
+  if (!tab) return layout;
+  const rest = layout.docks[0].tabs.filter((t) => t.id !== id);
+  if (rest.length === 0) return layout;
+  if (side === 1) return moveTab(layout, id, 1);
+
+  const restActive =
+    layout.docks[0].activeId === id
+      ? (rest[layout.docks[0].tabs.findIndex((t) => t.id === id)] ?? rest[rest.length - 1]).id
+      : layout.docks[0].activeId;
+  return normalizeDocks({
+    ...layout,
+    docks: [
+      { tabs: [tab], activeId: tab.id },
+      { tabs: rest, activeId: restActive },
+    ],
+    focused: 0,
+  });
+}
+
+/**
+ * Take in tabs handed back by a detached window that just closed.
+ *
+ * Appended to the focused dock rather than restored to where they were: the
+ * layout has moved on since the detach, and a remembered index is a position in
+ * a strip that no longer looks like that. Ids already present are skipped —
+ * two tabs with one id would fight over one shell, and the window handing them
+ * back has already stopped rendering them either way.
+ *
+ * `undefined` for a worktree this window has never opened: the tabs are the
+ * whole layout then, which is right — they are the only thing known about it.
+ */
+export function adoptTabs(layout: PaneLayout | undefined, tabs: PaneTab[]): PaneLayout | null {
+  const fresh = tabs.filter((t) => !layout || !hasTab(layout, t.id));
+  if (fresh.length === 0) return null;
+  if (!layout) {
+    return {
+      docks: [
+        { tabs: fresh, activeId: fresh[0].id },
+        { tabs: [], activeId: null },
+      ],
+      ratio: DEFAULT_RATIO,
+      focused: 0,
+    };
+  }
+  return fresh.reduce((acc, tab) => addTab(acc, acc.focused, tab), layout);
+}
+
+/**
+ * Validate a list of tabs arriving from another window.
+ *
+ * The same gate a restored layout goes through (`parseTab`), for the same
+ * reason: this data has been out of the page — through the shell's main process
+ * and a second renderer — and a `javascript:` URL or an unbounded user-agent
+ * string reaching a view from *here* is no better than one reaching it from
+ * storage.
+ */
+export function parseTransferTabs(value: unknown): PaneTab[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: PaneTab[] = [];
+  for (const entry of value) {
+    const tab = parseTab(entry);
+    if (!tab || seen.has(tab.id)) continue;
+    seen.add(tab.id);
+    out.push(tab);
+  }
+  return out;
 }
 
 export function setRatio(layout: PaneLayout, ratio: number): PaneLayout {
@@ -752,20 +887,291 @@ export function paneTabLabel(layout: PaneLayout, tab: PaneTab): string {
  */
 export const LAYOUT_STORAGE_KEY = "veld.panes.v1";
 
+/**
+ * Where a Veld Desktop window's layout is *also* kept, so it survives the app
+ * restarting.
+ *
+ * `sessionStorage` covers a reload, which is all a browser tab needs — a tab is
+ * a session, and closing it is the user saying they are done. An app is not: a
+ * Veld Desktop update replaces the window, and a new window is a new
+ * `sessionStorage`, so the layout — and with it every terminal's session id —
+ * was gone even though the holder processes had kept the shells running. This
+ * key is the durable half, and it is deliberately **per window slot**: two
+ * windows restoring one layout would both attach to one shell, and an attach
+ * takes over, so they would ping-pong it between them forever.
+ *
+ * Only the Electron shell has slots (it assigns one per window and passes it in
+ * the URL). A plain browser has no slot and keeps `sessionStorage`-only
+ * behaviour, which is the correct semantics there rather than a limitation.
+ */
+export function layoutSlotKey(slot: string): string {
+  return `veld.panes.slot.${slot}.v1`;
+}
+
+/**
+ * Every main window's layouts, keyed by worktree and **shared between windows**.
+ *
+ * A worktree has one set of panes, full stop — that is the whole model. Keying
+ * the durable store per *window* instead gave each window its own
+ * `layouts[worktree]`, so opening one worktree in two windows grew two
+ * independent sets of terminals and browser panes, and closing either window
+ * stranded its set until the detach grace killed it. Nobody can hold that in
+ * their head: which window has which shells, and what does closing this one
+ * cost me.
+ *
+ * What stops two windows attaching to one shell is no longer the storage key but
+ * an explicit **claim** in the shell (`veld:window:claim`): at most one window
+ * displays a given worktree, and picking one another window already shows
+ * focuses that window instead. That is a better fit than the slot ever was,
+ * because it can say *why* — the old scheme could only keep the two sets apart
+ * and had no way to explain the second one.
+ *
+ * Written read-through (see `saveLayouts`), because two windows share this key
+ * and each holds only the worktree it is showing — the same hazard, and the same
+ * fix, as `editSessions` in `App.tsx`.
+ *
+ * Detached windows are **not** in here: their tabs were transferred out of a
+ * worktree whose layout a main window owns, so a satellite writing this key
+ * would overwrite the layout it was pulled from. They keep the per-slot store.
+ */
+export const LAYOUT_WORKTREE_KEY = "veld.panes.worktrees.v1";
+
 export function serializeLayouts(layouts: Record<number, PaneLayout>): string {
   return JSON.stringify(layouts);
 }
 
-/** Read the stored layouts, tolerating storage being unavailable.
+/** The two `getItem`/`setItem` calls this module needs, so tests can pass fakes
+ *  and the real `Storage` objects satisfy it structurally. */
+export interface LayoutStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+}
+
+/**
+ * Restore layouts, preferring what this very window last wrote.
  *
- *  `sessionStorage` *access* throws outright in some privacy configurations —
- *  not just `setItem` — and this runs in a `useState` initialiser, where an
- *  exception white-screens the whole app before anything renders. */
-export function loadLayouts(): Record<number, PaneLayout> {
+ * Order matters. `sessionStorage` is *this window's* state and is therefore both
+ * more recent and unambiguously ours; the slot store is what a previous run of
+ * the app left behind. Reading the slot store first would let a stale layout
+ * (written before a reload that changed things) win over the live one.
+ */
+export function readLayouts(
+  session: LayoutStorage | null,
+  durable: LayoutStorage | null,
+  slot: string | null,
+  seed: string | null = null,
+  /** Whether the shell *reopened* this window on a slot it owned before, rather
+   *  than opening a new one that happened to be given the number. */
+  restored = false,
+  /** A detached window is a satellite of a main window's worktree, so it uses
+   *  the per-slot store; a main window uses the shared per-worktree one. */
+  satellite = false,
+): Record<number, PaneLayout> {
+  const own = parseLayouts(session?.getItem(LAYOUT_STORAGE_KEY) ?? null);
+  if (Object.keys(own).length > 0) return own;
+  // **Before the slot store, not after.** A seed exists only for a window the
+  // shell created *this instant* by pulling tabs out of another one — a restored
+  // window is opened with a slot and no seed — so its presence is proof that
+  // nothing in the durable store can be this window's own state.
+  //
+  // Ordering it last was the first version and it was wrong, because slots are
+  // *reused*: `nextSuffix` hands out the lowest free suffix counting live
+  // windows only, and nothing ever clears `veld.panes.slot.<slot>.v1`. So
+  // detach → close that window → detach again lands the new window on the same
+  // slot, where it found the *previous* window's dead layout, returned it, and
+  // discarded the seed. Both halves of that are silent: the tab actually being
+  // moved exists in no layout at all (the origin already released and closed
+  // it), so its shell dies at the detach grace — and the resurrected ids get
+  // attached to, which *takes them over* from the window that just adopted
+  // them. Exactly the ping-pong slots exist to prevent.
+  const seeded = parseLayouts(seed);
+  if (Object.keys(seeded).length > 0) return seeded;
+  // **Only a window that was reopened may read the slot store.** Slots are
+  // recycled and their keys are never cleared, so to a *new* window the stored
+  // layout is a dead one that happens to share a number — and adopting it means
+  // attaching to terminal ids another window is using, which takes those shells
+  // over. Sequence: detach a terminal, close the detached window (its tabs go
+  // back to the origin, which re-attaches), press ⌘N — the new window gets the
+  // freed suffix, restores the dead layout naming that same tab id, and steals
+  // the shell, leaving the origin on "connection lost".
+  //
+  // The seed covers the detach case, which is why the first version of this
+  // looked complete. A ⌘N window has no seed and fell straight through.
+  // Same gate as the write: no slot is a plain browser tab, which keeps its
+  // layout in `sessionStorage` alone.
+  if (!durable || !slot) return {};
+  // A main window reads the **shared** per-worktree store, and reads it whether
+  // or not it was restored: there is one set of panes per worktree, so a brand
+  // new window opening a worktree is *picking that set up*, not inventing a
+  // second one. What keeps two windows off one shell is the claim in the shell,
+  // not the storage key — see `LAYOUT_WORKTREE_KEY`.
+  if (!satellite) {
+    // **Nothing.** A main window picks worktrees up one at a time, as it shows
+    // them (`readWorktreeLayout`, from the seeding effect in `App.tsx`), and
+    // must not boot holding the whole shared store.
+    //
+    // Loading all of it was the first version and it quietly corrupted the
+    // store: `writeLayouts` merges this window's `layouts` over what is on disk,
+    // so every worktree the window merely *booted with* got stamped back on
+    // every save — including ones another window had been editing for the last
+    // ten minutes. A yield only fires on a *later* claim, so a window opened
+    // after another claimed a worktree was never asked to let it go and reverted
+    // it forever. The panes added in the meantime were orphaned at the next
+    // launch, their session ids only ever having been in the store.
+    //
+    // Owning only what it displays is what makes the read-through merge true.
+    return {};
+  }
+  // A satellite keeps the per-slot store, and only when reopened onto its own
+  // slot: a recycled slot's layout is a dead one that happens to share a number.
+  if (!restored) return {};
+  return slot ? parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null) : {};
+}
+
+/**
+ * Persist to both stores. The session copy is what a reload reads; the durable
+ * copy is what the next launch reads.
+ *
+ * The shared per-worktree store is written **read-through**: this window holds
+ * only the worktrees it is showing, so writing its whole `layouts` object would
+ * delete every other window's worktree from the key. Merging against what is on
+ * disk at write time — not against a snapshot taken at boot — is the same
+ * discipline `editSessions` documents in `App.tsx`, and for the same reason.
+ */
+export function writeLayouts(
+  session: LayoutStorage | null,
+  durable: LayoutStorage | null,
+  slot: string | null,
+  layouts: Record<number, PaneLayout>,
+  satellite = false,
+): void {
+  const serialized = serializeLayouts(layouts);
+  session?.setItem(LAYOUT_STORAGE_KEY, serialized);
+  // No slot means a plain browser tab, which writes nothing durable at all — a
+  // tab *is* a session, and two of them restoring one layout would attach to the
+  // same shells and take them from each other. Only the Electron shell hands out
+  // slots, and only it arbitrates who shows what.
+  if (!durable || !slot) return;
+  if (satellite) {
+    durable.setItem(layoutSlotKey(slot), serialized);
+    return;
+  }
+  const onDisk = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null);
+  durable.setItem(LAYOUT_WORKTREE_KEY, serializeLayouts({ ...onDisk, ...layouts }));
+}
+
+// A worktree whose last pane is closed needs no explicit removal: the merge
+// above writes its empty layout, and `parseLayout` rejects a layout with no tabs
+// on the way back in, so it is gone by the next read.
+
+/**
+ * One worktree's panes, read from the shared store **now**.
+ *
+ * The boot-time read is a snapshot, and a window may claim a worktree that
+ * another window has been using since — so falling back to `defaultLayout`
+ * because this window happens not to have it in memory would invent the second
+ * set of panes this whole design exists to prevent. Read fresh at the moment of
+ * claiming instead, which is the only moment it can be right.
+ *
+ * `null` when nothing is stored: then a default really is the answer.
+ */
+export function worktreeLayoutFrom(
+  durable: LayoutStorage | null,
+  worktreeId: number,
+  slot: string | null = null,
+): PaneLayout | null {
+  if (!durable) return null;
+  const shared = parseLayouts(durable.getItem(LAYOUT_WORKTREE_KEY) ?? null)[worktreeId];
+  if (shared) return shared;
+  // Falls back to this window's own slot store, one worktree at a time, so an
+  // app updating into the shared store finds the panes it had rather than
+  // orphaning their shells. Narrow on purpose: taking the whole slot store would
+  // reintroduce the over-broad ownership the shared store exists to avoid.
+  return slot ? (parseLayouts(durable.getItem(layoutSlotKey(slot)) ?? null)[worktreeId] ?? null) : null;
+}
+
+/** `worktreeLayoutFrom` against the real store, tolerating it being unusable. */
+export function readWorktreeLayout(
+  worktreeId: number,
+  satellite = false,
+  slot: string | null = null,
+): PaneLayout | null {
+  if (satellite) return null;
   try {
-    return parseLayouts(sessionStorage.getItem(LAYOUT_STORAGE_KEY));
+    return worktreeLayoutFrom(storages().durable, worktreeId, slot);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every terminal id the shared store knows about, for `EXPECTED_RESUMES`.
+ *
+ * Read-only and ownership-free, which is the distinction that matters: "which
+ * shells might legitimately still be running" is a different question from
+ * "which panes does this window hold", and answering the first by loading the
+ * second is what corrupted the store. Nothing is written back from this.
+ */
+export function storedTerminalIds(slot: string | null, satellite: boolean): string[] {
+  try {
+    const { durable } = storages();
+    if (!durable) return [];
+    const key = satellite ? (slot ? layoutSlotKey(slot) : null) : LAYOUT_WORKTREE_KEY;
+    if (!key) return [];
+    return Object.values(parseLayouts(durable.getItem(key) ?? null)).flatMap(terminalIds);
+  } catch {
+    return [];
+  }
+}
+
+/** The real storages, or `null` where they are unusable.
+ *
+ *  Storage *access* throws outright in some privacy configurations — not just
+ *  `setItem` — and `loadLayouts` runs in a `useState` initialiser, where an
+ *  exception white-screens the whole app before anything renders. */
+function storages(): { session: LayoutStorage | null; durable: LayoutStorage | null } {
+  let session: LayoutStorage | null = null;
+  let durable: LayoutStorage | null = null;
+  try {
+    session = sessionStorage;
+  } catch {
+    // Leave it null.
+  }
+  try {
+    durable = localStorage;
+  } catch {
+    // Leave it null.
+  }
+  return { session, durable };
+}
+
+/** Read the stored layouts, tolerating storage being unavailable. */
+export function loadLayouts(
+  slot: string | null,
+  seed: string | null = null,
+  restored = false,
+  satellite = false,
+): Record<number, PaneLayout> {
+  try {
+    const { session, durable } = storages();
+    return readLayouts(session, durable, slot, seed, restored, satellite);
   } catch {
     return {};
+  }
+}
+
+/** Save the layouts, tolerating storage being unavailable or full. */
+export function saveLayouts(
+  slot: string | null,
+  layouts: Record<number, PaneLayout>,
+  satellite = false,
+): void {
+  try {
+    const { session, durable } = storages();
+    writeLayouts(session, durable, slot, layouts, satellite);
+  } catch {
+    // The app keeps working; only the restore continuity is lost, and there is
+    // nothing useful to tell the user.
   }
 }
 

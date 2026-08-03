@@ -189,15 +189,18 @@ jobs:
       - run: npm ci
         env:
           ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+      # Globbed, not enumerated. The list was hand-maintained and immediately
+      # went stale: `windows.js` and `windowState.js` arrived with the
+      # multi-window work and were not added, so the largest file in that change
+      # was parsed by nothing in CI — `npm test` only runs `src/*.test.js`, and a
+      # module that requires `electron` is loaded by no test at all. A syntax
+      # error there merges green and fails at app launch.
       - name: Syntax-check the shell's JS
         run: |
-          node --check src/main.js
-          node --check src/preload.js
-          node --check src/browserViews.js
-          node --check src/validate.js
-          node --check src/updater.js
-          node --check src/updatePolicy.js
-          node --check scripts/adhoc-sign.js
+          for f in src/*.js scripts/*.js; do
+            echo "node --check $f"
+            node --check "$f"
+          done
       # The icons are generated and committed (see docs/branding.md). The generator
       # is stdlib-only and byte-deterministic, so re-running it is the drift gate:
       # without one, a hand-edited or stale asset ships silently — the same reason

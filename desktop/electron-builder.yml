@@ -147,11 +147,19 @@ linux:
     - target: AppImage
       arch: [x64]
 
+# `veld-desktop-`, not `Veld-`: every asset on a release lands in one flat list
+# beside the CLI's `veld-<version>-<os>-<arch>.tar.gz` tarballs, and a
+# capitalised `Veld-` sorted itself away from them while still reading as "the
+# veld download" — the app and the CLI were told apart by file extension alone.
+# The prefix says which of the two you are looking at; it matches
+# `linux.executableName` and the `veld-desktop-*` upload-artifact names in
+# `release.yml`.
+#
 # Each target expands `${arch}` its own way — `arm64`/`x64` for macOS,
 # `x86_64` for the AppImage, `amd64` for the .deb — so these names do not all
 # match the release tarballs' `macos-amd64` spelling. Left alone deliberately:
 # the name that has to agree is the one in the update feed electron-builder
 # writes beside the file, and that is generated from this same pattern.
-artifactName: Veld-${version}-${os}-${arch}.${ext}
+artifactName: veld-desktop-${version}-${os}-${arch}.${ext}
 
 afterPack: scripts/adhoc-sign.js
