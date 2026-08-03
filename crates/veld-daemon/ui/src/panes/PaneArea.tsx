@@ -412,8 +412,14 @@ export function PaneArea(props: {
   useEffect(() => {
     const shell = desktopWindow;
     if (!shell) return;
-    return shell.onDropHere(({ tabs }) => {
+    return shell.onDropHere(({ dropId, tabs }) => {
       const parsed = parseTransferTabs(tabs);
+      // Acknowledge exactly what lands, and acknowledge *nothing* when nothing
+      // does: the source window is holding these open until this answers, and
+      // it keeps whatever this does not claim. Silence would strand them there,
+      // which is the safe direction — the alternative is a pane that vanishes
+      // with a live shell behind it.
+      void shell.dropApplied(dropId, parsed.map((t) => t.id)).catch(() => {});
       if (parsed.length === 0) return;
       const where = lastRemoteRef.current;
       setRemoteTarget(null);

@@ -112,8 +112,13 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     onDragOver: (fn) => on("veld:window:drag-over", fn),
     /** …and has left again. */
     onDragOut: (fn) => on("veld:window:drag-out", fn),
-    /** Tabs dropped on this window, to be placed where it was previewing. */
+    /** Tabs dropped on this window, to be placed where it was previewing. The
+     *  page must answer with `dropApplied` — the window they came from does not
+     *  let go until it does. */
     onDropHere: (fn) => on("veld:window:drop-here", fn),
+    /** Which of them were actually placed. Anything omitted stays where it was. */
+    dropApplied: (dropId, accepted) =>
+      ipcRenderer.invoke("veld:window:drop-applied", { dropId, accepted }),
     /** A tab released outside this window, at a point in *screen* coordinates.
      *  The shell decides whether that lands on another Veld window (move the
      *  tabs there) or on nothing (open a new window) — the page cannot see

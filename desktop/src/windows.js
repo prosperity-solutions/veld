@@ -23,6 +23,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const {
   buildSeedLayout,
+  isViewId,
   safeRepoRoot,
   safeTitle,
   safeTransferTabs,
@@ -191,6 +192,23 @@ let drag = null;
  */
 let lastOverId = null;
 const DRAG_POLL_MS = 16;
+
+/**
+ * Cross-window drops waiting for the receiving window to say it took them.
+ *
+ * **The source must not let go until the destination has them.** It releases
+ * its terminals and closes the tabs on the strength of this handler's answer,
+ * so answering "moved" the moment the message is *sent* means anything that
+ * goes wrong on the far side — a renderer mid-reload, a payload its own
+ * validation rejects, a worktree it no longer shows — loses the pane outright.
+ * A tab that stayed put is a visible non-event; a tab that evaporated with a
+ * live shell behind it is not recoverable by the user.
+ *
+ * The timeout resolves to "took nothing", which fails the same safe way.
+ */
+const pendingDrops = new Map();
+let nextDropId = 1;
+const DROP_ACK_MS = 2000;
 
 function beginDrag(sourceId) {
   endDrag();
@@ -922,7 +940,17 @@ function registerWindowIpc(ipcMain) {
    * that window was previewing. Anywhere else, including back over the source →
    * a new detached window, which is what drag-out already did.
    */
-  ipcMain.handle("veld:window:drop-out", (event, payload) => {
+  /** The receiving window reporting which tabs it actually placed. */
+  ipcMain.handle("veld:window:drop-applied", (event, payload) => {
+    if (!senderWindow(event)) return false;
+    const settle = pendingDrops.get(payload?.dropId);
+    if (!settle) return false;
+    pendingDrops.delete(payload.dropId);
+    settle(Array.isArray(payload?.accepted) ? payload.accepted.filter(isViewId) : []);
+    return true;
+  });
+
+  ipcMain.handle("veld:window:drop-out", async (event, payload) => {
     const from = senderWindow(event);
     const fromRecord = recordFor(from);
     if (!from || !fromRecord) return { moved: false, opened: false };
@@ -958,11 +986,19 @@ function registerWindowIpc(ipcMain) {
       // *position* — an edge to split at, or a place in its tab strip — and
       // that is where these belong. The queue exists for a closing window's
       // tabs, which have no pointer behind them and can only be appended.
-      target.win.webContents.send("veld:window:drop-here", { worktreeId, tabs });
+      const dropId = nextDropId++;
+      const accepted = await new Promise((resolve) => {
+        pendingDrops.set(dropId, resolve);
+        setTimeout(() => {
+          if (pendingDrops.delete(dropId)) resolve([]);
+        }, DROP_ACK_MS);
+        target.win.webContents.send("veld:window:drop-here", { dropId, worktreeId, tabs });
+      });
+      if (accepted.length === 0) return { moved: false, opened: false, reason: "refused" };
       if (target.win.isMinimized()) target.win.restore();
       target.win.show();
       target.win.focus();
-      return { moved: true, opened: false, accepted: tabs.map((t) => t.id) };
+      return { moved: true, opened: false, accepted };
     }
 
     if (!canOpenAnother(windows.size)) return { moved: false, opened: false, reason: "cap" };

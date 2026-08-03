@@ -109,8 +109,13 @@ export interface DesktopWindowApi {
    *  only way a target can render its own drop preview. */
   onDragOver(fn: (p: { x: number; y: number }) => void): () => void;
   onDragOut(fn: () => void): () => void;
-  /** Tabs dropped here — place them where the preview said. */
-  onDropHere(fn: (p: TabTransfer) => void): () => void;
+  /** Tabs dropped here — place them where the preview said, then acknowledge.
+   *  The source window does not release them until you do. */
+  onDropHere(fn: (p: TabTransfer & { dropId: number }) => void): () => void;
+  /** Which of a `drop-here`'s tabs were placed. Omitting one leaves it in the
+   *  window it came from, which is the safe direction: a tab that stayed put is
+   *  a visible non-event, a vanished one is unrecoverable. */
+  dropApplied(dropId: number, accepted: string[]): Promise<boolean>;
   /** A tab released outside this window. The shell resolves the screen point
    *  against every window it owns: onto one showing this worktree, the tabs
    *  move there; onto nothing, a new window opens. */
