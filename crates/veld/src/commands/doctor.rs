@@ -564,12 +564,23 @@ impl Diagnostics {
         // The name a real socket would get: `socket_for` digests the session id to
         // a fixed 16 hex chars precisely so every session's path is the same length,
         // which is what makes one probe answer for all of them.
-        if let Some(reason) =
-            veld_core::instance::socket_path_too_long(&dir.join("0000000000000000.sock"))
-        {
+        let probe = dir.join("0000000000000000.sock");
+        if veld_core::instance::socket_path_too_long(&probe).is_some() {
+            // The label is written here rather than reused from
+            // `socket_path_too_long`, whose message embeds the absolute path — right
+            // for the holder's own bind failure, wrong for this command, where every
+            // other displayed path goes through `tilde_path` and doctor output is
+            // what people paste into an issue.
             return Check {
                 pass: false,
-                label: format!("No terminal can start here — {reason}"),
+                label: format!(
+                    "No terminal can start: the holder socket path is {} bytes, over the \
+                     {}-byte limit a unix socket allows ({}/<id>.sock). Set VELD_PTY_DIR \
+                     to a shorter directory.",
+                    probe.as_os_str().as_encoded_bytes().len(),
+                    veld_core::instance::MAX_SOCKET_PATH,
+                    shown,
+                ),
             };
         }
         let Ok(entries) = std::fs::read_dir(&dir) else {

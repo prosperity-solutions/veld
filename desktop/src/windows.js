@@ -996,7 +996,11 @@ function registerWindowIpc(ipcMain) {
    */
   ipcMain.handle("veld:window:worktrees-gone", (event, payload) => {
     const record = recordFor(senderWindow(event));
-    if (!record) return false;
+    // Main windows only, like `holds` beside it. A detached window is a satellite
+    // with no rail and no delete surface, so it has no business editing global
+    // ownership — and this handler is the one that accepts ids the sender does not
+    // hold, which is exactly why it should accept them from fewer callers.
+    if (!record || record.kind !== "main") return false;
     const ids = Array.isArray(payload?.worktreeIds)
       ? payload.worktreeIds
           .slice(0, MAX_HELD_WORKTREES)

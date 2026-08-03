@@ -1102,7 +1102,10 @@ function AppInner(props: {
    * must not read as "everything was deleted".
    */
   useEffect(() => {
-    if (repos.length === 0) return;
+    // Main windows only, like the other multi-window effects: a detached window
+    // shows one dock of a worktree a main window owns, so global ownership and the
+    // shared store are not its to edit. The shell refuses it either way.
+    if (chromeless || repos.length === 0) return;
     const alive = new Set(repos.flatMap((r) => r.worktrees.map((w) => w.id)));
     const gone = Object.keys(layouts)
       .map(Number)
@@ -1117,7 +1120,7 @@ function AppInner(props: {
     // reading them inside the updater would be too late — React runs that during
     // the next render, not here. Converges, because the run after this one finds
     // nothing left to forget.
-  }, [repos, layouts]);
+  }, [chromeless, repos, layouts]);
 
   // ---- multi-window --------------------------------------------------------
   //

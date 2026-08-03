@@ -476,18 +476,28 @@ export function markAnsiSpans(spans: AnsiSpan[], term: string): AnsiPiece[] {
   const ranges = matchRanges(text, term);
   if (ranges.length === 0) return spans.map((s) => ({ ...s, mark: false }));
 
+  // Both lists are sorted and disjoint, so this is a merge walk: each span
+  // advances a shared range cursor rather than rescanning the whole range list.
+  // The obvious nested loop is quadratic, and it is not a theoretical concern —
+  // one heavily-coloured megabyte line (142k spans, 71k matches) took **15.7
+  // seconds** in it, which is a frozen tab on the first keystroke of a search.
+  // The old `highlight` this replaced was a single `String.split`, so anything
+  // superlinear here is a regression.
   const pieces: AnsiPiece[] = [];
   let at = 0;
+  let first = 0;
   for (const span of spans) {
     const start = at;
     const end = at + span.text.length;
     at = end;
-    // Cut points inside this span, from the ranges that overlap it.
+    // Ranges that end at or before this span's start can never be seen again.
+    // Advanced on `first` — not on the inner cursor — because a range that
+    // *straddles* the boundary must still be visible to the next span.
+    while (first < ranges.length && ranges[first][1] <= start) first++;
     let cursor = start;
-    for (const [from, to] of ranges) {
-      if (to <= start || from >= end) continue;
-      const matchFrom = Math.max(from, start);
-      const matchTo = Math.min(to, end);
+    for (let k = first; k < ranges.length && ranges[k][0] < end; k++) {
+      const matchFrom = Math.max(ranges[k][0], start);
+      const matchTo = Math.min(ranges[k][1], end);
       if (matchFrom > cursor) {
         pieces.push({ text: text.slice(cursor, matchFrom), style: span.style, mark: false });
       }
