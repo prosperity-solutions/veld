@@ -63,7 +63,7 @@ import { theme as mantineTheme } from "./theme";
 import { RunsMode } from "./runs/RunsMode";
 import { PaneArea } from "./panes/PaneArea";
 import type { RunPaneContext } from "./panes/RunPanes";
-import { notifyError } from "./shared/notify";
+import { notifyError, notifyRedirect } from "./shared/notify";
 import {
   JoinRequestRow,
   RunSharePanel,
@@ -446,6 +446,42 @@ function AppInner(props: {
     null;
 
   /**
+   * Worktrees another window is showing.
+   *
+   * Only for the rail's benefit — the shell is the authority on who may show
+   * what, and `selectWorktree` still asks it. Rendering this is what stops the
+   * ownership model reading as a bug: without it, a row simply refuses to open
+   * and some other window jumps forward with no stated connection between the
+   * two.
+   */
+  const [elsewhere, setElsewhere] = useState<Set<number>>(new Set());
+  useEffect(() => {
+    const shell = desktopWindow;
+    if (chromeless || !shell?.onClaimsChanged) return;
+    let cancelled = false;
+    let pushed = false;
+    // Both, and in this order: the subscription first, so a claim made while
+    // the initial query is in flight is not lost, then the query for the state
+    // that predates this window. `pushed` because the answer to the query can
+    // land after an update that supersedes it — and "nobody else has anything"
+    // is a real answer, so an empty set cannot stand in for "not yet asked".
+    const off = shell.onClaimsChanged((p) => {
+      pushed = true;
+      setElsewhere(new Set(p.worktreeIds));
+    });
+    void shell
+      .claimedElsewhere()
+      .then((ids) => {
+        if (!cancelled && !pushed) setElsewhere(new Set(ids));
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+      off();
+    };
+  }, [chromeless]);
+
+  /**
    * Show a worktree — or go to the window that already is.
    *
    * A worktree has one set of panes and one window showing them, so this asks
@@ -464,7 +500,17 @@ function AppInner(props: {
     void desktopWindow
       .claimWorktree(w.id)
       .then((result) => {
-        if (!result?.ok) return; // shown elsewhere — the shell focused it
+        if (!result?.ok) {
+          // Without this the click reads as ignored: the row does not open,
+          // and a *different* window comes forward with nothing tying the two
+          // together. The toast is in this window, not the one that took
+          // focus — it is what you find when you come back, and the greyed
+          // rail row (`elsewhere`) is what warns you before you click.
+          if (result?.reason === "shown-elsewhere") {
+            notifyRedirect(`${w.alias} is open in another window — switched to it`);
+          }
+          return;
+        }
         setActiveRepoRoot(w.repo_root);
         setActiveWtKey(String(w.id));
       })
@@ -1782,6 +1828,7 @@ function AppInner(props: {
             canRun={canRunWorktreeNow}
             canStart={canStartWorktree}
             pendingFor={pendingFor}
+            elsewhere={elsewhere}
             onToggle={() => setRailWide((v) => !v)}
             onSelect={selectWorktree}
             onAdd={() => setDialog({ kind: "new-worktree" })}
@@ -2114,6 +2161,9 @@ function Rail(props: {
   canRun: (w: Worktree) => boolean;
   canStart: (w: Worktree) => boolean;
   pendingFor: (w: Worktree) => PendingAction | null;
+  /** Worktrees another window is showing. Clicking one goes there instead of
+   *  opening it here, so it is marked rather than left to surprise. */
+  elsewhere: Set<number>;
   onToggle: () => void;
   onSelect: (w: Worktree) => void;
   onAdd: () => void;
@@ -2151,6 +2201,7 @@ function Rail(props: {
           // Inline controls are wide-only — a 64px collapsed row has no space
           // for them. Right-click reaches the same actions in either mode.
           const showRunControl = props.wide && props.canRun(w);
+          const away = props.elsewhere.has(w.id);
           return (
             /* A div with role=button, not a <button>: the row carries nested
                controls of its own, and a <button> inside a <button> violates
@@ -2167,8 +2218,12 @@ function Rail(props: {
               /* Selection is "which one am I looking at", not a toggle that
                  can be un-pressed — aria-current, not aria-pressed. */
               aria-current={props.active?.id === w.id ? true : undefined}
-              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}`}
-              title={`${w.alias} — ${w.branch}`}
+              className={`wt-row${props.active?.id === w.id ? " active" : ""}${props.wide ? "" : " slim"}${away ? " away" : ""}`}
+              title={
+                away
+                  ? `${w.alias} — ${w.branch} (open in another window)`
+                  : `${w.alias} — ${w.branch}`
+              }
               onClick={() => props.onSelect(w)}
               onKeyDown={(e) => {
                 // Only the row's OWN key events. Keydown bubbles from the
@@ -2184,6 +2239,22 @@ function Rail(props: {
               onContextMenu={(e) => props.onMenu(e, w)}
             >
               <span className={`dot ${status}`} />
+              {/* Before the alias, where the eye already is for the dot — and
+                  rendered in the collapsed rail too, which is exactly where a
+                  greyed row alone would be too subtle to read. */}
+              {away && (
+                <IconExternalLink
+                  size={11}
+                  className="wt-away"
+                  /* Decorative, and it has to be. The row is a `role=button`
+                     whose accessible name comes from its content, so a label
+                     here would be folded into that name *before* the alias —
+                     "open in another window Sonnet feat/x" — and the `title`
+                     that already says it would be demoted to the description,
+                     announcing it a second time. The title carries it. */
+                  aria-hidden
+                />
+              )}
               {w.emoji && <span className="wt-emoji">{w.emoji}</span>}
               {props.wide && <span className="wt-alias">{w.alias}</span>}
               {props.wide && <span className="wt-branch">{w.branch}</span>}

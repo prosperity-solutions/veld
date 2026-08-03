@@ -91,6 +91,13 @@ contextBridge.exposeInMainWorld("veldDesktop", {
      *  caller should stay where it is. */
     claimWorktree: (worktreeId, focusHolder = true) =>
       ipcRenderer.invoke("veld:window:claim", { worktreeId, focusHolder }),
+    /** Which worktrees another window is showing right now — the rail greys
+     *  those rows out. Answers the state this page booted into; changes arrive
+     *  through `onClaimsChanged`. */
+    claimedElsewhere: () => ipcRenderer.invoke("veld:window:claims"),
+    /** …and every change to it, since they nearly all happen in some other
+     *  window: a claim, a switch, a window closing. */
+    onClaimsChanged: (fn) => on("veld:window:claims", fn),
     /** Which worktrees this window currently holds the panes of, so the shell
      *  knows who to ask to let go when another window claims one. */
     holdsWorktrees: (worktreeIds) =>

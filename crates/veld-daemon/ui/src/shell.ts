@@ -91,6 +91,11 @@ export interface DesktopWindowApi {
      *  window is working out what it may display — it asks about several. */
     focusHolder?: boolean,
   ): Promise<{ ok: boolean; reason?: string | null }>;
+  /** Which worktrees some *other* window is showing right now. The state this
+   *  page boots into; changes come through `onClaimsChanged`. */
+  claimedElsewhere(): Promise<number[]>;
+  /** …and every change to it. Nearly all of them happen in another window. */
+  onClaimsChanged(fn: (payload: { worktreeIds: number[] }) => void): () => void;
   /** Which worktrees this window holds the panes of. Reported so the shell can
    *  ask the right window to let go when another one claims a worktree. */
   holdsWorktrees(worktreeIds: number[]): Promise<boolean>;

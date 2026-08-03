@@ -354,6 +354,20 @@ select:focus {
   color: var(--accent);
 }
 
+/* Shown in another window. Dimmed, not disabled: the row still does something
+   — it takes you to the window that has it — and a disabled-looking row would
+   say the opposite. The status dot keeps its full colour, because whether a
+   run is up is true wherever it is being shown from. */
+.wt-row.away .wt-alias,
+.wt-row.away .wt-branch,
+.wt-row.away .wt-emoji {
+  opacity: 0.55;
+}
+.wt-away {
+  flex: none;
+  color: var(--muted);
+}
+
 .dot {
   width: 7px;
   height: 7px;

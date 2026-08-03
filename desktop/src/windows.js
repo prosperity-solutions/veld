@@ -269,6 +269,34 @@ function claimHolder(worktreeId) {
   return holder;
 }
 
+/**
+ * Tell every main window which worktrees *other* windows are showing.
+ *
+ * Personalised per window on purpose: what a rail needs to grey out is "not
+ * mine", and a window computing that from a shared map would first have to
+ * learn its own record id — one more thing to keep in sync for no gain.
+ *
+ * Pushed rather than polled, and re-sent on every claim, every window close and
+ * every load, because the interesting transitions all happen in another window:
+ * a rail that only refreshed when *you* did something would stay wrong for as
+ * long as you did nothing.
+ */
+function broadcastClaims() {
+  const live = allRecords().filter((r) => !r.win.isDestroyed());
+  const ids = new Set(live.map((r) => r.id));
+  // `claimHolder` prunes lazily, one worktree at a time, and it is not on this
+  // path — a dead window's claim left here would grey a rail row out with no
+  // window behind it and no way for the user to reach it again.
+  for (const [worktreeId, id] of claims) if (!ids.has(id)) claims.delete(worktreeId);
+  for (const record of live) {
+    if (record.kind !== "main") continue;
+    const worktreeIds = [];
+    for (const [worktreeId, id] of claims) {
+      if (id !== record.id) worktreeIds.push(worktreeId);
+    }
+    record.win.webContents.send("veld:window:claims", { worktreeIds });
+  }
+}
 
 /** @type {null | {
  *   baseUrl: string,
@@ -649,6 +677,9 @@ function openWindow(options = {}) {
     releaseHoldsIn(holders, record.id);
     windows.delete(win.id);
     persistWindows();
+    // Its worktrees are pickable again, and the rails saying otherwise are in
+    // other windows — nothing else would correct them.
+    broadcastClaims();
   });
 
   // A window opened while a drag is in flight is polled and asked to resolve a
@@ -912,6 +943,9 @@ function registerWindowIpc(ipcMain) {
     // that one.
     releaseClaimsIn(claims, record.id);
     claims.set(worktreeId, record.id);
+    // Both halves changed: the worktree this window let go of is free for
+    // everyone, and the one it took is now spoken for.
+    broadcastClaims();
     // Which is now. Any other window still holding this worktree's panes has to
     // let go before this one attaches, or the two would trade its shells.
     yieldWorktree(worktreeId, record.id);
@@ -935,6 +969,23 @@ function registerWindowIpc(ipcMain) {
       : [];
     setHoldsIn(holders, record.id, ids);
     return true;
+  });
+
+  /**
+   * Which worktrees another window is showing.
+   *
+   * The push in `broadcastClaims` covers every change from here on; this covers
+   * the state a page boots into, which no push can — the window may well have
+   * been opened after the claims it needs to know about were made.
+   */
+  ipcMain.handle("veld:window:claims", (event) => {
+    const record = recordFor(senderWindow(event));
+    if (!record) return [];
+    const worktreeIds = [];
+    for (const [worktreeId, id] of claims) {
+      if (id !== record.id && claimHolder(worktreeId)) worktreeIds.push(worktreeId);
+    }
+    return worktreeIds;
   });
 
   /** A tab drag started here. Every window freezes its views; the cursor starts
