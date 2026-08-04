@@ -77,6 +77,22 @@ pub const DEFAULT_SCROLLBACK: i64 = 10_000;
 /// memory with a number in a box.
 pub const MAX_SCROLLBACK: i64 = 100_000;
 
+/// Days a worktree may sit idle before auto-eviction moves it to the trash.
+///
+/// **Zero means off, and off is the default.** This is a destructive timer: it
+/// removes a checkout while the user is not looking, so it cannot be something a
+/// user discovers they had enabled. When it is on, eviction only *marks* a
+/// worktree for removal and `git worktree remove` still refuses a dirty or locked
+/// checkout — the timer never gets to bypass git's own safety checks.
+pub const DEFAULT_WORKTREE_EVICT_DAYS: i64 = 0;
+
+/// Shortest eviction horizon that is not a foot-gun. A day is already short
+/// enough to catch a checkout somebody made on Friday.
+pub const MIN_WORKTREE_EVICT_DAYS: i64 = 1;
+/// Longest eviction horizon. Past a year the timer is not doing anything a human
+/// would not have done first.
+pub const MAX_WORKTREE_EVICT_DAYS: i64 = 365;
+
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
@@ -105,6 +121,7 @@ pub enum SettingKey {
     TerminalShiftEnterNewline,
     TerminalDetachGrace,
     WorktreeMarkerStyle,
+    WorktreeEvictAfterDays,
     BrowserQuickSwitchResponsive,
     BrowserQuickSwitchColorScheme,
     Unknown(String),
@@ -130,6 +147,7 @@ impl SettingKey {
         Self::TerminalShiftEnterNewline,
         Self::TerminalDetachGrace,
         Self::WorktreeMarkerStyle,
+        Self::WorktreeEvictAfterDays,
         Self::BrowserQuickSwitchResponsive,
         Self::BrowserQuickSwitchColorScheme,
     ];
@@ -144,6 +162,7 @@ impl SettingKey {
             Self::TerminalShiftEnterNewline => "terminal.shiftEnterNewline",
             Self::TerminalDetachGrace => "terminal.detachGraceMinutes",
             Self::WorktreeMarkerStyle => "worktree.markerStyle",
+            Self::WorktreeEvictAfterDays => "worktree.evictAfterDays",
             Self::BrowserQuickSwitchResponsive => "browser.quickSwitch.responsive",
             Self::BrowserQuickSwitchColorScheme => "browser.quickSwitch.colorScheme",
             Self::Unknown(k) => k,
@@ -160,6 +179,7 @@ impl SettingKey {
             "terminal.shiftEnterNewline" => Self::TerminalShiftEnterNewline,
             "terminal.detachGraceMinutes" => Self::TerminalDetachGrace,
             "worktree.markerStyle" => Self::WorktreeMarkerStyle,
+            "worktree.evictAfterDays" => Self::WorktreeEvictAfterDays,
             "browser.quickSwitch.responsive" => Self::BrowserQuickSwitchResponsive,
             "browser.quickSwitch.colorScheme" => Self::BrowserQuickSwitchColorScheme,
             other => Self::Unknown(other.to_string()),
@@ -190,6 +210,18 @@ impl SettingKey {
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
             ),
+            // Zero is "off" and is deliberately outside the clamped range, because
+            // this is the one numeric setting whose off state is not a small value
+            // — a horizon clamped up to `MIN` would silently arm a destructive
+            // timer the user was trying to disable.
+            Self::WorktreeEvictAfterDays => {
+                let n = clamp_i64(value, 0, MAX_WORKTREE_EVICT_DAYS).ok_or_else(bad)?;
+                Value::from(if n == 0 {
+                    0
+                } else {
+                    n.max(MIN_WORKTREE_EVICT_DAYS)
+                })
+            }
             Self::TerminalCursorBlink
             | Self::TerminalShiftEnterNewline
             | Self::BrowserQuickSwitchResponsive
@@ -295,6 +327,12 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // emulating lives in that pane's layout.
         (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
         (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
+        // Off. A feature that deletes a developer's checkout unattended is opt-in,
+        // and the default has to be the one that cannot surprise anybody.
+        (
+            SettingKey::WorktreeEvictAfterDays,
+            Value::from(DEFAULT_WORKTREE_EVICT_DAYS),
+        ),
     ]
     .into_iter()
     .map(|(k, v)| (k.as_str().to_string(), v))
@@ -400,6 +438,27 @@ impl Db {
             .unwrap_or(DEFAULT_DETACH_GRACE_MINUTES)
             .clamp(MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES);
         std::time::Duration::from_secs(minutes as u64 * 60)
+    }
+
+    /// The worktree auto-eviction horizon in seconds, or `None` when eviction is
+    /// off — which is the default and, for a destructive timer, the answer this
+    /// returns for anything it cannot read.
+    ///
+    /// Re-read per GC pass rather than cached, so turning eviction off takes effect
+    /// at the next pass instead of at the next daemon restart. Turning *off* a
+    /// timer that deletes checkouts must not need a restart.
+    pub fn worktree_evict_after(&self) -> Option<std::time::Duration> {
+        let days = self
+            .setting(&SettingKey::WorktreeEvictAfterDays)
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_i64())
+            .unwrap_or(DEFAULT_WORKTREE_EVICT_DAYS);
+        if days <= 0 {
+            return None;
+        }
+        let days = days.clamp(MIN_WORKTREE_EVICT_DAYS, MAX_WORKTREE_EVICT_DAYS);
+        Some(std::time::Duration::from_secs(days as u64 * 86_400))
     }
 }
 
@@ -603,6 +662,41 @@ mod tests {
         assert_eq!(
             db.detach_grace(),
             std::time::Duration::from_secs(MAX_DETACH_GRACE_MINUTES as u64 * 60)
+        );
+    }
+
+    #[test]
+    fn worktree_eviction_is_off_by_default_and_zero_survives_the_clamp() {
+        let (_dir, db) = test_db();
+        assert_eq!(
+            db.worktree_evict_after(),
+            None,
+            "a timer that deletes checkouts unattended must default to off"
+        );
+
+        // Zero is the off switch and is deliberately outside the clamped range.
+        // Clamping it up to MIN would arm the timer for a user trying to disable
+        // it — the one numeric setting where the nearest legal value is wrong.
+        db.patch_settings(&patch(&[("worktree.evictAfterDays", Value::from(0))]))
+            .unwrap();
+        assert_eq!(db.worktree_evict_after(), None);
+
+        db.patch_settings(&patch(&[("worktree.evictAfterDays", Value::from(14))]))
+            .unwrap();
+        assert_eq!(
+            db.worktree_evict_after(),
+            Some(std::time::Duration::from_secs(14 * 86_400))
+        );
+
+        // Above the ceiling clamps down, as every other number does.
+        db.patch_settings(&patch(&[(
+            "worktree.evictAfterDays",
+            Value::from(MAX_WORKTREE_EVICT_DAYS + 500),
+        )]))
+        .unwrap();
+        assert_eq!(
+            db.settings().unwrap().get("worktree.evictAfterDays"),
+            Some(&Value::from(MAX_WORKTREE_EVICT_DAYS))
         );
     }
 

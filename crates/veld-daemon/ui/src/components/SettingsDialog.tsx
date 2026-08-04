@@ -39,6 +39,7 @@ import {
 } from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
+  evictAfterDays,
   markerStyle,
   quickSwitchPrefs,
   terminalPrefs,
@@ -97,6 +98,8 @@ export function SettingsDialog(props: {
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
+  const evictValue = evictAfterDays(settings ?? {});
+  const [evict, setEvict] = useState<number | string>(evictValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
@@ -117,6 +120,7 @@ export function SettingsDialog(props: {
     setScrollback(term.scrollback);
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
+    setEvict(evictValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -179,6 +183,44 @@ export function SettingsDialog(props: {
               onChange={(e) =>
                 set({ "worktree.markerStyle": e.currentTarget.value as MarkerStyle })
               }
+            />
+          </Row>
+        </Stack>
+
+        <Stack gap="xs">
+          <SectionTitle>Worktrees</SectionTitle>
+          <Row
+            label="Remove unused worktrees"
+            /* The copy is deliberately blunt about what this does and where it
+               stops. A timer that deletes a developer's checkout while they are
+               not looking cannot be described in the register of a preference —
+               and the second sentence is the reason it is defensible at all:
+               eviction only *asks* git, so uncommitted work is never what gets
+               discarded. */
+            help="Off by default. When set, a worktree with no runs for this many days is queued for removal — never the main checkout, and never one with a run going. git still refuses a checkout with uncommitted changes, and a worktree it refuses comes back with the reason."
+          >
+            <NumberInput
+              size="xs"
+              w={140}
+              min={0}
+              /* Mirrors MAX_WORKTREE_EVICT_DAYS in veld-core's settings.rs, the
+                 same way the scrollback and grace boxes mirror theirs — a control
+                 offering a range the server refuses is a #204 review finding. */
+              max={365}
+              step={7}
+              value={evict}
+              disabled={locked}
+              /* Zero is the off switch, so it must be reachable — and it is what
+                 the placeholder says the empty box means. */
+              placeholder="off"
+              suffix={typeof evict === "number" && evict > 0 ? " days" : ""}
+              onChange={setEvict}
+              onBlur={() =>
+                commitNumber("worktree.evictAfterDays", evict, evictValue, setEvict)
+              }
+              onKeyDown={(e) => {
+                if (e.key === "Enter") e.currentTarget.blur();
+              }}
             />
           </Row>
         </Stack>

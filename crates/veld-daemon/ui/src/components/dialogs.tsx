@@ -9,7 +9,7 @@ import {
   Text,
   TextInput,
 } from "@mantine/core";
-import { api, type EmojiHolder, type Repo } from "../api";
+import { api, MAX_LANE_NAME_LEN, type EmojiHolder, type Repo } from "../api";
 import type { MarkerStyle } from "../shared/settings";
 
 /**
@@ -443,9 +443,10 @@ export function RenameWorktreeDialog(props: {
             <>
               <Text size="sm" c="dimmed">
                 Removes the checkout from disk (git refuses if it has
-                uncommitted changes). The branch itself is kept. Stop any
-                running environment in this worktree first — removing pulls
-                the directory out from under it.
+                uncommitted changes). The branch itself is kept. Any running
+                environment here is stopped first, and the removal continues in
+                the background — you can keep working in other worktrees, and
+                if it fails the worktree comes back with the reason.
               </Text>
               <ErrorText error={del.error} />
               {del.error && (
@@ -482,6 +483,63 @@ export function RenameWorktreeDialog(props: {
           )}
         </Stack>
       )}
+    </Modal>
+  );
+}
+
+/**
+ * Create or rename a rail lane.
+ *
+ * One component for both because the only difference is the initial value and
+ * the button label — and because the collision rule has to be identical in
+ * both, which two components would eventually get wrong.
+ *
+ * The taken-name check here is a courtesy, not the enforcement: `create_lane`
+ * and `rename_lane` decide inside their transaction, so two windows creating
+ * "review" at once still resolve correctly. Checking here only means the user
+ * finds out before pressing the button.
+ */
+export function LaneNameDialog(props: {
+  title: string;
+  confirmLabel: string;
+  initial: string;
+  /** Existing lane names, excluding the one being renamed. */
+  taken: string[];
+  onSubmit: (name: string) => Promise<void>;
+  onClose: () => void;
+}) {
+  const [name, setName] = useState(props.initial);
+  const trimmed = name.trim();
+  // Case-insensitive, matching the daemon: two rail headers differing only in
+  // case is a mistake every time.
+  const collides = props.taken.some(
+    (n) => n.toLowerCase() === trimmed.toLowerCase(),
+  );
+  const { busy, error, submit } = useSubmit(() => props.onSubmit(trimmed));
+  return (
+    <Modal title={props.title} onClose={props.onClose}>
+      <form onSubmit={submit}>
+        <Stack gap="sm">
+          <TextInput
+            label="Lane name"
+            placeholder="review"
+            value={name}
+            maxLength={MAX_LANE_NAME_LEN}
+            onChange={(e) => setName(e.currentTarget.value)}
+            error={collides ? "This repo already has a lane with that name" : null}
+            data-autofocus
+          />
+          <Text size="sm" c="dimmed">
+            Lanes group the worktrees in the rail. They are yours, not the
+            repository&apos;s — nothing is written to the project&apos;s config, so
+            your lanes never show up in someone else&apos;s checkout.
+          </Text>
+          <ErrorText error={error} />
+          <Button type="submit" loading={busy} disabled={!trimmed || collides}>
+            {props.confirmLabel}
+          </Button>
+        </Stack>
+      </form>
     </Modal>
   );
 }

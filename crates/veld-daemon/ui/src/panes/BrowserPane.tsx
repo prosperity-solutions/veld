@@ -383,6 +383,17 @@ export function BrowserPane(props: {
     settings: [],
   });
   const [prompt, setPrompt] = useState<PermissionPrompt | null>(null);
+  /**
+   * Which session clear is awaiting confirmation — a profile, or "all".
+   *
+   * Clearing signs you out of every pane on that session and cannot be undone, and
+   * it sat one click deep in a menu with only a `Menu.Label` as warning (#188, the
+   * same missing-confirm gap as worktree removal). A menu item that destroys
+   * credentials needs the second click to be a decision, not an accident.
+   */
+  const [confirmClear, setConfirmClear] = useState<BrowserProfile | "all" | null>(
+    null,
+  );
   // Read by the unmount cleanup, which must not re-subscribe on every prompt.
   const promptRef = useRef<PermissionPrompt | null>(null);
   promptRef.current = prompt;
@@ -978,7 +989,7 @@ export function BrowserPane(props: {
                         leftSection={
                           <SessionDot color={BROWSER_PROFILE_COLORS[p]} />
                         }
-                        onClick={() => clearBrowserSession(p)}
+                        onClick={() => setConfirmClear(p)}
                       >
                         {browserProfileLabel(p)}
                         {p === profile ? " · this pane" : ""}
@@ -989,9 +1000,7 @@ export function BrowserPane(props: {
                     more: its slot is not listed above, but its cookies are still
                     on disk. */}
                     <Menu.Item
-                      onClick={() =>
-                        BROWSER_PROFILES.forEach(clearBrowserSession)
-                      }
+                      onClick={() => setConfirmClear("all")}
                     >
                       All sessions, including retired ones
                     </Menu.Item>
@@ -1622,6 +1631,50 @@ export function BrowserPane(props: {
           </Button>
           <Button size="compact-xs" onClick={() => answer("allow")}>
             Allow
+          </Button>
+        </div>
+      )}
+
+      {confirmClear && (
+        /* An in-pane bar, not a Mantine Modal: an embedded `WebContentsView`
+           ignores z-index, so a portalled dialog renders *behind* the page (#188).
+           The permission prompt above solved this the same way, and this reuses its
+           chrome so the two read as the same class of thing. */
+        <div
+          className="permission-prompt"
+          role="alertdialog"
+          aria-label="Confirm clearing session data"
+        >
+          <IconTrash size={16} />
+          <span className="permission-ask">
+            Clear{" "}
+            <strong>
+              {confirmClear === "all"
+                ? "every browser session"
+                : `the ${browserProfileLabel(confirmClear)} session`}
+            </strong>
+            ? This signs out every pane using it and cannot be undone.
+          </span>
+          <Button
+            size="compact-xs"
+            variant="default"
+            onClick={() => setConfirmClear(null)}
+          >
+            Cancel
+          </Button>
+          <Button
+            size="compact-xs"
+            color="red"
+            onClick={() => {
+              if (confirmClear === "all") {
+                BROWSER_PROFILES.forEach(clearBrowserSession);
+              } else {
+                clearBrowserSession(confirmClear);
+              }
+              setConfirmClear(null);
+            }}
+          >
+            Clear
           </Button>
         </div>
       )}

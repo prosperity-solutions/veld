@@ -2,7 +2,7 @@
 // veld run state (/api/environments). Every worktree with a veld.json is its
 // own veld project root, so the join key is worktree.path === project_root.
 
-import type { EnvironmentList, RunInfo, Worktree } from "./api";
+import type { EnvironmentList, Lane, RunInfo, Worktree } from "./api";
 
 export type WorktreeStatus = "running" | "partial" | "failed" | "stopped";
 
@@ -68,6 +68,145 @@ export function worktreeStatus(runs: RunInfo[]): WorktreeStatus {
   if (run.status === "running") return "running";
   if (run.status === "failed") return "failed";
   return "partial";
+}
+
+/**
+ * One rendered section of the rail.
+ *
+ * `lane` is `""` for the ungrouped section and the sentinel [`TRASH_LANE`] for
+ * pending removals — neither is a real lane, and both are deliberately not
+ * absences: the rail has to render a header for trash and none for ungrouped, so
+ * the distinction lives in the group rather than in a caller's conditional.
+ */
+export interface RailGroup {
+  /**
+   * Unique identity of this section, and what a drop target is keyed on.
+   *
+   * Distinct from [`lane`] because two sections can write the same lane: the main
+   * checkout gets a section of its own while still being ungrouped. Keying drops
+   * on `lane` made both of them the same target.
+   */
+  key: string;
+  /** The value to write to `worktrees.lane` for a worktree dropped here. */
+  lane: string;
+  /** Header text, or `null` for a section that has none (main, ungrouped). */
+  label: string | null;
+  /**
+   * Fixed position — not draggable, not a drop target.
+   *
+   * True for the main checkout, which always leads the rail, and for pending
+   * removals, which are leaving. A pinned section still renders and is still
+   * separated by a divider; it just takes no part in ordering.
+   */
+  pinned: boolean;
+  worktrees: Worktree[];
+}
+
+/**
+ * Group key for worktrees pending removal.
+ *
+ * Not a lane name: a lane is user-defined and this is a state, so a repo with a
+ * lane literally called "pending removal" must not merge with it. The leading
+ * NUL cannot occur in a lane name (the daemon trims and bounds them, and the
+ * name comes from a text input) so the two key spaces cannot collide.
+ */
+export const TRASH_LANE = "\u0000trash";
+
+/**
+ * Split a repo's worktrees into rail sections: ungrouped first, then each lane in
+ * its own order, then pending removals.
+ *
+ * The daemon already sorts the worktrees into this order (`WT_ORDER`), so this
+ * only *segments* the list — it must not re-sort, or the manual order the user
+ * dragged would be silently re-derived here from a different rule.
+ *
+ * Empty lanes are kept, because a lane you just created and have not filled yet
+ * still needs somewhere to drop a worktree.
+ */
+export function railGroups(worktrees: Worktree[], lanes: Lane[]): RailGroup[] {
+  const live = worktrees.filter((w) => !w.trashed_at);
+  const trashed = worktrees.filter((w) => w.trashed_at);
+  const known = new Set(lanes.map((l) => l.name));
+  // A worktree whose lane no longer exists counts as ungrouped rather than
+  // vanishing. `delete_lane` clears assignments in the same transaction, so this
+  // should not arise — but a row the client cannot place is a row the user cannot
+  // reach, and that is the worse failure.
+  const ungrouped = live.filter((w) => !w.lane || !known.has(w.lane));
+  // The main checkout gets a section of its own — it is the repository, not one of
+  // the branches you are juggling, and a divider under it says so. Only while it is
+  // ungrouped: assigned to a lane it belongs in that lane, because the user put it
+  // there on purpose.
+  const main = ungrouped.filter((w) => w.is_main);
+  const groups: RailGroup[] = [];
+  if (main.length > 0) {
+    groups.push({ key: "main", lane: "", label: null, pinned: true, worktrees: main });
+  }
+  groups.push({
+    key: "",
+    lane: "",
+    label: null,
+    pinned: false,
+    worktrees: ungrouped.filter((w) => !w.is_main),
+  });
+  for (const l of lanes) {
+    groups.push({
+      key: l.name,
+      lane: l.name,
+      label: l.name,
+      pinned: false,
+      worktrees: live.filter((w) => w.lane === l.name),
+    });
+  }
+  if (trashed.length > 0) {
+    groups.push({
+      key: TRASH_LANE,
+      lane: TRASH_LANE,
+      label: "Pending removal",
+      pinned: true,
+      worktrees: trashed,
+    });
+  }
+  return groups;
+}
+
+/**
+ * The rail order after dragging `path` to index `toIndex` of lane `toLane`.
+ *
+ * Returns the full path order for the repo plus the lane the worktree lands in,
+ * because the write is two halves: the lane goes on the worktree row and the
+ * order is a full-list rewrite. Full list, not a delta, so the write is
+ * idempotent — and **paths, not ids**, because `worktrees.id` is a rowid SQLite
+ * reuses.
+ *
+ * Pending removals are excluded from the returned order and cannot be a drop
+ * target: they are leaving, so placing one is meaningless.
+ */
+export function moveWorktree(
+  groups: RailGroup[],
+  path: string,
+  toKey: string,
+  toIndex: number,
+): { order: string[]; lane: string } | null {
+  const target = groups.find((g) => g.key === toKey);
+  if (!target || target.pinned) return null;
+  // Pinned sections take no part in ordering: the main checkout always leads
+  // (`is_main DESC` in the daemon's sort, so it needs no position) and pending
+  // removals would be given a position and then deleted.
+  const placed = groups.filter((g) => !g.pinned);
+  const moved = placed.flatMap((g) => g.worktrees).find((w) => w.path === path);
+  if (!moved) return null;
+  const order: string[] = [];
+  for (const g of placed) {
+    const rest = g.worktrees.filter((w) => w.path !== path);
+    if (g.key === toKey) {
+      // Clamped rather than trusted: the index comes from a drop position, and a
+      // stale render can hand over one past the end of a list that just shrank.
+      const at = Math.max(0, Math.min(toIndex, rest.length));
+      rest.splice(at, 0, moved);
+    }
+    order.push(...rest.map((w) => w.path));
+  }
+  return { order, lane: target.lane };
 }
 
 /**
