@@ -178,9 +178,8 @@ export function markerFace(
 /**
  * Which one-click toggles a browser pane puts in its chrome.
  *
- * A preference rather than a fixed pair because the chrome already carries
- * back/forward/reload, the permission shield, the address bar, the session dot, the
- * device picker and DevTools — so whether two more buttons belong there is the
+ * A preference rather than a fixed pair because the chrome already carries most of a
+ * browser's toolbar before these — so whether two more buttons belong there is the
  * user's call. Global and standing, **not** an answer to one narrow pane: see the
  * note beside the Rust defaults for why a measured bar width would be that, and why
  * this is not it. Both default on.

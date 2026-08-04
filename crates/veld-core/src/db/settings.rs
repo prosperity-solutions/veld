@@ -278,7 +278,7 @@ pub fn defaults() -> BTreeMap<String, Value> {
         (SettingKey::WorktreeMarkerStyle, Value::from("color")),
         // Both quick switches ship **on**. Whether two more buttons belong in a
         // pane's chrome for everyone is a real question — the bar already carries
-        // eight controls and has to stay usable at 300px — but the alternative is
+        // most of a browser's toolbar and has to read at 300px — but the alternative is
         // worse: a control defaulted off is a control nobody finds, and the whole
         // point of these two is reach. The responsive viewport and the page's colour
         // scheme are three levels deep in the device menu and are changed dozens of
