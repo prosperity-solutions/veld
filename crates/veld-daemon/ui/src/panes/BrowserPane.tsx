@@ -199,6 +199,9 @@ function bleed(px: number): React.CSSProperties {
  */
 function schemeName(value: string | undefined): string {
   if (!value) return "System";
+  // The `??` keeps this total; it is not a live case. `sanitizeMedia` drops any
+  // scheme outside `MEDIA_FEATURES` on every layout load (`panes/model.ts`), so the
+  // real guard is upstream and a value only ever arrives as light or dark.
   return MEDIA_LABELS["prefers-color-scheme"].values[value] ?? value;
 }
 
@@ -668,7 +671,7 @@ export function BrowserPane(props: {
   // it is reach, and which of them appears is a preference because the chrome is
   // already eight controls wide and has to stay usable at 300px.
   //
-  // **Off has to be a remembered other state.** The colour scheme cycles
+  // **Each switch's off is one definite state, never menu history.** The colour scheme cycles
   // System → Dark → Light → System rather than toggling dark on and off: System is
   // the *absence* of an override (which is what lets the CDP session be released),
   // and Light is a real destination, because a light-only layout bug is as ordinary
@@ -1002,15 +1005,35 @@ export function BrowserPane(props: {
             into, so the size question stays in one place on the bar. Both work in
             the browser build only as far as the backend does: an iframe really is
             that many CSS pixels wide, so responsive is real there, while
-            `Emulation.setEmulatedMedia` needs the debugger — so dark is disabled and
-            says why, the way the device menu's own rows do. */}
+            `Emulation.setEmulatedMedia` needs the debugger — so the colour scheme is
+            shown inert there and its tooltip says why.
+
+            **`data-disabled`, not `disabled`.** A real `<button disabled>` is styled
+            the same but dispatches no pointer events, so its Tooltip never opens —
+            Mantine puts the hover handlers on the child element itself, and adds no
+            `pointer-events: none` of its own. The explanation would be unreachable in
+            the one backend that needs it, which is the "control that silently does
+            nothing" this was meant to avoid. `data-disabled` is Mantine's own answer:
+            it drives the disabled *styling* through `mod` and leaves the element
+            hoverable, so the click has to be refused here instead, and
+            `aria-disabled` carries what the missing attribute used to. The device
+            menu does not have this problem because it states its gaps in a
+            `Menu.Label`, which renders regardless. */}
         {props.quickSwitches.responsive && (
           <Tooltip
             {...TIP}
             label={
               responsiveOn
                 ? "Stop emulating — the page is the pane again"
-                : "Responsive: drag the screen's edges to find where the layout breaks"
+                : emulation
+                  ? // A dragged preset or a hand-entered size is `custom`, not
+                    // `responsive` (`resizeEmulation`), so the switch reads off over a
+                    // viewport that already has draggable edges — and the click
+                    // *replaces* that size with a pane-measured one, which the layout
+                    // cannot undo. An off-looking toggle reads as costless, so the
+                    // cost is named here rather than discovered.
+                    `Replace ${emulationLabel(emulation)} (${emulationSize(emulation)}) with a responsive viewport at pane size`
+                  : "Responsive: drag the screen's edges to find where the layout breaks"
             }
           >
             <ActionIcon
@@ -1059,16 +1082,21 @@ export function BrowserPane(props: {
                   ? `Page colour scheme: ${schemeLabel}, paused`
                   : `Page colour scheme: ${schemeLabel}`
               }
-              disabled={iframeBackend}
-              onClick={() =>
+              data-disabled={iframeBackend || undefined}
+              aria-disabled={iframeBackend || undefined}
+              onClick={() => {
+                // `data-disabled` styles but does not disable, so the refusal lives
+                // here. Silent rather than a toast: the tooltip already answers it,
+                // and an error for clicking a control that looks inert is noise.
+                if (iframeBackend) return;
                 applyMedia(
                   withMediaFeature(
                     media,
                     "prefers-color-scheme",
                     nextColorScheme(scheme),
                   ),
-                )
-              }
+                );
+              }}
             >
               {/* Sun and moon match the app's own theme button, because they answer
                   the same question. System does **not** reuse its

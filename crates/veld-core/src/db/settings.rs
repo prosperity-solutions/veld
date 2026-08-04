@@ -282,9 +282,17 @@ pub fn defaults() -> BTreeMap<String, Value> {
         // worse: a control defaulted off is a control nobody finds, and the whole
         // point of these two is reach. The responsive viewport and the page's colour
         // scheme are three levels deep in the device menu and are changed dozens of
-        // times an hour while working on a layout. The preference is what a narrow
-        // pane turns off. Each key says whether the *switch is shown* — the scheme
-        // itself is per pane and lives in the layout, not here.
+        // times an hour while working on a layout.
+        //
+        // Note what this preference is **not**: it is one global document, so turning
+        // a switch off hides it in every pane, every window and every browser tab on
+        // this daemon. It cannot answer the 300px case on its own — pane width is
+        // per pane and changes on every split — and it is a standing choice about
+        // whether you want the shortcut at all. Hiding the switches below a measured
+        // bar width would answer the narrow-pane case directly and needs no key; it
+        // is the better answer to that specific problem and is deliberately not what
+        // this is. Each key says whether the *switch is shown*; what a pane is
+        // emulating lives in that pane's layout.
         (SettingKey::BrowserQuickSwitchResponsive, Value::from(true)),
         (SettingKey::BrowserQuickSwitchColorScheme, Value::from(true)),
     ]

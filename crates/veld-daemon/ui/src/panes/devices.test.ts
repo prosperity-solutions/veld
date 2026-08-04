@@ -642,8 +642,9 @@ describe("emulated media features", () => {
     expect(nextColorScheme(undefined)).toBe("dark");
     expect(nextColorScheme("dark")).toBe("light");
     expect(nextColorScheme("light")).toBeNull();
-    // A scheme a newer build wrote resets rather than cycling onwards, so the
-    // control can always be returned to a state this build can render.
+    // Total, not a guard: `sanitizeMedia` already keeps anything but light/dark
+    // out of a restored layout, so this pins the function's own completeness
+    // rather than documenting a reachable state.
     expect(nextColorScheme("sepia")).toBeNull();
   });
 

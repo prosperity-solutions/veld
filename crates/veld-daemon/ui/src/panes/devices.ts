@@ -912,9 +912,12 @@ export function withMediaFeature(
  * as a dark one and going to the menu for it is the reach problem this switch exists
  * to fix.
  *
- * An unrecognised value — a scheme a newer build wrote and this one has no icon for
- * — resets to System rather than being cycled onwards, so the control can always be
- * returned to a state it can render.
+ * Total rather than defensive: an unrecognised value returns System, which is the
+ * same answer `"light"` gets. That is a property of the function, **not** a guard
+ * against a live case — `sanitizeMedia` below drops any scheme outside
+ * [`MEDIA_FEATURES`] on every layout load (`panes/model.ts`), so nothing but
+ * `light`, `dark` or absent reaches here. Weakening that sanitiser is what would
+ * make this branch matter, so do not read it as permission to.
  */
 export function nextColorScheme(current: string | undefined): string | null {
   if (current === undefined) return "dark";

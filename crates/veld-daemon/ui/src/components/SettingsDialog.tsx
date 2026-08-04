@@ -187,9 +187,11 @@ export function SettingsDialog(props: {
           <SectionTitle>Browser panes</SectionTitle>
           {/* Both on by default. They are shortcuts into the device menu, which
               keeps every one of these controls — so turning a switch off costs
-              reach, never capability. Worth having because the pane's chrome has
-              to stay usable at 300px. These say whether the *button* is shown; what
-              each pane is emulating lives in that pane's layout. */}
+              reach, never capability. Global, like every other row here: this is a
+              standing choice about whether you want the shortcut, not an answer to
+              one narrow pane, since pane width changes on every split. These say
+              whether the *button* is shown; what each pane is emulating lives in
+              that pane's layout. */}
           <Row
             label="Responsive switch in the pane toolbar"
             help="One click into the resizable viewport, whose edges you drag to find where a layout breaks. Off means no emulation at all — it does not go back to a device you picked earlier."
@@ -205,7 +207,7 @@ export function SettingsDialog(props: {
           </Row>
           <Row
             label="Colour-scheme switch in the pane toolbar"
-            help="Cycles the page's prefers-color-scheme through System, Dark and Light — the page in the pane, not Veld itself. System is the absence of an override rather than a third value. Needs Veld Desktop; in a browser tab the button says so."
+            help="Cycles the page's prefers-color-scheme through System, Dark and Light — the page in the pane, not Veld itself. System is the absence of an override rather than a third value. Needs Veld Desktop; in a browser tab the button is shown inert and its tooltip says why."
           >
             <Checkbox
               size="xs"
