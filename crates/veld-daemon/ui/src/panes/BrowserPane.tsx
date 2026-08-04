@@ -1007,19 +1007,8 @@ export function BrowserPane(props: {
             the browser build only as far as the backend does: an iframe really is
             that many CSS pixels wide, so responsive is real there, while
             `Emulation.setEmulatedMedia` needs the debugger — so the colour scheme is
-            shown inert there and its tooltip says why.
-
-            **`data-disabled`, not `disabled`.** A real `<button disabled>` is styled
-            the same but dispatches no pointer events, so its Tooltip never opens —
-            Mantine puts the hover handlers on the child element itself, and adds no
-            `pointer-events: none` of its own. The explanation would be unreachable in
-            the one backend that needs it, which is the "control that silently does
-            nothing" this was meant to avoid. `data-disabled` is Mantine's own answer:
-            it drives the disabled *styling* through `mod` and leaves the element
-            hoverable, so the click has to be refused here instead, and
-            `aria-disabled` carries what the missing attribute used to. The device
-            menu does not have this problem because it states its gaps in a
-            `Menu.Label`, which renders regardless. */}
+            shown inert there, saying why in both its tooltip and its accessible
+            name. */}
         {props.quickSwitches.responsive && (
           <Tooltip
             {...TIP}
@@ -1059,6 +1048,17 @@ export function BrowserPane(props: {
             </ActionIcon>
           </Tooltip>
         )}
+        {/* **`data-disabled`, not `disabled`.** A real `<button disabled>` is styled
+            the same but dispatches no pointer events, so its Tooltip never opens —
+            Mantine puts the hover handlers on the child element itself, and adds no
+            `pointer-events: none` of its own. The explanation would be unreachable in
+            the one backend that needs it, which is the "control that silently does
+            nothing" this was meant to avoid. `data-disabled` is Mantine's own answer:
+            it drives the disabled *styling* through `mod` and leaves the element
+            hoverable, so the click has to be refused in the handler instead, and
+            `aria-disabled` carries what the missing attribute used to. The device
+            menu never hit this because it states its gaps in a `Menu.Label`, which
+            renders regardless of any item's state. */}
         {props.quickSwitches.colorScheme && (
           <Tooltip
             {...TIP}
