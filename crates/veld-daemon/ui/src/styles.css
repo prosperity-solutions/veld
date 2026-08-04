@@ -78,7 +78,6 @@
      carry weight. */
   --chart-grid: #23262b;
   --chart-axis: #363b43;
-
 }
 
 body[data-theme="light"] {
@@ -121,7 +120,6 @@ body[data-theme="light"] {
   --series-8: #e34948;
   --chart-grid: #e9ebee;
   --chart-axis: #d5d8dc;
-
 }
 
 * {

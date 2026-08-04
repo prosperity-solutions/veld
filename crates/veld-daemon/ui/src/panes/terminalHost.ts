@@ -179,13 +179,13 @@ export function applyTerminalTheme(theme: "dark" | "light"): void {
 export function applyTerminalPrefs(next: TerminalPrefs): void {
   const before = currentPrefs;
   currentPrefs = next;
-  // Nothing xterm-visible changed on the first publish if the values match what
-  // sessions were built with — but the first publish is also the common case
-  // (settings resolve, then terminals mount), so this must not skip on `null`.
-  const metricsChanged =
-    !before ||
-    before.fontSize !== next.fontSize ||
-    before.fontFamily !== next.fontFamily;
+  // Any change re-fits, rather than a hand-maintained list of the prefs that
+  // affect the cell box. That list was `fontSize` and `fontFamily`, and the next
+  // metric added — line height, letter spacing — would have set the xterm option
+  // and skipped the fit, leaving every open shell wrapping at the old width with
+  // nothing to catch it. A fit is rAF-deferred and bails on an unlaid-out
+  // container, so over-fitting costs a frame and under-fitting costs a wrong grid.
+  const changed = !before || JSON.stringify(before) !== JSON.stringify(next);
   for (const s of sessions.values()) {
     s.term.options.fontSize = next.fontSize;
     s.term.options.fontFamily = next.fontFamily;
@@ -194,7 +194,7 @@ export function applyTerminalPrefs(next: TerminalPrefs): void {
     // Lowering scrollback drops the oldest lines immediately, which is what the
     // settings copy promises.
     s.term.options.scrollback = next.scrollback;
-    if (metricsChanged) requestFit(s);
+    if (changed) requestFit(s);
   }
 }
 

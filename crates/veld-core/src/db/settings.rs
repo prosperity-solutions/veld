@@ -109,6 +109,27 @@ pub enum SettingKey {
 }
 
 impl SettingKey {
+    /// Every known key.
+    ///
+    /// Exists so tests can enumerate the variants, which is the only thing that
+    /// catches the two silent misses when a key is added: [`Self::parse`] ends in an
+    /// `other => Unknown` catch-all, so a forgotten arm makes the key *unvalidated*
+    /// rather than a compile error — and a forgotten [`defaults`] entry makes the
+    /// effective document incomplete, at which point TypeScript's `FALLBACK`
+    /// silently becomes the real default, the exact Rust↔TS drift this module's docs
+    /// claim is impossible. `as_str` and `validate` are exhaustive matches and need
+    /// no help; these two do.
+    pub const ALL: &'static [SettingKey] = &[
+        Self::TerminalFontSize,
+        Self::TerminalFontFamily,
+        Self::TerminalCursorStyle,
+        Self::TerminalCursorBlink,
+        Self::TerminalScrollback,
+        Self::TerminalShiftEnterNewline,
+        Self::TerminalDetachGrace,
+        Self::WorktreeMarkerStyle,
+    ];
+
     pub fn as_str(&self) -> &str {
         match self {
             Self::TerminalFontSize => "terminal.fontSize",
@@ -337,18 +358,6 @@ impl Db {
         Ok(())
     }
 
-    /// Drop a setting, returning it to its default. Distinct from writing the
-    /// default value: a stored default would survive a future change to
-    /// [`defaults`], which is not what "reset" means.
-    pub fn reset_setting(&self, key: &str) -> Result<(), DbError> {
-        let conn = self.lock();
-        conn.execute(
-            "DELETE FROM settings WHERE scope = ?1 AND key = ?2",
-            params![SCOPE_GLOBAL, key],
-        )?;
-        Ok(())
-    }
-
     /// The detach grace the daemon should enforce, as a `Duration`.
     ///
     /// The daemon reads this one itself, so it goes through the clamp rather than
@@ -379,6 +388,35 @@ mod tests {
     }
 
     #[test]
+    fn every_known_key_round_trips_and_has_a_default() {
+        // The guard for the two ways adding a key goes quietly wrong: `parse`'s
+        // catch-all turning a typo'd arm into an unvalidated `Unknown`, and a
+        // missing `defaults` entry handing the client an incomplete document.
+        for key in SettingKey::ALL {
+            assert_eq!(
+                &SettingKey::parse(key.as_str()),
+                key,
+                "{:?} has no `parse` arm — it would be stored unvalidated",
+                key
+            );
+            assert!(
+                defaults().contains_key(key.as_str()),
+                "{} has no default — the effective document would be incomplete",
+                key.as_str()
+            );
+        }
+        // And nothing in `defaults` that `parse` does not know, which would be a
+        // default for a key no validator covers.
+        for key in defaults().keys() {
+            assert!(
+                !matches!(SettingKey::parse(key), SettingKey::Unknown(_)),
+                "{key} is defaulted but unknown to `parse`"
+            );
+        }
+        assert_eq!(defaults().len(), SettingKey::ALL.len());
+    }
+
+    #[test]
     fn defaults_are_returned_when_nothing_is_stored() {
         let (_dir, db) = test_db();
         let s = db.settings().unwrap();
@@ -386,7 +424,9 @@ mod tests {
         assert_eq!(s["terminal.scrollback"], Value::from(DEFAULT_SCROLLBACK));
         assert_eq!(s["worktree.markerStyle"], Value::from("color"));
         // Every declared key is present, so a client never has to supply one.
-        assert_eq!(s.len(), defaults().len());
+        // Counted against the variant list rather than against `defaults()` itself,
+        // which would compare a value with itself.
+        assert_eq!(s.len(), SettingKey::ALL.len());
     }
 
     #[test]
@@ -471,22 +511,6 @@ mod tests {
         .unwrap();
         let s = db.settings().unwrap();
         assert_eq!(s["terminal.futureThing"], Value::from("from-a-newer-build"));
-    }
-
-    #[test]
-    fn reset_returns_the_default_rather_than_storing_it() {
-        let (_dir, db) = test_db();
-        db.patch_settings(&patch(&[("terminal.fontSize", Value::from(20))]))
-            .unwrap();
-        db.reset_setting("terminal.fontSize").unwrap();
-        assert_eq!(db.settings().unwrap()["terminal.fontSize"], Value::from(12));
-        // Stored rows are gone, not overwritten with the current default — a
-        // stored default would survive a later change to `defaults()`.
-        let conn = db.lock();
-        let n: i64 = conn
-            .query_row("SELECT count(*) FROM settings", [], |r| r.get(0))
-            .unwrap();
-        assert_eq!(n, 0);
     }
 
     #[test]

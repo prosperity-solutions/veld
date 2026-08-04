@@ -213,9 +213,9 @@ export function NewWorktreeDialog(props: {
  *
  * The choices come from the daemon (`/api/worktree-emoji`) rather than a
  * TypeScript copy, because the same list is the server-side allowlist. Glyphs
- * already in use elsewhere stay selectable — the assigner keeps them unique,
- * but an explicit choice is the user's to make — and are only labelled, so
- * the ambiguity is visible before it's created.
+ * already in use by another checkout of the same repo stay selectable — the assigner
+ * avoids duplicates within a repo, but an explicit choice is the user's to make —
+ * and are only labelled, so the ambiguity is visible before it's created.
  */
 export function ChangeMarkerDialog(props: {
   current: string;
@@ -224,8 +224,12 @@ export function ChangeMarkerDialog(props: {
   /** Identifies "this worktree" among the holders — aliases can't, since
    *  they are unique only within one repo. */
   worktreeId: number;
-  /** emoji → every worktree holding it, across all projects. */
+  /** emoji → the worktree's own repo siblings holding it. Scoped to one repo
+   *  because the assigner is: a glyph repeating across repos is expected, not a
+   *  collision, and the rail only ever renders one repo. */
   usedBy: Record<string, EmojiHolder[]>;
+  /** The same, for the colour face — so both halves of a marker warn alike. */
+  colorUsedBy: Record<string, EmojiHolder[]>;
   /** Which face the rail is currently rendering, so the dialog can say which
    *  half of the choice is the one being shown right now. Both halves stay
    *  editable regardless — see the note at the bottom of the dialog. */
@@ -291,6 +295,14 @@ export function ChangeMarkerDialog(props: {
             <div className="swatch-grid">
               {colors.map((color) => {
                 const isCurrent = color === props.currentColor;
+                // Same treatment as the glyph grid. It matters more here: eight
+                // colours against a repo that can hold more checkouts than that
+                // means a within-repo duplicate is likely, and within-repo is the
+                // only scope where distinctness is claimed.
+                const others = (props.colorUsedBy[color] ?? []).filter(
+                  (h) => h.id !== props.worktreeId,
+                );
+                const taken = others.map((h) => h.alias).join(", ");
                 return (
                   <button
                     key={color}
@@ -298,8 +310,19 @@ export function ChangeMarkerDialog(props: {
                     className={`swatch-cell${isCurrent ? " current" : ""}`}
                     disabled={busy !== null}
                     aria-pressed={isCurrent}
-                    aria-label={`Colour ${color}${isCurrent ? " — current" : ""}`}
-                    title={isCurrent ? `Current (${color})` : color}
+                    aria-label={
+                      taken
+                        ? `Colour ${color} — in use by ${taken}`
+                        : `Colour ${color}${isCurrent ? " — current" : ""}`
+                    }
+                    title={
+                      [
+                        isCurrent ? "Current" : color,
+                        taken ? `In use by ${taken}` : "",
+                      ]
+                        .filter(Boolean)
+                        .join(" · ") || undefined
+                    }
                     onClick={() => void pick(color, { marker_color: color })}
                   >
                     {busy === color ? (
@@ -307,6 +330,7 @@ export function ChangeMarkerDialog(props: {
                     ) : (
                       <span style={{ background: color }} />
                     )}
+                    {taken && <span className="emoji-taken" />}
                   </button>
                 );
               })}
@@ -364,8 +388,8 @@ export function ChangeMarkerDialog(props: {
         )}
         <ErrorText error={error} />
         <Text size="xs" c="dimmed">
-          A dot marks a glyph another worktree already uses. Picking it is
-          allowed — the rail just won&apos;t identify them apart.
+          A dot marks a colour or glyph another checkout of this repo already uses.
+          Picking it is allowed — the rail just won&apos;t identify them apart.
         </Text>
         <Text size="xs" c="dimmed">
           Both halves are always saved, so you can set the one you aren&apos;t

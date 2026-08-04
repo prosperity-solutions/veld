@@ -219,7 +219,13 @@ impl Db {
                             params![emoji, id],
                         )?;
                     }
-                    if !is_worktree_color(&cur_color) {
+                    // `is_empty()`, not `!is_worktree_color(...)`, so the two
+                    // faces behave alike. Testing validity would overwrite any
+                    // value *this* binary does not recognise — and the palette doc
+                    // promises widening the validator (`#rrggbbaa`, a named colour)
+                    // is "a UI addition, not a schema change", so an older daemon's
+                    // next sync would silently repaint every hand-picked marker.
+                    if cur_color.is_empty() {
                         let color = pick_color(&tx, &root, &d.branch)?;
                         tx.execute(
                             "UPDATE worktrees SET marker_color = ?1 WHERE id = ?2",

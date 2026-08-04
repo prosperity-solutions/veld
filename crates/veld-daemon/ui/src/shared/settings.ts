@@ -107,7 +107,8 @@ export function terminalPrefs(doc: SettingsDoc): TerminalPrefs {
  *
  * Only ever consulted by DOM renderers. The two OS-level text contexts — the
  * native tray menu label and the window title — always use the glyph, because a
- * colour has no textual form; see `markerGlyph`.
+ * colour has no textual form. That rule lives where it is applied, in
+ * `desktop/src/main.js`'s tray label.
  */
 export function markerStyle(doc: SettingsDoc): MarkerStyle {
   return oneOf(

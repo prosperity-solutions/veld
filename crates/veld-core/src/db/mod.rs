@@ -25,10 +25,7 @@ mod stats;
 mod worktrees;
 
 pub use logs::{LogFilter, LogRow, LogStream, stream_is_per_node};
-pub use settings::{
-    DEFAULT_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES, MIN_DETACH_GRACE_MINUTES, SCOPE_GLOBAL,
-    SettingKey, defaults as setting_defaults,
-};
+pub use settings::DEFAULT_DETACH_GRACE_MINUTES;
 pub use worktrees::{
     DiscoveredWorktree, RepoRecord, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeRecord, default_alias,
     is_worktree_color, is_worktree_emoji,

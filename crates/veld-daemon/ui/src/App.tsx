@@ -177,7 +177,8 @@ const PENDING_TTL_MS = 60_000;
  *
  * Deliberately not used for the OS window title or the native tray menu — those
  * are plain strings handed to the OS, where a CSS custom property means nothing.
- * They take the glyph unconditionally; see `markerGlyph`.
+ * They take the glyph unconditionally; the rule is stated in `desktop/src/main.js`,
+ * where the label is built.
  */
 function WorktreeMark(props: {
   settings: SettingsDoc | null;
@@ -862,16 +863,28 @@ function AppInner(props: {
    * checked out on `main` — the default case — would otherwise let the picker
    * mistake another project's glyph for the current worktree's own.
    */
-  const emojiUsedBy = useMemo(() => {
-    const used: Record<string, EmojiHolder[]> = {};
-    for (const r of repos) {
-      for (const w of r.worktrees) {
-        if (!w.emoji) continue;
-        (used[w.emoji] ??= []).push({ id: w.id, alias: w.alias });
-      }
+  /**
+   * Both marker faces, and which of the *selected worktree's own repo* siblings
+   * hold each one.
+   *
+   * **Scoped to one repo**, which changed with the assigner: `pick_emoji` and
+   * `pick_color` probe per repo now, so a glyph repeating across repos is the
+   * expected result rather than a collision — `markers_may_repeat_across_repos`
+   * pins it for the common two-repos-on-`main` case. Aggregating globally made the
+   * picker warn about duplicates the assigner itself manufactures, and which the
+   * rail can never show, because the rail renders one repo at a time.
+   */
+  const markerUsedBy = useMemo(() => {
+    const emoji: Record<string, EmojiHolder[]> = {};
+    const color: Record<string, EmojiHolder[]> = {};
+    const repo = repos.find((r) => r.root === activeRepoRoot);
+    for (const w of repo?.worktrees ?? []) {
+      const holder = { id: w.id, alias: w.alias };
+      if (w.emoji) (emoji[w.emoji] ??= []).push(holder);
+      if (w.marker_color) (color[w.marker_color] ??= []).push(holder);
     }
-    return used;
-  }, [repos]);
+    return { emoji, color };
+  }, [repos, activeRepoRoot]);
 
   const { showContextMenu } = useContextMenu();
   /**
@@ -2084,7 +2097,8 @@ function AppInner(props: {
           currentColor={dialog.worktree.marker_color}
           alias={dialog.worktree.alias}
           worktreeId={dialog.worktree.id}
-          usedBy={emojiUsedBy}
+          usedBy={markerUsedBy.emoji}
+          colorUsedBy={markerUsedBy.color}
           style={markerStyle(settings ?? {})}
           onClose={closeDialog}
           onPick={async (patch) => {
