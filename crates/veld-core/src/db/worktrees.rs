@@ -269,21 +269,23 @@ impl Db {
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
                     .optional()?;
-                // A trashed worktree is still a real `git worktree` until
-                // `git worktree remove` runs, so it is still in `discovered` and
-                // the DELETE above deliberately spared it. Leave the row exactly
-                // as the trash request left it: updating `branch` here would be
-                // harmless, but backfilling a marker onto a row that is about to
-                // be deleted is pure write amplification, and the guard is the
-                // one place that documents why the row is being skipped.
+                // Trashed rows are updated like any other, and that is deliberate.
                 //
-                // The mirror case needs no code: once removal succeeds the path
-                // leaves `discovered`, and the DELETE above reaps the row on the
-                // next pass. That is also what makes recovery idempotent — a
-                // re-run of an already-completed removal cannot leave a stray row.
-                if existing.as_ref().is_some_and(|(_, t)| !t.is_empty()) {
-                    continue;
-                }
+                // A worktree in the trash is still a real `git worktree` — the
+                // checkout stays on disk for the whole retention period, which
+                // defaults to "until the user empties it", i.e. possibly forever. An
+                // earlier version skipped these rows to avoid writing to something
+                // "about to be deleted"; with an unbounded retention that reasoning
+                // does not hold, and the cost was that a branch switch made inside a
+                // trashed checkout stayed invisible for as long as it sat there.
+                //
+                // Nothing here clears `trashed_at`, so the row cannot be resurrected
+                // by a poll. The anti-resurrection property comes from the DELETE
+                // above sparing it: its path is still in `discovered`, because the
+                // checkout is still there. And the mirror case needs no code either —
+                // once the deletion runs, the path leaves `discovered` and that same
+                // DELETE reaps the row, which is what makes a re-run of an
+                // already-completed deletion idempotent.
                 if let Some((id, _)) = existing {
                     // **Only columns derived from git belong in this UPDATE.**
                     // It runs on every discovery poll (every few seconds), so a
@@ -935,23 +937,6 @@ impl Db {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Worktrees eligible for auto-eviction: idle for at least `older_than_secs`,
-    /// not the main checkout, not already trashed, and with no live run.
-    ///
-    /// "Idle" is measured from the most recent run in the worktree, falling back to
-    /// `created_at` for one that has never been started — never from the
-    /// filesystem, because a build artifact's mtime is not evidence a human was
-    /// there. A worktree with a **live** run is excluded outright rather than by
-    /// timestamp: a run started before the cutoff and still going is the clearest
-    /// possible evidence the checkout is in use, and comparing its start time would
-    /// evict exactly the long-running server the user left up.
-    ///
-    /// Runs join to a worktree through `environments.project_root = worktrees.path`
-    /// — the same path equality the rest of the registry uses.
-    ///
-    /// Returns candidates only. Eviction marks them trashed and lets
-    /// `git worktree remove` refuse a dirty or locked checkout; nothing here
-    /// deletes anything, and nothing here bypasses git's own safety checks.
     /// Trashed worktrees whose retention period has expired, oldest request first.
     ///
     /// The GC pass hands these to the background remover. `retention_secs` comes from
@@ -2093,6 +2078,41 @@ mod tests {
         db.sync_worktrees(root, &[wt("/tmp/trash", "main", true)])
             .unwrap();
         assert!(db.get_worktree(id).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_trashed_worktree_still_tracks_its_branch() {
+        // The checkout stays on disk for the whole retention period, which defaults
+        // to "until emptied" — so skipping the update for trashed rows meant a branch
+        // switch made inside one was invisible in the rail indefinitely.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/track");
+        db.upsert_repo(root, "track").unwrap();
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/track", "main", true),
+                wt("/tmp/wt", "before", false),
+            ],
+        )
+        .unwrap();
+        let id = db.get_worktree_by_path("/tmp/wt").unwrap().unwrap().id;
+        db.trash_worktree(id).unwrap();
+
+        db.sync_worktrees(
+            root,
+            &[
+                wt("/tmp/track", "main", true),
+                wt("/tmp/wt", "after", false),
+            ],
+        )
+        .unwrap();
+        let row = db.get_worktree(id).unwrap().unwrap();
+        assert_eq!(row.branch, "after", "a trashed row still follows git");
+        assert!(
+            !row.trashed_at.is_empty(),
+            "and updating it must not take it out of the trash"
+        );
     }
 
     #[test]

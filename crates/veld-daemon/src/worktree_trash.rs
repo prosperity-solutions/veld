@@ -33,7 +33,7 @@
 //! next daemon start.
 
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -55,6 +55,57 @@ const STOP_POLL: Duration = Duration::from_secs(1);
 /// Sender into the worker task. `None` until [`spawn`] runs (tests and the CLI
 /// link this crate without starting the daemon's tasks).
 static QUEUE: OnceLock<mpsc::UnboundedSender<i64>> = OnceLock::new();
+
+/// Worktrees whose deletion is past the point of no return.
+///
+/// Restoring is a real undo for the whole retention period — but not once
+/// `git worktree remove` has started, because at that point the directory is going
+/// away and no database write can bring it back. Without this, a restore issued in
+/// that window returned `200` with a live-looking row and the checkout vanished
+/// moments later anyway: the one outcome this module promises cannot happen.
+/// Re-reading `trashed_at` before the removal (which is also done) cannot close it,
+/// since the race is *with* the removal rather than before it.
+///
+/// So the window is made visible instead of pretended away: [`is_deleting`] lets the
+/// restore handler answer "too late" honestly. In-memory is the right scope — one
+/// daemon owns both the worker and the handler.
+static DELETING: Mutex<Option<std::collections::HashSet<i64>>> = Mutex::new(None);
+
+/// Whether a deletion for this worktree has passed the point where restoring can
+/// still work.
+pub fn is_deleting(worktree_id: i64) -> bool {
+    DELETING
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .is_some_and(|set| set.contains(&worktree_id))
+}
+
+/// Marks a worktree as being deleted, and un-marks it on drop.
+///
+/// A guard rather than paired calls because every early return between the mark and
+/// the end of `process` would otherwise have to remember to clear it, and one that
+/// forgot would wedge the worktree as un-restorable until the daemon restarted.
+struct DeletingGuard(i64);
+
+impl DeletingGuard {
+    fn claim(id: i64) -> Self {
+        DELETING
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(std::collections::HashSet::new)
+            .insert(id);
+        Self(id)
+    }
+}
+
+impl Drop for DeletingGuard {
+    fn drop(&mut self) {
+        if let Some(set) = DELETING.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+            set.remove(&self.0);
+        }
+    }
+}
 
 /// Ask the worker to process a trashed worktree now.
 ///
@@ -167,6 +218,12 @@ async fn process(id: i64) {
         return;
     }
 
+    // Claimed before the final re-read, which is what makes the two possible
+    // interleavings both correct: a restore that landed first is seen by the re-read
+    // below and aborts the deletion, and one that arrives after this line is told
+    // "too late" by `is_deleting` rather than being silently overruled.
+    let _deleting = DeletingGuard::claim(id);
+
     // Re-read the intent immediately before the destructive step.
     //
     // `stop_runs` above can take up to STOP_TIMEOUT, and `git worktree remove` is
@@ -258,6 +315,12 @@ async fn stop_runs(db: &Db, path: &str) -> Result<(), String> {
 ///
 /// Called from the GC pass. Returns how many were queued.
 ///
+/// The GC scheduler is spawned before the server that calls [`spawn`], and tokio's
+/// `interval` fires its first tick immediately, so the first pass after a daemon
+/// start can run before `QUEUE` exists and every `enqueue` here is a no-op. That is
+/// harmless rather than a lost purge: [`recover`] re-enqueues every trashed row when
+/// the worker does start, expired ones included, so the delay is milliseconds.
+///
 /// This is the **only** thing that deletes a checkout the user has not asked about
 /// twice, and it is opt-in: `worktree.trashRetentionDays` defaults to zero, which
 /// means "keep until I empty it" and makes this a no-op. When it is set, everything
@@ -290,4 +353,42 @@ pub fn purge_expired_trash(db: &Db) -> usize {
         enqueue(wt.id);
     }
     expired.len()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The residual half of the restore race, and why `is_deleting` exists.
+    ///
+    /// Re-reading `trashed_at` before `git worktree remove` closes the window
+    /// *before* the removal; it cannot close the window *during* it, because once git
+    /// has deleted the directory no database write brings it back. So a restore in
+    /// that window has to be refused rather than granted and then silently overruled.
+    #[test]
+    fn a_worktree_being_deleted_is_reported_as_such_until_the_guard_drops() {
+        assert!(!is_deleting(41), "nothing is being deleted yet");
+        {
+            let _guard = DeletingGuard::claim(41);
+            assert!(is_deleting(41));
+            assert!(!is_deleting(42), "and only that worktree");
+        }
+        // Released on drop, so an early return anywhere in `process` cannot wedge a
+        // worktree as permanently un-restorable.
+        assert!(!is_deleting(41));
+    }
+
+    #[test]
+    fn claiming_the_same_worktree_twice_is_harmless() {
+        let outer = DeletingGuard::claim(7);
+        {
+            let _inner = DeletingGuard::claim(7);
+            assert!(is_deleting(7));
+        }
+        // The set is keyed by id, so the inner guard's drop clears it while the outer
+        // one is still alive. Acceptable because a worktree is only ever processed by
+        // the single serial worker — recorded so nobody relies on nesting.
+        drop(outer);
+        assert!(!is_deleting(7));
+    }
 }

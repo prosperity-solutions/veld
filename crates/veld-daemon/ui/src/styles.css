@@ -314,7 +314,7 @@ select:focus {
 /* Expanded width is set inline from the per-window preference; this is only the
    fallback for a window that has never been sized (and for a browser tab, which
    has no window slot). The transition is on width, so a drag would animate
-   against the pointer — it is suppressed while dragging via .rail-resizing. */
+   against the pointer — it is suppressed while dragging via `.rail.resizing`. */
 .rail.wide {
   width: 236px;
   position: relative;

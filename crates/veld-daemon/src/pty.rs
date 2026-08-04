@@ -929,6 +929,18 @@ async fn mint_ticket(
             err(StatusCode::INTERNAL_SERVER_ERROR, "database error")
         })?
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "worktree not found"))?;
+    // No new shells in a checkout that is in the trash. It is still a real directory
+    // for the whole retention period, so nothing stops a URL or a direct API call
+    // from opening a terminal in one — and `stop_runs` only quiesces the `runs`
+    // table, so the eventual `git worktree remove` would delete the directory out
+    // from under that shell with no warning at all. The rail already refuses to
+    // select a trashed worktree; this is the same rule where it is enforceable.
+    if !wt.trashed_at.is_empty() {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is in the trash — restore it first",
+        ));
+    }
 
     // A live session is claimed by the worktree it was started in. Without
     // this check a pane could name another worktree's session and adopt a

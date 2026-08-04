@@ -98,8 +98,8 @@ export function SettingsDialog(props: {
   const [scrollback, setScrollback] = useState<number | string>(term.scrollback);
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
-  const evictValue = trashRetentionDays(settings ?? {});
-  const [evict, setEvict] = useState<number | string>(evictValue);
+  const retentionValue = trashRetentionDays(settings ?? {});
+  const [retention, setRetention] = useState<number | string>(retentionValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
   // Availability is probed against the DOM, so compute it once per open rather
   // than on every render — the list cannot change while the dialog is up.
@@ -120,7 +120,7 @@ export function SettingsDialog(props: {
     setScrollback(term.scrollback);
     setFontFamily(term.fontFamily);
     setGrace(graceValue);
-    setEvict(evictValue);
+    setRetention(retentionValue);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings]);
 
@@ -207,19 +207,19 @@ export function SettingsDialog(props: {
                  offering a range the server refuses is a #204 review finding. */
               max={365}
               step={7}
-              value={evict}
+              value={retention}
               disabled={locked}
               /* Zero is "keep until I empty it", so it must be reachable — and it
                  is what the placeholder says an empty box means. */
               placeholder="keep"
-              suffix={typeof evict === "number" && evict > 0 ? " days" : ""}
-              onChange={setEvict}
+              suffix={typeof retention === "number" && retention > 0 ? " days" : ""}
+              onChange={setRetention}
               onBlur={() =>
                 commitNumber(
                   "worktree.trashRetentionDays",
-                  evict,
-                  evictValue,
-                  setEvict,
+                  retention,
+                  retentionValue,
+                  setRetention,
                 )
               }
               onKeyDown={(e) => {

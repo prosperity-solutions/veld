@@ -352,9 +352,10 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
             StatusCode::CONFLICT,
             format!("another checkout of this repo is already called \"{alias}\""),
         ),
-        // The main-checkout refusal moved into the DB layer with `trash_worktree`
-        // so that eviction and the HTTP path cannot disagree about it. Keeping the
-        // 400 here preserves the status the UI already handles.
+        // The main-checkout refusal lives in the DB layer (`trash_worktree`) rather
+        // than in this handler, so every path that can bin a worktree inherits it
+        // instead of each one having to remember. Keeping the 400 here preserves the
+        // status the UI already handles.
         veld_core::db::DbError::RefusingMainWorktree => err(
             StatusCode::BAD_REQUEST,
             "refusing to remove the main checkout",
@@ -1176,6 +1177,16 @@ async fn delete_worktree(
 /// why it reports whether the row was there rather than assuming it was.
 async fn restore_worktree(Path(id): Path<i64>) -> Result<Json<WorktreeView>, ApiError> {
     let db = open_desktop_db()?;
+    // Refuse rather than lie. Once `git worktree remove` has started, the directory
+    // is going and no database write brings it back — so clearing `trashed_at` here
+    // would hand back a live-looking row for a checkout that disappears moments
+    // later, which is exactly the silent loss the trash exists to prevent.
+    if super::worktree_trash::is_deleting(id) {
+        return Err(err(
+            StatusCode::CONFLICT,
+            "this worktree is already being deleted",
+        ));
+    }
     db.untrash_worktree(id, "").map_err(db_err)?;
     let wt = db
         .get_worktree(id)
