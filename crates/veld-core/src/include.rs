@@ -89,13 +89,14 @@ pub struct Document {
     #[serde(default)]
     pub nodes: Option<HashMap<String, NodeConfig>>,
 
-    /// **Reserved, parsed and held, never executed** (F8). See
+    /// **Reserved and held.** `hooks` is never executed; under `ide` everything
+    /// except `quicklinks` and `permissions` is never rendered (F8). See
     /// [`crate::config::VeldConfig::hooks`].
     #[serde(default)]
     pub hooks: Option<serde_json::Value>,
     /// **Reserved, parsed and held, never executed** (F8).
     #[serde(default)]
-    pub ui: Option<serde_json::Value>,
+    pub ide: Option<serde_json::Value>,
 
     /// Every top-level key that is not one of the above.
     ///
@@ -402,7 +403,7 @@ fn merge(
     let mut setup: Vec<SetupStep> = Vec::new();
     let mut teardown: Vec<SetupStep> = Vec::new();
     let mut hooks: Option<serde_json::Value> = None;
-    let mut ui: Option<serde_json::Value> = None;
+    let mut ide: Option<serde_json::Value> = None;
 
     // Project-level singletons come from the root file, which is docs[0].
     let root = &docs[0].1;
@@ -489,8 +490,8 @@ fn merge(
         if let Some(h) = &doc.hooks {
             merge_reserved(&mut hooks, h);
         }
-        if let Some(u) = &doc.ui {
-            merge_reserved(&mut ui, u);
+        if let Some(u) = &doc.ide {
+            merge_reserved(&mut ide, u);
         }
     }
 
@@ -514,13 +515,14 @@ fn merge(
         teardown: (!teardown.is_empty()).then_some(teardown),
         nodes,
         hooks,
-        ui,
+        ide,
         loaded_from_multiple_files: false,
         deferred_findings: Vec::new(),
     }
 }
 
-/// Shallow-merge two reserved (`hooks` / `ui`) objects by top-level key.
+/// Merge two `hooks` / `ide` objects by top-level key: arrays concatenate, and
+/// anything else is replaced by the later file.
 ///
 /// Reserved namespaces are opaque to this version, so the merge is deliberately
 /// dumb: enough that several files can each contribute entries, with no attempt
@@ -529,7 +531,31 @@ fn merge_reserved(into: &mut Option<serde_json::Value>, add: &serde_json::Value)
     match (into.as_mut(), add) {
         (Some(serde_json::Value::Object(target)), serde_json::Value::Object(source)) => {
             for (k, v) in source {
-                target.insert(k.clone(), v.clone());
+                match (target.get_mut(k), v) {
+                    // **Arrays concatenate; everything else is last-wins.**
+                    //
+                    // Replacing by key was safe while both namespaces were opaque:
+                    // overwriting a blob nobody interpreted lost nothing that had
+                    // meaning. It stopped being safe the moment `ide.quicklinks`
+                    // and `ide.permissions` became real — a `veld.d/*.jsonc` that
+                    // declared either one silently discarded the root file's whole
+                    // list, `deny` rules included, which is fail-*open* for a
+                    // permission. And splitting config across files is exactly
+                    // what `include` is for, so that is the shape people reach
+                    // for: `veld.d/ide.jsonc` is the obvious place to put this.
+                    //
+                    // Concatenation in file order is the semantic a list wants,
+                    // and it is safe for permissions specifically because `deny`
+                    // beats `allow` across *all* matching rules — so a rule
+                    // arriving from another file can tighten the result but never
+                    // loosen one already written.
+                    (Some(serde_json::Value::Array(existing)), serde_json::Value::Array(extra)) => {
+                        existing.extend(extra.iter().cloned());
+                    }
+                    _ => {
+                        target.insert(k.clone(), v.clone());
+                    }
+                }
             }
         }
         _ => *into = Some(add.clone()),
@@ -1019,7 +1045,7 @@ mod tests {
     fn every_root_only_key_is_reported_in_an_included_file() {
         // Keys that legitimately merge per entry, so they may appear anywhere.
         const MERGES: &[&str] = &[
-            "nodes", "presets", "vars", "env", "setup", "teardown", "hooks", "ui",
+            "nodes", "presets", "vars", "env", "setup", "teardown", "hooks", "ide",
         ];
         // Structural keys, handled before this check: `include` is only read from
         // the root, and the version/name/schema of the document itself are the
@@ -1060,7 +1086,7 @@ mod tests {
         }
     }
 
-    /// `hooks` and `ui` are reserved, so they parse anywhere — and are not
+    /// `hooks` and `ide` are reserved, so they parse anywhere — and are not
     /// executed (F8).
     #[test]
     fn reserved_namespaces_parse_and_round_trip() {
@@ -1071,14 +1097,76 @@ mod tests {
                 r#"{ "hooks": { "worktree.created": [ { "argv": ["./setup.sh"] } ] } }"#,
             ),
             (
-                "veld.d/ui.jsonc",
-                r#"{ "ui": { "my-ext": { "title": "Mine", "panel": "p" } } }"#,
+                "veld.d/ide.jsonc",
+                r#"{ "ide": { "my-ext": { "title": "Mine", "panel": "p" } } }"#,
             ),
         ]);
         let loaded = load(&dir.path().join("veld.json")).unwrap();
         let hooks = loaded.config.hooks.as_ref().expect("hooks are held");
         assert!(hooks.get("worktree.created").is_some());
-        assert!(loaded.config.ui.as_ref().unwrap().get("my-ext").is_some());
+        assert!(loaded.config.ide.as_ref().unwrap().get("my-ext").is_some());
+    }
+
+    /// Splitting `ide` across files must **add** to the lists, not replace them.
+    ///
+    /// The regression this pins is fail-open: while `ide` was opaque, an included
+    /// file overwriting a key lost a blob nobody read. Once `permissions` became
+    /// real, the same code silently discarded the root file's rules — `deny`
+    /// included — the moment any `veld.d/*.jsonc` mentioned the key. And
+    /// `include` is precisely what a project reaches for to keep IDE settings in
+    /// their own file, so this is the ordinary path, not an exotic one.
+    #[test]
+    fn an_included_file_extends_the_ide_lists_rather_than_replacing_them() {
+        let dir = project(&[
+            ("veld.json", ROOT_WITH_INCLUDE),
+            (
+                "veld.d/a-root-ish.jsonc",
+                r#"{ "ide": {
+                    "quicklinks": [ { "label": "Root", "url": "https://root.example" } ],
+                    "permissions": [ { "origin": "https://*.veld.localhost:*", "deny": ["camera"] } ],
+                    "my-ext": { "title": "First" }
+                } }"#,
+            ),
+            (
+                "veld.d/b-more.jsonc",
+                r#"{ "ide": {
+                    "quicklinks": [ { "label": "More", "url": "https://more.example" } ],
+                    "permissions": [ { "origin": "http://localhost:*", "allow": ["geolocation"] } ],
+                    "my-ext": { "title": "Second" }
+                } }"#,
+            ),
+        ]);
+        let section = load(&dir.path().join("veld.json"))
+            .unwrap()
+            .config
+            .ide_section();
+        assert!(section.problems.is_empty(), "{:?}", section.problems);
+
+        // Both files' entries survive, in file order.
+        let labels: Vec<&str> = section
+            .quicklinks
+            .iter()
+            .map(|q| q.label.as_str())
+            .collect();
+        assert_eq!(labels, vec!["Root", "More"]);
+        assert_eq!(section.permissions.len(), 2);
+        // The `deny` from the first file is still there — losing it was the
+        // fail-open half of this bug.
+        assert_eq!(section.permissions[0].deny, vec!["camera"]);
+
+        // A non-array key stays last-wins: `ide` is opaque apart from the two
+        // interpreted lists, and veld has no idea how to combine an extension's blob.
+        let raw = section_raw(&dir);
+        assert_eq!(raw["my-ext"]["title"], "Second");
+    }
+
+    /// The raw `ide` value, for asserting on the parts veld does not interpret.
+    fn section_raw(dir: &tempfile::TempDir) -> serde_json::Value {
+        load(&dir.path().join("veld.json"))
+            .unwrap()
+            .config
+            .ide
+            .expect("an ide section")
     }
 
     /// `config_hash` must change when **any** loaded file changes, or

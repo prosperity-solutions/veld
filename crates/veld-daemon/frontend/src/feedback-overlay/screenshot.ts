@@ -86,6 +86,26 @@ export function clampToFrame(x: number, y: number, w: number, h: number): { x: n
 }
 
 /**
+ * A capture failure the reader can act on.
+ *
+ * The two `catch` blocks below used to discard the error entirely, which made
+ * every distinct cause read as one sentence: a permission the user denied, a
+ * constraint the browser could not satisfy, an embedder with no picker wired up,
+ * and a track that died all surfaced as "Screen capture denied". That is one
+ * message for four different fixes — and inside a Veld Desktop browser pane,
+ * where the embedder answers the permission, it sent the reader looking in
+ * exactly the wrong place. `DOMException.name` is the discriminator, so it goes
+ * in the toast, and the whole error goes to the console for anything the name
+ * does not cover.
+ */
+function captureFailure(prefix: string, error: unknown): string {
+  console.error("[veld] screen capture failed", error);
+  const name =
+    error && typeof error === "object" && "name" in error ? String(error.name) : "";
+  return name ? `${prefix} (${name})` : prefix;
+}
+
+/**
  * Acquire a screen-capture stream. Chromium's `preferCurrentTab` /
  * `displaySurface` hints bias the picker toward the current tab.
  */
@@ -157,10 +177,10 @@ export function beginScreenshotCapture(): void {
             frozenBitmap = bitmap;
             showFrozenFrame(bitmap);
           })
-          .catch(() => failCapture("Screen capture failed"));
+          .catch((error: unknown) => failCapture(captureFailure("Screen capture failed", error)));
       });
     })
-    .catch(() => failCapture("Screen capture denied"));
+    .catch((error: unknown) => failCapture(captureFailure("Screen capture denied", error)));
 }
 
 /**

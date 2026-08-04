@@ -1123,7 +1123,7 @@ Glob syntax: `*` matches within one path segment, `?` one character, `**` across
 segments. Dotfiles are not matched by a bare `*`. Matches load in sorted order, so
 errors are deterministic.
 
-`vars`, `presets`, `env`, `setup`, `teardown`, `hooks`, and `ui` may appear in any
+`vars`, `presets`, `env`, `setup`, `teardown`, `hooks`, and `ide` may appear in any
 file. Other project-level settings (`url_template`, `default_preset`, `features`,
 `proxy`, `sharing`, `client_log_levels`) are read from the root file. So a preset
 may be declared in any file, but which one is the default is decided in one
@@ -1483,11 +1483,191 @@ already lost its leading zero, so it is refused rather than guessed at.
 
 ---
 
-## Reserved: `hooks` and `ui`
+## `ide`: quicklinks and permissions
+
+`ide` is where a project configures Veld's own IDE surfaces — Veld Desktop and
+the `/ide` view in a browser. Two keys under it are interpreted; the rest of
+`ide` stays reserved and opaque (see
+[below](#reserved-hooks-and-the-rest-of-ide)), so a JSON-defined IDE extension is
+free to use whatever shape it likes.
+
+The key was spelled `ui` while it was wholly reserved and was renamed here, in
+the release that first gave it a meaning — a top-level key rename is breaking, so
+there was no later chance at it. A config still using `ui` gets an
+`unknown-top-level-key` error naming the rename; nothing else changes.
+
+Nothing here is required, and nothing here affects a run. A project without an
+`ide` section behaves exactly as before.
+
+### `ide.quicklinks`
+
+The links that are *not* veld's. A browser pane with no page yet is the run's
+start page and lists the URLs veld made; these are the ones it didn't — staging,
+a dashboard, an internal wiki — shown beside them. Shipping a hardcoded set of
+those would be an opinion no tool should have, so they come from the project and
+are versioned and shared with the repo.
+
+```jsonc
+"ide": {
+  "quicklinks": [
+    { "label": "Staging", "url": "https://staging.example.com" },
+    { "label": "Grafana", "url": "https://grafana.internal" }
+  ]
+}
+```
+
+`url` must be `http://` or `https://`. Other schemes are refused: a quicklink is
+a repo-controlled string that a click hands to the OS, and `vscode://` or
+`file://` would make a config file a launcher for whatever the machine has
+registered. Literal only — `${...}` is **not** interpolated here, because the
+start page is rendered with no run to resolve against.
+
+### `ide.permissions`
+
+Browser permissions the project pre-answers for web content shown in a Veld
+Desktop browser pane. A dev server that needs geolocation, a camera, or clipboard
+read then works for everyone who clones the repo instead of prompting each of
+them — and, because Electron's permission *check* is synchronous and cannot
+prompt, it is also the only way `navigator.permissions.query()` reports anything
+but `denied` before a feature has been used once.
+
+```jsonc
+"ide": {
+  "permissions": [
+    // Veld's own URLs — almost certainly the ones you mean. They are
+    // {service}.{run}.{project}.localhost, so BOTH wildcards are needed: the run
+    // name sits in the hostname, and the port is 18443 on a no-sudo install.
+    { "origin": "https://*.myproject.localhost:*", "allow": ["geolocation", "clipboard-read"] },
+    // A server veld does not route — its port moves, its host does not.
+    { "origin": "http://localhost:*", "allow": ["clipboard-read"] },
+    { "origin": "https://staging.example.com", "deny": ["display-capture"] }
+  ]
+}
+```
+
+> **The first rule is the one to copy.** A pane showing one of your run's
+> services is at `{service}.{run}.{project}.localhost` — *not* at `localhost`. A
+> rule written `http://localhost:*` is perfectly valid, lints clean, and matches
+> a veld-served pane never; it is right only for something you started outside
+> veld's routing.
+
+**Origins.** A bare `scheme://host[:port]`, http or https, with no path.
+
+A leading `*.` on the host matches **any subdomain, at any depth**. That form is
+not a convenience — it is the only way to name veld's own URLs, which are
+`{service}.{run}.{project}.localhost` by default and therefore carry the **run
+name in the hostname**. Run names come from the worktree folder, the branch, or
+`--name`, so a pinned hostname is a rule that works for exactly one run:
+
+```jsonc
+{ "origin": "https://*.veld.localhost:*", "allow": ["notifications"] }
+// matches website.my-feature.veld.localhost, api.other-run.veld.localhost, …
+```
+
+**Write `:*` for veld's own URLs**, as above. An omitted port means the scheme's
+*default* port (see below), and only a **privileged** install serves on 443 —
+`veld setup unprivileged`, the no-sudo default, uses **18443**. A rule written
+`https://*.veld.localhost` therefore matches nothing on that install, and nothing
+tells you: the grant is simply never applied.
+
+The rules around it, each of which exists to stop a specific mistake:
+
+- The `*` is legal **only as the leading label**. `web*.example.com`, `a.*.b.com`
+  and a wildcard on an IP literal are all refused rather than interpreted.
+- Matching is **label-wise**: `*.veld.localhost` does not match
+  `evilveld.localhost`. It also does not match `veld.localhost` itself — write the
+  apex as its own rule if you want it.
+- A wildcard over a **single label** is refused, because `*.com` or `*.dev` is a
+  whole top-level domain and never what anyone meant. `*.localhost` is the
+  deliberate exception: RFC 6761 pins it to the local machine. This is not a
+  public-suffix list and does not pretend to be one — `*.co.uk` passes. It catches
+  the mistake people actually make.
+- The **port** may be `*` for "any port". An **omitted** port means the scheme's
+  default port, so `http://example.com` is port 80 exactly and not "any port on
+  that host".
+
+**Precedence**, highest first:
+
+1. **The user's own answer**, given at a prompt or in the pane's per-site panel.
+   It wins over this file in *both* directions — someone who blocks the camera at
+   a config-granted origin stays blocked, or the panel that offered them the
+   switch was decorative.
+2. **This file.** `deny` beats `allow`, across separate matching rules as well as
+   within one: two rules can match the same origin, and the safe reading of a
+   config that says both things is the restrictive one.
+3. **Veld's defaults** (below).
+
+**Defaults**, which is what "no rule matches" means:
+
+| Permission | Default | Why |
+|---|---|---|
+| `fullscreen`, `pointer-lock` | **allow** | Every browser grants these on a user gesture without asking, and both are reversible with Escape. Prompting would make a pane worse than the browser it embeds. **`keyboard-lock` is deliberately not here** — capturing Escape is what it does, so the justification does not extend to it |
+| `display-capture` | **allow at an origin veld serves**, otherwise ask | A pane only ever captures *its own frame*, which is what `preferCurrentTab` asks for — and it is what makes `veld feedback` screenshots work inside a pane. At any other origin it prompts |
+| everything else | **ask** | |
+
+Nothing else is granted behind your back. Two permissions — sanitized clipboard
+*write* and encrypted-media playback — used to be allowed before the policy ran,
+on the reasoning that no browser shows them as a per-site switch. That was wrong
+for this surface: an allow with no row in the panel is one nobody can see and
+nobody can revoke. They are ordinary permissions now (`clipboard-write`,
+`protected-media`) and they ask like everything else.
+
+A `deny` withdraws any of these, including the screen-capture default.
+
+**Understand what a grant is.** An entry for a *remote* origin hands that
+server's JavaScript a standing capability on the machine of anyone who opens it
+in a pane. That is a real step beyond what the rest of a veld config does: a
+config command runs once, locally, as you. Loopback entries are a different
+matter — a config that can already run `argv` on your machine is not meaningfully
+constrained by withholding a camera from its own dev server. Every grant from
+this file is shown in the pane's per-site panel labelled *set by veld.json*, and
+can be revoked there.
+
+**Permission ids** are veld's own, not Electron's. The difference is deliberate
+in one place: Electron reports camera and microphone as a single `media`
+permission, while a per-site panel has to show them as the two switches every
+browser shows.
+
+`camera`, `clipboard-read`, `clipboard-write`, `display-capture`, `file-system`, `fullscreen`,
+`geolocation`, `hid`, `idle-detection`, `keyboard-lock`, `microphone`, `midi`,
+`notifications`, `open-external`, `pointer-lock`, `protected-media`, `serial`,
+`speaker-selection`, `storage-access`, `usb`, `window-management`.
+
+Anything malformed here — an unparseable origin, an unknown id, a wrong-typed
+field — is **dropped and reported by `veld lint` as a warning**, never a load
+error. The dropped entry grants nothing: a permission rule that cannot be
+understood must not be half-applied.
+
+**Browser panes are Veld Desktop only.** A plain browser tab has no panes, so
+nothing under `ide.permissions` applies there — an `<iframe>`'s permissions are
+the embedding document's business, not veld's.
+
+---
+
+### Splitting `ide` across files
+
+`ide` may appear in any file an `include` glob picks up — `veld.d/ide.jsonc` is
+the obvious home for it — and the two interpreted lists **concatenate in file
+order** rather than the later file replacing the earlier one:
+
+```jsonc
+// veld.json          → "include": ["veld.d/*.jsonc"]
+// veld.d/ide.jsonc   → { "ide": { "permissions": [ … ] } }
+```
+
+That matters for `permissions` specifically: `deny` beats `allow` across *all*
+matching rules, so a rule arriving from another file can tighten the result but
+never loosen one already written. Every other key under `ide` stays last-wins,
+because veld does not interpret it and has no idea how to combine two of them.
+
+---
+
+## Reserved: `hooks` and the rest of `ide`
 
 Both are **reserved**: they parse, are stored, and are **not executed by this
 version**. `veld lint` says so, so a hook that does nothing is distinguishable
-from a config mistake.
+from a config mistake. For `ide` the notice now names the specific keys that are
+inert, since `quicklinks` and `permissions` are not.
 
 ```jsonc
 // veld.d/hooks.jsonc

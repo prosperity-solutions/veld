@@ -1,0 +1,40 @@
+{
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
+  "schemaVersion": "3",
+  "name": "ide-section",
+  // The two interpreted parts of `ide`. Everything else under `ide` stays
+  // reserved and opaque — see reserved-namespaces.json for that half.
+  "ide": {
+    "quicklinks": [
+      { "label": "Staging", "url": "https://staging.example.com" },
+      { "label": "Grafana", "url": "https://grafana.internal" }
+    ],
+    "permissions": [
+      // Veld's own URLs carry the RUN NAME in the hostname, and run names change
+      // with the worktree, the branch or --name — so a leading `*.` is how a
+      // project grants a permission to its own dev server. It matches any depth
+      // of subdomain, label-wise.
+      // `:*` as well as `*.` — an unprivileged install serves on 18443, and an
+      // omitted port would mean 443 exactly.
+      { "origin": "https://*.veld.localhost:*", "allow": ["notifications"] },
+      // A dev server's port moves, so `*` is the form worth knowing there. An
+      // omitted port would have meant port 80 exactly.
+      { "origin": "http://localhost:*", "allow": ["geolocation", "clipboard-read"] },
+      { "origin": "http://[::1]:5173", "allow": ["camera", "microphone"] },
+      // `deny` withdraws a default: veld otherwise lets a pane capture its own
+      // contents, which is what makes `veld feedback` screenshots work in a pane.
+      { "origin": "https://staging.example.com", "deny": ["display-capture"] }
+    ]
+  },
+  "nodes": {
+    "web": {
+      "default_variant": "dev",
+      "type": "start_server",
+      "ports": { "http": 5173 },
+      "probes": { "readiness": { "type": "http", "path": "/" } },
+      "variants": {
+        "dev": { "argv": ["node", "server.js"] }
+      }
+    }
+  }
+}

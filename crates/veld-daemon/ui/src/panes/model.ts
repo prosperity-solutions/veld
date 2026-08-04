@@ -14,7 +14,13 @@
  * the React side owns only the state cell and the rendering.
  */
 
-import { type PaneEmulation, sanitizeEmulation, sanitizeZoom } from "./devices";
+import {
+  type PaneEmulation,
+  type PaneMedia,
+  sanitizeEmulation,
+  sanitizeMedia,
+  sanitizeZoom,
+} from "./devices";
 
 /**
  * What a tab shows.
@@ -154,6 +160,14 @@ export interface PaneTab {
    * re-asserted on create. `browserHost` holds the live copy; this is the record.
    */
   emulation?: PaneEmulation;
+  /**
+   * `browser` only: the media features this pane overrides for its page
+   * (`prefers-color-scheme` and friends), absent when it reports the host's.
+   *
+   * In the layout for the same reason `emulation` is — it is per-`WebContents`,
+   * and a pane switching session destroys and recreates its view.
+   */
+  media?: PaneMedia;
   /**
    * `browser` only: page zoom factor, absent at 100%.
    *
@@ -1315,6 +1329,8 @@ function parseTab(value: unknown): PaneTab | null {
     // string is re-checked, because this one ends up in a request header.
     const emulation = sanitizeEmulation(t.emulation);
     if (emulation) tab.emulation = emulation;
+    const media = sanitizeMedia(t.media);
+    if (media) tab.media = media;
     const zoom = sanitizeZoom(t.zoom);
     if (zoom !== null) tab.zoom = zoom;
   }

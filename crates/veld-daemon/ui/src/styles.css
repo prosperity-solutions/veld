@@ -1035,6 +1035,88 @@ select:focus {
   border-color: var(--accent);
 }
 
+/* ---- Permissions (panes/BrowserPane.tsx) --------------------------------- */
+
+/* The prompt sits between the chrome and the slot rather than over the page: a
+   native view paints over DOM whatever the z-index says, so an overlaid prompt
+   would be invisible under the one backend that can raise one. Shrinking the
+   slot is fine — its ResizeObserver republishes the view's box. */
+.permission-prompt {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--border);
+  /* Lifted off the chrome above it, because it is a question and not another
+     row of controls. */
+  background: var(--panel2);
+  font-size: 11px;
+}
+
+.permission-ask {
+  flex: 1;
+  min-width: 0;
+  /* Wraps rather than truncating: an origin the user cannot read in full is
+     exactly the attribution failure this whole surface exists to fix. */
+  overflow-wrap: anywhere;
+}
+
+/* Twenty-one permissions is taller than most panes and, opened low in a tall
+   window, taller than the screen — so the panel scrolls itself rather than
+   running off the bottom with rows nobody can reach. `vh` is the right unit even
+   though the trigger lives in a pane: the dropdown is portalled to `body`, so it
+   is measured against the window, not the pane. The ceiling keeps it from
+   becoming a full-height wall on a large display. */
+.permission-panel {
+  max-width: 340px;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  /* The site the rows belong to has to stay readable while scrolling — a
+     per-site panel whose site has scrolled away is a list of switches for an
+     origin you have to guess at. */
+  overscroll-behavior: contain;
+}
+
+.permission-site {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  /* Mantine's dropdown paints on the body surface, which is `--panel` in both
+     themes — anything else leaves the rows visible through this as they pass
+     underneath. */
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  padding: 4px 10px 6px;
+  margin-bottom: 2px;
+  font-size: 11px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+
+.permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 3px 10px;
+  font-size: 11px;
+}
+
+.permission-name {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--muted);
+}
+
+/* A permission somebody decided — by hand or in veld.json. The panel lists every
+   permission, so most rows are "Ask" and scanning them is the whole job; the two
+   that were set have to be findable without reading the buttons. */
+.permission-row.decided .permission-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* The box a live view occupies. Under Electron the content is a native
    WebContentsView positioned over this element — it is NOT a child, and it
    ignores z-index — so nothing may be layered on top of it. `position:

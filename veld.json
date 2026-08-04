@@ -1,8 +1,36 @@
 {
-  "$schema": "https://veld.oss.life.li/schema/v1/veld.schema.json",
+  "$schema": "https://veld.oss.life.li/schema/v3/veld.schema.json",
   "schemaVersion": "3",
   "name": "veld",
   "url_template": "{service}.{run}.veld.localhost",
+  "ide": {
+    "quicklinks": [
+      { "label": "veld.oss.life.li", "url": "https://veld.oss.life.li" },
+      { "label": "GitHub", "url": "https://github.com/prosperity-solutions/veld" },
+      { "label": "Google", "url": "https://www.google.com" }
+    ],
+    "permissions": [
+      // Two wildcards, both load-bearing.
+      //
+      // `*.` because this project's URLs are {service}.{run}.veld.localhost, so
+      // the run name is *in the hostname* and changes with the worktree, the
+      // branch, or --name. A pinned host would grant to exactly one run.
+      //
+      // `:*` because an omitted port means the scheme's DEFAULT port, and only a
+      // privileged install serves on 443 — `veld setup unprivileged` (the no-sudo
+      // default) uses 18443, where `https://*.veld.localhost` matches nothing at
+      // all and the grant silently never applies.
+      //
+      // `display-capture` is already veld's default at an origin veld serves —
+      // it is what makes `veld feedback` screenshots work inside a browser pane.
+      // Written out anyway, because a default is invisible and this file is where
+      // someone looks to find out what the project granted.
+      {
+        "origin": "https://*.veld.localhost:*",
+        "allow": ["notifications", "display-capture"]
+      }
+    ]
+  },
   "nodes": {
     "website": {
       "default_variant": "local",

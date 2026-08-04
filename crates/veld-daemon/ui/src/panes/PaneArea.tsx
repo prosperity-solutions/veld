@@ -101,6 +101,7 @@ import {
   updateTab,
 } from "./model";
 import { notifyError } from "../shared/notify";
+import type { Quicklink } from "../api";
 import { desktopWindow } from "../shell";
 import { type DropZone, sameZone, zoneAt } from "./dropModel";
 import { tabKeyAction } from "./tabKeys";
@@ -248,6 +249,8 @@ export function PaneArea(props: {
   repoRoot: string;
   /** The run's live URLs, offered by every pane that has nothing in it yet. */
   serviceUrls: Array<[string, string]>;
+  /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
+  quicklinks: Quicklink[];
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
   /** Browser sessions: the set that exists for this worktree, and how to add or
@@ -699,6 +702,7 @@ export function PaneArea(props: {
       <div className="dock-area" ref={areaRef}>
         <PaneChooser
           serviceUrls={props.serviceUrls}
+          quicklinks={props.quicklinks}
           urlsEmptyHint={props.urlsEmptyHint}
           onTerminal={() =>
             onLayout(addTab(layout, 0, { id: newTabId(), kind: "terminal", title: "Terminal" }))
@@ -761,6 +765,7 @@ export function PaneArea(props: {
               onLayout={onLayout}
               worktreeId={props.worktreeId}
               serviceUrls={props.serviceUrls}
+              quicklinks={props.quicklinks}
               urlsEmptyHint={props.urlsEmptyHint}
               sessions={props.sessions}
               onAddSession={props.onAddSession}
@@ -813,6 +818,8 @@ function DockView(props: {
   onLayout: (next: PaneLayoutUpdate) => void;
   worktreeId: number;
   serviceUrls: Array<[string, string]>;
+  /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
+  quicklinks: Quicklink[];
   urlsEmptyHint: string;
   sessions: BrowserProfile[];
   onAddSession: ((tabId: string) => void) | undefined;
@@ -1184,6 +1191,7 @@ function DockView(props: {
         {(active === null || active.kind === "new") && (
           <PaneChooser
             serviceUrls={props.serviceUrls}
+            quicklinks={props.quicklinks}
             urlsEmptyHint={props.urlsEmptyHint}
             // A `new` tab becomes the chosen kind in place; an empty dock has no
             // tab to convert, so it gets a fresh one.
@@ -1201,6 +1209,7 @@ function DockView(props: {
             key={active.id}
             tab={active}
             serviceUrls={props.serviceUrls}
+            quicklinks={props.quicklinks}
             urlsEmptyHint={props.urlsEmptyHint}
             sessions={props.sessions}
             onAddSession={
@@ -1241,6 +1250,8 @@ function DockView(props: {
  */
 function PaneChooser(props: {
   serviceUrls: Array<[string, string]>;
+  /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
+  quicklinks: Quicklink[];
   urlsEmptyHint: string;
   onTerminal: () => void;
   onBrowser: (tab: PaneTab) => void;
@@ -1274,6 +1285,7 @@ function PaneChooser(props: {
       <hr className="pane-chooser-rule" />
       <VeldLinks
         urls={props.serviceUrls}
+        quicklinks={props.quicklinks}
         emptyHint={props.urlsEmptyHint}
         onOpen={(name, url) => props.onBrowser(browserTab({ url, title: name }))}
       />

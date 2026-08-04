@@ -33,6 +33,7 @@ import {
   IconRefresh,
   IconRestore,
   IconRotateClockwise,
+  IconShieldLock,
   IconTrash,
   IconUserCircle,
   IconWorldOff,
@@ -60,8 +61,12 @@ import {
   HANDLE_HIT_BLEED,
   HANDLE_LENGTH,
   MAX_DEVICE_PX,
+  MEDIA_FEATURES,
+  MEDIA_LABELS,
+  type MediaFeature,
   MIN_DEVICE_PX,
   type PaneEmulation,
+  type PaneMedia,
   RESPONSIVE_DEVICE,
   chromeVersionFrom,
   clampZoom,
@@ -78,11 +83,14 @@ import {
   resizeEmulation,
   responsiveEmulation,
   rotateEmulation,
+  withMediaFeature,
   withMobileUserAgent,
   zoomStep,
 } from "./devices";
 import { type BrowserErrorKind, describeBrowserError } from "./browserError";
 import {
+  abandonPermission,
+  answerPermission,
   browserBackend,
   browserCommand,
   browserDevTools,
@@ -91,15 +99,30 @@ import {
   mountBrowser,
   navigateBrowser,
   onBrowserPointer,
+  onPermissionRequest,
+  onPermissionSettings,
+  originOf,
   paneCovers,
   previewBrowserResize,
   reloadBrowser,
+  requestPermissionSettings,
   setBrowserEmulation,
+  setBrowserMedia,
   setBrowserResizing,
   setBrowserZoom,
+  setPermission,
   subscribeBrowser,
   unmountBrowser,
+  type PermissionPrompt,
+  type PermissionSetting,
 } from "./browserHost";
+import {
+  PERMISSION_LABELS,
+  effectiveLabel,
+  permissionSentence,
+  userChoice,
+} from "./permissions";
+import type { Quicklink } from "../api";
 
 /**
  * The Chromium version the shell is built on, for the mobile user-agent presets.
@@ -185,6 +208,8 @@ export function BrowserPane(props: {
   onTab: (patch: Partial<Omit<PaneTab, "id" | "kind">>) => void;
   /** The run's live URLs, which an empty pane shows as its start page. */
   serviceUrls: Array<[string, string]>;
+  /** The project's own links from `ide.quicklinks`, shown beside the veld URLs. */
+  quicklinks: Quicklink[];
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
   /** The sessions that exist for this worktree, in slot order. */
@@ -213,6 +238,9 @@ export function BrowserPane(props: {
   // off the state that gets persisted.
   const emulation = tab.emulation ?? null;
   const zoom = tab.zoom ?? DEFAULT_ZOOM;
+  // Beside the other two because it is the same kind of state — per-`WebContents`,
+  // recorded in the layout — and because the mount effect below needs it.
+  const media = tab.media ?? null;
 
   // Refs for the same reason `currentUrl` is one: `mountBrowser` uses these only
   // when it *creates* a view — a first mount, or a session switch, which rebuilds
@@ -222,6 +250,12 @@ export function BrowserPane(props: {
   currentEmulation.current = emulation;
   const currentZoom = useRef(zoom);
   currentZoom.current = zoom;
+  // Same reason as the two above, and it was missing: emulation state is
+  // per-`WebContents`, so a pane that switches session — or retries a refused
+  // create — rebuilds its view and must be handed everything back. Without this
+  // the layout still said "dark" while the new view emulated nothing.
+  const currentMedia = useRef(media);
+  currentMedia.current = media;
 
   useEffect(() => {
     const el = slot.current;
@@ -233,6 +267,7 @@ export function BrowserPane(props: {
       url: currentUrl.current,
       profile,
       emulation: currentEmulation.current,
+      media: currentMedia.current,
       zoom: currentZoom.current,
     });
     const unsubscribe = subscribeBrowser(id, bump);
@@ -306,6 +341,90 @@ export function BrowserPane(props: {
     return () => window.clearTimeout(timer);
   }, [opening, state.url]);
 
+  // ---- Permissions --------------------------------------------------------
+  //
+  // Two surfaces, one policy. The **prompt** is a strip in the pane's chrome
+  // rather than a native dialog or an overlay: a dialog saying "Veld" cannot
+  // honestly ask on example.com's behalf, and an overlay would be painted over by
+  // the native view. Sitting in the chrome, above the slot, it can name the pane
+  // *and* the site, and it shrinks the slot instead of covering it — the
+  // `ResizeObserver` on the slot republishes the view's box, so the page reflows
+  // the way it would under any other chrome.
+  //
+  // The **panel** behind the shield is per site, the way a browser's site settings
+  // are, and shows where each answer came from: a grant a project made in
+  // `veld.json` must not read as one the user gave.
+  const [site, setSite] = useState<{ origin: string | null; settings: PermissionSetting[] }>({
+    origin: null,
+    settings: [],
+  });
+  const [prompt, setPrompt] = useState<PermissionPrompt | null>(null);
+  // Read by the unmount cleanup, which must not re-subscribe on every prompt.
+  const promptRef = useRef<PermissionPrompt | null>(null);
+  promptRef.current = prompt;
+  useEffect(() => {
+    const offSettings = onPermissionSettings((p) => {
+      if (p.viewId !== id) return;
+      setSite({ origin: p.origin, settings: p.settings });
+    });
+    const offPrompt = onPermissionRequest((p) => {
+      if (p.viewId !== id) return;
+      // One prompt at a time per pane — a page asking for the camera and the
+      // microphone in the same tick would otherwise stack two strips, each
+      // pushing the page down again. The one that loses is **released**, not
+      // dropped: without that its request stayed blocked on a callback nothing
+      // could ever fire, so the page hung with no error and no way back.
+      setPrompt((current) => {
+        if (current) {
+          abandonPermission(p.requestId);
+          return current;
+        }
+        return p;
+      });
+    });
+    requestPermissionSettings(id);
+    return () => {
+      offSettings();
+      offPrompt();
+    };
+  }, [id]);
+  // A navigation to **another origin** invalidates a prompt raised by the page
+  // that is leaving: answering it would attribute a grant to the site now in the
+  // address bar. The request is released rather than merely hidden, since an
+  // in-page navigation does not tear the frame down and its callback is still
+  // waiting.
+  //
+  // Keyed on the *origin*, not the URL. `did-navigate-in-page` pushes state too,
+  // so a single-page app calling `history.replaceState` on its first route — the
+  // ordinary shape of the dev servers panes exist to show — was cancelling a
+  // prompt its own origin had raised a moment earlier: the strip flashed and the
+  // page got a refusal it could not tell from a Block. The shell already draws
+  // this line correctly for the per-site panel ("a fragment change cannot cross
+  // an origin"); this is the same rule on the other half.
+  const promptOrigin = originOf(state.url);
+  useEffect(() => {
+    setPrompt((current) => {
+      if (current) abandonPermission(current.requestId);
+      return null;
+    });
+  }, [promptOrigin]);
+
+  // A prompt cannot outlive the chrome that shows it: only the *active* tab
+  // renders a `BrowserPane`, so switching tabs with a prompt up would otherwise
+  // leave the page blocked on a callback with nothing left to answer it.
+  useEffect(
+    () => () => {
+      if (promptRef.current) abandonPermission(promptRef.current.requestId);
+    },
+    [],
+  );
+
+  const answer = (verdict: "allow" | "deny") => {
+    if (!prompt) return;
+    answerPermission(prompt.requestId, verdict);
+    setPrompt(null);
+  };
+
   /** Navigate, and record where the pane ended up. */
   const go = (raw: string, opts: { force?: boolean } = {}) => {
     const target = navigateBrowser(id, raw, opts);
@@ -336,12 +455,25 @@ export function BrowserPane(props: {
     !state.touchActive &&
     state.loaded;
 
+  // The media overrides ride the same debugger session as touch, so they get the
+  // same treatment: what was asked for lives in the tab (declared above, beside
+  // the emulation), and whether it is *in force* comes back from the shell. Not
+  // gated on `emulation` — asking what a page looks like in dark mode has nothing
+  // to do with emulating a phone.
+  const mediaSuspended =
+    !iframeBackend && media !== null && !state.mediaActive && state.loaded;
+
   const applyEmulation = (next: PaneEmulation | null) => {
     setBrowserEmulation(id, next);
     // `undefined`, not `null`: "no device" is the absence of the field, so a tab
     // that never emulated anything and one switched back to pane size serialise
     // the same way.
     onTab({ emulation: next ?? undefined });
+  };
+
+  const applyMedia = (next: PaneMedia | null) => {
+    setBrowserMedia(id, next);
+    onTab({ media: next ?? undefined });
   };
 
   const applyZoom = (factor: number) => {
@@ -559,6 +691,90 @@ export function BrowserPane(props: {
             {canStop ? <IconX size={14} /> : <IconRefresh size={14} />}
           </ActionIcon>
         </Tooltip>
+
+        {/* Site settings, where a browser puts them: at the head of the address
+            bar, about the site the address bar is showing. Hidden in the browser
+            build — an iframe's permissions are the embedding document's business
+            and veld has nothing to answer there. */}
+        {!iframeBackend && site.origin && (
+          <Tooltip {...TIP} label={`Permissions for ${site.origin}`}>
+            <span className="bar-tip">
+              <Menu position="bottom-start" withinPortal>
+                <Menu.Target>
+                  <ActionIcon
+                    size="sm"
+                    variant="subtle"
+                    color={site.settings.some((s) => s.verdict === "allow") ? "blue" : "gray"}
+                    aria-label={`Permissions for ${site.origin}`}
+                  >
+                    <IconShieldLock size={14} />
+                  </ActionIcon>
+                </Menu.Target>
+                <Menu.Dropdown className="permission-panel">
+                  {/* Not `Menu.Label`: this has to stay pinned while the rows
+                      scroll, and styling that through Mantine's own class name
+                      would break silently the day the class is renamed. A
+                      per-site panel whose site has scrolled out of view is a
+                      list of switches for an origin you have to guess at. */}
+                  <div className="permission-site">{site.origin}</div>
+                  {site.settings.map((setting) => (
+                    <div
+                      className={
+                        setting.source === "user"
+                          ? "permission-row decided"
+                          : "permission-row"
+                      }
+                      key={setting.id}
+                    >
+                      <span className="permission-name">
+                        {PERMISSION_LABELS[setting.id]?.title ?? setting.id}
+                        {/* What it currently resolves to, and *why* — the two
+                            questions the buttons below cannot answer, because
+                            they show your preference rather than the outcome. A
+                            project's grant must never read as your own decision. */}
+                        <span className="permission-effect faint">
+                          {effectiveLabel(setting)}
+                        </span>
+                      </span>
+                      <Button.Group>
+                        {(["default", "allow", "deny"] as const).map((choice) => (
+                          <Button
+                            key={choice}
+                            size="compact-xs"
+                            // Colour carries the meaning, not just the selection:
+                            // green for a grant, red for a block, and grey for
+                            // Default — the untouched state, and the one a reader
+                            // is trying to skip past. With one accent for all
+                            // three, twenty rows give no clue which two were set.
+                            color={
+                              choice === "allow" ? "green" : choice === "deny" ? "red" : "gray"
+                            }
+                            // **The buttons show *your* setting, not the outcome.**
+                            // They used to show the resolved verdict, which made
+                            // the third one unusable: clicking "Ask" on a
+                            // permission `veld.json` grants cleared the override,
+                            // the row re-resolved to allow, and the button you
+                            // pressed lit up as Allow. It looked like the control
+                            // refused the click. Nothing was wrong but the label —
+                            // the third state is "I have not decided", so it says
+                            // Default and the outcome is spelled out beside the
+                            // name.
+                            variant={userChoice(setting) === choice ? "filled" : "default"}
+                            onClick={() =>
+                              setPermission(id, site.origin as string, setting.id, choice)
+                            }
+                          >
+                            {choice === "allow" ? "Allow" : choice === "deny" ? "Block" : "Default"}
+                          </Button>
+                        ))}
+                      </Button.Group>
+                    </div>
+                  ))}
+                </Menu.Dropdown>
+              </Menu>
+            </span>
+          </Tooltip>
+        )}
 
         <input
           className="browser-address"
@@ -992,6 +1208,66 @@ export function BrowserPane(props: {
                     )}
 
                     <Menu.Divider />
+                    {/* About the *page*, not about Veld: the app themes itself
+                        light/dark too, and a control that reads as "dark mode"
+                        beside the device picker would be taken for that one. So
+                        the label says whose preference is being emulated. */}
+                    <Menu.Label>
+                      {iframeBackend
+                        ? "Media features need the desktop app"
+                        : "The page's media features"}
+                    </Menu.Label>
+                    {(Object.keys(MEDIA_FEATURES) as MediaFeature[]).map((feature) => (
+                      <Menu.Sub key={feature}>
+                        <Menu.Sub.Target>
+                          <Menu.Sub.Item
+                            disabled={iframeBackend}
+                            leftSection={media?.[feature] ? <IconCheck size={14} /> : undefined}
+                            rightSection={
+                              <span className="menu-size faint">
+                                {media?.[feature]
+                                  ? MEDIA_LABELS[feature].values[media[feature]]
+                                  : "System"}
+                              </span>
+                            }
+                          >
+                            {MEDIA_LABELS[feature].title}
+                          </Menu.Sub.Item>
+                        </Menu.Sub.Target>
+                        <Menu.Sub.Dropdown>
+                          {/* "System" is the absence of an override, not a third
+                              value — it is what makes turning one off possible at
+                              all, and it is what lets the debugger be released
+                              when no feature is overridden any more. */}
+                          <Menu.Item
+                            leftSection={!media?.[feature] ? <IconCheck size={14} /> : undefined}
+                            onClick={() => applyMedia(withMediaFeature(media, feature, null))}
+                          >
+                            System
+                          </Menu.Item>
+                          {MEDIA_FEATURES[feature].map((value) => (
+                            <Menu.Item
+                              key={value}
+                              leftSection={
+                                media?.[feature] === value ? <IconCheck size={14} /> : undefined
+                              }
+                              onClick={() => applyMedia(withMediaFeature(media, feature, value))}
+                            >
+                              {MEDIA_LABELS[feature].values[value]}
+                            </Menu.Item>
+                          ))}
+                        </Menu.Sub.Dropdown>
+                      </Menu.Sub>
+                    ))}
+                    {/* Same debugger session as touch, so the same honesty: report
+                        what the shell achieved, not what was asked for. */}
+                    {mediaSuspended && (
+                      <Menu.Label>
+                        Media features are paused — Chromium's debugger is in use elsewhere
+                      </Menu.Label>
+                    )}
+
+                    <Menu.Divider />
                     <Menu.Label>Custom size</Menu.Label>
                     {/* Not a Menu.Item: these are fields, and a click in one must not
                     close the menu it lives in. */}
@@ -1137,6 +1413,31 @@ export function BrowserPane(props: {
           only renders while there is no page, so it never overlaps one; the resize
           handles sit in the gap *around* the emulated screen, which is DOM the
           native view does not cover. */}
+      {/* Above the slot, never over it: a native view paints over DOM whatever
+          the z-index says, so an overlaid prompt would be invisible under
+          Electron — the one backend that can raise one. */}
+      {prompt && (
+        <div className="permission-prompt" role="alertdialog" aria-label="Permission request">
+          <IconShieldLock size={16} />
+          <span className="permission-ask">
+            <strong>{prompt.origin}</strong> wants to {permissionSentence(prompt.permissions)}
+            {/* Which pane, and whose cookie jar — the attribution a native dialog
+                cannot give, and the reason panes refused every permission before. */}
+            <span className="faint">
+              {" · "}
+              {browserProfileLabel(prompt.profile)} session
+              {!prompt.isMainFrame && " · asked by a frame inside the page"}
+            </span>
+          </span>
+          <Button size="compact-xs" variant="default" onClick={() => answer("deny")}>
+            Block
+          </Button>
+          <Button size="compact-xs" onClick={() => answer("allow")}>
+            Allow
+          </Button>
+        </div>
+      )}
+
       <div className="browser-slot" ref={slot}>
         {/* Drag any edge to resize the emulated screen — the answer to "which
             width does this break at", which no list of devices can give you. The
@@ -1204,6 +1505,7 @@ export function BrowserPane(props: {
           <div className="browser-screen start">
             <VeldLinks
               urls={props.serviceUrls}
+              quicklinks={props.quicklinks}
               emptyHint={props.urlsEmptyHint}
               onOpen={(name, url) => {
                 const target = navigateBrowser(id, url);

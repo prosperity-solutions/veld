@@ -116,6 +116,7 @@ import {
   pruneBrowsers,
   pushBrowserSuspend,
   reloadBrowser,
+  setBrowserPolicy,
 } from "./panes/browserHost";
 import { watchOverlays } from "./panes/overlayGuard";
 import {
@@ -545,6 +546,26 @@ function AppInner(props: {
   const run = activeRun(runs);
   const urls = sortedUrls(run);
   const status = worktreeStatus(runs);
+
+  // The permission policy every browser pane in this window is answered against.
+  //
+  // Pushed from here because this is what knows both halves: the rules are the
+  // selected worktree's `ide.permissions`, and the trusted origins are the URLs
+  // veld itself serves for its run — the only origins a pane may capture its own
+  // contents at without asking, which is what makes `veld feedback` screenshots
+  // work inside a pane. Re-sent whenever either changes; a no-op in the browser
+  // build, which has no panes to govern.
+  const permissionRules = worktree?.ide.permissions ?? [];
+  const trustedOrigins = urls.map(([, url]) => url);
+  useEffect(() => {
+    // The daemon's own origin is in the set because veld's UI is served from it,
+    // and a pane pointed at a veld surface is still veld's own page.
+    setBrowserPolicy(permissionRules, [...trustedOrigins, window.location.origin]);
+    // Serialised rather than compared by reference: both are rebuilt on every
+    // poll, so an identity dependency would push the policy several times a
+    // second and republish every pane's panel with it.
+  }, [JSON.stringify(permissionRules), trustedOrigins.join(" ")]);
+
   // What the diagnostics panes and the Sharing surface read. Wider than `run` on
   // purpose: an ended run still has logs, last node states and possibly a share
   // left to stop — see `diagnosticsRun`.
@@ -1743,6 +1764,7 @@ function AppInner(props: {
             worktreeId={worktree.id}
             repoRoot={worktree.repo_root}
             serviceUrls={urls}
+            quicklinks={worktree.ide.quicklinks}
             urlsEmptyHint={
               worktree.has_veld_config
                 ? "Start the run and its services appear here."
@@ -1870,6 +1892,7 @@ function AppInner(props: {
               worktreeId={worktree.id}
               repoRoot={worktree.repo_root}
               serviceUrls={urls}
+              quicklinks={worktree.ide.quicklinks}
               urlsEmptyHint={
                 worktree.has_veld_config
                   ? "Start the run and its services appear here."

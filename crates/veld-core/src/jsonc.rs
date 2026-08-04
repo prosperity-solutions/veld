@@ -13,7 +13,7 @@
 //! --write` — and it is instructive that it could not round-trip through `serde`
 //! without deleting every comment this module exists to allow, so it edited bytes
 //! instead, and editing bytes is precisely why it could not tell that `hooks` and
-//! `ui` are opaque. Anything proposing to rewrite a config should read that twice.
+//! `ide` are opaque. Anything proposing to rewrite a config should read that twice.
 //!
 //! There is no `.jsonc` extension **requirement**: every config file accepts
 //! comments whatever it is called, and an included file has always been matched

@@ -24,6 +24,7 @@ const wt = (path: string): Worktree => ({
   has_veld_config: true,
   presets: [],
   nodes: [],
+  ide: { quicklinks: [], permissions: [] },
 });
 
 const run = (

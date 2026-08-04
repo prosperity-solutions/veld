@@ -93,7 +93,83 @@ export interface Worktree {
   presets: Preset[];
   /** Startable nodes (hidden excluded) for custom selections. */
   nodes: NodeOption[];
+  /**
+   * The interpreted `ide` section of the checkout's config. Always sent, with
+   * arrays that may be empty — a worktree with no config gets empty ones rather
+   * than the key being omitted.
+   */
+  ide: IdeSection;
 }
+
+/** Mirrors `IdeView` in `crates/veld-daemon/src/desktop.rs`. */
+export interface IdeSection {
+  quicklinks: Quicklink[];
+  /**
+   * Permission pre-answers for browser panes. Only the desktop app can act on
+   * these; the browser build has no panes and ignores them.
+   */
+  permissions: PermissionRule[];
+}
+
+/** A project link that is not veld's own, shown on a browser pane's start page. */
+export interface Quicklink {
+  label: string;
+  url: string;
+}
+
+/** Mirrors `veld_core::ide::PermissionRule`. */
+export interface PermissionRule {
+  origin: OriginPattern;
+  allow: PermissionId[];
+  deny: PermissionId[];
+}
+
+/**
+ * An origin, already split by the daemon so the matcher never re-parses it.
+ *
+ * `port: null` means "any port" — written as `*` in the config. An omitted port
+ * is normalised to the scheme's default before it gets here, so `null` never
+ * means "unspecified".
+ */
+export interface OriginPattern {
+  raw: string;
+  scheme: string;
+  /** The host, or — when `wildcard` — the suffix it must sit under, with the
+   *  leading `*.` already removed. */
+  host: string;
+  /** A leading `*.` on the host: any subdomain, at any depth. Omitted by the
+   *  daemon when false, so a missing field means no wildcard. */
+  wildcard?: boolean;
+  port: number | null;
+}
+
+/**
+ * Veld's permission ids. The list is the `$defs.permissionId` enum in
+ * `schema/v3/veld.schema.json`; `veld_core::ide::PERMISSION_IDS` and the desktop
+ * app's mapping table are both gated against it by tests.
+ */
+export type PermissionId =
+  | "camera"
+  | "clipboard-read"
+  | "clipboard-write"
+  | "display-capture"
+  | "file-system"
+  | "fullscreen"
+  | "geolocation"
+  | "hid"
+  | "idle-detection"
+  | "keyboard-lock"
+  | "microphone"
+  | "midi"
+  | "notifications"
+  | "open-external"
+  | "pointer-lock"
+  | "protected-media"
+  | "serial"
+  | "speaker-selection"
+  | "storage-access"
+  | "usb"
+  | "window-management";
 
 /**
  * A preset with its key assigned. Mirrors `veld_core::presets::ResolvedPreset`.

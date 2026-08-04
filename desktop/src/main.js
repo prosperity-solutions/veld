@@ -567,7 +567,11 @@ app.whenReady().then(() => {
   if (!isPrimaryInstance) return;
   // Registered before any window exists, so the first page load already finds
   // the handlers. A view is only ever addressable from the window that owns it.
-  registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender));
+  registerBrowserViewIpc((event) => BrowserWindow.fromWebContents(event.sender), {
+    // Global, like the window set beside it: a permission is granted to a site in
+    // a session, and neither of those is per project.
+    permissionsFile: path.join(app.getPath("userData"), "permissions.json"),
+  });
   registerWindowIpc(ipcMain);
   buildAppMenu();
   app.setAboutPanelOptions({

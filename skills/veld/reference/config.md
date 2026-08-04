@@ -55,7 +55,7 @@ unreadable.
   // "default_preset": "<preset-name>",  // root file only
   "nodes": { },
   "hooks": { },   // reserved: parsed, stored, NOT executed by this version
-  "ui": { }       // reserved: parsed, stored, NOT rendered by this version
+  "ide": { }      // quicklinks + permissions are rendered; every other key is reserved
 }
 ```
 
@@ -458,7 +458,7 @@ Note: `${VAR}` (braces) is parsed by Veld, so use `$VAR` (no braces) for plain s
 | `ports` | node, variant | Named ports: `{"http": "auto", "debug": "auto"}`. `${veld.ports.<name>}`, `VELD_PORT_<NAME>`. `${veld.port}` = primary. |
 | `files` | node, variant | Values delivered to disk: `{"<path>": {source, secret?, mode?}}`. Mode defaults `0600`. |
 | `hooks` | project (any file) | **Reserved.** Parsed and stored, NOT executed by this version. `veld lint` emits a notice. |
-| `ui` | project (any file) | **Reserved.** Parsed and stored, NOT rendered by this version. |
+| `ide` | project (any file) | Veld's own IDE surfaces (Veld Desktop, `/ide`). `ide.quicklinks` and `ide.permissions` are rendered; **every other key under `ide` is reserved** — parsed, stored, NOT rendered. See the section below. |
 
 Any **other** top-level key is an error reported by `veld lint` and `veld start`
 (rule `unknown-top-level-key`) — deliberately not a load failure, so a typo cannot
@@ -523,3 +523,99 @@ Reverse-proxy header rules applied by the **local Caddy proxy** (local dev) and 
 - `request` → header rules for the request forwarded upstream; `response` → for the response returned to the browser.
 - `remove`: header names to strip. `set`: name → value map (replaces any existing value). Header names matched case-insensitively.
 - **Default change:** Veld no longer strips `Origin` by default (it used to, so dev-server WS HMR worked). `Origin` now passes through the local proxy; the gateway rewrites it *coherently* to the origin host on all requests (incl. WS upgrades) rather than dropping it. If a Next.js dev server rejects WS HMR on `Origin`, set `allowedDevOrigins` in `next.config.js` (recommended — https://nextjs.org/docs/app/api-reference/config/next-config-js/allowedDevOrigins). Escape hatch for frameworks with no allow-list: `"proxy": { "request": { "remove": ["Origin"] } }`.
+
+## `ide` — quicklinks and permissions
+
+Per-project settings for Veld's own IDE surfaces (Veld Desktop, and `/ide` in a
+browser). Absent from most configs, and never affects a run. Every key under `ide`
+other than the two below is **reserved**: parsed, stored, not rendered, and
+`veld lint` emits a notice naming it.
+
+> Spelled `ui` before it was interpreted. A config still using `ui` fails
+> `veld lint` with `unknown-top-level-key`, and the message names the rename —
+> renaming the key is the whole migration.
+
+```jsonc
+"ide": {
+  "quicklinks": [
+    { "label": "Staging", "url": "https://staging.example.com" }
+  ],
+  "permissions": [
+    { "origin": "https://*.veld.localhost:*", "allow": ["notifications"] },
+    { "origin": "http://localhost:*", "allow": ["geolocation"] },
+    { "origin": "https://staging.example.com", "deny": ["display-capture"] }
+  ]
+}
+```
+
+### `ide.quicklinks`
+
+Project links that are **not** veld's — staging, a dashboard, a wiki — listed
+beside the run's own URLs on a browser pane's start page. `label` and `url` are
+both required; `url` must be `http://` or `https://` (other schemes are refused,
+because a click hands the string to the OS). **Literal only** — `${...}` is not
+interpolated here, since the start page renders with no run to resolve against.
+
+### `ide.permissions`
+
+Browser permissions the project pre-answers for pages shown in a Veld Desktop
+browser pane, so a dev server needing geolocation or a camera works for everyone
+who clones the repo. A browser tab has no panes, so none of this applies there.
+
+**Writing the `origin` is the part to get right:**
+
+| Form | Matches |
+|---|---|
+| `https://*.veld.localhost:*` | any subdomain at **any depth**, on any port — the form to use for veld's own URLs |
+| `https://*.veld.localhost` | the same hosts, but **port 443 only** — matches nothing on an unprivileged install, which serves on 18443 |
+| `http://localhost:*` | that exact host, any port |
+| `https://staging.example.com` | that host, port 443 exactly |
+| `http://example.com` | port **80** exactly — an omitted port is the scheme's default, *not* "any port" |
+
+- **Use `*.<project>.localhost:*` for veld's own URLs** — both wildcards. The
+  host wildcard because URLs are `{service}.{run}.{project}.localhost`, so the
+  **run name is in the hostname** and changes with the worktree, the branch or
+  `--name`. The port wildcard because `veld setup unprivileged` (the no-sudo
+  default) serves on **18443**, and an omitted port means 443 — so the portless
+  form silently matches nothing there.
+- The wildcard is only legal as the **leading label**, and `*.x` does **not** match
+  `x` itself — write the apex out as its own rule if you want it.
+- Matching is label-wise, so `evilveld.localhost` does not match
+  `*.veld.localhost`.
+- `*.com`, `*.dev` and friends are **refused**: a wildcard over one label is a
+  whole TLD. `*.localhost` is allowed — RFC 6761 pins it to loopback.
+- No `${...}` interpolation, no `*` inside a label (`web*.example.com`), no
+  wildcards on an IP literal.
+
+**Permission ids** (veld's own spelling — Electron reports camera and microphone
+as one `media` permission, and a per-site panel needs two switches):
+`camera`, `clipboard-read`, `clipboard-write`, `display-capture`, `file-system`, `fullscreen`,
+`geolocation`, `hid`, `idle-detection`, `keyboard-lock`, `microphone`, `midi`,
+`notifications`, `open-external`, `pointer-lock`, `protected-media`, `serial`,
+`speaker-selection`, `storage-access`, `usb`, `window-management`.
+
+**Precedence**, highest first — worth knowing before writing a rule, because two
+of the three layers are not in this file:
+
+1. The **user's own answer** (a prompt, or the pane's per-site panel). Beats the
+   config in both directions; a config grant they blocked stays blocked.
+2. **This file.** `deny` beats `allow`, across separate matching rules as well as
+   within one.
+3. **Veld's defaults:** `fullscreen` and `pointer-lock` are allowed (every
+   browser grants them on a gesture, and Escape undoes both — which is why
+   `keyboard-lock`, whose whole job is capturing Escape, is *not* in that set and
+   asks like anything else); `display-capture` is allowed
+   **at an origin veld serves** — which is what makes `veld feedback` screenshots
+   work inside a pane — and asks anywhere else; everything else asks. A `deny`
+   withdraws any of these.
+
+**Anything malformed is dropped and reported by `veld lint` as a warning, never a
+load error** — and the dropped rule grants nothing. Do not assume a rule works
+because the config loaded; run `veld lint`.
+
+**Understand what a grant is.** A rule for a *remote* origin hands that server's
+JavaScript a standing capability on the machine of anyone who opens it in a pane.
+Loopback and veld's own URLs are a different matter — a config that can already
+run `argv` on the machine is not meaningfully constrained by withholding a camera
+from its own dev server. Every config grant is shown in the pane's per-site panel
+labelled *set by veld.json*, where it can be revoked.

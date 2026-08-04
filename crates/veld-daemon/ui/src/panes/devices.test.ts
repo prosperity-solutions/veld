@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   type DevicePreset,
   CUSTOM_DEVICE,
+  mediaLabel,
+  sanitizeMedia,
+  withMediaFeature,
   CUSTOM_RADIUS,
   DEVICE_GROUPS,
   DEVICE_PADDING,
@@ -598,5 +601,44 @@ describe("restore", () => {
     // Out of range is clamped rather than dropped: the intent is legible.
     expect(sanitizeZoom(99)).toBe(3);
     expect(sanitizeZoom(0.01)).toBe(0.25);
+  });
+});
+
+describe("emulated media features", () => {
+  it("clears back to nothing so the debugger can be released", () => {
+    // `null`, not `{}`: "no overrides" has one representation, and it is what the
+    // shell tests to decide whether to hold Chromium's debugger at all.
+    const dark = withMediaFeature(null, "prefers-color-scheme", "dark");
+    expect(dark).toEqual({ "prefers-color-scheme": "dark" });
+    expect(withMediaFeature(dark, "prefers-color-scheme", null)).toBeNull();
+  });
+
+  it("keeps the other features when one is cleared", () => {
+    let media = withMediaFeature(null, "prefers-color-scheme", "dark");
+    media = withMediaFeature(media, "prefers-reduced-motion", "reduce");
+    expect(withMediaFeature(media, "prefers-color-scheme", null)).toEqual({
+      "prefers-reduced-motion": "reduce",
+    });
+  });
+
+  it("drops an unknown feature or value rather than the whole set", () => {
+    expect(
+      sanitizeMedia({
+        "prefers-color-scheme": "dark",
+        "prefers-reduced-motion": "sideways",
+        "prefers-contrast": "more",
+      }),
+    ).toEqual({ "prefers-color-scheme": "dark" });
+    expect(sanitizeMedia({ "prefers-color-scheme": "sepia" })).toBeNull();
+    expect(sanitizeMedia(null)).toBeNull();
+    expect(sanitizeMedia("dark")).toBeNull();
+  });
+
+  it("labels what is being emulated, and nothing when nothing is", () => {
+    expect(mediaLabel(null)).toBeNull();
+    expect(mediaLabel({ "prefers-color-scheme": "dark" })).toBe("Dark");
+    expect(
+      mediaLabel({ "prefers-color-scheme": "dark", "forced-colors": "active" }),
+    ).toBe("Dark · Active");
   });
 });

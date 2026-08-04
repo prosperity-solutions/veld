@@ -143,6 +143,77 @@ function safeEmulation(raw) {
 }
 
 /**
+ * The media-feature values a pane may ask Chromium to emulate.
+ *
+ * An allow-list rather than a string pass-through: these go straight into
+ * `Emulation.setEmulatedMedia`, and the set of legal values per feature is fixed
+ * by the CSS specs. Anything else is dropped to `null`, which means "whatever the
+ * host reports" — the same thing as not overriding it.
+ */
+const MEDIA_VALUES = {
+  "prefers-color-scheme": ["light", "dark"],
+  "prefers-reduced-motion": ["reduce", "no-preference"],
+  "forced-colors": ["active", "none"],
+};
+
+/**
+ * A media override set, with every unrecognised feature and value removed.
+ *
+ * Returns `null` when nothing survives, so "no overrides" has one representation
+ * rather than two — the shell tests it with a truthiness check to decide whether
+ * the debugger is needed at all.
+ */
+function safeMedia(raw) {
+  if (typeof raw !== "object" || raw === null) return null;
+  const out = {};
+  for (const [feature, allowed] of Object.entries(MEDIA_VALUES)) {
+    const value = raw[feature];
+    if (typeof value === "string" && allowed.includes(value)) out[feature] = value;
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/**
+ * Whether a permission rule handed over IPC has the shape the matcher expects.
+ *
+ * Lives here rather than beside its caller for the reason stated at the top of
+ * this file: `browserViews.js` imports Electron, so nothing under `node --test`
+ * can load it, and a trust boundary no test can reach is one nobody checks. This
+ * one guards *grants* — it decides which rules are allowed to answer a permission
+ * request for arbitrary web content.
+ *
+ * The daemon normalises these (`veld_core::ide::OriginPattern`) and the renderer
+ * only relays them, but this process must not take that on trust. In particular
+ * it re-applies the **wildcard confinement**: `veld_core` spends its longest
+ * comment refusing `*.com`, and a copy of the check that omitted it would let a
+ * single crafted rule grant every host under a TLD.
+ */
+function isPermissionRule(rule, permissionIds) {
+  if (!rule || typeof rule !== "object") return false;
+  const origin = rule.origin;
+  if (!origin || typeof origin !== "object") return false;
+  if (origin.scheme !== "http" && origin.scheme !== "https") return false;
+  if (typeof origin.host !== "string" || origin.host === "") return false;
+  // The host is the *matchable* part and must never carry a `*` of its own — the
+  // wildcard is a separate flag, and a `*` left in the string would be compared
+  // literally and silently match nothing, or worse be treated as a label.
+  if (origin.host.includes("*")) return false;
+  if (origin.wildcard !== undefined && typeof origin.wildcard !== "boolean") return false;
+  if (origin.wildcard === true) {
+    // One label under a wildcard is a whole TLD. `.localhost` is the deliberate
+    // exception — RFC 6761 pins it to loopback.
+    if (!origin.host.includes(".") && origin.host !== "localhost") return false;
+    // An IP literal has no subdomains, so `*.` over one is meaningless.
+    if (origin.host.startsWith("[")) return false;
+  }
+  const port = origin.port;
+  if (port !== null && port !== undefined && !Number.isInteger(port)) return false;
+  const ids = (list) =>
+    list === undefined || (Array.isArray(list) && list.every((id) => permissionIds.includes(id)));
+  return ids(rule.allow) && ids(rule.deny);
+}
+
+/**
  * A CSS hex colour the shell is willing to hand to `setBackgroundColor`, or `null`.
  *
  * The page sends its own theme's surface colour so a view does not flash white in a dark
@@ -399,6 +470,9 @@ module.exports = {
   partitionFor,
   safeUserAgent,
   safeEmulation,
+  isPermissionRule,
+  MEDIA_VALUES,
+  safeMedia,
   safeZoom,
   safeColor,
   safeScale,
