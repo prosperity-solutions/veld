@@ -11,6 +11,9 @@ export PATH := env("HOME") + "/.cargo/bin:" + env("PATH")
 # owning 443/18443 and system DNS; both instances share it (distinct
 # hostnames and route ids keep them apart).
 dev_db := justfile_directory() + "/.veld-dev/veld.db"
+# What a plain `cargo run`/`cargo test` resolves to (see `Db::cargo_target_db`).
+# Separate from `dev_db` so tests never write the file a running dev daemon owns.
+cargo_db := justfile_directory() + "/.veld-dev/veld-cargo.db"
 # The dev instance's daemon port — installed daemon keeps 19899; both run
 # side by side. Dev CLI and dev daemon must agree on this.
 dev_daemon_port := "19898"
@@ -105,9 +108,15 @@ dev-real *ARGS:
         ./target/debug/veld {{ARGS}}
 
 # Wipe the dev DB (including WAL/SHM sidecars) for a fresh-state run.
+# Wipe BOTH dev databases: the `just dev` instance's, and the one every
+# cargo-built binary uses (`Db::cargo_target_db`). Removing only the first leaves
+# `veld-cargo.db` behind, and a database stranded at a `user_version` whose
+# migration was later rewritten never gets the corrected one — every query naming
+# the new column then fails. That happened during #167 §5b.
 dev-db-reset:
     rm -f "{{dev_db}}" "{{dev_db}}-wal" "{{dev_db}}-shm"
-    @echo "Dev DB reset ({{dev_db}})"
+    rm -f "{{cargo_db}}" "{{cargo_db}}-wal" "{{cargo_db}}-shm"
+    @echo "Dev DBs reset ({{dev_db}}, {{cargo_db}})"
 
 # Snapshot the REAL installed DB into the dev DB — migration rehearsal:
 # the next `just dev <cmd>` migrates the COPY forward while the real file

@@ -104,10 +104,19 @@ export function SettingsDialog(props: {
   // therefore still matches nothing.
   const [customFont, setCustomFont] = useState(false);
 
-  useEffect(() => setFontSize(term.fontSize), [term.fontSize]);
-  useEffect(() => setScrollback(term.scrollback), [term.scrollback]);
-  useEffect(() => setFontFamily(term.fontFamily), [term.fontFamily]);
-  useEffect(() => setGrace(graceValue), [graceValue]);
+  // Re-seeded from `settings` identity, not from each value. A clamp that resolves
+  // to the value already stored leaves `term.scrollback` unchanged, so a
+  // value-keyed effect never fires and the rejected number stays in the box —
+  // contradicting the header's promise that an out-of-range entry visibly snaps
+  // back. The daemon returns a fresh document on every write, so its identity is
+  // the signal that a write landed.
+  useEffect(() => {
+    setFontSize(term.fontSize);
+    setScrollback(term.scrollback);
+    setFontFamily(term.fontFamily);
+    setGrace(graceValue);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [settings]);
 
   const set = (patch: SettingsDoc) => {
     // Fire and forget: the hook holds the error, and awaiting here would freeze
@@ -286,7 +295,7 @@ export function SettingsDialog(props: {
               size="xs"
               w={120}
               min={0}
-              max={500000}
+              max={100000}
               value={scrollback}
               disabled={locked}
               onChange={setScrollback}

@@ -167,11 +167,15 @@ impl Db {
         let home = dirs::home_dir();
         let mut dir = exe.parent()?;
         let marked = loop {
-            if dir.join("CACHEDIR.TAG").is_file() {
-                break dir;
-            }
+            // The bound is checked *first*: a `CACHEDIR.TAG` sitting at `$HOME`
+            // itself must not divert an installed binary, which is the whole point
+            // of bounding the walk. Probing before stopping honoured exactly the
+            // case the bound exists to refuse.
             if home.as_deref() == Some(dir) {
                 return None;
+            }
+            if dir.join("CACHEDIR.TAG").is_file() {
+                break dir;
             }
             dir = dir.parent()?;
         };

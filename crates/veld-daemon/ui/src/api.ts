@@ -572,7 +572,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** Partial update — send any combination of alias, emoji and marker_hue. */
+  /** Partial update — send any combination of alias, emoji and marker_color. */
   patchWorktree: (
     id: number,
     patch: { alias?: string; emoji?: string; marker_color?: string },

@@ -43,6 +43,7 @@ desktop/dist-deb/
 *.key
 .claude/settings.local.json
 /package-lock.json
+/package.json
 
 # Review scaffolding (context pack, ledger) — never committed.
 .review/

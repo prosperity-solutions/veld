@@ -459,8 +459,10 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
 /// distinct beats more and merely different, because past about eight steps
 /// neighbours stop being tellable apart at rail size — and the honest limit is lower
 /// still under a colour vision deficiency (~1 in 12 men). Distinctness is only ever
-/// needed *within* one repo, and measured on a real database the repos held 9 and 7
-/// checkouts.
+/// needed *within* one repo — measured on a real database, two repos held 9 and 7
+/// checkouts, so a repo can exceed eight and the ninth simply repeats a colour via
+/// [`pick_color`]'s fallback. That is the intended trade: a duplicate in a nine-row
+/// rail costs less than four more colours nobody can tell apart.
 ///
 /// **Identical in both themes**, by decision: a marker is an identity, and an
 /// identity that changes appearance when the theme is switched is doing its job

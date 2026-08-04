@@ -471,8 +471,8 @@ fn validate_alias(alias: &str) -> Result<(), ApiError> {
 /// The glyphs `validate_emoji` accepts, for the UI's picker. Served rather
 /// than duplicated in TypeScript so the two can never drift; static, so the
 /// picker fetches it once on open instead of riding the 5s poll.
-/// The marker faces a client may choose from: the glyph allowlist and the number
-/// of hues. Served rather than duplicated in TypeScript so the two can never
+/// The marker faces a client may choose from: the glyph allowlist and the colour
+/// palette. Served rather than duplicated in TypeScript so the two can never
 /// drift; static, so the picker fetches it once on open instead of riding the 5s
 /// poll.
 ///

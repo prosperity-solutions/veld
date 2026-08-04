@@ -94,7 +94,7 @@ describe("markerFace", () => {
     });
   });
 
-  it("uses the glyph while a hue is still unassigned", () => {
+  it("uses the glyph while a colour is still unassigned", () => {
     // The upgrade window: a row migrated from before the colour column, whose
     // hue arrives on the next sync. Colour is the default style, so without this
     // the rail would render nothing at all for every existing worktree.

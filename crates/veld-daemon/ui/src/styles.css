@@ -507,12 +507,6 @@ body[data-theme="light"] .swatch-cell > span {
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.25);
 }
 
-
-/* Marker picker: the colour grid, beside the existing glyph grid. Both are always
-   editable regardless of which face is being rendered, because both faces are
-   stored — a user who prefers colours can still choose their glyph and find it
-   waiting if they ever switch. */
-
 .wt-branch {
   font-family: "JetBrains Mono Variable", ui-monospace, monospace;
   font-size: 10.5px;
@@ -1014,8 +1008,6 @@ body[data-theme="light"] .swatch-cell > span {
   display: inline-block;
   border-radius: 50%;
 }
-
-
 
 /* The grab target is the element's own 7px box, with the 1px divider drawn
    inside it — NOT a 1px element with an overhanging `::after` hit area, which is
@@ -1564,8 +1556,6 @@ body[data-theme="light"] .swatch-cell > span {
   gap: 8px;
   justify-content: center;
 }
-
-
 
 .browser-note {
   flex: none;
@@ -2193,7 +2183,6 @@ body[data-theme="light"] .swatch-cell > span {
   padding: 12px 0;
 }
 
-
 /* ---- logo / mode switch ----------------------------------------------------- */
 
 .logo-switch {
@@ -2214,7 +2203,6 @@ body[data-theme="light"] .swatch-cell > span {
 .ls-layer.show {
   opacity: 1;
 }
-
 
 /* ---- centered / empty states ------------------------------------------------ */
 
@@ -2285,7 +2273,6 @@ body[data-theme="light"] .swatch-cell > span {
   left: 50%;
   transform: translateX(-50%);
 }
-
 
 /* ---- emoji picker ---------------------------------------------------------- */
 

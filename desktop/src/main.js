@@ -377,9 +377,9 @@ async function trayMenu() {
     // worktree **emoji** — always the glyph, never the colour, regardless of the
     // `worktree.markerStyle` setting: this label is a plain string handed to the
     // OS, and a CSS custom property means nothing there. The same rule applies to
-    // the window title. A worktree always has a glyph, so there is nothing to fall
-    // back to.
-    // Mark those rows with the worktree emoji + alias — and only those, since for the single-checkout
+    // the window title. The glyph is empty only in the window between a worktree
+    // being registered and its first sync backfilling one, which is why the label
+    // below still guards it. — and only those, since for the single-checkout
     // majority it is noise, and then `/api/repos` isn't fetched at all.
     const nameCounts = new Map();
     for (const { project } of shownRuns) {
