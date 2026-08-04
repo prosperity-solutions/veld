@@ -40,6 +40,7 @@ import {
 import {
   detachGraceMinutes,
   markerStyle,
+  quickSwitchPrefs,
   terminalPrefs,
   type MarkerStyle,
 } from "../shared/settings";
@@ -87,6 +88,7 @@ export function SettingsDialog(props: {
   const locked = !settings || props.saving;
   const term = terminalPrefs(settings ?? {});
   const marker = markerStyle(settings ?? {});
+  const quick = quickSwitchPrefs(settings ?? {});
 
   // Number inputs are held locally while being typed and committed on blur —
   // see the file header. Re-seeded whenever the daemon's value changes so a
@@ -176,6 +178,41 @@ export function SettingsDialog(props: {
               ]}
               onChange={(e) =>
                 set({ "worktree.markerStyle": e.currentTarget.value as MarkerStyle })
+              }
+            />
+          </Row>
+        </Stack>
+
+        <Stack gap="xs">
+          <SectionTitle>Browser panes</SectionTitle>
+          {/* Both on by default. They are shortcuts into the device menu, which
+              keeps every one of these controls — so turning a switch off costs
+              reach, never capability. Worth having because the pane's chrome has
+              to stay usable at 300px. These say whether the *button* is shown; what
+              each pane is emulating lives in that pane's layout. */}
+          <Row
+            label="Responsive switch in the pane toolbar"
+            help="One click into the resizable viewport, whose edges you drag to find where a layout breaks. Off means no emulation at all — it does not go back to a device you picked earlier."
+          >
+            <Checkbox
+              size="xs"
+              checked={quick.responsive}
+              disabled={locked}
+              onChange={(e) =>
+                set({ "browser.quickSwitch.responsive": e.currentTarget.checked })
+              }
+            />
+          </Row>
+          <Row
+            label="Colour-scheme switch in the pane toolbar"
+            help="Cycles the page's prefers-color-scheme through System, Dark and Light — the page in the pane, not Veld itself. System is the absence of an override rather than a third value. Needs Veld Desktop; in a browser tab the button says so."
+          >
+            <Checkbox
+              size="xs"
+              checked={quick.colorScheme}
+              disabled={locked}
+              onChange={(e) =>
+                set({ "browser.quickSwitch.colorScheme": e.currentTarget.checked })
               }
             />
           </Row>

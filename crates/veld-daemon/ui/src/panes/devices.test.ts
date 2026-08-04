@@ -31,6 +31,7 @@ import {
   formatPercent,
   formatZoom,
   isLandscape,
+  nextColorScheme,
   orientationLabel,
   presetById,
   resizeEmulation,
@@ -632,6 +633,18 @@ describe("emulated media features", () => {
     expect(sanitizeMedia({ "prefers-color-scheme": "sepia" })).toBeNull();
     expect(sanitizeMedia(null)).toBeNull();
     expect(sanitizeMedia("dark")).toBeNull();
+  });
+
+  it("cycles the colour scheme back to System, not round the two values", () => {
+    // The quick switch's whole contract. Reaching System by cycling is what
+    // releases the debugger — a cycle that only alternated dark and light could
+    // never let go of it, and the pane would report an override forever.
+    expect(nextColorScheme(undefined)).toBe("dark");
+    expect(nextColorScheme("dark")).toBe("light");
+    expect(nextColorScheme("light")).toBeNull();
+    // A scheme a newer build wrote resets rather than cycling onwards, so the
+    // control can always be returned to a state this build can render.
+    expect(nextColorScheme("sepia")).toBeNull();
   });
 
   it("labels what is being emulated, and nothing when nothing is", () => {

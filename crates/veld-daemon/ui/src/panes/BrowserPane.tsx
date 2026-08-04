@@ -18,6 +18,7 @@ import {
   IconAlertTriangle,
   IconArrowLeft,
   IconArrowRight,
+  IconArrowsHorizontal,
   IconBug,
   IconCheck,
   IconClockExclamation,
@@ -28,12 +29,15 @@ import {
   IconInfinity,
   IconLockOff,
   IconMinus,
+  IconMoon,
   IconPlugConnectedX,
   IconPlus,
   IconRefresh,
   IconRestore,
   IconRotateClockwise,
   IconShieldLock,
+  IconSun,
+  IconSunMoon,
   IconTrash,
   IconUserCircle,
   IconWorldOff,
@@ -79,6 +83,7 @@ import {
   emulationSize,
   formatPercent,
   formatZoom,
+  nextColorScheme,
   orientationLabel,
   resizeEmulation,
   responsiveEmulation,
@@ -123,6 +128,7 @@ import {
   userChoice,
 } from "./permissions";
 import type { Quicklink } from "../api";
+import type { QuickSwitchPrefs } from "../shared/settings";
 
 /**
  * The Chromium version the shell is built on, for the mobile user-agent presets.
@@ -183,6 +189,19 @@ function bleed(px: number): React.CSSProperties {
   return { "--handle-bleed": `${px}px` } as React.CSSProperties;
 }
 
+/**
+ * What a `prefers-color-scheme` override is called, with `undefined` reading as
+ * **System** — the absence of an override, which is a state the chrome has to name
+ * even though nothing is stored for it.
+ *
+ * Falls through to the raw value for a scheme this build has no wording for, so a
+ * pane restored from a newer layout says what it is rather than claiming System.
+ */
+function schemeName(value: string | undefined): string {
+  if (!value) return "System";
+  return MEDIA_LABELS["prefers-color-scheme"].values[value] ?? value;
+}
+
 /** One coloured session pip. */
 function SessionDot(props: { color: string | null; size?: number }) {
   const size = props.size ?? 8;
@@ -212,6 +231,8 @@ export function BrowserPane(props: {
   quicklinks: Quicklink[];
   /** Why there are none — only the app knows (no run, or no veld.json). */
   urlsEmptyHint: string;
+  /** Which one-click toggles the chrome shows, from the settings store. */
+  quickSwitches: QuickSwitchPrefs;
   /** The sessions that exist for this worktree, in slot order. */
   sessions: BrowserProfile[];
   /** Create a session and move this pane onto it. Absent at the slot cap. */
@@ -620,6 +641,54 @@ export function BrowserPane(props: {
     return { width: box.width, height: box.height };
   };
 
+  /**
+   * Turn the responsive viewport on at whatever the pane can hold.
+   *
+   * One owner for the "measured from the pane's own box, and genuinely skipped when
+   * there is none to measure" rule, because two controls now enter this state — the
+   * device menu's Responsive item and the quick switch. `state.device*` is the
+   * *screen's* drawn box, already inset and scaled, which is the
+   * 172px-for-a-phone-at-50% answer `paneSize` exists to stop producing.
+   */
+  const enterResponsive = () => {
+    const box = paneSize();
+    if (!box) return;
+    applyEmulation(
+      responsiveEmulation(
+        box.width - DEVICE_PADDING * 2,
+        box.height - DEVICE_PADDING * 2,
+      ),
+    );
+  };
+
+  // ---- Quick switches -----------------------------------------------------
+  //
+  // The two things people do dozens of times an hour while working on a layout,
+  // both three levels deep in the device menu. Nothing here is new capability —
+  // it is reach, and which of them appears is a preference because the chrome is
+  // already eight controls wide and has to stay usable at 300px.
+  //
+  // **Off has to be a remembered other state.** The colour scheme cycles
+  // System → Dark → Light → System rather than toggling dark on and off: System is
+  // the *absence* of an override (which is what lets the CDP session be released),
+  // and Light is a real destination, because a light-only layout bug is as ordinary
+  // as a dark one and sending someone back into the menu for it is the reach problem
+  // this switch exists to fix. Responsive's off is no emulation at all: it
+  // deliberately does not restore a previously picked device, so the switch reads as
+  // one fact — "am I in the resizable viewport" — rather than as a history of the
+  // menu.
+  const responsiveOn = emulation?.device === RESPONSIVE_DEVICE;
+  const scheme = media?.["prefers-color-scheme"];
+  // Achieved, not requested: `mediaSuspended` is the shell's own report that the
+  // override is not in force because Chromium's debugger is held elsewhere. A switch
+  // that claims Dark over a page that is still light is the exact lie `mediaActive`
+  // exists to prevent.
+  const schemeSuspended = scheme !== undefined && mediaSuspended;
+  const schemeLabel = schemeName(scheme);
+  // Derived from the cycle rather than from a second table keyed by label, so the
+  // tooltip cannot promise a destination the click does not go to.
+  const nextSchemeLabel = schemeName(nextColorScheme(scheme) ?? undefined);
+
   const screen = {
     x: state.deviceX,
     y: state.deviceY,
@@ -929,9 +998,98 @@ export function BrowserPane(props: {
           </span>
         </Tooltip>
 
+        {/* The quick switches, immediately before the control they are a shortcut
+            into, so the size question stays in one place on the bar. Both work in
+            the browser build only as far as the backend does: an iframe really is
+            that many CSS pixels wide, so responsive is real there, while
+            `Emulation.setEmulatedMedia` needs the debugger — so dark is disabled and
+            says why, the way the device menu's own rows do. */}
+        {props.quickSwitches.responsive && (
+          <Tooltip
+            {...TIP}
+            label={
+              responsiveOn
+                ? "Stop emulating — the page is the pane again"
+                : "Responsive: drag the screen's edges to find where the layout breaks"
+            }
+          >
+            <ActionIcon
+              size="sm"
+              variant={responsiveOn ? "light" : "subtle"}
+              color={responsiveOn ? "blue" : "gray"}
+              aria-label={
+                responsiveOn
+                  ? "Turn off the responsive viewport"
+                  : "Turn on the responsive viewport"
+              }
+              aria-pressed={responsiveOn}
+              onClick={() => (responsiveOn ? applyEmulation(null) : enterResponsive())}
+            >
+              <IconArrowsHorizontal size={14} />
+            </ActionIcon>
+          </Tooltip>
+        )}
+        {props.quickSwitches.colorScheme && (
+          <Tooltip
+            {...TIP}
+            label={
+              iframeBackend
+                ? "Emulating the page's colour scheme needs the desktop app"
+                : schemeSuspended
+                  ? `${schemeLabel} is not in force — Chromium's debugger is in use elsewhere`
+                  : // Whose preference, and where the next click goes. "The page's"
+                    // is load-bearing: Veld themes itself light and dark too, and a
+                    // sun beside the device button would otherwise be taken for
+                    // that one.
+                    `The page's colour scheme: ${schemeLabel} — click for ${nextSchemeLabel}`
+            }
+          >
+            <ActionIcon
+              size="sm"
+              variant={scheme ? "light" : "subtle"}
+              // Yellow rather than blue for a scheme that is set and not in force —
+              // the same distinction the device menu draws in words for touch.
+              color={scheme ? (schemeSuspended ? "yellow" : "blue") : "gray"}
+              // Not `aria-pressed`: three states are a cycle, not a pressed
+              // toggle, and a two-valued attribute would have to lie about one of
+              // them. The label carries the state instead, the way the app's own
+              // theme button does.
+              aria-label={
+                schemeSuspended
+                  ? `Page colour scheme: ${schemeLabel}, paused`
+                  : `Page colour scheme: ${schemeLabel}`
+              }
+              disabled={iframeBackend}
+              onClick={() =>
+                applyMedia(
+                  withMediaFeature(
+                    media,
+                    "prefers-color-scheme",
+                    nextColorScheme(scheme),
+                  ),
+                )
+              }
+            >
+              {/* Sun and moon match the app's own theme button, because they answer
+                  the same question. System does **not** reuse its
+                  `IconDeviceDesktop` — that glyph sits one button away from the
+                  device picker here, where two monitor shapes next to each other
+                  would read as two device controls. */}
+              {scheme === "dark" ? (
+                <IconMoon size={14} />
+              ) : scheme === "light" ? (
+                <IconSun size={14} />
+              ) : (
+                <IconSunMoon size={14} />
+              )}
+            </ActionIcon>
+          </Tooltip>
+        )}
+
         {/* Device emulation and zoom. One menu, because they are one question —
             "what size is this page being shown at" — and because a pane is a
-            narrow strip: the chrome is already six controls wide before this. The
+            narrow strip: the chrome is already six controls wide before this, plus
+            whichever quick switches are enabled. The
             target carries the answer as text when there is one to carry, so the
             emulated size is readable without opening anything, and nothing is
             added to the bar while the pane is just a pane. */}
@@ -1030,20 +1188,10 @@ export function BrowserPane(props: {
                           <IconCheck size={14} />
                         ) : undefined
                       }
-                      // Measured from the pane's own box, and genuinely skipped when
-                      // there is none to measure — `state.device*` is the screen's drawn
-                      // box, already inset and scaled, which is the wrong-but-plausible
-                      // number this path exists to stop producing.
-                      onClick={() => {
-                        const box = paneSize();
-                        if (!box) return;
-                        applyEmulation(
-                          responsiveEmulation(
-                            box.width - DEVICE_PADDING * 2,
-                            box.height - DEVICE_PADDING * 2,
-                          ),
-                        );
-                      }}
+                      // Shared with the quick switch, which enters the same state —
+                      // see `enterResponsive` for why it is measured from the pane's
+                      // own box and skipped when there is none.
+                      onClick={enterResponsive}
                       rightSection={
                         <span className="menu-size faint">drag to resize</span>
                       }

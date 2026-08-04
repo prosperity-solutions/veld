@@ -39,6 +39,8 @@ const FALLBACK = {
   shiftEnterNewline: true,
   markerStyle: "color" as MarkerStyle,
   detachGraceMinutes: 30,
+  quickSwitchResponsive: true,
+  quickSwitchColorScheme: true,
 } as const;
 
 function num(doc: SettingsDoc, key: string, fallback: number): number {
@@ -157,6 +159,34 @@ export function markerFace(
     return { kind: "color", color: wt.marker_color };
   }
   return null;
+}
+
+/**
+ * Which one-click toggles a browser pane puts in its chrome.
+ *
+ * A preference rather than a fixed pair because the chrome already carries
+ * back/forward/reload, the permission shield, the address bar, the session dot, the
+ * device picker and DevTools, and it has to stay usable in a 300px pane. Both
+ * default on — see the note beside the Rust defaults.
+ */
+export interface QuickSwitchPrefs {
+  responsive: boolean;
+  colorScheme: boolean;
+}
+
+export function quickSwitchPrefs(doc: SettingsDoc): QuickSwitchPrefs {
+  return {
+    responsive: bool(
+      doc,
+      "browser.quickSwitch.responsive",
+      FALLBACK.quickSwitchResponsive,
+    ),
+    colorScheme: bool(
+      doc,
+      "browser.quickSwitch.colorScheme",
+      FALLBACK.quickSwitchColorScheme,
+    ),
+  };
 }
 
 /**

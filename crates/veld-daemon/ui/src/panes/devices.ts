@@ -902,6 +902,26 @@ export function withMediaFeature(
   return Object.keys(next).length > 0 ? next : null;
 }
 
+/**
+ * The colour scheme a quick switch moves to next: System → Dark → Light → System.
+ *
+ * `null` is System — the *absence* of an override, which is the state that lets the
+ * debugger be released, so it has to be reachable by cycling rather than only from
+ * the menu. Dark comes first because it is the one people are reaching for; Light is
+ * a real destination rather than "off", since a light-only layout bug is as ordinary
+ * as a dark one and going to the menu for it is the reach problem this switch exists
+ * to fix.
+ *
+ * An unrecognised value — a scheme a newer build wrote and this one has no icon for
+ * — resets to System rather than being cycled onwards, so the control can always be
+ * returned to a state it can render.
+ */
+export function nextColorScheme(current: string | undefined): string | null {
+  if (current === undefined) return "dark";
+  if (current === "dark") return "light";
+  return null;
+}
+
 /** What the pane's chrome says is being emulated, or `null` for nothing. */
 export function mediaLabel(media: PaneMedia | null): string | null {
   const parts = (Object.keys(MEDIA_FEATURES) as MediaFeature[])
