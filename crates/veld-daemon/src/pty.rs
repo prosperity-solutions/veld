@@ -138,9 +138,37 @@ const MAX_SESSIONS: usize = 48;
 /// It is also the bound on the one leak the model can't avoid. Closing the
 /// browser window drops the `sessionStorage` that held the session ids, so
 /// those shells can never be reattached — but they *are* detached, so this is
-/// what collects them. Quoted as "30 minutes" in `README.md` and
-/// `website/llms-full.txt`; change it in all three places.
-const DETACH_GRACE: Duration = Duration::from_secs(30 * 60);
+/// what collects them.
+///
+/// **Now a default, not a constant.** The effective value is the
+/// `terminal.detachGraceMinutes` setting, read through [`configured_detach_grace`]
+/// — this is the fallback when there is no database to ask. The number is quoted
+/// in `README.md` and `website/llms-full.txt`; those copies are pinned by a test
+/// beside the default in `veld_core::db::settings`, so changing it there tells you
+/// which files to update.
+const DETACH_GRACE: Duration =
+    Duration::from_secs(veld_core::db::DEFAULT_DETACH_GRACE_MINUTES as u64 * 60);
+
+/// The detach grace to enforce right now.
+///
+/// Re-read on every reaper pass rather than cached at startup: a user who
+/// lengthens the grace because a build keeps getting reaped should not have to
+/// restart the daemon — and restarting it is the one thing the holder-process
+/// design made safe, so requiring it here would be a poor trade. The read is a
+/// single indexed row on a local file once a minute.
+///
+/// An unreachable database falls back to [`DETACH_GRACE`]. Deliberately not "never
+/// reap": a daemon that cannot read its settings still leaks shells without a
+/// bound, and the default is the behaviour every release before this one had.
+fn configured_detach_grace() -> Duration {
+    match veld_core::db::Db::open() {
+        Ok(db) => db.detach_grace(),
+        Err(e) => {
+            warn!("could not read the detach grace setting, using the default: {e}");
+            DETACH_GRACE
+        }
+    }
+}
 
 /// How often the reaper looks for sessions past [`DETACH_GRACE`].
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
@@ -226,7 +254,7 @@ pub fn spawn_session_reaper() {
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(REAP_INTERVAL).await;
-            reap_detached(DETACH_GRACE).await;
+            reap_detached(configured_detach_grace()).await;
         }
     });
 }
@@ -1223,7 +1251,13 @@ async fn obtain_session(
         cols: size.cols,
         rows: size.rows,
         socket: socket_for(&ticket.session_id),
-        orphan_grace_secs: DETACH_GRACE.as_secs(),
+        // The holder's own self-destruct grace, used when the *daemon* is gone and
+        // nothing is left to reap it. Read at spawn, so a holder keeps the value
+        // that was configured when its shell started: changing the setting affects
+        // the daemon-side reaper immediately but cannot reach into holders already
+        // running, and reaching into them would mean a protocol message whose only
+        // job is to move a timer nobody is waiting on.
+        orphan_grace_secs: configured_detach_grace().as_secs(),
     };
     let attached = start_holder(&cfg).await.map_err(SessionError::Spawn)?;
 

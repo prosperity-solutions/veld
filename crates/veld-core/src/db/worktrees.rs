@@ -36,10 +36,22 @@ pub struct WorktreeRecord {
     /// renames.
     ///
     /// **Not an identity.** Uniqueness is a property of *assignment* only —
-    /// [`pick_emoji`] probes for a free glyph across all repos, but
+    /// [`pick_emoji`] probes for a free glyph among the repo's siblings, but
     /// [`Db::patch_worktree`] lets the user pick one that is already taken.
     /// Don't add a `UNIQUE` index, and don't assume one holder per glyph.
     pub emoji: String,
+    /// The colour half of the marker: an index into [`WORKTREE_HUES`], or `-1`
+    /// for "not assigned yet" (backfilled on the next sync, exactly as `emoji`
+    /// is).
+    ///
+    /// A worktree's marker is a **composite** — this colour and the `emoji`
+    /// glyph — and the `worktree.markerStyle` setting picks which face renders.
+    /// Both faces are stored permanently and neither is ever cleared by a style
+    /// change, which is what makes switching colour → emoji and back lossless.
+    /// Do not "simplify" this into a tagged union: that turns a rendering choice
+    /// back into a data migration, and the user's hand-picked glyph becomes
+    /// something a preference can destroy.
+    pub marker_hue: i64,
     pub is_main: bool,
     pub created_at: String,
 }
@@ -58,7 +70,7 @@ pub struct DiscoveredWorktree {
 // field means touching all of them (plus a NEW migration — never edit v5) AND
 // the TS `Worktree` interface in crates/veld-daemon/ui/src/api.ts — serde
 // flattens the new field into the API, but TS ignores unknown fields silently.
-const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at";
+const WT_COLS: &str = "id, repo_root, path, branch, alias, emoji, is_main, created_at, marker_hue";
 
 fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
     Ok(WorktreeRecord {
@@ -70,6 +82,7 @@ fn wt_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorktreeRecord> {
         emoji: row.get(5)?,
         is_main: row.get::<_, i64>(6)? != 0,
         created_at: row.get(7)?,
+        marker_hue: row.get(8)?,
     })
 }
 
@@ -185,26 +198,39 @@ impl Db {
                            AND (branch != ?1 OR is_main != ?2 OR repo_root != ?3)",
                         params![d.branch, d.is_main as i64, root, id],
                     )?;
-                    // Backfill rows created before the v6 emoji column.
-                    let cur: String = tx.query_row(
-                        "SELECT emoji FROM worktrees WHERE id = ?1",
+                    // Backfill both marker faces: `emoji` for rows created
+                    // before v6, `marker_hue` for rows created before v9. They
+                    // are read together and backfilled independently, because a
+                    // row upgraded through v6 already has a glyph and needs only
+                    // the colour.
+                    let (cur_emoji, cur_hue): (String, i64) = tx.query_row(
+                        "SELECT emoji, marker_hue FROM worktrees WHERE id = ?1",
                         params![id],
-                        |r| r.get(0),
+                        |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
-                    if cur.is_empty() {
-                        let emoji = pick_emoji(&tx, &d.branch)?;
+                    if cur_emoji.is_empty() {
+                        let emoji = pick_emoji(&tx, &root, &d.branch)?;
                         tx.execute(
                             "UPDATE worktrees SET emoji = ?1 WHERE id = ?2",
                             params![emoji, id],
                         )?;
                     }
+                    if !is_worktree_hue(cur_hue) {
+                        let hue = pick_hue(&tx, &root, &d.branch)?;
+                        tx.execute(
+                            "UPDATE worktrees SET marker_hue = ?1 WHERE id = ?2",
+                            params![hue, id],
+                        )?;
+                    }
                 } else {
                     let alias = unique_alias(&tx, &root, &default_alias(&d.branch))?;
-                    let emoji = pick_emoji(&tx, &alias)?;
+                    let emoji = pick_emoji(&tx, &root, &alias)?;
+                    let hue = pick_hue(&tx, &root, &alias)?;
                     tx.execute(
                         "INSERT INTO worktrees
-                            (repo_root, path, branch, alias, emoji, is_main, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            (repo_root, path, branch, alias, emoji, is_main, created_at,
+                             marker_hue)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                         params![
                             root,
                             d.path,
@@ -212,7 +238,8 @@ impl Db {
                             alias,
                             emoji,
                             d.is_main as i64,
-                            now_str()
+                            now_str(),
+                            hue
                         ],
                     )?;
                 }
@@ -246,7 +273,7 @@ impl Db {
     /// [`DbError::AliasTaken`] when a sibling of the same repo already holds
     /// the alias.
     pub fn rename_worktree(&self, id: i64, alias: &str) -> Result<bool, DbError> {
-        self.patch_worktree(id, Some(alias), None)
+        self.patch_worktree(id, Some(alias), None, None)
     }
 
     /// Update alias and/or emoji in one write, inside one transaction.
@@ -277,10 +304,19 @@ impl Db {
         id: i64,
         alias: Option<&str>,
         emoji: Option<&str>,
+        marker_hue: Option<i64>,
     ) -> Result<bool, DbError> {
+        // Both marker channels are validated before either is written, for the
+        // same both-or-neither reason the alias is: a patch carrying a good glyph
+        // and a bad hue must not half-apply.
         if let Some(e) = emoji {
             if !is_worktree_emoji(e) {
                 return Err(DbError::InvalidEmoji(e.to_owned()));
+            }
+        }
+        if let Some(h) = marker_hue {
+            if !is_worktree_hue(h) {
+                return Err(DbError::InvalidHue(h));
             }
         }
         let mut conn = self.lock();
@@ -349,9 +385,11 @@ impl Db {
         }
         let n = tx.execute(
             "UPDATE worktrees
-                SET alias = COALESCE(?1, alias), emoji = COALESCE(?2, emoji)
-              WHERE id = ?3",
-            params![alias, emoji, id],
+                SET alias = COALESCE(?1, alias),
+                    emoji = COALESCE(?2, emoji),
+                    marker_hue = COALESCE(?3, marker_hue)
+              WHERE id = ?4",
+            params![alias, emoji, marker_hue, id],
         )?;
         tx.commit()?;
         Ok(n > 0)
@@ -411,20 +449,60 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
     WORKTREE_EMOJI.contains(&emoji)
 }
 
-/// Pick an emoji for a new worktree: hash the alias into the curated list
-/// and probe forward for one not used by ANY worktree row (uniqueness across
-/// all projects). When the whole set is taken, fall back to the hash slot —
-/// duplicates beat failing.
-fn pick_emoji(conn: &rusqlite::Connection, seed: &str) -> rusqlite::Result<String> {
+/// Colour half of the worktree marker.
+///
+/// Twelve hues, and twelve rather than more for a reason: hue is not a wide
+/// channel. Beyond roughly a dozen steps the swatches stop being tellable apart at
+/// rail size, and the honest limit is lower still under a colour vision deficiency
+/// (~1 in 12 men). The set is chosen so no two entries collapse into each other
+/// under deuteranopia or protanopia — the red/green and blue/purple pairs are
+/// separated by lightness as well as hue.
+///
+/// **Colour is never the only channel.** The alias renders beside the badge
+/// everywhere the badge appears, so the swatch is a scanning aid over a text label
+/// rather than the identifier itself. A user who cannot separate two hues loses
+/// decoration, not function — which is why this does not need a pattern or a
+/// monogram bolted on.
+///
+/// Stored as an **index**, not a colour string: the actual values are CSS custom
+/// properties (`--wt-hue-N`) resolved per theme, so a light-theme swatch is not the
+/// same ink as a dark-theme one and the database should not claim otherwise.
+/// Entries may be **appended but never removed or reordered** — the index is
+/// persisted per worktree, so a reorder silently repaints every rail.
+pub const WORKTREE_HUES: usize = 12;
+
+/// Whether `hue` is an assignable marker colour index. `-1` (unassigned) is
+/// deliberately **not** valid here: it is a sentinel the backfill clears, not a
+/// value a client may write.
+pub fn is_worktree_hue(hue: i64) -> bool {
+    (0..WORKTREE_HUES as i64).contains(&hue)
+}
+
+/// Pick an emoji for a new worktree: hash the seed into the curated list and probe
+/// forward for one not used **by the repo's other checkouts**.
+///
+/// Scoped per repo, not globally. The global search this replaced meant 64 glyphs
+/// had to cover every worktree of every repo on the machine, so a developer with a
+/// handful of repos exhausted the set and fell through to the duplicate path —
+/// while the only place two markers are ever compared is one repo's rail, which
+/// shows one repo at a time. Per-repo also makes the probe's cost proportional to
+/// the checkouts of one repo instead of the whole table.
+///
+/// When a single repo really does hold more than 64 checkouts, fall back to the
+/// hash slot: duplicates beat failing.
+fn pick_emoji(
+    conn: &rusqlite::Connection,
+    repo_root: &str,
+    seed: &str,
+) -> rusqlite::Result<String> {
     let mut used = std::collections::HashSet::new();
-    let mut stmt = conn.prepare_cached("SELECT emoji FROM worktrees WHERE emoji != ''")?;
-    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    let mut stmt =
+        conn.prepare_cached("SELECT emoji FROM worktrees WHERE repo_root = ?1 AND emoji != ''")?;
+    let rows = stmt.query_map(params![repo_root], |r| r.get::<_, String>(0))?;
     for row in rows {
         used.insert(row?);
     }
-    let h = seed
-        .bytes()
-        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+    let h = marker_seed_hash(seed);
     for i in 0..WORKTREE_EMOJI.len() {
         let e = WORKTREE_EMOJI[(h + i) % WORKTREE_EMOJI.len()];
         if !used.contains(e) {
@@ -432,6 +510,39 @@ fn pick_emoji(conn: &rusqlite::Connection, seed: &str) -> rusqlite::Result<Strin
         }
     }
     Ok(WORKTREE_EMOJI[h % WORKTREE_EMOJI.len()].to_string())
+}
+
+/// Pick a marker hue, by the same probe as [`pick_emoji`] and for the same
+/// reasons — scoped to the repo, since the rail shows one repo at a time and 12
+/// hues could not cover a machine.
+///
+/// The seed is offset from the emoji's so a worktree does not get hue *n* purely
+/// because it got glyph *n*: the two faces are independent choices and a user who
+/// re-picks one should not find the other implied by it.
+fn pick_hue(conn: &rusqlite::Connection, repo_root: &str, seed: &str) -> rusqlite::Result<i64> {
+    let mut used = std::collections::HashSet::new();
+    let mut stmt = conn.prepare_cached(
+        "SELECT marker_hue FROM worktrees WHERE repo_root = ?1 AND marker_hue >= 0",
+    )?;
+    let rows = stmt.query_map(params![repo_root], |r| r.get::<_, i64>(0))?;
+    for row in rows {
+        used.insert(row?);
+    }
+    let h = marker_seed_hash(seed).wrapping_add(WORKTREE_HUES / 2);
+    for i in 0..WORKTREE_HUES {
+        let candidate = ((h + i) % WORKTREE_HUES) as i64;
+        if !used.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    Ok((h % WORKTREE_HUES) as i64)
+}
+
+/// Shared hash for both marker channels. Kept as one function so the two probes
+/// cannot drift into disagreeing about what "the same seed" means.
+fn marker_seed_hash(seed: &str) -> usize {
+    seed.bytes()
+        .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize))
 }
 
 /// Longest slug a numbered alias candidate may start from. `slugify` caps output
@@ -614,7 +725,7 @@ mod tests {
             .find(|g| **g != other.emoji)
             .expect("curated set has more than one glyph");
         assert!(
-            db.patch_worktree(other.id, Some(&main.alias), Some(glyph))
+            db.patch_worktree(other.id, Some(&main.alias), Some(glyph), None)
                 .is_err()
         );
         assert_eq!(
@@ -802,30 +913,124 @@ mod tests {
     }
 
     #[test]
-    fn emoji_assigned_and_unique_across_repos() {
+    fn markers_are_assigned_and_distinct_within_a_repo() {
         let (_dir, db) = test_db();
-        let a = Path::new("/tmp/repoEmojiA");
-        let b = Path::new("/tmp/repoEmojiB");
-        db.upsert_repo(a, "a").unwrap();
-        db.upsert_repo(b, "b").unwrap();
-        // Same branch name in both repos → same hash seed → probing must
-        // still produce distinct emoji.
+        let root = Path::new("/tmp/repoMarkerA");
+        db.upsert_repo(root, "a").unwrap();
+        // Three checkouts of ONE repo: this is the set that is ever compared,
+        // because the rail shows one repo at a time.
+        let wts = db
+            .sync_worktrees(
+                root,
+                &[
+                    wt("/tmp/repoMarkerA", "main", true),
+                    wt("/tmp/repoMarkerA-two", "feat/two", false),
+                    wt("/tmp/repoMarkerA-three", "feat/three", false),
+                ],
+            )
+            .unwrap();
+        assert_eq!(wts.len(), 3);
+        let glyphs: std::collections::HashSet<_> = wts.iter().map(|w| &w.emoji).collect();
+        let hues: std::collections::HashSet<_> = wts.iter().map(|w| w.marker_hue).collect();
+        assert_eq!(glyphs.len(), 3, "glyphs distinct among a repo's checkouts");
+        assert_eq!(hues.len(), 3, "hues distinct among a repo's checkouts");
+        assert!(wts.iter().all(|w| is_worktree_hue(w.marker_hue)));
+
+        // Rename must not change either face — the marker is a stable
+        // identifier, and both halves of it are.
+        let before = &wts[0];
+        db.rename_worktree(before.id, "renamed").unwrap();
+        let after = db.get_worktree(before.id).unwrap().unwrap();
+        assert_eq!(after.emoji, before.emoji);
+        assert_eq!(after.marker_hue, before.marker_hue);
+    }
+
+    #[test]
+    fn markers_may_repeat_across_repos() {
+        // Deliberate, and a change from the original global probe: 64 glyphs (and
+        // 12 hues) cannot cover every worktree of every repo on a machine, so a
+        // global search exhausted the set and fell through to duplicates anyway.
+        // Two markers are only ever compared within one repo's rail, so that is
+        // where distinctness is bought — and re-using a glyph in a *different*
+        // repo costs nothing a user can see.
+        let (_dir, db) = test_db();
+        let a = Path::new("/tmp/repoMarkerX");
+        let b = Path::new("/tmp/repoMarkerY");
+        db.upsert_repo(a, "x").unwrap();
+        db.upsert_repo(b, "y").unwrap();
+        // Same branch name in both, so the same hash seed: with a per-repo probe
+        // and no sibling to avoid, both land on the same slot.
         let wa = db
-            .sync_worktrees(a, &[wt("/tmp/repoEmojiA", "main", true)])
+            .sync_worktrees(a, &[wt("/tmp/repoMarkerX", "main", true)])
             .unwrap();
         let wb = db
-            .sync_worktrees(b, &[wt("/tmp/repoEmojiB", "main", true)])
+            .sync_worktrees(b, &[wt("/tmp/repoMarkerY", "main", true)])
             .unwrap();
         assert!(!wa[0].emoji.is_empty());
         assert!(!wb[0].emoji.is_empty());
-        assert_ne!(wa[0].emoji, wb[0].emoji, "unique across all projects");
+        assert_eq!(wa[0].emoji, wb[0].emoji);
+        assert_eq!(wa[0].marker_hue, wb[0].marker_hue);
+    }
 
-        // Rename must not change the emoji (stable identifier).
-        db.rename_worktree(wa[0].id, "renamed").unwrap();
-        assert_eq!(
-            db.get_worktree(wa[0].id).unwrap().unwrap().emoji,
-            wa[0].emoji
+    #[test]
+    fn a_marker_hue_is_backfilled_for_a_pre_v9_row() {
+        // The upgrade path: a row that came through v6 has a glyph and `-1` for
+        // its hue. The next sync must fill the colour without disturbing the
+        // glyph the user may have chosen.
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoMarkerBackfill");
+        db.upsert_repo(root, "bf").unwrap();
+        let wts = db
+            .sync_worktrees(root, &[wt("/tmp/repoMarkerBackfill", "main", true)])
+            .unwrap();
+        let id = wts[0].id;
+        let glyph = wts[0].emoji.clone();
+        {
+            let conn = db.lock();
+            conn.execute(
+                "UPDATE worktrees SET marker_hue = -1 WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        }
+        let after = db
+            .sync_worktrees(root, &[wt("/tmp/repoMarkerBackfill", "main", true)])
+            .unwrap();
+        assert!(is_worktree_hue(after[0].marker_hue), "hue backfilled");
+        assert_eq!(after[0].emoji, glyph, "glyph untouched by the hue backfill");
+    }
+
+    #[test]
+    fn an_explicit_hue_survives_sync_and_is_range_checked() {
+        let (_dir, db) = test_db();
+        let root = Path::new("/tmp/repoMarkerPick");
+        db.upsert_repo(root, "pick").unwrap();
+        let wts = db
+            .sync_worktrees(root, &[wt("/tmp/repoMarkerPick", "main", true)])
+            .unwrap();
+        let id = wts[0].id;
+        let chosen = (wts[0].marker_hue + 1) % WORKTREE_HUES as i64;
+        assert!(db.patch_worktree(id, None, None, Some(chosen)).unwrap());
+        // A user's explicit colour must not be clobbered by the UI's refresh poll.
+        db.sync_worktrees(root, &[wt("/tmp/repoMarkerPick", "main", true)])
+            .unwrap();
+        assert_eq!(db.get_worktree(id).unwrap().unwrap().marker_hue, chosen);
+
+        for bad in [-1, WORKTREE_HUES as i64, 9999] {
+            assert!(
+                matches!(
+                    db.patch_worktree(id, None, None, Some(bad)),
+                    Err(DbError::InvalidHue(_))
+                ),
+                "{bad} must be rejected"
+            );
+        }
+        // A rejected hue must not commit the alias that travelled with it.
+        assert!(
+            db.patch_worktree(id, Some("nope"), None, Some(9999))
+                .is_err()
         );
+        assert_ne!(db.get_worktree(id).unwrap().unwrap().alias, "nope");
     }
 
     #[test]
@@ -844,7 +1049,7 @@ mod tests {
             .iter()
             .find(|e| **e != wts[0].emoji)
             .expect("curated set has more than one glyph");
-        assert!(db.patch_worktree(id, None, Some(chosen)).unwrap());
+        assert!(db.patch_worktree(id, None, Some(chosen), None).unwrap());
         assert_eq!(&db.get_worktree(id).unwrap().unwrap().emoji, chosen);
 
         // Reconciliation backfills only empty emoji — an explicit choice must
@@ -866,7 +1071,7 @@ mod tests {
         for bad in ["", "🍕", "🦊🦊", "👨‍👩‍👧", "not-an-emoji"] {
             assert!(
                 matches!(
-                    db.patch_worktree(1, None, Some(bad)),
+                    db.patch_worktree(1, None, Some(bad), None),
                     Err(DbError::InvalidEmoji(_))
                 ),
                 "{bad:?} must be rejected"
@@ -898,19 +1103,19 @@ mod tests {
             .unwrap();
 
         // None leaves a column untouched.
-        assert!(db.patch_worktree(id, Some("renamed"), None).unwrap());
+        assert!(db.patch_worktree(id, Some("renamed"), None, None).unwrap());
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
         assert_eq!(after.emoji, original.emoji);
 
-        assert!(db.patch_worktree(id, None, Some(glyph)).unwrap());
+        assert!(db.patch_worktree(id, None, Some(glyph), None).unwrap());
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "renamed");
         assert_eq!(&after.emoji, glyph);
 
         // Both at once.
         assert!(
-            db.patch_worktree(id, Some("both"), Some(&original.emoji))
+            db.patch_worktree(id, Some("both"), Some(&original.emoji), None)
                 .unwrap()
         );
         let after = db.get_worktree(id).unwrap().unwrap();
@@ -918,17 +1123,20 @@ mod tests {
         assert_eq!(after.emoji, original.emoji);
 
         // A rejected emoji must not commit the alias that travelled with it.
-        assert!(db.patch_worktree(id, Some("nope"), Some("🍕")).is_err());
+        assert!(
+            db.patch_worktree(id, Some("nope"), Some("🍕"), None)
+                .is_err()
+        );
         assert_eq!(db.get_worktree(id).unwrap().unwrap().alias, "both");
 
         // Neither field: a no-op write that still reports row existence.
-        assert!(db.patch_worktree(id, None, None).unwrap());
+        assert!(db.patch_worktree(id, None, None, None).unwrap());
         let after = db.get_worktree(id).unwrap().unwrap();
         assert_eq!(after.alias, "both");
         assert_eq!(after.emoji, original.emoji);
 
-        assert!(!db.patch_worktree(4242, Some("x"), None).unwrap());
-        assert!(!db.patch_worktree(4242, None, None).unwrap());
+        assert!(!db.patch_worktree(4242, Some("x"), None, None).unwrap());
+        assert!(!db.patch_worktree(4242, None, None, None).unwrap());
     }
 
     #[test]

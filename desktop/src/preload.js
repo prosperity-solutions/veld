@@ -155,6 +155,18 @@ contextBridge.exposeInMainWorld("veldDesktop", {
     /** A nudge — "there is something in your queue" — with no payload. */
     onAdopt: (fn) => on("veld:window:adopt", fn),
   },
+  /**
+   * App-level surfaces the main process drives.
+   *
+   * `onOpenSettings` exists because the settings accelerator has to be a *menu*
+   * accelerator: a focused `WebContentsView` swallows every keystroke, so the
+   * page's own ⌘, handler never fires while a browser pane has focus. The main
+   * process decides which window should answer (a chrome-less detached window
+   * cannot host the dialog) and nudges it here.
+   */
+  app: {
+    onOpenSettings: (fn) => on("veld:app:settings", fn),
+  },
   browser: {
     /** Drop views left behind by a previous page. Called once, before any
      *  `create`, so the ordering is a queue rather than a race. */

@@ -98,3 +98,45 @@ describe("handleKeyEvent", () => {
     expect(other.handled).toBe(true);
   });
 });
+
+describe("the shiftEnterNewline preference", () => {
+  it("hands Shift+Enter to xterm when off", () => {
+    // A TUI that binds meta-Enter needs the key to reach it, so the handler must
+    // claim neither the keydown nor its keyup.
+    const sent: string[] = [];
+    expect(
+      handleKeyEvent(key({ code: "Enter", shift: true }).e, (d) => sent.push(d), false),
+    ).toBe(true);
+    expect(sent).toEqual([]);
+    // Swallowing the keyup after not claiming the keydown would drop a release
+    // xterm is waiting for.
+    expect(
+      handleKeyEvent(
+        key({ code: "Enter", shift: true, type: "keyup" }).e,
+        (d) => sent.push(d),
+        false,
+      ),
+    ).toBe(true);
+  });
+
+  it("still sends ESC CR when on, and defaults to on", () => {
+    const sent: string[] = [];
+    expect(
+      handleKeyEvent(key({ code: "Enter", shift: true }).e, (d) => sent.push(d), true),
+    ).toBe(false);
+    expect(sent).toEqual([SHIFT_ENTER_SEQUENCE]);
+    // No third argument behaves like the release that shipped this hardcoded.
+    expect(
+      handleKeyEvent(key({ code: "Enter", shift: true }).e, (d) => sent.push(d)),
+    ).toBe(false);
+    expect(sent).toEqual([SHIFT_ENTER_SEQUENCE, SHIFT_ENTER_SEQUENCE]);
+  });
+
+  it("leaves the palette chord alone regardless of the preference", () => {
+    for (const pref of [true, false]) {
+      expect(
+        handleKeyEvent(key({ code: "KeyP", shift: true, meta: true }).e, () => {}, pref),
+      ).toBe(false);
+    }
+  });
+});

@@ -10,6 +10,7 @@ import {
   TextInput,
 } from "@mantine/core";
 import { api, type EmojiHolder, type Repo } from "../api";
+import type { MarkerStyle } from "../shared/settings";
 
 /**
  * Shared dialog shell on Mantine's Modal (scrim, esc, focus trap, a11y) —
@@ -202,7 +203,13 @@ export function NewWorktreeDialog(props: {
 }
 
 /**
- * Emoji picker for a worktree's rail identifier.
+ * Marker picker for a worktree's rail identifier.
+ *
+ * A marker has two faces — a colour and a glyph — and `worktree.markerStyle`
+ * decides which one the rail renders. Both are editable here regardless of that
+ * setting, because both are stored: a user who prefers colours can still choose
+ * their glyph, and switching the setting later is then lossless in either
+ * direction rather than a re-pick.
  *
  * The choices come from the daemon (`/api/worktree-emoji`) rather than a
  * TypeScript copy, because the same list is the server-side allowlist. Glyphs
@@ -210,18 +217,24 @@ export function NewWorktreeDialog(props: {
  * but an explicit choice is the user's to make — and are only labelled, so
  * the ambiguity is visible before it's created.
  */
-export function ChangeEmojiDialog(props: {
+export function ChangeMarkerDialog(props: {
   current: string;
+  currentHue: number;
   alias: string;
   /** Identifies "this worktree" among the holders — aliases can't, since
    *  they are unique only within one repo. */
   worktreeId: number;
   /** emoji → every worktree holding it, across all projects. */
   usedBy: Record<string, EmojiHolder[]>;
-  onPick: (emoji: string) => Promise<void>;
+  /** Which face the rail is currently rendering, so the dialog can say which
+   *  half of the choice is the one being shown right now. Both halves stay
+   *  editable regardless — see the note at the bottom of the dialog. */
+  style: MarkerStyle;
+  onPick: (patch: { emoji?: string; marker_hue?: number }) => Promise<void>;
   onClose: () => void;
 }) {
   const [choices, setChoices] = useState<string[] | null>(null);
+  const [hues, setHues] = useState<number | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -236,6 +249,13 @@ export function ChangeEmojiDialog(props: {
         // Loader spinning forever with no error and no way out.
         if (Array.isArray(r?.emoji)) setChoices(r.emoji);
         else setLoadError("The daemon returned an unexpected emoji list.");
+        // The hue count comes from the daemon for the same reason the glyphs do:
+        // it is the server-side range check, and a TypeScript copy would drift.
+        // A missing or absurd count leaves the colour grid out rather than
+        // rendering swatches whose CSS variables do not exist.
+        if (typeof r?.hues === "number" && r.hues > 0 && r.hues <= 64) {
+          setHues(r.hues);
+        }
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -247,11 +267,14 @@ export function ChangeEmojiDialog(props: {
     };
   }, []);
 
-  const pick = async (emoji: string) => {
-    setBusy(emoji);
+  const pick = async (
+    key: string,
+    patch: { emoji?: string; marker_hue?: number },
+  ) => {
+    setBusy(key);
     setError(null);
     try {
-      await props.onPick(emoji);
+      await props.onPick(patch);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setBusy(null);
@@ -259,9 +282,45 @@ export function ChangeEmojiDialog(props: {
   };
 
   return (
-    <Modal title={`Emoji for ${props.alias}`} onClose={props.onClose}>
+    <Modal title={`Marker for ${props.alias}`} onClose={props.onClose}>
       <Stack gap="sm">
         {loadError && <ErrorText error={loadError} />}
+        {hues !== null && (
+          <>
+            <Text size="xs" fw={600} c="dimmed">
+              Colour{props.style === "color" ? " (shown in the rail)" : ""}
+            </Text>
+            <div className="hue-grid">
+              {Array.from({ length: hues }, (_, hue) => {
+                const isCurrent = hue === props.currentHue;
+                const key = `hue-${hue}`;
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    className={`hue-cell${isCurrent ? " current" : ""}`}
+                    disabled={busy !== null}
+                    aria-pressed={isCurrent}
+                    aria-label={`Colour ${hue + 1}${isCurrent ? " — current" : ""}`}
+                    title={isCurrent ? "Current" : undefined}
+                    onClick={() => void pick(key, { marker_hue: hue })}
+                  >
+                    {busy === key ? (
+                      <Loader size={14} />
+                    ) : (
+                      <span
+                        style={{ ["--wt-mark" as string]: `var(--wt-hue-${hue})` }}
+                      />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+            <Text size="xs" fw={600} c="dimmed">
+              Glyph{props.style === "emoji" ? " (shown in the rail)" : ""}
+            </Text>
+          </>
+        )}
         {!choices && !loadError && (
           <Group justify="center" py="lg">
             <Loader size="sm" aria-label="Loading emoji" />
@@ -295,7 +354,7 @@ export function ChangeEmojiDialog(props: {
                       .filter(Boolean)
                       .join(" · ") || undefined
                   }
-                  onClick={() => void pick(e)}
+                  onClick={() => void pick(e, { emoji: e })}
                 >
                   {busy === e ? (
                     <Loader size={14} />
@@ -312,6 +371,11 @@ export function ChangeEmojiDialog(props: {
         <Text size="xs" c="dimmed">
           A dot marks a glyph another worktree already uses. Picking it is
           allowed — the rail just won&apos;t identify them apart.
+        </Text>
+        <Text size="xs" c="dimmed">
+          Both halves are always saved, so you can set the one you aren&apos;t
+          currently showing and it will be waiting if you switch. Which one the
+          rail renders is under Settings → Appearance.
         </Text>
       </Stack>
     </Modal>

@@ -29,6 +29,9 @@ mod desktop;
 #[path = "pty.rs"]
 mod pty;
 
+#[path = "settings.rs"]
+mod settings;
+
 /// Note the terminal sessions being left running.
 ///
 /// Re-exported for the daemon's shutdown path. It no longer *ends* anything: a
@@ -108,6 +111,10 @@ pub async fn run_feedback_server(share_manager: Arc<crate::share::manager::Share
         // because management routes are stateless.
         .merge(management::routes())
         .merge(desktop::routes())
+        // User preferences. Kept out of desktop::routes() because settings are
+        // not desktop-specific (runs mode reads them too) and that router's
+        // blanket CSRF layer only covers routes registered before it.
+        .merge(settings::routes())
         // Terminal sockets. Kept out of desktop::routes() because that
         // router's CSRF layer cannot gate a WebSocket upgrade — see pty.rs.
         .merge(pty::routes())

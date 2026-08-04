@@ -27,6 +27,7 @@ const {
   restoreWindows,
   setQuitting,
   windowCount,
+  openSettings,
 } = require("./windows");
 const { MAX_WINDOWS, canOpenAnother } = require("./windowState");
 const {
@@ -483,6 +484,16 @@ function buildAppMenu() {
             submenu: [
               { role: "about" },
               { type: "separator" },
+              // A main-process accelerator, for the same reason ⌘N is one: a
+              // focused `WebContentsView` swallows every keystroke, so the page's
+              // own ⌘, handler never sees it while a browser pane has focus. The
+              // menu is handled before web contents get the key.
+              {
+                label: "Settings…",
+                accelerator: "CmdOrCtrl+,",
+                click: () => openSettings(),
+              },
+              { type: "separator" },
               ...veldItems,
               { type: "separator" },
               { role: "services" },
@@ -510,6 +521,17 @@ function buildAppMenu() {
           click: () => newWindowOrSayWhyNot(),
         },
         { type: "separator" },
+        // On macOS this lives in the app menu, where the platform expects it.
+        ...(isMac
+          ? []
+          : [
+              {
+                label: "Settings…",
+                accelerator: "CmdOrCtrl+,",
+                click: () => openSettings(),
+              },
+              { type: "separator" },
+            ]),
         ...(isMac
           ? [{ role: "close" }]
           : [...veldItems, { type: "separator" }, { role: "about" }, { role: "quit" }]),
