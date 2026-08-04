@@ -30,8 +30,8 @@ pub use settings::{
     SettingKey, defaults as setting_defaults,
 };
 pub use worktrees::{
-    DiscoveredWorktree, RepoRecord, WORKTREE_EMOJI, WORKTREE_HUES, WorktreeRecord, default_alias,
-    is_worktree_emoji, is_worktree_hue,
+    DiscoveredWorktree, RepoRecord, WORKTREE_COLORS, WORKTREE_EMOJI, WorktreeRecord, default_alias,
+    is_worktree_color, is_worktree_emoji,
 };
 
 use std::path::{Path, PathBuf};
@@ -66,8 +66,8 @@ pub enum DbError {
     #[error("{0:?} is not one of the curated worktree glyphs")]
     InvalidEmoji(String),
 
-    #[error("{0} is not one of the curated worktree marker colours")]
-    InvalidHue(i64),
+    #[error("{0:?} is not a usable worktree marker colour")]
+    InvalidColor(String),
 
     #[error("{value} is not a valid value for setting {key:?}")]
     InvalidSetting { key: String, value: String },
@@ -420,8 +420,8 @@ const MIGRATIONS: &[Migration] = &[
     },
     Migration {
         version: 9,
-        name: "worktree-marker-hue",
-        apply: migrate_v9_worktree_marker_hue,
+        name: "worktree-marker-color",
+        apply: migrate_v9_worktree_marker_color,
     },
 ];
 
@@ -855,22 +855,30 @@ fn migrate_v8_settings(conn: &Connection) -> rusqlite::Result<()> {
     )
 }
 
-/// v9: the colour half of a worktree's marker.
+/// v9: the colour half of a worktree's marker, stored as a literal `#rrggbb`.
 ///
-/// A worktree's marker is a **composite** — a colour channel and a glyph channel —
-/// and the `worktree.markerStyle` setting picks which face renders. It is
-/// deliberately *not* a storage mode: both faces are stored permanently, so
-/// switching colour → emoji and back is lossless in both directions. Modelling it
-/// as a tagged union would make "what happens to my hand-picked crab when I switch
-/// to colours" a data-migration question instead of a rendering one.
+/// A marker is a **composite** — this colour and the `emoji` glyph — and the
+/// `worktree.markerStyle` setting picks which face renders. Both faces are stored
+/// permanently, so switching colour → emoji and back is lossless. Modelling it as a
+/// tagged union would turn a rendering choice into a data migration and let a
+/// preference destroy a hand-picked glyph.
 ///
-/// `-1` means "not assigned yet" and is backfilled lazily on the next worktree
-/// sync, exactly as v6's `emoji` empty-string sentinel already is. Nothing derives
-/// a marker from `worktrees.id`: rowids are reused (a deleted worktree's id lands
-/// on the next one created), so an id-derived marker would be inherited by an
-/// unrelated worktree.
-fn migrate_v9_worktree_marker_hue(conn: &Connection) -> rusqlite::Result<()> {
-    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN marker_hue INTEGER NOT NULL DEFAULT -1;")
+/// **The colour itself, not an index into a palette.** The first version stored an
+/// index, which was wrong three ways: retuning the palette silently repainted every
+/// existing worktree (a marker is an identity — it must not change under the user);
+/// a custom colour could not be expressed at all, so allowing one later would have
+/// needed another migration; and the index created a Rust↔CSS coupling that had to
+/// be held together by a drift test, which is a gate existing to defend a shape
+/// rather than a property worth having. Storing the value also makes the two marker
+/// channels symmetric — `emoji` has always stored the glyph, not an offset into
+/// [`WORKTREE_EMOJI`].
+///
+/// The empty string means "not assigned yet" and is backfilled lazily on the next
+/// worktree sync, exactly as v6's `emoji` sentinel is. Nothing derives a marker from
+/// `worktrees.id`: rowids are reused, so an id-derived marker would be inherited by
+/// an unrelated worktree.
+fn migrate_v9_worktree_marker_color(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch("ALTER TABLE worktrees ADD COLUMN marker_color TEXT NOT NULL DEFAULT '';")
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,16 +1054,19 @@ mod tests {
         // colour arrives as the unassigned sentinel rather than as hue 0 — a
         // DEFAULT of 0 would have silently claimed a real colour for every
         // upgraded row, and the backfill could never tell it from a choice.
-        let (emoji, hue): (String, i64) = db
+        let (emoji, color): (String, String) = db
             .lock()
             .query_row(
-                "SELECT emoji, marker_hue FROM worktrees WHERE path = '/tmp/r'",
+                "SELECT emoji, marker_color FROM worktrees WHERE path = '/tmp/r'",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .unwrap();
         assert_eq!(emoji, "🦊");
-        assert_eq!(hue, -1, "pre-v9 rows are unassigned, not hue 0");
+        assert_eq!(
+            color, "",
+            "pre-v9 rows are unassigned, not silently the first palette entry"
+        );
 
         // The settings table exists and reads as empty — an upgraded install has
         // every default and no stored overrides.

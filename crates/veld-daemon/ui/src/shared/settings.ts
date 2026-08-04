@@ -119,43 +119,42 @@ export function markerStyle(doc: SettingsDoc): MarkerStyle {
 }
 
 /**
- * Whether a stored hue index is usable. `-1` is the daemon's "not assigned yet"
- * sentinel for a row that predates the column, cleared on the next sync — so a
- * renderer must fall back to the glyph rather than reach for hue `-1`.
- */
-export function hasMarkerHue(hue: number): boolean {
-  return Number.isInteger(hue) && hue >= 0;
-}
-
-/**
- * The CSS custom property carrying a hue's ink.
+ * Whether a stored marker colour is usable.
  *
- * The index is stored, the colour is not: the property is defined once per theme
- * in `styles.css`, so a light-theme swatch is not the same ink as a dark-theme one
- * and neither the database nor this module has to know either value.
+ * `""` is the daemon's "not assigned yet" sentinel for a row that predates the
+ * column, cleared on the next sync — so a renderer must fall back to the glyph
+ * rather than emitting an empty colour.
+ *
+ * Shape-checked rather than trusted: the value goes into a CSS colour position, and
+ * `#` plus six lowercase hex digits is the only form the daemon stores.
  */
-export function markerHueVar(hue: number): string {
-  return `var(--wt-hue-${hue})`;
+export function hasMarkerColor(color: string): boolean {
+  return /^#[0-9a-f]{6}$/.test(color);
 }
 
 /**
  * What to show as a worktree's marker in the DOM.
  *
- * Returns the glyph when the style says emoji, when no hue has been assigned yet,
+ * Returns the glyph when the style says emoji, when no colour has been assigned yet,
  * or when the glyph is the only face that exists — so a renderer never has to
  * special-case the upgrade window.
  */
 export function markerFace(
   doc: SettingsDoc,
-  wt: { emoji: string; marker_hue: number },
-): { kind: "color"; hue: number } | { kind: "emoji"; emoji: string } | null {
-  if (markerStyle(doc) === "color" && hasMarkerHue(wt.marker_hue)) {
-    return { kind: "color", hue: wt.marker_hue };
+  wt: { emoji: string; marker_color: string },
+):
+  | { kind: "color"; color: string }
+  | { kind: "emoji"; emoji: string }
+  | null {
+  if (markerStyle(doc) === "color" && hasMarkerColor(wt.marker_color)) {
+    return { kind: "color", color: wt.marker_color };
   }
   if (wt.emoji) return { kind: "emoji", emoji: wt.emoji };
-  // A hue exists but the style asked for a glyph that was never assigned: show
+  // A colour exists but the style asked for a glyph that was never assigned: show
   // the colour rather than nothing.
-  if (hasMarkerHue(wt.marker_hue)) return { kind: "color", hue: wt.marker_hue };
+  if (hasMarkerColor(wt.marker_color)) {
+    return { kind: "color", color: wt.marker_color };
+  }
   return null;
 }
 
@@ -163,10 +162,10 @@ export function markerFace(
  * How long a detached shell is kept, in minutes.
  *
  * Has a reader of its own rather than being read raw at the call site, so the
- * settings surface cannot hardcode a second copy of the default — which it did,
- * and which is exactly the drift this store exists to remove. The daemon is the
- * authority and clamps this on both write and read; the fallback here is only for
- * a daemon too old to know the key.
+ * settings surface cannot hardcode a second copy of the default — which it did, and
+ * which is exactly the drift this store exists to remove. The daemon is the
+ * authority and clamps this on both write and read; the fallback here is only for a
+ * daemon too old to know the key.
  */
 export function detachGraceMinutes(doc: SettingsDoc): number {
   return num(doc, "terminal.detachGraceMinutes", FALLBACK.detachGraceMinutes);

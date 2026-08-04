@@ -87,17 +87,17 @@ export interface Worktree {
    */
   emoji: string;
   /**
-   * The colour half of the marker: an index into the curated hue set, or `-1`
-   * when it has not been assigned yet (a row from before the column existed,
-   * filled in on the next sync).
+   * The colour half of the marker: a literal `#rrggbb`, or `""` when it has not
+   * been assigned yet (a row from before the column existed, filled in on the next
+   * sync).
    *
    * The marker is a composite and the `worktree.markerStyle` setting picks which
    * face renders — so this and `emoji` are both always present and neither is
    * cleared by changing the style. Rendering reads one; the picker edits both.
-   * Like `emoji`, it is not an identity: two worktrees of different repos
-   * routinely share a hue.
+   * Like `emoji`, it is not an identity: two worktrees of different repos routinely
+   * share a colour.
    */
-  marker_hue: number;
+  marker_color: string;
   is_main: boolean;
   created_at: string;
   has_veld_config: boolean;
@@ -575,7 +575,7 @@ export const api = {
   /** Partial update — send any combination of alias, emoji and marker_hue. */
   patchWorktree: (
     id: number,
-    patch: { alias?: string; emoji?: string; marker_hue?: number },
+    patch: { alias?: string; emoji?: string; marker_color?: string },
   ) =>
     request<Worktree>(`/api/worktrees/${id}`, {
       method: "PATCH",
@@ -586,12 +586,12 @@ export const api = {
    * exist. Served by the daemon rather than duplicated here so the picker and
    * the server-side allowlist can't drift.
    *
-   * `hues` is a count, not a list of colours — the ink is a per-theme CSS custom
-   * property (`--wt-hue-N`), so the daemon has no opinion on what hue 3 looks
-   * like in light mode.
+   * `colors` are the literal values the picker offers. Not the set of *storable*
+   * values — the daemon accepts any `#rrggbb`, so a custom colour is a UI addition
+   * rather than a schema change.
    */
   worktreeEmoji: () =>
-    request<{ emoji: string[]; hues: number }>("/api/worktree-emoji"),
+    request<{ emoji: string[]; colors: string[] }>("/api/worktree-emoji"),
   deleteWorktree: (id: number, force: boolean) =>
     request<void>(`/api/worktrees/${id}?force=${force}`, { method: "DELETE" }),
   /**

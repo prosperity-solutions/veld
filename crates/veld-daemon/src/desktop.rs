@@ -313,13 +313,13 @@ fn write_err(e: veld_core::db::DbError) -> ApiError {
         }
         // Same posture as the emoji arm: the handler pre-checks, and this keeps
         // the DB-layer rejection from degrading into a 500 if that check is ever
-        // deleted as redundant. The hue is a small integer, so echoing it back
-        // would be harmless — the message stays fixed anyway, for symmetry.
-        veld_core::db::DbError::InvalidHue(_) => {
-            warn!("rejected worktree marker hue: {e}");
+        // deleted as redundant. Fixed message, value only to the log — the same
+        // habit the emoji arm keeps about echoing client input.
+        veld_core::db::DbError::InvalidColor(_) => {
+            warn!("rejected worktree marker colour: {e}");
             err(
                 StatusCode::BAD_REQUEST,
-                "marker_hue must be one of the curated worktree marker colours",
+                "marker_color must be a lowercase #rrggbb colour",
             )
         }
         // On the PATCH path there is no handler pre-check: the DB layer
@@ -476,23 +476,23 @@ fn validate_alias(alias: &str) -> Result<(), ApiError> {
 /// drift; static, so the picker fetches it once on open instead of riding the 5s
 /// poll.
 ///
-/// Hues are a **count**, not a colour list: the ink is a per-theme CSS custom
-/// property (`--wt-hue-N`), so the daemon has no business claiming what "hue 3"
-/// looks like in light mode.
+/// The colours are the literal values the picker offers. Not the set of *storable*
+/// values — `is_worktree_color` accepts any `#rrggbb`, so a custom colour needs no
+/// migration and no change here.
 async fn worktree_emoji() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "emoji": veld_core::db::WORKTREE_EMOJI,
-        "hues": veld_core::db::WORKTREE_HUES,
+        "colors": veld_core::db::WORKTREE_COLORS,
     }))
 }
 
-/// Turn the hue-range check into a 400 before any DB work. The rule lives in
-/// `veld_core::db::is_worktree_hue`, next to the constant.
-fn validate_marker_hue(hue: i64) -> Result<(), ApiError> {
-    if !veld_core::db::is_worktree_hue(hue) {
+/// Turn the colour check into a 400 before any DB work. The rule lives in
+/// `veld_core::db::is_worktree_color`, next to the palette.
+fn validate_marker_color(color: &str) -> Result<(), ApiError> {
+    if !veld_core::db::is_worktree_color(color) {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "marker_hue must be one of the curated worktree marker colours",
+            "marker_color must be a lowercase #rrggbb colour",
         ));
     }
     Ok(())
@@ -921,14 +921,14 @@ struct PatchWorktreeBody {
     alias: Option<String>,
     #[serde(default)]
     emoji: Option<String>,
-    /// The colour half of the marker — an index into the curated hue set.
+    /// The colour half of the marker — a literal `#rrggbb`.
     ///
     /// Independent of `emoji`, and settable while the UI is displaying the *other*
     /// face: both faces are stored permanently, so a user who prefers colours can
     /// still pick their glyph (and vice versa) and find it waiting when they switch
     /// the `worktree.markerStyle` setting.
     #[serde(default)]
-    marker_hue: Option<i64>,
+    marker_color: Option<String>,
 }
 
 impl PatchWorktreeBody {
@@ -938,9 +938,9 @@ impl PatchWorktreeBody {
         let Self {
             alias,
             emoji,
-            marker_hue,
+            marker_color,
         } = self;
-        alias.is_none() && emoji.is_none() && marker_hue.is_none()
+        alias.is_none() && emoji.is_none() && marker_color.is_none()
     }
 }
 
@@ -951,7 +951,7 @@ async fn patch_worktree(
     if body.is_empty() {
         return Err(err(
             StatusCode::BAD_REQUEST,
-            "nothing to update: send an alias, an emoji, a marker_hue, or any combination",
+            "nothing to update: send an alias, an emoji, a marker_color, or any combination",
         ));
     }
     // Validate everything before touching the database: a request carrying a
@@ -962,8 +962,8 @@ async fn patch_worktree(
     if let Some(emoji) = &body.emoji {
         validate_emoji(emoji)?;
     }
-    if let Some(hue) = body.marker_hue {
-        validate_marker_hue(hue)?;
+    if let Some(color) = &body.marker_color {
+        validate_marker_color(color)?;
     }
 
     let db = open_desktop_db()?;
@@ -974,7 +974,7 @@ async fn patch_worktree(
             id,
             body.alias.as_deref(),
             body.emoji.as_deref(),
-            body.marker_hue,
+            body.marker_color.as_deref(),
         )
         .map_err(write_err)?;
     if !existed {

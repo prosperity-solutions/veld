@@ -12,12 +12,7 @@ import {
   type StatsResponse,
   type Worktree,
 } from "./api";
-import {
-  markerFace,
-  markerHueVar,
-  markerStyle,
-  terminalPrefs,
-} from "./shared/settings";
+import { markerFace, markerStyle, terminalPrefs } from "./shared/settings";
 import { applyTerminalPrefs } from "./panes/terminalHost";
 import { SettingsDialog } from "./components/SettingsDialog";
 import { useSettings } from "./shared/useSettings";
@@ -186,7 +181,7 @@ const PENDING_TTL_MS = 60_000;
  */
 function WorktreeMark(props: {
   settings: SettingsDoc | null;
-  worktree: { emoji: string; marker_hue: number };
+  worktree: { emoji: string; marker_color: string };
 }) {
   const face = markerFace(props.settings ?? {}, props.worktree);
   if (!face) return null;
@@ -196,14 +191,14 @@ function WorktreeMark(props: {
   return (
     <span
       className="wt-dot"
-      // The index is what is stored; the ink is a per-theme custom property, so
-      // the same hue is a different colour in light and dark and neither the
-      // database nor this component has to know either value.
-      style={{ ["--wt-mark" as string]: markerHueVar(face.hue) }}
-      // Decorative: the alias is rendered right beside it, so announcing "colour
-      // 3" would add nothing a screen reader user can act on. That the label is
-      // always present is also the colour-vision answer — the swatch is a
-      // scanning aid over text, never the identifier.
+      // The stored value is the colour itself, so there is no palette to look it up
+      // in and nothing that repaints an existing worktree when the offered set is
+      // retuned. Shape-checked by `hasMarkerColor` before reaching here.
+      style={{ background: face.color }}
+      // Decorative: the alias is rendered right beside it, so announcing a colour
+      // would add nothing a screen reader user can act on. That the label is always
+      // present is also the colour-vision answer — the swatch is a scanning aid over
+      // text, never the identifier.
       aria-hidden
     />
   );
@@ -1476,7 +1471,7 @@ function AppInner(props: {
         label: w.alias,
         hint: w.branch,
         alt: [w.branch],
-        mark: { emoji: w.emoji, marker_hue: w.marker_hue },
+        mark: { emoji: w.emoji, marker_color: w.marker_color },
         status: worktreeStatus(runsForWorktree(envs, w)),
         run: () => selectWorktree(w),
       });
@@ -2086,7 +2081,7 @@ function AppInner(props: {
       {dialog.kind === "marker" && (
         <ChangeMarkerDialog
           current={dialog.worktree.emoji}
-          currentHue={dialog.worktree.marker_hue}
+          currentColor={dialog.worktree.marker_color}
           alias={dialog.worktree.alias}
           worktreeId={dialog.worktree.id}
           usedBy={emojiUsedBy}
@@ -2523,7 +2518,7 @@ interface PaletteItem {
   alt?: string[];
   /** The worktree this row stands for, when it stands for one — so the row can
    *  render the same marker face the rail does rather than hardcoding a glyph. */
-  mark?: { emoji: string; marker_hue: number };
+  mark?: { emoji: string; marker_color: string };
   status?: WorktreeStatus;
   run: () => void;
 }

@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  hasMarkerHue,
+  hasMarkerColor,
   markerFace,
   detachGraceMinutes,
-  markerHueVar,
   markerStyle,
   terminalPrefs,
 } from "./settings";
@@ -72,21 +71,23 @@ describe("markerStyle", () => {
   });
 });
 
-describe("hasMarkerHue", () => {
+describe("hasMarkerColor", () => {
   it("treats the unassigned sentinel as absent", () => {
-    expect(hasMarkerHue(-1)).toBe(false);
-    expect(hasMarkerHue(0)).toBe(true);
-    expect(hasMarkerHue(11)).toBe(true);
-    // A fractional index would build a `--wt-hue-1.5` that resolves to nothing.
-    expect(hasMarkerHue(1.5)).toBe(false);
+    expect(hasMarkerColor("")).toBe(false);
+    expect(hasMarkerColor("#008cff")).toBe(true);
+    // Shape-checked because the value goes into a CSS colour position; the daemon
+    // stores only lowercase #rrggbb.
+    expect(hasMarkerColor("#008CFF")).toBe(false);
+    expect(hasMarkerColor("#08f")).toBe(false);
+    expect(hasMarkerColor("red")).toBe(false);
   });
 });
 
 describe("markerFace", () => {
-  const both = { emoji: "🦊", marker_hue: 3 };
+  const both = { emoji: "🦊", marker_color: "#008cff" };
 
   it("follows the style when both faces exist", () => {
-    expect(markerFace({}, both)).toEqual({ kind: "color", hue: 3 });
+    expect(markerFace({}, both)).toEqual({ kind: "color", color: "#008cff" });
     expect(markerFace({ "worktree.markerStyle": "emoji" }, both)).toEqual({
       kind: "emoji",
       emoji: "🦊",
@@ -97,7 +98,7 @@ describe("markerFace", () => {
     // The upgrade window: a row migrated from before the colour column, whose
     // hue arrives on the next sync. Colour is the default style, so without this
     // the rail would render nothing at all for every existing worktree.
-    expect(markerFace({}, { emoji: "🦊", marker_hue: -1 })).toEqual({
+    expect(markerFace({}, { emoji: "🦊", marker_color: "" })).toEqual({
       kind: "emoji",
       emoji: "🦊",
     });
@@ -105,21 +106,17 @@ describe("markerFace", () => {
 
   it("uses the colour when the glyph is the missing face", () => {
     expect(
-      markerFace({ "worktree.markerStyle": "emoji" }, { emoji: "", marker_hue: 2 }),
-    ).toEqual({ kind: "color", hue: 2 });
+      markerFace(
+        { "worktree.markerStyle": "emoji" },
+        { emoji: "", marker_color: "#ff3502" },
+      ),
+    ).toEqual({ kind: "color", color: "#ff3502" });
   });
 
   it("is null only when neither face exists", () => {
-    expect(markerFace({}, { emoji: "", marker_hue: -1 })).toBeNull();
+    expect(markerFace({}, { emoji: "", marker_color: "" })).toBeNull();
   });
 });
-
-describe("markerHueVar", () => {
-  it("names the per-theme custom property", () => {
-    expect(markerHueVar(7)).toBe("var(--wt-hue-7)");
-  });
-});
-
 
 describe("detachGraceMinutes", () => {
   it("reads the stored value and falls back for an older daemon", () => {

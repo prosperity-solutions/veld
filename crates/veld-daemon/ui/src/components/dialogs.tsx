@@ -219,7 +219,7 @@ export function NewWorktreeDialog(props: {
  */
 export function ChangeMarkerDialog(props: {
   current: string;
-  currentHue: number;
+  currentColor: string;
   alias: string;
   /** Identifies "this worktree" among the holders — aliases can't, since
    *  they are unique only within one repo. */
@@ -230,11 +230,11 @@ export function ChangeMarkerDialog(props: {
    *  half of the choice is the one being shown right now. Both halves stay
    *  editable regardless — see the note at the bottom of the dialog. */
   style: MarkerStyle;
-  onPick: (patch: { emoji?: string; marker_hue?: number }) => Promise<void>;
+  onPick: (patch: { emoji?: string; marker_color?: string }) => Promise<void>;
   onClose: () => void;
 }) {
   const [choices, setChoices] = useState<string[] | null>(null);
-  const [hues, setHues] = useState<number | null>(null);
+  const [colors, setColors] = useState<string[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -249,13 +249,11 @@ export function ChangeMarkerDialog(props: {
         // Loader spinning forever with no error and no way out.
         if (Array.isArray(r?.emoji)) setChoices(r.emoji);
         else setLoadError("The daemon returned an unexpected emoji list.");
-        // The hue count comes from the daemon for the same reason the glyphs do:
-        // it is the server-side range check, and a TypeScript copy would drift.
-        // A missing or absurd count leaves the colour grid out rather than
-        // rendering swatches whose CSS variables do not exist.
-        if (typeof r?.hues === "number" && r.hues > 0 && r.hues <= 64) {
-          setHues(r.hues);
-        }
+        // The palette comes from the daemon for the same reason the glyphs do: it
+        // is the set the server offers, and a TypeScript copy would drift. A
+        // malformed payload leaves the colour grid out rather than rendering
+        // swatches with no fill.
+        if (Array.isArray(r?.colors)) setColors(r.colors);
       })
       .catch((e: unknown) => {
         if (!cancelled) {
@@ -269,7 +267,7 @@ export function ChangeMarkerDialog(props: {
 
   const pick = async (
     key: string,
-    patch: { emoji?: string; marker_hue?: number },
+    patch: { emoji?: string; marker_color?: string },
   ) => {
     setBusy(key);
     setError(null);
@@ -285,32 +283,29 @@ export function ChangeMarkerDialog(props: {
     <Modal title={`Marker for ${props.alias}`} onClose={props.onClose}>
       <Stack gap="sm">
         {loadError && <ErrorText error={loadError} />}
-        {hues !== null && (
+        {colors !== null && (
           <>
             <Text size="xs" fw={600} c="dimmed">
               Colour{props.style === "color" ? " (shown in the rail)" : ""}
             </Text>
-            <div className="hue-grid">
-              {Array.from({ length: hues }, (_, hue) => {
-                const isCurrent = hue === props.currentHue;
-                const key = `hue-${hue}`;
+            <div className="swatch-grid">
+              {colors.map((color) => {
+                const isCurrent = color === props.currentColor;
                 return (
                   <button
-                    key={key}
+                    key={color}
                     type="button"
-                    className={`hue-cell${isCurrent ? " current" : ""}`}
+                    className={`swatch-cell${isCurrent ? " current" : ""}`}
                     disabled={busy !== null}
                     aria-pressed={isCurrent}
-                    aria-label={`Colour ${hue + 1}${isCurrent ? " — current" : ""}`}
-                    title={isCurrent ? "Current" : undefined}
-                    onClick={() => void pick(key, { marker_hue: hue })}
+                    aria-label={`Colour ${color}${isCurrent ? " — current" : ""}`}
+                    title={isCurrent ? `Current (${color})` : color}
+                    onClick={() => void pick(color, { marker_color: color })}
                   >
-                    {busy === key ? (
+                    {busy === color ? (
                       <Loader size={14} />
                     ) : (
-                      <span
-                        style={{ ["--wt-mark" as string]: `var(--wt-hue-${hue})` }}
-                      />
+                      <span style={{ background: color }} />
                     )}
                   </button>
                 );

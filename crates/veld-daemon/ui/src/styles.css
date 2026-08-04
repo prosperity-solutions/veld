@@ -79,33 +79,6 @@
   --chart-grid: #23262b;
   --chart-axis: #363b43;
 
-  /* Worktree marker hues — one palette, identical in both themes.
-     Chosen as a set by the maintainer and used **as given**: no per-theme
-     variant, no lightness adjustment. That is a deliberate reversal of the earlier
-     design, which deepened each hue for the light theme and meant a worktree
-     changed appearance when you switched theme — the marker is an identity, and an
-     identity that looks different depending on the surface behind it is doing its
-     job badly. Consequence, stated rather than discovered: the pale members
-     (FFF827, 41FFFC) sit low-contrast on a white panel, so the swatch's inner ring
-     is strengthened in the light theme to hold its edge. The fill itself is exact.
-     Eight, because fewer and genuinely distinct beats more and merely different —
-     past about eight steps neighbours stop being tellable apart at 11px.
-     Colour is never the only channel: the alias renders beside the badge
-     everywhere, so a swatch is a scanning aid over a text label, not the
-     identifier — which is also the honest answer for the ~1 in 12 men with a colour
-     vision deficiency.
-     Order is the maintainer's list order. Indices are persisted
-     (`worktrees.marker_hue`), so entries may be APPENDED but never reordered — a
-     reorder silently repaints every rail. Shrinking is safe only because
-     `sync_worktrees` re-picks any hue outside `WORKTREE_HUES`. */
-  --wt-hue-0: #008cff;
-  --wt-hue-1: #41fffc;
-  --wt-hue-2: #7dff1a;
-  --wt-hue-3: #9719ff;
-  --wt-hue-4: #ff17e0;
-  --wt-hue-5: #ff3502;
-  --wt-hue-6: #ffa31a;
-  --wt-hue-7: #fff827;
 }
 
 body[data-theme="light"] {
@@ -481,7 +454,7 @@ select:focus {
    41FFFC) land low-contrast on a white panel. Only the ring is strengthened — the
    fill is used exactly as given. */
 body[data-theme="light"] .wt-dot,
-body[data-theme="light"] .hue-cell > span {
+body[data-theme="light"] .swatch-cell > span {
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 0.45);
 }
 
@@ -489,13 +462,13 @@ body[data-theme="light"] .hue-cell > span {
    editable regardless of which face is being rendered, because both faces are
    stored — a user who prefers colours can still choose their glyph and find it
    waiting if they ever switch. */
-.hue-grid {
+.swatch-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 
-.hue-cell {
+.swatch-cell {
   aspect-ratio: 1;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -506,21 +479,21 @@ body[data-theme="light"] .hue-cell > span {
   padding: 0;
 }
 
-.hue-cell:hover {
+.swatch-cell:hover {
   border-color: var(--border2);
   background: var(--elev);
 }
 
-.hue-cell.current {
+.swatch-cell.current {
   border-color: var(--accent);
 }
 
-.hue-cell:focus-visible {
+.swatch-cell:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-.hue-cell > span {
+.swatch-cell > span {
   width: 18px;
   height: 18px;
   border-radius: 50%;
