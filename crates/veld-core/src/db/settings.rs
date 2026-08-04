@@ -54,6 +54,29 @@ pub const MIN_DETACH_GRACE_MINUTES: i64 = 1;
 /// already generous; unbounded means a leak with a preference in front of it.
 pub const MAX_DETACH_GRACE_MINUTES: i64 = 10_080;
 
+/// Lines of scrollback each terminal keeps.
+///
+/// xterm stores a cell as **3 × u32 = 12 bytes** (`new Uint32Array(3 * cols)` per
+/// line), so a line costs `12 × cols` — about 1.4 KB at 120 columns. 10 000 lines is
+/// therefore ~14 MB per terminal, and a handful of open terminals is tens of MB,
+/// which is the right trade for a desktop app whose whole point is long-running
+/// builds. For comparison: Alacritty defaults to 10 000, Windows Terminal to 9 001,
+/// GNOME Terminal to 8 192, VS Code and iTerm2 to 1 000, tmux to 2 000.
+///
+/// Note the asymmetry this does **not** fix: the daemon's replay buffer is
+/// `SCROLLBACK_BYTES` (256 KiB, `veld-daemon/src/pty.rs`), so a page reload restores
+/// only the last few thousand lines of output regardless of this number. Scrollback
+/// above that is history for the life of the page, not across a reload.
+pub const DEFAULT_SCROLLBACK: i64 = 10_000;
+
+/// Upper bound on scrollback.
+///
+/// 100 000 lines is ~144 MB per terminal at 120 columns — generous past any real
+/// use and still short of wedging the renderer. The first version allowed 500 000
+/// (~720 MB for one terminal), which is not a preference, it is a way to run out of
+/// memory with a number in a box.
+pub const MAX_SCROLLBACK: i64 = 100_000;
+
 /// Longest accepted `terminal.fontFamily`. A CSS font-family list that needs more
 /// than this is not a font list.
 const MAX_FONT_FAMILY_LEN: usize = 200;
@@ -131,7 +154,9 @@ impl SettingKey {
         };
         Ok(match self {
             Self::TerminalFontSize => Value::from(clamp_i64(value, 6, 72).ok_or_else(bad)?),
-            Self::TerminalScrollback => Value::from(clamp_i64(value, 0, 500_000).ok_or_else(bad)?),
+            Self::TerminalScrollback => {
+                Value::from(clamp_i64(value, 0, MAX_SCROLLBACK).ok_or_else(bad)?)
+            }
             Self::TerminalDetachGrace => Value::from(
                 clamp_i64(value, MIN_DETACH_GRACE_MINUTES, MAX_DETACH_GRACE_MINUTES)
                     .ok_or_else(bad)?,
@@ -206,7 +231,10 @@ pub fn defaults() -> BTreeMap<String, Value> {
         ),
         (SettingKey::TerminalCursorStyle, Value::from("block")),
         (SettingKey::TerminalCursorBlink, Value::from(true)),
-        (SettingKey::TerminalScrollback, Value::from(5000)),
+        (
+            SettingKey::TerminalScrollback,
+            Value::from(DEFAULT_SCROLLBACK),
+        ),
         // Ships on: #197 established `ESC CR` as the default because it is what
         // Claude Code's `/terminal-setup` configures, so matching it means no
         // extra setup. The toggle exists for anyone whose TUI binds meta-Enter.
@@ -355,7 +383,7 @@ mod tests {
         let (_dir, db) = test_db();
         let s = db.settings().unwrap();
         assert_eq!(s["terminal.fontSize"], Value::from(12));
-        assert_eq!(s["terminal.scrollback"], Value::from(5000));
+        assert_eq!(s["terminal.scrollback"], Value::from(DEFAULT_SCROLLBACK));
         assert_eq!(s["worktree.markerStyle"], Value::from("color"));
         // Every declared key is present, so a client never has to supply one.
         assert_eq!(s.len(), defaults().len());
@@ -384,6 +412,26 @@ mod tests {
             .patch_settings(&patch(&[("terminal.cursorStyle", Value::from("wobble"))]))
             .unwrap_err();
         assert!(matches!(err, DbError::InvalidSetting { .. }));
+    }
+
+    #[test]
+    fn scrollback_clamps_at_the_maximum() {
+        // The bound exists so a number in a box cannot wedge the renderer:
+        // 100_000 lines is already ~144 MB for one terminal at 120 columns.
+        let (_dir, db) = test_db();
+        db.patch_settings(&patch(&[("terminal.scrollback", Value::from(10_000_000))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["terminal.scrollback"],
+            Value::from(MAX_SCROLLBACK)
+        );
+        // Zero is legal — "no scrollback" is a real preference, not an error.
+        db.patch_settings(&patch(&[("terminal.scrollback", Value::from(0))]))
+            .unwrap();
+        assert_eq!(
+            db.settings().unwrap()["terminal.scrollback"],
+            Value::from(0)
+        );
     }
 
     #[test]

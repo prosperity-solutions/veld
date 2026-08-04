@@ -35,7 +35,7 @@ const FALLBACK = {
     '"JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace',
   cursorStyle: "block" as CursorStyle,
   cursorBlink: true,
-  scrollback: 5000,
+  scrollback: 10000,
   shiftEnterNewline: true,
   markerStyle: "color" as MarkerStyle,
   detachGraceMinutes: 30,

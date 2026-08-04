@@ -34,7 +34,7 @@ describe("terminalPrefs", () => {
     // effective document arrives without it.
     const p = terminalPrefs({});
     expect(p.fontSize).toBe(12);
-    expect(p.scrollback).toBe(5000);
+    expect(p.scrollback).toBe(10000);
     expect(p.cursorStyle).toBe("block");
   });
 

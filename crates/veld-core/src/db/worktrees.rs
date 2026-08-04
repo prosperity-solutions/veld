@@ -451,12 +451,19 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
 
 /// Colour half of the worktree marker.
 ///
-/// Twelve hues, and twelve rather than more for a reason: hue is not a wide
-/// channel. Beyond roughly a dozen steps the swatches stop being tellable apart at
-/// rail size, and the honest limit is lower still under a colour vision deficiency
-/// (~1 in 12 men). The set is chosen so no two entries collapse into each other
-/// under deuteranopia or protanopia — the red/green and blue/purple pairs are
-/// separated by lightness as well as hue.
+/// **Eight hues, and eight rather than more on purpose.** Hue is a narrow channel:
+/// fewer and genuinely distinct beats more and merely different, because past about
+/// eight steps the neighbours stop being tellable apart at rail size — and the
+/// honest limit is lower still under a colour vision deficiency (~1 in 12 men). The
+/// four that were dropped were buying collision headroom nobody needs: measured on a
+/// real database, the repos held 9 and 7 checkouts, and distinctness is only ever
+/// needed *within* one repo.
+///
+/// Index order is **interleaved rather than spectral**, because [`pick_hue`] hashes
+/// and then probes forward: consecutive indices are handed out together, so ordering
+/// them around the wheel would give two worktrees created back to back two adjacent
+/// hues. The pair that collapses under deuteranopia (3 red and 7 green) is kept far
+/// apart in the sequence and separated by lightness.
 ///
 /// **Colour is never the only channel.** The alias renders beside the badge
 /// everywhere the badge appears, so the swatch is a scanning aid over a text label
@@ -465,11 +472,18 @@ pub fn is_worktree_emoji(emoji: &str) -> bool {
 /// monogram bolted on.
 ///
 /// Stored as an **index**, not a colour string: the actual values are CSS custom
-/// properties (`--wt-hue-N`) resolved per theme, so a light-theme swatch is not the
-/// same ink as a dark-theme one and the database should not claim otherwise.
-/// Entries may be **appended but never removed or reordered** — the index is
-/// persisted per worktree, so a reorder silently repaints every rail.
-pub const WORKTREE_HUES: usize = 12;
+/// properties (`--wt-hue-N`) resolved per theme — the dark theme is neon, because a
+/// desaturated swatch on near-black reads as grey, and the light theme is the same
+/// identity deepened so it carries on white. A light-theme swatch is therefore not
+/// the same ink as a dark-theme one, which is precisely why the database stores an
+/// index and has no opinion about colour.
+///
+/// Entries may be **appended, never reordered** — the index is persisted per
+/// worktree, so a reorder silently repaints every rail. Shrinking the set is safe
+/// only because `sync_worktrees` re-picks any hue that fails [`is_worktree_hue`],
+/// so a row left holding a dropped index heals on the next sync rather than
+/// rendering an undefined variable.
+pub const WORKTREE_HUES: usize = 8;
 
 /// Whether `hue` is an assignable marker colour index. `-1` (unassigned) is
 /// deliberately **not** valid here: it is a sentinel the backfill clears, not a

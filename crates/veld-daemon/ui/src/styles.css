@@ -1,5 +1,28 @@
 /* Design tokens from the Veld Desktop design handoff (dark default + light). */
 
+/* A second bundled terminal font, offered in Settings → Terminal.
+ *
+ * Declared by hand rather than imported as `@fontsource-variable/fira-code` because
+ * that package's `index.css` pulls **seven** subsets (cyrillic, greek, latin-ext,
+ * symbols…) totalling ~108 KB of woff2, and `vite-plugin-singlefile` base64-inlines
+ * every one of them into the daemon binary permanently. A terminal font is chosen for
+ * its latin glyphs, so this takes the 35 KB latin subset and nothing else.
+ *
+ * The relative path is what makes vite resolve and inline it; a bare package
+ * specifier in `url()` is not resolved. If the dependency moves, this breaks loudly
+ * at build time rather than silently shipping no font. */
+@font-face {
+  font-family: "Fira Code Variable";
+  font-style: normal;
+  font-display: swap;
+  font-weight: 300 700;
+  src: url("../node_modules/@fontsource-variable/fira-code/files/fira-code-latin-wght-normal.woff2")
+    format("woff2-variations");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA,
+    U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193,
+    U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 :root {
   --bg: #0d0e10;
   --panel: #141619;
@@ -56,29 +79,35 @@
   --chart-grid: #23262b;
   --chart-axis: #363b43;
 
-  /* Worktree marker hues (dark).
-     Twelve, and twelve deliberately: hue is a narrow channel, and past about a
-     dozen steps swatches stop being tellable apart at rail size — lower still
-     under a colour vision deficiency. Ordered so neighbours differ in lightness
-     as well as hue, and so the pairs that collapse under deuteranopia (1/3,
-     red/green) and tritanopia (5/9, blue/purple) are never adjacent.
-     Colour is never the only channel: the alias renders beside the badge
-     everywhere the badge appears, so a swatch is a scanning aid over a text
-     label, not the identifier. Indices are persisted (`worktrees.marker_hue`),
-     so entries may be APPENDED but never reordered or removed — a reorder
-     silently repaints every rail. */
-  --wt-hue-0: #e0685f;
-  --wt-hue-1: #e2914a;
-  --wt-hue-2: #d6b53f;
-  --wt-hue-3: #8fbf4a;
-  --wt-hue-4: #4bb474;
-  --wt-hue-5: #3fb8a8;
-  --wt-hue-6: #46a7d8;
-  --wt-hue-7: #5d8ce6;
-  --wt-hue-8: #8a7ce8;
-  --wt-hue-9: #b673dd;
-  --wt-hue-10: #dd6bb0;
-  --wt-hue-11: #a08b74;
+  /* Worktree marker hues (dark) — full-chroma, in the register of a printed swatch
+     card rather than a muted UI accent, because the rail sits on near-black and a
+     desaturated dot at 11px reads as grey.
+     **Eight, not twelve.** Fewer and genuinely distinct beats more and merely
+     different: past about eight steps neighbours stop being tellable apart at rail
+     size, and the four dropped ones bought collision headroom nobody needs —
+     measured on a real database the repos held 9 and 7 checkouts, and distinctness
+     is only ever needed *within* one repo.
+     **Index order is interleaved, not spectral.** The allocator hashes and then
+     probes *forward*, so consecutive indices get handed out together; ordering these
+     around the wheel would give two adjacent worktrees two adjacent hues. Magenta →
+     yellow → blue → red keeps sequential allocations far apart.
+     Six are lifted from a swatch-card reference; blue and violet were added at the
+     same chroma because the reference covers only magenta→teal, and a palette that
+     omits half the wheel spends its distinctness on near-duplicates.
+     Colour is never the only channel: the alias renders beside the badge everywhere,
+     so a swatch is a scanning aid over a text label, not the identifier — which is
+     also the honest answer for the ~1 in 12 men with a colour vision deficiency.
+     Entries may be APPENDED but never reordered — the index is persisted, so a
+     reorder silently repaints every rail. Shrinking is safe only because
+     `sync_worktrees` re-picks any hue outside `WORKTREE_HUES`. */
+  --wt-hue-0: #f5228e;
+  --wt-hue-1: #ffed02;
+  --wt-hue-2: #13c2f9;
+  --wt-hue-3: #f81919;
+  --wt-hue-4: #13d4c7;
+  --wt-hue-5: #ff8000;
+  --wt-hue-6: #9d2bf5;
+  --wt-hue-7: #27b621;
 }
 
 body[data-theme="light"] {
@@ -122,22 +151,20 @@ body[data-theme="light"] {
   --chart-grid: #e9ebee;
   --chart-axis: #d5d8dc;
 
-  /* Worktree marker hues (light). Same twelve identities, darker and slightly
-     less saturated so they carry against a white panel — which is exactly why
-     the database stores an index and not a colour: hue 3 is not the same ink in
-     both themes, and neither the schema nor the daemon should claim it is. */
-  --wt-hue-0: #c8443c;
-  --wt-hue-1: #b96a12;
-  --wt-hue-2: #8f7500;
-  --wt-hue-3: #5a8210;
-  --wt-hue-4: #1c8a4c;
-  --wt-hue-5: #0c8378;
-  --wt-hue-6: #1b7cab;
-  --wt-hue-7: #3a63c4;
-  --wt-hue-8: #6a55d0;
-  --wt-hue-9: #9245bd;
-  --wt-hue-10: #b83e8c;
-  --wt-hue-11: #786348;
+  /* Worktree marker hues (light) — the same eight identities, deepened.
+     Full chroma on white is a pale smudge, and #ffed02 in particular is invisible
+     there, so each one keeps its hue and loses lightness. That the same index is
+     `#ffed02` in dark and `#8f7f00` here is exactly why the database stores an
+     *index* and not a colour: neither the schema nor the daemon has any business
+     claiming what hue 1 looks like. */
+  --wt-hue-0: #c4106f;
+  --wt-hue-1: #8f7f00;
+  --wt-hue-2: #0b7fa8;
+  --wt-hue-3: #cf1010;
+  --wt-hue-4: #0a8f86;
+  --wt-hue-5: #c06000;
+  --wt-hue-6: #7014c4;
+  --wt-hue-7: #1c8417;
 }
 
 * {
@@ -472,7 +499,7 @@ select:focus {
    waiting if they ever switch. */
 .hue-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 8px;
 }
 

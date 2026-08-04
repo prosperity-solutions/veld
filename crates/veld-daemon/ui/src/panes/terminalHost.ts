@@ -292,7 +292,9 @@ function ensure(id: string, worktreeId: number): Session {
     fontFamily: p.fontFamily,
     fontSize: p.fontSize,
     // The shell's own scrollback plus room for a verbose build; settable because
-    // "room for a verbose build" is a different number for everyone.
+    // "room for a verbose build" is a different number for everyone. A line costs
+    // 12 bytes per column in xterm, so the default is ~14 MB per terminal at 120
+    // columns — see DEFAULT_SCROLLBACK in veld-core's settings module.
     scrollback: p.scrollback,
     theme: xtermTheme(),
   });

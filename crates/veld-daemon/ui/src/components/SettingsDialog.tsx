@@ -20,7 +20,7 @@
  * entry visibly snap back instead of appearing to have been accepted.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   Checkbox,
   Group,
@@ -33,6 +33,10 @@ import {
 
 import type { SettingsDoc } from "../api";
 import { Modal } from "./dialogs";
+import {
+  availableFonts,
+  matchFont,
+} from "../shared/terminalFonts";
 import {
   detachGraceMinutes,
   markerStyle,
@@ -60,6 +64,9 @@ function Row(props: {
     </Stack>
   );
 }
+
+/** Sentinel for the "Custom…" option; not a font stack. */
+const CUSTOM_FONT = "\u0000custom";
 
 function SectionTitle(props: { children: React.ReactNode }) {
   return (
@@ -89,6 +96,13 @@ export function SettingsDialog(props: {
   const graceValue = detachGraceMinutes(settings ?? {});
   const [grace, setGrace] = useState<number | string>(graceValue);
   const [fontFamily, setFontFamily] = useState(term.fontFamily);
+  // Availability is probed against the DOM, so compute it once per open rather
+  // than on every render — the list cannot change while the dialog is up.
+  const fonts = useMemo(() => availableFonts(), []);
+  const fontOption = matchFont(term.fontFamily, fonts);
+  // Sticky, so choosing "Custom…" keeps the field open while it is still empty and
+  // therefore still matches nothing.
+  const [customFont, setCustomFont] = useState(false);
 
   useEffect(() => setFontSize(term.fontSize), [term.fontSize]);
   useEffect(() => setScrollback(term.scrollback), [term.scrollback]);
@@ -175,28 +189,69 @@ export function SettingsDialog(props: {
             />
           </Row>
           <Row
-            label="Font family"
-            help="A CSS font-family list. Falls back to the bundled JetBrains Mono."
+            label="Font"
+            help={
+              fontOption
+                ? fontOption.bundled
+                  ? "Bundled with Veld, so it renders the same everywhere."
+                  : "Installed on this machine. Another machine may not have it."
+                : "A CSS font-family list of your own."
+            }
           >
-            <TextInput
+            <NativeSelect
               size="xs"
-              w={240}
-              value={fontFamily}
+              w={200}
+              // The stored stack is the value, not the label: two stacks that
+              // differ only in their fallback are genuinely different settings.
+              value={fontOption?.stack ?? CUSTOM_FONT}
               disabled={locked}
-              onChange={(e) => setFontFamily(e.currentTarget.value)}
-              onBlur={() => {
-                const v = fontFamily.trim();
-                // An empty family would render as the browser default and read as
-                // a bug, so treat clearing the box as "reset" rather than sending
-                // a value the daemon must reject.
-                if (!v) {
+              data={[
+                ...fonts.map((f) => ({
+                  value: f.stack,
+                  label: f.bundled ? f.label : `${f.label} (system)`,
+                })),
+                { value: CUSTOM_FONT, label: "Custom…" },
+              ]}
+              onChange={(e) => {
+                const v = e.currentTarget.value;
+                if (v === CUSTOM_FONT) {
+                  // Reveal the field seeded with what is in effect, so "Custom"
+                  // starts from the current font rather than from empty.
+                  setCustomFont(true);
                   setFontFamily(term.fontFamily);
                   return;
                 }
-                if (v !== term.fontFamily) set({ "terminal.fontFamily": v });
+                setCustomFont(false);
+                setFontFamily(v);
+                set({ "terminal.fontFamily": v });
               }}
             />
           </Row>
+          {(customFont || !fontOption) && (
+            <Row
+              label="Custom font family"
+              help="A CSS font-family list. Ends up in a stylesheet, so { } ; < > are refused."
+            >
+              <TextInput
+                size="xs"
+                w={240}
+                value={fontFamily}
+                disabled={locked}
+                onChange={(e) => setFontFamily(e.currentTarget.value)}
+                onBlur={() => {
+                  const v = fontFamily.trim();
+                  // An empty family would render as the browser default and read as
+                  // a bug, so treat clearing the box as "reset" rather than sending
+                  // a value the daemon must reject.
+                  if (!v) {
+                    setFontFamily(term.fontFamily);
+                    return;
+                  }
+                  if (v !== term.fontFamily) set({ "terminal.fontFamily": v });
+                }}
+              />
+            </Row>
+          )}
           <Row label="Cursor">
             <NativeSelect
               size="xs"
